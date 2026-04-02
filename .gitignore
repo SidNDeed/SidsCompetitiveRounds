@@ -853,3 +853,5 @@ BepInEx/patchers/
 .env
 .env.*
 !.env.example
+*.env
+env.txt
