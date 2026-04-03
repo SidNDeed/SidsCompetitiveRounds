@@ -101,6 +101,7 @@ namespace CompetitiveRounds
             public bool is_ranked;
             public string ended_at;
             public string cards_display; // Comma-separated card names for display
+            public string opp_cards_display; // Opponent's cards
         }
 
         [Serializable]
@@ -254,7 +255,64 @@ namespace CompetitiveRounds
                     {
                         try
                         {
-                            CachedLeaderboard = JsonUtility.FromJson<LeaderboardData>(response);
+                            // Manual parse — JsonUtility silently fails on this structure
+                            var data = new LeaderboardData();
+                            data.total_players = ExtractJsonInt(response, "total_players");
+
+                            var entries = new List<LeaderboardEntry>();
+                            var parts = response.Split(new[] { "\"rank\"" }, StringSplitOptions.None);
+
+                            for (int i = 1; i < parts.Length; i++)
+                            {
+                                var chunk = parts[i];
+                                var entry = new LeaderboardEntry();
+
+                                // rank is right after the split point: :1,
+                                try
+                                {
+                                    int colonIdx = chunk.IndexOf(':');
+                                    if (colonIdx < 0) colonIdx = -1;
+                                    int commaIdx = chunk.IndexOf(',', colonIdx + 1);
+                                    if (colonIdx >= 0 && commaIdx > colonIdx)
+                                    {
+                                        string rankStr = chunk.Substring(colonIdx + 1, commaIdx - colonIdx - 1).Trim();
+                                        entry.rank = int.Parse(rankStr);
+                                    }
+                                }
+                                catch { entry.rank = i; }
+
+                                entry.steam_id = ExtractJsonString(chunk, "steam_id");
+                                entry.display_name = ExtractJsonString(chunk, "display_name");
+                                entry.rating = ExtractJsonInt(chunk, "rating");
+                                entry.rd = ExtractJsonInt(chunk, "rd");
+                                entry.total_matches = ExtractJsonInt(chunk, "total_matches");
+                                entry.wins = ExtractJsonInt(chunk, "wins");
+                                entry.losses = ExtractJsonInt(chunk, "losses");
+
+                                // Parse win_rate as float
+                                try
+                                {
+                                    int wrIdx = chunk.IndexOf("\"win_rate\":");
+                                    if (wrIdx >= 0)
+                                    {
+                                        wrIdx += "\"win_rate\":".Length;
+                                        while (wrIdx < chunk.Length && chunk[wrIdx] == ' ') wrIdx++;
+                                        int wrEnd = wrIdx;
+                                        while (wrEnd < chunk.Length && (char.IsDigit(chunk[wrEnd]) || chunk[wrEnd] == '.' || chunk[wrEnd] == '-'))
+                                            wrEnd++;
+                                        if (wrEnd > wrIdx)
+                                            entry.win_rate = float.Parse(chunk.Substring(wrIdx, wrEnd - wrIdx),
+                                                System.Globalization.CultureInfo.InvariantCulture);
+                                    }
+                                }
+                                catch { entry.win_rate = 0f; }
+
+                                if (!string.IsNullOrEmpty(entry.steam_id))
+                                    entries.Add(entry);
+                            }
+
+                            data.entries = entries.ToArray();
+                            CachedLeaderboard = data;
                             Plugin.Log.LogInfo($"Leaderboard loaded: {CachedLeaderboard.entries?.Length ?? 0} entries");
                         }
                         catch (Exception ex)
@@ -303,11 +361,53 @@ namespace CompetitiveRounds
             ));
         }
 
-        public static void FetchCardStats(int limit = 30)
+
+        /// <summary>
+        /// Fetch stats for any player by Steam ID, with a callback.
+        /// Used when clicking a player in the leaderboard.
+        /// Does NOT overwrite CachedPlayerStats (that's the local player's).
+        /// </summary>
+        public static void FetchPlayerStatsForView(string steamId, Action<PlayerStatsData> callback)
+        {
+            if (string.IsNullOrEmpty(steamId))
+            {
+                callback(null);
+                return;
+            }
+
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/{steamId}",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        try
+                        {
+                            var data = JsonUtility.FromJson<PlayerStatsData>(response);
+                            callback(data);
+                        }
+                        catch
+                        {
+                            callback(null);
+                        }
+                    }
+                    else
+                    {
+                        callback(null);
+                    }
+                }
+            ));
+        }
+
+        public static void FetchCardStats(int limit = 30, string steamId = null, string sortBy = "times_picked")
         {
             IsLoading = true;
+            string url = $"{baseUrl}/api/v1/cards?limit={limit}&sort_by={sortBy}&min_picks=1";
+            if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
+                url += $"&steam_id={steamId}";
+
             Plugin.Instance.StartCoroutine(GetRequest(
-                $"{baseUrl}/api/v1/cards?limit={limit}&sort_by=times_picked&min_picks=1",
+                url,
                 (success, response) =>
                 {
                     IsLoading = false;
@@ -375,7 +475,7 @@ namespace CompetitiveRounds
             ));
         }
 
-        public static void FetchMatchHistory(string steamId, int limit = 10)
+        public static void FetchMatchHistory(string steamId, int limit = 100)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
 
@@ -416,6 +516,9 @@ namespace CompetitiveRounds
 
                                 // Extract card names from cards_picked array
                                 entry.cards_display = ExtractCardNames(chunk);
+
+                                // Extract opponent card names from opponent_cards_picked array
+                                entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
 
                                 entries.Add(entry);
                             }
@@ -469,11 +572,11 @@ namespace CompetitiveRounds
             catch { return 0; }
         }
 
-        private static string ExtractCardNames(string chunk)
+        private static string ExtractCardNames(string chunk, string key = "cards_picked")
         {
             try
             {
-                int cpStart = chunk.IndexOf("\"cards_picked\"");
+                int cpStart = chunk.IndexOf("\"" + key + "\"");
                 if (cpStart < 0) return "";
 
                 int arrStart = chunk.IndexOf("[", cpStart);

@@ -15,10 +15,19 @@ namespace CompetitiveRounds
         private static Vector2 leaderboardScroll;
         private static Vector2 cardStatsScroll;
 
+        // Leaderboard player detail
+        private static string selectedPlayerSteamId = "";
+        private static ApiClient.PlayerStatsData selectedPlayerStats = null;
+        private static bool selectedPlayerLoading = false;
+
         // History pagination
         private static int rankedPage = 0;
         private static int casualPage = 0;
         private static int matchesPerPage = 5;
+
+        // Card stats sorting
+        private static string cardSortBy = "times_picked";
+        private static bool cardSortDesc = true;
 
         // Notification
         private static string notificationText = "";
@@ -107,6 +116,13 @@ namespace CompetitiveRounds
             }
             GUILayout.EndHorizontal();
 
+            // Player name
+            string playerName = ApiClient.CachedPlayerStats?.display_name ?? MatchTracker.LocalDisplayName;
+            if (!string.IsNullOrEmpty(playerName) && playerName != "unknown" && playerName != "Unknown")
+            {
+                GUILayout.Label(playerName, subHeaderStyle);
+            }
+
             GUILayout.Space(4);
 
             DrawRankedToggle();
@@ -122,7 +138,7 @@ namespace CompetitiveRounds
                 {
                     currentTab = i;
                     if (i == 1 && ApiClient.CachedLeaderboard == null) ApiClient.FetchLeaderboard();
-                    if (i == 2 && ApiClient.CachedCardStats == null) ApiClient.FetchCardStats();
+                    if (i == 2 && ApiClient.CachedCardStats == null) ApiClient.FetchCardStats(50, MatchTracker.LocalSteamId);
                 }
             }
             GUILayout.EndHorizontal();
@@ -209,67 +225,80 @@ namespace CompetitiveRounds
 
             GUILayout.Space(6);
 
-            // Record section — split by ranked/casual
+            // Record section — always show both ranked and casual
             var history = ApiClient.CachedMatchHistory;
             GUILayout.BeginVertical(boxStyle);
             GUILayout.Label("Record", subHeaderStyle);
 
+            int rWins = 0, rLosses = 0, cWins = 0, cLosses = 0;
+            List<ApiClient.MatchHistoryEntry> sRanked = new List<ApiClient.MatchHistoryEntry>();
+            List<ApiClient.MatchHistoryEntry> sCasual = new List<ApiClient.MatchHistoryEntry>();
+
             if (history != null && history.Count > 0)
             {
-                var sRanked = history.FindAll(m => m.is_ranked);
-                var sCasual = history.FindAll(m => !m.is_ranked);
-
-                int rWins = 0, rLosses = 0, cWins = 0, cLosses = 0;
+                sRanked = history.FindAll(m => m.is_ranked);
+                sCasual = history.FindAll(m => !m.is_ranked);
                 foreach (var m in sRanked) { if (m.won) rWins++; else rLosses++; }
                 foreach (var m in sCasual) { if (m.won) cWins++; else cLosses++; }
+            }
 
-                // Ranked record
-                if (sRanked.Count > 0)
-                {
-                    GUILayout.BeginHorizontal();
-                    var oc = GUI.contentColor;
-                    GUI.contentColor = new Color(1f, 0.85f, 0.3f);
-                    GUILayout.Label("Ranked:", statValueStyle, GUILayout.Width(65));
-                    GUI.contentColor = oc;
-                    GUILayout.Label($"{rWins}W / {rLosses}L", statValueStyle, GUILayout.Width(80));
+            // Ranked record (always visible)
+            GUILayout.BeginHorizontal();
+            var oc = GUI.contentColor;
+            GUI.contentColor = new Color(1f, 0.85f, 0.3f);
+            GUILayout.Label("Ranked:", statValueStyle, GUILayout.Width(65));
+            GUI.contentColor = oc;
 
-                    int rStreak = CalcStreak(sRanked);
-                    string rsText = rStreak > 0 ? $"Streak: {rStreak}W" : $"Streak: {-rStreak}L";
-                    GUI.contentColor = rStreak > 0 ? Color.green : new Color(1f, 0.4f, 0.4f);
-                    GUILayout.Label(rsText, statValueStyle);
-                    GUI.contentColor = oc;
-                    GUILayout.EndHorizontal();
-                }
+            if (sRanked.Count > 0)
+            {
+                string rRatio = rLosses > 0 ? $"({(float)rWins / rLosses:F1})" : (rWins > 0 ? $"({rWins}:0)" : "");
+                GUILayout.Label($"{rWins}W / {rLosses}L  {rRatio}", statValueStyle, GUILayout.Width(160));
 
-                // Casual record
-                if (sCasual.Count > 0)
-                {
-                    GUILayout.BeginHorizontal();
-                    GUILayout.Label("Casual:", statValueStyle, GUILayout.Width(65));
-                    GUILayout.Label($"{cWins}W / {cLosses}L", statValueStyle, GUILayout.Width(80));
-
-                    int cStreak = CalcStreak(sCasual);
-                    string csText = cStreak > 0 ? $"Streak: {cStreak}W" : $"Streak: {-cStreak}L";
-                    var oc2 = GUI.contentColor;
-                    GUI.contentColor = cStreak > 0 ? Color.green : new Color(1f, 0.4f, 0.4f);
-                    GUILayout.Label(csText, statValueStyle);
-                    GUI.contentColor = oc2;
-                    GUILayout.EndHorizontal();
-                }
-
-                // Total
-                GUILayout.Space(4);
-                GUILayout.Label($"Total: {stats.total_matches} matches  ({stats.wins}W / {stats.losses}L)", statLabelStyle);
+                int rStreak = CalcStreak(sRanked);
+                string rsText = rStreak > 0 ? $"Streak: {rStreak}W" : $"Streak: {-rStreak}L";
+                GUI.contentColor = rStreak > 0 ? Color.green : new Color(1f, 0.4f, 0.4f);
+                GUILayout.Label(rsText, statValueStyle);
+                GUI.contentColor = oc;
             }
             else
             {
-                GUILayout.BeginHorizontal();
-                DrawStat("Matches", stats.total_matches.ToString());
-                DrawStat("Wins", stats.wins.ToString());
-                DrawStat("Losses", stats.losses.ToString());
-                DrawStat("W/L", stats.losses > 0 ? $"{(float)stats.wins / stats.losses:F1}" : $"{stats.wins}:0");
-                GUILayout.EndHorizontal();
+                GUI.contentColor = new Color(0.5f, 0.5f, 0.55f);
+                GUILayout.Label("No ranked matches yet", statLabelStyle);
+                GUI.contentColor = oc;
             }
+            GUILayout.EndHorizontal();
+
+            // Casual record (always visible)
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Casual:", statValueStyle, GUILayout.Width(65));
+
+            if (sCasual.Count > 0)
+            {
+                string cRatio = cLosses > 0 ? $"({(float)cWins / cLosses:F1})" : (cWins > 0 ? $"({cWins}:0)" : "");
+                GUILayout.Label($"{cWins}W / {cLosses}L  {cRatio}", statValueStyle, GUILayout.Width(160));
+
+                int cStreak = CalcStreak(sCasual);
+                string csText = cStreak > 0 ? $"Streak: {cStreak}W" : $"Streak: {-cStreak}L";
+                var oc2 = GUI.contentColor;
+                GUI.contentColor = cStreak > 0 ? Color.green : new Color(1f, 0.4f, 0.4f);
+                GUILayout.Label(csText, statValueStyle);
+                GUI.contentColor = oc2;
+            }
+            else
+            {
+                var oc3 = GUI.contentColor;
+                GUI.contentColor = new Color(0.5f, 0.5f, 0.55f);
+                GUILayout.Label("No casual matches yet", statLabelStyle);
+                GUI.contentColor = oc3;
+            }
+            GUILayout.EndHorizontal();
+
+            // Total (use PlayerStats API for accurate lifetime count)
+            GUILayout.Space(4);
+            int totalW = stats.wins;
+            int totalL = stats.losses;
+            string totalRatio = totalL > 0 ? $"({(float)totalW / totalL:F1})" : (totalW > 0 ? $"({totalW}:0)" : "");
+            GUILayout.Label($"Total: {stats.total_matches} matches  ({totalW}W / {totalL}L  {totalRatio})", statLabelStyle);
 
             GUILayout.EndVertical();
 
@@ -415,6 +444,14 @@ namespace CompetitiveRounds
                 GUILayout.Label($"       Cards: {m.cards_display}", statLabelStyle);
                 GUI.contentColor = origColor;
             }
+
+            // Show opponent's card picks (if available)
+            if (!string.IsNullOrEmpty(m.opp_cards_display))
+            {
+                GUI.contentColor = new Color(0.9f, 0.6f, 0.5f);
+                GUILayout.Label($"       Opp:   {m.opp_cards_display}", statLabelStyle);
+                GUI.contentColor = origColor;
+            }
         }
 
         // ── Leaderboard tab ───────────────────────────────────
@@ -435,34 +472,98 @@ namespace CompetitiveRounds
             GUILayout.Label("Rating", subHeaderStyle, GUILayout.Width(60));
             GUILayout.Label("W", subHeaderStyle, GUILayout.Width(35));
             GUILayout.Label("L", subHeaderStyle, GUILayout.Width(35));
-            GUILayout.Label("WR%", subHeaderStyle, GUILayout.Width(50));
+            GUILayout.Label("W/L", subHeaderStyle, GUILayout.Width(50));
             GUILayout.EndHorizontal();
 
             GUILayout.Space(2);
 
-            leaderboardScroll = GUILayout.BeginScrollView(leaderboardScroll, GUILayout.Height(360));
+            leaderboardScroll = GUILayout.BeginScrollView(leaderboardScroll, GUILayout.Height(280));
 
             foreach (var entry in board.entries)
             {
                 bool isLocal = entry.steam_id == MatchTracker.LocalSteamId;
+                bool isSelected = entry.steam_id == selectedPlayerSteamId;
                 var bgColor = GUI.backgroundColor;
                 if (isLocal) GUI.backgroundColor = new Color(0.2f, 0.5f, 0.2f, 0.5f);
+                else if (isSelected) GUI.backgroundColor = new Color(0.3f, 0.3f, 0.5f, 0.5f);
 
                 GUILayout.BeginHorizontal(entryStyle);
                 GUILayout.Label($"{entry.rank}", rankStyle, GUILayout.Width(30));
-                GUILayout.Label(TruncateName(entry.display_name, 18), statLabelStyle, GUILayout.Width(150));
+
+                // Clickable player name
+                var nameStyle = isSelected ? statValueStyle : statLabelStyle;
+                if (GUILayout.Button(TruncateName(entry.display_name, 18), nameStyle, GUILayout.Width(150), GUILayout.Height(18)))
+                {
+                    if (selectedPlayerSteamId == entry.steam_id)
+                    {
+                        selectedPlayerSteamId = "";
+                        selectedPlayerStats = null;
+                    }
+                    else
+                    {
+                        selectedPlayerSteamId = entry.steam_id;
+                        selectedPlayerStats = null;
+                        selectedPlayerLoading = true;
+                        ApiClient.FetchPlayerStatsForView(entry.steam_id, (data) =>
+                        {
+                            selectedPlayerStats = data;
+                            selectedPlayerLoading = false;
+                        });
+                    }
+                }
+
                 GUILayout.Label($"{entry.rating}", statValueStyle, GUILayout.Width(60));
                 GUILayout.Label($"{entry.wins}", statLabelStyle, GUILayout.Width(35));
                 GUILayout.Label($"{entry.losses}", statLabelStyle, GUILayout.Width(35));
-                GUILayout.Label($"{entry.win_rate * 100:F0}%", statLabelStyle, GUILayout.Width(50));
+                string lbRatio = entry.losses > 0 ? $"{(float)entry.wins / entry.losses:F1}" : (entry.wins > 0 ? $"{entry.wins}:0" : "0:0");
+                GUILayout.Label(lbRatio, statLabelStyle, GUILayout.Width(50));
                 GUILayout.EndHorizontal();
 
-                if (isLocal) GUI.backgroundColor = bgColor;
+                GUI.backgroundColor = bgColor;
             }
 
             GUILayout.EndScrollView();
 
             GUILayout.Label($"{board.total_players} players ranked", statLabelStyle);
+
+            // Selected player detail panel
+            if (!string.IsNullOrEmpty(selectedPlayerSteamId))
+            {
+                GUILayout.Space(4);
+                GUILayout.BeginVertical(boxStyle);
+
+                if (selectedPlayerLoading)
+                {
+                    GUILayout.Label("Loading player stats...", statLabelStyle);
+                }
+                else if (selectedPlayerStats != null)
+                {
+                    var ps = selectedPlayerStats;
+                    GUILayout.Label(ps.display_name, subHeaderStyle);
+
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label($"Rating: {ps.rating:F0}", statValueStyle, GUILayout.Width(120));
+                    GUILayout.Label($"RD: {ps.rating_deviation:F0}", statLabelStyle, GUILayout.Width(80));
+                    GUILayout.EndHorizontal();
+
+                    string pRatio = ps.losses > 0 ? $"({(float)ps.wins / ps.losses:F1})" : (ps.wins > 0 ? $"({ps.wins}:0)" : "");
+                    GUILayout.Label($"{ps.total_matches} matches  ({ps.wins}W / {ps.losses}L  {pRatio})", statLabelStyle);
+
+                    if (ps.ranked_enabled)
+                    {
+                        var origC = GUI.contentColor;
+                        GUI.contentColor = Color.green;
+                        GUILayout.Label("Ranked: Active", statLabelStyle);
+                        GUI.contentColor = origC;
+                    }
+                }
+                else
+                {
+                    GUILayout.Label("Player not found", statLabelStyle);
+                }
+
+                GUILayout.EndVertical();
+            }
         }
 
         // ── Card Stats tab ────────────────────────────────────
@@ -477,19 +578,41 @@ namespace CompetitiveRounds
                 return;
             }
 
+            // Sort client-side based on current sort column
+            var sorted = new List<ApiClient.CardStatData>(cards);
+            switch (cardSortBy)
+            {
+                case "card_name":
+                    sorted.Sort((a, b) => cardSortDesc ? string.Compare(b.card_name, a.card_name, StringComparison.OrdinalIgnoreCase) : string.Compare(a.card_name, b.card_name, StringComparison.OrdinalIgnoreCase));
+                    break;
+                case "card_rarity":
+                    sorted.Sort((a, b) => cardSortDesc ? string.Compare(b.card_rarity, a.card_rarity, StringComparison.OrdinalIgnoreCase) : string.Compare(a.card_rarity, b.card_rarity, StringComparison.OrdinalIgnoreCase));
+                    break;
+                case "times_picked":
+                    sorted.Sort((a, b) => cardSortDesc ? b.times_picked.CompareTo(a.times_picked) : a.times_picked.CompareTo(b.times_picked));
+                    break;
+                case "wins_with_card":
+                    sorted.Sort((a, b) => cardSortDesc ? b.wins_with_card.CompareTo(a.wins_with_card) : a.wins_with_card.CompareTo(b.wins_with_card));
+                    break;
+                case "win_rate":
+                    sorted.Sort((a, b) => cardSortDesc ? b.win_rate.CompareTo(a.win_rate) : a.win_rate.CompareTo(b.win_rate));
+                    break;
+            }
+
+            // Sortable column headers
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Card", subHeaderStyle, GUILayout.Width(160));
-            GUILayout.Label("Rarity", subHeaderStyle, GUILayout.Width(80));
-            GUILayout.Label("Picks", subHeaderStyle, GUILayout.Width(50));
-            GUILayout.Label("Wins", subHeaderStyle, GUILayout.Width(50));
-            GUILayout.Label("WR%", subHeaderStyle, GUILayout.Width(50));
+            DrawSortButton("Card", "card_name", 160);
+            DrawSortButton("Rarity", "card_rarity", 80);
+            DrawSortButton("Picks", "times_picked", 50);
+            DrawSortButton("Wins", "wins_with_card", 50);
+            DrawSortButton("WR%", "win_rate", 50);
             GUILayout.EndHorizontal();
 
             GUILayout.Space(2);
 
-            cardStatsScroll = GUILayout.BeginScrollView(cardStatsScroll, GUILayout.Height(360));
+            cardStatsScroll = GUILayout.BeginScrollView(cardStatsScroll, GUILayout.ExpandHeight(true));
 
-            foreach (var card in cards)
+            foreach (var card in sorted)
             {
                 GUILayout.BeginHorizontal(entryStyle);
                 GUILayout.Label(TruncateName(card.card_name, 20), statLabelStyle, GUILayout.Width(160));
@@ -507,6 +630,25 @@ namespace CompetitiveRounds
             }
 
             GUILayout.EndScrollView();
+        }
+
+        private static void DrawSortButton(string label, string sortKey, float width)
+        {
+            string arrow = "";
+            if (cardSortBy == sortKey)
+                arrow = cardSortDesc ? " v" : " ^";
+
+            var style = (cardSortBy == sortKey) ? activeTabStyle : tabStyle;
+            if (GUILayout.Button(label + arrow, style, GUILayout.Width(width), GUILayout.Height(20)))
+            {
+                if (cardSortBy == sortKey)
+                    cardSortDesc = !cardSortDesc;
+                else
+                {
+                    cardSortBy = sortKey;
+                    cardSortDesc = true;
+                }
+            }
         }
 
         // ── Notification (bottom center, small) ───────────────
@@ -573,7 +715,7 @@ namespace CompetitiveRounds
             }
 
             if (currentTab == 1) ApiClient.FetchLeaderboard();
-            if (currentTab == 2) ApiClient.FetchCardStats();
+            if (currentTab == 2) ApiClient.FetchCardStats(50, MatchTracker.LocalSteamId);
         }
 
         private static void DrawStat(string label, string value)
@@ -634,7 +776,7 @@ namespace CompetitiveRounds
             entryStyle.margin = new RectOffset(0, 0, 1, 1);
 
             headerStyle = new GUIStyle(GUI.skin.label);
-            headerStyle.fontSize = 18;
+            headerStyle.fontSize = 22;
             headerStyle.fontStyle = FontStyle.Bold;
             headerStyle.normal.textColor = Color.white;
 

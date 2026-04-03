@@ -57,6 +57,11 @@ namespace CompetitiveRounds
         private static int lastKnownOpponentBroadcastCount = 0;
         private const string CARD_PROP_KEY = "cr_cards";
 
+        // Pre-match card picks (cards picked before isTracking = true)
+        // These get moved into localCards when OnMatchStarted fires
+        private static List<MatchTracker.CardPickData> preMatchCards = new List<MatchTracker.CardPickData>();
+        private static int preMatchPickCount = 0;
+
         // Room info
         private static string photonRoomId = "";
         private static string photonRegion = "";
@@ -123,6 +128,35 @@ namespace CompetitiveRounds
 
             if (!inRoom && wasInRoom)
             {
+                if (isTracking && !gameOverReported)
+                {
+                    // Someone disconnected mid-match
+                    int localRounds = localTeamId == 0 ? p1Rounds : p2Rounds;
+                    int oppRounds = localTeamId == 0 ? p2Rounds : p1Rounds;
+                    string matchType = matchIsRanked ? "RANKED" : "CASUAL";
+
+                    if (localRounds >= 4)
+                    {
+                        // Local player had dominant lead — count as a win
+                        Plugin.Log.LogInfo($"[POLL] === {matchType} DC Win === Opponent disconnected at {localRounds}-{oppRounds}");
+                        int winnerTeam = localTeamId;
+                        OnGameOver(winnerTeam);
+                    }
+                    else if (oppRounds >= 4)
+                    {
+                        // Opponent had dominant lead — count as a loss (we DC'd or opponent won)
+                        Plugin.Log.LogInfo($"[POLL] === {matchType} DC Loss === Disconnected at {localRounds}-{oppRounds}");
+                        int winnerTeam = localTeamId == 0 ? 1 : 0;
+                        OnGameOver(winnerTeam);
+                    }
+                    else
+                    {
+                        // No clear winner — log as canceled, don't report
+                        Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Disconnect at {localRounds}-{oppRounds} (not counted)");
+                        CompetitiveUI.ShowNotification("Match canceled (DC)", new Color(1f, 0.7f, 0.3f));
+                    }
+                }
+
                 Plugin.Log.LogInfo("[POLL] Left room");
                 ResetMatchState();
             }
@@ -376,6 +410,38 @@ namespace CompetitiveRounds
             }
             catch { }
 
+            // Recover pre-match card picks into localCards
+            // These were captured by the log listener before tracking started
+            if (preMatchCards.Count > 0)
+            {
+                Plugin.Log.LogInfo($"[POLL] Recovering {preMatchCards.Count} pre-match card(s)");
+                foreach (var card in preMatchCards)
+                {
+                    pickCountThisMatch++;
+                    card.PickOrder = pickCountThisMatch;
+                    card.RoundNumber = 1;
+                    localCards.Add(card);
+                    broadcastCardNames.Add(card.CardName);
+                    Plugin.Log.LogInfo($"[POLL] Card: Pre-match picked {card.CardName} [#{pickCountThisMatch}]");
+                }
+
+                // Broadcast recovered cards to opponent
+                try
+                {
+                    if (PhotonNetwork.InRoom && PhotonNetwork.LocalPlayer != null)
+                    {
+                        string cardList = string.Join("|", broadcastCardNames.ToArray());
+                        var props = new Hashtable();
+                        props[CARD_PROP_KEY] = cardList;
+                        PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                        Plugin.Log.LogInfo($"[POLL] Broadcast recovered cards: {cardList}");
+                    }
+                }
+                catch { }
+            }
+            preMatchCards.Clear();
+            preMatchPickCount = 0;
+
             // Snapshot opponent's current broadcast count so we ignore stale cards
             lastKnownOpponentBroadcastCount = 0;
             try
@@ -548,7 +614,6 @@ namespace CompetitiveRounds
 
         private static void OnUnityLog(string message, string stackTrace, LogType type)
         {
-            if (!isTracking) return;
             if (type != LogType.Log) return;
 
             // The game logs "Picking Card: CardName(Clone)" only for the LOCAL player
@@ -558,6 +623,21 @@ namespace CompetitiveRounds
                 string cardName = ToTitleCase(raw.Replace("(Clone)", "").Trim());
 
                 if (string.IsNullOrEmpty(cardName)) return;
+
+                if (!isTracking)
+                {
+                    // Store for later — OnMatchStarted will recover these
+                    preMatchPickCount++;
+                    preMatchCards.Add(new MatchTracker.CardPickData
+                    {
+                        CardName = cardName,
+                        CardRarity = "Unknown",
+                        PickOrder = preMatchPickCount,
+                        RoundNumber = 1,
+                    });
+                    Plugin.Log.LogInfo($"[POLL] Card stored (pre-match): {cardName} [#{preMatchPickCount}]");
+                    return;
+                }
 
                 pickCountThisMatch++;
 
@@ -750,6 +830,8 @@ namespace CompetitiveRounds
             pickCountThisMatch = 0;
             broadcastCardNames.Clear();
             lastKnownOpponentBroadcastCount = 0;
+            preMatchCards.Clear();
+            preMatchPickCount = 0;
             fieldsResolved = false;
 
             // Clear our card broadcast when leaving room

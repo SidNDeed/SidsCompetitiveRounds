@@ -125,6 +125,7 @@ class MatchHistoryEntry(BaseModel):
     is_ranked: bool = False
     ended_at: datetime
     cards_picked: list[CardPick] = Field(default_factory=list)
+    opponent_cards_picked: list[CardPick] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 

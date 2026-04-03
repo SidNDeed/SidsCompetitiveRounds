@@ -238,47 +238,34 @@ async def get_leaderboard(
 ):
     """Get the ranked leaderboard sorted by Glicko-2 rating."""
 
-    # Count matches per player (as both p1 and p2)
-    match_counts = (
-        select(
-            func.coalesce(
-                case(
-                    (Match.player1_id == Player.id, Match.player1_id),
-                    else_=Match.player2_id,
-                ),
-                Player.id,
-            ).label("pid"),
-        )
-        .select_from(Player)
-        .outerjoin(Match, or_(Match.player1_id == Player.id, Match.player2_id == Player.id))
-        .group_by(Player.id)
-    )
-
-    # Main query using the leaderboard view
+    # CTE-based query (replaces LATERAL join which had issues with asyncpg)
     query = text("""
+        WITH match_stats AS (
+            SELECT
+                p.id AS player_id,
+                COUNT(m.id) AS total,
+                COALESCE(SUM(CASE WHEN m.winner_id = p.id THEN 1 ELSE 0 END), 0) AS wins,
+                COALESCE(SUM(CASE WHEN m.winner_id IS NOT NULL AND m.winner_id != p.id THEN 1 ELSE 0 END), 0) AS losses
+            FROM players p
+            LEFT JOIN matches m ON m.player1_id = p.id OR m.player2_id = p.id
+            GROUP BY p.id
+        )
         SELECT
             ROW_NUMBER() OVER (ORDER BY gr.rating DESC) AS rank,
             p.steam_id,
             p.display_name,
             ROUND(gr.rating::numeric, 0) AS rating,
             ROUND(gr.rating_deviation::numeric, 0) AS rd,
-            COALESCE(stats.total, 0) AS total_matches,
-            COALESCE(stats.wins, 0) AS wins,
-            COALESCE(stats.losses, 0) AS losses,
-            CASE WHEN COALESCE(stats.total, 0) > 0
-                 THEN ROUND(COALESCE(stats.wins, 0)::numeric / stats.total, 4)
+            COALESCE(ms.total, 0) AS total_matches,
+            COALESCE(ms.wins, 0) AS wins,
+            COALESCE(ms.losses, 0) AS losses,
+            CASE WHEN COALESCE(ms.total, 0) > 0
+                 THEN ROUND(COALESCE(ms.wins, 0)::numeric / ms.total, 4)
                  ELSE 0 END AS win_rate
         FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
-        LEFT JOIN LATERAL (
-            SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN m.winner_id = p.id THEN 1 ELSE 0 END) AS wins,
-                SUM(CASE WHEN m.winner_id IS NOT NULL AND m.winner_id != p.id THEN 1 ELSE 0 END) AS losses
-            FROM matches m
-            WHERE m.player1_id = p.id OR m.player2_id = p.id
-        ) stats ON true
-        WHERE COALESCE(stats.total, 0) >= :min_matches
+        LEFT JOIN match_stats ms ON ms.player_id = p.id
+        WHERE COALESCE(ms.total, 0) >= :min_matches
           AND gr.rating_deviation < 200
         ORDER BY gr.rating DESC
         LIMIT :limit OFFSET :offset
@@ -304,13 +291,18 @@ async def get_leaderboard(
 
     # Total players who qualify
     count_query = text("""
+        WITH match_stats AS (
+            SELECT
+                p.id AS player_id,
+                COUNT(m.id) AS total
+            FROM players p
+            LEFT JOIN matches m ON m.player1_id = p.id OR m.player2_id = p.id
+            GROUP BY p.id
+        )
         SELECT COUNT(*) FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
-        LEFT JOIN LATERAL (
-            SELECT COUNT(*) AS total
-            FROM matches m WHERE m.player1_id = p.id OR m.player2_id = p.id
-        ) stats ON true
-        WHERE COALESCE(stats.total, 0) >= :min_matches AND gr.rating_deviation < 200
+        LEFT JOIN match_stats ms ON ms.player_id = p.id
+        WHERE COALESCE(ms.total, 0) >= :min_matches AND gr.rating_deviation < 200
     """)
     total = (await db.execute(count_query, {"min_matches": min_matches})).scalar() or 0
 
@@ -434,7 +426,8 @@ async def get_player_matches(
             CASE WHEN m.player1_id = :pid THEN m.p1_rounds_won ELSE m.p2_rounds_won END AS player_rounds,
             CASE WHEN m.player1_id = :pid THEN m.p2_rounds_won ELSE m.p1_rounds_won END AS opp_rounds,
             CASE WHEN m.player1_id = :pid THEN p2.steam_id ELSE p1.steam_id END AS opp_steam_id,
-            CASE WHEN m.player1_id = :pid THEN p2.display_name ELSE p1.display_name END AS opp_name
+            CASE WHEN m.player1_id = :pid THEN p2.display_name ELSE p1.display_name END AS opp_name,
+            CASE WHEN m.player1_id = :pid THEN m.player2_id ELSE m.player1_id END AS opp_id
         FROM matches m
         JOIN players p1 ON p1.id = m.player1_id
         JOIN players p2 ON p2.id = m.player2_id
@@ -458,6 +451,18 @@ async def get_player_matches(
             for c in cards_result.scalars().all()
         ]
 
+        # Get opponent's cards in this match
+        opp_cards_result = await db.execute(
+            select(MatchCard)
+            .where(MatchCard.match_id == row["match_id"], MatchCard.player_id == row["opp_id"])
+            .order_by(MatchCard.round_number, MatchCard.pick_order)
+        )
+        opp_cards = [
+            {"card_name": c.card_name, "card_rarity": c.card_rarity,
+             "pick_order": c.pick_order, "round_number": c.round_number}
+            for c in opp_cards_result.scalars().all()
+        ]
+
         entries.append(MatchHistoryEntry(
             match_id=row["match_id"],
             opponent_steam_id=row["opp_steam_id"],
@@ -468,6 +473,7 @@ async def get_player_matches(
             ended_at=row["ended_at"],
             is_ranked=row["is_ranked"] if "is_ranked" in row.keys() else False,
             cards_picked=cards,
+            opponent_cards_picked=opp_cards,
         ))
 
     return entries
@@ -481,12 +487,19 @@ async def get_card_stats(
     order: str = Query("desc", enum=["asc", "desc"]),
     limit: int = Query(50, ge=1, le=200),
     min_picks: int = Query(5, ge=0, description="Minimum times picked to appear"),
+    steam_id: str | None = Query(None, description="Filter to a specific player's cards"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get aggregated card statistics across all matches."""
+    """Get aggregated card statistics. Optionally filter to a single player."""
 
-    # Query directly rather than relying on the materialized view,
-    # so results are always fresh.
+    # Build WHERE clause for optional player filter
+    player_filter = ""
+    params = {"min_picks": min_picks, "limit": limit}
+
+    if steam_id:
+        player_filter = "AND mc.player_id = (SELECT id FROM players WHERE steam_id = :steam_id)"
+        params["steam_id"] = steam_id
+
     query = text(f"""
         SELECT
             mc.card_name,
@@ -501,13 +514,14 @@ async def get_card_stats(
             ) AS win_rate
         FROM match_cards mc
         JOIN matches m ON m.id = mc.match_id
+        WHERE 1=1 {player_filter}
         GROUP BY mc.card_name, mc.card_rarity
         HAVING COUNT(*) >= :min_picks
         ORDER BY {sort_by} {"DESC" if order == "desc" else "ASC"}
         LIMIT :limit
     """)
 
-    rows = (await db.execute(query, {"min_picks": min_picks, "limit": limit})).mappings().all()
+    rows = (await db.execute(query, params)).mappings().all()
 
     return [
         CardStatEntry(
