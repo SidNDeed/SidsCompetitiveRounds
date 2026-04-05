@@ -68,6 +68,14 @@ namespace CompetitiveRounds
             public int total_xp;
             public int xp_into_level;
             public int xp_for_next_level;
+            public int best_ranked_streak;
+            public int best_casual_streak;
+            public int ranked_series_wins;
+            public int ranked_series_losses;
+
+            // Parsed manually (JsonUtility can't handle nested arrays)
+            public List<string> top_card_names;
+            public List<int> top_card_picks;
         }
 
         [Serializable]
@@ -107,6 +115,9 @@ namespace CompetitiveRounds
             public string ended_at;
             public string cards_display; // Comma-separated card names for display
             public string opp_cards_display; // Opponent's cards
+            public string series_id; // For grouping matches into BO3 series
+            public string series_score; // e.g. "2-0", "1-1"
+            public float series_rating_change; // Elo change for completed series
         }
 
         [Serializable]
@@ -212,34 +223,49 @@ namespace CompetitiveRounds
 
                         // Parse XP from response
                         int xpGained = ExtractJsonInt(response, "xp_gained");
-                        int level = ExtractJsonInt(response, "level");
+                        int newLevel = ExtractJsonInt(response, "level");
+                        int totalXp = ExtractJsonInt(response, "total_xp");
 
-                        // Build XP notification
-                        string xpText = $"+{xpGained} XP";
+                        // Track previous level for level-up detection
+                        int prevLevel = CompetitiveUI.LastKnownLevel;
 
-                        // Check for bonuses in the response
-                        if (response.Contains("Win x"))
-                            xpText += " (Win!)";
-                        if (response.Contains("Sweep"))
-                            xpText += " Sweep!";
-                        if (response.Contains("Top 5"))
-                            xpText += " TOP 5!";
+                        // Build XP notification with breakdown
+                        string xpLine = $"+{xpGained} XP";
+                        var bonusParts = new List<string>();
+                        if (response.Contains("Win x")) bonusParts.Add("Win x1.5");
+                        if (response.Contains("Ranked x")) bonusParts.Add("Ranked x1.2");
+                        if (response.Contains("Sweep")) bonusParts.Add("Sweep +100");
+                        if (response.Contains("Top 5")) bonusParts.Add("Top 5 +150");
 
-                        CompetitiveUI.ShowNotification(xpText, new Color(0.4f, 0.8f, 1f));
+                        if (bonusParts.Count > 0)
+                            xpLine += "  [" + string.Join(", ", bonusParts.ToArray()) + "]";
 
-                        // Show level-up if applicable
-                        if (level > 0)
+                        CompetitiveUI.ShowNotification(xpLine, new Color(0.4f, 0.8f, 1f), 4f);
+
+                        // Show level-up if we gained a level
+                        if (newLevel > prevLevel && prevLevel >= 0)
                         {
-                            CompetitiveUI.QueueNotification($"Level {level}!", new Color(1f, 0.85f, 0.3f));
+                            CompetitiveUI.QueueNotification($"LEVEL UP!  Level {newLevel}", new Color(1f, 0.85f, 0.3f), 4f);
                         }
+                        CompetitiveUI.LastKnownLevel = newLevel;
 
                         FetchPlayerStats(MatchTracker.LocalSteamId);
                         FetchMatchHistory(MatchTracker.LocalSteamId);
 
-                        // Trigger Glicko-2 recalculation after ranked matches
+                        // Series notifications and Glicko trigger
                         if (isRanked)
                         {
-                            TriggerGlickoRecalc();
+                            string seriesStatus = ExtractJsonString(response, "series_status");
+                            string seriesScore = ExtractJsonString(response, "series_score");
+
+                            if (seriesStatus == "active")
+                            {
+                                CompetitiveUI.QueueNotification($"Series: {seriesScore}", new Color(1f, 0.85f, 0.3f), 3f);
+                            }
+                            else if (seriesStatus == "completed")
+                            {
+                                CompetitiveUI.QueueNotification($"SERIES COMPLETE {seriesScore}!", new Color(0.3f, 1f, 0.3f), 4f);
+                            }
                         }
                     }
                     else
@@ -411,6 +437,8 @@ namespace CompetitiveRounds
                         try
                         {
                             var data = JsonUtility.FromJson<PlayerStatsData>(response);
+                            // Manually parse top_cards (JsonUtility can't handle nested arrays)
+                            ParseTopCards(data, response);
                             callback(data);
                         }
                         catch
@@ -426,12 +454,57 @@ namespace CompetitiveRounds
             ));
         }
 
-        public static void FetchCardStats(int limit = 30, string steamId = null, string sortBy = "times_picked")
+        private static void ParseTopCards(PlayerStatsData data, string response)
+        {
+            data.top_card_names = new List<string>();
+            data.top_card_picks = new List<int>();
+            try
+            {
+                int tcStart = response.IndexOf("\"top_cards\"");
+                if (tcStart < 0) return;
+
+                int arrStart = response.IndexOf("[", tcStart);
+                int arrEnd = FindMatchingBracket(response, arrStart);
+                if (arrStart < 0 || arrEnd < 0) return;
+
+                string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
+                if (arr == "[]") return;
+
+                var cardParts = arr.Split(new[] { "\"card_name\"" }, StringSplitOptions.None);
+                for (int i = 1; i < cardParts.Length && i <= 5; i++)
+                {
+                    string name = ExtractJsonString(cardParts[i], "");
+                    int picks = ExtractJsonInt(cardParts[i], "times_picked");
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        data.top_card_names.Add(name);
+                        data.top_card_picks.Add(picks);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static int FindMatchingBracket(string s, int openPos)
+        {
+            if (openPos < 0 || openPos >= s.Length) return -1;
+            int depth = 0;
+            for (int i = openPos; i < s.Length; i++)
+            {
+                if (s[i] == '[') depth++;
+                else if (s[i] == ']') { depth--; if (depth == 0) return i; }
+            }
+            return -1;
+        }
+
+        public static void FetchCardStats(int limit = 30, string steamId = null, string sortBy = "times_picked", string isRanked = null)
         {
             IsLoading = true;
             string url = $"{baseUrl}/api/v1/cards?limit={limit}&sort_by={sortBy}&min_picks=1";
             if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
                 url += $"&steam_id={steamId}";
+            if (!string.IsNullOrEmpty(isRanked))
+                url += $"&is_ranked={isRanked}";
 
             Plugin.Instance.StartCoroutine(GetRequest(
                 url,
@@ -547,6 +620,11 @@ namespace CompetitiveRounds
                                 // Extract opponent card names from opponent_cards_picked array
                                 entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
 
+                                // Extract series fields for BO3 grouping
+                                entry.series_id = ExtractJsonString(chunk, "series_id");
+                                entry.series_score = ExtractJsonString(chunk, "series_score");
+                                entry.series_rating_change = ExtractJsonFloat(chunk, "series_rating_change");
+
                                 entries.Add(entry);
                             }
 
@@ -597,6 +675,26 @@ namespace CompetitiveRounds
                 return int.Parse(json.Substring(start, end - start));
             }
             catch { return 0; }
+        }
+
+        private static float ExtractJsonFloat(string json, string key)
+        {
+            try
+            {
+                string search = $"\"{key}\":";
+                int start = json.IndexOf(search);
+                if (start < 0) return 0f;
+                start += search.Length;
+                while (start < json.Length && (json[start] == ' ' || json[start] == '\t')) start++;
+                // Check for null
+                if (start < json.Length && json[start] == 'n') return 0f;
+                int end = start;
+                while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '.' || json[end] == '-')) end++;
+                if (end == start) return 0f;
+                return float.Parse(json.Substring(start, end - start),
+                    System.Globalization.CultureInfo.InvariantCulture);
+            }
+            catch { return 0f; }
         }
 
         private static string ExtractCardNames(string chunk, string key = "cards_picked")

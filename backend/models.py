@@ -83,6 +83,7 @@ class Match(Base):
     hmac_signature = Column(String(128), nullable=True)
     reported_by = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=True)
     is_ranked = Column(Boolean, nullable=False, default=False)
+    series_id = Column(UUID(as_uuid=True), ForeignKey("ranked_series.id"), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -91,6 +92,7 @@ class Match(Base):
     player2 = relationship("Player", foreign_keys=[player2_id])
     winner = relationship("Player", foreign_keys=[winner_id])
     cards = relationship("MatchCard", back_populates="match", cascade="all, delete-orphan")
+    series = relationship("RankedSeries", back_populates="matches")
 
     __table_args__ = (
         UniqueConstraint("photon_room_id", "player1_id", "player2_id", name="unique_match"),
@@ -98,6 +100,27 @@ class Match(Base):
         Index("idx_matches_player2", "player2_id", ended_at.desc()),
         Index("idx_matches_ended", ended_at.desc()),
     )
+
+
+class RankedSeries(Base):
+    __tablename__ = "ranked_series"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    player1_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    player2_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    p1_series_wins = Column(SmallInteger, nullable=False, default=0)
+    p2_series_wins = Column(SmallInteger, nullable=False, default=0)
+    status = Column(String(16), nullable=False, default="active")
+    winner_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=True)
+    p1_rating_change = Column(Double, nullable=True)
+    p2_rating_change = Column(Double, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    player1 = relationship("Player", foreign_keys=[player1_id])
+    player2 = relationship("Player", foreign_keys=[player2_id])
+    series_winner = relationship("Player", foreign_keys=[winner_id])
+    matches = relationship("Match", back_populates="series", order_by="Match.ended_at")
 
 
 class MatchCard(Base):

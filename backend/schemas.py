@@ -60,6 +60,8 @@ class MatchResponse(BaseModel):
     xp_bonuses: list[str] = Field(default_factory=list)
     total_xp: int = 0
     level: int = 0
+    series_status: str = "none"  # "none", "active", "completed"
+    series_score: str = ""       # e.g. "1-0", "2-1"
 
     model_config = {"from_attributes": True}
 
@@ -83,6 +85,10 @@ class PlayerStatsResponse(BaseModel):
     total_xp: int = 0
     xp_into_level: int = 0
     xp_for_next_level: int = 0
+    best_ranked_streak: int = 0
+    best_casual_streak: int = 0
+    ranked_series_wins: int = 0
+    ranked_series_losses: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -135,6 +141,9 @@ class MatchHistoryEntry(BaseModel):
     ended_at: datetime
     cards_picked: list[CardPick] = Field(default_factory=list)
     opponent_cards_picked: list[CardPick] = Field(default_factory=list)
+    series_id: str | None = None
+    series_score: str | None = None
+    series_rating_change: float | None = None
 
     model_config = {"from_attributes": True}
 

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import GlickoRating, Match, MatchCard, Player, RatingHistory
+from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory
 from schemas import (
     CardStatEntry,
     HealthResponse,
@@ -335,7 +335,102 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
 
     reporter_level, reporter_xp_into, reporter_xp_needed = level_from_xp(reporter_total_xp)
 
+    # ── Best of 3 Series Logic (ranked only) ──────────────────
+    series_status = "none"
+    series_score = ""
+    series_completed = False
+
+    if report.is_ranked:
+        # Find active series between these two players (order-independent)
+        series_query = (
+            select(RankedSeries)
+            .where(
+                RankedSeries.status == "active",
+                or_(
+                    (RankedSeries.player1_id == p1.id) & (RankedSeries.player2_id == p2.id),
+                    (RankedSeries.player1_id == p2.id) & (RankedSeries.player2_id == p1.id),
+                )
+            )
+        )
+        series_result = await db.execute(series_query)
+        series = series_result.scalar_one_or_none()
+
+        if not series:
+            # Create new series — p1/p2 order matches first match's order
+            series = RankedSeries(
+                player1_id=p1.id,
+                player2_id=p2.id,
+            )
+            db.add(series)
+            await db.flush()
+
+        # Link match to series
+        match.series_id = series.id
+
+        # Increment series wins for the match winner
+        if winner.id == series.player1_id:
+            series.p1_series_wins += 1
+        else:
+            series.p2_series_wins += 1
+
+        series_score = f"{series.p1_series_wins}-{series.p2_series_wins}"
+
+        # Check if series is complete (first to 2)
+        if series.p1_series_wins >= 2 or series.p2_series_wins >= 2:
+            series.status = "completed"
+            series.winner_id = series.player1_id if series.p1_series_wins >= 2 else series.player2_id
+            series.completed_at = datetime.now(timezone.utc)
+            series_status = "completed"
+            series_completed = True
+        else:
+            series_status = "active"
+
     await db.commit()
+
+    # Trigger Glicko recalculation only when a series completes
+    # (for non-ranked matches, Glicko is not affected)
+    if series_completed:
+        # Inline recalculation for the two series players
+        try:
+            # Read both ratings BEFORE any updates (avoids ordering bug)
+            g1_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p1.id))
+            g1 = g1_r.scalar_one_or_none()
+            g2_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p2.id))
+            g2 = g2_r.scalar_one_or_none()
+
+            if g1 and g2:
+                p1_won_series = (series.winner_id == p1.id)
+
+                # Calculate both new ratings using pre-update opponent values
+                new_r1, new_rd1, new_vol1 = calculate_new_rating(
+                    g1.rating, g1.rating_deviation, g1.volatility,
+                    [(g2.rating, g2.rating_deviation, 1.0 if p1_won_series else 0.0)],
+                    GLICKO2_TAU,
+                )
+                new_r2, new_rd2, new_vol2 = calculate_new_rating(
+                    g2.rating, g2.rating_deviation, g2.volatility,
+                    [(g1.rating, g1.rating_deviation, 0.0 if p1_won_series else 1.0)],
+                    GLICKO2_TAU,
+                )
+
+                # Store rating changes on the series for UI display
+                series.p1_rating_change = round(new_r1 - g1.rating, 1)
+                series.p2_rating_change = round(new_r2 - g2.rating, 1)
+
+                # Apply updates
+                now = datetime.now(timezone.utc)
+                g1.rating = new_r1
+                g1.rating_deviation = new_rd1
+                g1.volatility = new_vol1
+                g1.updated_at = now
+                g2.rating = new_r2
+                g2.rating_deviation = new_rd2
+                g2.volatility = new_vol2
+                g2.updated_at = now
+
+            await db.commit()
+        except Exception as ex:
+            print(f"Series Glicko update error: {ex}")
 
     return MatchResponse(
         match_id=match.id,
@@ -345,6 +440,8 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         xp_bonuses=reporter_bonuses,
         total_xp=reporter_total_xp,
         level=reporter_level,
+        series_status=series_status,
+        series_score=series_score,
     )
 
 
@@ -359,17 +456,47 @@ async def get_leaderboard(
 ):
     """Get the ranked leaderboard sorted by Glicko-2 rating."""
 
-    # CTE-based query — ranked matches only for leaderboard
+    # Leaderboard counts: completed series W/L + legacy individual ranked matches
     query = text("""
-        WITH match_stats AS (
+        WITH series_stats AS (
+            SELECT
+                sub.player_id,
+                SUM(sub.won) AS wins,
+                SUM(sub.lost) AS losses,
+                COUNT(*) AS total
+            FROM (
+                SELECT rs.player1_id AS player_id,
+                       CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END AS won,
+                       CASE WHEN rs.winner_id != rs.player1_id THEN 1 ELSE 0 END AS lost
+                FROM ranked_series rs WHERE rs.status = 'completed'
+                UNION ALL
+                SELECT rs.player2_id AS player_id,
+                       CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END AS won,
+                       CASE WHEN rs.winner_id != rs.player2_id THEN 1 ELSE 0 END AS lost
+                FROM ranked_series rs WHERE rs.status = 'completed'
+            ) sub
+            GROUP BY sub.player_id
+        ),
+        legacy_stats AS (
             SELECT
                 p.id AS player_id,
-                COUNT(m.id) AS total,
                 COALESCE(SUM(CASE WHEN m.winner_id = p.id THEN 1 ELSE 0 END), 0) AS wins,
-                COALESCE(SUM(CASE WHEN m.winner_id IS NOT NULL AND m.winner_id != p.id THEN 1 ELSE 0 END), 0) AS losses
+                COALESCE(SUM(CASE WHEN m.winner_id IS NOT NULL AND m.winner_id != p.id THEN 1 ELSE 0 END), 0) AS losses,
+                COUNT(m.id) AS total
             FROM players p
-            LEFT JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id) AND m.is_ranked = true
+            LEFT JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id)
+                AND m.is_ranked = true AND m.series_id IS NULL
             GROUP BY p.id
+        ),
+        combined AS (
+            SELECT
+                p.id AS player_id,
+                COALESCE(ss.wins, 0) + COALESCE(ls.wins, 0) AS wins,
+                COALESCE(ss.losses, 0) + COALESCE(ls.losses, 0) AS losses,
+                COALESCE(ss.total, 0) + COALESCE(ls.total, 0) AS total
+            FROM players p
+            LEFT JOIN series_stats ss ON ss.player_id = p.id
+            LEFT JOIN legacy_stats ls ON ls.player_id = p.id
         )
         SELECT
             ROW_NUMBER() OVER (ORDER BY gr.rating DESC) AS rank,
@@ -377,17 +504,17 @@ async def get_leaderboard(
             p.display_name,
             ROUND(gr.rating::numeric, 0) AS rating,
             ROUND(gr.rating_deviation::numeric, 0) AS rd,
-            COALESCE(ms.total, 0) AS total_matches,
-            COALESCE(ms.wins, 0) AS wins,
-            COALESCE(ms.losses, 0) AS losses,
-            CASE WHEN COALESCE(ms.total, 0) > 0
-                 THEN ROUND(COALESCE(ms.wins, 0)::numeric / ms.total, 4)
+            COALESCE(c.total, 0) AS total_matches,
+            COALESCE(c.wins, 0) AS wins,
+            COALESCE(c.losses, 0) AS losses,
+            CASE WHEN COALESCE(c.total, 0) > 0
+                 THEN ROUND(COALESCE(c.wins, 0)::numeric / c.total, 4)
                  ELSE 0 END AS win_rate,
             COALESCE(p.total_xp, 0) AS total_xp
         FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
-        LEFT JOIN match_stats ms ON ms.player_id = p.id
-        WHERE COALESCE(ms.total, 0) >= :min_matches
+        LEFT JOIN combined c ON c.player_id = p.id
+        WHERE COALESCE(c.total, 0) >= :min_matches
           AND gr.rating_deviation < 200
         ORDER BY gr.rating DESC
         LIMIT :limit OFFSET :offset
@@ -414,18 +541,32 @@ async def get_leaderboard(
 
     # Total players who qualify
     count_query = text("""
-        WITH match_stats AS (
-            SELECT
-                p.id AS player_id,
-                COUNT(m.id) AS total
+        WITH series_stats AS (
+            SELECT sub.player_id, COUNT(*) AS total
+            FROM (
+                SELECT rs.player1_id AS player_id FROM ranked_series rs WHERE rs.status = 'completed'
+                UNION ALL
+                SELECT rs.player2_id AS player_id FROM ranked_series rs WHERE rs.status = 'completed'
+            ) sub GROUP BY sub.player_id
+        ),
+        legacy_stats AS (
+            SELECT p.id AS player_id, COUNT(m.id) AS total
             FROM players p
-            LEFT JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id) AND m.is_ranked = true
+            LEFT JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id)
+                AND m.is_ranked = true AND m.series_id IS NULL
             GROUP BY p.id
+        ),
+        combined AS (
+            SELECT p.id AS player_id,
+                   COALESCE(ss.total, 0) + COALESCE(ls.total, 0) AS total
+            FROM players p
+            LEFT JOIN series_stats ss ON ss.player_id = p.id
+            LEFT JOIN legacy_stats ls ON ls.player_id = p.id
         )
         SELECT COUNT(*) FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
-        LEFT JOIN match_stats ms ON ms.player_id = p.id
-        WHERE COALESCE(ms.total, 0) >= :min_matches AND gr.rating_deviation < 200
+        LEFT JOIN combined c ON c.player_id = p.id
+        WHERE COALESCE(c.total, 0) >= :min_matches AND gr.rating_deviation < 200
     """)
     total = (await db.execute(count_query, {"min_matches": min_matches})).scalar() or 0
 
@@ -510,6 +651,56 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
     player_total_xp = player.total_xp or 0
     player_level, xp_into_level, xp_needed_for_next = level_from_xp(player_total_xp)
 
+    # Compute best win streaks (ranked and casual)
+    streak_query = text("""
+        SELECT m.winner_id, m.is_ranked
+        FROM matches m
+        WHERE m.player1_id = :pid OR m.player2_id = :pid
+        ORDER BY m.ended_at ASC
+    """)
+    streak_rows = (await db.execute(streak_query, {"pid": player.id})).mappings().all()
+
+    best_ranked_streak = 0
+    best_casual_streak = 0
+    cur_ranked_streak = 0
+    cur_casual_streak = 0
+    for sr in streak_rows:
+        won = (sr["winner_id"] == player.id)
+        if sr["is_ranked"]:
+            cur_ranked_streak = cur_ranked_streak + 1 if won else 0
+            best_ranked_streak = max(best_ranked_streak, cur_ranked_streak)
+        else:
+            cur_casual_streak = cur_casual_streak + 1 if won else 0
+            best_casual_streak = max(best_casual_streak, cur_casual_streak)
+
+    # Compute series-aware ranked W/L (completed series + legacy individual ranked matches)
+    ranked_wl_query = text("""
+        WITH series_wl AS (
+            SELECT
+                SUM(CASE WHEN rs.winner_id = :pid THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN rs.winner_id IS NOT NULL AND rs.winner_id != :pid THEN 1 ELSE 0 END) AS losses
+            FROM ranked_series rs
+            WHERE rs.status = 'completed'
+              AND (rs.player1_id = :pid OR rs.player2_id = :pid)
+        ),
+        legacy_wl AS (
+            SELECT
+                SUM(CASE WHEN m.winner_id = :pid THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN m.winner_id IS NOT NULL AND m.winner_id != :pid THEN 1 ELSE 0 END) AS losses
+            FROM matches m
+            WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+              AND m.is_ranked = true
+              AND m.series_id IS NULL
+        )
+        SELECT
+            COALESCE(s.wins, 0) + COALESCE(l.wins, 0) AS ranked_wins,
+            COALESCE(s.losses, 0) + COALESCE(l.losses, 0) AS ranked_losses
+        FROM series_wl s, legacy_wl l
+    """)
+    ranked_wl = (await db.execute(ranked_wl_query, {"pid": player.id})).mappings().first()
+    ranked_series_wins = ranked_wl["ranked_wins"] if ranked_wl else 0
+    ranked_series_losses = ranked_wl["ranked_losses"] if ranked_wl else 0
+
     return PlayerStatsResponse(
         steam_id=player.steam_id,
         display_name=player.display_name,
@@ -528,6 +719,10 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         total_xp=player_total_xp,
         xp_into_level=xp_into_level,
         xp_for_next_level=xp_needed_for_next,
+        best_ranked_streak=best_ranked_streak,
+        best_casual_streak=best_casual_streak,
+        ranked_series_wins=ranked_series_wins,
+        ranked_series_losses=ranked_series_losses,
     )
 
 
@@ -557,10 +752,18 @@ async def get_player_matches(
             CASE WHEN m.player1_id = :pid THEN m.p2_rounds_won ELSE m.p1_rounds_won END AS opp_rounds,
             CASE WHEN m.player1_id = :pid THEN p2.steam_id ELSE p1.steam_id END AS opp_steam_id,
             CASE WHEN m.player1_id = :pid THEN p2.display_name ELSE p1.display_name END AS opp_name,
-            CASE WHEN m.player1_id = :pid THEN m.player2_id ELSE m.player1_id END AS opp_id
+            CASE WHEN m.player1_id = :pid THEN m.player2_id ELSE m.player1_id END AS opp_id,
+            m.series_id::text AS series_id,
+            rs.status AS series_status,
+            rs.p1_series_wins AS s_p1w,
+            rs.p2_series_wins AS s_p2w,
+            rs.player1_id AS s_p1id,
+            CASE WHEN rs.player1_id = :pid THEN rs.p1_rating_change
+                 ELSE rs.p2_rating_change END AS series_rating_change
         FROM matches m
         JOIN players p1 ON p1.id = m.player1_id
         JOIN players p2 ON p2.id = m.player2_id
+        LEFT JOIN ranked_series rs ON rs.id = m.series_id
         WHERE m.player1_id = :pid OR m.player2_id = :pid
         ORDER BY m.ended_at DESC
         LIMIT :limit OFFSET :offset
@@ -593,6 +796,21 @@ async def get_player_matches(
             for c in opp_cards_result.scalars().all()
         ]
 
+        # Compute series score from the requesting player's perspective
+        series_id_str = row["series_id"] if "series_id" in row.keys() else None
+        series_score_str = None
+        series_rc = None
+        if series_id_str:
+            s_p1w = row["s_p1w"] or 0
+            s_p2w = row["s_p2w"] or 0
+            s_p1id = row["s_p1id"]
+            # Show score as "my_wins - their_wins"
+            if s_p1id == player.id:
+                series_score_str = f"{s_p1w}-{s_p2w}"
+            else:
+                series_score_str = f"{s_p2w}-{s_p1w}"
+            series_rc = float(row["series_rating_change"]) if row["series_rating_change"] is not None else None
+
         entries.append(MatchHistoryEntry(
             match_id=row["match_id"],
             opponent_steam_id=row["opp_steam_id"],
@@ -604,6 +822,9 @@ async def get_player_matches(
             is_ranked=row["is_ranked"] if "is_ranked" in row.keys() else False,
             cards_picked=cards,
             opponent_cards_picked=opp_cards,
+            series_id=series_id_str,
+            series_score=series_score_str,
+            series_rating_change=series_rc,
         ))
 
     return entries
@@ -618,17 +839,24 @@ async def get_card_stats(
     limit: int = Query(50, ge=1, le=200),
     min_picks: int = Query(5, ge=0, description="Minimum times picked to appear"),
     steam_id: str | None = Query(None, description="Filter to a specific player's cards"),
+    is_ranked: str | None = Query(None, description="Filter by ranked (true) or casual (false)"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get aggregated card statistics. Optionally filter to a single player."""
+    """Get aggregated card statistics. Optionally filter to a single player and/or ranked/casual."""
 
-    # Build WHERE clause for optional player filter
+    # Build WHERE clause for optional filters
     player_filter = ""
+    ranked_filter = ""
     params = {"min_picks": min_picks, "limit": limit}
 
     if steam_id:
         player_filter = "AND mc.player_id = (SELECT id FROM players WHERE steam_id = :steam_id)"
         params["steam_id"] = steam_id
+
+    if is_ranked == "true":
+        ranked_filter = "AND m.is_ranked = true"
+    elif is_ranked == "false":
+        ranked_filter = "AND m.is_ranked = false"
 
     query = text(f"""
         SELECT
@@ -644,7 +872,7 @@ async def get_card_stats(
             ) AS win_rate
         FROM match_cards mc
         JOIN matches m ON m.id = mc.match_id
-        WHERE 1=1 {player_filter}
+        WHERE 1=1 {player_filter} {ranked_filter}
         GROUP BY mc.card_name, mc.card_rarity
         HAVING COUNT(*) >= :min_picks
         ORDER BY {sort_by} {"DESC" if order == "desc" else "ASC"}

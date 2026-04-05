@@ -81,10 +81,19 @@ namespace CompetitiveRounds
         // Poll throttle
         private static float pollTimer = 0f;
 
+        // Session tracking
+        private static DateTime roomJoinTime;
+        private static Dictionary<string, float> sessionTimeByOpponent = new Dictionary<string, float>();
+        private static int sessionMatchCount = 0;
+
         // Public state
         public static MatchTracker.MatchResult LastResult { get; private set; }
         public static bool HasPendingResult { get; private set; } = false;
         public static bool MatchIsRanked => matchIsRanked;
+
+        // Session accessors
+        public static Dictionary<string, float> SessionTimeByOpponent => sessionTimeByOpponent;
+        public static int SessionMatchCount => sessionMatchCount;
 
         // ── Initialization ────────────────────────────────────
 
@@ -117,6 +126,7 @@ namespace CompetitiveRounds
             {
                 photonRoomId = PhotonNetwork.CurrentRoom?.Name ?? "";
                 photonRegion = PhotonNetwork.CloudRegion ?? "";
+                roomJoinTime = DateTime.UtcNow;
                 IdentifyLocalPlayer();
                 playersIdentified = false;
                 opponentSteamIdResolved = false;
@@ -128,6 +138,16 @@ namespace CompetitiveRounds
 
             if (!inRoom && wasInRoom)
             {
+                // Accumulate session time for this opponent
+                if (!string.IsNullOrEmpty(opponentDisplayName) && opponentDisplayName != "Opponent")
+                {
+                    float minutes = (float)(DateTime.UtcNow - roomJoinTime).TotalMinutes;
+                    if (sessionTimeByOpponent.ContainsKey(opponentDisplayName))
+                        sessionTimeByOpponent[opponentDisplayName] += minutes;
+                    else
+                        sessionTimeByOpponent[opponentDisplayName] = minutes;
+                }
+
                 if (isTracking && !gameOverReported)
                 {
                     // Someone disconnected mid-match
@@ -388,6 +408,16 @@ namespace CompetitiveRounds
             gameOverReported = false;
             matchStartTime = DateTime.UtcNow;
 
+            // Retry card rarity scan if it didn't work at startup
+            if (CardRarityLookup.Count == 0)
+            {
+                try
+                {
+                    CardRarityLookup.ScanAll();
+                }
+                catch { }
+            }
+
             p1Points = 0; p2Points = 0;
             p1Rounds = 0; p2Rounds = 0;
             currentRound = 1;
@@ -481,6 +511,7 @@ namespace CompetitiveRounds
         {
             if (!isTracking || gameOverReported) return;
             gameOverReported = true;
+            sessionMatchCount++;
 
             if (!opponentSteamIdResolved)
                 TryResolveOpponent();
@@ -631,7 +662,7 @@ namespace CompetitiveRounds
                     preMatchCards.Add(new MatchTracker.CardPickData
                     {
                         CardName = cardName,
-                        CardRarity = "Unknown",
+                        CardRarity = CardRarityLookup.GetRarity(cardName),
                         PickOrder = preMatchPickCount,
                         RoundNumber = 1,
                     });
@@ -644,7 +675,7 @@ namespace CompetitiveRounds
                 var pick = new MatchTracker.CardPickData
                 {
                     CardName = cardName,
-                    CardRarity = "Unknown",
+                    CardRarity = CardRarityLookup.GetRarity(cardName),
                     PickOrder = pickCountThisMatch,
                     RoundNumber = currentRound,
                 };
@@ -708,6 +739,14 @@ namespace CompetitiveRounds
                     string[] cards = cardList.Split('|');
                     int newCount = cards.Length;
 
+                    // Detect opponent broadcast reset (they cleared for a new match)
+                    // When count drops, opponent has restarted their card list
+                    if (newCount < lastKnownOpponentBroadcastCount)
+                    {
+                        Plugin.Log.LogInfo($"[POLL] Opponent broadcast reset detected ({lastKnownOpponentBroadcastCount} -> {newCount}), re-syncing");
+                        lastKnownOpponentBroadcastCount = 0;
+                    }
+
                     if (newCount > lastKnownOpponentBroadcastCount)
                     {
                         // New cards from opponent
@@ -719,7 +758,7 @@ namespace CompetitiveRounds
                             var pick = new MatchTracker.CardPickData
                             {
                                 CardName = cardName,
-                                CardRarity = "Unknown",
+                                CardRarity = CardRarityLookup.GetRarity(cardName),
                                 PickOrder = i + 1,
                                 RoundNumber = currentRound,
                             };
