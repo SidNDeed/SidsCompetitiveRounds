@@ -49,6 +49,7 @@ namespace CompetitiveRounds
             public int wins;
             public int losses;
             public float win_rate;
+            public int level;
         }
 
         [Serializable]
@@ -63,6 +64,10 @@ namespace CompetitiveRounds
             public int losses;
             public float win_rate;
             public bool ranked_enabled;
+            public int level;
+            public int total_xp;
+            public int xp_into_level;
+            public int xp_for_next_level;
         }
 
         [Serializable]
@@ -204,10 +209,30 @@ namespace CompetitiveRounds
                     if (success)
                     {
                         Plugin.Log.LogInfo($"Match reported successfully: {response}");
-                        CompetitiveUI.ShowNotification(
-                            isRanked ? "Ranked point recorded!" : "Point recorded!",
-                            isRanked ? Color.green : Color.yellow
-                        );
+
+                        // Parse XP from response
+                        int xpGained = ExtractJsonInt(response, "xp_gained");
+                        int level = ExtractJsonInt(response, "level");
+
+                        // Build XP notification
+                        string xpText = $"+{xpGained} XP";
+
+                        // Check for bonuses in the response
+                        if (response.Contains("Win x"))
+                            xpText += " (Win!)";
+                        if (response.Contains("Sweep"))
+                            xpText += " Sweep!";
+                        if (response.Contains("Top 5"))
+                            xpText += " TOP 5!";
+
+                        CompetitiveUI.ShowNotification(xpText, new Color(0.4f, 0.8f, 1f));
+
+                        // Show level-up if applicable
+                        if (level > 0)
+                        {
+                            CompetitiveUI.QueueNotification($"Level {level}!", new Color(1f, 0.85f, 0.3f));
+                        }
+
                         FetchPlayerStats(MatchTracker.LocalSteamId);
                         FetchMatchHistory(MatchTracker.LocalSteamId);
 
@@ -306,6 +331,8 @@ namespace CompetitiveRounds
                                     }
                                 }
                                 catch { entry.win_rate = 0f; }
+
+                                entry.level = ExtractJsonInt(chunk, "level");
 
                                 if (!string.IsNullOrEmpty(entry.steam_id))
                                     entries.Add(entry);

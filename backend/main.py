@@ -5,6 +5,7 @@ FastAPI backend for match tracking, Glicko-2 ratings, and leaderboards.
 
 import hashlib
 import hmac
+import math
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -121,6 +122,90 @@ def verify_hmac(report: MatchReport) -> bool:
     return hmac.compare_digest(report.hmac_signature, expected)
 
 
+# ── XP System ──────────────────────────────────────────────────
+
+def xp_for_level(level: int) -> int:
+    """XP required to go from level-1 to level. J-curve scaling."""
+    if level <= 0:
+        return 0
+    return int(100 * math.pow(level, 1.5))
+
+
+def total_xp_for_level(level: int) -> int:
+    """Total cumulative XP needed to reach a given level."""
+    return sum(xp_for_level(n) for n in range(1, level + 1))
+
+
+def level_from_xp(total_xp: int) -> tuple[int, int, int]:
+    """
+    Given total XP, return (level, xp_into_current_level, xp_needed_for_next_level).
+    Max level is 100.
+    """
+    level = 0
+    remaining = total_xp
+    for n in range(1, 101):
+        needed = xp_for_level(n)
+        if remaining < needed:
+            return level, remaining, needed
+        remaining -= needed
+        level = n
+    return 100, 0, 0  # Max level
+
+
+async def calculate_match_xp(
+    won: bool,
+    is_ranked: bool,
+    winner_rounds: int,
+    loser_rounds: int,
+    opponent_id,
+    db: AsyncSession,
+) -> tuple[int, list[str]]:
+    """
+    Calculate XP earned for a match. Returns (xp_amount, list_of_bonus_descriptions).
+
+    Base: 250 XP per finished game
+    Win: 1.5x multiplier
+    Sweep (5-0): +100 flat bonus
+    Ranked: 1.2x multiplier
+    Beat top-5 player: +150 flat bonus
+    """
+    base_xp = 250
+    bonuses = []
+    multiplier = 1.0
+
+    if won:
+        multiplier *= 1.5
+        bonuses.append("Win x1.5")
+
+    if is_ranked:
+        multiplier *= 1.2
+        bonuses.append("Ranked x1.2")
+
+    xp = int(base_xp * multiplier)
+
+    # Sweep bonus
+    if won and loser_rounds == 0:
+        xp += 100
+        bonuses.append("Sweep +100")
+
+    # Top-5 bonus (check if opponent is in top 5 by rating)
+    if won and opponent_id:
+        try:
+            top5_query = text("""
+                SELECT player_id FROM glicko_ratings
+                WHERE rating_deviation < 200
+                ORDER BY rating DESC LIMIT 5
+            """)
+            top5 = (await db.execute(top5_query)).scalars().all()
+            if opponent_id in top5:
+                xp += 150
+                bonuses.append("Top 5 opponent +150")
+        except Exception:
+            pass
+
+    return xp, bonuses
+
+
 # ── Routes: Health ─────────────────────────────────────────────
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -218,12 +303,48 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             glicko.games_in_period += 1
             glicko.updated_at = datetime.now(timezone.utc)
 
+    # Award XP to both players
+    winner_rounds = max(report.p1_rounds_won, report.p2_rounds_won)
+    loser_rounds = min(report.p1_rounds_won, report.p2_rounds_won)
+    loser = p2 if winner == p1 else p1
+
+    p1_won = (winner == p1)
+    p1_xp, p1_bonuses = await calculate_match_xp(
+        won=p1_won, is_ranked=report.is_ranked,
+        winner_rounds=winner_rounds, loser_rounds=loser_rounds,
+        opponent_id=p2.id, db=db,
+    )
+    p2_xp, p2_bonuses = await calculate_match_xp(
+        won=(not p1_won), is_ranked=report.is_ranked,
+        winner_rounds=winner_rounds, loser_rounds=loser_rounds,
+        opponent_id=p1.id, db=db,
+    )
+
+    p1.total_xp = (p1.total_xp or 0) + p1_xp
+    p2.total_xp = (p2.total_xp or 0) + p2_xp
+
+    # Determine reporter's XP for the response
+    if report.reported_by_steam_id == report.player1.steam_id:
+        reporter_xp = p1_xp
+        reporter_bonuses = p1_bonuses
+        reporter_total_xp = p1.total_xp
+    else:
+        reporter_xp = p2_xp
+        reporter_bonuses = p2_bonuses
+        reporter_total_xp = p2.total_xp
+
+    reporter_level, reporter_xp_into, reporter_xp_needed = level_from_xp(reporter_total_xp)
+
     await db.commit()
 
     return MatchResponse(
         match_id=match.id,
         winner_steam_id=winner.steam_id,
         message="Match recorded successfully",
+        xp_gained=reporter_xp,
+        xp_bonuses=reporter_bonuses,
+        total_xp=reporter_total_xp,
+        level=reporter_level,
     )
 
 
@@ -238,7 +359,7 @@ async def get_leaderboard(
 ):
     """Get the ranked leaderboard sorted by Glicko-2 rating."""
 
-    # CTE-based query (replaces LATERAL join which had issues with asyncpg)
+    # CTE-based query — ranked matches only for leaderboard
     query = text("""
         WITH match_stats AS (
             SELECT
@@ -247,7 +368,7 @@ async def get_leaderboard(
                 COALESCE(SUM(CASE WHEN m.winner_id = p.id THEN 1 ELSE 0 END), 0) AS wins,
                 COALESCE(SUM(CASE WHEN m.winner_id IS NOT NULL AND m.winner_id != p.id THEN 1 ELSE 0 END), 0) AS losses
             FROM players p
-            LEFT JOIN matches m ON m.player1_id = p.id OR m.player2_id = p.id
+            LEFT JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id) AND m.is_ranked = true
             GROUP BY p.id
         )
         SELECT
@@ -261,7 +382,8 @@ async def get_leaderboard(
             COALESCE(ms.losses, 0) AS losses,
             CASE WHEN COALESCE(ms.total, 0) > 0
                  THEN ROUND(COALESCE(ms.wins, 0)::numeric / ms.total, 4)
-                 ELSE 0 END AS win_rate
+                 ELSE 0 END AS win_rate,
+            COALESCE(p.total_xp, 0) AS total_xp
         FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
         LEFT JOIN match_stats ms ON ms.player_id = p.id
@@ -285,6 +407,7 @@ async def get_leaderboard(
             wins=row["wins"],
             losses=row["losses"],
             win_rate=float(row["win_rate"]),
+            level=level_from_xp(row["total_xp"])[0],
         )
         for row in rows
     ]
@@ -296,7 +419,7 @@ async def get_leaderboard(
                 p.id AS player_id,
                 COUNT(m.id) AS total
             FROM players p
-            LEFT JOIN matches m ON m.player1_id = p.id OR m.player2_id = p.id
+            LEFT JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id) AND m.is_ranked = true
             GROUP BY p.id
         )
         SELECT COUNT(*) FROM glicko_ratings gr
@@ -384,6 +507,9 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         for c in cards
     ]
 
+    player_total_xp = player.total_xp or 0
+    player_level, xp_into_level, xp_needed_for_next = level_from_xp(player_total_xp)
+
     return PlayerStatsResponse(
         steam_id=player.steam_id,
         display_name=player.display_name,
@@ -398,6 +524,10 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         last_match=stats["last_match"],
         recent_rating_history=history,
         top_cards=top_cards,
+        level=player_level,
+        total_xp=player_total_xp,
+        xp_into_level=xp_into_level,
+        xp_for_next_level=xp_needed_for_next,
     )
 
 

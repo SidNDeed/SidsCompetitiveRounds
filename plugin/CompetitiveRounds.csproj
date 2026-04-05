@@ -16,6 +16,9 @@
 
   <!-- BepInEx (still needed for plugin loading and logging) -->
   <ItemGroup>
+    <Reference Include="0Harmony">
+      <HintPath>..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\ROUNDS\BepInEx\core\0Harmony.dll</HintPath>
+    </Reference>
     <Reference Include="BepInEx">
       <HintPath>$(BepInExDir)\core\BepInEx.dll</HintPath>
       <Private>false</Private>
@@ -93,10 +96,7 @@
   <!-- Auto-copy to plugins folder after build -->
   <Target Name="CopyToPlugins" AfterTargets="Build">
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds" />
-    <Copy
-      SourceFiles="$(OutputPath)$(AssemblyName).dll"
-      DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds"
-      SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds" SkipUnchangedFiles="true" />
     <Message Text="Copied $(AssemblyName).dll to BepInEx plugins" Importance="high" />
   </Target>
 

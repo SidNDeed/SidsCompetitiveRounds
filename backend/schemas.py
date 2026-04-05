@@ -56,6 +56,10 @@ class MatchResponse(BaseModel):
     p1_new_rating: float | None = None
     p2_new_rating: float | None = None
     message: str = "Match recorded"
+    xp_gained: int = 0
+    xp_bonuses: list[str] = Field(default_factory=list)
+    total_xp: int = 0
+    level: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -75,6 +79,10 @@ class PlayerStatsResponse(BaseModel):
     last_match: datetime | None
     recent_rating_history: list[dict] = Field(default_factory=list)
     top_cards: list[dict] = Field(default_factory=list)
+    level: int = 0
+    total_xp: int = 0
+    xp_into_level: int = 0
+    xp_for_next_level: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -90,6 +98,7 @@ class LeaderboardEntry(BaseModel):
     wins: int
     losses: int
     win_rate: float
+    level: int = 0
 
     model_config = {"from_attributes": True}
 

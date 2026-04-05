@@ -1,6 +1,7 @@
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using HarmonyLib;
 using System;
 using System.Collections;
 using UnityEngine;
@@ -13,10 +14,11 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.4.0";
+        public const string ModVersion = "1.8.0";
 
         internal static ManualLogSource Log;
         internal static CompetitiveRoundsBehaviour Instance;
+        internal static Harmony HarmonyInstance;
 
         // Config entries
         internal static ConfigEntry<string> ApiBaseUrl;
@@ -48,6 +50,18 @@ namespace CompetitiveRounds
             );
 
             Log.LogInfo($"{ModName} v{ModVersion} initializing...");
+
+            // Try Harmony patching
+            try
+            {
+                HarmonyInstance = new Harmony(ModId);
+                HarmonyInstance.PatchAll();
+                Log.LogInfo("Harmony patches applied successfully!");
+            }
+            catch (Exception ex)
+            {
+                Log.LogWarning($"Harmony patching failed (mod will work without it): {ex.Message}");
+            }
 
             // Create persistent object with maximum protection
             if (!spawned)
@@ -153,6 +167,18 @@ namespace CompetitiveRounds
             {
                 Plugin.Log.LogError($"[PERSIST] Respawn failed: {ex.Message}");
             }
+        }
+    }
+
+    // ── Harmony Test Patch ────────────────────────────────────
+    // If this fires, Harmony works and we can use it for
+    // menu integration, card rarity hooks, etc.
+    [HarmonyPatch(typeof(GM_ArmsRace), "Start")]
+    class HarmonyTestPatch
+    {
+        static void Postfix()
+        {
+            Plugin.Log.LogInfo("[HARMONY] GM_ArmsRace.Start fired! Harmony is WORKING!");
         }
     }
 }

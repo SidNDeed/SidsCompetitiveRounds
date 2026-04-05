@@ -560,7 +560,7 @@ namespace CompetitiveRounds
             }
 
             // Use consistent room ID (no per-PC timestamp, use round count instead)
-            string reportRoomId = $"{photonRoomId}_r{p1Rounds + p2Rounds}";
+            string reportRoomId = $"{photonRoomId}_{matchStartTime:HHmmss}_r{p1Rounds + p2Rounds}";
 
             if (shouldReport)
             {

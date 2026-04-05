@@ -33,6 +33,13 @@ namespace CompetitiveRounds
         private static string notificationText = "";
         private static Color notificationColor = Color.white;
         private static float notificationTimer = 0f;
+        private static List<KeyValuePair<string, Color>> notificationQueue = new List<KeyValuePair<string, Color>>();
+
+        // FPS counter
+        private static float fpsTimer = 0f;
+        private static int fpsFrameCount = 0;
+        private static float fpsDisplay = 0f;
+        private static GUIStyle fpsStyle;
 
         // Styles (re-initialized when needed)
         private static bool stylesInitialized = false;
@@ -72,6 +79,12 @@ namespace CompetitiveRounds
             notificationTimer = 3.0f;
         }
 
+        public static void QueueNotification(string text, Color color)
+        {
+            if (!Plugin.ShowNotifications.Value) return;
+            notificationQueue.Add(new KeyValuePair<string, Color>(text, color));
+        }
+
         /// <summary>
         /// Call this when the persistent object respawns to reset GUI styles.
         /// </summary>
@@ -84,6 +97,7 @@ namespace CompetitiveRounds
 
         public static void DrawUI()
         {
+            DrawFPS();
             DrawNotification();
             DrawMatchStatus();
 
@@ -221,6 +235,43 @@ namespace CompetitiveRounds
             GUILayout.EndHorizontal();
             GUILayout.Label("(Lower deviation = more confident rating)", statLabelStyle);
 
+            GUILayout.EndVertical();
+
+            GUILayout.Space(6);
+
+            // Level & XP bar
+            GUILayout.BeginVertical(boxStyle);
+            GUILayout.BeginHorizontal();
+            var origLvlColor = GUI.contentColor;
+            GUI.contentColor = new Color(0.4f, 0.8f, 1f);
+            GUILayout.Label($"Level {stats.level}", subHeaderStyle, GUILayout.Width(80));
+            GUI.contentColor = origLvlColor;
+
+            if (stats.level < 100 && stats.xp_for_next_level > 0)
+            {
+                GUILayout.Label($"{stats.xp_into_level} / {stats.xp_for_next_level} XP", statLabelStyle);
+            }
+            else if (stats.level >= 100)
+            {
+                GUI.contentColor = new Color(1f, 0.85f, 0.3f);
+                GUILayout.Label("MAX", statValueStyle);
+                GUI.contentColor = origLvlColor;
+            }
+            GUILayout.FlexibleSpace();
+            GUILayout.Label($"Total: {stats.total_xp:N0} XP", statLabelStyle);
+            GUILayout.EndHorizontal();
+
+            // XP progress bar
+            if (stats.level < 100 && stats.xp_for_next_level > 0)
+            {
+                float progress = (float)stats.xp_into_level / stats.xp_for_next_level;
+                Rect barRect = GUILayoutUtility.GetRect(0, 12, GUILayout.ExpandWidth(true));
+                // Background
+                GUI.DrawTexture(barRect, MakeTex(1, 1, new Color(0.2f, 0.2f, 0.25f, 0.8f)));
+                // Fill
+                Rect fillRect = new Rect(barRect.x, barRect.y, barRect.width * progress, barRect.height);
+                GUI.DrawTexture(fillRect, MakeTex(1, 1, new Color(0.3f, 0.7f, 1f, 0.9f)));
+            }
             GUILayout.EndVertical();
 
             GUILayout.Space(6);
@@ -467,12 +518,13 @@ namespace CompetitiveRounds
             }
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label("#", rankStyle, GUILayout.Width(30));
-            GUILayout.Label("Player", subHeaderStyle, GUILayout.Width(150));
-            GUILayout.Label("Rating", subHeaderStyle, GUILayout.Width(60));
-            GUILayout.Label("W", subHeaderStyle, GUILayout.Width(35));
-            GUILayout.Label("L", subHeaderStyle, GUILayout.Width(35));
-            GUILayout.Label("W/L", subHeaderStyle, GUILayout.Width(50));
+            GUILayout.Label("#", rankStyle, GUILayout.Width(26));
+            GUILayout.Label("Lv", subHeaderStyle, GUILayout.Width(28));
+            GUILayout.Label("Player", subHeaderStyle, GUILayout.Width(140));
+            GUILayout.Label("Rating", subHeaderStyle, GUILayout.Width(55));
+            GUILayout.Label("W", subHeaderStyle, GUILayout.Width(30));
+            GUILayout.Label("L", subHeaderStyle, GUILayout.Width(30));
+            GUILayout.Label("W/L", subHeaderStyle, GUILayout.Width(45));
             GUILayout.EndHorizontal();
 
             GUILayout.Space(2);
@@ -488,11 +540,17 @@ namespace CompetitiveRounds
                 else if (isSelected) GUI.backgroundColor = new Color(0.3f, 0.3f, 0.5f, 0.5f);
 
                 GUILayout.BeginHorizontal(entryStyle);
-                GUILayout.Label($"{entry.rank}", rankStyle, GUILayout.Width(30));
+                GUILayout.Label($"{entry.rank}", rankStyle, GUILayout.Width(26));
+
+                // Level with color
+                var lvColor = GUI.contentColor;
+                GUI.contentColor = new Color(0.4f, 0.8f, 1f);
+                GUILayout.Label($"{entry.level}", statLabelStyle, GUILayout.Width(28));
+                GUI.contentColor = lvColor;
 
                 // Clickable player name
                 var nameStyle = isSelected ? statValueStyle : statLabelStyle;
-                if (GUILayout.Button(TruncateName(entry.display_name, 18), nameStyle, GUILayout.Width(150), GUILayout.Height(18)))
+                if (GUILayout.Button(TruncateName(entry.display_name, 16), nameStyle, GUILayout.Width(140), GUILayout.Height(18)))
                 {
                     if (selectedPlayerSteamId == entry.steam_id)
                     {
@@ -512,11 +570,11 @@ namespace CompetitiveRounds
                     }
                 }
 
-                GUILayout.Label($"{entry.rating}", statValueStyle, GUILayout.Width(60));
-                GUILayout.Label($"{entry.wins}", statLabelStyle, GUILayout.Width(35));
-                GUILayout.Label($"{entry.losses}", statLabelStyle, GUILayout.Width(35));
+                GUILayout.Label($"{entry.rating}", statValueStyle, GUILayout.Width(55));
+                GUILayout.Label($"{entry.wins}", statLabelStyle, GUILayout.Width(30));
+                GUILayout.Label($"{entry.losses}", statLabelStyle, GUILayout.Width(30));
                 string lbRatio = entry.losses > 0 ? $"{(float)entry.wins / entry.losses:F1}" : (entry.wins > 0 ? $"{entry.wins}:0" : "0:0");
-                GUILayout.Label(lbRatio, statLabelStyle, GUILayout.Width(50));
+                GUILayout.Label(lbRatio, statLabelStyle, GUILayout.Width(45));
                 GUILayout.EndHorizontal();
 
                 GUI.backgroundColor = bgColor;
@@ -539,7 +597,14 @@ namespace CompetitiveRounds
                 else if (selectedPlayerStats != null)
                 {
                     var ps = selectedPlayerStats;
+                    GUILayout.BeginHorizontal();
                     GUILayout.Label(ps.display_name, subHeaderStyle);
+                    GUILayout.FlexibleSpace();
+                    var origLv = GUI.contentColor;
+                    GUI.contentColor = new Color(0.4f, 0.8f, 1f);
+                    GUILayout.Label($"Lv {ps.level}", statValueStyle);
+                    GUI.contentColor = origLv;
+                    GUILayout.EndHorizontal();
 
                     GUILayout.BeginHorizontal();
                     GUILayout.Label($"Rating: {ps.rating:F0}", statValueStyle, GUILayout.Width(120));
@@ -651,10 +716,44 @@ namespace CompetitiveRounds
             }
         }
 
+        // ── FPS Counter (top-left, small grey) ─────────────────
+
+        private static void DrawFPS()
+        {
+            // Update FPS counter
+            fpsFrameCount++;
+            fpsTimer += Time.deltaTime;
+            if (fpsTimer >= 0.5f)
+            {
+                fpsDisplay = fpsFrameCount / fpsTimer;
+                fpsFrameCount = 0;
+                fpsTimer = 0f;
+            }
+
+            if (fpsStyle == null)
+            {
+                fpsStyle = new GUIStyle(GUI.skin.label);
+                fpsStyle.fontSize = 11;
+                fpsStyle.normal.textColor = new Color(0.5f, 0.5f, 0.5f, 0.7f);
+            }
+
+            GUI.Label(new Rect(6, 4, 60, 18), $"{fpsDisplay:F0} FPS", fpsStyle);
+        }
+
         // ── Notification (bottom center, small) ───────────────
 
         private static void DrawNotification()
         {
+            // Process queue when current notification finishes
+            if (notificationTimer <= 0f && notificationQueue.Count > 0)
+            {
+                var next = notificationQueue[0];
+                notificationQueue.RemoveAt(0);
+                notificationText = next.Key;
+                notificationColor = next.Value;
+                notificationTimer = 2.5f;
+            }
+
             if (notificationTimer <= 0f) return;
 
             notificationTimer -= Time.deltaTime;
@@ -667,7 +766,7 @@ namespace CompetitiveRounds
             var origColor = GUI.contentColor;
             GUI.contentColor = color;
 
-            float width = 200;
+            float width = 300;
             float x = (Screen.width - width) / 2;
             float y = Screen.height - 60;
 
