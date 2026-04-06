@@ -144,6 +144,7 @@ class MatchHistoryEntry(BaseModel):
     series_id: str | None = None
     series_score: str | None = None
     series_rating_change: float | None = None
+    xp_gained: int = 0
 
     model_config = {"from_attributes": True}
 

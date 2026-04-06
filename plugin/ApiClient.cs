@@ -118,6 +118,7 @@ namespace CompetitiveRounds
             public string series_id; // For grouping matches into BO3 series
             public string series_score; // e.g. "2-0", "1-1"
             public float series_rating_change; // Elo change for completed series
+            public int xp_gained; // XP earned for this match
         }
 
         [Serializable]
@@ -624,6 +625,7 @@ namespace CompetitiveRounds
                                 entry.series_id = ExtractJsonString(chunk, "series_id");
                                 entry.series_score = ExtractJsonString(chunk, "series_score");
                                 entry.series_rating_change = ExtractJsonFloat(chunk, "series_rating_change");
+                                entry.xp_gained = ExtractJsonInt(chunk, "xp_gained");
 
                                 entries.Add(entry);
                             }

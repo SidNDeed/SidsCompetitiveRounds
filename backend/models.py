@@ -24,7 +24,7 @@ class Player(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     steam_id = Column(String(20), nullable=False, unique=True, index=True)
     display_name = Column(String(64), nullable=False)
-    ranked_enabled = Column(Boolean, nullable=False, default=False)
+    ranked_enabled = Column(Boolean, nullable=False, default=True)
     total_xp = Column(Integer, nullable=False, default=0)
     first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -85,6 +85,10 @@ class Match(Base):
     is_ranked = Column(Boolean, nullable=False, default=False)
     series_id = Column(UUID(as_uuid=True), ForeignKey("ranked_series.id"), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
+
+    # XP earned per player
+    p1_xp_gained = Column(Integer, default=0)
+    p2_xp_gained = Column(Integer, default=0)
     ended_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 

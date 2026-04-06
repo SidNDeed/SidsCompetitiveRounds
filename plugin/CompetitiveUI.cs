@@ -790,6 +790,12 @@ namespace CompetitiveRounds
                 $"  {result}  {m.player_rounds_won}-{m.opponent_rounds_won}  vs {oppName}",
                 statValueStyle
             );
+            GUILayout.FlexibleSpace();
+            if (m.xp_gained > 0)
+            {
+                GUI.contentColor = new Color(0.4f, 0.8f, 1f);
+                GUILayout.Label($"+{m.xp_gained}xp", statLabelStyle, GUILayout.Width(55));
+            }
             if (!string.IsNullOrEmpty(dateStr))
             {
                 GUI.contentColor = new Color(0.5f, 0.5f, 0.55f);
@@ -955,6 +961,12 @@ namespace CompetitiveRounds
                 $"      {result}  {m.player_rounds_won}-{m.opponent_rounds_won}",
                 statValueStyle
             );
+            GUILayout.FlexibleSpace();
+            if (m.xp_gained > 0)
+            {
+                GUI.contentColor = new Color(0.4f, 0.8f, 1f);
+                GUILayout.Label($"+{m.xp_gained}xp", statLabelStyle, GUILayout.Width(55));
+            }
             if (!string.IsNullOrEmpty(dateStr))
             {
                 GUI.contentColor = new Color(0.5f, 0.5f, 0.55f);

@@ -323,6 +323,10 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     p1.total_xp = (p1.total_xp or 0) + p1_xp
     p2.total_xp = (p2.total_xp or 0) + p2_xp
 
+    # Store XP earned per player on the match record
+    match.p1_xp_gained = p1_xp
+    match.p2_xp_gained = p2_xp
+
     # Determine reporter's XP for the response
     if report.reported_by_steam_id == report.player1.steam_id:
         reporter_xp = p1_xp
@@ -759,7 +763,9 @@ async def get_player_matches(
             rs.p2_series_wins AS s_p2w,
             rs.player1_id AS s_p1id,
             CASE WHEN rs.player1_id = :pid THEN rs.p1_rating_change
-                 ELSE rs.p2_rating_change END AS series_rating_change
+                 ELSE rs.p2_rating_change END AS series_rating_change,
+            CASE WHEN m.player1_id = :pid THEN m.p1_xp_gained
+                 ELSE m.p2_xp_gained END AS xp_gained
         FROM matches m
         JOIN players p1 ON p1.id = m.player1_id
         JOIN players p2 ON p2.id = m.player2_id
@@ -825,6 +831,7 @@ async def get_player_matches(
             series_id=series_id_str,
             series_score=series_score_str,
             series_rating_change=series_rc,
+            xp_gained=row["xp_gained"] or 0,
         ))
 
     return entries

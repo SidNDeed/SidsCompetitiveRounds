@@ -16,7 +16,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.12.0";
+        public const string ModVersion = "1.13.0";
 
         internal static ManualLogSource Log;
         internal static CompetitiveRoundsBehaviour Instance;
@@ -111,7 +111,6 @@ namespace CompetitiveRounds
     /// </summary>
     public class QueueRoomJoiner : MonoBehaviour
     {
-        private float logTimer = 0f;
         private bool leaving = false;
         private bool connectAttempted = false;
 
@@ -125,14 +124,6 @@ namespace CompetitiveRounds
             string pendingRoom = Plugin.PendingRankedRoom;
             if (string.IsNullOrEmpty(pendingRoom)) { connectAttempted = false; return; }
             if (leaving) return;
-
-            // Diagnostic logging
-            logTimer += Time.deltaTime;
-            if (logTimer >= 3f)
-            {
-                logTimer = 0f;
-                Plugin.Log.LogInfo($"[QUEUE-JOINER] Waiting: connected={PhotonNetwork.IsConnected}, inRoom={PhotonNetwork.InRoom}, state={PhotonNetwork.NetworkClientState}");
-            }
 
             // Photon disconnected — connect ourselves
             if (!PhotonNetwork.IsConnected && !connectAttempted)

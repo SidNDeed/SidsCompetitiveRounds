@@ -1,0 +1,3 @@
+-- Add XP tracking per match
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS p1_xp_gained INTEGER DEFAULT 0;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS p2_xp_gained INTEGER DEFAULT 0;
