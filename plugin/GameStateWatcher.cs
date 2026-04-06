@@ -51,6 +51,7 @@ namespace CompetitiveRounds
         private static List<MatchTracker.CardPickData> opponentCards = new List<MatchTracker.CardPickData>();
         private static int lastKnownP1CardCount = 0;
         private static int lastKnownP2CardCount = 0;
+        private static bool opponentCardsViaHarmony = false; // True when Harmony hook is providing opponent cards
 
         // Card sharing via Photon custom properties
         private static List<string> broadcastCardNames = new List<string>();
@@ -83,8 +84,16 @@ namespace CompetitiveRounds
 
         // Session tracking
         private static DateTime roomJoinTime;
+        private static DateTime sessionStartTime = DateTime.UtcNow;
         private static Dictionary<string, float> sessionTimeByOpponent = new Dictionary<string, float>();
         private static int sessionMatchCount = 0;
+
+        // Per-opponent W/L tracking within session: [rankedWins, rankedLosses, casualWins, casualLosses]
+        private static Dictionary<string, int[]> sessionWLByOpponent = new Dictionary<string, int[]>();
+        private static int sessionRankedWins = 0;
+        private static int sessionRankedLosses = 0;
+        private static int sessionCasualWins = 0;
+        private static int sessionCasualLosses = 0;
 
         // Public state
         public static MatchTracker.MatchResult LastResult { get; private set; }
@@ -93,12 +102,19 @@ namespace CompetitiveRounds
 
         // Session accessors
         public static Dictionary<string, float> SessionTimeByOpponent => sessionTimeByOpponent;
+        public static Dictionary<string, int[]> SessionWLByOpponent => sessionWLByOpponent;
         public static int SessionMatchCount => sessionMatchCount;
+        public static int SessionRankedWins => sessionRankedWins;
+        public static int SessionRankedLosses => sessionRankedLosses;
+        public static int SessionCasualWins => sessionCasualWins;
+        public static int SessionCasualLosses => sessionCasualLosses;
+        public static DateTime SessionStartTime => sessionStartTime;
 
         // ── Initialization ────────────────────────────────────
 
         public static void Initialize()
         {
+            sessionStartTime = DateTime.UtcNow;
             IdentifyLocalPlayer();
             RegisterLogListener(); // Register early to catch all picks
             Plugin.Log.LogInfo("GameStateWatcher initialized");
@@ -139,14 +155,7 @@ namespace CompetitiveRounds
             if (!inRoom && wasInRoom)
             {
                 // Accumulate session time for this opponent
-                if (!string.IsNullOrEmpty(opponentDisplayName) && opponentDisplayName != "Opponent")
-                {
-                    float minutes = (float)(DateTime.UtcNow - roomJoinTime).TotalMinutes;
-                    if (sessionTimeByOpponent.ContainsKey(opponentDisplayName))
-                        sessionTimeByOpponent[opponentDisplayName] += minutes;
-                    else
-                        sessionTimeByOpponent[opponentDisplayName] = minutes;
-                }
+                AccumulateSessionTime();
 
                 if (isTracking && !gameOverReported)
                 {
@@ -203,6 +212,25 @@ namespace CompetitiveRounds
             }
 
             wasInRoom = inRoom;
+        }
+
+        /// <summary>
+        /// Accumulates session time for the current opponent.
+        /// Called on room leave AND after game over for real-time updates.
+        /// </summary>
+        private static void AccumulateSessionTime()
+        {
+            if (!string.IsNullOrEmpty(opponentDisplayName) && opponentDisplayName != "Opponent")
+            {
+                float minutes = (float)(DateTime.UtcNow - roomJoinTime).TotalMinutes;
+                if (sessionTimeByOpponent.ContainsKey(opponentDisplayName))
+                    sessionTimeByOpponent[opponentDisplayName] += minutes;
+                else
+                    sessionTimeByOpponent[opponentDisplayName] = minutes;
+
+                // Reset join time so we don't double-count
+                roomJoinTime = DateTime.UtcNow;
+            }
         }
 
         // ── Opponent identification ───────────────────────────
@@ -423,6 +451,7 @@ namespace CompetitiveRounds
             currentRound = 1;
             localCards.Clear();
             opponentCards.Clear();
+            opponentCardsViaHarmony = false;
             lastKnownP1CardCount = 0;
             lastKnownP2CardCount = 0;
             pickCountThisMatch = 0;
@@ -498,6 +527,27 @@ namespace CompetitiveRounds
             TryResolveOpponent();
             DetermineLocalTeam();
 
+            // Flush any opponent cards that were picked before localTeam was known
+            if (localTeamId >= 0)
+            {
+                try { CardChoiceEndPickPatch.FlushPendingPicks(localTeamId); }
+                catch { }
+            }
+
+            // Recover pre-match opponent cards (picked between matches before isTracking)
+            if (preMatchOpponentCards.Count > 0)
+            {
+                opponentCardsViaHarmony = true;
+                Plugin.Log.LogInfo($"[HARMONY-CARD] Recovering {preMatchOpponentCards.Count} pre-match opponent card(s)");
+                foreach (var card in preMatchOpponentCards)
+                {
+                    card.PickOrder = opponentCards.Count + 1;
+                    opponentCards.Add(card);
+                    Plugin.Log.LogInfo($"[HARMONY-CARD] Opp pre-match recovered: {card.CardName} [#{card.PickOrder}]");
+                }
+                preMatchOpponentCards.Clear();
+            }
+
             // Re-evaluate ranked status at match start
             matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked;
 
@@ -524,6 +574,25 @@ namespace CompetitiveRounds
                 ? $"[POLL] YOU WON vs {opponentDisplayName}!"
                 : $"[POLL] You lost to {opponentDisplayName}");
             Plugin.Log.LogInfo($"[POLL] Final: P1 {p1Rounds}r - P2 {p2Rounds}r");
+
+            // ── Update session W/L tracking ──
+            string oppKey = opponentDisplayName ?? "Unknown";
+            if (!sessionWLByOpponent.ContainsKey(oppKey))
+                sessionWLByOpponent[oppKey] = new int[] { 0, 0, 0, 0 }; // [rW, rL, cW, cL]
+
+            if (matchIsRanked)
+            {
+                if (localWon) { sessionRankedWins++; sessionWLByOpponent[oppKey][0]++; }
+                else { sessionRankedLosses++; sessionWLByOpponent[oppKey][1]++; }
+            }
+            else
+            {
+                if (localWon) { sessionCasualWins++; sessionWLByOpponent[oppKey][2]++; }
+                else { sessionCasualLosses++; sessionWLByOpponent[oppKey][3]++; }
+            }
+
+            // Update session time immediately (not just on room leave)
+            AccumulateSessionTime();
 
             LastResult = new MatchTracker.MatchResult
             {
@@ -714,13 +783,64 @@ namespace CompetitiveRounds
         }
 
         /// <summary>
+        /// Called by the Harmony CardChoice.Pick hook when the opponent picks a card.
+        /// This works even when the opponent doesn't have the mod installed.
+        /// </summary>
+        public static void OnOpponentCardPicked(string cardName, string rarity)
+        {
+            // Title-case the name for consistency
+            cardName = ToTitleCase(cardName);
+
+            if (!isTracking)
+            {
+                // Buffer for later — OnMatchStarted will recover these
+                preMatchOpponentCards.Add(new MatchTracker.CardPickData
+                {
+                    CardName = cardName,
+                    CardRarity = rarity,
+                    PickOrder = preMatchOpponentCards.Count + 1,
+                    RoundNumber = 1,
+                });
+                Plugin.Log.LogInfo($"[HARMONY-CARD] Opp card stored (pre-match): {cardName}");
+                return;
+            }
+
+            // Check for duplicates
+            foreach (var existing in opponentCards)
+            {
+                if (existing.CardName == cardName && existing.PickOrder == opponentCards.Count)
+                    return;
+            }
+
+            opponentCardsViaHarmony = true;
+
+            var pick = new MatchTracker.CardPickData
+            {
+                CardName = cardName,
+                CardRarity = rarity,
+                PickOrder = opponentCards.Count + 1,
+                RoundNumber = currentRound,
+            };
+
+            opponentCards.Add(pick);
+            Plugin.Log.LogInfo($"[HARMONY-CARD] Opp card added: {cardName} [#{pick.PickOrder}] (via Harmony)");
+        }
+
+        // Pre-match opponent cards (picked before isTracking = true)
+        private static List<MatchTracker.CardPickData> preMatchOpponentCards = new List<MatchTracker.CardPickData>();
+
+        /// <summary>
         /// Polls opponent's Photon custom properties for card picks they've broadcast.
         /// Only works when the opponent also has the mod installed.
+        /// Skipped when Harmony hook is providing opponent cards (preferred source).
         /// </summary>
         private static void PollCardPicks()
         {
             try
             {
+                // Skip Photon-based card polling when Harmony hook is providing opponent cards
+                if (opponentCardsViaHarmony) return;
+
                 if (!PhotonNetwork.InRoom) return;
 
                 Photon.Realtime.Player[] players = PhotonNetwork.PlayerList;
@@ -752,19 +872,19 @@ namespace CompetitiveRounds
                         // New cards from opponent
                         for (int i = lastKnownOpponentBroadcastCount; i < newCount; i++)
                         {
-                            string cardName = ToTitleCase(cards[i].Trim());
-                            if (string.IsNullOrEmpty(cardName)) continue;
+                            string cn = ToTitleCase(cards[i].Trim());
+                            if (string.IsNullOrEmpty(cn)) continue;
 
                             var pick = new MatchTracker.CardPickData
                             {
-                                CardName = cardName,
-                                CardRarity = CardRarityLookup.GetRarity(cardName),
+                                CardName = cn,
+                                CardRarity = CardRarityLookup.GetRarity(cn),
                                 PickOrder = i + 1,
                                 RoundNumber = currentRound,
                             };
 
                             opponentCards.Add(pick);
-                            Plugin.Log.LogInfo($"[POLL] Card: Opp picked {cardName} [via mod sync]");
+                            Plugin.Log.LogInfo($"[POLL] Card: Opp picked {cn} [via mod sync]");
                         }
 
                         lastKnownOpponentBroadcastCount = newCount;
@@ -864,6 +984,7 @@ namespace CompetitiveRounds
             matchIsRanked = false;
             localCards.Clear();
             opponentCards.Clear();
+            opponentCardsViaHarmony = false;
             lastKnownP1CardCount = 0;
             lastKnownP2CardCount = 0;
             pickCountThisMatch = 0;
@@ -872,6 +993,11 @@ namespace CompetitiveRounds
             preMatchCards.Clear();
             preMatchPickCount = 0;
             fieldsResolved = false;
+
+            // Clear buffered Harmony picks
+            try { CardChoiceEndPickPatch.ClearPending(); }
+            catch { }
+            preMatchOpponentCards.Clear();
 
             // Clear our card broadcast when leaving room
             try

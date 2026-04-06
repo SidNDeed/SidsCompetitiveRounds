@@ -23,7 +23,7 @@ namespace CompetitiveRounds
         // History pagination
         private static int rankedPage = 0;
         private static int casualPage = 0;
-        private static int matchesPerPage = 5;
+        private static int matchesPerPage = 6;
 
         // Card stats sorting
         private static string cardSortBy = "times_picked";
@@ -64,10 +64,9 @@ namespace CompetitiveRounds
         private static GUIStyle notificationStyle;
 
         // Window
-        private static Rect windowRect = new Rect(50, 50, 520, 560);
+        private static Rect windowRect = new Rect(30, 30, 850, 600);
         private static bool hasLoadedData = false;
         private static Texture2D backdropTex = null;
-        private static Vector2 mainScrollPos;
 
         // ── Public interface ──────────────────────────────────
 
@@ -109,11 +108,79 @@ namespace CompetitiveRounds
 
         // ── Drawing ───────────────────────────────────────────
 
+        // GraphicRaycaster click-blocking state
+        private static bool raycastersCached = false;
+        private static System.Type raycasterType = null;
+        private static bool raycastersDisabled = false;
+        // Cached raycaster references to avoid FindObjectsOfType every toggle
+        private static List<Behaviour> cachedRaycasters = new List<Behaviour>();
+        private static float raycasterRefreshTimer = 0f;
+
+        /// <summary>
+        /// Pre-cache GraphicRaycaster type at startup to eliminate
+        /// the brief click-through window between overlay open and raycaster disable.
+        /// </summary>
+        public static void CacheRaycasters()
+        {
+            if (raycastersCached) return;
+            raycastersCached = true;
+
+            try
+            {
+                foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    raycasterType = asm.GetType("UnityEngine.UI.GraphicRaycaster");
+                    if (raycasterType != null) break;
+                }
+                if (raycasterType == null)
+                    Plugin.Log.LogWarning("[UI] GraphicRaycaster type not found");
+                else
+                    RefreshRaycasterCache();
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Refreshes the cached list of GraphicRaycaster instances.
+        /// Called periodically since new canvases can appear (scene changes, etc).
+        /// </summary>
+        private static void RefreshRaycasterCache()
+        {
+            cachedRaycasters.Clear();
+            if (raycasterType == null) return;
+
+            try
+            {
+                var all = UnityEngine.Object.FindObjectsOfType(raycasterType);
+                foreach (var obj in all)
+                {
+                    var behaviour = obj as Behaviour;
+                    if (behaviour != null)
+                        cachedRaycasters.Add(behaviour);
+                }
+            }
+            catch { }
+        }
+
         public static void DrawUI()
         {
             DrawFPS();
             DrawNotification();
             DrawMatchStatus();
+
+            // ── GraphicRaycaster lifecycle (blocks Canvas clicks without corrupting EventSystem) ──
+            if (showOverlay && !raycastersDisabled)
+            {
+                // Refresh cache before disabling (catches new canvases)
+                RefreshRaycasterCache();
+                SetRaycastersEnabled(false);
+                raycastersDisabled = true;
+            }
+            else if (!showOverlay && raycastersDisabled)
+            {
+                SetRaycastersEnabled(true);
+                raycastersDisabled = false;
+            }
 
             if (!showOverlay) return;
 
@@ -124,32 +191,57 @@ namespace CompetitiveRounds
                 InitStyles();
             }
 
-            // ── Fullscreen backdrop: darkens screen and blocks click-through ──
-            // This is purely visual — we do NOT touch EventSystem because
-            // disabling/re-enabling it corrupts ROUNDS' internal UI state.
+            // ── Fullscreen backdrop ──
             if (backdropTex == null)
                 backdropTex = MakeTex(1, 1, new Color(0f, 0f, 0f, 0.4f));
             GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), backdropTex);
-
-            // Clamp window height to 85% of screen
-            float maxH = Screen.height * 0.85f;
-            if (windowRect.height > maxH)
-                windowRect.height = maxH;
 
             windowRect = GUILayout.Window(
                 9999,
                 windowRect,
                 DrawWindow,
                 "",
-                boxStyle,
-                GUILayout.MaxHeight(maxH)
+                boxStyle
             );
 
-            // Consume any mouse events that land outside the window
+            // Consume any mouse events outside the window (IMGUI layer)
             if (Event.current.isMouse && !windowRect.Contains(Event.current.mousePosition))
             {
                 Event.current.Use();
             }
+        }
+
+        /// <summary>
+        /// Toggles all cached GraphicRaycaster components.
+        /// Uses the pre-cached list for speed; falls back to scene search.
+        /// </summary>
+        private static void SetRaycastersEnabled(bool enabled)
+        {
+            try
+            {
+                if (raycasterType == null) return;
+
+                // Use cached list
+                if (cachedRaycasters.Count > 0)
+                {
+                    foreach (var rc in cachedRaycasters)
+                    {
+                        if (rc != null)
+                            rc.enabled = enabled;
+                    }
+                }
+                else
+                {
+                    // Fallback: find fresh
+                    var all = UnityEngine.Object.FindObjectsOfType(raycasterType);
+                    foreach (var obj in all)
+                    {
+                        var behaviour = obj as Behaviour;
+                        if (behaviour != null) behaviour.enabled = enabled;
+                    }
+                }
+            }
+            catch { }
         }
 
         private static void DrawWindow(int id)
@@ -197,17 +289,12 @@ namespace CompetitiveRounds
                 GUILayout.Label("Loading...", subHeaderStyle);
             }
 
-            // Scrollable content area
-            mainScrollPos = GUILayout.BeginScrollView(mainScrollPos);
-
             switch (currentTab)
             {
                 case 0: DrawMyStats(); break;
                 case 1: DrawLeaderboard(); break;
                 case 2: DrawCardStats(); break;
             }
-
-            GUILayout.EndScrollView();
 
             GUILayout.Space(8);
 
@@ -264,73 +351,16 @@ namespace CompetitiveRounds
                 return;
             }
 
-            GUILayout.BeginVertical(boxStyle);
-            GUILayout.Label("Glicko-2 Rating", subHeaderStyle);
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label($"{stats.rating:F0}", headerStyle, GUILayout.Width(100));
-            GUILayout.Label($"Deviation: {stats.rating_deviation:F0}", statLabelStyle);
-            GUILayout.EndHorizontal();
-            GUILayout.Label("(Lower deviation = more confident rating)", statLabelStyle);
-
-            GUILayout.EndVertical();
-
-            GUILayout.Space(6);
-
-            // Level & XP bar
-            GUILayout.BeginVertical(boxStyle);
-            GUILayout.BeginHorizontal();
-            var origLvlColor = GUI.contentColor;
-            GUI.contentColor = new Color(0.4f, 0.8f, 1f);
-            GUILayout.Label($"Level {stats.level}", subHeaderStyle, GUILayout.Width(80));
-            GUI.contentColor = origLvlColor;
-
-            if (stats.level < 100 && stats.xp_for_next_level > 0)
-            {
-                GUILayout.Label($"{stats.xp_into_level} / {stats.xp_for_next_level} XP", statLabelStyle);
-            }
-            else if (stats.level >= 100)
-            {
-                GUI.contentColor = new Color(1f, 0.85f, 0.3f);
-                GUILayout.Label("MAX", statValueStyle);
-                GUI.contentColor = origLvlColor;
-            }
-            GUILayout.FlexibleSpace();
-            GUILayout.Label($"Total: {stats.total_xp:N0} XP", statLabelStyle);
-            GUILayout.EndHorizontal();
-
-            // XP progress bar
-            if (stats.level < 100 && stats.xp_for_next_level > 0)
-            {
-                float progress = (float)stats.xp_into_level / stats.xp_for_next_level;
-                Rect barRect = GUILayoutUtility.GetRect(0, 12, GUILayout.ExpandWidth(true));
-                // Background
-                GUI.DrawTexture(barRect, MakeTex(1, 1, new Color(0.2f, 0.2f, 0.25f, 0.8f)));
-                // Fill
-                Rect fillRect = new Rect(barRect.x, barRect.y, barRect.width * progress, barRect.height);
-                GUI.DrawTexture(fillRect, MakeTex(1, 1, new Color(0.3f, 0.7f, 1f, 0.9f)));
-            }
-            GUILayout.EndVertical();
-
-            GUILayout.Space(6);
-
-            // Record section — always show both ranked and casual
             var history = ApiClient.CachedMatchHistory;
-            GUILayout.BeginVertical(boxStyle);
-            GUILayout.Label("Record", subHeaderStyle);
-
-            int cWins = 0, cLosses = 0;
-            int sweepsGiven = 0, sweepsTaken = 0;
             List<ApiClient.MatchHistoryEntry> sRanked = new List<ApiClient.MatchHistoryEntry>();
             List<ApiClient.MatchHistoryEntry> sCasual = new List<ApiClient.MatchHistoryEntry>();
+            int cWins = 0, cLosses = 0, sweepsGiven = 0, sweepsTaken = 0;
 
             if (history != null && history.Count > 0)
             {
                 sRanked = history.FindAll(m => m.is_ranked);
                 sCasual = history.FindAll(m => !m.is_ranked);
                 foreach (var m in sCasual) { if (m.won) cWins++; else cLosses++; }
-
-                // Count sweeps from ALL matches
                 foreach (var m in history)
                 {
                     if (m.won && m.opponent_rounds_won == 0) sweepsGiven++;
@@ -338,212 +368,301 @@ namespace CompetitiveRounds
                 }
             }
 
-            // Ranked record — use server's series-aware W/L (BO3 series, not individual games)
+            // ════════ TWO-COLUMN LAYOUT ════════
+            GUILayout.BeginHorizontal();
+
+            // ── LEFT COLUMN: Stats ──────────────────────────────
+            GUILayout.BeginVertical(GUILayout.Width(340));
+
+            // Rating
+            GUILayout.BeginVertical(boxStyle);
+            GUILayout.Label("Glicko-2 Rating", subHeaderStyle);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"{stats.rating:F0}", headerStyle, GUILayout.Width(80));
+            GUILayout.Label($"RD: {stats.rating_deviation:F0}", statLabelStyle);
+            GUILayout.EndHorizontal();
+            GUILayout.EndVertical();
+            GUILayout.Space(4);
+
+            // Level & XP
+            GUILayout.BeginVertical(boxStyle);
+            GUILayout.BeginHorizontal();
+            var origLvlColor = GUI.contentColor;
+            GUI.contentColor = new Color(0.4f, 0.8f, 1f);
+            GUILayout.Label($"Level {stats.level}", subHeaderStyle, GUILayout.Width(70));
+            GUI.contentColor = origLvlColor;
+            if (stats.level < 100 && stats.xp_for_next_level > 0)
+                GUILayout.Label($"{stats.xp_into_level}/{stats.xp_for_next_level} XP", statLabelStyle);
+            GUILayout.FlexibleSpace();
+            GUILayout.Label($"{stats.total_xp:N0} XP", statLabelStyle);
+            GUILayout.EndHorizontal();
+            if (stats.level < 100 && stats.xp_for_next_level > 0)
+            {
+                float progress = (float)stats.xp_into_level / stats.xp_for_next_level;
+                Rect barRect = GUILayoutUtility.GetRect(0, 10, GUILayout.ExpandWidth(true));
+                GUI.DrawTexture(barRect, MakeTex(1, 1, new Color(0.2f, 0.2f, 0.25f, 0.8f)));
+                Rect fillRect = new Rect(barRect.x, barRect.y, barRect.width * progress, barRect.height);
+                GUI.DrawTexture(fillRect, MakeTex(1, 1, new Color(0.3f, 0.7f, 1f, 0.9f)));
+            }
+            GUILayout.EndVertical();
+            GUILayout.Space(4);
+
+            // Record
+            GUILayout.BeginVertical(boxStyle);
+            GUILayout.Label("Record", subHeaderStyle);
             int rWins = stats.ranked_series_wins;
             int rLosses = stats.ranked_series_losses;
-
-            // Ranked record (always visible)
-            GUILayout.BeginHorizontal();
             var oc = GUI.contentColor;
-            GUI.contentColor = new Color(1f, 0.85f, 0.3f);
-            GUILayout.Label("Ranked:", statValueStyle, GUILayout.Width(65));
-            GUI.contentColor = oc;
 
+            // Ranked
+            GUILayout.BeginHorizontal();
+            GUI.contentColor = new Color(1f, 0.85f, 0.3f);
+            GUILayout.Label("Ranked:", statValueStyle, GUILayout.Width(55));
+            GUI.contentColor = oc;
             if (rWins + rLosses > 0)
             {
-                string rRatio = rLosses > 0 ? $"({(float)rWins / rLosses:F1})" : (rWins > 0 ? $"({rWins}:0)" : "");
-                GUILayout.Label($"{rWins}W / {rLosses}L  {rRatio}", statValueStyle, GUILayout.Width(160));
-
-                int rStreak = CalcStreak(sRanked);
-                string rsText = (rStreak > 0 ? $"Streak: {rStreak}W" : $"Streak: {-rStreak}L")
-                    + (stats.best_ranked_streak > 0 ? $"  Best: {stats.best_ranked_streak}W" : "");
-                GUI.contentColor = rStreak > 0 ? Color.green : new Color(1f, 0.4f, 0.4f);
-                GUILayout.Label(rsText, statValueStyle);
-                GUI.contentColor = oc;
+                string rRatio = rLosses > 0 ? $"({(float)rWins / rLosses:F1})" : $"({rWins}:0)";
+                GUILayout.Label($"{rWins}W / {rLosses}L {rRatio}", statValueStyle);
             }
             else
             {
                 GUI.contentColor = new Color(0.5f, 0.5f, 0.55f);
-                GUILayout.Label("No ranked matches yet", statLabelStyle);
+                GUILayout.Label("—", statLabelStyle);
                 GUI.contentColor = oc;
             }
             GUILayout.EndHorizontal();
 
-            // Casual record (always visible)
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Casual:", statValueStyle, GUILayout.Width(65));
+            // Streaks
+            if (sRanked.Count > 0)
+            {
+                int rStreak = CalcStreak(sRanked);
+                GUI.contentColor = rStreak > 0 ? Color.green : new Color(1f, 0.4f, 0.4f);
+                string rsText = (rStreak > 0 ? $"  Streak: {rStreak}W" : $"  Streak: {-rStreak}L")
+                    + (stats.best_ranked_streak > 0 ? $"  Best: {stats.best_ranked_streak}W" : "");
+                GUILayout.Label(rsText, statLabelStyle);
+                GUI.contentColor = oc;
+            }
 
+            // Casual
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Casual:", statValueStyle, GUILayout.Width(55));
             if (sCasual.Count > 0)
             {
                 string cRatio = cLosses > 0 ? $"({(float)cWins / cLosses:F1})" : (cWins > 0 ? $"({cWins}:0)" : "");
-                GUILayout.Label($"{cWins}W / {cLosses}L  {cRatio}", statValueStyle, GUILayout.Width(160));
-
-                int cStreak = CalcStreak(sCasual);
-                string csText = (cStreak > 0 ? $"Streak: {cStreak}W" : $"Streak: {-cStreak}L")
-                    + (stats.best_casual_streak > 0 ? $"  Best: {stats.best_casual_streak}W" : "");
-                var oc2 = GUI.contentColor;
-                GUI.contentColor = cStreak > 0 ? Color.green : new Color(1f, 0.4f, 0.4f);
-                GUILayout.Label(csText, statValueStyle);
-                GUI.contentColor = oc2;
+                GUILayout.Label($"{cWins}W / {cLosses}L {cRatio}", statValueStyle);
             }
             else
             {
-                var oc3 = GUI.contentColor;
                 GUI.contentColor = new Color(0.5f, 0.5f, 0.55f);
-                GUILayout.Label("No casual matches yet", statLabelStyle);
-                GUI.contentColor = oc3;
+                GUILayout.Label("—", statLabelStyle);
+                GUI.contentColor = oc;
             }
             GUILayout.EndHorizontal();
 
-            // Sweep stats
-            if (sweepsGiven + sweepsTaken > 0)
+            if (sCasual.Count > 0)
             {
-                GUILayout.BeginHorizontal();
-                GUILayout.Label("Sweeps:", statValueStyle, GUILayout.Width(65));
-                var oc4 = GUI.contentColor;
-                GUI.contentColor = Color.green;
-                GUILayout.Label($"5-0 x{sweepsGiven}", statValueStyle, GUILayout.Width(70));
-                GUI.contentColor = new Color(1f, 0.4f, 0.4f);
-                GUILayout.Label($"0-5 x{sweepsTaken}", statValueStyle);
-                GUI.contentColor = oc4;
-                GUILayout.EndHorizontal();
+                int cStreak = CalcStreak(sCasual);
+                GUI.contentColor = cStreak > 0 ? Color.green : new Color(1f, 0.4f, 0.4f);
+                string csText = $"  Streak: {(cStreak > 0 ? $"{cStreak}W" : $"{-cStreak}L")}"
+                    + (stats.best_casual_streak > 0 ? $"  Best: {stats.best_casual_streak}W" : "");
+                GUILayout.Label(csText, statLabelStyle);
+                GUI.contentColor = oc;
             }
 
-            // Total (use PlayerStats API for accurate lifetime count)
-            GUILayout.Space(4);
-            int totalW = stats.wins;
-            int totalL = stats.losses;
-            string totalRatio = totalL > 0 ? $"({(float)totalW / totalL:F1})" : (totalW > 0 ? $"({totalW}:0)" : "");
-            GUILayout.Label($"Total: {stats.total_matches} matches  ({totalW}W / {totalL}L  {totalRatio})", statLabelStyle);
+            // Sweeps + Total
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Sweeps:", statValueStyle, GUILayout.Width(55));
+            GUI.contentColor = Color.green;
+            GUILayout.Label($"5-0 x{sweepsGiven}", statValueStyle, GUILayout.Width(55));
+            GUI.contentColor = new Color(1f, 0.4f, 0.4f);
+            GUILayout.Label($"0-5 x{sweepsTaken}", statValueStyle);
+            GUI.contentColor = oc;
+            GUILayout.EndHorizontal();
 
+            int totalW = stats.wins, totalL = stats.losses;
+            GUILayout.Label($"Total: {stats.total_matches} ({totalW}W / {totalL}L)", statLabelStyle);
             GUILayout.EndVertical();
+            GUILayout.Space(4);
 
-            GUILayout.Space(6);
+            // ── Session Info (real-time, always visible) ──
+            DrawSessionInfo();
 
-            // ── Session Info ──────────────────────────────────────
-            var sessionTime = GameStateWatcher.SessionTimeByOpponent;
-            if (sessionTime != null && sessionTime.Count > 0)
+            GUILayout.EndVertical(); // End left column
+
+            GUILayout.Space(8);
+
+            // ── RIGHT COLUMN: Match History ────────────────────
+            GUILayout.BeginVertical(GUILayout.Width(470));
+
+            // Ranked History (paginated by series groups)
+            GUILayout.BeginVertical(boxStyle);
+            var origColor1 = GUI.contentColor;
+            GUI.contentColor = new Color(1f, 0.85f, 0.3f);
+            GUILayout.Label("Ranked History", subHeaderStyle);
+            GUI.contentColor = origColor1;
+
+            if (sRanked.Count > 0)
             {
-                GUILayout.BeginVertical(boxStyle);
-                var oc5 = GUI.contentColor;
-                GUI.contentColor = new Color(0.7f, 0.8f, 1f);
-                GUILayout.Label($"Session ({GameStateWatcher.SessionMatchCount} games)", subHeaderStyle);
-                GUI.contentColor = oc5;
-
-                foreach (var kvp in sessionTime)
-                {
-                    int mins = (int)kvp.Value;
-                    string timeStr = mins >= 60 ? $"{mins / 60}h {mins % 60}m" : $"{mins}m";
-                    GUILayout.Label($"  {kvp.Key}: {timeStr}", statLabelStyle);
-                }
-
-                GUILayout.EndVertical();
-                GUILayout.Space(6);
-            }
-
-            // ── Recent matches split by ranked/casual ──────────
-            history = ApiClient.CachedMatchHistory;
-            if (history != null && history.Count > 0)
-            {
-                // ── RANKED HISTORY with series grouping ──
-                GUILayout.BeginVertical(boxStyle);
-                var origColor1 = GUI.contentColor;
-                GUI.contentColor = new Color(1f, 0.85f, 0.3f);
-                GUILayout.Label("Ranked History", subHeaderStyle);
-                GUI.contentColor = origColor1;
-
-                var ranked = history.FindAll(m => m.is_ranked);
-                if (ranked.Count > 0)
-                {
-                    // Per-opponent series W/L summary
-                    DrawOpponentSummary(ranked);
-                    GUILayout.Space(4);
-
-                    // Group ranked matches into series
-                    var seriesGroups = GroupMatchesBySeries(ranked);
-
-                    // Paginate by series groups (3 per page)
-                    int groupsPerPage = 3;
-                    int totalSeriesPages = (seriesGroups.Count + groupsPerPage - 1) / groupsPerPage;
-                    rankedPage = Math.Max(0, Math.Min(rankedPage, totalSeriesPages - 1));
-                    int startIdx = rankedPage * groupsPerPage;
-                    int endIdx = Math.Min(startIdx + groupsPerPage, seriesGroups.Count);
-
-                    for (int g = startIdx; g < endIdx; g++)
-                    {
-                        DrawSeriesGroup(seriesGroups[g]);
-                    }
-
-                    if (totalSeriesPages > 1)
-                    {
-                        GUILayout.BeginHorizontal();
-                        GUILayout.FlexibleSpace();
-                        if (rankedPage > 0 && GUILayout.Button("< Prev", GUILayout.Width(60)))
-                            rankedPage--;
-                        GUILayout.Label($"{rankedPage + 1}/{totalSeriesPages}", statLabelStyle, GUILayout.Width(40));
-                        if (rankedPage < totalSeriesPages - 1 && GUILayout.Button("Next >", GUILayout.Width(60)))
-                            rankedPage++;
-                        GUILayout.FlexibleSpace();
-                        GUILayout.EndHorizontal();
-                    }
-                }
-                else
-                {
-                    GUILayout.Label("No ranked matches yet", statLabelStyle);
-                }
-                GUILayout.EndVertical();
+                DrawOpponentSummary(sRanked);
                 GUILayout.Space(4);
 
-                // ── CASUAL HISTORY (flat list, no series grouping) ──
-                var casual = history.FindAll(m => !m.is_ranked);
-                if (casual.Count > 0)
+                var seriesGroups = GroupMatchesBySeries(sRanked);
+                int groupsPerPage = 3;
+                int totalSeriesPages = (seriesGroups.Count + groupsPerPage - 1) / groupsPerPage;
+                rankedPage = Math.Max(0, Math.Min(rankedPage, totalSeriesPages - 1));
+                int rStart = rankedPage * groupsPerPage;
+                int rEnd = Math.Min(rStart + groupsPerPage, seriesGroups.Count);
+
+                for (int g = rStart; g < rEnd; g++)
+                    DrawSeriesGroup(seriesGroups[g]);
+
+                if (totalSeriesPages > 1)
                 {
-                    GUILayout.BeginVertical(boxStyle);
-                    GUILayout.Label("Casual History", subHeaderStyle);
-
-                    int totalCasualPages = (casual.Count + matchesPerPage - 1) / matchesPerPage;
-                    casualPage = Math.Max(0, Math.Min(casualPage, totalCasualPages - 1));
-                    int csStart = casualPage * matchesPerPage;
-                    int csEnd = Math.Min(csStart + matchesPerPage, casual.Count);
-
-                    for (int i = csStart; i < csEnd; i++)
-                    {
-                        DrawMatchEntry(casual[i]);
-                    }
-
-                    if (totalCasualPages > 1)
-                    {
-                        GUILayout.BeginHorizontal();
-                        GUILayout.FlexibleSpace();
-                        if (casualPage > 0 && GUILayout.Button("< Prev", GUILayout.Width(60)))
-                            casualPage--;
-                        GUILayout.Label($"{casualPage + 1}/{totalCasualPages}", statLabelStyle, GUILayout.Width(40));
-                        if (casualPage < totalCasualPages - 1 && GUILayout.Button("Next >", GUILayout.Width(60)))
-                            casualPage++;
-                        GUILayout.FlexibleSpace();
-                        GUILayout.EndHorizontal();
-                    }
-                    GUILayout.EndVertical();
+                    GUILayout.BeginHorizontal();
+                    GUILayout.FlexibleSpace();
+                    if (rankedPage > 0 && GUILayout.Button("< Prev", GUILayout.Width(60)))
+                        rankedPage--;
+                    GUILayout.Label($"{rankedPage + 1}/{totalSeriesPages}", statLabelStyle, GUILayout.Width(40));
+                    if (rankedPage < totalSeriesPages - 1 && GUILayout.Button("Next >", GUILayout.Width(60)))
+                        rankedPage++;
+                    GUILayout.FlexibleSpace();
+                    GUILayout.EndHorizontal();
                 }
             }
-            else if (MatchTracker.HasPendingResult && MatchTracker.LastResult != null)
+            else
             {
-                var result = MatchTracker.LastResult;
-                GUILayout.BeginVertical(boxStyle);
-                GUILayout.Label("Last Match", subHeaderStyle);
-
-                var color = result.Won ? Color.green : new Color(1f, 0.4f, 0.4f);
-                var origColor = GUI.contentColor;
-                GUI.contentColor = color;
-                GUILayout.Label(
-                    $"{(result.Won ? "WIN" : "LOSS")} vs {result.OpponentName}  " +
-                    $"({result.MyRounds} - {result.TheirRounds})",
-                    statValueStyle
-                );
-                GUI.contentColor = origColor;
-
-                GUILayout.EndVertical();
+                GUILayout.Label("No ranked matches yet", statLabelStyle);
             }
+            GUILayout.EndVertical();
+            GUILayout.Space(4);
+
+            // Casual History (paginated)
+            GUILayout.BeginVertical(boxStyle);
+            GUILayout.Label("Casual History", subHeaderStyle);
+
+            if (sCasual.Count > 0)
+            {
+                int totalCasualPages = (sCasual.Count + matchesPerPage - 1) / matchesPerPage;
+                casualPage = Math.Max(0, Math.Min(casualPage, totalCasualPages - 1));
+                int cStart = casualPage * matchesPerPage;
+                int cEnd = Math.Min(cStart + matchesPerPage, sCasual.Count);
+
+                for (int i = cStart; i < cEnd; i++)
+                    DrawMatchEntry(sCasual[i]);
+
+                if (totalCasualPages > 1)
+                {
+                    GUILayout.BeginHorizontal();
+                    GUILayout.FlexibleSpace();
+                    if (casualPage > 0 && GUILayout.Button("< Prev", GUILayout.Width(60)))
+                        casualPage--;
+                    GUILayout.Label($"{casualPage + 1}/{totalCasualPages}", statLabelStyle, GUILayout.Width(40));
+                    if (casualPage < totalCasualPages - 1 && GUILayout.Button("Next >", GUILayout.Width(60)))
+                        casualPage++;
+                    GUILayout.FlexibleSpace();
+                    GUILayout.EndHorizontal();
+                }
+            }
+            else
+            {
+                GUILayout.Label("No casual matches yet", statLabelStyle);
+            }
+            GUILayout.EndVertical();
+
+            GUILayout.EndVertical(); // End right column
+
+            GUILayout.EndHorizontal(); // End two-column layout
+        }
+
+        // ── Session Info (improved: per-player W/L, total duration, ranked/casual split) ──
+
+        private static void DrawSessionInfo()
+        {
+            GUILayout.BeginVertical(boxStyle);
+            var oc5 = GUI.contentColor;
+            GUI.contentColor = new Color(0.7f, 0.8f, 1f);
+            GUILayout.Label("Session Info", subHeaderStyle);
+            GUI.contentColor = oc5;
+
+            int sessionGames = GameStateWatcher.SessionMatchCount;
+
+            if (sessionGames > 0)
+            {
+                // Total session duration
+                float sessionMinutes = (float)(DateTime.UtcNow - GameStateWatcher.SessionStartTime).TotalMinutes;
+                int totalMins = (int)sessionMinutes;
+                string totalTimeStr = totalMins >= 60 ? $"{totalMins / 60}h {totalMins % 60}m" : $"{totalMins}m";
+
+                // Session totals line
+                int srW = GameStateWatcher.SessionRankedWins;
+                int srL = GameStateWatcher.SessionRankedLosses;
+                int scW = GameStateWatcher.SessionCasualWins;
+                int scL = GameStateWatcher.SessionCasualLosses;
+                int totalW = srW + scW;
+                int totalL = srL + scL;
+
+                GUILayout.Label($"{sessionGames} games   {totalW}W-{totalL}L   {totalTimeStr}", statValueStyle);
+
+                // Only show ranked/casual split if both types were played
+                if (srW + srL > 0 && scW + scL > 0)
+                {
+                    GUI.contentColor = new Color(0.6f, 0.6f, 0.65f);
+                    GUILayout.Label($"  Ranked: {srW}W / {srL}L   Casual: {scW}W / {scL}L", statLabelStyle);
+                    GUI.contentColor = oc5;
+                }
+
+                // Per-opponent breakdown
+                var sessionWL = GameStateWatcher.SessionWLByOpponent;
+                var sessionTime = GameStateWatcher.SessionTimeByOpponent;
+
+                if (sessionWL != null && sessionWL.Count > 0)
+                {
+                    GUILayout.Space(3);
+                    foreach (var kvp in sessionWL)
+                    {
+                        string oppName = kvp.Key;
+                        int[] wl = kvp.Value; // [rW, rL, cW, cL]
+                        int oppW = wl[0] + wl[2];
+                        int oppL = wl[1] + wl[3];
+
+                        // Time
+                        string timeStr = "";
+                        if (sessionTime != null && sessionTime.ContainsKey(oppName))
+                        {
+                            int mins = (int)sessionTime[oppName];
+                            timeStr = mins >= 60 ? $"{mins / 60}h {mins % 60}m" : $"{mins}m";
+                        }
+
+                        var origC = GUI.contentColor;
+                        Color wlColor = oppW > oppL ? Color.green
+                            : oppW < oppL ? new Color(1f, 0.4f, 0.4f)
+                            : new Color(0.7f, 0.7f, 0.75f);
+                        GUI.contentColor = wlColor;
+
+                        // Build a clean single-line summary
+                        string oppLine = $"  vs {oppName}: {oppW}W-{oppL}L";
+
+                        // Add ranked/casual only if both types exist for this opponent
+                        bool hasRanked = wl[0] + wl[1] > 0;
+                        bool hasCasual = wl[2] + wl[3] > 0;
+                        if (hasRanked && hasCasual)
+                            oppLine += $"  (R:{wl[0]}-{wl[1]} C:{wl[2]}-{wl[3]})";
+
+                        if (!string.IsNullOrEmpty(timeStr))
+                            oppLine += $"  {timeStr}";
+
+                        GUILayout.Label(oppLine, statLabelStyle);
+                        GUI.contentColor = origC;
+                    }
+                }
+            }
+            else
+            {
+                GUI.contentColor = new Color(0.5f, 0.5f, 0.55f);
+                GUILayout.Label("No games this session", statLabelStyle);
+                GUI.contentColor = oc5;
+            }
+            GUILayout.EndVertical();
         }
 
         private static void DrawMatchEntry(ApiClient.MatchHistoryEntry m)
@@ -803,12 +922,23 @@ namespace CompetitiveRounds
             var origColor = GUI.contentColor;
             GUI.contentColor = new Color(0.7f, 0.8f, 1f);
 
+            // Show top 3 opponents by recency (match history is already newest-first)
+            // Use insertion order from oppStats which follows seriesGroups order
+            var oppList = new List<KeyValuePair<string, int[]>>(oppStats);
+            // Already in recency order from the iteration — just take first 3
+
             string summaryLine = "";
-            foreach (var kvp in oppStats)
+            int shown = 0;
+            foreach (var kvp in oppList)
             {
+                if (shown >= 3) break;
                 if (summaryLine.Length > 0) summaryLine += "   ";
                 summaryLine += $"vs {TruncateName(kvp.Key, 10)}: {kvp.Value[0]}W-{kvp.Value[1]}L";
+                shown++;
             }
+            if (oppList.Count > 3)
+                summaryLine += $"   +{oppList.Count - 3} more";
+
             GUILayout.Label(summaryLine, statLabelStyle);
             GUI.contentColor = origColor;
         }
@@ -825,19 +955,24 @@ namespace CompetitiveRounds
                 return;
             }
 
+            // Two-column: player list on left, detail panel on right
+            GUILayout.BeginHorizontal();
+
+            // ── LEFT: Player list ──
+            GUILayout.BeginVertical(GUILayout.Width(440));
+
             GUILayout.BeginHorizontal();
             GUILayout.Label("#", rankStyle, GUILayout.Width(26));
             GUILayout.Label("Lv", subHeaderStyle, GUILayout.Width(28));
-            GUILayout.Label("Player", subHeaderStyle, GUILayout.Width(140));
-            GUILayout.Label("Rating", subHeaderStyle, GUILayout.Width(55));
+            GUILayout.Label("Player", subHeaderStyle, GUILayout.Width(180));
+            GUILayout.Label("Rating", subHeaderStyle, GUILayout.Width(60));
             GUILayout.Label("W", subHeaderStyle, GUILayout.Width(30));
             GUILayout.Label("L", subHeaderStyle, GUILayout.Width(30));
-            GUILayout.Label("W/L", subHeaderStyle, GUILayout.Width(45));
+            GUILayout.Label("W/L", subHeaderStyle, GUILayout.Width(50));
             GUILayout.EndHorizontal();
-
             GUILayout.Space(2);
 
-            leaderboardScroll = GUILayout.BeginScrollView(leaderboardScroll, GUILayout.Height(280));
+            leaderboardScroll = GUILayout.BeginScrollView(leaderboardScroll);
 
             foreach (var entry in board.entries)
             {
@@ -850,15 +985,13 @@ namespace CompetitiveRounds
                 GUILayout.BeginHorizontal(entryStyle);
                 GUILayout.Label($"{entry.rank}", rankStyle, GUILayout.Width(26));
 
-                // Level with color
                 var lvColor = GUI.contentColor;
                 GUI.contentColor = new Color(0.4f, 0.8f, 1f);
                 GUILayout.Label($"{entry.level}", statLabelStyle, GUILayout.Width(28));
                 GUI.contentColor = lvColor;
 
-                // Clickable player name
                 var nameStyle = isSelected ? statValueStyle : statLabelStyle;
-                if (GUILayout.Button(TruncateName(entry.display_name, 16), nameStyle, GUILayout.Width(140), GUILayout.Height(18)))
+                if (GUILayout.Button(TruncateName(entry.display_name, 20), nameStyle, GUILayout.Width(180), GUILayout.Height(18)))
                 {
                     if (selectedPlayerSteamId == entry.steam_id)
                     {
@@ -878,80 +1011,164 @@ namespace CompetitiveRounds
                     }
                 }
 
-                GUILayout.Label($"{entry.rating}", statValueStyle, GUILayout.Width(55));
+                GUILayout.Label($"{entry.rating}", statValueStyle, GUILayout.Width(60));
                 GUILayout.Label($"{entry.wins}", statLabelStyle, GUILayout.Width(30));
                 GUILayout.Label($"{entry.losses}", statLabelStyle, GUILayout.Width(30));
                 string lbRatio = entry.losses > 0 ? $"{(float)entry.wins / entry.losses:F1}" : (entry.wins > 0 ? $"{entry.wins}:0" : "0:0");
-                GUILayout.Label(lbRatio, statLabelStyle, GUILayout.Width(45));
+                GUILayout.Label(lbRatio, statLabelStyle, GUILayout.Width(50));
                 GUILayout.EndHorizontal();
 
                 GUI.backgroundColor = bgColor;
             }
 
             GUILayout.EndScrollView();
-
             GUILayout.Label($"{board.total_players} players ranked", statLabelStyle);
 
-            // Selected player detail panel
-            if (!string.IsNullOrEmpty(selectedPlayerSteamId))
+            GUILayout.EndVertical(); // End left
+
+            GUILayout.Space(8);
+
+            // ── RIGHT: Selected player detail ──
+            GUILayout.BeginVertical(boxStyle, GUILayout.Width(350));
+
+            if (string.IsNullOrEmpty(selectedPlayerSteamId))
             {
-                GUILayout.Space(4);
-                GUILayout.BeginVertical(boxStyle);
-
-                if (selectedPlayerLoading)
-                {
-                    GUILayout.Label("Loading player stats...", statLabelStyle);
-                }
-                else if (selectedPlayerStats != null)
-                {
-                    var ps = selectedPlayerStats;
-                    GUILayout.BeginHorizontal();
-                    GUILayout.Label(ps.display_name, subHeaderStyle);
-                    GUILayout.FlexibleSpace();
-                    var origLv = GUI.contentColor;
-                    GUI.contentColor = new Color(0.4f, 0.8f, 1f);
-                    GUILayout.Label($"Lv {ps.level}", statValueStyle);
-                    GUI.contentColor = origLv;
-                    GUILayout.EndHorizontal();
-
-                    GUILayout.BeginHorizontal();
-                    GUILayout.Label($"Rating: {ps.rating:F0}", statValueStyle, GUILayout.Width(120));
-                    GUILayout.Label($"RD: {ps.rating_deviation:F0}", statLabelStyle, GUILayout.Width(80));
-                    GUILayout.EndHorizontal();
-
-                    string pRatio = ps.losses > 0 ? $"({(float)ps.wins / ps.losses:F1})" : (ps.wins > 0 ? $"({ps.wins}:0)" : "");
-                    GUILayout.Label($"{ps.total_matches} matches  ({ps.wins}W / {ps.losses}L  {pRatio})", statLabelStyle);
-
-                    if (ps.ranked_enabled)
-                    {
-                        var origC = GUI.contentColor;
-                        GUI.contentColor = Color.green;
-                        GUILayout.Label("Ranked: Active", statLabelStyle);
-                        GUI.contentColor = origC;
-                    }
-
-                    // Top 5 cards
-                    if (ps.top_card_names != null && ps.top_card_names.Count > 0)
-                    {
-                        GUILayout.Space(4);
-                        GUILayout.Label("Top Cards:", statLabelStyle);
-                        var origCardColor = GUI.contentColor;
-                        GUI.contentColor = new Color(0.6f, 0.7f, 0.9f);
-                        for (int ci = 0; ci < ps.top_card_names.Count && ci < 5; ci++)
-                        {
-                            string pickText = ps.top_card_picks.Count > ci ? $" ({ps.top_card_picks[ci]}x)" : "";
-                            GUILayout.Label($"  {ps.top_card_names[ci]}{pickText}", statLabelStyle);
-                        }
-                        GUI.contentColor = origCardColor;
-                    }
-                }
-                else
-                {
-                    GUILayout.Label("Player not found", statLabelStyle);
-                }
-
-                GUILayout.EndVertical();
+                GUILayout.Space(20);
+                var oc2 = GUI.contentColor;
+                GUI.contentColor = new Color(0.5f, 0.5f, 0.55f);
+                GUILayout.Label("Click a player to view details", statLabelStyle);
+                GUI.contentColor = oc2;
+                GUILayout.Space(20);
             }
+            else if (selectedPlayerLoading)
+            {
+                GUILayout.Label("Loading player stats...", statLabelStyle);
+            }
+            else if (selectedPlayerStats != null)
+            {
+                var ps = selectedPlayerStats;
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(ps.display_name, subHeaderStyle);
+                GUILayout.FlexibleSpace();
+                var origLv = GUI.contentColor;
+                GUI.contentColor = new Color(0.4f, 0.8f, 1f);
+                GUILayout.Label($"Lv {ps.level}", statValueStyle);
+                GUI.contentColor = origLv;
+                GUILayout.EndHorizontal();
+
+                GUILayout.Space(4);
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"Rating: {ps.rating:F0}", statValueStyle, GUILayout.Width(120));
+                GUILayout.Label($"RD: {ps.rating_deviation:F0}", statLabelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.Space(4);
+
+                string pRatio = ps.losses > 0 ? $"({(float)ps.wins / ps.losses:F1})" : (ps.wins > 0 ? $"({ps.wins}:0)" : "");
+                GUILayout.Label($"{ps.total_matches} matches  ({ps.wins}W / {ps.losses}L  {pRatio})", statLabelStyle);
+
+                // Ranked/Casual W/L split
+                int prW = ps.ranked_series_wins;
+                int prL = ps.ranked_series_losses;
+                if (prW + prL > 0)
+                {
+                    var origRc = GUI.contentColor;
+                    GUI.contentColor = new Color(1f, 0.85f, 0.3f);
+                    GUILayout.Label($"  Ranked: {prW}W / {prL}L", statLabelStyle);
+                    GUI.contentColor = origRc;
+                }
+                int pcW = ps.wins - prW;
+                int pcL = ps.losses - prL;
+                if (pcW + pcL > 0)
+                    GUILayout.Label($"  Casual: {pcW}W / {pcL}L", statLabelStyle);
+
+                // ── Head-to-head record vs this player ──
+                var history = ApiClient.CachedMatchHistory;
+                if (history != null && history.Count > 0)
+                {
+                    int h2hRankedW = 0, h2hRankedL = 0, h2hCasualW = 0, h2hCasualL = 0;
+                    foreach (var m in history)
+                    {
+                        if (m.opponent_steam_id == selectedPlayerSteamId)
+                        {
+                            if (m.is_ranked)
+                            {
+                                if (m.won) h2hRankedW++; else h2hRankedL++;
+                            }
+                            else
+                            {
+                                if (m.won) h2hCasualW++; else h2hCasualL++;
+                            }
+                        }
+                    }
+
+                    int h2hTotal = h2hRankedW + h2hRankedL + h2hCasualW + h2hCasualL;
+                    if (h2hTotal > 0)
+                    {
+                        GUILayout.Space(8);
+                        GUILayout.Label("vs You:", subHeaderStyle);
+                        int h2hW = h2hRankedW + h2hCasualW;
+                        int h2hL = h2hRankedL + h2hCasualL;
+                        var origH2h = GUI.contentColor;
+                        GUI.contentColor = h2hW > h2hL ? Color.green
+                            : h2hW < h2hL ? new Color(1f, 0.4f, 0.4f)
+                            : new Color(0.7f, 0.7f, 0.75f);
+                        GUILayout.Label($"  {h2hW}W - {h2hL}L ({h2hTotal} games)", statLabelStyle);
+                        GUI.contentColor = origH2h;
+
+                        if (h2hRankedW + h2hRankedL > 0 && h2hCasualW + h2hCasualL > 0)
+                        {
+                            GUI.contentColor = new Color(0.6f, 0.6f, 0.65f);
+                            GUILayout.Label($"    Ranked: {h2hRankedW}W / {h2hRankedL}L   Casual: {h2hCasualW}W / {h2hCasualL}L", statLabelStyle);
+                            GUI.contentColor = origH2h;
+                        }
+                        else if (h2hRankedW + h2hRankedL > 0)
+                        {
+                            GUI.contentColor = new Color(0.6f, 0.6f, 0.65f);
+                            GUILayout.Label($"    Ranked: {h2hRankedW}W / {h2hRankedL}L", statLabelStyle);
+                            GUI.contentColor = origH2h;
+                        }
+                        else
+                        {
+                            GUI.contentColor = new Color(0.6f, 0.6f, 0.65f);
+                            GUILayout.Label($"    Casual: {h2hCasualW}W / {h2hCasualL}L", statLabelStyle);
+                            GUI.contentColor = origH2h;
+                        }
+                    }
+                }
+
+                if (ps.ranked_enabled)
+                {
+                    var origC = GUI.contentColor;
+                    GUI.contentColor = Color.green;
+                    GUILayout.Label("Ranked: Active", statLabelStyle);
+                    GUI.contentColor = origC;
+                }
+
+                // Top 5 cards
+                if (ps.top_card_names != null && ps.top_card_names.Count > 0)
+                {
+                    GUILayout.Space(8);
+                    GUILayout.Label("Top Cards:", subHeaderStyle);
+                    var origCardColor = GUI.contentColor;
+                    GUI.contentColor = new Color(0.6f, 0.7f, 0.9f);
+                    for (int ci = 0; ci < ps.top_card_names.Count && ci < 5; ci++)
+                    {
+                        string pickText = ps.top_card_picks.Count > ci ? $" ({ps.top_card_picks[ci]}x)" : "";
+                        GUILayout.Label($"  {ps.top_card_names[ci]}{pickText}", statLabelStyle);
+                    }
+                    GUI.contentColor = origCardColor;
+                }
+            }
+            else
+            {
+                GUILayout.Label("Player not found", statLabelStyle);
+            }
+
+            GUILayout.EndVertical(); // End right
+
+            GUILayout.EndHorizontal();
         }
 
         // ── Card Stats tab ────────────────────────────────────

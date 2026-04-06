@@ -24,7 +24,7 @@ class Player(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     steam_id = Column(String(20), nullable=False, unique=True, index=True)
     display_name = Column(String(64), nullable=False)
-    ranked_enabled = Column(Boolean, nullable=False, default=True)
+    ranked_enabled = Column(Boolean, nullable=False, default=False)
     total_xp = Column(Integer, nullable=False, default=0)
     first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

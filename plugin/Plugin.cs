@@ -2,6 +2,7 @@ using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
+using Photon.Pun;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -15,7 +16,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.10.0";
+        public const string ModVersion = "1.12.0";
 
         internal static ManualLogSource Log;
         internal static CompetitiveRoundsBehaviour Instance;
@@ -94,6 +95,13 @@ namespace CompetitiveRounds
 
         private void Update()
         {
+            // Menu injection runs independently — doesn't need API/GameState init
+            try
+            {
+                MainMenuInjector.TryInject();
+            }
+            catch { }
+
             // Delayed initialization (wait for game to be fully loaded)
             if (!startupComplete)
             {
@@ -108,10 +116,9 @@ namespace CompetitiveRounds
 
             if (!initialized) return;
 
-            // F5 input
+            // F5 input (no log spam — just toggle)
             if (Input.GetKeyDown(KeyCode.F5))
             {
-                Plugin.Log.LogInfo("[INPUT] F5 pressed!");
                 CompetitiveUI.ToggleOverlay();
             }
 
@@ -124,13 +131,6 @@ namespace CompetitiveRounds
             {
                 Plugin.Log.LogError($"Poll error: {ex.Message}");
             }
-
-            // Try to inject main menu button (idempotent, checks once/sec)
-            try
-            {
-                MainMenuInjector.TryInject();
-            }
-            catch { }
         }
 
         private void DoInitialize()
@@ -139,6 +139,7 @@ namespace CompetitiveRounds
 
             ApiClient.Initialize(Plugin.ApiBaseUrl.Value);
             GameStateWatcher.Initialize();
+            CompetitiveUI.CacheRaycasters(); // Pre-cache for click-through prevention
             initialized = true;
 
             // Fetch initial data so overlay has content before first F5
@@ -161,6 +162,9 @@ namespace CompetitiveRounds
         private void OnDestroy()
         {
             Plugin.Log.LogWarning("[PERSIST] Destroyed! Attempting respawn...");
+
+            // Reset menu injector so it re-injects on the new instance
+            MainMenuInjector.Reset();
 
             // Last resort: try to respawn ourselves
             try
@@ -193,6 +197,168 @@ namespace CompetitiveRounds
     }
 
     /// <summary>
+    /// Hooks CardChoice.Pick to capture LOCAL card picks with full CardInfo.
+    /// Pick only fires for the local player's selection.
+    /// Used to confirm local picks and extract rarity data.
+    /// </summary>
+    [HarmonyPatch(typeof(CardChoice), "Pick")]
+    class CardChoicePickPatch
+    {
+        static void Prefix(GameObject pickedCard, bool clear)
+        {
+            try
+            {
+                if (pickedCard == null) return;
+
+                CardInfo cardInfo = pickedCard.GetComponent<CardInfo>();
+                if (cardInfo == null)
+                    cardInfo = pickedCard.GetComponentInChildren<CardInfo>();
+                if (cardInfo == null) return;
+
+                string cardName = null;
+                try
+                {
+                    var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                    var nameField = typeof(CardInfo).GetField("cardName", flags);
+                    if (nameField != null)
+                        cardName = nameField.GetValue(cardInfo) as string;
+                }
+                catch { }
+
+                if (string.IsNullOrEmpty(cardName))
+                    cardName = pickedCard.name.Replace("(Clone)", "").Trim();
+
+                if (string.IsNullOrEmpty(cardName)) return;
+
+                int pickerID = -1;
+                try { pickerID = CardChoice.instance.pickrID; } catch { }
+
+                Plugin.Log.LogInfo($"[HARMONY-CARD] Local Pick: card={cardName}, pickerID={pickerID}");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[HARMONY-CARD] Pick hook error: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Hooks CardChoice.RPCA_DoEndPick — the Photon RPC that fires on ALL clients
+    /// for ALL player card picks (local AND opponent).
+    /// 
+    /// Verified from diagnostics:
+    ///   pickId = player index (0 or 1), matches localTeam
+    ///   targetCardID = Photon ViewID of the picked card GameObject
+    ///   theInt = card position in the pick UI (not player-related)
+    /// </summary>
+    [HarmonyPatch(typeof(CardChoice), "RPCA_DoEndPick")]
+    class CardChoiceEndPickPatch
+    {
+        // Buffer for picks that arrive before localTeam is resolved
+        private static List<PendingPick> pendingPicks = new List<PendingPick>();
+
+        private struct PendingPick
+        {
+            public string CardName;
+            public string Rarity;
+            public int PickId;
+        }
+
+        /// <summary>
+        /// Called by GameStateWatcher once localTeam is known.
+        /// Flushes any buffered picks that were opponent cards.
+        /// </summary>
+        public static void FlushPendingPicks(int localTeam)
+        {
+            if (pendingPicks.Count == 0) return;
+
+            foreach (var pick in pendingPicks)
+            {
+                if (pick.PickId != localTeam && !string.IsNullOrEmpty(pick.CardName))
+                {
+                    Plugin.Log.LogInfo($"[HARMONY-CARD] Flushing pre-match opp card: {pick.CardName} ({pick.Rarity})");
+                    GameStateWatcher.OnOpponentCardPicked(pick.CardName, pick.Rarity);
+                }
+            }
+            pendingPicks.Clear();
+        }
+
+        public static void ClearPending()
+        {
+            pendingPicks.Clear();
+        }
+
+        static void Prefix(int[] cardIDs, int targetCardID, int theInt, int pickId)
+        {
+            try
+            {
+                int localTeam = GameStateWatcher.LocalTeamId;
+
+                // Resolve card name via Photon ViewID
+                string cardName = null;
+                string rarity = "Unknown";
+
+                try
+                {
+                    var photonView = PhotonView.Find(targetCardID);
+                    if (photonView != null)
+                    {
+                        var cardInfo = photonView.GetComponent<CardInfo>();
+                        if (cardInfo == null)
+                            cardInfo = photonView.GetComponentInChildren<CardInfo>();
+
+                        if (cardInfo != null)
+                        {
+                            var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                            var nameField = typeof(CardInfo).GetField("cardName", flags);
+                            if (nameField != null)
+                                cardName = nameField.GetValue(cardInfo) as string;
+
+                            var rarityField = typeof(CardInfo).GetField("rarity", flags);
+                            if (rarityField != null)
+                            {
+                                var rarVal = rarityField.GetValue(cardInfo);
+                                rarity = rarVal?.ToString() ?? "Unknown";
+                            }
+                        }
+
+                        if (string.IsNullOrEmpty(cardName))
+                            cardName = photonView.gameObject.name.Replace("(Clone)", "").Trim();
+                    }
+                }
+                catch { }
+
+                if (!string.IsNullOrEmpty(cardName) && rarity == "Unknown")
+                    rarity = CardRarityLookup.GetRarity(cardName);
+
+                // If localTeam not yet resolved, buffer the pick for later
+                if (localTeam < 0)
+                {
+                    if (!string.IsNullOrEmpty(cardName))
+                    {
+                        pendingPicks.Add(new PendingPick { CardName = cardName, Rarity = rarity, PickId = pickId });
+                        Plugin.Log.LogInfo($"[HARMONY-CARD] Buffered pick: card={cardName}, pickId={pickId} (localTeam unknown)");
+                    }
+                    return;
+                }
+
+                bool isOpponent = (pickId != localTeam);
+                Plugin.Log.LogInfo($"[HARMONY-CARD] EndPick: card={cardName ?? "(unresolved)"}, pickId(player)={pickId}, localTeam={localTeam}, isOpp={isOpponent}");
+
+                if (isOpponent && !string.IsNullOrEmpty(cardName))
+                {
+                    Plugin.Log.LogInfo($"[HARMONY-CARD] Opponent picked: {cardName} ({rarity})");
+                    GameStateWatcher.OnOpponentCardPicked(cardName, rarity);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[HARMONY-CARD] EndPick error: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
     /// Injects a "COMPETITIVE" button into the main menu's ListMenu.
     /// Runs from Update() — checks once per scene if injection is needed.
     /// </summary>
@@ -201,6 +367,21 @@ namespace CompetitiveRounds
         private static bool injected = false;
         private static float checkTimer = 0f;
         private static GameObject injectedButton = null;
+        private static int retryCount = 0;
+        private static int maxRetries = 30; // 30 seconds of trying — enough for slow scene loads
+        private static bool loggedFirstInjection = false; // Suppress verbose re-injection logs, not warnings
+
+        /// <summary>
+        /// Resets injector state — called when persistent object respawns
+        /// so the button gets re-injected on the new scene.
+        /// </summary>
+        public static void Reset()
+        {
+            injected = false;
+            injectedButton = null;
+            retryCount = 0;
+            // Keep loggedFirstInjection to avoid re-logging verbose info
+        }
 
         public static void TryInject()
         {
@@ -211,7 +392,18 @@ namespace CompetitiveRounds
 
             // Already injected and button still exists
             if (injected && injectedButton != null) return;
-            injected = false; // Reset if button was destroyed (scene change)
+
+            // Button was destroyed (scene change) — allow re-injection
+            if (injected && injectedButton == null)
+            {
+                injected = false;
+                retryCount = 0;
+                // Don't re-log on re-injection — already logged once
+            }
+
+            // Stop trying after max retries (resets on scene change)
+            if (retryCount >= maxRetries) return;
+            retryCount++;
 
             // Only inject when not in a Photon room (i.e., on main menu)
             if (Photon.Pun.PhotonNetwork.InRoom) return;
@@ -226,66 +418,82 @@ namespace CompetitiveRounds
             }
         }
 
+        private static System.Type cachedTmpType = null;
+
         private static void DoInject()
         {
-            // Find the ListMenu in the scene
-            var listMenu = UnityEngine.Object.FindObjectOfType<ListMenu>();
-            if (listMenu == null) return;
-
-            // Find the button container — the ListMenu's transform holds button children
-            Transform container = listMenu.transform;
-            if (container.childCount == 0) return;
-
-            // Find an existing button to clone (use the last one — usually QUIT)
-            Transform templateTransform = null;
-            for (int i = container.childCount - 1; i >= 0; i--)
+            // Cache TMP_Text type for text reading
+            if (cachedTmpType == null)
             {
-                var child = container.GetChild(i);
-                if (child.GetComponent<ListMenuButton>() != null)
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    templateTransform = child;
-                    break;
+                    cachedTmpType = asm.GetType("TMPro.TMP_Text");
+                    if (cachedTmpType != null) break;
+                }
+                if (cachedTmpType == null)
+                {
+                    Plugin.Log.LogWarning("[MENU] TMPro.TMP_Text not found");
+                    return;
                 }
             }
 
-            if (templateTransform == null)
+            var textProp = cachedTmpType.GetProperty("text",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            if (textProp == null) return;
+
+            // Find ALL ListMenuButtons in the scene
+            var allButtons = UnityEngine.Object.FindObjectsOfType<ListMenuButton>();
+            if (allButtons == null || allButtons.Length == 0) return;
+
+            // Find a main menu button by checking TMP text for known labels
+            ListMenuButton quitButton = null;
+            foreach (var btn in allButtons)
             {
-                Plugin.Log.LogWarning("[MENU] No ListMenuButton found to clone");
+                try
+                {
+                    var tmpComp = btn.GetComponentInChildren(cachedTmpType, true);
+                    if (tmpComp == null) continue;
+                    string text = (textProp.GetValue(tmpComp) as string ?? "").Trim().ToUpper();
+                    if (text == "QUIT")
+                    {
+                        quitButton = btn;
+                        break;
+                    }
+                }
+                catch { }
+            }
+
+            if (quitButton == null)
+            {
+                // Only warn once per injection cycle
+                if (!loggedFirstInjection)
+                    Plugin.Log.LogWarning("[MENU] Could not find QUIT button in main menu");
                 return;
             }
 
-            // Clone the button
+            Transform templateTransform = quitButton.transform;
+            Transform container = templateTransform.parent;
+
+            // Only log first injection
+            if (!loggedFirstInjection)
+                Plugin.Log.LogInfo($"[MENU] Found QUIT button at {templateTransform.name}, parent: {container.name}");
+
+            // Clone the QUIT button
             var clone = UnityEngine.Object.Instantiate(templateTransform.gameObject, container);
             clone.name = "CompetitiveRoundsButton";
 
-            // Move it above the template (insert before QUIT)
+            // Insert above QUIT — layout group will handle spacing automatically
             clone.transform.SetSiblingIndex(templateTransform.GetSiblingIndex());
 
-            // Change the text via reflection (TextMeshProUGUI)
+            // Change the text (short label for the menu)
             bool textSet = false;
             try
             {
-                // Find TMP_Text type in loaded assemblies
-                System.Type tmpType = null;
-                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                var tmpComponent = clone.GetComponentInChildren(cachedTmpType);
+                if (tmpComponent != null)
                 {
-                    tmpType = asm.GetType("TMPro.TMP_Text");
-                    if (tmpType != null) break;
-                }
-
-                if (tmpType != null)
-                {
-                    var tmpComponent = clone.GetComponentInChildren(tmpType);
-                    if (tmpComponent != null)
-                    {
-                        var textProp = tmpType.GetProperty("text",
-                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                        if (textProp != null)
-                        {
-                            textProp.SetValue(tmpComponent, "COMPETITIVE");
-                            textSet = true;
-                        }
-                    }
+                    textProp.SetValue(tmpComponent, "SID'S COMPETITIVE ROUNDS");
+                    textSet = true;
                 }
             }
             catch (Exception ex)
@@ -294,21 +502,42 @@ namespace CompetitiveRounds
             }
 
             if (!textSet)
-            {
                 Plugin.Log.LogWarning("[MENU] Could not set button text");
-            }
 
-            // Remove the existing ListMenuButton so it doesn't trigger the original action
-            var oldButton = clone.GetComponent<ListMenuButton>();
-            if (oldButton != null)
-                UnityEngine.Object.Destroy(oldButton);
+            // ── FIX: Keep ListMenuButton for hover highlight ──
+            // ListMenuButton is purely visual — it handles text color, hover bar animation,
+            // font sizing. It has NO page/action fields (verified from Assembly-CSharp.dll).
+            // The actual click behavior comes from QuitButton, GoBack, and Button.onClick,
+            // which we remove/override below. Keeping ListMenuButton = orange hover bar works!
+
+            // CRITICAL: Remove QuitButton component — without this, clicking quits the game
+            try
+            {
+                var quitComp = clone.GetComponent<QuitButton>();
+                if (quitComp != null)
+                    UnityEngine.Object.Destroy(quitComp);
+            }
+            catch { }
+
+            // Also remove GoBack if present
+            try
+            {
+                var goBack = clone.GetComponent<GoBack>();
+                if (goBack != null)
+                    UnityEngine.Object.Destroy(goBack);
+            }
+            catch { }
 
             // Add our click handler component
             clone.AddComponent<CompetitiveMenuButton>();
 
             injectedButton = clone;
             injected = true;
-            Plugin.Log.LogInfo("[MENU] Competitive button injected into main menu!");
+            if (!loggedFirstInjection)
+            {
+                Plugin.Log.LogInfo("[MENU] Competitive button injected into main menu!");
+                loggedFirstInjection = true;
+            }
         }
     }
 
@@ -318,8 +547,16 @@ namespace CompetitiveRounds
     /// </summary>
     public class CompetitiveMenuButton : MonoBehaviour
     {
+        private const string BUTTON_TEXT = "SID'S COMPETITIVE ROUNDS";
+        private object cachedTmpComponent = null;
+        private System.Reflection.PropertyInfo cachedTextProp = null;
+        private bool textEnforcementReady = false;
+
         private void Start()
         {
+            // Cache the TMP component and text property for text enforcement
+            CacheTmpReferences();
+
             // Try to wire into the Unity Button onClick via reflection
             try
             {
@@ -361,6 +598,48 @@ namespace CompetitiveRounds
             {
                 Plugin.Log.LogWarning($"[MENU] Button wiring failed: {ex.Message}");
             }
+        }
+
+        private void CacheTmpReferences()
+        {
+            try
+            {
+                System.Type tmpType = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    tmpType = asm.GetType("TMPro.TMP_Text");
+                    if (tmpType != null) break;
+                }
+                if (tmpType == null) return;
+
+                cachedTmpComponent = GetComponentInChildren(tmpType);
+                if (cachedTmpComponent == null) return;
+
+                cachedTextProp = tmpType.GetProperty("text",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+                textEnforcementReady = (cachedTextProp != null);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// ROUNDS' ListMenuButton re-initializes after submenu navigation and resets
+        /// the TMP text back to "QUIT". LateUpdate catches this and re-applies our text.
+        /// </summary>
+        private void LateUpdate()
+        {
+            if (!textEnforcementReady) return;
+
+            try
+            {
+                string current = cachedTextProp.GetValue(cachedTmpComponent) as string;
+                if (current != BUTTON_TEXT)
+                {
+                    cachedTextProp.SetValue(cachedTmpComponent, BUTTON_TEXT);
+                }
+            }
+            catch { }
         }
 
         private void OnButtonClick()
