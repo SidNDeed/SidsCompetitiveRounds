@@ -13,10 +13,10 @@ namespace CompetitiveRounds
 {
     public static class GameStateWatcher
     {
-        // ── Room state ────────────────────────────────────────
+        // \u2500\u2500 Room state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         private static bool wasInRoom = false;
 
-        // ── Match state ───────────────────────────────────────
+        // \u2500\u2500 Match state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         private static bool isTracking = false;
         private static bool wasGameInProgress = false;
         private static DateTime matchStartTime;
@@ -46,12 +46,15 @@ namespace CompetitiveRounds
         private static bool opponentRankChecked = false;
         private static bool matchIsRanked = false;
 
+        // Harmony opponent card tracking
+        private static bool opponentCardsViaHarmony = false;
+        private static List<MatchTracker.CardPickData> preMatchOpponentCards = new List<MatchTracker.CardPickData>();
+
         // Card tracking
         private static List<MatchTracker.CardPickData> localCards = new List<MatchTracker.CardPickData>();
         private static List<MatchTracker.CardPickData> opponentCards = new List<MatchTracker.CardPickData>();
         private static int lastKnownP1CardCount = 0;
         private static int lastKnownP2CardCount = 0;
-        private static bool opponentCardsViaHarmony = false; // True when Harmony hook is providing opponent cards
 
         // Card sharing via Photon custom properties
         private static List<string> broadcastCardNames = new List<string>();
@@ -88,8 +91,8 @@ namespace CompetitiveRounds
         private static Dictionary<string, float> sessionTimeByOpponent = new Dictionary<string, float>();
         private static int sessionMatchCount = 0;
 
-        // Per-opponent W/L tracking within session: [rankedWins, rankedLosses, casualWins, casualLosses]
-        private static Dictionary<string, int[]> sessionWLByOpponent = new Dictionary<string, int[]>();
+        // Per-opponent W/L tracking within session
+        private static Dictionary<string, int[]> sessionWLByOpponent = new Dictionary<string, int[]>(); // [wins, losses]
         private static int sessionRankedWins = 0;
         private static int sessionRankedLosses = 0;
         private static int sessionCasualWins = 0;
@@ -110,7 +113,7 @@ namespace CompetitiveRounds
         public static int SessionCasualLosses => sessionCasualLosses;
         public static DateTime SessionStartTime => sessionStartTime;
 
-        // ── Initialization ────────────────────────────────────
+        // \u2500\u2500 Initialization \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
         public static void Initialize()
         {
@@ -120,7 +123,7 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo("GameStateWatcher initialized");
         }
 
-        // ── Main poll loop ────────────────────────────────────
+        // \u2500\u2500 Main poll loop \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
         public static void Poll()
         {
@@ -132,7 +135,7 @@ namespace CompetitiveRounds
             PollMatchState();
         }
 
-        // ── Room state ────────────────────────────────────────
+        // \u2500\u2500 Room state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
         private static void PollRoomState()
         {
@@ -166,21 +169,21 @@ namespace CompetitiveRounds
 
                     if (localRounds >= 4)
                     {
-                        // Local player had dominant lead — count as a win
+                        // Local player had dominant lead \u2014 count as a win
                         Plugin.Log.LogInfo($"[POLL] === {matchType} DC Win === Opponent disconnected at {localRounds}-{oppRounds}");
                         int winnerTeam = localTeamId;
                         OnGameOver(winnerTeam);
                     }
                     else if (oppRounds >= 4)
                     {
-                        // Opponent had dominant lead — count as a loss (we DC'd or opponent won)
+                        // Opponent had dominant lead \u2014 count as a loss (we DC'd or opponent won)
                         Plugin.Log.LogInfo($"[POLL] === {matchType} DC Loss === Disconnected at {localRounds}-{oppRounds}");
                         int winnerTeam = localTeamId == 0 ? 1 : 0;
                         OnGameOver(winnerTeam);
                     }
                     else
                     {
-                        // No clear winner — log as canceled, don't report
+                        // No clear winner \u2014 log as canceled, don't report
                         Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Disconnect at {localRounds}-{oppRounds} (not counted)");
                         CompetitiveUI.ShowNotification("Match canceled (DC)", new Color(1f, 0.7f, 0.3f));
                     }
@@ -233,7 +236,7 @@ namespace CompetitiveRounds
             }
         }
 
-        // ── Opponent identification ───────────────────────────
+        // \u2500\u2500 Opponent identification \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
         private static void TryResolveOpponent()
         {
@@ -279,7 +282,7 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        // ── Local player / team ───────────────────────────────
+        // \u2500\u2500 Local player / team \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
         private static void IdentifyLocalPlayer()
         {
@@ -364,7 +367,7 @@ namespace CompetitiveRounds
             }
         }
 
-        // ── Match state polling ───────────────────────────────
+        // \u2500\u2500 Match state polling \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
         private static void PollMatchState()
         {
@@ -428,7 +431,7 @@ namespace CompetitiveRounds
             wasGameInProgress = gameActive;
         }
 
-        // ── Events ────────────────────────────────────────────
+        // \u2500\u2500 Events \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
         private static void OnMatchStarted()
         {
@@ -451,7 +454,6 @@ namespace CompetitiveRounds
             currentRound = 1;
             localCards.Clear();
             opponentCards.Clear();
-            opponentCardsViaHarmony = false;
             lastKnownP1CardCount = 0;
             lastKnownP2CardCount = 0;
             pickCountThisMatch = 0;
@@ -501,6 +503,21 @@ namespace CompetitiveRounds
             preMatchCards.Clear();
             preMatchPickCount = 0;
 
+            // Recover pre-match opponent cards from Harmony hooks
+            if (preMatchOpponentCards.Count > 0)
+            {
+                Plugin.Log.LogInfo($"[HARMONY-CARD] Recovering {preMatchOpponentCards.Count} pre-match opponent card(s)");
+                foreach (var card in preMatchOpponentCards)
+                {
+                    card.RoundNumber = 1;
+                    card.PickOrder = opponentCards.Count + 1;
+                    opponentCards.Add(card);
+                    opponentCardsViaHarmony = true;
+                    Plugin.Log.LogInfo($"[HARMONY-CARD] Opp pre-match recovered: {card.CardName} [#{card.PickOrder}]");
+                }
+            }
+            preMatchOpponentCards.Clear();
+
             // Snapshot opponent's current broadcast count so we ignore stale cards
             lastKnownOpponentBroadcastCount = 0;
             try
@@ -526,27 +543,6 @@ namespace CompetitiveRounds
             IdentifyLocalPlayer();
             TryResolveOpponent();
             DetermineLocalTeam();
-
-            // Flush any opponent cards that were picked before localTeam was known
-            if (localTeamId >= 0)
-            {
-                try { CardChoiceEndPickPatch.FlushPendingPicks(localTeamId); }
-                catch { }
-            }
-
-            // Recover pre-match opponent cards (picked between matches before isTracking)
-            if (preMatchOpponentCards.Count > 0)
-            {
-                opponentCardsViaHarmony = true;
-                Plugin.Log.LogInfo($"[HARMONY-CARD] Recovering {preMatchOpponentCards.Count} pre-match opponent card(s)");
-                foreach (var card in preMatchOpponentCards)
-                {
-                    card.PickOrder = opponentCards.Count + 1;
-                    opponentCards.Add(card);
-                    Plugin.Log.LogInfo($"[HARMONY-CARD] Opp pre-match recovered: {card.CardName} [#{card.PickOrder}]");
-                }
-                preMatchOpponentCards.Clear();
-            }
 
             // Re-evaluate ranked status at match start
             matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked;
@@ -575,20 +571,23 @@ namespace CompetitiveRounds
                 : $"[POLL] You lost to {opponentDisplayName}");
             Plugin.Log.LogInfo($"[POLL] Final: P1 {p1Rounds}r - P2 {p2Rounds}r");
 
-            // ── Update session W/L tracking ──
+            // \u2500\u2500 Update session W/L tracking \u2500\u2500
             string oppKey = opponentDisplayName ?? "Unknown";
             if (!sessionWLByOpponent.ContainsKey(oppKey))
-                sessionWLByOpponent[oppKey] = new int[] { 0, 0, 0, 0 }; // [rW, rL, cW, cL]
+                sessionWLByOpponent[oppKey] = new int[] { 0, 0 };
+
+            if (localWon)
+                sessionWLByOpponent[oppKey][0]++;
+            else
+                sessionWLByOpponent[oppKey][1]++;
 
             if (matchIsRanked)
             {
-                if (localWon) { sessionRankedWins++; sessionWLByOpponent[oppKey][0]++; }
-                else { sessionRankedLosses++; sessionWLByOpponent[oppKey][1]++; }
+                if (localWon) sessionRankedWins++; else sessionRankedLosses++;
             }
             else
             {
-                if (localWon) { sessionCasualWins++; sessionWLByOpponent[oppKey][2]++; }
-                else { sessionCasualLosses++; sessionWLByOpponent[oppKey][3]++; }
+                if (localWon) sessionCasualWins++; else sessionCasualLosses++;
             }
 
             // Update session time immediately (not just on room leave)
@@ -629,7 +628,7 @@ namespace CompetitiveRounds
             bool shouldReport = true;
             if (opponentSteamIdResolved && !opponentSteamId.StartsWith("photon_"))
             {
-                // Both have real Steam IDs — check if opponent has the mod
+                // Both have real Steam IDs \u2014 check if opponent has the mod
                 // by looking for their cr_cards property (mod-only feature)
                 bool opponentHasMod = false;
                 try
@@ -649,7 +648,7 @@ namespace CompetitiveRounds
 
                 if (opponentHasMod)
                 {
-                    // Both have mod — only lower Steam ID reports
+                    // Both have mod \u2014 only lower Steam ID reports
                     long myId = 0, theirId = 0;
                     long.TryParse(localSteamId, out myId);
                     long.TryParse(opponentSteamId, out theirId);
@@ -688,9 +687,9 @@ namespace CompetitiveRounds
             matchIsRanked = false; // Clear indicator immediately
         }
 
-        // ── Card tracking via CardBar ─────────────────────────
+        // \u2500\u2500 Card tracking via CardBar \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
-        // ── Card tracking via Unity log capture ────────────────
+        // \u2500\u2500 Card tracking via Unity log capture \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         // The game logs "Picking Card: CardName(Clone)" for each pick.
         // We capture these via Application.logMessageReceived.
 
@@ -726,7 +725,7 @@ namespace CompetitiveRounds
 
                 if (!isTracking)
                 {
-                    // Store for later — OnMatchStarted will recover these
+                    // Store for later \u2014 OnMatchStarted will recover these
                     preMatchPickCount++;
                     preMatchCards.Add(new MatchTracker.CardPickData
                     {
@@ -783,17 +782,20 @@ namespace CompetitiveRounds
         }
 
         /// <summary>
-        /// Called by the Harmony CardChoice.Pick hook when the opponent picks a card.
-        /// This works even when the opponent doesn't have the mod installed.
+        /// Polls opponent's Photon custom properties for card picks they've broadcast.
+        /// Only works when the opponent also has the mod installed.
+        /// </summary>
+        /// <summary>
+        /// Called by the Harmony CardChoice hooks when the opponent picks a card.
+        /// Works even when the opponent doesn't have the mod installed.
         /// </summary>
         public static void OnOpponentCardPicked(string cardName, string rarity)
         {
-            // Title-case the name for consistency
             cardName = ToTitleCase(cardName);
 
             if (!isTracking)
             {
-                // Buffer for later — OnMatchStarted will recover these
+                // Buffer for later recovery
                 preMatchOpponentCards.Add(new MatchTracker.CardPickData
                 {
                     CardName = cardName,
@@ -803,13 +805,6 @@ namespace CompetitiveRounds
                 });
                 Plugin.Log.LogInfo($"[HARMONY-CARD] Opp card stored (pre-match): {cardName}");
                 return;
-            }
-
-            // Check for duplicates
-            foreach (var existing in opponentCards)
-            {
-                if (existing.CardName == cardName && existing.PickOrder == opponentCards.Count)
-                    return;
             }
 
             opponentCardsViaHarmony = true;
@@ -826,22 +821,16 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo($"[HARMONY-CARD] Opp card added: {cardName} [#{pick.PickOrder}] (via Harmony)");
         }
 
-        // Pre-match opponent cards (picked before isTracking = true)
-        private static List<MatchTracker.CardPickData> preMatchOpponentCards = new List<MatchTracker.CardPickData>();
-
         /// <summary>
         /// Polls opponent's Photon custom properties for card picks they've broadcast.
-        /// Only works when the opponent also has the mod installed.
         /// Skipped when Harmony hook is providing opponent cards (preferred source).
         /// </summary>
         private static void PollCardPicks()
         {
             try
             {
-                // Skip Photon-based card polling when Harmony hook is providing opponent cards
-                if (opponentCardsViaHarmony) return;
-
                 if (!PhotonNetwork.InRoom) return;
+                if (opponentCardsViaHarmony) return; // Harmony provides cards, skip Photon polling
 
                 Photon.Realtime.Player[] players = PhotonNetwork.PlayerList;
                 if (players == null) return;
@@ -896,7 +885,7 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        // ── Helpers ───────────────────────────────────────────
+        // \u2500\u2500 Helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
         private static void ResolveFields(GM_ArmsRace gm)
         {
@@ -984,7 +973,6 @@ namespace CompetitiveRounds
             matchIsRanked = false;
             localCards.Clear();
             opponentCards.Clear();
-            opponentCardsViaHarmony = false;
             lastKnownP1CardCount = 0;
             lastKnownP2CardCount = 0;
             pickCountThisMatch = 0;
@@ -992,12 +980,9 @@ namespace CompetitiveRounds
             lastKnownOpponentBroadcastCount = 0;
             preMatchCards.Clear();
             preMatchPickCount = 0;
-            fieldsResolved = false;
-
-            // Clear buffered Harmony picks
-            try { CardChoiceEndPickPatch.ClearPending(); }
-            catch { }
+            opponentCardsViaHarmony = false;
             preMatchOpponentCards.Clear();
+            fieldsResolved = false;
 
             // Clear our card broadcast when leaving room
             try
@@ -1012,7 +997,7 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        // ── Public accessors ──────────────────────────────────
+        // \u2500\u2500 Public accessors \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
         public static bool IsInMatch => isTracking;
         public static bool IsInRoom => wasInRoom;

@@ -313,7 +313,10 @@ namespace CompetitiveRounds
 
         private static void DrawRankedToggle()
         {
-            GUILayout.BeginHorizontal(boxStyle);
+            GUILayout.BeginVertical(boxStyle);
+
+            // Row 1: Ranked status + toggle
+            GUILayout.BeginHorizontal();
 
             bool ranked = Plugin.RankedEnabled.Value;
             string statusText = ranked ? "RANKED: ON" : "RANKED: OFF";
@@ -326,6 +329,28 @@ namespace CompetitiveRounds
 
             GUILayout.FlexibleSpace();
 
+            // Queue controls (only when ranked is on)
+            var queueState = ApiClient.CurrentQueueState;
+
+            if (ranked && queueState == ApiClient.QueueState.Idle)
+            {
+                if (GUILayout.Button("Search Ranked", GUILayout.Width(110), GUILayout.Height(22)))
+                {
+                    string steamId = MatchTracker.LocalSteamId;
+                    if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
+                    {
+                        ApiClient.JoinQueue(steamId, null, false);
+                    }
+                }
+            }
+            else if (ranked && queueState == ApiClient.QueueState.Searching)
+            {
+                if (GUILayout.Button("Cancel", GUILayout.Width(60), GUILayout.Height(22)))
+                {
+                    ApiClient.LeaveQueue(MatchTracker.LocalSteamId);
+                }
+            }
+
             if (GUILayout.Button(ranked ? "Disable" : "Enable", GUILayout.Width(70), GUILayout.Height(22)))
             {
                 Plugin.RankedEnabled.Value = !ranked;
@@ -334,9 +359,80 @@ namespace CompetitiveRounds
                 {
                     ApiClient.ToggleRanked(steamId, Plugin.RankedEnabled.Value);
                 }
+                // Leave queue if disabling ranked
+                if (!Plugin.RankedEnabled.Value && queueState != ApiClient.QueueState.Idle)
+                {
+                    ApiClient.LeaveQueue(steamId);
+                }
             }
 
             GUILayout.EndHorizontal();
+
+            // Row 2: Queue status (only when searching or matched)
+            if (queueState == ApiClient.QueueState.Searching)
+            {
+                var poll = ApiClient.LastPollData;
+                GUILayout.Space(4);
+                var origC = GUI.contentColor;
+                GUI.contentColor = new Color(0.4f, 0.8f, 1f);
+
+                string searchLine = "Searching...";
+                if (poll != null)
+                {
+                    int mins = poll.wait_time / 60;
+                    int secs = poll.wait_time % 60;
+                    string timeStr = mins > 0 ? $"{mins}m {secs}s" : $"{secs}s";
+                    searchLine = $"Searching...  {timeStr}   Range: ±{poll.elo_range}";
+                    if (poll.queue_size > 1)
+                        searchLine += $"   ({poll.queue_size} in queue)";
+                }
+                GUILayout.Label(searchLine, statLabelStyle);
+                GUI.contentColor = origC;
+            }
+            else if (queueState == ApiClient.QueueState.Matched)
+            {
+                var poll = ApiClient.LastPollData;
+                GUILayout.Space(4);
+                var origC = GUI.contentColor;
+                GUI.contentColor = Color.green;
+
+                if (poll != null)
+                {
+                    GUILayout.Label($"MATCH FOUND!  vs {poll.opponent_name} ({poll.opponent_rating:F0})", statValueStyle);
+
+                    bool roomReady = !string.IsNullOrEmpty(Plugin.PendingRankedRoom);
+
+                    GUILayout.BeginHorizontal();
+                    if (!roomReady)
+                    {
+                        if (GUILayout.Button("Ready Up", GUILayout.Width(80), GUILayout.Height(22)))
+                        {
+                            Plugin.SetPendingRoom(poll.room_name);
+                        }
+                    }
+                    else
+                    {
+                        GUI.contentColor = new Color(0.4f, 0.8f, 1f);
+                        GUILayout.Label("Connecting... please wait", statValueStyle);
+                    }
+
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button("Decline", GUILayout.Width(60), GUILayout.Height(22)))
+                    {
+                        Plugin.ClearPendingRoom();
+                        ApiClient.LeaveQueue(MatchTracker.LocalSteamId);
+                        ApiClient.ResetQueueState();
+                    }
+                    GUILayout.EndHorizontal();
+                }
+                else
+                {
+                    GUILayout.Label("MATCH FOUND!", statValueStyle);
+                }
+                GUI.contentColor = origC;
+            }
+
+            GUILayout.EndVertical();
         }
 
         // ── My Stats tab ──────────────────────────────────────

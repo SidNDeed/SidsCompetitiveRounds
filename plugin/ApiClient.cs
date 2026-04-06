@@ -770,6 +770,147 @@ namespace CompetitiveRounds
             ));
         }
 
+        // ── Ranked Queue ──────────────────────────────────────
+
+        public enum QueueState { Idle, Searching, Matched }
+
+        [Serializable]
+        public class QueuePollData
+        {
+            public string status;        // searching, matched, not_in_queue, expired
+            public int wait_time;
+            public int queue_size;
+            public int elo_range;
+            public string opponent_steam_id;
+            public string opponent_name;
+            public float opponent_rating;
+            public string room_name;
+        }
+
+        // Current queue state (mod-side)
+        public static QueueState CurrentQueueState { get; private set; } = QueueState.Idle;
+        public static QueuePollData LastPollData { get; private set; }
+        public static bool IsQueuePolling { get; private set; } = false;
+        private static float queuePollTimer = 0f;
+        private static float queuePollInterval = 3f;
+
+        public static void JoinQueue(string steamId, string region, bool rankedOnly)
+        {
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"region\":\"{Escape(region ?? "")}\",\"ranked_only\":{(rankedOnly ? "true" : "false")}}}";
+
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/queue/join",
+                json,
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        CurrentQueueState = QueueState.Searching;
+                        IsQueuePolling = true;
+                        queuePollTimer = 0f;
+                        Plugin.Log.LogInfo("[QUEUE] Joined ranked queue");
+                        CompetitiveUI.ShowNotification("Searching for ranked match...", new Color(0.4f, 0.8f, 1f));
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[QUEUE] Failed to join queue: {response}");
+                        CompetitiveUI.ShowNotification("Failed to join queue", new Color(1f, 0.4f, 0.4f));
+                    }
+                }
+            ));
+        }
+
+        public static void LeaveQueue(string steamId)
+        {
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/queue/leave?steam_id={Escape(steamId)}",
+                "",
+                (success, response) =>
+                {
+                    CurrentQueueState = QueueState.Idle;
+                    IsQueuePolling = false;
+                    LastPollData = null;
+                    Plugin.Log.LogInfo("[QUEUE] Left ranked queue");
+                }
+            ));
+        }
+
+        /// <summary>
+        /// Called from Update() when polling is active. Polls every 3 seconds.
+        /// </summary>
+        public static void UpdateQueuePoll(string steamId)
+        {
+            if (!IsQueuePolling) return;
+
+            queuePollTimer += Time.deltaTime;
+            if (queuePollTimer < queuePollInterval) return;
+            queuePollTimer = 0f;
+
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/queue/poll/{steamId}",
+                (success, response) =>
+                {
+                    if (!success || !IsQueuePolling) return;
+
+                    try
+                    {
+                        // Manual JSON parsing (JsonUtility doesn't handle nulls well)
+                        string status = ExtractJsonString(response, "status");
+
+                        if (status == "matched")
+                        {
+                            CurrentQueueState = QueueState.Matched;
+                            IsQueuePolling = false;
+
+                            LastPollData = new QueuePollData
+                            {
+                                status = "matched",
+                                wait_time = ExtractJsonInt(response, "wait_time"),
+                                opponent_steam_id = ExtractJsonString(response, "opponent_steam_id"),
+                                opponent_name = ExtractJsonString(response, "opponent_name"),
+                                opponent_rating = ExtractJsonFloat(response, "opponent_rating"),
+                                room_name = ExtractJsonString(response, "room_name"),
+                            };
+
+                            Plugin.Log.LogInfo($"[QUEUE] MATCHED! vs {LastPollData.opponent_name} ({LastPollData.opponent_rating:F0}), room: {LastPollData.room_name}");
+                            CompetitiveUI.ShowNotification(
+                                $"MATCH FOUND!  vs {LastPollData.opponent_name} ({LastPollData.opponent_rating:F0})",
+                                Color.green, 8f
+                            );
+                        }
+                        else if (status == "searching")
+                        {
+                            LastPollData = new QueuePollData
+                            {
+                                status = "searching",
+                                wait_time = ExtractJsonInt(response, "wait_time"),
+                                queue_size = ExtractJsonInt(response, "queue_size"),
+                                elo_range = ExtractJsonInt(response, "elo_range"),
+                            };
+                        }
+                        else if (status == "expired" || status == "not_in_queue")
+                        {
+                            CurrentQueueState = QueueState.Idle;
+                            IsQueuePolling = false;
+                            LastPollData = null;
+                            CompetitiveUI.ShowNotification("Queue search expired", Color.yellow);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[QUEUE] Poll parse error: {ex.Message}");
+                    }
+                }
+            ));
+        }
+
+        public static void ResetQueueState()
+        {
+            CurrentQueueState = QueueState.Idle;
+            IsQueuePolling = false;
+            LastPollData = null;
+        }
+
         // ── HTTP helpers ──────────────────────────────────────
 
         private static IEnumerator GetRequest(string url, Action<bool, string> callback)
