@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory
+from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory, RankedQueue, QueueBlock
 from schemas import (
     CardStatEntry,
     HealthResponse,
@@ -29,6 +29,9 @@ from schemas import (
     MatchReport,
     MatchResponse,
     PlayerStatsResponse,
+    QueueJoinRequest,
+    QueueDeclineRequest,
+    QueuePollResponse,
 )
 
 # ── Config from environment ────────────────────────────────────
@@ -1034,3 +1037,292 @@ async def toggle_ranked(steam_id: str, enabled: bool = Query(...), db: AsyncSess
     await db.commit()
 
     return {"steam_id": steam_id, "ranked_enabled": enabled}
+
+
+# ── Routes: Ranked Queue ──────────────────────────────────────
+
+QUEUE_EXPIRE_MINUTES = 30
+QUEUE_BLOCK_MINUTES = 5
+
+
+def compute_elo_range(wait_seconds: int) -> int:
+    """Stepped elo range expansion based on wait time."""
+    if wait_seconds >= 120:
+        return 800
+    elif wait_seconds >= 60:
+        return 400
+    elif wait_seconds >= 30:
+        return 200
+    else:
+        return 100
+
+
+@app.post("/api/v1/queue/join", tags=["Queue"])
+async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Join the ranked matchmaking queue.
+    Upserts the player into ranked_queue with status='searching'.
+    """
+    # Find the player
+    result = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found. Play a match first.")
+
+    # Get their current rating
+    rating_result = await db.execute(
+        select(GlickoRating).where(GlickoRating.player_id == player.id)
+    )
+    glicko = rating_result.scalar_one_or_none()
+    cur_rating = glicko.rating if glicko else GLICKO2_DEFAULT_RATING
+    cur_rd = glicko.rating_deviation if glicko else GLICKO2_DEFAULT_RD
+
+    # Upsert into queue
+    stmt = pg_insert(RankedQueue).values(
+        player_id=player.id,
+        steam_id=req.steam_id,
+        display_name=player.display_name,
+        rating=cur_rating,
+        rating_deviation=cur_rd,
+        region=req.region,
+        ranked_only=req.ranked_only,
+        status="searching",
+        matched_with=None,
+        room_name=None,
+        joined_at=datetime.now(timezone.utc),
+        matched_at=None,
+    ).on_conflict_do_update(
+        index_elements=[RankedQueue.player_id],
+        set_={
+            "status": "searching",
+            "rating": cur_rating,
+            "rating_deviation": cur_rd,
+            "region": req.region,
+            "ranked_only": req.ranked_only,
+            "matched_with": None,
+            "room_name": None,
+            "joined_at": datetime.now(timezone.utc),
+            "matched_at": None,
+        },
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+    return {"status": "searching", "message": "Joined ranked queue"}
+
+
+@app.post("/api/v1/queue/leave", tags=["Queue"])
+async def queue_leave(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    """Leave the ranked queue."""
+    result = await db.execute(select(Player).where(Player.steam_id == steam_id))
+    player = result.scalar_one_or_none()
+    if player:
+        await db.execute(
+            text("DELETE FROM ranked_queue WHERE player_id = :pid"),
+            {"pid": player.id},
+        )
+        await db.commit()
+
+    return {"status": "left", "message": "Left ranked queue"}
+
+
+@app.get("/api/v1/queue/poll/{steam_id}", response_model=QueuePollResponse, tags=["Queue"])
+async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Poll queue status. If searching, attempts to find a match.
+    Uses SELECT FOR UPDATE SKIP LOCKED to prevent race conditions
+    where both players' polls match each other simultaneously.
+    Elo range expands in steps: ±100 / ±200@30s / ±400@60s / ±800@120s.
+    """
+    import uuid as uuid_mod
+
+    # Clean up expired blocks opportunistically
+    await db.execute(
+        text("DELETE FROM queue_blocks WHERE expires_at < now()")
+    )
+
+    # Find our queue entry (lock it so no concurrent poll can match us)
+    result = await db.execute(
+        text("""
+            SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
+                   rq.rating_deviation, rq.status, rq.matched_with,
+                   rq.room_name, rq.joined_at, rq.matched_at
+            FROM ranked_queue rq
+            JOIN players p ON rq.player_id = p.id
+            WHERE p.steam_id = :sid
+            FOR UPDATE OF rq
+        """),
+        {"sid": steam_id},
+    )
+    entry = result.mappings().first()
+
+    if not entry:
+        await db.commit()
+        return QueuePollResponse(status="not_in_queue")
+
+    now = datetime.now(timezone.utc)
+    wait_seconds = int((now - entry["joined_at"]).total_seconds())
+
+    # Check for expiry
+    if wait_seconds > QUEUE_EXPIRE_MINUTES * 60:
+        await db.execute(
+            text("DELETE FROM ranked_queue WHERE player_id = :pid"),
+            {"pid": entry["player_id"]},
+        )
+        await db.commit()
+        return QueuePollResponse(status="expired", wait_time=wait_seconds)
+
+    # Already matched — return match info
+    if entry["status"] == "matched" and entry["room_name"]:
+        opp_result = await db.execute(
+            text("""
+                SELECT steam_id, display_name, rating
+                FROM ranked_queue WHERE player_id = :oid
+            """),
+            {"oid": entry["matched_with"]},
+        )
+        opp = opp_result.mappings().first()
+        await db.commit()
+        return QueuePollResponse(
+            status="matched",
+            wait_time=wait_seconds,
+            opponent_steam_id=opp["steam_id"] if opp else "",
+            opponent_name=opp["display_name"] if opp else "",
+            opponent_rating=opp["rating"] if opp else 0,
+            room_name=entry["room_name"],
+        )
+
+    # Still searching — try to find a match
+    elo_range = compute_elo_range(wait_seconds)
+    my_pid = entry["player_id"]
+    my_rating = entry["rating"]
+    min_rating = my_rating - elo_range
+    max_rating = my_rating + elo_range
+
+    # Find best candidate with row lock (SKIP LOCKED prevents two polls
+    # from grabbing the same opponent simultaneously)
+    candidate = await db.execute(
+        text("""
+            SELECT player_id, steam_id, display_name, rating
+            FROM ranked_queue
+            WHERE status = 'searching'
+              AND player_id != :pid
+              AND rating BETWEEN :rmin AND :rmax
+              AND player_id NOT IN (
+                  SELECT blocked_id FROM queue_blocks
+                  WHERE blocker_id = :pid AND expires_at > now()
+              )
+              AND player_id NOT IN (
+                  SELECT blocker_id FROM queue_blocks
+                  WHERE blocked_id = :pid AND expires_at > now()
+              )
+            ORDER BY ABS(rating - :my_rating)
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        """),
+        {
+            "pid": my_pid,
+            "rmin": min_rating,
+            "rmax": max_rating,
+            "my_rating": my_rating,
+        },
+    )
+    opp = candidate.mappings().first()
+
+    if opp:
+        # Match found — update both entries atomically
+        room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
+        matched_at = datetime.now(timezone.utc)
+
+        await db.execute(
+            text("""
+                UPDATE ranked_queue
+                SET status = 'matched', matched_with = :opp_id,
+                    room_name = :room, matched_at = :mat
+                WHERE player_id = :pid
+            """),
+            {"opp_id": opp["player_id"], "room": room_name, "mat": matched_at, "pid": my_pid},
+        )
+        await db.execute(
+            text("""
+                UPDATE ranked_queue
+                SET status = 'matched', matched_with = :my_id,
+                    room_name = :room, matched_at = :mat
+                WHERE player_id = :opp_id
+            """),
+            {"my_id": my_pid, "room": room_name, "mat": matched_at, "opp_id": opp["player_id"]},
+        )
+        await db.commit()
+
+        return QueuePollResponse(
+            status="matched",
+            wait_time=wait_seconds,
+            opponent_steam_id=opp["steam_id"],
+            opponent_name=opp["display_name"],
+            opponent_rating=opp["rating"],
+            room_name=room_name,
+        )
+
+    # No match yet — return search status
+    count_result = await db.execute(
+        text("SELECT COUNT(*) FROM ranked_queue WHERE status = 'searching'")
+    )
+    queue_size = count_result.scalar() or 0
+    await db.commit()
+
+    return QueuePollResponse(
+        status="searching",
+        wait_time=wait_seconds,
+        queue_size=queue_size,
+        elo_range=elo_range,
+    )
+
+
+@app.post("/api/v1/queue/decline", tags=["Queue"])
+async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Decline a matched opponent. Removes both from queue and
+    blocks re-matching for 5 minutes (bidirectional).
+    """
+    # Resolve both player IDs
+    p1_result = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
+    p1 = p1_result.scalar_one_or_none()
+    p2_result = await db.execute(select(Player).where(Player.steam_id == req.opponent_steam_id))
+    p2 = p2_result.scalar_one_or_none()
+
+    if not p1 or not p2:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    expires = datetime.now(timezone.utc) + timedelta(minutes=QUEUE_BLOCK_MINUTES)
+
+    # Insert block (bidirectional — both directions)
+    for blocker, blocked in [(p1.id, p2.id), (p2.id, p1.id)]:
+        await db.execute(
+            text("""
+                INSERT INTO queue_blocks (blocker_id, blocked_id, expires_at)
+                VALUES (:b, :bl, :ex)
+                ON CONFLICT (blocker_id, blocked_id)
+                DO UPDATE SET expires_at = :ex
+            """),
+            {"b": blocker, "bl": blocked, "ex": expires},
+        )
+
+    # Remove the declining player from queue
+    await db.execute(
+        text("DELETE FROM ranked_queue WHERE player_id = :pid"),
+        {"pid": p1.id},
+    )
+
+    # Reset the opponent back to searching (so they can find someone else)
+    await db.execute(
+        text("""
+            UPDATE ranked_queue
+            SET status = 'searching', matched_with = NULL,
+                room_name = NULL, matched_at = NULL
+            WHERE player_id = :pid AND status = 'matched'
+        """),
+        {"pid": p2.id},
+    )
+
+    await db.commit()
+    return {"status": "declined", "message": f"Declined match. Blocked for {QUEUE_BLOCK_MINUTES} minutes."}

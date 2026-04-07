@@ -92,7 +92,7 @@ namespace CompetitiveRounds
         private static int sessionMatchCount = 0;
 
         // Per-opponent W/L tracking within session
-        private static Dictionary<string, int[]> sessionWLByOpponent = new Dictionary<string, int[]>(); // [wins, losses]
+        private static Dictionary<string, int[]> sessionWLByOpponent = new Dictionary<string, int[]>(); // [rW, rL, cW, cL]
         private static int sessionRankedWins = 0;
         private static int sessionRankedLosses = 0;
         private static int sessionCasualWins = 0;
@@ -574,12 +574,18 @@ namespace CompetitiveRounds
             // \u2500\u2500 Update session W/L tracking \u2500\u2500
             string oppKey = opponentDisplayName ?? "Unknown";
             if (!sessionWLByOpponent.ContainsKey(oppKey))
-                sessionWLByOpponent[oppKey] = new int[] { 0, 0 };
+                sessionWLByOpponent[oppKey] = new int[] { 0, 0, 0, 0 }; // [rW, rL, cW, cL]
 
-            if (localWon)
-                sessionWLByOpponent[oppKey][0]++;
+            if (matchIsRanked)
+            {
+                if (localWon) sessionWLByOpponent[oppKey][0]++;
+                else sessionWLByOpponent[oppKey][1]++;
+            }
             else
-                sessionWLByOpponent[oppKey][1]++;
+            {
+                if (localWon) sessionWLByOpponent[oppKey][2]++;
+                else sessionWLByOpponent[oppKey][3]++;
+            }
 
             if (matchIsRanked)
             {

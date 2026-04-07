@@ -812,6 +812,7 @@ namespace CompetitiveRounds
                         queuePollTimer = 0f;
                         Plugin.Log.LogInfo("[QUEUE] Joined ranked queue");
                         CompetitiveUI.ShowNotification("Searching for ranked match...", new Color(0.4f, 0.8f, 1f));
+                        NativeUI.MarkDirty();
                     }
                     else
                     {
@@ -824,15 +825,63 @@ namespace CompetitiveRounds
 
         public static void LeaveQueue(string steamId)
         {
+            if (CurrentQueueState == QueueState.Idle && !IsQueuePolling) return; // Already idle
+            CurrentQueueState = QueueState.Idle;
+            IsQueuePolling = false;
+            LastPollData = null;
+            NativeUI.MarkDirty();
+
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/queue/leave?steam_id={Escape(steamId)}",
                 "",
                 (success, response) =>
                 {
-                    CurrentQueueState = QueueState.Idle;
-                    IsQueuePolling = false;
-                    LastPollData = null;
                     Plugin.Log.LogInfo("[QUEUE] Left ranked queue");
+                }
+            ));
+        }
+
+        /// <summary>
+        /// Decline a matched opponent. Blocks re-matching for 5 minutes.
+        /// Resets the opponent back to searching so they can find someone else.
+        /// </summary>
+        public static void DeclineMatch(string steamId)
+        {
+            var poll = LastPollData;
+            string oppSteamId = poll?.opponent_steam_id ?? "";
+
+            // Reset local state immediately
+            CurrentQueueState = QueueState.Idle;
+            IsQueuePolling = false;
+            LastPollData = null;
+            Plugin.ClearPendingRoom();
+            NativeUI.MarkDirty();
+
+            if (string.IsNullOrEmpty(oppSteamId))
+            {
+                // No opponent data — just leave queue as fallback
+                Plugin.Instance.StartCoroutine(PostRequest(
+                    $"{baseUrl}/api/v1/queue/leave?steam_id={Escape(steamId)}",
+                    "",
+                    (success, response) =>
+                    {
+                        Plugin.Log.LogInfo("[QUEUE] Left ranked queue (decline fallback)");
+                    }
+                ));
+                return;
+            }
+
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"opponent_steam_id\":\"{Escape(oppSteamId)}\"}}";
+
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/queue/decline",
+                json,
+                (success, response) =>
+                {
+                    if (success)
+                        Plugin.Log.LogInfo($"[QUEUE] Declined match vs {oppSteamId}");
+                    else
+                        Plugin.Log.LogWarning($"[QUEUE] Decline failed: {response}");
                 }
             ));
         }
@@ -879,6 +928,9 @@ namespace CompetitiveRounds
                                 $"MATCH FOUND!  vs {LastPollData.opponent_name} ({LastPollData.opponent_rating:F0})",
                                 Color.green, 8f
                             );
+
+                            // UI will show Match Found panel with Ready Up button
+                            NativeUI.MarkDirty();
                         }
                         else if (status == "searching")
                         {

@@ -154,3 +154,30 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "1.0.0"
     database: str = "connected"
+
+
+# ── Queue ─────────────────────────────────────────────────────
+
+class QueueJoinRequest(BaseModel):
+    """Request to join the ranked queue."""
+    steam_id: str = Field(..., max_length=20)
+    region: str | None = Field(None, max_length=8)
+    ranked_only: bool = False
+
+
+class QueuePollResponse(BaseModel):
+    """Response from polling the queue."""
+    status: str  # searching, matched, not_in_queue, expired
+    wait_time: int = 0
+    queue_size: int = 0
+    elo_range: int = 0
+    opponent_steam_id: str | None = None
+    opponent_name: str | None = None
+    opponent_rating: float | None = None
+    room_name: str | None = None
+
+
+class QueueDeclineRequest(BaseModel):
+    """Request to decline a matched opponent."""
+    steam_id: str = Field(..., max_length=20)
+    opponent_steam_id: str = Field(..., max_length=20)

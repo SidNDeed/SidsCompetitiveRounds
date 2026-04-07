@@ -16,7 +16,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.13.0";
+        public const string ModVersion = "1.15.0";
 
         internal static ManualLogSource Log;
         internal static CompetitiveRoundsBehaviour Instance;
@@ -113,6 +113,7 @@ namespace CompetitiveRounds
     {
         private bool leaving = false;
         private bool connectAttempted = false;
+        private bool joinAttempted = false;
 
         private void Awake()
         {
@@ -122,7 +123,7 @@ namespace CompetitiveRounds
         private void Update()
         {
             string pendingRoom = Plugin.PendingRankedRoom;
-            if (string.IsNullOrEmpty(pendingRoom)) { connectAttempted = false; return; }
+            if (string.IsNullOrEmpty(pendingRoom)) { connectAttempted = false; joinAttempted = false; return; }
             if (leaving) return;
 
             // Photon disconnected — connect ourselves
@@ -139,8 +140,13 @@ namespace CompetitiveRounds
                 string currentRoom = PhotonNetwork.CurrentRoom?.Name ?? "";
                 if (currentRoom == pendingRoom)
                 {
-                    Plugin.Log.LogInfo($"[QUEUE-JOINER] In ranked room: {currentRoom}");
+                    Plugin.Log.LogInfo($"[QUEUE] In ranked room: {currentRoom}!");
                     Plugin.ClearPendingRoom();
+                    CompetitiveUI.ShowNotification("In ranked match room!", Color.green, 5f);
+
+                    // Hide the main menu — our Photon connect bypassed ROUNDS' scene transition
+                    CompetitiveRoundsBehaviour.HideMainMenu();
+
                     string steamId = GameStateWatcher.LocalSteamId;
                     if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
                         ApiClient.LeaveQueue(steamId);
@@ -161,12 +167,13 @@ namespace CompetitiveRounds
             }
 
             if (!PhotonNetwork.IsConnectedAndReady) return;
-            if (PhotonNetwork.NetworkClientState != Photon.Realtime.ClientState.ConnectedToMasterServer && !PhotonNetwork.InLobby) return; // Wait for MasterServer
+            if (PhotonNetwork.NetworkClientState != Photon.Realtime.ClientState.ConnectedToMasterServer && !PhotonNetwork.InLobby) return;
+            if (joinAttempted) return; // Already attempted join, waiting for Photon callback
 
             // Connected and not in room — join!
-            string room = pendingRoom;
-            Plugin.ClearPendingRoom();
-            Plugin.Log.LogInfo($"[QUEUE-JOINER] Auto-joining ranked room: {room}");
+            // Do NOT clear pendingRoom yet — only clear when confirmed in room above
+            joinAttempted = true;
+            Plugin.Log.LogInfo($"[QUEUE] Auto-joining ranked room: {pendingRoom}");
             CompetitiveUI.ShowNotification("Joining ranked match...", new Color(0.4f, 0.8f, 1f));
 
             var roomOptions = new Photon.Realtime.RoomOptions
@@ -175,11 +182,7 @@ namespace CompetitiveRounds
                 IsVisible = false,
                 IsOpen = true,
             };
-            PhotonNetwork.JoinOrCreateRoom(room, roomOptions, Photon.Realtime.TypedLobby.Default);
-
-            string sid = GameStateWatcher.LocalSteamId;
-            if (!string.IsNullOrEmpty(sid) && sid != "unknown")
-                ApiClient.LeaveQueue(sid);
+            PhotonNetwork.JoinOrCreateRoom(pendingRoom, roomOptions, Photon.Realtime.TypedLobby.Default);
         }
     }
 
@@ -202,9 +205,8 @@ namespace CompetitiveRounds
 
         private void Update()
         {
-            // Menu injection and queue joining run independently
+            // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }
-            try { CheckPendingRankedRoom(); } catch { }
 
             // Delayed initialization (wait for game to be fully loaded)
             if (!startupComplete)
@@ -219,6 +221,9 @@ namespace CompetitiveRounds
             }
 
             if (!initialized) return;
+
+            // Canvas UI tick (notifications, match status, session refresh)
+            try { CompetitiveUI.Tick(); } catch { }
 
             // F5 input (no log spam — just toggle)
             if (Input.GetKeyDown(KeyCode.F5))
@@ -253,8 +258,12 @@ namespace CompetitiveRounds
 
             ApiClient.Initialize(Plugin.ApiBaseUrl.Value);
             GameStateWatcher.Initialize();
-            CompetitiveUI.CacheRaycasters(); // Pre-cache for click-through prevention
+            CompetitiveUI.CacheRaycasters(); // No-op but kept for compat
             initialized = true;
+
+            // Initialize UI type cache for native menu integration
+            try { UIFactory.InitTypes(); UIFactory.InitFont(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[UI] Type init deferred: {ex.Message}"); }
 
             // Fetch initial data so overlay has content before first F5
             string steamId = GameStateWatcher.LocalSteamId;
@@ -278,7 +287,7 @@ namespace CompetitiveRounds
         /// Our Photon connect bypasses ROUNDS' normal scene transition,
         /// so the main menu stays rendered over the game.
         /// </summary>
-        private static void HideMainMenu()
+        internal static void HideMainMenu()
         {
             try
             {
@@ -340,78 +349,6 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>
-        /// Checks for a pending ranked room (set by the queue system).
-        /// Runs before startup delay so it catches rooms after scene change/respawn.
-        /// If we're in the wrong room (ROUNDS joined random), leaves and joins ours.
-        /// </summary>
-        private static bool queueLeaving = false;
-        private static bool queueJoinAttempted = false;
-
-        private void CheckPendingRankedRoom()
-        {
-            string pendingRoom = Plugin.PendingRankedRoom;
-            if (string.IsNullOrEmpty(pendingRoom)) { queueJoinAttempted = false; return; }
-            if (queueLeaving) return;
-
-            if (PhotonNetwork.InRoom)
-            {
-                string currentRoom = PhotonNetwork.CurrentRoom?.Name ?? "";
-                if (currentRoom == pendingRoom)
-                {
-                    Plugin.Log.LogInfo($"[QUEUE] In ranked room: {currentRoom}!");
-                    Plugin.ClearPendingRoom();
-                    queueLeaving = false;
-                    queueJoinAttempted = false;
-                    CompetitiveUI.ShowNotification("In ranked match room!", Color.green, 5f);
-
-                    // Pre-flag this match as ranked (both players came from queue)
-                    // TODO: Add ForceNextMatchRanked to GameStateWatcher for instant RANKED indicator
-
-                    // Hide the main menu — our Photon connect bypassed ROUNDS' scene transition
-                    HideMainMenu();
-
-                    string steamId = GameStateWatcher.LocalSteamId;
-                    if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
-                        ApiClient.LeaveQueue(steamId);
-                    return;
-                }
-
-                // Wrong room — leave it
-                Plugin.Log.LogInfo($"[QUEUE] In wrong room ({currentRoom}), leaving for {pendingRoom}...");
-                queueLeaving = true;
-                queueJoinAttempted = false;
-                PhotonNetwork.LeaveRoom(false);
-                return;
-            }
-
-            // Not in room
-            if (queueLeaving)
-            {
-                queueLeaving = false;
-                Plugin.Log.LogInfo("[QUEUE] Left wrong room");
-            }
-
-            if (!PhotonNetwork.IsConnectedAndReady) return;
-            if (PhotonNetwork.NetworkClientState != Photon.Realtime.ClientState.ConnectedToMasterServer && !PhotonNetwork.InLobby) return; // Wait for MasterServer
-            if (queueJoinAttempted) return; // Already attempted, waiting for result
-
-            // Connected, not in room — join our ranked room
-            // DO NOT clear pendingRoom yet — only clear when we confirm we're in
-            queueJoinAttempted = true;
-            Plugin.Log.LogInfo($"[QUEUE] Auto-joining ranked room: {pendingRoom}");
-            CompetitiveUI.ShowNotification("Joining ranked match...", new Color(0.4f, 0.8f, 1f));
-
-            var roomOptions = new Photon.Realtime.RoomOptions
-            {
-                MaxPlayers = 2,
-                IsVisible = false,
-                IsOpen = true,
-            };
-            PhotonNetwork.JoinOrCreateRoom(pendingRoom, roomOptions, Photon.Realtime.TypedLobby.Default);
-
-            // Don't leave queue yet — wait until confirmed in room
-        }
     }
 
     // ── Harmony Patches ────────────────────────────────────────

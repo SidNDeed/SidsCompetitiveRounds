@@ -139,3 +139,28 @@ class MatchCard(Base):
     round_number = Column(SmallInteger, nullable=False)
 
     match = relationship("Match", back_populates="cards")
+
+
+class RankedQueue(Base):
+    __tablename__ = "ranked_queue"
+
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    steam_id = Column(String(20), nullable=False)
+    display_name = Column(String(64), nullable=False)
+    rating = Column(Double, nullable=False, default=1500)
+    rating_deviation = Column(Double, nullable=False, default=350)
+    region = Column(String(8), nullable=True)
+    ranked_only = Column(Boolean, nullable=False, default=False)
+    status = Column(String(16), nullable=False, default="searching")
+    matched_with = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=True)
+    room_name = Column(String(64), nullable=True)
+    joined_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    matched_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class QueueBlock(Base):
+    __tablename__ = "queue_blocks"
+
+    blocker_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    blocked_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
