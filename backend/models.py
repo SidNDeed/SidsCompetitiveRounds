@@ -154,6 +154,7 @@ class RankedQueue(Base):
     status = Column(String(16), nullable=False, default="searching")
     matched_with = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=True)
     room_name = Column(String(64), nullable=True)
+    ready = Column(Boolean, nullable=False, default=False)
     joined_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     matched_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -164,3 +165,11 @@ class QueueBlock(Base):
     blocker_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
     blocked_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class PlayerBlock(Base):
+    __tablename__ = "player_blocks"
+
+    blocker_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    blocked_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

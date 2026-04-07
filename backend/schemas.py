@@ -167,13 +167,14 @@ class QueueJoinRequest(BaseModel):
 
 class QueuePollResponse(BaseModel):
     """Response from polling the queue."""
-    status: str  # searching, matched, not_in_queue, expired
+    status: str  # searching, matched, ready_join, not_in_queue, expired
     wait_time: int = 0
     queue_size: int = 0
     elo_range: int = 0
     opponent_steam_id: str | None = None
     opponent_name: str | None = None
     opponent_rating: float | None = None
+    opponent_ready: bool = False
     room_name: str | None = None
 
 

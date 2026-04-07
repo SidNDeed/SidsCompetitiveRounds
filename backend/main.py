@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory, RankedQueue, QueueBlock
+from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock
 from schemas import (
     CardStatEntry,
     HealthResponse,
@@ -1043,6 +1043,7 @@ async def toggle_ranked(steam_id: str, enabled: bool = Query(...), db: AsyncSess
 
 QUEUE_EXPIRE_MINUTES = 30
 QUEUE_BLOCK_MINUTES = 5
+READY_TIMEOUT_SECONDS = 30
 
 
 def compute_elo_range(wait_seconds: int) -> int:
@@ -1089,6 +1090,7 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
         status="searching",
         matched_with=None,
         room_name=None,
+        ready=False,
         joined_at=datetime.now(timezone.utc),
         matched_at=None,
     ).on_conflict_do_update(
@@ -1101,6 +1103,7 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
             "ranked_only": req.ranked_only,
             "matched_with": None,
             "room_name": None,
+            "ready": False,
             "joined_at": datetime.now(timezone.utc),
             "matched_at": None,
         },
@@ -1126,27 +1129,39 @@ async def queue_leave(steam_id: str = Query(...), db: AsyncSession = Depends(get
     return {"status": "left", "message": "Left ranked queue"}
 
 
+@app.get("/api/v1/queue/count", tags=["Queue"])
+async def queue_count(db: AsyncSession = Depends(get_db)):
+    """Lightweight endpoint: returns number of players searching in the ranked queue."""
+    result = await db.execute(
+        text("SELECT COUNT(*) FROM ranked_queue WHERE status = 'searching'")
+    )
+    searching = result.scalar() or 0
+    result2 = await db.execute(
+        text("SELECT COUNT(*) FROM ranked_queue")
+    )
+    total = result2.scalar() or 0
+    return {"searching": searching, "total": total}
+
+
 @app.get("/api/v1/queue/poll/{steam_id}", response_model=QueuePollResponse, tags=["Queue"])
 async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     """
-    Poll queue status. If searching, attempts to find a match.
-    Uses SELECT FOR UPDATE SKIP LOCKED to prevent race conditions
-    where both players' polls match each other simultaneously.
-    Elo range expands in steps: ±100 / ±200@30s / ±400@60s / ±800@120s.
+    Poll queue status. Handles searching, matching, mutual ready-up, and timeouts.
+    Uses SELECT FOR UPDATE SKIP LOCKED for race-safe matching.
+    Elo range: ±100 / ±200@30s / ±400@60s / ±800@120s.
+    Ready timeout: 30s — if both players don't ready up, match is canceled.
     """
     import uuid as uuid_mod
 
     # Clean up expired blocks opportunistically
-    await db.execute(
-        text("DELETE FROM queue_blocks WHERE expires_at < now()")
-    )
+    await db.execute(text("DELETE FROM queue_blocks WHERE expires_at < now()"))
 
-    # Find our queue entry (lock it so no concurrent poll can match us)
+    # Find our queue entry (lock it)
     result = await db.execute(
         text("""
             SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                    rq.rating_deviation, rq.status, rq.matched_with,
-                   rq.room_name, rq.joined_at, rq.matched_at
+                   rq.room_name, rq.ready, rq.joined_at, rq.matched_at
             FROM ranked_queue rq
             JOIN players p ON rq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -1162,45 +1177,118 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
     now = datetime.now(timezone.utc)
     wait_seconds = int((now - entry["joined_at"]).total_seconds())
+    my_pid = entry["player_id"]
 
-    # Check for expiry
-    if wait_seconds > QUEUE_EXPIRE_MINUTES * 60:
+    # Check for expiry (only applies to searching state)
+    if entry["status"] == "searching" and wait_seconds > QUEUE_EXPIRE_MINUTES * 60:
         await db.execute(
             text("DELETE FROM ranked_queue WHERE player_id = :pid"),
-            {"pid": entry["player_id"]},
+            {"pid": my_pid},
         )
         await db.commit()
         return QueuePollResponse(status="expired", wait_time=wait_seconds)
 
-    # Already matched — return match info
-    if entry["status"] == "matched" and entry["room_name"]:
+    # ── MATCHED state: handle ready-up and room joining ──
+    if entry["status"] == "matched" and entry["matched_with"]:
+        # Get opponent info (lock their row too for atomic updates)
         opp_result = await db.execute(
             text("""
-                SELECT steam_id, display_name, rating
+                SELECT player_id, steam_id, display_name, rating, ready, room_name
                 FROM ranked_queue WHERE player_id = :oid
+                FOR UPDATE
             """),
             {"oid": entry["matched_with"]},
         )
         opp = opp_result.mappings().first()
+
+        if not opp:
+            # Opponent left queue entirely — go back to searching
+            await db.execute(
+                text("""
+                    UPDATE ranked_queue
+                    SET status = 'searching', matched_with = NULL,
+                        room_name = NULL, ready = false, matched_at = NULL
+                    WHERE player_id = :pid
+                """),
+                {"pid": my_pid},
+            )
+            await db.commit()
+            return QueuePollResponse(status="searching", wait_time=wait_seconds)
+
+        my_ready = entry["ready"]
+        opp_ready = opp["ready"]
+        room_name = entry["room_name"]
+
+        # Check ready timeout
+        if entry["matched_at"]:
+            match_age = int((now - entry["matched_at"]).total_seconds())
+            if match_age > READY_TIMEOUT_SECONDS and not (my_ready and opp_ready):
+                # Timeout — cancel match, both back to searching
+                for pid in [my_pid, opp["player_id"]]:
+                    await db.execute(
+                        text("""
+                            UPDATE ranked_queue
+                            SET status = 'searching', matched_with = NULL,
+                                room_name = NULL, ready = false, matched_at = NULL
+                            WHERE player_id = :pid
+                        """),
+                        {"pid": pid},
+                    )
+                await db.commit()
+                return QueuePollResponse(status="searching", wait_time=wait_seconds)
+
+        # Both ready — generate room if not already done
+        if my_ready and opp_ready:
+            if not room_name:
+                room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
+                for pid in [my_pid, opp["player_id"]]:
+                    await db.execute(
+                        text("UPDATE ranked_queue SET room_name = :room WHERE player_id = :pid"),
+                        {"room": room_name, "pid": pid},
+                    )
+            await db.commit()
+            return QueuePollResponse(
+                status="ready_join",
+                wait_time=wait_seconds,
+                opponent_steam_id=opp["steam_id"],
+                opponent_name=opp["display_name"],
+                opponent_rating=opp["rating"],
+                opponent_ready=True,
+                room_name=room_name,
+            )
+
+        # Room already set (by /ready endpoint) but we see it on poll
+        if room_name:
+            await db.commit()
+            return QueuePollResponse(
+                status="ready_join",
+                wait_time=wait_seconds,
+                opponent_steam_id=opp["steam_id"],
+                opponent_name=opp["display_name"],
+                opponent_rating=opp["rating"],
+                opponent_ready=opp_ready,
+                room_name=room_name,
+            )
+
+        # Waiting for ready-up
         await db.commit()
         return QueuePollResponse(
             status="matched",
             wait_time=wait_seconds,
-            opponent_steam_id=opp["steam_id"] if opp else "",
-            opponent_name=opp["display_name"] if opp else "",
-            opponent_rating=opp["rating"] if opp else 0,
-            room_name=entry["room_name"],
+            opponent_steam_id=opp["steam_id"],
+            opponent_name=opp["display_name"],
+            opponent_rating=opp["rating"],
+            opponent_ready=opp_ready,
         )
 
-    # Still searching — try to find a match
+    # ── SEARCHING state: try to find a match ──
     elo_range = compute_elo_range(wait_seconds)
-    my_pid = entry["player_id"]
     my_rating = entry["rating"]
     min_rating = my_rating - elo_range
     max_rating = my_rating + elo_range
 
-    # Find best candidate with row lock (SKIP LOCKED prevents two polls
-    # from grabbing the same opponent simultaneously)
+    # Find best candidate (SKIP LOCKED prevents race conditions)
+    # Bilateral range check: OUR range must include them AND THEIR range must include us
     candidate = await db.execute(
         text("""
             SELECT player_id, steam_id, display_name, rating
@@ -1208,6 +1296,20 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             WHERE status = 'searching'
               AND player_id != :pid
               AND rating BETWEEN :rmin AND :rmax
+              AND :my_rating BETWEEN
+                  rating - (CASE
+                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 120 THEN 800
+                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 60 THEN 400
+                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 30 THEN 200
+                      ELSE 100
+                  END)
+                  AND
+                  rating + (CASE
+                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 120 THEN 800
+                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 60 THEN 400
+                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 30 THEN 200
+                      ELSE 100
+                  END)
               AND player_id NOT IN (
                   SELECT blocked_id FROM queue_blocks
                   WHERE blocker_id = :pid AND expires_at > now()
@@ -1216,42 +1318,33 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                   SELECT blocker_id FROM queue_blocks
                   WHERE blocked_id = :pid AND expires_at > now()
               )
+              AND player_id NOT IN (
+                  SELECT blocked_id FROM player_blocks WHERE blocker_id = :pid
+              )
+              AND player_id NOT IN (
+                  SELECT blocker_id FROM player_blocks WHERE blocked_id = :pid
+              )
             ORDER BY ABS(rating - :my_rating)
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         """),
-        {
-            "pid": my_pid,
-            "rmin": min_rating,
-            "rmax": max_rating,
-            "my_rating": my_rating,
-        },
+        {"pid": my_pid, "rmin": min_rating, "rmax": max_rating, "my_rating": my_rating},
     )
     opp = candidate.mappings().first()
 
     if opp:
-        # Match found — update both entries atomically
-        room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
+        # Match found — set both to matched, NO room yet (wait for both to ready up)
         matched_at = datetime.now(timezone.utc)
-
-        await db.execute(
-            text("""
-                UPDATE ranked_queue
-                SET status = 'matched', matched_with = :opp_id,
-                    room_name = :room, matched_at = :mat
-                WHERE player_id = :pid
-            """),
-            {"opp_id": opp["player_id"], "room": room_name, "mat": matched_at, "pid": my_pid},
-        )
-        await db.execute(
-            text("""
-                UPDATE ranked_queue
-                SET status = 'matched', matched_with = :my_id,
-                    room_name = :room, matched_at = :mat
-                WHERE player_id = :opp_id
-            """),
-            {"my_id": my_pid, "room": room_name, "mat": matched_at, "opp_id": opp["player_id"]},
-        )
+        for pid, opp_id in [(my_pid, opp["player_id"]), (opp["player_id"], my_pid)]:
+            await db.execute(
+                text("""
+                    UPDATE ranked_queue
+                    SET status = 'matched', matched_with = :opp_id,
+                        room_name = NULL, ready = false, matched_at = :mat
+                    WHERE player_id = :pid
+                """),
+                {"opp_id": opp_id, "mat": matched_at, "pid": pid},
+            )
         await db.commit()
 
         return QueuePollResponse(
@@ -1260,10 +1353,10 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             opponent_steam_id=opp["steam_id"],
             opponent_name=opp["display_name"],
             opponent_rating=opp["rating"],
-            room_name=room_name,
+            opponent_ready=False,
         )
 
-    # No match yet — return search status
+    # No match yet
     count_result = await db.execute(
         text("SELECT COUNT(*) FROM ranked_queue WHERE status = 'searching'")
     )
@@ -1278,13 +1371,74 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     )
 
 
+@app.post("/api/v1/queue/ready", tags=["Queue"])
+async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    """
+    Mark player as ready for their matched game.
+    If opponent is also ready, generates a room immediately.
+    """
+    import uuid as uuid_mod
+
+    result = await db.execute(select(Player).where(Player.steam_id == steam_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    # Lock our queue entry
+    entry_result = await db.execute(
+        text("""
+            SELECT player_id, status, matched_with, room_name, ready
+            FROM ranked_queue WHERE player_id = :pid
+            FOR UPDATE
+        """),
+        {"pid": player.id},
+    )
+    entry = entry_result.mappings().first()
+
+    if not entry or entry["status"] != "matched":
+        await db.commit()
+        return {"status": "not_matched", "message": "Not currently in a matched state"}
+
+    # Set ourselves as ready
+    await db.execute(
+        text("UPDATE ranked_queue SET ready = true WHERE player_id = :pid"),
+        {"pid": player.id},
+    )
+
+    # Check if opponent is also ready
+    opp_result = await db.execute(
+        text("""
+            SELECT player_id, ready, room_name
+            FROM ranked_queue WHERE player_id = :oid
+            FOR UPDATE
+        """),
+        {"oid": entry["matched_with"]},
+    )
+    opp = opp_result.mappings().first()
+
+    if opp and opp["ready"]:
+        # Both ready — generate room if not already done
+        room_name = entry["room_name"] or opp["room_name"]
+        if not room_name:
+            room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
+            for pid in [player.id, opp["player_id"]]:
+                await db.execute(
+                    text("UPDATE ranked_queue SET room_name = :room WHERE player_id = :pid"),
+                    {"room": room_name, "pid": pid},
+                )
+        await db.commit()
+        return {"status": "both_ready", "room_name": room_name}
+
+    await db.commit()
+    return {"status": "waiting", "message": "Waiting for opponent to ready up"}
+
+
 @app.post("/api/v1/queue/decline", tags=["Queue"])
 async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get_db)):
     """
-    Decline a matched opponent. Removes both from queue and
-    blocks re-matching for 5 minutes (bidirectional).
+    Decline a matched opponent. Blocks re-matching for 5 minutes.
+    Both players are reset to searching (stay in queue).
     """
-    # Resolve both player IDs
     p1_result = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
     p1 = p1_result.scalar_one_or_none()
     p2_result = await db.execute(select(Player).where(Player.steam_id == req.opponent_steam_id))
@@ -1295,7 +1449,7 @@ async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get
 
     expires = datetime.now(timezone.utc) + timedelta(minutes=QUEUE_BLOCK_MINUTES)
 
-    # Insert block (bidirectional — both directions)
+    # Insert bidirectional blocks
     for blocker, blocked in [(p1.id, p2.id), (p2.id, p1.id)]:
         await db.execute(
             text("""
@@ -1307,22 +1461,78 @@ async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get
             {"b": blocker, "bl": blocked, "ex": expires},
         )
 
-    # Remove the declining player from queue
-    await db.execute(
-        text("DELETE FROM ranked_queue WHERE player_id = :pid"),
-        {"pid": p1.id},
-    )
-
-    # Reset the opponent back to searching (so they can find someone else)
-    await db.execute(
-        text("""
-            UPDATE ranked_queue
-            SET status = 'searching', matched_with = NULL,
-                room_name = NULL, matched_at = NULL
-            WHERE player_id = :pid AND status = 'matched'
-        """),
-        {"pid": p2.id},
-    )
+    # Reset BOTH players back to searching (stay in queue, find other opponents)
+    for pid in [p1.id, p2.id]:
+        await db.execute(
+            text("""
+                UPDATE ranked_queue
+                SET status = 'searching', matched_with = NULL,
+                    room_name = NULL, ready = false, matched_at = NULL
+                WHERE player_id = :pid
+            """),
+            {"pid": pid},
+        )
 
     await db.commit()
     return {"status": "declined", "message": f"Declined match. Blocked for {QUEUE_BLOCK_MINUTES} minutes."}
+
+
+# ── Player Blocks (permanent, from leaderboard) ─────────────
+
+@app.post("/api/v1/players/block", tags=["Players"])
+async def block_player(
+    steam_id: str = Query(...),
+    target_steam_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently block a player from ranked matchmaking against you."""
+    p1 = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    p2 = (await db.execute(select(Player).where(Player.steam_id == target_steam_id))).scalar_one_or_none()
+    if not p1 or not p2:
+        raise HTTPException(status_code=404, detail="Player not found")
+    await db.execute(
+        text("""
+            INSERT INTO player_blocks (blocker_id, blocked_id)
+            VALUES (:b, :bl)
+            ON CONFLICT DO NOTHING
+        """),
+        {"b": p1.id, "bl": p2.id},
+    )
+    await db.commit()
+    return {"status": "blocked", "message": f"Blocked {target_steam_id} from ranked matchmaking"}
+
+
+@app.post("/api/v1/players/unblock", tags=["Players"])
+async def unblock_player(
+    steam_id: str = Query(...),
+    target_steam_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a permanent ranked matchmaking block."""
+    p1 = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    p2 = (await db.execute(select(Player).where(Player.steam_id == target_steam_id))).scalar_one_or_none()
+    if not p1 or not p2:
+        raise HTTPException(status_code=404, detail="Player not found")
+    await db.execute(
+        text("DELETE FROM player_blocks WHERE blocker_id = :b AND blocked_id = :bl"),
+        {"b": p1.id, "bl": p2.id},
+    )
+    await db.commit()
+    return {"status": "unblocked", "message": f"Unblocked {target_steam_id}"}
+
+
+@app.get("/api/v1/players/blocks/{steam_id}", tags=["Players"])
+async def get_player_blocks(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """Get list of steam IDs this player has blocked from ranked matchmaking."""
+    p = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if not p:
+        return {"blocked_steam_ids": []}
+    result = await db.execute(
+        text("""
+            SELECT p.steam_id FROM player_blocks pb
+            JOIN players p ON pb.blocked_id = p.id
+            WHERE pb.blocker_id = :pid
+        """),
+        {"pid": p.id},
+    )
+    return {"blocked_steam_ids": [r[0] for r in result.fetchall()]}

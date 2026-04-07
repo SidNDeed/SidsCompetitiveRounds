@@ -167,7 +167,14 @@ namespace CompetitiveRounds
                     int oppRounds = localTeamId == 0 ? p2Rounds : p1Rounds;
                     string matchType = matchIsRanked ? "RANKED" : "CASUAL";
 
-                    if (localRounds >= 4)
+                    if (LeavingForRanked)
+                    {
+                        // We initiated the leave for a ranked match — cancel, don't count
+                        Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Left for ranked queue at {localRounds}-{oppRounds} (not counted)");
+                        CompetitiveUI.ShowNotification("Left match for ranked queue", new Color(0.4f, 0.8f, 1f));
+                        LeavingForRanked = false;
+                    }
+                    else if (localRounds >= 4)
                     {
                         // Local player had dominant lead \u2014 count as a win
                         Plugin.Log.LogInfo($"[POLL] === {matchType} DC Win === Opponent disconnected at {localRounds}-{oppRounds}");
@@ -319,6 +326,7 @@ namespace CompetitiveRounds
                 {
                     localTeamId = System.Convert.ToInt32(localProps["t_id"]);
                     Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from Photon t_id)");
+                    CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
                     return;
                 }
             }
@@ -344,6 +352,7 @@ namespace CompetitiveRounds
                             {
                                 localTeamId = (int)field.GetValue(charData);
                                 Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from CharacterData)");
+                                CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
                                 return;
                             }
                         }
@@ -355,6 +364,7 @@ namespace CompetitiveRounds
                             {
                                 localTeamId = i;
                                 Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from index)");
+                                CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
                                 return;
                             }
                         }
@@ -1007,6 +1017,7 @@ namespace CompetitiveRounds
 
         public static bool IsInMatch => isTracking;
         public static bool IsInRoom => wasInRoom;
+        public static bool LeavingForRanked { get; set; } = false;
         public static string LocalSteamId => localSteamId;
         public static string LocalDisplayName => localDisplayName;
         public static string OpponentDisplayName => opponentDisplayName;

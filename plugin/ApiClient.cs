@@ -699,6 +699,20 @@ namespace CompetitiveRounds
             catch { return 0f; }
         }
 
+        private static bool ExtractJsonBool(string json, string key)
+        {
+            try
+            {
+                string search = $"\"{key}\":";
+                int start = json.IndexOf(search);
+                if (start < 0) return false;
+                start += search.Length;
+                while (start < json.Length && (json[start] == ' ' || json[start] == '\t')) start++;
+                return start < json.Length && json[start] == 't'; // "true" vs "false"
+            }
+            catch { return false; }
+        }
+
         private static string ExtractCardNames(string chunk, string key = "cards_picked")
         {
             try
@@ -774,18 +788,19 @@ namespace CompetitiveRounds
 
         // ── Ranked Queue ──────────────────────────────────────
 
-        public enum QueueState { Idle, Searching, Matched }
+        public enum QueueState { Idle, Searching, Matched, ReadySent }
 
         [Serializable]
         public class QueuePollData
         {
-            public string status;        // searching, matched, not_in_queue, expired
+            public string status;        // searching, matched, ready_join, not_in_queue, expired
             public int wait_time;
             public int queue_size;
             public int elo_range;
             public string opponent_steam_id;
             public string opponent_name;
             public float opponent_rating;
+            public bool opponent_ready;
             public string room_name;
         }
 
@@ -843,16 +858,15 @@ namespace CompetitiveRounds
 
         /// <summary>
         /// Decline a matched opponent. Blocks re-matching for 5 minutes.
-        /// Resets the opponent back to searching so they can find someone else.
+        /// Both players are reset to searching (stay in queue).
         /// </summary>
         public static void DeclineMatch(string steamId)
         {
             var poll = LastPollData;
             string oppSteamId = poll?.opponent_steam_id ?? "";
 
-            // Reset local state immediately
-            CurrentQueueState = QueueState.Idle;
-            IsQueuePolling = false;
+            // Reset local state to Searching (stay in queue, keep polling)
+            CurrentQueueState = QueueState.Searching;
             LastPollData = null;
             Plugin.ClearPendingRoom();
             NativeUI.MarkDirty();
@@ -860,6 +874,8 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(oppSteamId))
             {
                 // No opponent data — just leave queue as fallback
+                CurrentQueueState = QueueState.Idle;
+                IsQueuePolling = false;
                 Plugin.Instance.StartCoroutine(PostRequest(
                     $"{baseUrl}/api/v1/queue/leave?steam_id={Escape(steamId)}",
                     "",
@@ -868,6 +884,7 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo("[QUEUE] Left ranked queue (decline fallback)");
                     }
                 ));
+                NativeUI.MarkDirty();
                 return;
             }
 
@@ -879,9 +896,57 @@ namespace CompetitiveRounds
                 (success, response) =>
                 {
                     if (success)
-                        Plugin.Log.LogInfo($"[QUEUE] Declined match vs {oppSteamId}");
+                        Plugin.Log.LogInfo($"[QUEUE] Declined match vs {oppSteamId}, searching for new opponent");
                     else
                         Plugin.Log.LogWarning($"[QUEUE] Decline failed: {response}");
+                }
+            ));
+        }
+
+        /// <summary>
+        /// Signal ready for the current matched game. Server will generate
+        /// a room when both players are ready.
+        /// </summary>
+        public static void ReadyUp(string steamId)
+        {
+            if (CurrentQueueState != QueueState.Matched) return;
+
+            CurrentQueueState = QueueState.ReadySent;
+            NativeUI.MarkDirty();
+            Plugin.Log.LogInfo("[QUEUE] Ready Up sent");
+
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/queue/ready?steam_id={Escape(steamId)}",
+                "",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        // Check if both ready already (instant room)
+                        string status = ExtractJsonString(response, "status");
+                        if (status == "both_ready")
+                        {
+                            string room = ExtractJsonString(response, "room_name");
+                            if (!string.IsNullOrEmpty(room))
+                            {
+                                IsQueuePolling = false;
+                                CurrentQueueState = QueueState.Idle;
+                                LastPollData = null;
+                                Plugin.SetPendingRoom(room);
+                                Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room}");
+                                CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
+                                NativeUI.MarkDirty();
+                            }
+                        }
+                        else
+                        {
+                            Plugin.Log.LogInfo("[QUEUE] Waiting for opponent to ready up");
+                        }
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[QUEUE] Ready failed: {response}");
+                    }
                 }
             ));
         }
@@ -905,14 +970,36 @@ namespace CompetitiveRounds
 
                     try
                     {
-                        // Manual JSON parsing (JsonUtility doesn't handle nulls well)
                         string status = ExtractJsonString(response, "status");
 
-                        if (status == "matched")
+                        if (status == "ready_join")
                         {
-                            CurrentQueueState = QueueState.Matched;
+                            // Both ready — room assigned, join it!
+                            string room = ExtractJsonString(response, "room_name");
                             IsQueuePolling = false;
+                            CurrentQueueState = QueueState.Idle;
+                            LastPollData = null;
+                            Plugin.SetPendingRoom(room);
+                            Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room}");
+                            CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
+                            NativeUI.MarkDirty();
+                        }
+                        else if (status == "matched")
+                        {
+                            bool oppReady = ExtractJsonBool(response, "opponent_ready");
 
+                            if (CurrentQueueState == QueueState.Searching)
+                            {
+                                // New match found!
+                                CurrentQueueState = QueueState.Matched;
+                                Plugin.Log.LogInfo($"[QUEUE] MATCHED! vs {ExtractJsonString(response, "opponent_name")} ({ExtractJsonFloat(response, "opponent_rating"):F0})");
+                                CompetitiveUI.ShowNotification(
+                                    $"MATCH FOUND!  vs {ExtractJsonString(response, "opponent_name")} ({ExtractJsonFloat(response, "opponent_rating"):F0})",
+                                    Color.green, 8f
+                                );
+                            }
+
+                            // Keep polling — update data (opponent_ready may change)
                             LastPollData = new QueuePollData
                             {
                                 status = "matched",
@@ -920,20 +1007,20 @@ namespace CompetitiveRounds
                                 opponent_steam_id = ExtractJsonString(response, "opponent_steam_id"),
                                 opponent_name = ExtractJsonString(response, "opponent_name"),
                                 opponent_rating = ExtractJsonFloat(response, "opponent_rating"),
-                                room_name = ExtractJsonString(response, "room_name"),
+                                opponent_ready = oppReady,
                             };
-
-                            Plugin.Log.LogInfo($"[QUEUE] MATCHED! vs {LastPollData.opponent_name} ({LastPollData.opponent_rating:F0}), room: {LastPollData.room_name}");
-                            CompetitiveUI.ShowNotification(
-                                $"MATCH FOUND!  vs {LastPollData.opponent_name} ({LastPollData.opponent_rating:F0})",
-                                Color.green, 8f
-                            );
-
-                            // UI will show Match Found panel with Ready Up button
                             NativeUI.MarkDirty();
                         }
                         else if (status == "searching")
                         {
+                            if (CurrentQueueState == QueueState.Matched || CurrentQueueState == QueueState.ReadySent)
+                            {
+                                // Was matched but now searching — declined or timeout
+                                Plugin.Log.LogInfo("[QUEUE] Match canceled — back to searching");
+                                CompetitiveUI.ShowNotification("Match canceled — searching...", Color.yellow, 5f);
+                            }
+
+                            CurrentQueueState = QueueState.Searching;
                             LastPollData = new QueuePollData
                             {
                                 status = "searching",
@@ -941,6 +1028,7 @@ namespace CompetitiveRounds
                                 queue_size = ExtractJsonInt(response, "queue_size"),
                                 elo_range = ExtractJsonInt(response, "elo_range"),
                             };
+                            NativeUI.MarkDirty();
                         }
                         else if (status == "expired" || status == "not_in_queue")
                         {
@@ -948,6 +1036,7 @@ namespace CompetitiveRounds
                             IsQueuePolling = false;
                             LastPollData = null;
                             CompetitiveUI.ShowNotification("Queue search expired", Color.yellow);
+                            NativeUI.MarkDirty();
                         }
                     }
                     catch (Exception ex)
@@ -963,6 +1052,119 @@ namespace CompetitiveRounds
             CurrentQueueState = QueueState.Idle;
             IsQueuePolling = false;
             LastPollData = null;
+        }
+
+        // ── Queue Count (lightweight, always-on when page open) ──
+
+        public static int CachedQueueSearching { get; private set; } = 0;
+        public static int CachedQueueTotal { get; private set; } = 0;
+        private static float queueCountTimer = 0f;
+        private static float queueCountInterval = 10f;
+
+        public static void UpdateQueueCount()
+        {
+            queueCountTimer += Time.deltaTime;
+            if (queueCountTimer < queueCountInterval) return;
+            queueCountTimer = 0f;
+
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/queue/count",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        int s = ExtractJsonInt(response, "searching");
+                        int t = ExtractJsonInt(response, "total");
+                        if (s != CachedQueueSearching || t != CachedQueueTotal)
+                        {
+                            CachedQueueSearching = s;
+                            CachedQueueTotal = t;
+                            NativeUI.MarkDirty();
+                        }
+                    }
+                }
+            ));
+        }
+
+        public static void ResetQueueCountTimer() { queueCountTimer = queueCountInterval; }
+
+        // ── Player Blocks (permanent, from leaderboard) ──────────
+
+        public static HashSet<string> BlockedSteamIds { get; private set; } = new HashSet<string>();
+        private static bool blocksLoaded = false;
+
+        public static void FetchBlockedPlayers(string steamId)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/blocks/{steamId}",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        BlockedSteamIds.Clear();
+                        // Parse JSON array of steam IDs
+                        int arrStart = response.IndexOf("[");
+                        int arrEnd = response.IndexOf("]");
+                        if (arrStart >= 0 && arrEnd > arrStart)
+                        {
+                            string arr = response.Substring(arrStart + 1, arrEnd - arrStart - 1);
+                            if (!string.IsNullOrEmpty(arr))
+                            {
+                                foreach (string part in arr.Split(','))
+                                {
+                                    string sid = part.Trim().Trim('"');
+                                    if (!string.IsNullOrEmpty(sid))
+                                        BlockedSteamIds.Add(sid);
+                                }
+                            }
+                        }
+                        blocksLoaded = true;
+                        NativeUI.MarkDirty();
+                        Plugin.Log.LogInfo($"[BLOCKS] Loaded {BlockedSteamIds.Count} blocked players");
+                    }
+                }
+            ));
+        }
+
+        public static bool IsPlayerBlocked(string steamId)
+        {
+            return BlockedSteamIds.Contains(steamId);
+        }
+
+        public static void BlockPlayer(string mySteamId, string targetSteamId, Action<bool> callback = null)
+        {
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/players/block?steam_id={Escape(mySteamId)}&target_steam_id={Escape(targetSteamId)}",
+                "",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        BlockedSteamIds.Add(targetSteamId);
+                        Plugin.Log.LogInfo($"[BLOCKS] Blocked {targetSteamId}");
+                        NativeUI.MarkDirty();
+                    }
+                    callback?.Invoke(success);
+                }
+            ));
+        }
+
+        public static void UnblockPlayer(string mySteamId, string targetSteamId, Action<bool> callback = null)
+        {
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/players/unblock?steam_id={Escape(mySteamId)}&target_steam_id={Escape(targetSteamId)}",
+                "",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        BlockedSteamIds.Remove(targetSteamId);
+                        Plugin.Log.LogInfo($"[BLOCKS] Unblocked {targetSteamId}");
+                        NativeUI.MarkDirty();
+                    }
+                    callback?.Invoke(success);
+                }
+            ));
         }
 
         // ── HTTP helpers ──────────────────────────────────────
