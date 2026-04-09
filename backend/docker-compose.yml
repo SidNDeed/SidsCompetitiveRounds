@@ -47,6 +47,21 @@ services:
     security_opt:
       - apparmor:unconfined
 
+  # ── Discord Bot ─────────────────────────────────────────────
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: comp-rounds-bot
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      API_BASE_URL: http://api:8000
+      LEADERBOARD_CHANNEL: ${LEADERBOARD_CHANNEL}
+      SERIES_LOG_CHANNEL: ${SERIES_LOG_CHANNEL}
+
 volumes:
   pgdata:
     driver: local

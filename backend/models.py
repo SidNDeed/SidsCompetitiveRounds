@@ -26,6 +26,7 @@ class Player(Base):
     display_name = Column(String(64), nullable=False)
     ranked_enabled = Column(Boolean, nullable=False, default=True)
     total_xp = Column(Integer, nullable=False, default=0)
+    discord_id = Column(String(20), nullable=True, unique=True, index=True)
     first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -40,6 +41,7 @@ class GlickoRating(Base):
     rating = Column(Double, nullable=False, default=1500.0)
     rating_deviation = Column(Double, nullable=False, default=350.0)
     volatility = Column(Double, nullable=False, default=0.06)
+    peak_rating = Column(Double, nullable=True)
     games_in_period = Column(Integer, nullable=False, default=0)
     last_calculated = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -154,6 +156,7 @@ class RankedQueue(Base):
     status = Column(String(16), nullable=False, default="searching")
     matched_with = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=True)
     room_name = Column(String(64), nullable=True)
+    room_region = Column(String(8), nullable=True)
     ready = Column(Boolean, nullable=False, default=False)
     joined_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     matched_at = Column(DateTime(timezone=True), nullable=True)
@@ -172,4 +175,13 @@ class PlayerBlock(Base):
 
     blocker_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
     blocked_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class LinkCode(Base):
+    __tablename__ = "link_codes"
+
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    code = Column(String(6), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

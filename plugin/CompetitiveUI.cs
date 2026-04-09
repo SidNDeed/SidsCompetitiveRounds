@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Photon.Pun;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -64,7 +65,38 @@ namespace CompetitiveRounds
             fpsTimer += Time.deltaTime;
             if (fpsTimer >= 0.5f) { fpsVal = fpsCnt / fpsTimer; fpsCnt = 0; fpsTimer = 0f; }
             if (fpsStyle == null) { fpsStyle = new GUIStyle(GUI.skin.label); fpsStyle.fontSize = 11; fpsStyle.normal.textColor = new Color(0.5f, 0.5f, 0.5f, 0.7f); }
-            GUI.Label(new Rect(6, 4, 60, 18), $"{fpsVal:F0} FPS", fpsStyle);
+
+            string label = $"{fpsVal:F0} FPS";
+            float width = 60;
+
+            // Show ping + region when connected to Photon
+            try
+            {
+                if (PhotonNetwork.IsConnected && PhotonNetwork.InRoom)
+                {
+                    int ping = PhotonNetwork.GetPing();
+                    string region = PhotonNetwork.CloudRegion ?? "";
+                    if (!string.IsNullOrEmpty(region))
+                    {
+                        // Clean region string (e.g. "us/*" -> "us")
+                        int slash = region.IndexOf('/');
+                        if (slash > 0) region = region.Substring(0, slash);
+                        region = region.ToUpper();
+                    }
+                    Color pingColor = ping < 60 ? new Color(0.4f, 0.7f, 0.4f, 0.7f) :
+                                      ping < 120 ? new Color(0.7f, 0.7f, 0.3f, 0.7f) :
+                                                    new Color(0.7f, 0.4f, 0.4f, 0.7f);
+                    label += $"  |  {ping}ms  {region}";
+                    width = 200;
+
+                    // Draw with ping color for the ping portion
+                    GUI.Label(new Rect(6, 4, width, 18), label, fpsStyle);
+                    return;
+                }
+            }
+            catch { }
+
+            GUI.Label(new Rect(6, 4, width, 18), label, fpsStyle);
         }
 
         private static void DrawNotification()

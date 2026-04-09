@@ -16,7 +16,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.17.1";
+        public const string ModVersion = "1.18.0";
 
         internal static ManualLogSource Log;
         internal static CompetitiveRoundsBehaviour Instance;
@@ -31,19 +31,23 @@ namespace CompetitiveRounds
 
         // Ranked queue auto-join state (on Plugin so it survives scene changes)
         private static string pendingRankedRoom = null;
+        private static string pendingRankedRegion = null;
         private static bool pendingRoomLeaving = false;
         private static float pendingRoomLogTimer = 0f;
         public static string PendingRankedRoom => pendingRankedRoom;
+        public static string PendingRankedRegion => pendingRankedRegion;
 
-        public static void SetPendingRoom(string roomName)
+        public static void SetPendingRoom(string roomName, string region = null)
         {
             pendingRankedRoom = roomName;
-            Log.LogInfo($"[QUEUE] Pending ranked room set: {roomName}");
+            pendingRankedRegion = region;
+            Log.LogInfo($"[QUEUE] Pending ranked room set: {roomName} (region: {region ?? "auto"})");
         }
 
         public static void ClearPendingRoom()
         {
             pendingRankedRoom = null;
+            pendingRankedRegion = null;
             pendingRoomLeaving = false;
         }
 
@@ -106,14 +110,15 @@ namespace CompetitiveRounds
 
     /// <summary>
     /// Tiny MonoBehaviour solely for ranked queue auto-join.
-    /// Created once in Plugin.Awake with DontDestroyOnLoad.
-    /// Separate from CompetitiveRoundsBehaviour to avoid ROUNDS' cleanup.
+    /// Uses ROUNDS' own NetworkConnectionHandler for region connection and room joining.
+    /// Requires Krafs.Publicizer for direct access to NCH private members.
     /// </summary>
     public class QueueRoomJoiner : MonoBehaviour
     {
-        private enum JoinState { Idle, LeavingRoom, WaitingDisconnect, Connecting, WaitingMaster, Joining }
+        private enum JoinState { Idle, WaitingForRoom }
         private JoinState state = JoinState.Idle;
         private float stateTimer = 0f;
+        private bool joinInitiated = false;
 
         private void Awake()
         {
@@ -125,6 +130,7 @@ namespace CompetitiveRounds
             string pendingRoom = Plugin.PendingRankedRoom;
             if (string.IsNullOrEmpty(pendingRoom))
             {
+                joinInitiated = false;
                 state = JoinState.Idle;
                 stateTimer = 0f;
                 return;
@@ -132,125 +138,135 @@ namespace CompetitiveRounds
 
             stateTimer += Time.deltaTime;
 
-            // Safety timeout — if stuck in any state for 15s, reset
-            if (state != JoinState.Idle && stateTimer > 15f)
+            // Safety timeout — 30s to account for NCH's connection sequence
+            if (state != JoinState.Idle && stateTimer > 30f)
             {
-                Plugin.Log.LogWarning($"[QUEUE-JOINER] State {state} timed out, resetting");
+                Plugin.Log.LogWarning("[QUEUE-JOINER] Timed out waiting for room join, resetting");
                 Plugin.ClearPendingRoom();
+                joinInitiated = false;
                 state = JoinState.Idle;
                 stateTimer = 0f;
+                CompetitiveUI.ShowNotification("Failed to join ranked room", new Color(1f, 0.4f, 0.4f));
                 return;
             }
 
             switch (state)
             {
                 case JoinState.Idle:
+                    if (joinInitiated) return;
+
+                    // If already in the correct room, done
                     if (PhotonNetwork.InRoom)
                     {
                         string currentRoom = PhotonNetwork.CurrentRoom?.Name ?? "";
                         if (currentRoom == pendingRoom)
                         {
-                            // Already in the right room!
                             OnJoinedRankedRoom(currentRoom);
                             return;
                         }
-
-                        // Wrong room — suppress ROUNDS' auto-reconnect, then leave
-                        Plugin.Log.LogInfo($"[QUEUE-JOINER] In wrong room ({currentRoom}), leaving for {pendingRoom}...");
-                        GameStateWatcher.LeavingForRanked = true;
-                        CompetitiveRoundsBehaviour.HideMainMenu();
-                        PhotonNetwork.LeaveRoom(false);
-                        state = JoinState.LeavingRoom;
-                        stateTimer = 0f;
-                        return;
                     }
 
-                    // Not in room — start connecting
-                    if (!PhotonNetwork.IsConnected)
-                    {
-                        Plugin.Log.LogInfo("[QUEUE-JOINER] Connecting to Photon...");
-                        PhotonNetwork.ConnectUsingSettings();
-                        state = JoinState.Connecting;
-                        stateTimer = 0f;
-                        return;
-                    }
-
-                    // Connected but not in room — go straight to waiting for master
-                    state = JoinState.WaitingMaster;
-                    stateTimer = 0f;
+                    // Kick off room join via ROUNDS' NetworkConnectionHandler
+                    InitiateRoomJoin(pendingRoom, Plugin.PendingRankedRegion);
                     break;
 
-                case JoinState.LeavingRoom:
-                    if (!PhotonNetwork.InRoom)
-                    {
-                        Plugin.Log.LogInfo("[QUEUE-JOINER] Left room, disconnecting...");
-                        if (PhotonNetwork.IsConnected)
-                            PhotonNetwork.Disconnect();
-                        state = JoinState.WaitingDisconnect;
-                        stateTimer = 0f;
-                    }
-                    break;
-
-                case JoinState.WaitingDisconnect:
-                    if (!PhotonNetwork.IsConnected && PhotonNetwork.NetworkClientState == Photon.Realtime.ClientState.Disconnected)
-                    {
-                        Plugin.Log.LogInfo("[QUEUE-JOINER] Disconnected, reconnecting...");
-                        PhotonNetwork.ConnectUsingSettings();
-                        state = JoinState.Connecting;
-                        stateTimer = 0f;
-                    }
-                    break;
-
-                case JoinState.Connecting:
-                    if (PhotonNetwork.IsConnectedAndReady)
-                    {
-                        state = JoinState.WaitingMaster;
-                        stateTimer = 0f;
-                    }
-                    break;
-
-                case JoinState.WaitingMaster:
+                case JoinState.WaitingForRoom:
                     if (PhotonNetwork.InRoom)
                     {
-                        // ROUNDS reconnected us to a vanilla room — leave again
                         string cur = PhotonNetwork.CurrentRoom?.Name ?? "";
-                        if (cur == pendingRoom) { OnJoinedRankedRoom(cur); return; }
-                        Plugin.Log.LogInfo($"[QUEUE-JOINER] ROUNDS reconnected to wrong room ({cur}), leaving again...");
-                        PhotonNetwork.LeaveRoom(false);
-                        state = JoinState.LeavingRoom;
-                        stateTimer = 0f;
-                        return;
+                        if (cur == pendingRoom)
+                        {
+                            OnJoinedRankedRoom(cur);
+                            return;
+                        }
                     }
-                    if (PhotonNetwork.NetworkClientState == Photon.Realtime.ClientState.ConnectedToMasterServer
-                        || PhotonNetwork.InLobby)
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Uses ROUNDS' NetworkConnectionHandler to connect to the correct region
+        /// and join/create the ranked room. Mirrors ForceRegionJoin() but uses
+        /// JoinOrCreateRoom instead of room-code search.
+        /// </summary>
+        private void InitiateRoomJoin(string roomName, string region)
+        {
+            joinInitiated = true;
+            var nch = NetworkConnectionHandler.instance;
+
+            if (nch == null)
+            {
+                Plugin.Log.LogError("[QUEUE-JOINER] NetworkConnectionHandler.instance is null!");
+                return;
+            }
+
+            try
+            {
+                // 1. Disconnect if in room (like ForceRegionJoin does)
+                if (PhotonNetwork.InRoom)
+                {
+                    GameStateWatcher.LeavingForRanked = true;
+                    PhotonNetwork.Disconnect();
+                    Plugin.Log.LogInfo("[QUEUE-JOINER] Disconnecting from current room...");
+                }
+
+                // 2. Close menus (matches ForceRegionJoin behavior)
+                try { CharacterCreatorHandler.instance?.CloseMenus(); } catch { }
+                try { MainMenuHandler.instance?.Close(); } catch { }
+
+                // 3. Set target region — NCH's WaitForConnect reads RegionSelector.region
+                if (!string.IsNullOrEmpty(region))
+                {
+                    RegionSelector.region = region;
+                    Plugin.Log.LogInfo($"[QUEUE-JOINER] Set RegionSelector.region = {region}");
+                }
+
+                // 4. Set m_ForceRegion = true (direct access via Publicizer)
+                //    Prevents PlayOnBestActiveRegion, tells WaitForConnect to use ConnectToRegion
+                nch.m_ForceRegion = true;
+                Plugin.Log.LogInfo("[QUEUE-JOINER] Set m_ForceRegion = true");
+
+                // 5. Loading screen and game start time (matches ForceRegionJoin)
+                try { TimeHandler.instance.gameStartTime = 1f; } catch { }
+                try { LoadingScreen.instance?.StartLoading(); } catch { }
+
+                // 6. Use NCH's DoActionWhenConnected (direct access via Publicizer)
+                //    This coroutine handles: ConnectUsingSettings → ConnectToRegion → wait for master
+                //    Then we JoinOrCreate with proper ROUNDS room options
+                string capturedRoom = roomName;
+                nch.StartCoroutine(nch.DoActionWhenConnected(() =>
+                {
+                    try
                     {
-                        // Ready to join our ranked room
-                        Plugin.Log.LogInfo($"[QUEUE] Auto-joining ranked room: {pendingRoom}");
-                        CompetitiveUI.ShowNotification("Joining ranked match...", new Color(0.4f, 0.8f, 1f));
+                        Plugin.Log.LogInfo($"[QUEUE-JOINER] Connected! JoinOrCreate: {capturedRoom}");
                         var roomOptions = new Photon.Realtime.RoomOptions
                         {
                             MaxPlayers = 2,
-                            IsVisible = false,
                             IsOpen = true,
+                            IsVisible = true,
+                            CustomRoomProperties = new ExitGames.Client.Photon.Hashtable
+                            {
+                                { "C2", capturedRoom }  // ROOM_CODE — ROUNDS' custom property key
+                            },
+                            CustomRoomPropertiesForLobby = new string[] { "C2" }
                         };
-                        PhotonNetwork.JoinOrCreateRoom(pendingRoom, roomOptions, Photon.Realtime.TypedLobby.Default);
-                        state = JoinState.Joining;
-                        stateTimer = 0f;
+                        var lobby = new Photon.Realtime.TypedLobby("RoomCodeLobby", Photon.Realtime.LobbyType.SqlLobby);
+                        PhotonNetwork.JoinOrCreateRoom(capturedRoom, roomOptions, lobby);
                     }
-                    break;
-
-                case JoinState.Joining:
-                    if (PhotonNetwork.InRoom)
+                    catch (Exception ex)
                     {
-                        string cur = PhotonNetwork.CurrentRoom?.Name ?? "";
-                        if (cur == pendingRoom) { OnJoinedRankedRoom(cur); return; }
-                        // Ended up in wrong room somehow
-                        Plugin.Log.LogWarning($"[QUEUE-JOINER] Joined wrong room ({cur}), retrying...");
-                        PhotonNetwork.LeaveRoom(false);
-                        state = JoinState.LeavingRoom;
-                        stateTimer = 0f;
+                        Plugin.Log.LogError($"[QUEUE-JOINER] JoinOrCreate failed: {ex.Message}");
                     }
-                    break;
+                }));
+
+                Plugin.Log.LogInfo($"[QUEUE-JOINER] Started NCH connection sequence for room: {roomName}");
+                state = JoinState.WaitingForRoom;
+                stateTimer = 0f;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[QUEUE-JOINER] InitiateRoomJoin failed: {ex.Message}");
+                joinInitiated = false;
             }
         }
 
@@ -258,8 +274,19 @@ namespace CompetitiveRounds
         {
             Plugin.Log.LogInfo($"[QUEUE] In ranked room: {roomName}!");
             Plugin.ClearPendingRoom();
+            joinInitiated = false;
             state = JoinState.Idle;
             stateTimer = 0f;
+
+            // Clear force region flag so NCH works normally for vanilla play afterward
+            try
+            {
+                var nch = NetworkConnectionHandler.instance;
+                if (nch != null)
+                    nch.m_ForceRegion = false;
+            }
+            catch { }
+
             CompetitiveUI.ShowNotification("In ranked match room!", Color.green, 5f);
             CompetitiveRoundsBehaviour.HideMainMenu();
 

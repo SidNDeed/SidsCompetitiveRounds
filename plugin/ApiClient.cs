@@ -1,7 +1,9 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Security.Cryptography;
 using System.Text;
+using Photon.Pun;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -59,6 +61,7 @@ namespace CompetitiveRounds
             public string display_name;
             public float rating;
             public float rating_deviation;
+            public float peak_rating;
             public int total_matches;
             public int wins;
             public int losses;
@@ -72,10 +75,13 @@ namespace CompetitiveRounds
             public int best_casual_streak;
             public int ranked_series_wins;
             public int ranked_series_losses;
+            public string discord_id;
 
             // Parsed manually (JsonUtility can't handle nested arrays)
             public List<string> top_card_names;
             public List<int> top_card_picks;
+            public List<float> top_card_win_rates;
+            public List<string> recent_form; // "W","L","W"... last 20
         }
 
         [Serializable]
@@ -110,6 +116,8 @@ namespace CompetitiveRounds
             public string opponent_name;
             public int player_rounds_won;
             public int opponent_rounds_won;
+            public int player_points;
+            public int opponent_points;
             public bool won;
             public bool is_ranked;
             public string ended_at;
@@ -127,8 +135,33 @@ namespace CompetitiveRounds
             public MatchHistoryEntry[] items;
         }
 
+        // ── Achievement data ──────────────────────────────────
+
+        [Serializable]
+        public class AchievementData
+        {
+            public string achievement_key;
+            public bool unlocked;
+            public string unlocked_at; // ISO date or null
+        }
+
+        // Master definition list (mirrored from server)
+        public static readonly Dictionary<string, string[]> AchievementDefs = new Dictionary<string, string[]>
+        {
+            {"untouchable",         new[]{"Untouchable",         "Win a game without taking any damage"}},
+            {"silent_assassin",     new[]{"Silent Assassin",     "5-0 someone with Sneaky"}},
+            {"total_mayhem",        new[]{"Total Mayhem",        "5-0 someone with Mayhem"}},
+            {"fragile_perfection",  new[]{"Fragile Perfection",  "5-0 someone with Glass Cannon"}},
+            {"no_escape",           new[]{"No Escape",           "5-0 someone with Chase"}},
+            {"rise_from_the_ashes", new[]{"Rise from the Ashes", "Win 5-0 with Phoenix without losing a life"}},
+            {"the_comeback_kid",    new[]{"The Comeback Kid",    "Win after being down 0-4"}},
+            {"stacked_deck",        new[]{"Stacked Deck",        "Get 5 copies of one card in a game"}},
+            {"regicide",            new[]{"Regicide",            "Win against Sid in a ranked series"}},
+        };
+
         // Cached data
         public static List<MatchHistoryEntry> CachedMatchHistory { get; private set; }
+        public static Dictionary<string, AchievementData> CachedAchievements { get; private set; }
 
         // ── Initialization ────────────────────────────────────
 
@@ -136,6 +169,43 @@ namespace CompetitiveRounds
         {
             baseUrl = url.TrimEnd('/');
             Plugin.Log.LogInfo($"API client initialized: {baseUrl}");
+        }
+
+        // ── HMAC Match Signing ────────────────────────────────
+
+        // Obfuscated key (XOR encoded — not plain string in DLL)
+        private static readonly byte[] _hkE = {0xE2,0x60,0x7D,0x46,0xD1,0x1D,0xAE,0xD4,0xF3,0x33,0x3C,0x2F,0x47,0xED,0x9A,0x32,0xD7,0x6A,0x0B,0x18,0xA5,0x04,0xE3,0xEC,0xDC,0x50,0x22,0x18,0x15,0xA6,0xE7,0x2E,0xD8,0x46,0x03,0x33,0xA7,0x5A,0xD1,0xD1,0xFD,0x78,0x1C,0x3A,0x02,0x90,0xEF,0x2D};
+        private static readonly byte[] _hkX = {0xB2,0x19,0x4F,0x77,0xE6,0x6F,0x96,0xB5,0xBA,0x0A,0x6A,0x5F,0x77,0xDF,0xAE,0x4B};
+
+        private static byte[] GetHmacKeyBytes()
+        {
+            byte[] result = new byte[_hkE.Length];
+            for (int i = 0; i < _hkE.Length; i++)
+                result[i] = (byte)(_hkE[i] ^ _hkX[i % _hkX.Length]);
+            return result;
+        }
+
+        private static string ComputeHmac(string p1SteamId, string p2SteamId,
+            int p1Rounds, int p2Rounds, bool isRanked,
+            string reporterSteamId, string roomId)
+        {
+            string message = $"{p1SteamId}:{p2SteamId}:{p1Rounds}:{p2Rounds}:" +
+                             $"{(isRanked ? "true" : "false")}:{reporterSteamId}:{roomId ?? ""}";
+            try
+            {
+                using (var hmac = new HMACSHA256(GetHmacKeyBytes()))
+                {
+                    byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(message));
+                    var sb = new StringBuilder(hash.Length * 2);
+                    foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                    return sb.ToString();
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[HMAC] Computation failed: {ex.Message}");
+                return "";
+            }
         }
 
         // ── Opponent ranked check ─────────────────────────────
@@ -206,7 +276,9 @@ namespace CompetitiveRounds
             sb.Append($"\"match_duration\":{durationSeconds},");
             sb.Append($"\"started_at\":\"{startedAt:yyyy-MM-ddTHH:mm:ssZ}\",");
             sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
-            sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteamId)}\"");
+            sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteamId)}\",");
+            string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
+            sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
 
             string json = sb.ToString();
@@ -266,6 +338,24 @@ namespace CompetitiveRounds
                             else if (seriesStatus == "completed")
                             {
                                 CompetitiveUI.QueueNotification($"SERIES COMPLETE {seriesScore}!", new Color(0.3f, 1f, 0.3f), 4f);
+
+                                // Regicide check — won a ranked series against Sid
+                                if (GameStateWatcher.pendingRegicideCheck)
+                                {
+                                    // seriesScore is "2-x" if we won
+                                    try
+                                    {
+                                        var sp = seriesScore.Split('-');
+                                        int myW = int.Parse(sp[0]);
+                                        int thW = int.Parse(sp[1]);
+                                        if (myW > thW)
+                                        {
+                                            UnlockAchievement(MatchTracker.LocalSteamId, "regicide");
+                                        }
+                                    }
+                                    catch { }
+                                    GameStateWatcher.pendingRegicideCheck = false;
+                                }
                             }
                         }
                     }
@@ -459,27 +549,74 @@ namespace CompetitiveRounds
         {
             data.top_card_names = new List<string>();
             data.top_card_picks = new List<int>();
+            data.top_card_win_rates = new List<float>();
+            data.recent_form = new List<string>();
             try
             {
                 int tcStart = response.IndexOf("\"top_cards\"");
-                if (tcStart < 0) return;
-
-                int arrStart = response.IndexOf("[", tcStart);
-                int arrEnd = FindMatchingBracket(response, arrStart);
-                if (arrStart < 0 || arrEnd < 0) return;
-
-                string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
-                if (arr == "[]") return;
-
-                var cardParts = arr.Split(new[] { "\"card_name\"" }, StringSplitOptions.None);
-                for (int i = 1; i < cardParts.Length && i <= 5; i++)
+                if (tcStart >= 0)
                 {
-                    string name = ExtractJsonString(cardParts[i], "");
-                    int picks = ExtractJsonInt(cardParts[i], "times_picked");
-                    if (!string.IsNullOrEmpty(name))
+                    int arrStart = response.IndexOf("[", tcStart);
+                    int arrEnd = FindMatchingBracket(response, arrStart);
+                    if (arrStart >= 0 && arrEnd >= 0)
                     {
-                        data.top_card_names.Add(name);
-                        data.top_card_picks.Add(picks);
+                        string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
+                        if (arr != "[]")
+                        {
+                            var cardParts = arr.Split(new[] { "\"card_name\"" }, StringSplitOptions.None);
+                            for (int i = 1; i < cardParts.Length && i <= 10; i++)
+                            {
+                                string name = ExtractJsonString(cardParts[i], "");
+                                int picks = ExtractJsonInt(cardParts[i], "times_picked");
+                                float wr = 0f;
+                                try
+                                {
+                                    int wrIdx = cardParts[i].IndexOf("\"win_rate\":");
+                                    if (wrIdx >= 0)
+                                    {
+                                        wrIdx += "\"win_rate\":".Length;
+                                        while (wrIdx < cardParts[i].Length && cardParts[i][wrIdx] == ' ') wrIdx++;
+                                        int wrEnd = wrIdx;
+                                        while (wrEnd < cardParts[i].Length && (char.IsDigit(cardParts[i][wrEnd]) || cardParts[i][wrEnd] == '.' || cardParts[i][wrEnd] == '-')) wrEnd++;
+                                        if (wrEnd > wrIdx)
+                                            wr = float.Parse(cardParts[i].Substring(wrIdx, wrEnd - wrIdx), System.Globalization.CultureInfo.InvariantCulture);
+                                    }
+                                }
+                                catch { }
+                                if (!string.IsNullOrEmpty(name))
+                                {
+                                    data.top_card_names.Add(name);
+                                    data.top_card_picks.Add(picks);
+                                    data.top_card_win_rates.Add(wr);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Parse recent_form
+            try
+            {
+                int rfStart = response.IndexOf("\"recent_form\"");
+                if (rfStart >= 0)
+                {
+                    int arrStart = response.IndexOf("[", rfStart);
+                    int arrEnd = FindMatchingBracket(response, arrStart);
+                    if (arrStart >= 0 && arrEnd >= 0)
+                    {
+                        string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
+                        if (arr != "[]")
+                        {
+                            var parts = arr.Split(new[] { "\"result\"" }, StringSplitOptions.None);
+                            for (int i = 1; i < parts.Length; i++)
+                            {
+                                string result = ExtractJsonString(parts[i], "");
+                                if (!string.IsNullOrEmpty(result))
+                                    data.recent_form.Add(result);
+                            }
+                        }
                     }
                 }
             }
@@ -611,6 +748,8 @@ namespace CompetitiveRounds
 
                                 entry.player_rounds_won = ExtractJsonInt(chunk, "player_rounds_won");
                                 entry.opponent_rounds_won = ExtractJsonInt(chunk, "opponent_rounds_won");
+                                entry.player_points = ExtractJsonInt(chunk, "player_points");
+                                entry.opponent_points = ExtractJsonInt(chunk, "opponent_points");
                                 entry.won = chunk.Contains("\"won\":true") || chunk.Contains("\"won\": true");
                                 entry.is_ranked = chunk.Contains("\"is_ranked\":true") || chunk.Contains("\"is_ranked\": true");
                                 entry.ended_at = ExtractJsonString(chunk, "ended_at");
@@ -802,6 +941,7 @@ namespace CompetitiveRounds
             public float opponent_rating;
             public bool opponent_ready;
             public string room_name;
+            public string photon_region;
         }
 
         // Current queue state (mod-side)
@@ -811,9 +951,15 @@ namespace CompetitiveRounds
         private static float queuePollTimer = 0f;
         private static float queuePollInterval = 3f;
 
-        public static void JoinQueue(string steamId, string region, bool rankedOnly)
+        public static void JoinQueue(string steamId, string displayName, string region, bool rankedOnly)
         {
-            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"region\":\"{Escape(region ?? "")}\",\"ranked_only\":{(rankedOnly ? "true" : "false")}}}";
+            // Use current Photon region if not specified
+            if (string.IsNullOrEmpty(region))
+            {
+                try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            }
+            string safeName = Escape(displayName ?? steamId);
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"ranked_only\":{(rankedOnly ? "true" : "false")}}}";
 
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/queue/join",
@@ -927,13 +1073,14 @@ namespace CompetitiveRounds
                         if (status == "both_ready")
                         {
                             string room = ExtractJsonString(response, "room_name");
+                            string region = ExtractJsonString(response, "photon_region");
                             if (!string.IsNullOrEmpty(room))
                             {
                                 IsQueuePolling = false;
                                 CurrentQueueState = QueueState.Idle;
                                 LastPollData = null;
-                                Plugin.SetPendingRoom(room);
-                                Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room}");
+                                Plugin.SetPendingRoom(room, region);
+                                Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"})");
                                 CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
                                 NativeUI.MarkDirty();
                             }
@@ -976,11 +1123,12 @@ namespace CompetitiveRounds
                         {
                             // Both ready — room assigned, join it!
                             string room = ExtractJsonString(response, "room_name");
+                            string region = ExtractJsonString(response, "photon_region");
                             IsQueuePolling = false;
                             CurrentQueueState = QueueState.Idle;
                             LastPollData = null;
-                            Plugin.SetPendingRoom(room);
-                            Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room}");
+                            Plugin.SetPendingRoom(room, region);
+                            Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"})");
                             CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
                             NativeUI.MarkDirty();
                         }
@@ -1199,6 +1347,113 @@ namespace CompetitiveRounds
                 bool success = request.result == UnityWebRequest.Result.Success;
                 callback(success, success ? request.downloadHandler.text : request.error);
             }
+        }
+
+        // ── Discord Linking ──────────────────────────────────────
+
+        public static void GenerateLinkCode(string steamId)
+        {
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/players/link-code?steam_id={Escape(steamId)}",
+                "",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        string code = ExtractJsonString(response, "code");
+                        if (!string.IsNullOrEmpty(code))
+                        {
+                            Plugin.Log.LogInfo($"[LINK] Generated link code: {code}");
+                            CompetitiveUI.ShowNotification($"Link code: {code}", Color.cyan, 15f);
+                            NativeUI.SetLinkCode(code);
+                        }
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[LINK] Failed to generate code: {response}");
+                        CompetitiveUI.ShowNotification("Failed to get link code", new Color(1f, 0.4f, 0.4f));
+                    }
+                }
+            ));
+        }
+
+        // ── Achievements ──────────────────────────────────────────
+
+        public static void FetchAchievements(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/achievements/{steamId}",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        try
+                        {
+                            var dict = new Dictionary<string, AchievementData>();
+                            // Manual parse — array of {achievement_key, unlocked, unlocked_at}
+                            var parts = response.Split(new[] { "\"achievement_key\"" }, StringSplitOptions.None);
+                            for (int i = 1; i < parts.Length; i++)
+                            {
+                                string key = ExtractJsonString(parts[i], "");
+                                if (string.IsNullOrEmpty(key)) continue;
+                                bool unlocked = parts[i].Contains("\"unlocked\":true") || parts[i].Contains("\"unlocked\": true");
+                                string unlockedAt = ExtractJsonString(parts[i], "unlocked_at");
+                                dict[key] = new AchievementData
+                                {
+                                    achievement_key = key,
+                                    unlocked = unlocked,
+                                    unlocked_at = unlockedAt
+                                };
+                            }
+                            CachedAchievements = dict;
+                            NativeUI.MarkDirty();
+                            Plugin.Log.LogInfo($"[ACH] Loaded {dict.Count} achievements");
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning($"[ACH] Parse error: {ex.Message}");
+                        }
+                    }
+                }
+            ));
+        }
+
+        public static void UnlockAchievement(string steamId, string achievementKey, string matchId = null)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"achievement_key\":\"{Escape(achievementKey)}\"";
+            if (!string.IsNullOrEmpty(matchId))
+                json += $",\"match_id\":\"{Escape(matchId)}\"";
+            json += "}";
+
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/achievements/unlock",
+                json,
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        string status = ExtractJsonString(response, "status");
+                        string name = ExtractJsonString(response, "name");
+                        if (status == "unlocked" && !string.IsNullOrEmpty(name))
+                        {
+                            CompetitiveUI.ShowNotification($"Achievement Unlocked: {name}!", new Color(1f, 0.85f, 0.3f), 6f);
+                            Plugin.Log.LogInfo($"[ACH] Unlocked: {achievementKey} ({name})");
+                        }
+                        else
+                        {
+                            Plugin.Log.LogInfo($"[ACH] {achievementKey}: {status}");
+                        }
+                        // Refresh cached achievements
+                        FetchAchievements(steamId);
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[ACH] Unlock failed for {achievementKey}: {response}");
+                    }
+                }
+            ));
         }
 
         private static string Escape(string s)

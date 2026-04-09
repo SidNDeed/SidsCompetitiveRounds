@@ -73,11 +73,13 @@ class PlayerStatsResponse(BaseModel):
     rating: float
     rating_deviation: float
     volatility: float
+    peak_rating: float = 1500.0
     total_matches: int
     wins: int
     losses: int
     win_rate: float
     ranked_enabled: bool
+    discord_id: str | None = None
     last_match: datetime | None
     recent_rating_history: list[dict] = Field(default_factory=list)
     top_cards: list[dict] = Field(default_factory=list)
@@ -136,6 +138,8 @@ class MatchHistoryEntry(BaseModel):
     opponent_name: str
     player_rounds_won: int
     opponent_rounds_won: int
+    player_points: int = 0
+    opponent_points: int = 0
     won: bool
     is_ranked: bool = False
     ended_at: datetime
@@ -161,6 +165,7 @@ class HealthResponse(BaseModel):
 class QueueJoinRequest(BaseModel):
     """Request to join the ranked queue."""
     steam_id: str = Field(..., max_length=20)
+    display_name: str | None = Field(None, max_length=64)
     region: str | None = Field(None, max_length=8)
     ranked_only: bool = False
 
@@ -176,6 +181,7 @@ class QueuePollResponse(BaseModel):
     opponent_rating: float | None = None
     opponent_ready: bool = False
     room_name: str | None = None
+    photon_region: str | None = None
 
 
 class QueueDeclineRequest(BaseModel):

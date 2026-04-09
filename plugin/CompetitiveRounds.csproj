@@ -14,6 +14,14 @@
     <ManagedDir>$(RoundsDir)\Rounds_Data\Managed</ManagedDir>
   </PropertyGroup>
 
+  <!-- Krafs.Publicizer — exposes private members of referenced assemblies at compile time -->
+  <ItemGroup>
+    <PackageReference Include="Krafs.Publicizer" Version="2.2.1">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
   <!-- BepInEx (still needed for plugin loading and logging) -->
   <ItemGroup>
     <Reference Include="0Harmony">
@@ -61,15 +69,16 @@
     </Reference>
   </ItemGroup>
 
-  <!-- Game -->
+  <!-- Game (publicized for direct access to private members) -->
   <ItemGroup>
     <Reference Include="Assembly-CSharp">
       <HintPath>$(ManagedDir)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Publicize Include="Assembly-CSharp" IncludeCompilerGeneratedMembers="false" />
   </ItemGroup>
 
-  <!-- Photon -->
+  <!-- Photon (publicized for direct access to private members) -->
   <ItemGroup>
     <Reference Include="PhotonUnityNetworking">
       <HintPath>$(ManagedDir)\PhotonUnityNetworking.dll</HintPath>
@@ -83,6 +92,8 @@
       <HintPath>$(ManagedDir)\Photon3Unity3D.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Publicize Include="PhotonUnityNetworking" IncludeCompilerGeneratedMembers="false" />
+    <Publicize Include="PhotonRealtime" IncludeCompilerGeneratedMembers="false" />
   </ItemGroup>
 
   <!-- Steamworks -->

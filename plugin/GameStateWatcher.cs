@@ -98,6 +98,18 @@ namespace CompetitiveRounds
         private static int sessionCasualWins = 0;
         private static int sessionCasualLosses = 0;
 
+        // Achievement tracking within current match
+        private static bool achTookDamage = false;       // health ever < MaxHealth during a round
+        private static bool achPhoenixUsed = false;       // remainingRespawns < respawns detected
+        private static bool achDied = false;              // data.dead became true (actual death)
+        private static int achMaxOpponentRounds = 0;      // highest round count opponent reached (for comeback)
+        private static bool achWasDown04 = false;         // opponent had 4 rounds while local had 0
+        private static bool lastDeadState = false;
+        private static int lastRemainingRespawns = -1;
+
+        // Sid's Steam ID for "Regicide" achievement
+        private const string SID_STEAM_ID = "76561198040410653";
+
         // Public state
         public static MatchTracker.MatchResult LastResult { get; private set; }
         public static bool HasPendingResult { get; private set; } = false;
@@ -424,6 +436,12 @@ namespace CompetitiveRounds
                     if (curP2Rounds > lastP2Rounds)
                         Plugin.Log.LogInfo($"[POLL] Round: P2! Rounds: {p1Rounds}-{p2Rounds}");
 
+                    // Achievement: track comeback (0-4 deficit)
+                    int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
+                    int oppR = localTeamId == 0 ? p2Rounds : p1Rounds;
+                    if (oppR > achMaxOpponentRounds) achMaxOpponentRounds = oppR;
+                    if (localR == 0 && oppR >= 4) achWasDown04 = true;
+
                     if (!gameOverReported && (curP1Rounds >= roundsToWin || curP2Rounds >= roundsToWin))
                     {
                         int winnerTeam = curP1Rounds > curP2Rounds ? 0 : 1;
@@ -432,6 +450,9 @@ namespace CompetitiveRounds
                 }
                 // Track card picks
                 PollCardPicks();
+
+                // Achievement: poll health and death state on local player
+                PollAchievementState();
             }
 
             lastP1Points = curP1Points;
@@ -699,9 +720,147 @@ namespace CompetitiveRounds
                 );
             }
 
+            // Evaluate achievements before clearing match state
+            EvaluateAchievements(localWon);
+
             isTracking = false;
             matchIsRanked = false; // Clear indicator immediately
         }
+
+        // ── Achievement health/death polling ─────────────────────
+        private static void PollAchievementState()
+        {
+            if (!isTracking) return;
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return;
+                foreach (var playerObj in pm.players)
+                {
+                    if (playerObj == null) continue;
+                    var pv = playerObj.GetComponent<PhotonView>();
+                    if (pv == null || !pv.IsMine) continue;
+
+                    var data = playerObj.GetComponent<CharacterData>();
+                    if (data == null) break;
+
+                    // Damage check: health < MaxHealth while alive and playing
+                    if (!data.dead && data.health > 0 && data.health < data.MaxHealth)
+                    {
+                        if (!achTookDamage)
+                            Plugin.Log.LogInfo("[ACH] Player took damage");
+                        achTookDamage = true;
+                    }
+
+                    // Death check: data.dead transitioned to true
+                    if (data.dead && !lastDeadState)
+                    {
+                        achDied = true;
+                    }
+                    lastDeadState = data.dead;
+
+                    // Phoenix check: remainingRespawns < respawns
+                    var stats = data.stats;
+                    if (stats != null && stats.respawns > 0)
+                    {
+                        if (stats.remainingRespawns < stats.respawns)
+                        {
+                            if (!achPhoenixUsed)
+                                Plugin.Log.LogInfo("[ACH] Phoenix life consumed");
+                            achPhoenixUsed = true;
+                        }
+                    }
+                    break;
+                }
+            }
+            catch { }
+        }
+
+        private static void EvaluateAchievements(bool localWon)
+        {
+            try
+            {
+                int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
+                int oppR = localTeamId == 0 ? p2Rounds : p1Rounds;
+                bool swept = localWon && oppR == 0;
+                string steamId = localSteamId;
+
+                // Collect local card names
+                var cardNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var cardCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (var c in localCards)
+                {
+                    string cn = c.CardName ?? "";
+                    cardNames.Add(cn);
+                    if (cardCounts.ContainsKey(cn)) cardCounts[cn]++;
+                    else cardCounts[cn] = 1;
+                }
+                foreach (var c in preMatchCards)
+                {
+                    string cn = c.CardName ?? "";
+                    cardNames.Add(cn);
+                    if (cardCounts.ContainsKey(cn)) cardCounts[cn]++;
+                    else cardCounts[cn] = 1;
+                }
+
+                // 1. Untouchable — won without taking any damage
+                if (localWon && !achTookDamage)
+                {
+                    Plugin.Log.LogInfo("[ACH] Evaluating: Untouchable — PASSED");
+                    ApiClient.UnlockAchievement(steamId, "untouchable");
+                }
+
+                // 2-5. Card-specific 5-0 sweeps
+                if (swept)
+                {
+                    if (cardNames.Contains("Sneaky"))
+                        ApiClient.UnlockAchievement(steamId, "silent_assassin");
+                    if (cardNames.Contains("Mayhem"))
+                        ApiClient.UnlockAchievement(steamId, "total_mayhem");
+                    if (cardNames.Contains("Glass Cannon") || cardNames.Contains("GlassCannon"))
+                        ApiClient.UnlockAchievement(steamId, "fragile_perfection");
+                    if (cardNames.Contains("Chase"))
+                        ApiClient.UnlockAchievement(steamId, "no_escape");
+                }
+
+                // 6. Rise from the Ashes — 5-0 with Phoenix, never lost a life
+                bool hasPhoenix = cardNames.Contains("Phoenix");
+                if (swept && hasPhoenix && !achPhoenixUsed && !achDied)
+                {
+                    Plugin.Log.LogInfo("[ACH] Evaluating: Rise from the Ashes — PASSED");
+                    ApiClient.UnlockAchievement(steamId, "rise_from_the_ashes");
+                }
+
+                // 7. The Comeback Kid — won after being down 0-4
+                if (localWon && achWasDown04)
+                {
+                    Plugin.Log.LogInfo("[ACH] Evaluating: The Comeback Kid — PASSED");
+                    ApiClient.UnlockAchievement(steamId, "the_comeback_kid");
+                }
+
+                // 8. Stacked Deck — 5+ copies of one card
+                foreach (var kvp in cardCounts)
+                {
+                    if (kvp.Value >= 5)
+                    {
+                        Plugin.Log.LogInfo($"[ACH] Evaluating: Stacked Deck — PASSED ({kvp.Key} x{kvp.Value})");
+                        ApiClient.UnlockAchievement(steamId, "stacked_deck");
+                        break;
+                    }
+                }
+
+                // 9. Regicide — set flag for series completion check in ApiClient
+                if (matchIsRanked && localWon && opponentSteamId == SID_STEAM_ID)
+                    pendingRegicideCheck = true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[ACH] Achievement evaluation error: {ex.Message}");
+            }
+        }
+
+        // Regicide flag — consumed in ApiClient when series_status == "completed"
+        public static bool pendingRegicideCheck = false;
 
         // \u2500\u2500 Card tracking via CardBar \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
@@ -1000,6 +1159,16 @@ namespace CompetitiveRounds
             preMatchOpponentCards.Clear();
             fieldsResolved = false;
 
+            // Reset achievement tracking
+            achTookDamage = false;
+            achPhoenixUsed = false;
+            achDied = false;
+            achMaxOpponentRounds = 0;
+            achWasDown04 = false;
+            lastDeadState = false;
+            lastRemainingRespawns = -1;
+            pendingRegicideCheck = false;
+
             // Clear our card broadcast when leaving room
             try
             {
@@ -1021,6 +1190,7 @@ namespace CompetitiveRounds
         public static string LocalSteamId => localSteamId;
         public static string LocalDisplayName => localDisplayName;
         public static string OpponentDisplayName => opponentDisplayName;
+        public static string OpponentSteamId => opponentSteamId;
         public static int P1Rounds => p1Rounds;
         public static int P2Rounds => p2Rounds;
         public static int P1Points => p1Points;

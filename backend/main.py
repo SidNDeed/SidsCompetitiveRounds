@@ -7,6 +7,8 @@ import hashlib
 import hmac
 import math
 import os
+import random
+import string
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -19,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock
+from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode
 from schemas import (
     CardStatEntry,
     HealthResponse,
@@ -429,10 +431,12 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                 g1.rating = new_r1
                 g1.rating_deviation = new_rd1
                 g1.volatility = new_vol1
+                g1.peak_rating = max(g1.peak_rating or new_r1, new_r1)
                 g1.updated_at = now
                 g2.rating = new_r2
                 g2.rating_deviation = new_rd2
                 g2.volatility = new_vol2
+                g2.peak_rating = max(g2.peak_rating or new_r2, new_r2)
                 g2.updated_at = now
 
             await db.commit()
@@ -522,7 +526,6 @@ async def get_leaderboard(
         JOIN players p ON p.id = gr.player_id
         LEFT JOIN combined c ON c.player_id = p.id
         WHERE COALESCE(c.total, 0) >= :min_matches
-          AND gr.rating_deviation < 200
         ORDER BY gr.rating DESC
         LIMIT :limit OFFSET :offset
     """)
@@ -573,7 +576,7 @@ async def get_leaderboard(
         SELECT COUNT(*) FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
         LEFT JOIN combined c ON c.player_id = p.id
-        WHERE COALESCE(c.total, 0) >= :min_matches AND gr.rating_deviation < 200
+        WHERE COALESCE(c.total, 0) >= :min_matches
     """)
     total = (await db.execute(count_query, {"min_matches": min_matches})).scalar() or 0
 
@@ -714,11 +717,13 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         rating=round(glicko.rating, 1) if glicko else GLICKO2_DEFAULT_RATING,
         rating_deviation=round(glicko.rating_deviation, 1) if glicko else GLICKO2_DEFAULT_RD,
         volatility=round(glicko.volatility, 4) if glicko else GLICKO2_DEFAULT_VOLATILITY,
+        peak_rating=round(glicko.peak_rating, 1) if glicko and glicko.peak_rating else GLICKO2_DEFAULT_RATING,
         total_matches=total,
         wins=wins,
         losses=losses,
         win_rate=round(wins / total, 4) if total > 0 else 0.0,
         ranked_enabled=player.ranked_enabled,
+        discord_id=player.discord_id,
         last_match=stats["last_match"],
         recent_rating_history=history,
         top_cards=top_cards,
@@ -757,6 +762,8 @@ async def get_player_matches(
             m.is_ranked,
             CASE WHEN m.player1_id = :pid THEN m.p1_rounds_won ELSE m.p2_rounds_won END AS player_rounds,
             CASE WHEN m.player1_id = :pid THEN m.p2_rounds_won ELSE m.p1_rounds_won END AS opp_rounds,
+            CASE WHEN m.player1_id = :pid THEN m.p1_points_total ELSE m.p2_points_total END AS player_points,
+            CASE WHEN m.player1_id = :pid THEN m.p2_points_total ELSE m.p1_points_total END AS opp_points,
             CASE WHEN m.player1_id = :pid THEN p2.steam_id ELSE p1.steam_id END AS opp_steam_id,
             CASE WHEN m.player1_id = :pid THEN p2.display_name ELSE p1.display_name END AS opp_name,
             CASE WHEN m.player1_id = :pid THEN m.player2_id ELSE m.player1_id END AS opp_id,
@@ -826,6 +833,8 @@ async def get_player_matches(
             opponent_name=row["opp_name"],
             player_rounds_won=row["player_rounds"],
             opponent_rounds_won=row["opp_rounds"],
+            player_points=row["player_points"] or 0,
+            opponent_points=row["opp_points"] or 0,
             won=(row["winner_id"] == player.id),
             ended_at=row["ended_at"],
             is_ranked=row["is_ranked"] if "is_ranked" in row.keys() else False,
@@ -985,6 +994,7 @@ async def recalculate_ratings(
         glicko.rating = new_rating
         glicko.rating_deviation = new_rd
         glicko.volatility = new_vol
+        glicko.peak_rating = max(glicko.peak_rating or new_rating, new_rating)
         glicko.games_in_period = 0
         glicko.last_calculated = now
         glicko.updated_at = now
@@ -1064,11 +1074,9 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
     Join the ranked matchmaking queue.
     Upserts the player into ranked_queue with status='searching'.
     """
-    # Find the player
-    result = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
-    player = result.scalar_one_or_none()
-    if not player:
-        raise HTTPException(status_code=404, detail="Player not found. Play a match first.")
+    # Get or create the player (auto-register on first queue join)
+    name = req.display_name or req.steam_id
+    player = await get_or_create_player(db, req.steam_id, name)
 
     # Get their current rating
     rating_result = await db.execute(
@@ -1090,6 +1098,7 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
         status="searching",
         matched_with=None,
         room_name=None,
+        room_region=None,
         ready=False,
         joined_at=datetime.now(timezone.utc),
         matched_at=None,
@@ -1103,6 +1112,7 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
             "ranked_only": req.ranked_only,
             "matched_with": None,
             "room_name": None,
+            "room_region": None,
             "ready": False,
             "joined_at": datetime.now(timezone.utc),
             "matched_at": None,
@@ -1161,7 +1171,8 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         text("""
             SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                    rq.rating_deviation, rq.status, rq.matched_with,
-                   rq.room_name, rq.ready, rq.joined_at, rq.matched_at
+                   rq.room_name, rq.room_region, rq.region, rq.ready,
+                   rq.joined_at, rq.matched_at
             FROM ranked_queue rq
             JOIN players p ON rq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -1193,7 +1204,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         # Get opponent info (lock their row too for atomic updates)
         opp_result = await db.execute(
             text("""
-                SELECT player_id, steam_id, display_name, rating, ready, room_name
+                SELECT player_id, steam_id, display_name, rating, ready, room_name, region
                 FROM ranked_queue WHERE player_id = :oid
                 FOR UPDATE
             """),
@@ -1207,7 +1218,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 text("""
                     UPDATE ranked_queue
                     SET status = 'searching', matched_with = NULL,
-                        room_name = NULL, ready = false, matched_at = NULL
+                        room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
                     WHERE player_id = :pid
                 """),
                 {"pid": my_pid},
@@ -1229,7 +1240,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                         text("""
                             UPDATE ranked_queue
                             SET status = 'searching', matched_with = NULL,
-                                room_name = NULL, ready = false, matched_at = NULL
+                                room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
                             WHERE player_id = :pid
                         """),
                         {"pid": pid},
@@ -1241,10 +1252,12 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         if my_ready and opp_ready:
             if not room_name:
                 room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
+                # Pick region: use our region (first poller), fallback to opponent's, fallback to "us"
+                chosen_region = entry["region"] or opp["region"] or "us"
                 for pid in [my_pid, opp["player_id"]]:
                     await db.execute(
-                        text("UPDATE ranked_queue SET room_name = :room WHERE player_id = :pid"),
-                        {"room": room_name, "pid": pid},
+                        text("UPDATE ranked_queue SET room_name = :room, room_region = :region WHERE player_id = :pid"),
+                        {"room": room_name, "region": chosen_region, "pid": pid},
                     )
             await db.commit()
             return QueuePollResponse(
@@ -1255,6 +1268,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 opponent_rating=opp["rating"],
                 opponent_ready=True,
                 room_name=room_name,
+                photon_region=entry["room_region"] or entry["region"] or "us",
             )
 
         # Room already set (by /ready endpoint) but we see it on poll
@@ -1268,6 +1282,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 opponent_rating=opp["rating"],
                 opponent_ready=opp_ready,
                 room_name=room_name,
+                photon_region=entry["room_region"] or entry["region"] or "us",
             )
 
         # Waiting for ready-up
@@ -1340,7 +1355,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 text("""
                     UPDATE ranked_queue
                     SET status = 'matched', matched_with = :opp_id,
-                        room_name = NULL, ready = false, matched_at = :mat
+                        room_name = NULL, room_region = NULL, ready = false, matched_at = :mat
                     WHERE player_id = :pid
                 """),
                 {"opp_id": opp_id, "mat": matched_at, "pid": pid},
@@ -1387,7 +1402,7 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
     # Lock our queue entry
     entry_result = await db.execute(
         text("""
-            SELECT player_id, status, matched_with, room_name, ready
+            SELECT player_id, status, matched_with, room_name, room_region, region, ready
             FROM ranked_queue WHERE player_id = :pid
             FOR UPDATE
         """),
@@ -1408,7 +1423,7 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
     # Check if opponent is also ready
     opp_result = await db.execute(
         text("""
-            SELECT player_id, ready, room_name
+            SELECT player_id, ready, room_name, region
             FROM ranked_queue WHERE player_id = :oid
             FOR UPDATE
         """),
@@ -1421,13 +1436,16 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
         room_name = entry["room_name"] or opp["room_name"]
         if not room_name:
             room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
+            chosen_region = entry["region"] or (opp["region"] if opp else None) or "us"
             for pid in [player.id, opp["player_id"]]:
                 await db.execute(
-                    text("UPDATE ranked_queue SET room_name = :room WHERE player_id = :pid"),
-                    {"room": room_name, "pid": pid},
+                    text("UPDATE ranked_queue SET room_name = :room, room_region = :region WHERE player_id = :pid"),
+                    {"room": room_name, "region": chosen_region, "pid": pid},
                 )
+        else:
+            chosen_region = entry["room_region"] or entry["region"] or "us"
         await db.commit()
-        return {"status": "both_ready", "room_name": room_name}
+        return {"status": "both_ready", "room_name": room_name, "photon_region": chosen_region}
 
     await db.commit()
     return {"status": "waiting", "message": "Waiting for opponent to ready up"}
@@ -1467,7 +1485,7 @@ async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get
             text("""
                 UPDATE ranked_queue
                 SET status = 'searching', matched_with = NULL,
-                    room_name = NULL, ready = false, matched_at = NULL
+                    room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
                 WHERE player_id = :pid
             """),
             {"pid": pid},
@@ -1536,3 +1554,200 @@ async def get_player_blocks(steam_id: str, db: AsyncSession = Depends(get_db)):
         {"pid": p.id},
     )
     return {"blocked_steam_ids": [r[0] for r in result.fetchall()]}
+
+
+# ── Routes: Discord Linking ──────────────────────────────────────
+
+@app.post("/api/v1/players/link-code", tags=["Discord"])
+async def generate_link_code(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    """
+    Generate a 6-character verification code for Discord linking.
+    Code expires after 10 minutes.
+    """
+    result = await db.execute(select(Player).where(Player.steam_id == steam_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    # Delete any existing codes for this player
+    await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": player.id})
+
+    # Generate a 6-char uppercase alphanumeric code
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+    db.add(LinkCode(player_id=player.id, code=code, expires_at=expires))
+    await db.commit()
+
+    return {"code": code, "expires_in": 600}
+
+
+@app.post("/api/v1/players/link-discord", tags=["Discord"])
+async def link_discord(
+    code: str = Query(...),
+    discord_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Link a Discord account to a Steam account via verification code.
+    Called by the Discord bot after !link CODE.
+    """
+    # Clean up expired codes
+    await db.execute(text("DELETE FROM link_codes WHERE expires_at < now()"))
+
+    # Find the code
+    result = await db.execute(
+        select(LinkCode).where(LinkCode.code == code.upper())
+    )
+    link = result.scalar_one_or_none()
+    if not link:
+        raise HTTPException(status_code=404, detail="Invalid or expired code")
+
+    # Check if discord_id is already linked to another player
+    existing = await db.execute(
+        select(Player).where(Player.discord_id == discord_id)
+    )
+    existing_player = existing.scalar_one_or_none()
+    if existing_player and existing_player.id != link.player_id:
+        # Unlink old player
+        existing_player.discord_id = None
+
+    # Link the discord account
+    player_result = await db.execute(select(Player).where(Player.id == link.player_id))
+    player = player_result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    player.discord_id = discord_id
+
+    # Delete the used code
+    await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": player.id})
+    await db.commit()
+
+    return {
+        "status": "linked",
+        "steam_id": player.steam_id,
+        "display_name": player.display_name,
+        "discord_id": discord_id,
+    }
+
+
+@app.get("/api/v1/players/by-discord/{discord_id}", tags=["Discord"])
+async def get_player_by_discord(discord_id: str, db: AsyncSession = Depends(get_db)):
+    """Look up a player by their linked Discord ID."""
+    result = await db.execute(select(Player).where(Player.discord_id == discord_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="No player linked to this Discord account")
+
+    rating_result = await db.execute(
+        select(GlickoRating).where(GlickoRating.player_id == player.id)
+    )
+    glicko = rating_result.scalar_one_or_none()
+
+    return {
+        "steam_id": player.steam_id,
+        "display_name": player.display_name,
+        "discord_id": discord_id,
+        "rating": round(glicko.rating, 1) if glicko else GLICKO2_DEFAULT_RATING,
+        "peak_rating": round(glicko.peak_rating, 1) if glicko and glicko.peak_rating else GLICKO2_DEFAULT_RATING,
+        "level": level_from_xp(player.total_xp or 0)[0],
+    }
+
+
+@app.get("/api/v1/series/recent", tags=["Discord"])
+async def get_recent_series(
+    minutes: int = Query(2, ge=1, le=60),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get recently completed ranked series for Discord bot polling.
+    Returns series completed within the last N minutes.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    query = text("""
+        SELECT
+            rs.id::text AS series_id,
+            rs.status,
+            rs.p1_series_wins,
+            rs.p2_series_wins,
+            rs.p1_rating_change,
+            rs.p2_rating_change,
+            rs.completed_at,
+            p1.steam_id AS p1_steam_id,
+            p1.display_name AS p1_name,
+            p1.discord_id AS p1_discord_id,
+            p2.steam_id AS p2_steam_id,
+            p2.display_name AS p2_name,
+            p2.discord_id AS p2_discord_id,
+            g1.rating AS p1_rating,
+            g1.peak_rating AS p1_peak,
+            g2.rating AS p2_rating,
+            g2.peak_rating AS p2_peak,
+            pw.steam_id AS winner_steam_id,
+            pw.display_name AS winner_name
+        FROM ranked_series rs
+        JOIN players p1 ON p1.id = rs.player1_id
+        JOIN players p2 ON p2.id = rs.player2_id
+        LEFT JOIN glicko_ratings g1 ON g1.player_id = rs.player1_id
+        LEFT JOIN glicko_ratings g2 ON g2.player_id = rs.player2_id
+        LEFT JOIN players pw ON pw.id = rs.winner_id
+        WHERE rs.status = 'completed'
+          AND rs.completed_at >= :cutoff
+        ORDER BY rs.completed_at DESC
+    """)
+    rows = (await db.execute(query, {"cutoff": cutoff})).mappings().all()
+
+    # Compute streaks for each player
+    async def get_ranked_streak(steam_id):
+        """Get current ranked win/loss streak."""
+        p = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+        if not p:
+            return 0
+        streak_q = text("""
+            SELECT rs.winner_id
+            FROM ranked_series rs
+            WHERE rs.status = 'completed'
+              AND (rs.player1_id = :pid OR rs.player2_id = :pid)
+            ORDER BY rs.completed_at DESC
+            LIMIT 20
+        """)
+        streak_rows = (await db.execute(streak_q, {"pid": p.id})).mappings().all()
+        if not streak_rows:
+            return 0
+        first_won = (streak_rows[0]["winner_id"] == p.id)
+        count = 0
+        for sr in streak_rows:
+            if (sr["winner_id"] == p.id) == first_won:
+                count += 1
+            else:
+                break
+        return count if first_won else -count
+
+    series_list = []
+    for row in rows:
+        p1_streak = await get_ranked_streak(row["p1_steam_id"])
+        p2_streak = await get_ranked_streak(row["p2_steam_id"])
+
+        series_list.append({
+            "series_id": row["series_id"],
+            "p1_name": row["p1_name"],
+            "p1_steam_id": row["p1_steam_id"],
+            "p1_discord_id": row["p1_discord_id"],
+            "p1_rating": round(row["p1_rating"] or 1500, 1),
+            "p1_rating_change": row["p1_rating_change"] or 0,
+            "p1_streak": p1_streak,
+            "p2_name": row["p2_name"],
+            "p2_steam_id": row["p2_steam_id"],
+            "p2_discord_id": row["p2_discord_id"],
+            "p2_rating": round(row["p2_rating"] or 1500, 1),
+            "p2_rating_change": row["p2_rating_change"] or 0,
+            "p2_streak": p2_streak,
+            "p1_series_wins": row["p1_series_wins"],
+            "p2_series_wins": row["p2_series_wins"],
+            "winner_name": row["winner_name"],
+            "winner_steam_id": row["winner_steam_id"],
+            "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+        })
+
+    return {"series": series_list}
