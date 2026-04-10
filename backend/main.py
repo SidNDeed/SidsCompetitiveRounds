@@ -89,8 +89,8 @@ async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: st
         player.last_seen = datetime.now(timezone.utc)
         return player
 
-    # New player
-    player = Player(steam_id=steam_id, display_name=display_name)
+    # New player — ranked_enabled defaults to False until they explicitly enable it via the mod
+    player = Player(steam_id=steam_id, display_name=display_name, ranked_enabled=False)
     db.add(player)
     await db.flush()  # Get the player.id
 
@@ -1079,12 +1079,13 @@ async def check_player_registered(steam_id: str, db: AsyncSession = Depends(get_
 
 @app.post("/api/v1/mod/toggle-ranked/{steam_id}", tags=["Mod"])
 async def toggle_ranked(steam_id: str, enabled: bool = Query(...), db: AsyncSession = Depends(get_db)):
-    """Toggle a player's ranked mode on or off."""
+    """Toggle a player's ranked mode on or off. Auto-registers if needed."""
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
 
     if not player:
-        raise HTTPException(status_code=404, detail="Player not found. Play a match first to register.")
+        # Auto-register on first toggle (startup sync)
+        player = await get_or_create_player(db, steam_id, steam_id)
 
     player.ranked_enabled = enabled
     await db.commit()
@@ -1194,6 +1195,26 @@ async def queue_count(db: AsyncSession = Depends(get_db)):
     )
     total = result2.scalar() or 0
     return {"searching": searching, "total": total}
+
+
+@app.get("/api/v1/queue/recent-joins", tags=["Queue"])
+async def queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
+    """Return players who joined the queue within the last N seconds."""
+    result = await db.execute(
+        text("""
+            SELECT rq.display_name, rq.steam_id, rq.rating, rq.joined_at
+            FROM ranked_queue rq
+            WHERE rq.status = 'searching'
+              AND rq.joined_at > NOW() - INTERVAL '1 second' * :secs
+            ORDER BY rq.joined_at DESC
+        """), {"secs": seconds}
+    )
+    rows = result.mappings().all()
+    return {"joins": [
+        {"display_name": r["display_name"], "steam_id": r["steam_id"],
+         "rating": round(r["rating"]), "joined_at": r["joined_at"].isoformat()}
+        for r in rows
+    ]}
 
 
 @app.get("/api/v1/queue/poll/{steam_id}", response_model=QueuePollResponse, tags=["Queue"])

@@ -11,6 +11,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://api:8000")
 LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL", "0"))
 SERIES_LOG_CHANNEL_ID = int(os.getenv("SERIES_LOG_CHANNEL", "0"))
+QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
 
 RANK_ROLES = [
     (2610, "Grand Master V 2610+"),
@@ -100,6 +101,7 @@ async def on_ready():
     except Exception as e: print(f"Tree sync error: {e}")
     if not poll_recent_series.is_running(): poll_recent_series.start()
     if not sync_roles_periodic.is_running(): sync_roles_periodic.start()
+    if not poll_queue_beacon.is_running(): poll_queue_beacon.start()
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)})")
 
 @bot.event
@@ -204,6 +206,43 @@ async def cmd_leaderboard(ctx, page: int = 1):
     embed = discord.Embed(title="🏆 Competitive ROUNDS Leaderboard", description="\n".join(lines), color=discord.Color.gold())
     embed.set_footer(text=f"Page {page}/{total_pages} • {total} ranked players" + (f" • /lb {page+1} for next page" if page < total_pages else ""))
     await ctx.send(embed=embed)
+
+# ── Queue Beacon (15s) ───────────────────────────────────────────
+seen_queue_joins = {}  # steam_id -> timestamp
+
+@tasks.loop(seconds=15)
+async def poll_queue_beacon():
+    if not QUEUE_BEACON_CHANNEL_ID:
+        return
+    try:
+        # Expire entries older than 5 minutes
+        now = datetime.utcnow()
+        expired = [k for k, v in seen_queue_joins.items() if (now - v).total_seconds() > 300]
+        for k in expired:
+            del seen_queue_joins[k]
+
+        data = await api_get("/queue/recent-joins?seconds=20")
+        if not data or not data.get("joins"):
+            return
+        for j in data["joins"]:
+            sid = j["steam_id"]
+            if sid in seen_queue_joins:
+                continue
+            seen_queue_joins[sid] = now
+
+            name = j["display_name"] or sid
+            rating = j.get("rating", 1500)
+
+            channel = bot.get_channel(QUEUE_BEACON_CHANNEL_ID)
+            if not channel:
+                try:
+                    channel = await bot.fetch_channel(QUEUE_BEACON_CHANNEL_ID)
+                except:
+                    continue
+
+            await channel.send(f"🔍 **{name}** ({rating}) is searching for a ranked match!")
+    except Exception as e:
+        print(f"Queue beacon error: {e}")
 
 # ── Series Polling (30s) ─────────────────────────────────────────
 

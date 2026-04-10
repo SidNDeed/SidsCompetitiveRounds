@@ -17,7 +17,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.18.0";
+        public const string ModVersion = "1.18.2";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -129,10 +129,12 @@ namespace CompetitiveRounds
     /// </summary>
     public class QueueRoomJoiner : MonoBehaviour
     {
-        private enum JoinState { Idle, WaitingForRoom }
+        private enum JoinState { Idle, LeavingRoom, Connecting, WaitingForRoom }
         private JoinState state = JoinState.Idle;
         private float stateTimer = 0f;
         private bool joinInitiated = false;
+        private string targetRoom;
+        private string targetRegion;
 
         private void Awake()
         {
@@ -152,7 +154,7 @@ namespace CompetitiveRounds
 
             stateTimer += Time.deltaTime;
 
-            // Safety timeout — 30s to account for NCH's connection sequence
+            // Safety timeout — 30s to account for disconnect + NCH connection sequence
             if (state != JoinState.Idle && stateTimer > 30f)
             {
                 Plugin.Log.LogWarning("[QUEUE-JOINER] Timed out waiting for room join, resetting");
@@ -178,17 +180,52 @@ namespace CompetitiveRounds
                             OnJoinedRankedRoom(currentRoom);
                             return;
                         }
+                        // In a different room — need to leave first
+                        targetRoom = pendingRoom;
+                        targetRegion = Plugin.PendingRankedRegion;
+                        joinInitiated = true;
+                        GameStateWatcher.LeavingForRanked = true;
+                        PhotonNetwork.LeaveRoom();
+                        Plugin.Log.LogInfo("[QUEUE-JOINER] Leaving current room before ranked join...");
+                        state = JoinState.LeavingRoom;
+                        stateTimer = 0f;
+                        return;
                     }
 
-                    // Kick off room join via ROUNDS' NetworkConnectionHandler
-                    InitiateRoomJoin(pendingRoom, Plugin.PendingRankedRegion);
+                    // Not in a room — go straight to connecting
+                    targetRoom = pendingRoom;
+                    targetRegion = Plugin.PendingRankedRegion;
+                    StartNCHConnect();
+                    break;
+
+                case JoinState.LeavingRoom:
+                    // Wait for Photon to fully leave the room
+                    if (!PhotonNetwork.InRoom)
+                    {
+                        Plugin.Log.LogInfo("[QUEUE-JOINER] Left room, starting NCH connect...");
+                        // Small delay to let Photon settle
+                        StartNCHConnect();
+                    }
+                    break;
+
+                case JoinState.Connecting:
+                    // NCH coroutine is running, wait for room join
+                    if (PhotonNetwork.InRoom)
+                    {
+                        string cur = PhotonNetwork.CurrentRoom?.Name ?? "";
+                        if (cur == targetRoom)
+                        {
+                            OnJoinedRankedRoom(cur);
+                            return;
+                        }
+                    }
                     break;
 
                 case JoinState.WaitingForRoom:
                     if (PhotonNetwork.InRoom)
                     {
                         string cur = PhotonNetwork.CurrentRoom?.Name ?? "";
-                        if (cur == pendingRoom)
+                        if (cur == targetRoom)
                         {
                             OnJoinedRankedRoom(cur);
                             return;
@@ -198,12 +235,7 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>
-        /// Uses ROUNDS' NetworkConnectionHandler to connect to the correct region
-        /// and join/create the ranked room. Mirrors ForceRegionJoin() but uses
-        /// JoinOrCreateRoom instead of room-code search.
-        /// </summary>
-        private void InitiateRoomJoin(string roomName, string region)
+        private void StartNCHConnect()
         {
             joinInitiated = true;
             var nch = NetworkConnectionHandler.instance;
@@ -216,38 +248,34 @@ namespace CompetitiveRounds
 
             try
             {
-                // 1. Disconnect if in room (like ForceRegionJoin does)
-                if (PhotonNetwork.InRoom)
+                // Disconnect fully if still connected (e.g. on master server but not in room)
+                if (PhotonNetwork.IsConnected)
                 {
-                    GameStateWatcher.LeavingForRanked = true;
                     PhotonNetwork.Disconnect();
-                    Plugin.Log.LogInfo("[QUEUE-JOINER] Disconnecting from current room...");
+                    Plugin.Log.LogInfo("[QUEUE-JOINER] Disconnecting from Photon...");
                 }
 
-                // 2. Close menus (matches ForceRegionJoin behavior)
+                // Close menus
                 try { CharacterCreatorHandler.instance?.CloseMenus(); } catch { }
                 try { MainMenuHandler.instance?.Close(); } catch { }
 
-                // 3. Set target region — NCH's WaitForConnect reads RegionSelector.region
-                if (!string.IsNullOrEmpty(region))
+                // Set target region
+                if (!string.IsNullOrEmpty(targetRegion))
                 {
-                    RegionSelector.region = region;
-                    Plugin.Log.LogInfo($"[QUEUE-JOINER] Set RegionSelector.region = {region}");
+                    RegionSelector.region = targetRegion;
+                    Plugin.Log.LogInfo($"[QUEUE-JOINER] Set RegionSelector.region = {targetRegion}");
                 }
 
-                // 4. Set m_ForceRegion = true (direct access via Publicizer)
-                //    Prevents PlayOnBestActiveRegion, tells WaitForConnect to use ConnectToRegion
+                // Force region (via Publicizer)
                 nch.m_ForceRegion = true;
                 Plugin.Log.LogInfo("[QUEUE-JOINER] Set m_ForceRegion = true");
 
-                // 5. Loading screen and game start time (matches ForceRegionJoin)
+                // Loading screen
                 try { TimeHandler.instance.gameStartTime = 1f; } catch { }
                 try { LoadingScreen.instance?.StartLoading(); } catch { }
 
-                // 6. Use NCH's DoActionWhenConnected (direct access via Publicizer)
-                //    This coroutine handles: ConnectUsingSettings → ConnectToRegion → wait for master
-                //    Then we JoinOrCreate with proper ROUNDS room options
-                string capturedRoom = roomName;
+                // NCH handles: disconnect wait → ConnectToRegion → wait for master → execute callback
+                string capturedRoom = targetRoom;
                 nch.StartCoroutine(nch.DoActionWhenConnected(() =>
                 {
                     try
@@ -260,7 +288,7 @@ namespace CompetitiveRounds
                             IsVisible = true,
                             CustomRoomProperties = new ExitGames.Client.Photon.Hashtable
                             {
-                                { "C2", capturedRoom }  // ROOM_CODE — ROUNDS' custom property key
+                                { "C2", capturedRoom }
                             },
                             CustomRoomPropertiesForLobby = new string[] { "C2" }
                         };
@@ -273,13 +301,13 @@ namespace CompetitiveRounds
                     }
                 }));
 
-                Plugin.Log.LogInfo($"[QUEUE-JOINER] Started NCH connection sequence for room: {roomName}");
-                state = JoinState.WaitingForRoom;
+                Plugin.Log.LogInfo($"[QUEUE-JOINER] Started NCH connection sequence for room: {targetRoom}");
+                state = JoinState.Connecting;
                 stateTimer = 0f;
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogError($"[QUEUE-JOINER] InitiateRoomJoin failed: {ex.Message}");
+                Plugin.Log.LogError($"[QUEUE-JOINER] StartNCHConnect failed: {ex.Message}");
                 joinInitiated = false;
             }
         }
@@ -431,6 +459,10 @@ namespace CompetitiveRounds
             string steamId = GameStateWatcher.LocalSteamId;
             if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
             {
+                // Sync ranked status to server on every startup
+                // This ensures DB stays in sync even after resets/wipes
+                ApiClient.ToggleRanked(steamId, Plugin.RankedEnabled.Value);
+
                 ApiClient.FetchPlayerStats(steamId);
                 ApiClient.FetchMatchHistory(steamId);
                 ApiClient.FetchBlockedPlayers(steamId);
