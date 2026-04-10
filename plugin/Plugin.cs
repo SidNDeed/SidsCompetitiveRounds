@@ -1,4 +1,5 @@
 using BepInEx;
+using BepInEx.Bootstrap;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
@@ -17,6 +18,7 @@ namespace CompetitiveRounds
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
         public const string ModVersion = "1.18.0";
+        public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
         internal static CompetitiveRoundsBehaviour Instance;
@@ -28,6 +30,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowNotifications;
 
         private static bool spawned = false;
+        internal static bool modDisabled = false;
 
         // Ranked queue auto-join state (on Plugin so it survives scene changes)
         private static string pendingRankedRoom = null;
@@ -74,6 +77,17 @@ namespace CompetitiveRounds
             );
 
             Log.LogInfo($"{ModName} v{ModVersion} initializing...");
+
+            // ── Game version check ──
+            string gameVer = Application.version ?? "";
+            if (!gameVer.StartsWith(RequiredGameVersion))
+            {
+                Log.LogError($"[COMPAT] ROUNDS version {gameVer} is NOT supported! This mod requires vanilla ROUNDS v{RequiredGameVersion}.");
+                Log.LogError($"[COMPAT] Please switch to the 'Default Public Version' in Steam → ROUNDS → Properties → Betas.");
+                Log.LogError($"[COMPAT] Mod DISABLED.");
+                return;
+            }
+            Log.LogInfo($"[COMPAT] Game version OK: {gameVer}");
 
             // Try Harmony patching
             try
@@ -315,6 +329,8 @@ namespace CompetitiveRounds
 
         private void Update()
         {
+            if (Plugin.modDisabled) return;
+
             // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }
 
@@ -373,6 +389,35 @@ namespace CompetitiveRounds
         {
             Plugin.Log.LogInfo("[PERSIST] Delayed initialization starting...");
 
+            // ── Other mods check (Chainloader is complete by now) ──
+            try
+            {
+                var plugins = Chainloader.PluginInfos;
+                if (plugins != null && plugins.Count > 1)
+                {
+                    var otherMods = new List<string>();
+                    foreach (var kvp in plugins)
+                    {
+                        if (kvp.Key != Plugin.ModId)
+                            otherMods.Add($"{kvp.Value.Metadata.Name} ({kvp.Key})");
+                    }
+                    if (otherMods.Count > 0)
+                    {
+                        Plugin.Log.LogError($"[COMPAT] {otherMods.Count} other mod(s) detected! This mod requires vanilla ROUNDS with no other plugins.");
+                        foreach (var m in otherMods)
+                            Plugin.Log.LogError($"[COMPAT]   - {m}");
+                        Plugin.Log.LogError("[COMPAT] Mod DISABLED to ensure competitive integrity.");
+                        Plugin.modDisabled = true;
+                        return;
+                    }
+                }
+                Plugin.Log.LogInfo("[COMPAT] No other mods detected — OK");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[COMPAT] Could not check other mods: {ex.Message}");
+            }
+
             ApiClient.Initialize(Plugin.ApiBaseUrl.Value);
             GameStateWatcher.Initialize();
             CompetitiveUI.CacheRaycasters(); // No-op but kept for compat
@@ -396,7 +441,7 @@ namespace CompetitiveRounds
 
         private void OnGUI()
         {
-            if (!initialized) return;
+            if (!initialized || Plugin.modDisabled) return;
             CompetitiveUI.DrawUI();
         }
 
