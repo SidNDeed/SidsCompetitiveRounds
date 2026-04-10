@@ -3,6 +3,7 @@ Competitive ROUNDS API Server
 FastAPI backend for match tracking, Glicko-2 ratings, and leaderboards.
 """
 
+import asyncio
 import hashlib
 import hmac
 import math
@@ -55,8 +56,33 @@ GLICKO2_PERIOD_HOURS = int(os.getenv("GLICKO2_PERIOD_HOURS", "168"))
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     print("Competitive ROUNDS API starting up")
+    task = asyncio.create_task(queue_cleanup_loop())
     yield
+    task.cancel()
     print("Competitive ROUNDS API shutting down")
+
+
+async def queue_cleanup_loop():
+    """Delete stale queue entries every 60 seconds."""
+    import asyncio as _aio
+    from database import async_session
+    while True:
+        try:
+            await _aio.sleep(60)
+            async with async_session() as db:
+                result = await db.execute(
+                    text("""DELETE FROM ranked_queue 
+                        WHERE last_polled < NOW() - INTERVAL '30 seconds'
+                           OR joined_at < NOW() - INTERVAL '30 minutes'
+                        RETURNING steam_id, display_name""")
+                )
+                rows = result.fetchall()
+                if rows:
+                    names = [r[1] for r in rows]
+                    print(f"[QUEUE-CLEANUP] Expired {len(rows)} stale entries: {', '.join(names)}")
+                await db.commit()
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] Error: {e}")
 
 
 app = FastAPI(
@@ -1146,6 +1172,7 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
         ready=False,
         joined_at=datetime.now(timezone.utc),
         matched_at=None,
+        last_polled=datetime.now(timezone.utc),
     ).on_conflict_do_update(
         index_elements=[RankedQueue.player_id],
         set_={
@@ -1160,6 +1187,7 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
             "ready": False,
             "joined_at": datetime.now(timezone.utc),
             "matched_at": None,
+            "last_polled": datetime.now(timezone.utc),
         },
     )
     await db.execute(stmt)
@@ -1253,6 +1281,12 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     now = datetime.now(timezone.utc)
     wait_seconds = int((now - entry["joined_at"]).total_seconds())
     my_pid = entry["player_id"]
+
+    # Heartbeat — update last_polled so cleanup knows we're alive
+    await db.execute(
+        text("UPDATE ranked_queue SET last_polled = NOW() WHERE player_id = :pid"),
+        {"pid": my_pid},
+    )
 
     # Check for expiry (only applies to searching state)
     if entry["status"] == "searching" and wait_seconds > QUEUE_EXPIRE_MINUTES * 60:

@@ -17,7 +17,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.18.2";
+        public const string ModVersion = "1.18.3";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -547,6 +547,24 @@ namespace CompetitiveRounds
     }
 
     // ── Harmony Patches ────────────────────────────────────────
+
+    /// <summary>
+    /// Redirects the vanilla quickmatch lobby to a mod-only lobby.
+    /// Mod users only match with other mod users in casual play.
+    /// This ensures the mod does not interfere with the vanilla queue.
+    /// </summary>
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "Awake")]
+    class LobbyRedirectPatch
+    {
+        private static readonly Photon.Realtime.TypedLobby LOBBY_QUICKMATCH_COMP =
+            new Photon.Realtime.TypedLobby("QuickmatchCompLobby", Photon.Realtime.LobbyType.SqlLobby);
+
+        static void Postfix()
+        {
+            NetworkConnectionHandler.LOBBY_QUICKMATCH = LOBBY_QUICKMATCH_COMP;
+            Plugin.Log.LogInfo("[HARMONY] Quickmatch lobby redirected to CompLobby (mod-only matchmaking)");
+        }
+    }
 
     [HarmonyPatch(typeof(GM_ArmsRace), "Awake")]
     class GMArmsRaceAwakePatch

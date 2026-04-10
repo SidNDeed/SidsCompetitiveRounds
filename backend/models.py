@@ -24,7 +24,7 @@ class Player(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     steam_id = Column(String(20), nullable=False, unique=True, index=True)
     display_name = Column(String(64), nullable=False)
-    ranked_enabled = Column(Boolean, nullable=False, default=True)
+    ranked_enabled = Column(Boolean, nullable=False, default=False)
     total_xp = Column(Integer, nullable=False, default=0)
     discord_id = Column(String(20), nullable=True, unique=True, index=True)
     first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -160,6 +160,7 @@ class RankedQueue(Base):
     ready = Column(Boolean, nullable=False, default=False)
     joined_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     matched_at = Column(DateTime(timezone=True), nullable=True)
+    last_polled = Column(DateTime(timezone=True), nullable=True, default=lambda: datetime.now(timezone.utc))
 
 
 class QueueBlock(Base):
@@ -185,3 +186,19 @@ class LinkCode(Base):
     code = Column(String(6), nullable=False, unique=True, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PlayerAchievement(Base):
+    __tablename__ = "player_achievements"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(Integer, ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    achievement_key = Column(String(64), nullable=False)
+    unlocked_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    match_id = Column(Integer, ForeignKey("matches.id", ondelete="SET NULL"), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("player_id", "achievement_key", name="uq_player_achievement"),
+        Index("idx_pa_player", "player_id"),
+        Index("idx_pa_key", "achievement_key"),
+    )
