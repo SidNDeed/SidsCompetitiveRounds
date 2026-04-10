@@ -157,6 +157,8 @@ namespace CompetitiveRounds
             {"the_comeback_kid",    new[]{"The Comeback Kid",    "Win after being down 0-4"}},
             {"stacked_deck",        new[]{"Stacked Deck",        "Get 5 copies of one card in a game"}},
             {"regicide",            new[]{"Regicide",            "Win against Sid in a ranked series"}},
+            {"pacifist",            new[]{"Pacifist",            "Win a game without firing a single shot"}},
+            {"immovable_object",    new[]{"Immovable Object",    "Win a game without moving or jumping"}},
         };
 
         // Cached data

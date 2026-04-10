@@ -21,8 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode
+from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement
 from schemas import (
+    AchievementUnlockRequest,
+    AchievementListResponse,
+    AchievementEntry,
     CardStatEntry,
     HealthResponse,
     LeaderboardEntry,
@@ -110,12 +113,14 @@ def verify_hmac(report: MatchReport) -> bool:
     if not MATCH_HMAC_SECRET:
         return True  # HMAC not configured yet (Phase 4)
     if not report.hmac_signature:
+        print(f"[HMAC] No signature provided")
         return False
 
     # Build the message to sign (deterministic field order)
     message = (
         f"{report.player1.steam_id}:{report.player2.steam_id}:"
         f"{report.p1_rounds_won}:{report.p2_rounds_won}:"
+        f"{str(report.is_ranked).lower()}:{report.reported_by_steam_id}:"
         f"{report.photon_room_id or ''}"
     )
     expected = hmac.new(
@@ -124,7 +129,10 @@ def verify_hmac(report: MatchReport) -> bool:
         hashlib.sha256,
     ).hexdigest()
 
-    return hmac.compare_digest(report.hmac_signature, expected)
+    match = hmac.compare_digest(report.hmac_signature, expected)
+    if not match:
+        print(f"[HMAC] Signature mismatch for room {report.photon_room_id}")
+    return match
 
 
 # ── XP System ──────────────────────────────────────────────────
@@ -711,6 +719,40 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
     ranked_series_wins = ranked_wl["ranked_wins"] if ranked_wl else 0
     ranked_series_losses = ranked_wl["ranked_losses"] if ranked_wl else 0
 
+    # Recent form (last 20 matches, newest first)
+    form_query = text("""
+        SELECT
+            CASE WHEN m.winner_id = :pid THEN 'W' ELSE 'L' END AS result,
+            m.is_ranked,
+            CASE
+                WHEN m.player1_id = :pid THEN p2.display_name
+                ELSE p1.display_name
+            END AS opponent_name,
+            CASE
+                WHEN m.player1_id = :pid THEN m.p1_rounds_won
+                ELSE m.p2_rounds_won
+            END AS my_rounds,
+            CASE
+                WHEN m.player1_id = :pid THEN m.p2_rounds_won
+                ELSE m.p1_rounds_won
+            END AS opp_rounds,
+            m.ended_at
+        FROM matches m
+        JOIN players p1 ON p1.id = m.player1_id
+        JOIN players p2 ON p2.id = m.player2_id
+        WHERE m.player1_id = :pid OR m.player2_id = :pid
+        ORDER BY m.ended_at DESC
+        LIMIT 20
+    """)
+    form_rows = (await db.execute(form_query, {"pid": player.id})).mappings().all()
+    recent_form = [
+        {"result": r["result"], "ranked": r["is_ranked"],
+         "opponent": r["opponent_name"],
+         "score": f"{r['my_rounds']}-{r['opp_rounds']}",
+         "date": r["ended_at"].isoformat() if r["ended_at"] else ""}
+        for r in form_rows
+    ]
+
     return PlayerStatsResponse(
         steam_id=player.steam_id,
         display_name=player.display_name,
@@ -735,6 +777,7 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         best_casual_streak=best_casual_streak,
         ranked_series_wins=ranked_series_wins,
         ranked_series_losses=ranked_series_losses,
+        recent_form=recent_form,
     )
 
 
@@ -1751,3 +1794,101 @@ async def get_recent_series(
         })
 
     return {"series": series_list}
+
+
+# ── Routes: Achievements ─────────────────────────────────────
+
+# Master achievement definitions — single source of truth
+ACHIEVEMENT_DEFS = {
+    "untouchable":          {"name": "Untouchable",         "desc": "Win a game without taking any damage"},
+    "silent_assassin":      {"name": "Silent Assassin",     "desc": "5-0 someone with Sneaky"},
+    "total_mayhem":         {"name": "Total Mayhem",        "desc": "5-0 someone with Mayhem"},
+    "fragile_perfection":   {"name": "Fragile Perfection",  "desc": "5-0 someone with Glass Cannon"},
+    "no_escape":            {"name": "No Escape",           "desc": "5-0 someone with Chase"},
+    "rise_from_the_ashes":  {"name": "Rise from the Ashes", "desc": "Win 5-0 with Phoenix without losing a life"},
+    "the_comeback_kid":     {"name": "The Comeback Kid",    "desc": "Win after being down 0-4"},
+    "stacked_deck":         {"name": "Stacked Deck",        "desc": "Get 5 copies of one card in a game"},
+    "regicide":             {"name": "Regicide",            "desc": "Win against Sid in a ranked series"},
+    "pacifist":             {"name": "Pacifist",            "desc": "Win a game without firing a single shot"},
+    "immovable_object":     {"name": "Immovable Object",    "desc": "Win a game without moving or jumping"},
+}
+
+
+@app.get("/api/v1/achievements/definitions", tags=["Achievements"])
+async def get_achievement_definitions():
+    """Return the master list of all achievements."""
+    return {"achievements": ACHIEVEMENT_DEFS}
+
+
+@app.get("/api/v1/achievements/{steam_id}", tags=["Achievements"])
+async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """Get all achievements for a player, merged with definitions."""
+    player = await db.execute(select(Player).where(Player.steam_id == steam_id))
+    player = player.scalar_one_or_none()
+    if not player:
+        # Return all locked if player not found
+        entries = [
+            AchievementEntry(achievement_key=k, unlocked=False)
+            for k in ACHIEVEMENT_DEFS
+        ]
+        return AchievementListResponse(steam_id=steam_id, achievements=entries)
+
+    result = await db.execute(
+        select(PlayerAchievement).where(PlayerAchievement.player_id == player.id)
+    )
+    unlocked = {a.achievement_key: a.unlocked_at for a in result.scalars().all()}
+
+    entries = []
+    for key in ACHIEVEMENT_DEFS:
+        entries.append(AchievementEntry(
+            achievement_key=key,
+            unlocked=key in unlocked,
+            unlocked_at=unlocked.get(key),
+        ))
+    return AchievementListResponse(steam_id=steam_id, achievements=entries)
+
+
+@app.post("/api/v1/achievements/unlock", tags=["Achievements"])
+async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = Depends(get_db)):
+    """Unlock an achievement for a player. Idempotent — re-unlocking is a no-op."""
+    if req.achievement_key not in ACHIEVEMENT_DEFS:
+        raise HTTPException(status_code=400, detail=f"Unknown achievement: {req.achievement_key}")
+
+    player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
+    player = player.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    # Check if already unlocked
+    existing = await db.execute(
+        select(PlayerAchievement).where(
+            PlayerAchievement.player_id == player.id,
+            PlayerAchievement.achievement_key == req.achievement_key,
+        )
+    )
+    if existing.scalar_one_or_none():
+        return {"status": "already_unlocked", "achievement_key": req.achievement_key}
+
+    # Resolve optional match_id
+    match_id_val = None
+    if req.match_id:
+        try:
+            from uuid import UUID as _UUID
+            mid = _UUID(req.match_id)
+            match_row = await db.execute(select(Match.id).where(Match.id == mid))
+            m = match_row.scalar_one_or_none()
+            if m:
+                match_id_val = m
+        except Exception:
+            pass
+
+    ach = PlayerAchievement(
+        player_id=player.id,
+        achievement_key=req.achievement_key,
+        match_id=match_id_val,
+    )
+    db.add(ach)
+    await db.commit()
+
+    name = ACHIEVEMENT_DEFS[req.achievement_key]["name"]
+    return {"status": "unlocked", "achievement_key": req.achievement_key, "name": name}

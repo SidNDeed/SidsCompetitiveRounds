@@ -106,6 +106,8 @@ namespace CompetitiveRounds
         private static bool achWasDown04 = false;         // opponent had 4 rounds while local had 0
         private static bool lastDeadState = false;
         private static int lastRemainingRespawns = -1;
+        private static bool achFiredShot = false;         // left mouse clicked during match
+        private static bool achMoved = false;              // WASD or Space pressed during match
 
         // Sid's Steam ID for "Regicide" achievement
         private const string SID_STEAM_ID = "76561198040410653";
@@ -774,6 +776,22 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+
+            // Input tracking (lightweight — just bool checks)
+            if (!achFiredShot && Input.GetMouseButton(0))
+            {
+                achFiredShot = true;
+                Plugin.Log.LogInfo("[ACH] Player fired a shot");
+            }
+            if (!achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
+                Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
+                Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||
+                Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.LeftArrow) ||
+                Input.GetKey(KeyCode.RightArrow)))
+            {
+                achMoved = true;
+                Plugin.Log.LogInfo("[ACH] Player moved");
+            }
         }
 
         private static void EvaluateAchievements(bool localWon)
@@ -852,6 +870,20 @@ namespace CompetitiveRounds
                 // 9. Regicide — set flag for series completion check in ApiClient
                 if (matchIsRanked && localWon && opponentSteamId == SID_STEAM_ID)
                     pendingRegicideCheck = true;
+
+                // 10. Pacifist — won without firing a single shot
+                if (localWon && !achFiredShot)
+                {
+                    Plugin.Log.LogInfo("[ACH] Evaluating: Pacifist — PASSED");
+                    ApiClient.UnlockAchievement(steamId, "pacifist");
+                }
+
+                // 11. Immovable Object — won without moving or jumping
+                if (localWon && !achMoved)
+                {
+                    Plugin.Log.LogInfo("[ACH] Evaluating: Immovable Object — PASSED");
+                    ApiClient.UnlockAchievement(steamId, "immovable_object");
+                }
             }
             catch (Exception ex)
             {
@@ -1167,6 +1199,8 @@ namespace CompetitiveRounds
             achWasDown04 = false;
             lastDeadState = false;
             lastRemainingRespawns = -1;
+            achFiredShot = false;
+            achMoved = false;
             pendingRegicideCheck = false;
 
             // Clear our card broadcast when leaving room
