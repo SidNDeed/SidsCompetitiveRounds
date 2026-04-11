@@ -22,13 +22,13 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 ## Compatibility
 
 - **Required**: ROUNDS v1.1.2 (Steam "Default Public Version", updated Dec 2, 2025)
-- **Required**: BepInEx 5.4.22
+- **Required**: BepInEx 5.4.1901
 - **NOT compatible** with any other BepInEx mods — this mod must be the only plugin installed
 - **NOT compatible** with older ROUNDS versions or Steam beta branches
 
 ## How It Works
 
-1. Install via r2modman or Thunderstore Mod Manager
+1. Install via the auto-installer (found on Competitive Rounds here: https://discord.gg/4tsWadH6tc )
 2. Launch ROUNDS — the mod loads automatically
 3. Click "SID'S COMPETITIVE ROUNDS" in the main menu
 4. Enable Ranked to start tracking your matches
