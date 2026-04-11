@@ -340,24 +340,8 @@ namespace CompetitiveRounds
                             else if (seriesStatus == "completed")
                             {
                                 CompetitiveUI.QueueNotification($"SERIES COMPLETE {seriesScore}!", new Color(0.3f, 1f, 0.3f), 4f);
-
-                                // Regicide check — won a ranked series against Sid
-                                if (GameStateWatcher.pendingRegicideCheck)
-                                {
-                                    // seriesScore is "2-x" if we won
-                                    try
-                                    {
-                                        var sp = seriesScore.Split('-');
-                                        int myW = int.Parse(sp[0]);
-                                        int thW = int.Parse(sp[1]);
-                                        if (myW > thW)
-                                        {
-                                            UnlockAchievement(MatchTracker.LocalSteamId, "regicide");
-                                        }
-                                    }
-                                    catch { }
-                                    GameStateWatcher.pendingRegicideCheck = false;
-                                }
+                                // Regicide is now handled server-side after series completion
+                                GameStateWatcher.pendingRegicideCheck = false;
                             }
                         }
                     }
@@ -1147,6 +1131,8 @@ namespace CompetitiveRounds
                                     $"MATCH FOUND!  vs {ExtractJsonString(response, "opponent_name")} ({ExtractJsonFloat(response, "opponent_rating"):F0})",
                                     Color.green, 8f
                                 );
+                                CompetitiveUI.PlayMatchFoundSound();
+                                TaskbarFlash.Flash();
                             }
 
                             // Keep polling — update data (opponent_ready may change)

@@ -182,12 +182,16 @@ namespace CompetitiveRounds
             if(!UIFactory.Ready){UIFactory.InitTypes();UIFactory.InitFont();}if(!UIFactory.Ready)return;
             bool inRoom=GameStateWatcher.IsInRoom;
             if(inRoom){inGameMode=true;EnsureOverlayCanvas();if(!pageBuilt||pageGO==null||pageGO.transform.parent!=overlayCanvasGO.transform){if(pageGO!=null)UnityEngine.Object.Destroy(pageGO);pageBuilt=false;BuildPage(overlayCanvasGO.transform);if(!pageBuilt)return;}pageGO.SetActive(true);}
-            else{inGameMode=false;if(mainMenuGroup==null||(mainMenuGroup as UnityEngine.Object)==null){FindMainMenuGroup();if(mainMenuGroup==null)return;}Transform mc=FindCanvasAbove(mainMenuGroup.transform);if(!pageBuilt||pageGO==null||pageGO.transform.parent!=mc){if(pageGO!=null)UnityEngine.Object.Destroy(pageGO);pageBuilt=false;BuildPage(mc);if(!pageBuilt)return;}mainMenuGroup.SetActive(false);pageGO.SetActive(true);}
+            else{inGameMode=false;if(mainMenuGroup==null||(mainMenuGroup as UnityEngine.Object)==null){FindMainMenuGroup();if(mainMenuGroup==null)return;}Transform mc=FindCanvasAbove(mainMenuGroup.transform);if(!pageBuilt||pageGO==null||pageGO.transform.parent!=mc){if(pageGO!=null)UnityEngine.Object.Destroy(pageGO);pageBuilt=false;BuildPage(mc);if(!pageBuilt)return;}pageGO.transform.SetAsLastSibling();DisableMenuRaycasts(mc);pageGO.SetActive(true);}
             try{UIFactory.tCanvas?.GetMethod("ForceUpdateCanvases",BindingFlags.Public|BindingFlags.Static)?.Invoke(null,null);}catch{}
             isOpen=true;dirty=true;RefreshData();ApiClient.ResetQueueCountTimer();Plugin.Log.LogInfo($"[NATIVE] Opened competitive page (inGame={inGameMode})");
         }
 
-        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);if(!inGameMode&&mainMenuGroup!=null)mainMenuGroup.SetActive(true);isOpen=false;Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);if(!inGameMode)EnableMenuRaycasts();isOpen=false;Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+
+        private static Component cachedMenuGR;
+        private static void DisableMenuRaycasts(Transform canvas){try{if(UIFactory.tGR==null)return;cachedMenuGR=canvas.GetComponent(UIFactory.tGR)as Component;if(cachedMenuGR!=null){var en=UIFactory.tGR.GetProperty("enabled",BindingFlags.Public|BindingFlags.Instance);en?.SetValue(cachedMenuGR,false);}}catch{}}
+        private static void EnableMenuRaycasts(){try{if(cachedMenuGR!=null){var en=UIFactory.tGR.GetProperty("enabled",BindingFlags.Public|BindingFlags.Instance);en?.SetValue(cachedMenuGR,true);}}catch{}}
 
         private static float dataCheckTimer;private static int lastMatchCount=-1,lastLBCount=-1,lastCardCount=-1;
         public static void Tick()
@@ -206,7 +210,7 @@ namespace CompetitiveRounds
         {
             try{rankedRows.Clear();casualRows.Clear();lbRows.Clear();cardRows.Clear();sessionOppTexts.Clear();
             pageGO=new GameObject("CompetitiveRoundsPage");pageGO.transform.SetParent(canvasParent,false);var rt=pageGO.AddComponent<RectTransform>();rt.anchorMin=Vector2.zero;rt.anchorMax=Vector2.one;rt.offsetMin=Vector2.zero;rt.offsetMax=Vector2.zero;pageGO.SetActive(false);
-            var bgGO=UIFactory.CreatePanel("BG",pageGO.transform,C_BG);var bgImg=bgGO.GetComponent(UIFactory.tImage);if(bgImg!=null)UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(bgImg,false);
+            var bgGO=UIFactory.CreatePanel("BG",pageGO.transform,C_BG);var bgImg=bgGO.GetComponent(UIFactory.tImage);if(bgImg!=null)UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(bgImg,true);
             var content=new GameObject("Content");content.transform.SetParent(pageGO.transform,false);var crt=content.AddComponent<RectTransform>();crt.anchorMin=Vector2.zero;crt.anchorMax=Vector2.one;crt.offsetMin=new Vector2(30,10);crt.offsetMax=new Vector2(-30,-10);UIFactory.AddVLG(content,spacing:4,padL:8,padR:8,padT:8,padB:8);
 
             var titleRow=new GameObject("TitleRow");titleRow.transform.SetParent(content.transform,false);titleRow.AddComponent<RectTransform>();UIFactory.AddHLG(titleRow,spacing:8,forceExpandH:true);UIFactory.AddLE(titleRow,prefH:42,minH:42,flexH:0);

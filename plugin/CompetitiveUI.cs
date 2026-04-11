@@ -42,6 +42,52 @@ namespace CompetitiveRounds
             notifQueue.Add(new QueuedNotif { text = text, color = color, dur = duration });
         }
 
+        // Match-found notification sound
+        private static AudioClip matchFoundClip;
+        private static GameObject soundObj;
+
+        public static void PlayMatchFoundSound()
+        {
+            try
+            {
+                if (matchFoundClip == null)
+                {
+                    int sampleRate = 44100;
+                    float dur = 0.45f;
+                    int samples = (int)(sampleRate * dur);
+                    matchFoundClip = AudioClip.Create("MatchFound", samples, 1, sampleRate, false);
+                    float[] data = new float[samples];
+                    int half = samples / 2;
+                    for (int i = 0; i < samples; i++)
+                    {
+                        float t = (float)i / sampleRate;
+                        float freq = i < half ? 660f : 880f; // two-tone ascending
+                        data[i] = Mathf.Sin(2f * Mathf.PI * freq * t) * 0.35f;
+                        // Fade within each tone
+                        float pos = i < half ? (float)i / half : (float)(i - half) / (samples - half);
+                        float env = Mathf.Clamp01(pos * 10f) * Mathf.Clamp01((1f - pos) * 5f);
+                        data[i] *= env;
+                    }
+                    matchFoundClip.SetData(data, 0);
+                }
+                if (soundObj == null)
+                {
+                    soundObj = new GameObject("CR_Sound");
+                    soundObj.hideFlags = HideFlags.HideAndDontSave;
+                    UnityEngine.Object.DontDestroyOnLoad(soundObj);
+                }
+                var src = soundObj.GetComponent<AudioSource>();
+                if (src == null) src = soundObj.AddComponent<AudioSource>();
+                src.clip = matchFoundClip;
+                src.volume = 0.7f;
+                src.Play();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[SOUND] Match found sound failed: {ex.Message}");
+            }
+        }
+
         public static void ResetStyles() { }
 
         public static void CacheRaycasters() { }

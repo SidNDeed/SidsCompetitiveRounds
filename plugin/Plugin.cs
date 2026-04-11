@@ -7,6 +7,8 @@ using Photon.Pun;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -17,7 +19,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.18.3";
+        public const string ModVersion = "1.18.4";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -119,6 +121,12 @@ namespace CompetitiveRounds
             queueObj.hideFlags = HideFlags.HideAndDontSave;
             UnityEngine.Object.DontDestroyOnLoad(queueObj);
             queueObj.AddComponent<QueueRoomJoiner>();
+
+            // Taskbar flash for alt-tabbed match found notifications
+            var flashObj = new GameObject("CR_TaskbarFlash");
+            flashObj.hideFlags = HideFlags.HideAndDontSave;
+            UnityEngine.Object.DontDestroyOnLoad(flashObj);
+            flashObj.AddComponent<TaskbarFlash>();
         }
     }
 
@@ -548,23 +556,25 @@ namespace CompetitiveRounds
 
     // ── Harmony Patches ────────────────────────────────────────
 
-    /// <summary>
-    /// Redirects the vanilla quickmatch lobby to a mod-only lobby.
-    /// Mod users only match with other mod users in casual play.
-    /// This ensures the mod does not interfere with the vanilla queue.
-    /// </summary>
-    [HarmonyPatch(typeof(NetworkConnectionHandler), "Awake")]
-    class LobbyRedirectPatch
-    {
-        private static readonly Photon.Realtime.TypedLobby LOBBY_QUICKMATCH_COMP =
-            new Photon.Realtime.TypedLobby("QuickmatchCompLobby", Photon.Realtime.LobbyType.SqlLobby);
-
-        static void Postfix()
-        {
-            NetworkConnectionHandler.LOBBY_QUICKMATCH = LOBBY_QUICKMATCH_COMP;
-            Plugin.Log.LogInfo("[HARMONY] Quickmatch lobby redirected to CompLobby (mod-only matchmaking)");
-        }
-    }
+    // NOTE: LobbyRedirectPatch was added in v1.18.3 for Thunderstore compliance.
+    // It redirects vanilla quickmatch to a mod-only Photon lobby ("QuickmatchCompLobby")
+    // so mod users never match with vanilla players.
+    // Currently DISABLED for direct distribution — Landfall permission pending.
+    // To re-enable: uncomment this patch. No other changes needed.
+    // See HANDOFF.md "Landfall / Thunderstore Situation" for full context.
+    //
+    // [HarmonyPatch(typeof(NetworkConnectionHandler), "Awake")]
+    // class LobbyRedirectPatch
+    // {
+    //     private static readonly Photon.Realtime.TypedLobby LOBBY_QUICKMATCH_COMP =
+    //         new Photon.Realtime.TypedLobby("QuickmatchCompLobby", Photon.Realtime.LobbyType.SqlLobby);
+    //
+    //     static void Postfix()
+    //     {
+    //         NetworkConnectionHandler.LOBBY_QUICKMATCH = LOBBY_QUICKMATCH_COMP;
+    //         Plugin.Log.LogInfo("[HARMONY] Quickmatch lobby redirected to CompLobby (mod-only matchmaking)");
+    //     }
+    // }
 
     [HarmonyPatch(typeof(GM_ArmsRace), "Awake")]
     class GMArmsRaceAwakePatch
@@ -1038,27 +1048,72 @@ namespace CompetitiveRounds
     public static class CardRarityLookup
     {
         private static readonly Dictionary<string, string> lookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> canonical = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // Known mismatches between GameObject name (log capture) and cardName field
+        private static readonly Dictionary<string, string> hardAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Leach", "Leech" },
+            { "BombsAway", "Bombs Away" },
+            { "Glasscannon", "Glass Cannon" },
+            { "ShieldCharge", "Shield Charge" },
+            { "AbyssalCountdown", "Abyssal Countdown" },
+        };
 
         public static void Register(string cardName, string rarity)
         {
             if (!string.IsNullOrEmpty(cardName))
+            {
                 lookup[cardName] = rarity;
+                if (!canonical.ContainsKey(cardName))
+                    canonical[cardName] = cardName;
+            }
         }
 
         public static string GetRarity(string cardName)
         {
             if (string.IsNullOrEmpty(cardName)) return "Unknown";
-            // Try exact match first, then title case
             if (lookup.TryGetValue(cardName, out string rarity))
                 return rarity;
+            // Try alias
+            string norm = GetCanonicalName(cardName);
+            if (norm != cardName && lookup.TryGetValue(norm, out rarity))
+                return rarity;
             return "Unknown";
+        }
+
+        /// <summary>
+        /// Maps a log-captured card name to the canonical CardInfo name.
+        /// Returns title-cased canonical name for display.
+        /// </summary>
+        public static string GetCanonicalName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return name;
+            // Hard alias first
+            if (hardAliases.TryGetValue(name, out string alias))
+                name = alias;
+            // Canonical map (populated during ScanAll)
+            if (canonical.TryGetValue(name, out string canon))
+                return ToTitleCase(canon);
+            return name;
+        }
+
+        private static string ToTitleCase(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return input;
+            var words = input.ToLower().Split(' ');
+            for (int i = 0; i < words.Length; i++)
+                if (words[i].Length > 0)
+                    words[i] = char.ToUpper(words[i][0]) + words[i].Substring(1);
+            return string.Join(" ", words);
         }
 
         public static int Count => lookup.Count;
 
         /// <summary>
         /// Scan all CardInfo objects in the scene and build the rarity lookup.
-        /// Can be called multiple times safely — only scans if lookup is empty.
+        /// Registers BOTH the cardName field and the GameObject name as lookup keys,
+        /// mapping both to the canonical cardName.
         /// </summary>
         public static void ScanAll()
         {
@@ -1069,14 +1124,10 @@ namespace CompetitiveRounds
                 var cardInfoType = typeof(CardInfo);
                 var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
 
-                // Find name field (we know from logs it's "cardName")
                 var nameField = cardInfoType.GetField("cardName", flags);
                 var rarityField = cardInfoType.GetField("rarity", flags);
-
-                // Also try the property "CardName" 
                 var nameProp = cardInfoType.GetProperty("CardName", flags);
 
-                // Scan all CardInfo objects in scene (including inactive)
                 var allCards = Resources.FindObjectsOfTypeAll<CardInfo>();
 
                 foreach (var ci in allCards)
@@ -1101,13 +1152,32 @@ namespace CompetitiveRounds
                             rarity = rarVal?.ToString() ?? "Unknown";
                         }
 
+                        // Register canonical cardName
                         Register(cardName, rarity);
+
+                        // Also register by GameObject name (log capture uses this)
+                        string goName = ci.gameObject.name.Replace("(Clone)", "").Trim();
+                        if (!string.IsNullOrEmpty(goName))
+                        {
+                            lookup[goName] = rarity;
+                            canonical[goName] = cardName; // maps GO name → canonical
+                        }
                     }
                     catch { }
                 }
 
+                // Register hard aliases
+                foreach (var kvp in hardAliases)
+                {
+                    if (lookup.TryGetValue(kvp.Value, out string r))
+                    {
+                        lookup[kvp.Key] = r;
+                        canonical[kvp.Key] = kvp.Value;
+                    }
+                }
+
                 if (lookup.Count > 0)
-                    Plugin.Log.LogInfo($"[RARITY] Card rarity lookup built: {lookup.Count} cards. Sample: {GetSampleEntries(5)}");
+                    Plugin.Log.LogInfo($"[RARITY] Card rarity lookup built: {lookup.Count} entries ({allCards.Length} CardInfo objects scanned)");
             }
             catch (Exception ex)
             {
@@ -1125,6 +1195,108 @@ namespace CompetitiveRounds
                 if (++i >= max) break;
             }
             return string.Join(", ", samples.ToArray());
+        }
+    }
+
+    /// <summary>
+    /// Flashes the ROUNDS taskbar icon when the window is not focused.
+    /// Used for ranked match found notifications when alt-tabbed.
+    /// Based on code contributed by lopidav.
+    /// </summary>
+    public class TaskbarFlash : MonoBehaviour
+    {
+        private const uint FLASHW_STOP = 0;
+        private const uint FLASHW_ALL = 3;
+        private const uint FLASHW_TIMERNOFG = 12;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FLASHWINFO
+        {
+            public uint cbSize;
+            public IntPtr hwnd;
+            public uint dwFlags;
+            public uint uCount;
+            public uint dwTimeout;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        private bool shouldFlash = false;
+        private bool isFlashing = false;
+        private IntPtr gameWindowHandle = IntPtr.Zero;
+
+        private static TaskbarFlash instance;
+
+        private void Awake()
+        {
+            if (instance != null && instance != this)
+            {
+                Destroy(gameObject);
+                return;
+            }
+            instance = this;
+        }
+
+        private void Update()
+        {
+            if (gameWindowHandle == IntPtr.Zero)
+            {
+                gameWindowHandle = Process.GetCurrentProcess().MainWindowHandle;
+                if (gameWindowHandle == IntPtr.Zero) return;
+            }
+
+            bool isWindowInFocus = GetForegroundWindow() == gameWindowHandle;
+
+            // Only flash when alt-tabbed
+            if (shouldFlash && !isFlashing && !isWindowInFocus)
+                StartFlashing();
+
+            // Auto-stop when user returns to window
+            if (shouldFlash && isWindowInFocus)
+                shouldFlash = false;
+
+            if (isFlashing && (!shouldFlash || isWindowInFocus))
+                StopFlashing();
+        }
+
+        /// <summary>Call this to trigger a taskbar flash (only flashes if window is not focused).</summary>
+        public static void Flash()
+        {
+            if (instance != null)
+                instance.shouldFlash = true;
+        }
+
+        private void StartFlashing()
+        {
+            if (isFlashing) return;
+            FLASHWINFO fInfo = new FLASHWINFO();
+            fInfo.cbSize = (uint)Marshal.SizeOf(fInfo);
+            fInfo.hwnd = gameWindowHandle;
+            fInfo.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+            fInfo.uCount = uint.MaxValue;
+            fInfo.dwTimeout = 0;
+            FlashWindowEx(ref fInfo);
+            isFlashing = true;
+            shouldFlash = true;
+        }
+
+        private void StopFlashing()
+        {
+            if (!isFlashing) return;
+            FLASHWINFO fInfo = new FLASHWINFO();
+            fInfo.cbSize = (uint)Marshal.SizeOf(fInfo);
+            fInfo.hwnd = gameWindowHandle;
+            fInfo.dwFlags = FLASHW_STOP;
+            fInfo.uCount = 0;
+            fInfo.dwTimeout = 0;
+            FlashWindowEx(ref fInfo);
+            isFlashing = false;
+            shouldFlash = false;
         }
     }
 }

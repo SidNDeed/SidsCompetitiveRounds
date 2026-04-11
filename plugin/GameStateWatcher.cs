@@ -733,6 +733,7 @@ namespace CompetitiveRounds
         private static void PollAchievementState()
         {
             if (!isTracking) return;
+            bool localAliveInCombat = false;
             try
             {
                 var pm = PlayerManager.instance;
@@ -745,6 +746,10 @@ namespace CompetitiveRounds
 
                     var data = playerObj.GetComponent<CharacterData>();
                     if (data == null) break;
+
+                    // Player is alive and in active gameplay (not card pick / transition)
+                    if (!data.dead && data.health > 0)
+                        localAliveInCombat = true;
 
                     // Damage check: health < MaxHealth while alive and playing
                     if (!data.dead && data.health > 0 && data.health < data.MaxHealth)
@@ -777,20 +782,26 @@ namespace CompetitiveRounds
             }
             catch { }
 
-            // Input tracking (lightweight — just bool checks)
-            if (!achFiredShot && Input.GetMouseButton(0))
+            // Input tracking — ONLY during active combat
+            // Card picks use Space + A/D, between-round screens use Space,
+            // so we must exclude those phases. localAliveInCombat is false
+            // during card picks and round transitions (player dead or not spawned).
+            if (localAliveInCombat)
             {
-                achFiredShot = true;
-                Plugin.Log.LogInfo("[ACH] Player fired a shot");
-            }
-            if (!achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
-                Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
-                Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||
-                Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.LeftArrow) ||
-                Input.GetKey(KeyCode.RightArrow)))
-            {
-                achMoved = true;
-                Plugin.Log.LogInfo("[ACH] Player moved");
+                if (!achFiredShot && Input.GetMouseButton(0))
+                {
+                    achFiredShot = true;
+                    Plugin.Log.LogInfo("[ACH] Player fired a shot");
+                }
+                if (!achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
+                    Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
+                    Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||
+                    Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.LeftArrow) ||
+                    Input.GetKey(KeyCode.RightArrow)))
+                {
+                    achMoved = true;
+                    Plugin.Log.LogInfo("[ACH] Player moved");
+                }
             }
         }
 
@@ -800,10 +811,18 @@ namespace CompetitiveRounds
             {
                 int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
                 int oppR = localTeamId == 0 ? p2Rounds : p1Rounds;
+
+                // Only evaluate on proper game completions (someone reached roundsToWin)
+                if (localR < roundsToWin && oppR < roundsToWin)
+                {
+                    Plugin.Log.LogInfo($"[ACH] Skipping — incomplete game ({localR}-{oppR}, need {roundsToWin})");
+                    return;
+                }
+
                 bool swept = localWon && oppR == 0;
                 string steamId = localSteamId;
 
-                // Collect local card names
+                // Collect local card names (normalized)
                 var cardNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var cardCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 foreach (var c in localCards)
@@ -831,11 +850,12 @@ namespace CompetitiveRounds
                 // 2-5. Card-specific 5-0 sweeps
                 if (swept)
                 {
-                    if (cardNames.Contains("Sneaky"))
+                    // Check multiple name variants for each card
+                    if (cardNames.Contains("Sneaky") || cardNames.Contains("Sneaky Bullets"))
                         ApiClient.UnlockAchievement(steamId, "silent_assassin");
                     if (cardNames.Contains("Mayhem"))
                         ApiClient.UnlockAchievement(steamId, "total_mayhem");
-                    if (cardNames.Contains("Glass Cannon") || cardNames.Contains("GlassCannon"))
+                    if (cardNames.Contains("Glass Cannon") || cardNames.Contains("Glasscannon"))
                         ApiClient.UnlockAchievement(steamId, "fragile_perfection");
                     if (cardNames.Contains("Chase"))
                         ApiClient.UnlockAchievement(steamId, "no_escape");
@@ -867,7 +887,8 @@ namespace CompetitiveRounds
                     }
                 }
 
-                // 9. Regicide — set flag for series completion check in ApiClient
+                // 9. Regicide — now handled server-side after series completion
+                // (pendingRegicideCheck flag is still set but consumed/cleared by ApiClient)
                 if (matchIsRanked && localWon && opponentSteamId == SID_STEAM_ID)
                     pendingRegicideCheck = true;
 
@@ -927,6 +948,7 @@ namespace CompetitiveRounds
             {
                 string raw = message.Substring("Picking Card: ".Length);
                 string cardName = ToTitleCase(raw.Replace("(Clone)", "").Trim());
+                cardName = CardRarityLookup.GetCanonicalName(cardName); // normalize to canonical
 
                 if (string.IsNullOrEmpty(cardName)) return;
 
@@ -1069,6 +1091,7 @@ namespace CompetitiveRounds
                         for (int i = lastKnownOpponentBroadcastCount; i < newCount; i++)
                         {
                             string cn = ToTitleCase(cards[i].Trim());
+                            cn = CardRarityLookup.GetCanonicalName(cn);
                             if (string.IsNullOrEmpty(cn)) continue;
 
                             var pick = new MatchTracker.CardPickData
