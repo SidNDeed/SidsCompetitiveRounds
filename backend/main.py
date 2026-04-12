@@ -257,6 +257,14 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
+LATEST_MOD_VERSION = "1.18.5"
+
+@app.get("/api/v1/mod-version", tags=["System"])
+async def get_mod_version():
+    """Returns the latest recommended mod version."""
+    return {"version": LATEST_MOD_VERSION}
+
+
 # ── Routes: Match Submission ───────────────────────────────────
 
 @app.post("/api/v1/matches", response_model=MatchResponse, tags=["Matches"])
@@ -477,6 +485,36 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         except Exception as ex:
             print(f"Series Glicko update error: {ex}")
 
+        # ── Auto-grant Regicide achievement ──
+        # If someone beat Sid (the mod creator) in a ranked series, unlock "regicide"
+        SID_STEAM_ID = "76561198040410653"
+        try:
+            winner_steam = (await db.execute(
+                select(Player.steam_id).where(Player.id == series.winner_id)
+            )).scalar_one_or_none()
+            loser_id = series.player2_id if series.winner_id == series.player1_id else series.player1_id
+            loser_steam = (await db.execute(
+                select(Player.steam_id).where(Player.id == loser_id)
+            )).scalar_one_or_none()
+            if loser_steam == SID_STEAM_ID and winner_steam and winner_steam != SID_STEAM_ID:
+                # Winner beat Sid — check if they already have it
+                existing = (await db.execute(
+                    select(PlayerAchievement).where(
+                        PlayerAchievement.player_id == series.winner_id,
+                        PlayerAchievement.achievement_id == "regicide",
+                    )
+                )).scalar_one_or_none()
+                if not existing:
+                    ach = PlayerAchievement(
+                        player_id=series.winner_id,
+                        achievement_id="regicide",
+                    )
+                    db.add(ach)
+                    await db.commit()
+                    print(f"[ACH] Regicide auto-granted to {winner_steam} for beating Sid in ranked series")
+        except Exception as ex:
+            print(f"Regicide auto-grant error: {ex}")
+
     return MatchResponse(
         match_id=match.id,
         winner_steam_id=winner.steam_id,
@@ -695,27 +733,73 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
     player_total_xp = player.total_xp or 0
     player_level, xp_into_level, xp_needed_for_next = level_from_xp(player_total_xp)
 
-    # Compute best win streaks (ranked and casual)
-    streak_query = text("""
-        SELECT m.winner_id, m.is_ranked
-        FROM matches m
-        WHERE m.player1_id = :pid OR m.player2_id = :pid
-        ORDER BY m.ended_at ASC
+    # Compute best win streaks
+    # Ranked: count per SERIES completion, not per individual match
+    ranked_streak_query = text("""
+        SELECT rs.winner_id
+        FROM ranked_series rs
+        WHERE rs.status = 'completed'
+          AND (rs.player1_id = :pid OR rs.player2_id = :pid)
+        ORDER BY rs.completed_at ASC
     """)
-    streak_rows = (await db.execute(streak_query, {"pid": player.id})).mappings().all()
-
+    ranked_streak_rows = (await db.execute(ranked_streak_query, {"pid": player.id})).mappings().all()
     best_ranked_streak = 0
-    best_casual_streak = 0
     cur_ranked_streak = 0
-    cur_casual_streak = 0
-    for sr in streak_rows:
-        won = (sr["winner_id"] == player.id)
-        if sr["is_ranked"]:
-            cur_ranked_streak = cur_ranked_streak + 1 if won else 0
+    for sr in ranked_streak_rows:
+        if sr["winner_id"] == player.id:
+            cur_ranked_streak += 1
             best_ranked_streak = max(best_ranked_streak, cur_ranked_streak)
         else:
-            cur_casual_streak = cur_casual_streak + 1 if won else 0
+            cur_ranked_streak = 0
+
+    # Casual: count per individual match (no series)
+    casual_streak_query = text("""
+        SELECT m.winner_id
+        FROM matches m
+        WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+          AND m.is_ranked = false
+        ORDER BY m.ended_at ASC
+    """)
+    casual_streak_rows = (await db.execute(casual_streak_query, {"pid": player.id})).mappings().all()
+    best_casual_streak = 0
+    cur_casual_streak = 0
+    for sr in casual_streak_rows:
+        if sr["winner_id"] == player.id:
+            cur_casual_streak += 1
             best_casual_streak = max(best_casual_streak, cur_casual_streak)
+        else:
+            cur_casual_streak = 0
+
+    # Casual W/L (individual casual matches only)
+    casual_wl_query = text("""
+        SELECT
+            SUM(CASE WHEN m.winner_id = :pid THEN 1 ELSE 0 END) AS casual_wins,
+            SUM(CASE WHEN m.winner_id IS NOT NULL AND m.winner_id != :pid THEN 1 ELSE 0 END) AS casual_losses
+        FROM matches m
+        WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+          AND m.is_ranked = false
+    """)
+    casual_wl = (await db.execute(casual_wl_query, {"pid": player.id})).mappings().first()
+    casual_wins = casual_wl["casual_wins"] or 0 if casual_wl else 0
+    casual_losses = casual_wl["casual_losses"] or 0 if casual_wl else 0
+
+    # Sweep counts (5-0 wins given and taken)
+    sweep_query = text("""
+        SELECT
+            SUM(CASE
+                WHEN m.winner_id = :pid
+                    AND CASE WHEN m.player1_id = :pid THEN m.p2_rounds_won ELSE m.p1_rounds_won END = 0
+                THEN 1 ELSE 0 END) AS sweeps_given,
+            SUM(CASE
+                WHEN m.winner_id IS NOT NULL AND m.winner_id != :pid
+                    AND CASE WHEN m.player1_id = :pid THEN m.p1_rounds_won ELSE m.p2_rounds_won END = 0
+                THEN 1 ELSE 0 END) AS sweeps_taken
+        FROM matches m
+        WHERE m.player1_id = :pid OR m.player2_id = :pid
+    """)
+    sweep_data = (await db.execute(sweep_query, {"pid": player.id})).mappings().first()
+    sweeps_given = sweep_data["sweeps_given"] or 0 if sweep_data else 0
+    sweeps_taken = sweep_data["sweeps_taken"] or 0 if sweep_data else 0
 
     # Compute series-aware ranked W/L (completed series + legacy individual ranked matches)
     ranked_wl_query = text("""
@@ -803,6 +887,10 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         best_casual_streak=best_casual_streak,
         ranked_series_wins=ranked_series_wins,
         ranked_series_losses=ranked_series_losses,
+        casual_wins=casual_wins,
+        casual_losses=casual_losses,
+        sweeps_given=sweeps_given,
+        sweeps_taken=sweeps_taken,
         recent_form=recent_form,
     )
 

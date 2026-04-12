@@ -22,6 +22,9 @@ namespace CompetitiveRounds
         public static bool IsLoading { get; private set; } = false;
         public static string LastError { get; private set; } = "";
 
+        // Version check
+        public static string LatestModVersion { get; private set; } = null;
+
         // ── Data classes ──────────────────────────────────────
 
         [Serializable]
@@ -171,6 +174,30 @@ namespace CompetitiveRounds
         {
             baseUrl = url.TrimEnd('/');
             Plugin.Log.LogInfo($"API client initialized: {baseUrl}");
+            CheckModVersion();
+        }
+
+        public static void CheckModVersion()
+        {
+            Plugin.Instance.StartCoroutine(DoCheckModVersion());
+        }
+
+        private static IEnumerator DoCheckModVersion()
+        {
+            var req = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version");
+            yield return req.SendWebRequest();
+            if (req.result == UnityWebRequest.Result.Success)
+            {
+                string ver = ExtractJsonString(req.downloadHandler.text, "version");
+                if (!string.IsNullOrEmpty(ver))
+                {
+                    LatestModVersion = ver;
+                    if (ver != Plugin.ModVersion)
+                        Plugin.Log.LogWarning($"[VERSION] Update available: v{Plugin.ModVersion} → v{ver}");
+                    else
+                        Plugin.Log.LogInfo($"[VERSION] Mod is up to date (v{ver})");
+                }
+            }
         }
 
         // ── HMAC Match Signing ────────────────────────────────

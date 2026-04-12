@@ -19,7 +19,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.18.4";
+        public const string ModVersion = "1.18.5";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1224,7 +1224,7 @@ namespace CompetitiveRounds
         private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
 
         [DllImport("user32.dll")]
-        private static extern IntPtr GetForegroundWindow();
+        private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
         private bool shouldFlash = false;
         private bool isFlashing = false;
@@ -1244,19 +1244,31 @@ namespace CompetitiveRounds
 
         private void Update()
         {
+            // Resolve window handle (try multiple methods)
             if (gameWindowHandle == IntPtr.Zero)
             {
-                gameWindowHandle = Process.GetCurrentProcess().MainWindowHandle;
+                try
+                {
+                    gameWindowHandle = Process.GetCurrentProcess().MainWindowHandle;
+                }
+                catch { }
+
+                // Fallback: find Unity window by class name
+                if (gameWindowHandle == IntPtr.Zero)
+                {
+                    try { gameWindowHandle = FindWindow("UnityWndClass", null); } catch { }
+                }
+
                 if (gameWindowHandle == IntPtr.Zero) return;
+                Plugin.Log.LogInfo($"[FLASH] Window handle resolved: {gameWindowHandle}");
             }
 
-            bool isWindowInFocus = GetForegroundWindow() == gameWindowHandle;
+            // Use Unity's own focus detection — more reliable than Win32 GetForegroundWindow
+            bool isWindowInFocus = Application.isFocused;
 
-            // Only flash when alt-tabbed
             if (shouldFlash && !isFlashing && !isWindowInFocus)
                 StartFlashing();
 
-            // Auto-stop when user returns to window
             if (shouldFlash && isWindowInFocus)
                 shouldFlash = false;
 
@@ -1268,7 +1280,14 @@ namespace CompetitiveRounds
         public static void Flash()
         {
             if (instance != null)
+            {
                 instance.shouldFlash = true;
+                Plugin.Log.LogInfo($"[FLASH] Flash requested (focused={Application.isFocused}, handle={instance.gameWindowHandle})");
+            }
+            else
+            {
+                Plugin.Log.LogWarning("[FLASH] Flash requested but no instance");
+            }
         }
 
         private void StartFlashing()
@@ -1280,9 +1299,10 @@ namespace CompetitiveRounds
             fInfo.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
             fInfo.uCount = uint.MaxValue;
             fInfo.dwTimeout = 0;
-            FlashWindowEx(ref fInfo);
+            bool result = FlashWindowEx(ref fInfo);
             isFlashing = true;
             shouldFlash = true;
+            Plugin.Log.LogInfo($"[FLASH] Started flashing (result={result})");
         }
 
         private void StopFlashing()

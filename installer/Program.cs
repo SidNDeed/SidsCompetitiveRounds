@@ -58,6 +58,10 @@ namespace CompetitiveRoundsInstaller
                     case ConsoleKey.NumPad5:
                         LaunchRounds();
                         break;
+                    case ConsoleKey.D6:
+                    case ConsoleKey.NumPad6:
+                        UninstallMenu();
+                        break;
                     case ConsoleKey.Q:
                     case ConsoleKey.Escape:
                         return;
@@ -165,6 +169,8 @@ namespace CompetitiveRoundsInstaller
             Console.WriteLine("  [4]  Install Everything (BepInEx + mod)");
             Console.ForegroundColor = ConsoleColor.White;
             Console.WriteLine("  [5]  Launch ROUNDS");
+            Console.ForegroundColor = ConsoleColor.DarkRed;
+            Console.WriteLine("  [6]  Uninstall");
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.WriteLine("  [Q]  Quit");
             Console.ResetColor();
@@ -547,14 +553,12 @@ namespace CompetitiveRoundsInstaller
 
             try
             {
-                // Launch via Steam protocol (ensures Steam overlay works)
                 Process.Start("steam://rungameid/1557740");
                 PrintSuccess("Launching ROUNDS via Steam...");
                 Thread.Sleep(1500);
             }
             catch
             {
-                // Fallback: direct launch
                 try
                 {
                     string exe = Path.Combine(roundsPath, "Rounds.exe");
@@ -576,6 +580,125 @@ namespace CompetitiveRoundsInstaller
                     WaitForKey();
                 }
             }
+        }
+
+        static void UninstallMenu()
+        {
+            Console.Clear();
+            PrintHeader();
+
+            if (string.IsNullOrEmpty(roundsPath))
+            {
+                PrintError("ROUNDS path not set. Use option [1] first.");
+                WaitForKey();
+                return;
+            }
+
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("  What would you like to uninstall?");
+            Console.WriteLine();
+            Console.WriteLine("  [1]  Competitive ROUNDS mod only (keep BepInEx)");
+            Console.WriteLine("  [2]  Everything (BepInEx + mod)");
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine("  [Q]  Cancel");
+            Console.ResetColor();
+            Console.WriteLine();
+            Console.Write("  > ");
+
+            var key = Console.ReadKey(true).Key;
+            switch (key)
+            {
+                case ConsoleKey.D1:
+                case ConsoleKey.NumPad1:
+                    UninstallMod();
+                    break;
+                case ConsoleKey.D2:
+                case ConsoleKey.NumPad2:
+                    UninstallEverything();
+                    break;
+            }
+        }
+
+        static void UninstallMod()
+        {
+            Console.WriteLine();
+            string dllPath = GetModDllPath();
+            if (dllPath == null)
+            {
+                PrintError("Competitive ROUNDS is not installed.");
+                WaitForKey();
+                return;
+            }
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  This will delete: {dllPath}");
+            Console.WriteLine("  Continue? (Y/N)");
+            Console.ResetColor();
+            if (Console.ReadKey(true).Key != ConsoleKey.Y) return;
+
+            try
+            {
+                File.Delete(dllPath);
+
+                // Remove subfolder if empty
+                string dir = Path.GetDirectoryName(dllPath);
+                if (dir != pluginsPath && Directory.Exists(dir) && Directory.GetFiles(dir).Length == 0)
+                    Directory.Delete(dir);
+
+                PrintSuccess("Competitive ROUNDS mod removed.");
+                cachedLatestVersion = null;
+            }
+            catch (Exception ex)
+            {
+                PrintError($"Failed: {ex.Message}");
+            }
+            WaitForKey();
+        }
+
+        static void UninstallEverything()
+        {
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("  This will delete:");
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine($"    - {bepinexPath}\\  (entire folder)");
+            Console.WriteLine($"    - {Path.Combine(roundsPath, "winhttp.dll")}");
+            Console.WriteLine($"    - {Path.Combine(roundsPath, "doorstop_config.ini")}");
+            Console.WriteLine($"    - {Path.Combine(roundsPath, ".doorstop_version")}");
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine();
+            Console.WriteLine("  ROUNDS will return to vanilla. Continue? (Y/N)");
+            Console.ResetColor();
+            if (Console.ReadKey(true).Key != ConsoleKey.Y) return;
+
+            try
+            {
+                if (Directory.Exists(bepinexPath))
+                {
+                    Directory.Delete(bepinexPath, true);
+                    PrintSuccess("BepInEx folder deleted.");
+                }
+
+                string[] filesToDelete = { "winhttp.dll", "doorstop_config.ini", ".doorstop_version" };
+                foreach (var f in filesToDelete)
+                {
+                    string path = Path.Combine(roundsPath, f);
+                    if (File.Exists(path))
+                    {
+                        File.Delete(path);
+                        PrintInfo($"Deleted {f}");
+                    }
+                }
+
+                PrintSuccess("Uninstall complete — ROUNDS is now vanilla.");
+                cachedLatestVersion = null;
+            }
+            catch (Exception ex)
+            {
+                PrintError($"Failed: {ex.Message}");
+                PrintInfo("Make sure ROUNDS is not running.");
+            }
+            WaitForKey();
         }
 
         // ── Helpers ────────────────────────────────────────────────

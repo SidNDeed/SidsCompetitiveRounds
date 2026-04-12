@@ -91,6 +91,11 @@ class PlayerStatsResponse(BaseModel):
     best_casual_streak: int = 0
     ranked_series_wins: int = 0
     ranked_series_losses: int = 0
+    casual_wins: int = 0
+    casual_losses: int = 0
+    sweeps_given: int = 0
+    sweeps_taken: int = 0
+    recent_form: list[dict] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -188,3 +193,27 @@ class QueueDeclineRequest(BaseModel):
     """Request to decline a matched opponent."""
     steam_id: str = Field(..., max_length=20)
     opponent_steam_id: str = Field(..., max_length=20)
+
+
+# ── Achievements ──────────────────────────────────────────────
+
+class AchievementUnlockRequest(BaseModel):
+    """Request to unlock an achievement."""
+    steam_id: str = Field(..., max_length=20)
+    achievement_key: str = Field(..., max_length=64)
+    match_id: str | None = None  # optional match reference
+
+
+class AchievementEntry(BaseModel):
+    """One achievement for a player."""
+    achievement_key: str
+    unlocked_at: datetime | None = None
+    unlocked: bool = False
+
+    model_config = {"from_attributes": True}
+
+
+class AchievementListResponse(BaseModel):
+    """All achievements for a player."""
+    steam_id: str
+    achievements: list[AchievementEntry]

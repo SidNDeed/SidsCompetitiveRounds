@@ -6,7 +6,7 @@ This installer automatically sets up BepInEx and the Competitive ROUNDS mod for 
 
 ## How To Use
 
-1. Download and run `CompetitiveRoundsInstaller.exe` (found on Competitive Rounds here: https://discord.gg/4tsWadH6tc )
+1. Download and run `CompetitiveRoundsInstaller.exe`
 2. It will automatically find your ROUNDS install folder
 3. Press **[4]** to install everything
 4. Press **[5]** to launch ROUNDS
@@ -19,6 +19,7 @@ This installer automatically sets up BepInEx and the Competitive ROUNDS mod for 
 - **[3] Install / Update Competitive ROUNDS mod** — Downloads the latest CompetitiveRounds.dll from GitHub. If you already have the mod installed, it compares your version to the latest release and only downloads if there's an update. Your old DLL is backed up automatically.
 - **[4] Install Everything** — Does [2] then [3] in one step. This is what most people should use.
 - **[5] Launch ROUNDS** — Launches ROUNDS through Steam so the Steam overlay works normally.
+- **[6] Uninstall** — Choose to remove just the mod (keeps BepInEx for other mods) or remove everything (BepInEx + mod, returns ROUNDS to vanilla). Asks for confirmation before deleting anything.
 
 ## Status Display
 
@@ -42,7 +43,7 @@ When a new version comes out, just run the installer again and press **[3]**. It
 
 ## Uninstalling
 
-To remove the mod and BepInEx completely, delete these from your ROUNDS folder:
+Use option **[6]** in the installer, or manually delete these from your ROUNDS folder:
 - The `BepInEx` folder
 - `winhttp.dll`
 - `doorstop_config.ini`

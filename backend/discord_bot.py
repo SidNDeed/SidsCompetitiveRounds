@@ -133,25 +133,31 @@ async def cmd_rank(ctx, member: discord.Member = None):
     s = await api_get(f"/players/{link['steam_id']}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
     rank = get_rank_name(s["rating"])
-    embed = discord.Embed(title=rank, description="1v1 Ranked", color=discord.Color.gold())
+    peak = s.get("peak_rating", s["rating"])
+    embed = discord.Embed(title=f"{rank_emoji(rank)}  {s['display_name']}  —  {rank}", color=discord.Color.gold())
     embed.set_thumbnail(url=target.display_avatar.url)
-    info = f"**{s['display_name']}**\nDiscord: {target.mention}\nSteam: `{s['steam_id']}`"
-    embed.add_field(name="ℹ️  INFO", value=info, inline=True)
+
+    # Elo block
+    elo_lines = f"**{s['rating']:.0f}** Elo  ·  Peak: **{peak:.0f}**  ·  RD: {s['rating_deviation']:.0f}"
+    embed.add_field(name="📊  Rating", value=elo_lines, inline=False)
+
+    # Ranked series
     rw, rl = s.get("ranked_series_wins", 0), s.get("ranked_series_losses", 0)
     total = rw + rl
     wl = f"{rw/rl:.2f}" if rl > 0 else f"{rw}:0"
     wr = f"{rw/total*100:.1f}%" if total > 0 else "—"
-    games = f"Series: **{total}**\nWins: **{rw}**\nLosses: **{rl}**\nW/L: **{wl}** ({wr})"
-    embed.add_field(name="🏆  RANKED SERIES", value=games, inline=True)
-    embed.add_field(name="\u200b", value="\u200b", inline=False)
-    peak = s.get("peak_rating", s["rating"])
-    elo = f"Elo: **{s['rating']:.0f}**\nBest: **{peak:.0f}**\nRD: **{s['rating_deviation']:.0f}**"
-    embed.add_field(name="📊  ELO", value=elo, inline=True)
+    series_lines = f"**{rw}**W / **{rl}**L  ({wr})\nW/L Ratio: **{wl}**"
     br = s.get("best_ranked_streak", 0)
-    streak = f"Best Streak: **{br}W**\nLevel: **{s.get('level', 0)}**\nXP: **{s.get('total_xp', 0):,}**"
-    embed.add_field(name="📈  STREAK", value=streak, inline=True)
+    if br > 0: series_lines += f"\nBest Streak: **{br}W** 🔥"
+    embed.add_field(name="🏆  Ranked Series", value=series_lines, inline=True)
+
+    # Sweeps
+    sg, st = s.get("sweeps_given", 0), s.get("sweeps_taken", 0)
+    sweep_lines = f"5-0 Given: **{sg}** 🧹\n0-5 Taken: **{st}**"
+    embed.add_field(name="💨  Sweeps", value=sweep_lines, inline=True)
+
     pos = await get_lb_position(link["steam_id"])
-    embed.set_footer(text=f"Position on leaderboard: {pos}")
+    embed.set_footer(text=f"Leaderboard: #{pos}  •  Steam: {s['steam_id']}")
     await ctx.send(embed=embed)
 
 async def get_lb_position(steam_id):
@@ -161,7 +167,7 @@ async def get_lb_position(steam_id):
         if e["steam_id"] == steam_id: return str(e["rank"])
     return "Unranked"
 
-@bot.hybrid_command(name="stats", description="View detailed ranked stats")
+@bot.hybrid_command(name="stats", description="View overall & casual stats")
 @app_commands.describe(member="Player to look up (defaults to yourself)")
 async def cmd_stats(ctx, member: discord.Member = None):
     target = member or ctx.author
@@ -170,23 +176,56 @@ async def cmd_stats(ctx, member: discord.Member = None):
         await ctx.send("❌ Not linked." if target == ctx.author else f"❌ {target.display_name} not linked."); return
     s = await api_get(f"/players/{link['steam_id']}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
-    rank = get_rank_name(s["rating"])
-    embed = discord.Embed(title=f"{rank_emoji(rank)} {s['display_name']} — Ranked Stats", color=discord.Color.blue())
+    embed = discord.Embed(title=f"📋  {s['display_name']}  —  Overall Stats", color=discord.Color.blue())
     embed.set_thumbnail(url=target.display_avatar.url)
-    peak = s.get("peak_rating", s["rating"])
-    embed.add_field(name="Rating", value=f"**{s['rating']:.0f}** (Peak: {peak:.0f})", inline=False)
-    embed.add_field(name="Rank", value=rank, inline=True)
-    embed.add_field(name="Level", value=str(s.get("level", 0)), inline=True)
-    embed.add_field(name="XP", value=f"{s.get('total_xp', 0):,}", inline=True)
+
+    # Overall record
+    tw, tl = s.get("wins", 0), s.get("losses", 0)
+    tt = s.get("total_matches", 0)
+    twr = f"{tw/tt*100:.1f}%" if tt > 0 else "—"
+    embed.add_field(name="📊  Total Record", value=f"**{tt}** matches  —  **{tw}**W / **{tl}**L  ({twr})", inline=False)
+
+    # Casual record (from API)
+    cw, cl = s.get("casual_wins", 0), s.get("casual_losses", 0)
+    ct = cw + cl
+    cwr = f"{cw/ct*100:.1f}%" if ct > 0 else "—"
+    casual_str = f"**{cw}**W / **{cl}**L  ({cwr})" if ct > 0 else "—"
+    embed.add_field(name="🎮  Casual", value=casual_str, inline=True)
+
+    # Ranked series
     rw, rl = s.get("ranked_series_wins", 0), s.get("ranked_series_losses", 0)
-    total = rw + rl
-    wr = f"{rw/total*100:.1f}%" if total > 0 else "—"
-    embed.add_field(name="Ranked Series", value=f"{rw}W / {rl}L ({wr})", inline=False)
+    rt = rw + rl
+    ranked_str = f"**{rw}**W / **{rl}**L" if rt > 0 else "—"
+    embed.add_field(name="⚔️  Ranked Series", value=ranked_str, inline=True)
+
+    # Sweeps
+    sg, st = s.get("sweeps_given", 0), s.get("sweeps_taken", 0)
+    if sg + st > 0:
+        embed.add_field(name="💨  Sweeps", value=f"5-0: **{sg}** 🧹  ·  0-5: **{st}**", inline=True)
+
+    embed.add_field(name="\u200b", value="\u200b", inline=False)
+
+    # Level & XP
+    embed.add_field(name="⭐  Level", value=f"**{s.get('level', 0)}**", inline=True)
+    embed.add_field(name="✨  XP", value=f"**{s.get('total_xp', 0):,}**", inline=True)
+
+    # Streaks
     br = s.get("best_ranked_streak", 0)
-    if br > 0: embed.add_field(name="Best Ranked Streak", value=f"{br}W", inline=True)
-    embed.add_field(name="RD", value=f"{s['rating_deviation']:.0f}", inline=True)
-    pos = await get_lb_position(link["steam_id"])
-    embed.set_footer(text=f"Steam: {s['steam_id']} • Leaderboard: #{pos}")
+    bc = s.get("best_casual_streak", 0)
+    streaks = []
+    if br > 0: streaks.append(f"Ranked: **{br}W** 🔥")
+    if bc > 0: streaks.append(f"Casual: **{bc}W**")
+    if streaks:
+        embed.add_field(name="📈  Best Streaks", value="  ·  ".join(streaks), inline=True)
+
+    # Top cards
+    top = s.get("top_card_names", [])
+    picks = s.get("top_card_picks", [])
+    if top:
+        cards_lines = "\n".join(f"**{top[i]}** ({picks[i]}x)" for i in range(min(5, len(top))) if i < len(picks))
+        embed.add_field(name="🃏  Top Cards", value=cards_lines, inline=False)
+
+    embed.set_footer(text=f"Steam: {s['steam_id']}")
     await ctx.send(embed=embed)
 
 @bot.hybrid_command(name="lb", description="Show the ranked leaderboard")
