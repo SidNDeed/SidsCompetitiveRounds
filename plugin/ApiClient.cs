@@ -314,7 +314,7 @@ namespace CompetitiveRounds
             string matchType = isRanked ? "RANKED" : "CASUAL";
             Plugin.Log.LogInfo($"Reporting {matchType} match to API...");
 
-            Plugin.Instance.StartCoroutine(PostRequest(
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/matches",
                 json,
                 (success, response) =>
@@ -1074,7 +1074,7 @@ namespace CompetitiveRounds
             NativeUI.MarkDirty();
             Plugin.Log.LogInfo("[QUEUE] Ready Up sent");
 
-            Plugin.Instance.StartCoroutine(PostRequest(
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/queue/ready?steam_id={Escape(steamId)}",
                 "",
                 (success, response) =>
@@ -1105,9 +1105,13 @@ namespace CompetitiveRounds
                     }
                     else
                     {
-                        Plugin.Log.LogWarning($"[QUEUE] Ready failed: {response}");
+                        Plugin.Log.LogWarning($"[QUEUE] Ready failed after retries: {response}");
+                        CompetitiveUI.ShowNotification("Ready-up failed — retrying search", new Color(1f, 0.6f, 0.2f), 5f);
+                        CurrentQueueState = QueueState.Searching;
+                        NativeUI.MarkDirty();
                     }
-                }
+                },
+                maxRetries: 3, retryDelay: 2f
             ));
         }
 
@@ -1364,6 +1368,41 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>POST with automatic retry on failure (DNS hiccups, timeouts).</summary>
+        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f)
+        {
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
+            {
+                using (var request = new UnityWebRequest(url, "POST"))
+                {
+                    if (!string.IsNullOrEmpty(json))
+                    {
+                        byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
+                        request.uploadHandler = new UploadHandlerRaw(bodyRaw);
+                    }
+                    request.downloadHandler = new DownloadHandlerBuffer();
+                    request.SetRequestHeader("Content-Type", "application/json");
+                    request.timeout = 10;
+
+                    yield return request.SendWebRequest();
+
+                    bool success = request.result == UnityWebRequest.Result.Success;
+                    if (success)
+                    {
+                        callback(true, request.downloadHandler.text);
+                        yield break;
+                    }
+
+                    Plugin.Log.LogWarning($"[HTTP] POST attempt {attempt}/{maxRetries} failed: {request.error}");
+
+                    if (attempt < maxRetries)
+                        yield return new WaitForSeconds(retryDelay);
+                    else
+                        callback(false, request.error);
+                }
+            }
+        }
+
         // ── Discord Linking ──────────────────────────────────────
 
         public static void GenerateLinkCode(string steamId)
@@ -1442,7 +1481,7 @@ namespace CompetitiveRounds
                 json += $",\"match_id\":\"{Escape(matchId)}\"";
             json += "}";
 
-            Plugin.Instance.StartCoroutine(PostRequest(
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/achievements/unlock",
                 json,
                 (success, response) =>

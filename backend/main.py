@@ -257,7 +257,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.18.5"
+LATEST_MOD_VERSION = "1.18.6"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -501,13 +501,13 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                 existing = (await db.execute(
                     select(PlayerAchievement).where(
                         PlayerAchievement.player_id == series.winner_id,
-                        PlayerAchievement.achievement_id == "regicide",
+                        PlayerAchievement.achievement_key == "regicide",
                     )
                 )).scalar_one_or_none()
                 if not existing:
                     ach = PlayerAchievement(
                         player_id=series.winner_id,
-                        achievement_id="regicide",
+                        achievement_key="regicide",
                     )
                     db.add(ach)
                     await db.commit()

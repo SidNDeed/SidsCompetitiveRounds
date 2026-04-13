@@ -1,22 +1,16 @@
-# v1.18.5 Changelog
+# v1.18.6 Changelog
 
 ## Bug Fixes
-- **Menu overlay bug** — Opening the competitive menu (F5) on submenus no longer causes menus to overlap when going back. Fixed by removing mainMenuGroup toggling entirely; uses a full-screen raycast-blocking background instead.
-- **Scroll and button regression** — Fixed scrolling and Refresh button not working in the competitive menu (caused by overly aggressive raycaster disabling in v1.18.4).
-- **Unknown card rarities** — Cards like "Leach", "BombsAway", and "Glasscannon" now correctly resolve to their proper names and rarities. The rarity lookup now registers both the internal card name and the Unity GameObject name with automatic alias mapping.
-- **Duplicate card entries** — Card names from log capture are now normalized to canonical names before storage, preventing duplicates like "Leach" vs "Leech".
-- **Achievement: Untouchable false positive** — No longer triggers on disconnects or incomplete games. Only evaluates when a player actually reaches the win threshold.
-- **Achievement: Silent Assassin** — Now correctly detects both "Sneaky" and "Sneaky Bullets" card names.
-- **Achievement: Regicide** — Moved to server-side. Now properly awards when any player beats Sid in a ranked series, regardless of which client reports the match.
-- **Achievement: Pacifist** — Card pick clicks (left mouse) between rounds no longer count as "firing a shot". Only tracks during active combat.
-- **Achievement: Immovable Object** — Space bar presses during card picks and round transitions no longer count as movement. Only tracks during active combat.
-- **Discord /stats command** — Casual W/L no longer double-counts ranked games. Now uses proper server-side casual match tracking.
-- **Ranked streaks** — Now count per series completion, not per individual match.
+- **Achievement state persisting across matches** — Achievement tracking flags (moved, fired, took damage, etc.) now reset at the start of each match, not just when leaving a room. Previously, moving in game 1 would prevent the Immovable Object achievement from triggering in game 2 of the same session. (Thanks lopidav!)
+- **Achievements completely broken (500 errors)** — The `player_achievements` database table had INTEGER columns but `players.id` is UUID, causing every achievement unlock to fail silently. Table recreated with correct UUID types. No achievements were functional prior to this fix.
+- **Regicide server-side field name** — Fixed `achievement_id` → `achievement_key` in the server-side regicide auto-grant.
+- **Menu overlay showing game UI through it** — The competitive menu now always renders on its own overlay canvas instead of parenting to ROUNDS' canvas. Fixes character faces and other game UI bleeding through.
+- **Match found panel text clipping** — Split from one cramped row into two: match info on top, Ready/Decline buttons below.
+- **Font characters rendering as squares** — Replaced unicode characters (stars, checkmark, bullet) with ASCII alternatives compatible with ROUNDS' font.
 
 ## New Features
-- **Match found sound** — A two-tone notification beep plays when a ranked match is found in the queue.
-- **Taskbar flash** — ROUNDS' taskbar icon flashes when a ranked match is found while the game is alt-tabbed. Contributed by lopidav.
-- **Update check** — The mod checks the server for the latest version on startup. Version number in the bottom-left is now bold with a status indicator showing "✓ up to date" or "⚠ update available".
-- **Split /stats and /rank** — `/rank` is now ranked-focused (Elo, peak, series W/L, streaks, sweeps, leaderboard position). `/stats` shows overall and casual stats (total record, casual W/L, level, XP, top cards).
-- **Sweep tracking** — Server now tracks 5-0 sweeps given and taken. Shown in both Discord commands.
-- **Auto-installer** — Standalone Windows app that detects ROUNDS, installs BepInEx, and downloads the latest mod from GitHub. Includes version comparison and uninstall options.
+- **API retry logic** — Ready-up, match reporting, and achievement unlocks now retry up to 3 times with a 2-second delay on network failure. Prevents DNS hiccups from losing match data or breaking queue flow.
+- **Update button** — Orange "Update" button appears in the bottom bar when a new version is available, links to GitHub releases.
+- **GitHub button** — Added next to Discord button in the bottom bar.
+- **Retroactive achievement grants** — Historical match data scanned to award card-based sweep achievements, Stacked Deck, and Regicide to players who earned them before achievements were functional.
+- **Installer improvements** — Uninstall options (mod only or everything), version comparison on status screen, subfolder detection for existing installs.

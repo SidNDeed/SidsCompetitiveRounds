@@ -192,10 +192,10 @@ class PlayerAchievement(Base):
     __tablename__ = "player_achievements"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    player_id = Column(Integer, ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
     achievement_key = Column(String(64), nullable=False)
     unlocked_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
-    match_id = Column(Integer, ForeignKey("matches.id", ondelete="SET NULL"), nullable=True)
+    match_id = Column(UUID(as_uuid=True), ForeignKey("matches.id", ondelete="SET NULL"), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("player_id", "achievement_key", name="uq_player_achievement"),

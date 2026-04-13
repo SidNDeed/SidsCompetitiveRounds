@@ -472,6 +472,18 @@ namespace CompetitiveRounds
             gameOverReported = false;
             matchStartTime = DateTime.UtcNow;
 
+            // Reset achievement tracking for this match
+            achTookDamage = false;
+            achPhoenixUsed = false;
+            achDied = false;
+            achMaxOpponentRounds = 0;
+            achWasDown04 = false;
+            lastDeadState = false;
+            lastRemainingRespawns = -1;
+            achFiredShot = false;
+            achMoved = false;
+            pendingRegicideCheck = false;
+
             // Retry card rarity scan if it didn't work at startup
             if (CardRarityLookup.Count == 0)
             {
