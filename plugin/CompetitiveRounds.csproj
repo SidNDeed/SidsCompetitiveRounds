@@ -8,6 +8,12 @@
     <NoWarn>$(NoWarn);CS1701;CS1702;CS0169;CS0649</NoWarn>
   </PropertyGroup>
 
+  <!-- Thunderstore build: excludes auto-updater .bat at compile time -->
+  <!-- Build with: dotnet build -c Thunderstore  (or select "Thunderstore" config in VS) -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Thunderstore'">
+    <DefineConstants>$(DefineConstants);THUNDERSTORE</DefineConstants>
+  </PropertyGroup>
+
   <PropertyGroup>
     <RoundsDir>C:\Program Files (x86)\Steam\steamapps\common\ROUNDS</RoundsDir>
     <BepInExDir>$(RoundsDir)\BepInEx</BepInExDir>

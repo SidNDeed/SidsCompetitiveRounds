@@ -232,30 +232,13 @@ namespace CompetitiveRounds
 
         private static IEnumerator DoAutoUpdate()
         {
-            // Thunderstore/r2modman detection — these mod managers don't allow spawning .bat files
-            // If running from a managed profile, direct user to update through their mod manager
-            bool isModManager = false;
-            try
-            {
-                string dllPath = System.Reflection.Assembly.GetExecutingAssembly().Location ?? "";
-                if (string.IsNullOrEmpty(dllPath))
-                    try { dllPath = BepInEx.Paths.PluginPath ?? ""; } catch { }
-                string pathLower = dllPath.ToLower();
-                if (pathLower.Contains("r2modman") || pathLower.Contains("thunderstore"))
-                    isModManager = true;
-            }
-            catch { }
-
-            if (isModManager)
-            {
-                Plugin.Log.LogInfo("[UPDATE] Thunderstore/r2modman detected — skipping auto-update");
-                CompetitiveUI.ShowNotification("Update available — update through your mod manager", Color.cyan, 6f);
-                IsUpdating = false;
-                UpdateReady = false;
-                NativeUI.MarkDirty();
-                yield break;
-            }
-
+#if THUNDERSTORE
+            Plugin.Log.LogInfo("[UPDATE] Thunderstore build — auto-update disabled, use mod manager");
+            CompetitiveUI.ShowNotification("Update available — update through your mod manager", Color.cyan, 6f);
+            IsUpdating = false;
+            NativeUI.MarkDirty();
+            yield break;
+#else
             CompetitiveUI.ShowNotification("Downloading update...", Color.cyan, 10f);
             NativeUI.MarkDirty();
 
@@ -444,6 +427,7 @@ namespace CompetitiveRounds
             IsUpdating = false;
             CompetitiveUI.ShowNotification("Update downloaded! Close ROUNDS to apply.", new Color(0.3f, 1f, 0.3f), 15f);
             NativeUI.MarkDirty();
+#endif
         }
 
         // ── HMAC Match Signing ────────────────────────────────
