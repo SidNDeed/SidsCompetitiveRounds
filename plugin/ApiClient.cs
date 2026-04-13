@@ -1,8 +1,11 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Photon.Pun;
 using UnityEngine;
 using UnityEngine.Networking;
@@ -24,6 +27,18 @@ namespace CompetitiveRounds
 
         // Version check
         public static string LatestModVersion { get; private set; } = null;
+
+        // Recent ranked series (for leaderboard sidebar)
+        public static List<RecentSeriesEntry> CachedRecentSeries { get; private set; }
+        public class RecentSeriesEntry
+        {
+            public string winner_name;
+            public string p1_name, p2_name;
+            public int p1_wins, p2_wins;
+            public float p1_rating_change, p2_rating_change;
+            public string winner_steam_id, p1_steam_id, p2_steam_id;
+            public string completed_at;
+        }
 
         // ── Data classes ──────────────────────────────────────
 
@@ -78,6 +93,7 @@ namespace CompetitiveRounds
             public int best_casual_streak;
             public int ranked_series_wins;
             public int ranked_series_losses;
+            public int ranked_dc_count;
             public string discord_id;
 
             // Parsed manually (JsonUtility can't handle nested arrays)
@@ -85,6 +101,7 @@ namespace CompetitiveRounds
             public List<int> top_card_picks;
             public List<float> top_card_win_rates;
             public List<string> recent_form; // "W","L","W"... last 20
+            public List<float> rating_history; // oldest→newest
         }
 
         [Serializable]
@@ -198,6 +215,211 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo($"[VERSION] Mod is up to date (v{ver})");
                 }
             }
+        }
+
+        // ── Auto-Update ─────────────────────────────────────────
+
+        public static bool IsUpdating { get; private set; } = false;
+        public static bool UpdateReady { get; private set; } = false;
+        private const string GITHUB_API_LATEST = "https://api.github.com/repos/SidNDeed/SidsCompetitiveRounds/releases/latest";
+
+        public static void StartAutoUpdate()
+        {
+            if (IsUpdating || UpdateReady) return;
+            IsUpdating = true;
+            Plugin.Instance.StartCoroutine(DoAutoUpdate());
+        }
+
+        private static IEnumerator DoAutoUpdate()
+        {
+            CompetitiveUI.ShowNotification("Downloading update...", Color.cyan, 10f);
+            NativeUI.MarkDirty();
+
+            // Step 1: Get latest release info from GitHub
+            var apiReq = UnityWebRequest.Get(GITHUB_API_LATEST);
+            apiReq.SetRequestHeader("User-Agent", "CompetitiveRounds-AutoUpdate");
+            apiReq.timeout = 15;
+            yield return apiReq.SendWebRequest();
+
+            if (apiReq.result != UnityWebRequest.Result.Success)
+            {
+                Plugin.Log.LogWarning($"[UPDATE] GitHub API failed: {apiReq.error}");
+                CompetitiveUI.ShowNotification("Update failed — could not reach GitHub", new Color(1f, 0.4f, 0.4f), 5f);
+                IsUpdating = false;
+                yield break;
+            }
+
+            string json = apiReq.downloadHandler.text;
+
+            // Step 2: Find the DLL asset URL
+            string dllUrl = null;
+            var matches = Regex.Matches(json, @"""browser_download_url""\s*:\s*""([^""]+\.dll)""");
+            foreach (Match m in matches)
+            {
+                if (m.Groups[1].Value.IndexOf("CompetitiveRounds", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    dllUrl = m.Groups[1].Value;
+                    break;
+                }
+            }
+            if (dllUrl == null && matches.Count > 0)
+                dllUrl = matches[0].Groups[1].Value;
+
+            // Fallback: try zip
+            if (dllUrl == null)
+            {
+                var zipMatches = Regex.Matches(json, @"""browser_download_url""\s*:\s*""([^""]+\.zip)""");
+                if (zipMatches.Count > 0)
+                {
+                    // Can't easily unzip in Unity — fall back to opening browser
+                    Plugin.Log.LogWarning("[UPDATE] No DLL asset found, only zip. Opening browser.");
+                    CompetitiveUI.ShowNotification("No DLL found — opening releases page", Color.yellow, 5f);
+                    Application.OpenURL("https://github.com/SidNDeed/SidsCompetitiveRounds/releases/latest");
+                    IsUpdating = false;
+                    yield break;
+                }
+                Plugin.Log.LogWarning("[UPDATE] No downloadable assets found in release");
+                CompetitiveUI.ShowNotification("Update failed — no assets in release", new Color(1f, 0.4f, 0.4f), 5f);
+                IsUpdating = false;
+                yield break;
+            }
+
+            Plugin.Log.LogInfo($"[UPDATE] Downloading: {dllUrl}");
+
+            // Step 3: Download the DLL to temp
+            string tempPath = Path.Combine(Path.GetTempPath(), "CompetitiveRounds_update.dll");
+            var dlReq = UnityWebRequest.Get(dllUrl);
+            dlReq.SetRequestHeader("User-Agent", "CompetitiveRounds-AutoUpdate");
+            dlReq.timeout = 30;
+            dlReq.downloadHandler = new DownloadHandlerFile(tempPath);
+            yield return dlReq.SendWebRequest();
+
+            if (dlReq.result != UnityWebRequest.Result.Success)
+            {
+                Plugin.Log.LogWarning($"[UPDATE] Download failed: {dlReq.error}");
+                CompetitiveUI.ShowNotification("Update failed — download error", new Color(1f, 0.4f, 0.4f), 5f);
+                IsUpdating = false;
+                yield break;
+            }
+
+            Plugin.Log.LogInfo($"[UPDATE] Downloaded to: {tempPath}");
+
+            // Step 4: Find where the current DLL lives
+            string currentDll = "";
+            try
+            {
+                currentDll = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            }
+            catch { }
+
+            if (string.IsNullOrEmpty(currentDll) || !File.Exists(currentDll))
+            {
+                // Fallback: use BepInEx.Paths.PluginPath (works for both vanilla and Thunderstore profiles)
+                string bepPlugins = "";
+                try { bepPlugins = BepInEx.Paths.PluginPath; } catch { }
+
+                if (!string.IsNullOrEmpty(bepPlugins) && Directory.Exists(bepPlugins))
+                {
+                    // Search subdirectories first (e.g. plugins/CompetitiveRounds/ or plugins/SidNDeed-CompetitiveRounds/)
+                    try
+                    {
+                        foreach (string dir in Directory.GetDirectories(bepPlugins))
+                        {
+                            string candidate = Path.Combine(dir, "CompetitiveRounds.dll");
+                            if (File.Exists(candidate)) { currentDll = candidate; break; }
+                        }
+                    }
+                    catch { }
+
+                    // Also check plugins root
+                    if (string.IsNullOrEmpty(currentDll) || !File.Exists(currentDll))
+                    {
+                        string root = Path.Combine(bepPlugins, "CompetitiveRounds.dll");
+                        if (File.Exists(root)) currentDll = root;
+                    }
+                }
+
+                // Last resort: vanilla hardcoded path
+                if (string.IsNullOrEmpty(currentDll) || !File.Exists(currentDll))
+                {
+                    string vanillaPlugins = Path.Combine(Application.dataPath, "..", "BepInEx", "plugins");
+                    string sub = Path.Combine(vanillaPlugins, "CompetitiveRounds", "CompetitiveRounds.dll");
+                    string rootV = Path.Combine(vanillaPlugins, "CompetitiveRounds.dll");
+                    if (File.Exists(sub)) currentDll = sub;
+                    else if (File.Exists(rootV)) currentDll = rootV;
+                }
+            }
+
+            Plugin.Log.LogInfo($"[UPDATE] Resolved DLL path: {currentDll}");
+
+            if (string.IsNullOrEmpty(currentDll) || !File.Exists(currentDll))
+            {
+                Plugin.Log.LogWarning("[UPDATE] Could not locate current DLL");
+                CompetitiveUI.ShowNotification("Update failed — can't find current DLL", new Color(1f, 0.4f, 0.4f), 5f);
+                IsUpdating = false;
+                yield break;
+            }
+
+            // Step 5: Write batch script that waits for ROUNDS to exit, then swaps the file
+            string batPath = Path.Combine(Path.GetTempPath(), "CompetitiveRounds_update.bat");
+            string batContent =
+                "@echo off\r\n" +
+                "echo Waiting for ROUNDS to close...\r\n" +
+                ":wait\r\n" +
+                "tasklist /FI \"IMAGENAME eq Rounds.exe\" 2>NUL | find /I \"Rounds.exe\" >NUL\r\n" +
+                "if %ERRORLEVEL%==0 (\r\n" +
+                "    timeout /t 2 /nobreak >NUL\r\n" +
+                "    goto wait\r\n" +
+                ")\r\n" +
+                "timeout /t 1 /nobreak >NUL\r\n" +
+                $"copy /Y \"{tempPath}\" \"{currentDll}\"\r\n" +
+                "if %ERRORLEVEL%==0 (\r\n" +
+                "    echo Update complete!\r\n" +
+                ") else (\r\n" +
+                "    echo Update failed - could not copy file.\r\n" +
+                "    pause\r\n" +
+                "    exit /b 1\r\n" +
+                ")\r\n" +
+                $"del \"{tempPath}\"\r\n" +
+                $"del \"%~f0\"\r\n";
+
+            try
+            {
+                File.WriteAllText(batPath, batContent);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[UPDATE] Failed to write batch script: {ex.Message}");
+                CompetitiveUI.ShowNotification("Update failed — could not write updater", new Color(1f, 0.4f, 0.4f), 5f);
+                IsUpdating = false;
+                yield break;
+            }
+
+            // Step 6: Launch the batch script hidden
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = batPath,
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                };
+                Process.Start(psi);
+                Plugin.Log.LogInfo("[UPDATE] Updater launched — will apply after ROUNDS closes");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[UPDATE] Failed to launch updater: {ex.Message}");
+                CompetitiveUI.ShowNotification("Update failed — could not launch updater", new Color(1f, 0.4f, 0.4f), 5f);
+                IsUpdating = false;
+                yield break;
+            }
+
+            UpdateReady = true;
+            IsUpdating = false;
+            CompetitiveUI.ShowNotification("Update downloaded! Close ROUNDS to apply.", new Color(0.3f, 1f, 0.3f), 15f);
+            NativeUI.MarkDirty();
         }
 
         // ── HMAC Match Signing ────────────────────────────────
@@ -487,6 +709,44 @@ namespace CompetitiveRounds
             ));
         }
 
+        public static void FetchRecentSeries(int limit = 10)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/series/recent?minutes=10080&limit={limit}",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        try
+                        {
+                            var list = new List<RecentSeriesEntry>();
+                            var parts = response.Split(new[] { "\"series_id\"" }, StringSplitOptions.None);
+                            for (int i = 1; i < parts.Length && list.Count < limit; i++)
+                            {
+                                var e = new RecentSeriesEntry();
+                                e.winner_name = ExtractJsonString(parts[i], "winner_name");
+                                e.p1_name = ExtractJsonString(parts[i], "p1_name");
+                                e.p2_name = ExtractJsonString(parts[i], "p2_name");
+                                e.p1_wins = ExtractJsonInt(parts[i], "p1_series_wins");
+                                e.p2_wins = ExtractJsonInt(parts[i], "p2_series_wins");
+                                e.winner_steam_id = ExtractJsonString(parts[i], "winner_steam_id");
+                                e.p1_steam_id = ExtractJsonString(parts[i], "p1_steam_id");
+                                e.p2_steam_id = ExtractJsonString(parts[i], "p2_steam_id");
+                                // Parse rating changes as float
+                                try{int rc1=parts[i].IndexOf("\"p1_rating_change\":");if(rc1>=0){rc1+="\"p1_rating_change\":".Length;int rc1e=rc1;while(rc1e<parts[i].Length&&(char.IsDigit(parts[i][rc1e])||parts[i][rc1e]=='.'||parts[i][rc1e]=='-'))rc1e++;if(rc1e>rc1)e.p1_rating_change=float.Parse(parts[i].Substring(rc1,rc1e-rc1),System.Globalization.CultureInfo.InvariantCulture);}}catch{}
+                                try{int rc2=parts[i].IndexOf("\"p2_rating_change\":");if(rc2>=0){rc2+="\"p2_rating_change\":".Length;int rc2e=rc2;while(rc2e<parts[i].Length&&(char.IsDigit(parts[i][rc2e])||parts[i][rc2e]=='.'||parts[i][rc2e]=='-'))rc2e++;if(rc2e>rc2)e.p2_rating_change=float.Parse(parts[i].Substring(rc2,rc2e-rc2),System.Globalization.CultureInfo.InvariantCulture);}}catch{}
+                                if (!string.IsNullOrEmpty(e.p1_name)) list.Add(e);
+                            }
+                            CachedRecentSeries = list;
+                            Plugin.Log.LogInfo($"Recent series loaded: {list.Count}");
+                            NativeUI.MarkDirty();
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"Recent series parse error: {ex.Message}"); }
+                    }
+                }
+            ));
+        }
+
         public static void FetchPlayerStats(string steamId, bool force = false)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
@@ -634,6 +894,85 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+
+            // Parse recent_rating_history
+            data.rating_history = new List<float>();
+            try
+            {
+                int rhStart = response.IndexOf("\"recent_rating_history\"");
+                if (rhStart >= 0)
+                {
+                    int arrStart = response.IndexOf("[", rhStart);
+                    int arrEnd = FindMatchingBracket(response, arrStart);
+                    if (arrStart >= 0 && arrEnd >= 0)
+                    {
+                        string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
+                        if (arr != "[]")
+                        {
+                            var parts = arr.Split(new[] { "\"rating\"" }, StringSplitOptions.None);
+                            for (int i = 1; i < parts.Length; i++)
+                            {
+                                // extract number after ":"
+                                int colonIdx = parts[i].IndexOf(':');
+                                if (colonIdx >= 0)
+                                {
+                                    int vStart = colonIdx + 1;
+                                    while (vStart < parts[i].Length && parts[i][vStart] == ' ') vStart++;
+                                    int vEnd = vStart;
+                                    while (vEnd < parts[i].Length && (char.IsDigit(parts[i][vEnd]) || parts[i][vEnd] == '.' || parts[i][vEnd] == '-')) vEnd++;
+                                    if (vEnd > vStart)
+                                    {
+                                        float val = float.Parse(parts[i].Substring(vStart, vEnd - vStart), System.Globalization.CultureInfo.InvariantCulture);
+                                        data.rating_history.Add(val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            // Reverse so oldest is first (API returns newest first)
+            if (data.rating_history.Count > 1)
+                data.rating_history.Reverse();
+            Plugin.Log.LogInfo($"[STATS] Parsed {data.rating_history.Count} rating history points for {data.display_name}");
+        }
+
+        // ── Selected player achievements (for LB detail) ─────────
+
+        public static Dictionary<string, AchievementData> SelectedPlayerAchievements { get; private set; }
+        private static string selectedAchSteamId = "";
+
+        public static void FetchAchievementsForView(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            if (steamId == selectedAchSteamId && SelectedPlayerAchievements != null) return; // already fetched
+            selectedAchSteamId = steamId;
+            SelectedPlayerAchievements = null;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/achievements/{steamId}",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        try
+                        {
+                            var dict = new Dictionary<string, AchievementData>();
+                            var parts = response.Split(new[] { "\"achievement_key\"" }, StringSplitOptions.None);
+                            for (int i = 1; i < parts.Length; i++)
+                            {
+                                string key = ExtractJsonString(parts[i], "");
+                                if (string.IsNullOrEmpty(key)) continue;
+                                bool unlocked = parts[i].Contains("\"unlocked\":true") || parts[i].Contains("\"unlocked\": true");
+                                dict[key] = new AchievementData { achievement_key = key, unlocked = unlocked };
+                            }
+                            SelectedPlayerAchievements = dict;
+                            NativeUI.MarkDirty();
+                        }
+                        catch { }
+                    }
+                }
+            ));
         }
 
         private static int FindMatchingBracket(string s, int openPos)
@@ -1296,6 +1635,24 @@ namespace CompetitiveRounds
         public static bool IsPlayerBlocked(string steamId)
         {
             return BlockedSteamIds.Contains(steamId);
+        }
+
+        // ── Disconnect Reporting (leave % tracking) ─────────
+
+        public static void ReportDisconnect(string reporterSteamId, string disconnectedSteamId)
+        {
+            if (string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(disconnectedSteamId)) return;
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/report-disconnect?reporter_steam_id={Escape(reporterSteamId)}&disconnected_steam_id={Escape(disconnectedSteamId)}",
+                "",
+                (success, response) =>
+                {
+                    if (success)
+                        Plugin.Log.LogInfo($"[DC] Reported disconnect by {disconnectedSteamId}: {response}");
+                    else
+                        Plugin.Log.LogWarning($"[DC] Failed to report disconnect: {response}");
+                }
+            ));
         }
 
         public static void BlockPlayer(string mySteamId, string targetSteamId, Action<bool> callback = null)

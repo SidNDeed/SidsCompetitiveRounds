@@ -156,6 +156,13 @@ async def cmd_rank(ctx, member: discord.Member = None):
     sweep_lines = f"5-0 Given: **{sg}** 🧹\n0-5 Taken: **{st}**"
     embed.add_field(name="💨  Sweeps", value=sweep_lines, inline=True)
 
+    # Leave rate
+    dc = s.get("ranked_dc_count", 0)
+    if dc > 0:
+        rt_total = rw + rl + dc
+        pct = f"{dc/rt_total*100:.1f}%" if rt_total > 0 else "—"
+        embed.add_field(name="🚪  Leave Rate", value=f"**{dc}** / {rt_total} ({pct})", inline=True)
+
     pos = await get_lb_position(link["steam_id"])
     embed.set_footer(text=f"Leaderboard: #{pos}  •  Steam: {s['steam_id']}")
     await ctx.send(embed=embed)
@@ -202,6 +209,13 @@ async def cmd_stats(ctx, member: discord.Member = None):
     sg, st = s.get("sweeps_given", 0), s.get("sweeps_taken", 0)
     if sg + st > 0:
         embed.add_field(name="💨  Sweeps", value=f"5-0: **{sg}** 🧹  ·  0-5: **{st}**", inline=True)
+
+    # Leave rate
+    dc = s.get("ranked_dc_count", 0)
+    if dc > 0:
+        rt_dc_total = rt + dc
+        pct = f"{dc/rt_dc_total*100:.1f}%" if rt_dc_total > 0 else "—"
+        embed.add_field(name="🚪  Leave Rate", value=f"**{dc}** / {rt_dc_total} ({pct})", inline=True)
 
     embed.add_field(name="\u200b", value="\u200b", inline=False)
 

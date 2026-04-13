@@ -26,6 +26,7 @@ class Player(Base):
     display_name = Column(String(64), nullable=False)
     ranked_enabled = Column(Boolean, nullable=False, default=False)
     total_xp = Column(Integer, nullable=False, default=0)
+    ranked_dc_count = Column(Integer, nullable=False, default=0)
     discord_id = Column(String(20), nullable=True, unique=True, index=True)
     first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

@@ -73,6 +73,10 @@ namespace CompetitiveRounds
         // Game over
         private static bool gameOverReported = false;
 
+        // Opponent disconnect detection
+        private static bool opponentWasPresent = false;
+        private static bool opponentDCReported = false;
+
         // GM_ArmsRace fields
         private static FieldInfo f_p1Points;
         private static FieldInfo f_p2Points;
@@ -233,6 +237,39 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo($"[POLL] Opponent ranked: {opponentIsRanked}, Match ranked: {matchIsRanked}");
                     });
                 }
+            }
+
+            // ── Opponent DC detection (leave % tracking) ──
+            // While still in the room during an active match, check if opponent left
+            if (inRoom && isTracking && !gameOverReported)
+            {
+                try
+                {
+                    int playerCount = PhotonNetwork.PlayerList?.Length ?? 0;
+                    if (playerCount >= 2)
+                        opponentWasPresent = true;
+
+                    if (opponentWasPresent && playerCount <= 1 && !opponentDCReported)
+                    {
+                        opponentDCReported = true;
+                        int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
+                        int oppR = localTeamId == 0 ? p2Rounds : p1Rounds;
+                        int totalPts = p1Points + p2Points;
+
+                        // Report for leave % if: ranked, >=2 total points, neither has >=4 rounds
+                        if (matchIsRanked && totalPts >= 2 && localR < 4 && oppR < 4
+                            && opponentSteamIdResolved && !opponentSteamId.StartsWith("photon_"))
+                        {
+                            Plugin.Log.LogInfo($"[DC] Opponent {opponentDisplayName} disconnected at {localR}-{oppR} ({totalPts}pts) — reporting leave");
+                            ApiClient.ReportDisconnect(localSteamId, opponentSteamId);
+                        }
+                        else
+                        {
+                            Plugin.Log.LogInfo($"[DC] Opponent left (ranked={matchIsRanked}, pts={totalPts}, rounds={localR}-{oppR}) — not eligible for leave tracking");
+                        }
+                    }
+                }
+                catch { }
             }
 
             wasInRoom = inRoom;
@@ -1225,6 +1262,10 @@ namespace CompetitiveRounds
             opponentCardsViaHarmony = false;
             preMatchOpponentCards.Clear();
             fieldsResolved = false;
+
+            // Reset DC tracking
+            opponentWasPresent = false;
+            opponentDCReported = false;
 
             // Reset achievement tracking
             achTookDamage = false;

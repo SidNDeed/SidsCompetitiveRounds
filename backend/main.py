@@ -481,6 +481,19 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                 g2.peak_rating = max(g2.peak_rating or new_r2, new_r2)
                 g2.updated_at = now
 
+                # Save rating history snapshots (powers the Elo-over-time graph)
+                for pid, r, rd, vol in [
+                    (p1.id, new_r1, new_rd1, new_vol1),
+                    (p2.id, new_r2, new_rd2, new_vol2),
+                ]:
+                    db.add(RatingHistory(
+                        player_id=pid,
+                        rating=r,
+                        rating_deviation=rd,
+                        volatility=vol,
+                        period_end=now,
+                    ))
+
             await db.commit()
         except Exception as ex:
             print(f"Series Glicko update error: {ex}")
@@ -829,36 +842,32 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
     ranked_series_wins = ranked_wl["ranked_wins"] if ranked_wl else 0
     ranked_series_losses = ranked_wl["ranked_losses"] if ranked_wl else 0
 
-    # Recent form (last 20 matches, newest first)
+    # Recent form (last 20 completed ranked SERIES, newest first — aligns with Elo changes)
     form_query = text("""
         SELECT
-            CASE WHEN m.winner_id = :pid THEN 'W' ELSE 'L' END AS result,
-            m.is_ranked,
+            CASE WHEN rs.winner_id = :pid THEN 'W' ELSE 'L' END AS result,
             CASE
-                WHEN m.player1_id = :pid THEN p2.display_name
+                WHEN rs.player1_id = :pid THEN p2.display_name
                 ELSE p1.display_name
             END AS opponent_name,
             CASE
-                WHEN m.player1_id = :pid THEN m.p1_rounds_won
-                ELSE m.p2_rounds_won
-            END AS my_rounds,
-            CASE
-                WHEN m.player1_id = :pid THEN m.p2_rounds_won
-                ELSE m.p1_rounds_won
-            END AS opp_rounds,
-            m.ended_at
-        FROM matches m
-        JOIN players p1 ON p1.id = m.player1_id
-        JOIN players p2 ON p2.id = m.player2_id
-        WHERE m.player1_id = :pid OR m.player2_id = :pid
-        ORDER BY m.ended_at DESC
+                WHEN rs.player1_id = :pid THEN rs.p1_series_wins || '-' || rs.p2_series_wins
+                ELSE rs.p2_series_wins || '-' || rs.p1_series_wins
+            END AS score,
+            rs.completed_at AS ended_at
+        FROM ranked_series rs
+        JOIN players p1 ON p1.id = rs.player1_id
+        JOIN players p2 ON p2.id = rs.player2_id
+        WHERE rs.status = 'completed'
+          AND (rs.player1_id = :pid OR rs.player2_id = :pid)
+        ORDER BY rs.completed_at DESC
         LIMIT 20
     """)
     form_rows = (await db.execute(form_query, {"pid": player.id})).mappings().all()
     recent_form = [
-        {"result": r["result"], "ranked": r["is_ranked"],
+        {"result": r["result"], "ranked": True,
          "opponent": r["opponent_name"],
-         "score": f"{r['my_rounds']}-{r['opp_rounds']}",
+         "score": r["score"],
          "date": r["ended_at"].isoformat() if r["ended_at"] else ""}
         for r in form_rows
     ]
@@ -891,6 +900,7 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         casual_losses=casual_losses,
         sweeps_given=sweeps_given,
         sweeps_taken=sweeps_taken,
+        ranked_dc_count=player.ranked_dc_count or 0,
         recent_form=recent_form,
     )
 
@@ -1742,6 +1752,42 @@ async def get_player_blocks(steam_id: str, db: AsyncSession = Depends(get_db)):
     return {"blocked_steam_ids": [r[0] for r in result.fetchall()]}
 
 
+# ── Routes: Disconnect Reporting ─────────────────────────────────
+
+@app.post("/api/v1/report-disconnect", tags=["Players"])
+async def report_disconnect(
+    reporter_steam_id: str = Query(...),
+    disconnected_steam_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Report that a player disconnected during a ranked match.
+    Called by the remaining player's client when the opponent leaves mid-match.
+    Only counts if the match was ranked and enough gameplay occurred.
+    The client enforces eligibility (ranked, >=2 total points, neither has >=4 rounds).
+    """
+    # Validate both players exist
+    reporter = (await db.execute(select(Player).where(Player.steam_id == reporter_steam_id))).scalar_one_or_none()
+    disconnected = (await db.execute(select(Player).where(Player.steam_id == disconnected_steam_id))).scalar_one_or_none()
+
+    if not reporter or not disconnected:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    if reporter.id == disconnected.id:
+        raise HTTPException(status_code=400, detail="Cannot report yourself")
+
+    # Increment the disconnected player's DC count
+    disconnected.ranked_dc_count = (disconnected.ranked_dc_count or 0) + 1
+    await db.commit()
+
+    print(f"[DC] {reporter_steam_id} reported disconnect by {disconnected_steam_id} (total: {disconnected.ranked_dc_count})")
+    return {
+        "status": "recorded",
+        "disconnected_steam_id": disconnected_steam_id,
+        "ranked_dc_count": disconnected.ranked_dc_count,
+    }
+
+
 # ── Routes: Discord Linking ──────────────────────────────────────
 
 @app.post("/api/v1/players/link-code", tags=["Discord"])
@@ -1843,12 +1889,13 @@ async def get_player_by_discord(discord_id: str, db: AsyncSession = Depends(get_
 
 @app.get("/api/v1/series/recent", tags=["Discord"])
 async def get_recent_series(
-    minutes: int = Query(2, ge=1, le=60),
+    minutes: int = Query(2, ge=1, le=43200),
+    limit: int = Query(20, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Get recently completed ranked series for Discord bot polling.
-    Returns series completed within the last N minutes.
+    Get recently completed ranked series.
+    Used by Discord bot (small minutes) and in-game leaderboard (large minutes + limit).
     """
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     query = text("""
@@ -1881,8 +1928,9 @@ async def get_recent_series(
         WHERE rs.status = 'completed'
           AND rs.completed_at >= :cutoff
         ORDER BY rs.completed_at DESC
+        LIMIT :limit
     """)
-    rows = (await db.execute(query, {"cutoff": cutoff})).mappings().all()
+    rows = (await db.execute(query, {"cutoff": cutoff, "limit": limit})).mappings().all()
 
     # Compute streaks for each player
     async def get_ranked_streak(steam_id):

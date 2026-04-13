@@ -95,6 +95,7 @@ class PlayerStatsResponse(BaseModel):
     casual_losses: int = 0
     sweeps_given: int = 0
     sweeps_taken: int = 0
+    ranked_dc_count: int = 0
     recent_form: list[dict] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
