@@ -12,6 +12,8 @@ API_BASE_URL = os.getenv("API_BASE_URL", "http://api:8000")
 LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL", "0"))
 SERIES_LOG_CHANNEL_ID = int(os.getenv("SERIES_LOG_CHANNEL", "0"))
 QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
+CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 
 RANK_ROLES = [
     (2610, "Grand Master V 2610+"),
@@ -102,7 +104,137 @@ async def on_ready():
     if not poll_recent_series.is_running(): poll_recent_series.start()
     if not sync_roles_periodic.is_running(): sync_roles_periodic.start()
     if not poll_queue_beacon.is_running(): poll_queue_beacon.start()
-    print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)})")
+    # Chat bridge: subscribe to the WS firehose so we can forward in-game
+    # messages to the Discord channel. Discord -> in-game goes the other way
+    # via on_message below.
+    asyncio.create_task(chat_ws_listener())
+    # One-shot backfill — resolve Discord usernames for any player that was
+    # linked before the discord_username column existed.
+    asyncio.create_task(backfill_discord_usernames())
+    print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID})")
+
+
+async def backfill_discord_usernames():
+    if not http_session or not API_SECRET_KEY:
+        return
+    await asyncio.sleep(5)  # give the API a moment to settle after bot restart
+    try:
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/admin/missing-discord-usernames",
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[BACKFILL] missing-discord-usernames returned {resp.status}"); return
+            data = await resp.json()
+    except Exception as e:
+        print(f"[BACKFILL] failed to fetch list: {e}"); return
+
+    ids = data.get("discord_ids", [])
+    if not ids:
+        print("[BACKFILL] No Discord usernames to backfill"); return
+    print(f"[BACKFILL] Resolving {len(ids)} Discord usernames")
+    resolved = 0
+    for did in ids:
+        try:
+            user = bot.get_user(int(did)) or await bot.fetch_user(int(did))
+            if user is None: continue
+            username = getattr(user, "global_name", None) or user.name
+            await http_session.post(
+                f"{API_BASE_URL}/api/v1/admin/set-discord-username",
+                json={"discord_id": str(did), "discord_username": username},
+                headers={"X-Internal-Key": API_SECRET_KEY},
+                timeout=aiohttp.ClientTimeout(total=5),
+            )
+            resolved += 1
+        except discord.NotFound:
+            continue
+        except Exception as e:
+            print(f"[BACKFILL] {did}: {e}")
+        # Rate-limit: Discord is lenient on user fetches but 5/s keeps us polite.
+        await asyncio.sleep(0.2)
+    print(f"[BACKFILL] Resolved {resolved}/{len(ids)} Discord usernames")
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Must not block command dispatch.
+    if message.author.bot:
+        await bot.process_commands(message)
+        return
+    if CHAT_CHANNEL_ID and message.channel and message.channel.id == CHAT_CHANNEL_ID:
+        content = (message.content or "").strip()
+        display = getattr(message.author, "global_name", None) or message.author.name
+        print(f"[CHAT] Discord msg from {display}: {content[:60]} (session={http_session is not None}, key={'set' if API_SECRET_KEY else 'MISSING'})")
+        if content and http_session is not None and API_SECRET_KEY:
+            try:
+                async with http_session.post(
+                    f"{API_BASE_URL}/api/v1/chat/post",
+                    json={
+                        "discord_id": str(message.author.id),
+                        "display_name": display,
+                        "message": content,
+                    },
+                    headers={"X-Internal-Key": API_SECRET_KEY},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    body = await resp.text()
+                    print(f"[CHAT] Relay Discord→API: status={resp.status} body={body[:100]}")
+            except Exception as e:
+                print(f"[CHAT] Failed to relay Discord -> API: {e}")
+    await bot.process_commands(message)
+
+
+async def chat_ws_listener():
+    """Long-lived WS subscription. Reconnects with backoff on drop."""
+    url = API_BASE_URL.replace("http://", "ws://").replace("https://", "wss://") + "/api/v1/ws/chat"
+    backoff = 2
+    while True:
+        try:
+            if http_session is None:
+                await asyncio.sleep(1); continue
+            async with http_session.ws_connect(url, heartbeat=30) as ws:
+                print(f"[CHAT] WS connected: {url}")
+                backoff = 2
+                async for msg in ws:
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        print(f"[CHAT] WS non-text: {msg.type}")
+                        continue
+                    try:
+                        data = msg.json()
+                    except Exception as e:
+                        print(f"[CHAT] WS parse error: {e}")
+                        continue
+                    src = data.get("source")
+                    content = (data.get("message") or "").strip()
+                    name = data.get("display_name") or "player"
+                    print(f"[CHAT] WS <- source={src} name={name} msg={content[:60]}")
+                    if src != "ingame":
+                        continue  # Discord originals already live there
+                    if not content:
+                        continue
+                    rating = data.get("rating")
+                    rating_str = f" ({rating:.0f})" if isinstance(rating, (int, float)) else ""
+                    title = data.get("title")
+                    title_str = f" [{title}]" if title else ""
+                    channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
+                    if channel is None:
+                        print(f"[CHAT] Channel {CHAT_CHANNEL_ID} not resolvable")
+                        continue
+                    try:
+                        await channel.send(
+                            f"**{discord.utils.escape_markdown(name)}"
+                            f"{discord.utils.escape_markdown(title_str)}"
+                            f"{rating_str}** (in-game): "
+                            f"{discord.utils.escape_markdown(content)[:1900]}"
+                        )
+                        print(f"[CHAT] Posted to Discord: {name}{title_str}: {content[:60]}")
+                    except Exception as e:
+                        print(f"[CHAT] Post to Discord failed: {e}")
+        except Exception as e:
+            print(f"[CHAT] WS dropped: {e} (reconnect in {backoff}s)")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
 
 @bot.event
 async def on_close():
@@ -113,7 +245,14 @@ async def on_close():
 async def cmd_link(ctx, code: str = None):
     if not code:
         await ctx.send("**How to link:**\n1. Open ROUNDS → Competitive menu → My Stats\n2. Click **Get Link Code**\n3. Type `!link YOUR_CODE` here"); return
-    result = await api_post("/players/link-discord", params={"code": code.upper(), "discord_id": str(ctx.author.id)})
+    # Send Discord username alongside the ID so the in-game UI can display "Linked as @foo"
+    # instead of raw ID. Prefer global_name (new display-name system), fall back to legacy name.
+    discord_username = getattr(ctx.author, "global_name", None) or ctx.author.name
+    result = await api_post("/players/link-discord", params={
+        "code": code.upper(),
+        "discord_id": str(ctx.author.id),
+        "discord_username": discord_username,
+    })
     if not result: await ctx.send("❌ API unreachable."); return
     if "error" in result:
         await ctx.send("❌ Invalid or expired code." if result.get("status") == 404 else f"❌ {result['error']}"); return

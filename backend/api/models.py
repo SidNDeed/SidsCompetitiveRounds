@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Double, ForeignKey, Index, Integer,
+    BigInteger, Boolean, Column, DateTime, Double, ForeignKey, Index, Integer,
     SmallInteger, String, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -28,6 +28,12 @@ class Player(Base):
     total_xp = Column(Integer, nullable=False, default=0)
     ranked_dc_count = Column(Integer, nullable=False, default=0)
     discord_id = Column(String(20), nullable=True, unique=True, index=True)
+    discord_username = Column(String(64), nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    gold_earned = Column(Integer, nullable=False, default=0)
+    gold_spent = Column(Integer, nullable=False, default=0)
+    active_title_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
+    active_trail_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -142,6 +148,68 @@ class MatchCard(Base):
     round_number = Column(SmallInteger, nullable=False)
 
     match = relationship("Match", back_populates="cards")
+
+
+class CardOffer(Base):
+    __tablename__ = "card_offers"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    match_id = Column(UUID(as_uuid=True), ForeignKey("matches.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    round_number = Column(Integer, nullable=False)
+    card_name = Column(String(64), nullable=False)
+    was_picked = Column(Boolean, nullable=False, default=False)
+
+
+class GoldTransaction(Base):
+    __tablename__ = "gold_transactions"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    amount = Column(Integer, nullable=False)
+    reason = Column(String(64), nullable=False)
+    reference_id = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class ShopItem(Base):
+    __tablename__ = "shop_items"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    sku = Column(String(64), unique=True, nullable=False)
+    kind = Column(String(16), nullable=False)
+    name = Column(String(128), nullable=False)
+    description = Column(String(256), nullable=True)
+    price = Column(Integer, nullable=False)
+    rarity = Column(String(16), nullable=False, default="common")
+    rotation_pool = Column(String(32), nullable=True)
+    preview_color = Column(String(16), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PlayerItem(Base):
+    __tablename__ = "player_items"
+
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    item_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="CASCADE"), primary_key=True)
+    purchased_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    purchase_price = Column(Integer, nullable=False)
+
+
+class Bet(Base):
+    __tablename__ = "bets"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    series_id = Column(UUID(as_uuid=True), ForeignKey("ranked_series.id", ondelete="CASCADE"), nullable=False)
+    bet_on_player_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    amount = Column(Integer, nullable=False)
+    odds_multiplier = Column(Double, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    settled_at = Column(DateTime(timezone=True), nullable=True)
+    payout = Column(Integer, nullable=True)
+
+    __table_args__ = (UniqueConstraint("player_id", "series_id", name="uq_bet_player_series"),)
 
 
 class RankedQueue(Base):

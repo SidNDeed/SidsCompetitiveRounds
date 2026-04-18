@@ -12,17 +12,20 @@ import random
 import string
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import uuid
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+import json as _json
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import GlickoRating, Match, MatchCard, Player, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement
+from models import Bet, CardOffer, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerItem, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -100,27 +103,108 @@ app.add_middleware(
 )
 
 
+# ── Version gate ───────────────────────────────────────────────
+# Clients send X-Mod-Version on every request. If the version is below
+# MIN_MOD_VERSION, the request is rejected with 426 so the mod can prompt
+# the user to update before showing any data.
+#
+# Initial deploy grandfathers requests with no header (older clients in the
+# wild). Once adoption of the header is universal, set REQUIRE_MOD_VERSION
+# to True to lock out anyone who removes it.
+
+MIN_MOD_VERSION = "1.20.0"
+REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
+
+# Endpoints that bypass the gate (mod uses these to discover the required version).
+# Use a frozenset of exact paths — startswith on a tuple containing "/" would match everything.
+_VERSION_GATE_BYPASS = frozenset({
+    "/api/v1/mod-version",
+    "/api/v1/health",
+    "/api/v1/healthz",
+    "/api/v1/chat/post",      # internal bot relay; authenticated by X-Internal-Key instead
+    "/api/v1/chat/recent",    # bot uses this for scrollback on WS reconnect too
+})
+
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in v.strip().split("."))
+    except Exception:
+        return (0,)
+
+
+@app.middleware("http")
+async def version_gate(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/v1/") or path in _VERSION_GATE_BYPASS:
+        return await call_next(request)
+    sent = request.headers.get("X-Mod-Version")
+    if sent is None:
+        if REQUIRE_MOD_VERSION:
+            return JSONResponse(
+                status_code=426,
+                content={"error": "outdated", "required": MIN_MOD_VERSION, "current": None},
+            )
+        return await call_next(request)
+    if _parse_version(sent) < _parse_version(MIN_MOD_VERSION):
+        return JSONResponse(
+            status_code=426,
+            content={"error": "outdated", "required": MIN_MOD_VERSION, "current": sent},
+        )
+    return await call_next(request)
+
+
 # ── Helpers ────────────────────────────────────────────────────
+
+def _hash_steam_id(steam_id: str) -> str:
+    """Server-salted one-way hash. Used to identify previously-purged Steam IDs
+    without storing the Steam ID itself."""
+    return hashlib.sha256(f"{MATCH_HMAC_SECRET}:{steam_id}".encode()).hexdigest()
+
+
+async def _is_steam_id_purged(db: AsyncSession, steam_id: str) -> bool:
+    if not MATCH_HMAC_SECRET:
+        return False
+    h = _hash_steam_id(steam_id)
+    row = await db.execute(text("SELECT 1 FROM deleted_steam_ids WHERE steam_id_hash = :h"), {"h": h})
+    return row.scalar() is not None
+
 
 async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: str) -> Player:
     """
     Find an existing player by Steam ID or create a new one.
     Also creates their initial Glicko-2 rating row.
+
+    If the Steam ID was previously purged via /players/{steam_id}/data, the
+    player is re-created as a permanent [Deleted User] tombstone. Their
+    matches continue to process so opponents' stats stay consistent, but the
+    deleted player never earns a rating, never shows on leaderboards, and
+    can never reclaim their identity.
     """
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
 
     if player:
-        player.display_name = display_name
-        player.last_seen = datetime.now(timezone.utc)
+        # Don't resurrect a tombstoned row.
+        if player.deleted_at is None:
+            player.display_name = display_name
+            player.last_seen = datetime.now(timezone.utc)
         return player
 
-    # New player — ranked_enabled defaults to False until they explicitly enable it via the mod
-    player = Player(steam_id=steam_id, display_name=display_name, ranked_enabled=False)
+    # Was this Steam ID permanently deleted in a previous session?
+    purged = await _is_steam_id_purged(db, steam_id)
+
+    player = Player(
+        steam_id=steam_id,
+        display_name="[Deleted User]" if purged else display_name,
+        ranked_enabled=False,
+        deleted_at=datetime.now(timezone.utc) if purged else None,
+    )
     db.add(player)
     await db.flush()  # Get the player.id
 
-    # Create initial rating
+    # Tombstoned players still get a Glicko row so FK constraints hold, but
+    # it's scoped out of the recalc by the deleted_at filter.
     glicko = GlickoRating(
         player_id=player.id,
         rating=GLICKO2_DEFAULT_RATING,
@@ -128,6 +212,9 @@ async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: st
         volatility=GLICKO2_DEFAULT_VOLATILITY,
     )
     db.add(glicko)
+
+    if purged:
+        print(f"[PRIVACY] Re-registration blocked: steam_id={steam_id} was previously purged — tombstoned")
     return player
 
 
@@ -257,12 +344,12 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.18.6"
+LATEST_MOD_VERSION = "1.20.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
-    """Returns the latest recommended mod version."""
-    return {"version": LATEST_MOD_VERSION}
+    """Returns the latest recommended mod version and the gating floor."""
+    return {"version": LATEST_MOD_VERSION, "min_version": MIN_MOD_VERSION}
 
 
 # ── Routes: Match Submission ───────────────────────────────────
@@ -342,6 +429,18 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             round_number=card.round_number,
         ))
 
+    # Record per-player offered cards (pass-tracking). Only the local mod has
+    # this for itself; opponent's offers may or may not be present.
+    for player_obj, side in ((p1, report.player1), (p2, report.player2)):
+        for offer in side.card_offers:
+            db.add(CardOffer(
+                match_id=match.id,
+                player_id=player_obj.id,
+                round_number=offer.round_number,
+                card_name=offer.card_name,
+                was_picked=offer.was_picked,
+            ))
+
     # Increment games_in_period for both players
     for pid in [p1.id, p2.id]:
         result = await db.execute(select(GlickoRating).where(GlickoRating.player_id == pid))
@@ -367,8 +466,21 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         opponent_id=p1.id, db=db,
     )
 
-    p1.total_xp = (p1.total_xp or 0) + p1_xp
-    p2.total_xp = (p2.total_xp or 0) + p2_xp
+    # Convert XP milestones to gold BEFORE persisting — 100 XP = 1 gold.
+    # Only the crossings matter (so we don't double-pay if a player re-reports).
+    old_xp_p1 = p1.total_xp or 0
+    old_xp_p2 = p2.total_xp or 0
+    p1.total_xp = old_xp_p1 + p1_xp
+    p2.total_xp = old_xp_p2 + p2_xp
+
+    gold_p1 = (p1.total_xp // 100) - (old_xp_p1 // 100)
+    gold_p2 = (p2.total_xp // 100) - (old_xp_p2 // 100)
+    if gold_p1 > 0:
+        p1.gold_earned = (p1.gold_earned or 0) + gold_p1
+        db.add(GoldTransaction(player_id=p1.id, amount=gold_p1, reason="xp", reference_id=str(match.id)))
+    if gold_p2 > 0:
+        p2.gold_earned = (p2.gold_earned or 0) + gold_p2
+        db.add(GoldTransaction(player_id=p2.id, amount=gold_p2, reason="xp", reference_id=str(match.id)))
 
     # Store XP earned per player on the match record
     match.p1_xp_gained = p1_xp
@@ -433,6 +545,20 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             series.completed_at = datetime.now(timezone.utc)
             series_status = "completed"
             series_completed = True
+
+            # +5 gold to the series winner, +1 extra if it was a 2-0 sweep.
+            series_winner = p1 if series.p1_series_wins >= 2 else p2
+            bonus = 5
+            if series.p1_series_wins == 0 or series.p2_series_wins == 0:
+                bonus += 1
+            series_winner.gold_earned = (series_winner.gold_earned or 0) + bonus
+            db.add(GoldTransaction(
+                player_id=series_winner.id, amount=bonus,
+                reason="series_win", reference_id=str(series.id),
+            ))
+
+            # Settle all pending bets on this series.
+            await _settle_series_bets(db, series)
         else:
             series_status = "active"
 
@@ -465,8 +591,16 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                 )
 
                 # Store rating changes on the series for UI display
-                series.p1_rating_change = round(new_r1 - g1.rating, 1)
-                series.p2_rating_change = round(new_r2 - g2.rating, 1)
+                # Must map match-report p1/p2 to the series' player1/player2
+                # (match report order can differ from series order)
+                rc_match_p1 = round(new_r1 - g1.rating, 1)
+                rc_match_p2 = round(new_r2 - g2.rating, 1)
+                if p1.id == series.player1_id:
+                    series.p1_rating_change = rc_match_p1
+                    series.p2_rating_change = rc_match_p2
+                else:
+                    series.p1_rating_change = rc_match_p2
+                    series.p2_rating_change = rc_match_p1
 
                 # Apply updates
                 now = datetime.now(timezone.utc)
@@ -523,10 +657,36 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                         achievement_key="regicide",
                     )
                     db.add(ach)
+                    # Match the /achievements/unlock gold grant (25 gold).
+                    winner_row = (await db.execute(select(Player).where(Player.id == series.winner_id))).scalar_one_or_none()
+                    if winner_row is not None:
+                        winner_row.gold_earned = (winner_row.gold_earned or 0) + 25
+                        db.add(GoldTransaction(
+                            player_id=series.winner_id, amount=25,
+                            reason="achievement", reference_id="regicide",
+                        ))
                     await db.commit()
-                    print(f"[ACH] Regicide auto-granted to {winner_steam} for beating Sid in ranked series")
+                    print(f"[ACH] Regicide auto-granted to {winner_steam} for beating Sid in ranked series (+25 gold)")
         except Exception as ex:
             print(f"Regicide auto-grant error: {ex}")
+
+    # Compile gold breakdown for the reporter so the notification can show
+    # "+3 gold [XP]  [Series win +5]  [Sweep +1]" type details.
+    reporter_is_p1 = (report.reported_by_steam_id == report.player1.steam_id)
+    reporter_gold_from_xp = gold_p1 if reporter_is_p1 else gold_p2
+    reporter_gold_total = reporter_gold_from_xp
+    reporter_gold_bonuses = []
+    if reporter_gold_from_xp > 0:
+        reporter_gold_bonuses.append(f"XP +{reporter_gold_from_xp}")
+    # Series-win gold only goes to the series winner; check if reporter == winner.
+    if series_completed:
+        reporter_player_id = p1.id if reporter_is_p1 else p2.id
+        if series.winner_id == reporter_player_id:
+            reporter_gold_total += 5
+            reporter_gold_bonuses.append("Series win +5")
+            if series.p1_series_wins == 0 or series.p2_series_wins == 0:
+                reporter_gold_total += 1
+                reporter_gold_bonuses.append("Sweep +1")
 
     return MatchResponse(
         match_id=match.id,
@@ -538,6 +698,8 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         level=reporter_level,
         series_status=series_status,
         series_score=series_score,
+        gold_gained=reporter_gold_total,
+        gold_bonuses=reporter_gold_bonuses,
     )
 
 
@@ -606,11 +768,16 @@ async def get_leaderboard(
             CASE WHEN COALESCE(c.total, 0) > 0
                  THEN ROUND(COALESCE(c.wins, 0)::numeric / c.total, 4)
                  ELSE 0 END AS win_rate,
-            COALESCE(p.total_xp, 0) AS total_xp
+            COALESCE(p.total_xp, 0) AS total_xp,
+            COALESCE(p.gold_earned, 0) - COALESCE(p.gold_spent, 0) AS gold,
+            si.name          AS title,
+            si.preview_color AS title_color
         FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
         LEFT JOIN combined c ON c.player_id = p.id
+        LEFT JOIN shop_items si ON si.id = p.active_title_id
         WHERE COALESCE(c.total, 0) >= :min_matches
+          AND p.deleted_at IS NULL
         ORDER BY gr.rating DESC
         LIMIT :limit OFFSET :offset
     """)
@@ -630,6 +797,9 @@ async def get_leaderboard(
             losses=row["losses"],
             win_rate=float(row["win_rate"]),
             level=level_from_xp(row["total_xp"])[0],
+            gold=int(row["gold"] or 0),
+            title=row["title"],
+            title_color=row["title_color"],
         )
         for row in rows
     ]
@@ -719,8 +889,21 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         for h in history_result.scalars().all()
     ]
 
-    # Top cards by pick count
+    # Top cards by pick count, with pass-rate from card_offers (additive — old
+    # matches without offer rows just yield times_offered=0, pass_rate=0).
     cards_query = text("""
+        WITH offers AS (
+            SELECT card_name,
+                   COUNT(*) AS times_offered,
+                   ROUND(
+                       (1.0 - SUM(CASE WHEN was_picked THEN 1 ELSE 0 END)::numeric
+                            / NULLIF(COUNT(*), 0)),
+                       4
+                   ) AS pass_rate
+            FROM card_offers
+            WHERE player_id = :pid
+            GROUP BY card_name
+        )
         SELECT
             mc.card_name,
             COUNT(*) AS times_picked,
@@ -728,18 +911,22 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
             ROUND(
                 SUM(CASE WHEN m.winner_id = :pid THEN 1 ELSE 0 END)::numeric
                 / NULLIF(COUNT(*), 0), 4
-            ) AS win_rate
+            ) AS win_rate,
+            COALESCE(o.times_offered, 0) AS times_offered,
+            COALESCE(o.pass_rate, 0)     AS pass_rate
         FROM match_cards mc
         JOIN matches m ON m.id = mc.match_id
+        LEFT JOIN offers o ON o.card_name = mc.card_name
         WHERE mc.player_id = :pid
-        GROUP BY mc.card_name
+        GROUP BY mc.card_name, o.times_offered, o.pass_rate
         ORDER BY times_picked DESC
         LIMIT 10
     """)
     cards = (await db.execute(cards_query, {"pid": player.id})).mappings().all()
     top_cards = [
         {"card_name": c["card_name"], "times_picked": c["times_picked"],
-         "wins_with": c["wins_with"], "win_rate": float(c["win_rate"] or 0)}
+         "wins_with": c["wins_with"], "win_rate": float(c["win_rate"] or 0),
+         "times_offered": c["times_offered"], "pass_rate": float(c["pass_rate"] or 0)}
         for c in cards
     ]
 
@@ -782,6 +969,25 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
             best_casual_streak = max(best_casual_streak, cur_casual_streak)
         else:
             cur_casual_streak = 0
+
+    # Active cosmetic lookups (title + trail)
+    active_title_name: str | None = None
+    active_title_color: str | None = None
+    active_trail_sku: str | None = None
+    active_trail_color: str | None = None
+    active_trail_price: int = 0
+    for cosmetic_id, is_title in ((player.active_title_id, True), (player.active_trail_id, False)):
+        if cosmetic_id is None:
+            continue
+        row = (await db.execute(
+            select(ShopItem.name, ShopItem.sku, ShopItem.preview_color, ShopItem.price).where(ShopItem.id == cosmetic_id)
+        )).first()
+        if row is None:
+            continue
+        if is_title:
+            active_title_name, active_title_color = row[0], row[2]
+        else:
+            active_trail_sku, active_trail_color, active_trail_price = row[1], row[2], row[3] or 0
 
     # Casual W/L (individual casual matches only)
     casual_wl_query = text("""
@@ -885,6 +1091,14 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         win_rate=round(wins / total, 4) if total > 0 else 0.0,
         ranked_enabled=player.ranked_enabled,
         discord_id=player.discord_id,
+        discord_username=player.discord_username,
+        gold_earned=player.gold_earned or 0,
+        gold_spent=player.gold_spent or 0,
+        active_title=active_title_name,
+        active_title_color=active_title_color,
+        active_trail_sku=active_trail_sku,
+        active_trail_color=active_trail_color,
+        active_trail_price=active_trail_price,
         last_match=stats["last_match"],
         recent_rating_history=history,
         top_cards=top_cards,
@@ -910,7 +1124,7 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
 @app.get("/api/v1/players/{steam_id}/matches", response_model=list[MatchHistoryEntry], tags=["Players"])
 async def get_player_matches(
     steam_id: str,
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(100, ge=1, le=2000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
@@ -942,7 +1156,17 @@ async def get_player_matches(
             CASE WHEN rs.player1_id = :pid THEN rs.p1_rating_change
                  ELSE rs.p2_rating_change END AS series_rating_change,
             CASE WHEN m.player1_id = :pid THEN m.p1_xp_gained
-                 ELSE m.p2_xp_gained END AS xp_gained
+                 ELSE m.p2_xp_gained END AS xp_gained,
+            -- Gold earned ON this match (xp crossings), and series bonus if applicable.
+            COALESCE((
+                SELECT SUM(gt.amount) FROM gold_transactions gt
+                WHERE gt.player_id = :pid AND gt.reason = 'xp' AND gt.reference_id = m.id::text
+            ), 0) AS gold_gained,
+            COALESCE((
+                SELECT SUM(gt.amount) FROM gold_transactions gt
+                WHERE gt.player_id = :pid AND gt.reason = 'series_win' AND gt.reference_id = m.series_id::text
+                  AND m.series_id IS NOT NULL
+            ), 0) AS series_gold_gained
         FROM matches m
         JOIN players p1 ON p1.id = m.player1_id
         JOIN players p2 ON p2.id = m.player2_id
@@ -1011,6 +1235,8 @@ async def get_player_matches(
             series_score=series_score_str,
             series_rating_change=series_rc,
             xp_gained=row["xp_gained"] or 0,
+            gold_gained=row["gold_gained"] or 0,
+            series_gold_gained=row["series_gold_gained"] or 0,
         ))
 
     return entries
@@ -1044,7 +1270,26 @@ async def get_card_stats(
     elif is_ranked == "false":
         ranked_filter = "AND m.is_ranked = false"
 
+    # Pass-rate aggregation. Filtered to the same player when requested so the
+    # number reflects "how often THIS player passes on this card." Without a
+    # player filter we pool across everyone — community-wide pass rate.
+    offer_player_filter = ""
+    if steam_id:
+        offer_player_filter = "WHERE player_id = (SELECT id FROM players WHERE steam_id = :steam_id)"
+
     query = text(f"""
+        WITH offers AS (
+            SELECT card_name,
+                   COUNT(*) AS times_offered,
+                   ROUND(
+                       (1.0 - SUM(CASE WHEN was_picked THEN 1 ELSE 0 END)::numeric
+                            / NULLIF(COUNT(*), 0)),
+                       4
+                   ) AS pass_rate
+            FROM card_offers
+            {offer_player_filter}
+            GROUP BY card_name
+        )
         SELECT
             mc.card_name,
             mc.card_rarity,
@@ -1055,11 +1300,14 @@ async def get_card_stats(
             ROUND(
                 SUM(CASE WHEN m.winner_id = mc.player_id THEN 1 ELSE 0 END)::numeric
                 / NULLIF(COUNT(*), 0), 4
-            ) AS win_rate
+            ) AS win_rate,
+            COALESCE(o.times_offered, 0) AS times_offered,
+            COALESCE(o.pass_rate, 0)     AS pass_rate
         FROM match_cards mc
         JOIN matches m ON m.id = mc.match_id
+        LEFT JOIN offers o ON o.card_name = mc.card_name
         WHERE 1=1 {player_filter} {ranked_filter}
-        GROUP BY mc.card_name, mc.card_rarity
+        GROUP BY mc.card_name, mc.card_rarity, o.times_offered, o.pass_rate
         HAVING COUNT(*) >= :min_picks
         ORDER BY {sort_by} {"DESC" if order == "desc" else "ASC"}
         LIMIT :limit
@@ -1076,6 +1324,8 @@ async def get_card_stats(
             unique_players=r["unique_players"],
             wins_with_card=r["wins_with_card"],
             win_rate=float(r["win_rate"] or 0),
+            times_offered=r["times_offered"],
+            pass_rate=float(r["pass_rate"] or 0),
         )
         for r in rows
     ]
@@ -1102,9 +1352,12 @@ async def recalculate_ratings(
     now = datetime.now(timezone.utc)
     updated_count = 0
 
-    # Get all players with ratings
+    # Get all live players with ratings. Tombstoned (anonymized) players keep
+    # their Glicko row for FK integrity but are skipped by the recalc.
     result = await db.execute(
-        select(GlickoRating).join(Player, Player.id == GlickoRating.player_id)
+        select(GlickoRating)
+        .join(Player, Player.id == GlickoRating.player_id)
+        .where(Player.deleted_at.is_(None))
     )
     all_ratings = result.scalars().all()
 
@@ -1818,6 +2071,7 @@ async def generate_link_code(steam_id: str = Query(...), db: AsyncSession = Depe
 async def link_discord(
     code: str = Query(...),
     discord_id: str = Query(...),
+    discord_username: str | None = Query(None, max_length=64),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1851,6 +2105,8 @@ async def link_discord(
         raise HTTPException(status_code=404, detail="Player not found")
 
     player.discord_id = discord_id
+    if discord_username:
+        player.discord_username = discord_username
 
     # Delete the used code
     await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": player.id})
@@ -1861,7 +2117,48 @@ async def link_discord(
         "steam_id": player.steam_id,
         "display_name": player.display_name,
         "discord_id": discord_id,
+        "discord_username": player.discord_username,
     }
+
+
+@app.get("/api/v1/admin/missing-discord-usernames", tags=["Discord"])
+async def missing_discord_usernames(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Internal — used by the bot's startup backfill. Returns Discord IDs that
+    are linked but haven't cached a username yet."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    rows = (await db.execute(text(
+        "SELECT discord_id FROM players "
+        "WHERE discord_id IS NOT NULL AND discord_username IS NULL AND deleted_at IS NULL "
+        "LIMIT 500"
+    ))).mappings().all()
+    return {"discord_ids": [r["discord_id"] for r in rows]}
+
+
+@app.post("/api/v1/admin/set-discord-username", tags=["Discord"])
+async def set_discord_username(
+    payload: dict,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Internal — bot writes resolved Discord usernames here."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    discord_id = str(payload.get("discord_id", "")).strip()
+    username = str(payload.get("discord_username", "")).strip()[:64]
+    if not discord_id or not username:
+        return {"status": "skipped"}
+    await db.execute(
+        text("UPDATE players SET discord_username = :u WHERE discord_id = :did AND discord_username IS NULL"),
+        {"u": username, "did": discord_id},
+    )
+    await db.commit()
+    return {"status": "ok"}
 
 
 @app.get("/api/v1/players/by-discord/{discord_id}", tags=["Discord"])
@@ -1987,6 +2284,698 @@ async def get_recent_series(
     return {"series": series_list}
 
 
+# ── Chat bridge (in-game ↔ Discord) ──────────────────────────
+# Minimal groundwork: in-memory fanout. Mods connect via WebSocket;
+# Discord bot POSTs Discord messages to /chat/post which broadcasts
+# to every WS client. Bot also holds one WS connection so in-game
+# messages reach the Discord channel.
+#
+# TODO (hardening, not in scope yet): per-connection rate limiting,
+# HMAC on the send path, chat_messages persistence for scrollback.
+
+class _ChatManager:
+    def __init__(self):
+        self._connections: set[WebSocket] = set()
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        self._connections.add(ws)
+
+    def disconnect(self, ws: WebSocket):
+        self._connections.discard(ws)
+
+    async def broadcast(self, message: dict, exclude: WebSocket | None = None):
+        payload = _json.dumps(message)
+        dead = []
+        for ws in list(self._connections):
+            if ws is exclude:
+                continue
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self._connections.discard(ws)
+
+    @property
+    def count(self) -> int:
+        return len(self._connections)
+
+
+chat_manager = _ChatManager()
+
+
+async def _persist_chat(db_session_factory, entry: dict):
+    """Insert one chat row. Swallows failures — chat durability is nice-to-have, never critical path."""
+    from database import async_session
+    try:
+        async with async_session() as db:
+            await db.execute(
+                text(
+                    "INSERT INTO chat_messages (source, steam_id, discord_id, display_name, message) "
+                    "VALUES (:source, :steam_id, :discord_id, :display_name, :message)"
+                ),
+                {
+                    "source": entry.get("source", "ingame"),
+                    "steam_id": entry.get("steam_id"),
+                    "discord_id": entry.get("discord_id"),
+                    "display_name": entry.get("display_name", "")[:64],
+                    "message": entry.get("message", "")[:500],
+                },
+            )
+            await db.commit()
+    except Exception as e:
+        print(f"[CHAT] persist failed: {e}")
+
+
+async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | None = None) -> dict:
+    """Look up Glicko rating + active title (for the 'Name [Title] (rating)' render).
+    Returns {'rating': int|None, 'title': str|None, 'title_color': str|None}."""
+    from database import async_session
+    try:
+        async with async_session() as db:
+            col = None
+            val = None
+            if steam_id:
+                col, val = "steam_id", steam_id
+            elif discord_id:
+                col, val = "discord_id", discord_id
+            else:
+                return {"rating": None, "title": None, "title_color": None}
+            r = await db.execute(text(
+                f"SELECT gr.rating, si.name AS title, si.preview_color AS title_color "
+                f"FROM glicko_ratings gr "
+                f"JOIN players p ON p.id = gr.player_id "
+                f"LEFT JOIN shop_items si ON si.id = p.active_title_id "
+                f"WHERE p.{col} = :v AND p.deleted_at IS NULL"
+            ), {"v": val})
+            row = r.mappings().first()
+            if row is None:
+                return {"rating": None, "title": None, "title_color": None}
+            return {
+                "rating": int(round(row["rating"])) if row["rating"] is not None else None,
+                "title": row["title"],
+                "title_color": row["title_color"],
+            }
+    except Exception as e:
+        print(f"[CHAT] meta lookup failed: {e}")
+        return {"rating": None, "title": None, "title_color": None}
+
+
+@app.websocket("/api/v1/ws/chat")
+async def ws_chat(ws: WebSocket):
+    """Mod <-> server chat channel. Messages are broadcast fan-out style."""
+    sent = ws.headers.get("x-mod-version")
+    if sent and _parse_version(sent) < _parse_version(MIN_MOD_VERSION):
+        await ws.close(code=1008, reason="outdated")
+        return
+    await chat_manager.connect(ws)
+    print(f"[CHAT] subscriber connected (total={chat_manager.count})")
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                data = _json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            # App-level keepalive — silently ignore, don't broadcast.
+            if data.get("type") == "ping":
+                continue
+            message = str(data.get("message", ""))[:500].strip()
+            steam_id = str(data.get("steam_id", ""))[:20]
+            display_name = str(data.get("display_name", ""))[:64]
+            if not message or not steam_id:
+                continue
+            meta = await _lookup_chat_meta(steam_id=steam_id)
+            out = {
+                "source": "ingame",
+                "steam_id": steam_id,
+                "display_name": display_name,
+                "rating": meta["rating"],
+                "title": meta["title"],
+                "title_color": meta["title_color"],
+                "message": message,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            print(f"[CHAT] <- ingame {display_name}({meta['rating']}): {message[:80]}")
+            # Exclude the sender so they don't double-render (local echo on the client covers it).
+            await chat_manager.broadcast(out, exclude=ws)
+            await _persist_chat(None, out)
+    except WebSocketDisconnect:
+        print(f"[CHAT] subscriber disconnected")
+        chat_manager.disconnect(ws)
+    except Exception as e:
+        print(f"[CHAT] WS error: {e}")
+        chat_manager.disconnect(ws)
+
+
+@app.post("/api/v1/chat/post", tags=["Chat"])
+async def post_chat_from_discord(
+    payload: dict,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+):
+    """Bot -> server relay. Auth: same API_SECRET_KEY used for the Glicko admin route."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    message = str(payload.get("message", ""))[:500].strip()
+    if not message:
+        return {"status": "empty"}
+    discord_id = str(payload.get("discord_id", ""))[:20] or None
+    meta = await _lookup_chat_meta(discord_id=discord_id) if discord_id else {"rating": None, "title": None, "title_color": None}
+    out = {
+        "source": "discord",
+        "discord_id": discord_id,
+        "display_name": str(payload.get("display_name", "Discord"))[:64],
+        "rating": meta["rating"],
+        "title": meta["title"],
+        "title_color": meta["title_color"],
+        "message": message,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    print(f"[CHAT] <- discord {out['display_name']}({meta['rating']}): {message[:80]} (subs={chat_manager.count})")
+    await chat_manager.broadcast(out)
+    await _persist_chat(None, out)
+    return {"status": "posted", "subscribers": chat_manager.count}
+
+
+@app.get("/api/v1/chat/recent", tags=["Chat"])
+async def get_recent_chat(
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Scrollback for clients just connecting. Returns most-recent first, newest-last
+    so the client can append directly to its display log."""
+    # Join to current rating + active title so scrollback shows them too.
+    rows = (await db.execute(
+        text(
+            "SELECT cm.source, cm.steam_id, cm.discord_id, cm.display_name, cm.message, cm.created_at, "
+            "       ROUND(gr.rating)::int AS rating, si.name AS title, si.preview_color AS title_color "
+            "FROM chat_messages cm "
+            "LEFT JOIN players p ON "
+            "   (cm.steam_id IS NOT NULL AND p.steam_id = cm.steam_id) OR "
+            "   (cm.steam_id IS NULL AND cm.discord_id IS NOT NULL AND p.discord_id = cm.discord_id) "
+            "LEFT JOIN glicko_ratings gr ON gr.player_id = p.id AND p.deleted_at IS NULL "
+            "LEFT JOIN shop_items si ON si.id = p.active_title_id "
+            "ORDER BY cm.created_at DESC LIMIT :limit"
+        ),
+        {"limit": limit},
+    )).mappings().all()
+    entries = list(reversed([
+        {
+            "source": r["source"],
+            "steam_id": r["steam_id"],
+            "discord_id": r["discord_id"],
+            "display_name": r["display_name"],
+            "rating": r["rating"],
+            "title": r["title"],
+            "title_color": r["title_color"],
+            "message": r["message"],
+            "timestamp": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]))
+    return {"messages": entries}
+
+
+# ── Betting helpers ──────────────────────────────────────────
+# Elo expectancy. At |ΔR| ≥ 800 the favorite's P → ≈0.99, so the payout
+# multiplier floors at 1/0.99 ≈ 1.01x — practically nothing for betting the
+# obvious winner (matches the requested design).
+def _elo_expectancy(rating_a: float, rating_b: float) -> float:
+    return 1.0 / (1.0 + 10.0 ** ((rating_b - rating_a) / 400.0))
+
+
+def _odds_multiplier(bet_on_rating: float, opponent_rating: float) -> float:
+    p = _elo_expectancy(bet_on_rating, opponent_rating)
+    if p <= 0.0:
+        return 3.0
+    # Cap the payout multiplier at 3x so no single bet can pay more than triple
+    # your stake. Underdog bets on very-large Elo gaps still max out at 3x.
+    # Favorite bets floor at 1.01x (barely-profitable) — matches the intent of
+    # "shouldn't give anyone any gold for betting on an 800+ favorite."
+    mult = 1.0 / p
+    return max(1.01, min(mult, 3.0))
+
+
+async def _settle_series_bets(db: AsyncSession, series: RankedSeries):
+    """Called when a series transitions to status='completed'. Pays winning
+    bets from the implicit house pool."""
+    rows = (await db.execute(
+        select(Bet).where(Bet.series_id == series.id, Bet.settled_at.is_(None))
+    )).scalars().all()
+    if not rows:
+        return
+    now = datetime.now(timezone.utc)
+    for bet in rows:
+        if bet.bet_on_player_id == series.winner_id:
+            payout = int(round(bet.amount * bet.odds_multiplier))
+            bet.payout = payout
+            # Credit to bettor — payout INCLUDES stake return.
+            bettor = (await db.execute(select(Player).where(Player.id == bet.player_id))).scalar_one_or_none()
+            if bettor is not None:
+                bettor.gold_earned = (bettor.gold_earned or 0) + payout
+                db.add(GoldTransaction(
+                    player_id=bettor.id, amount=payout,
+                    reason="bet_win", reference_id=str(series.id),
+                ))
+        else:
+            bet.payout = 0  # lost
+        bet.settled_at = now
+    print(f"[BETS] Settled {len(rows)} bets on series {series.id}")
+
+
+# ── Routes: Shop ─────────────────────────────────────────────
+
+@app.get("/api/v1/shop/items", tags=["Shop"])
+async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession = Depends(get_db)):
+    """Always-available items + (future) today's rotation pick. If steam_id is
+    provided, annotates each item with 'owned' so the UI can hide Buy buttons
+    for already-owned items."""
+    rows = (await db.execute(
+        select(ShopItem).where(ShopItem.rotation_pool.is_(None)).order_by(ShopItem.price)
+    )).scalars().all()
+
+    owned_ids: set[int] = set()
+    if steam_id:
+        p = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+        if p is not None:
+            owned_ids = {
+                r for (r,) in (await db.execute(
+                    select(PlayerItem.item_id).where(PlayerItem.player_id == p.id)
+                )).all()
+            }
+
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "sku": r.sku,
+                "kind": r.kind,
+                "name": r.name,
+                "description": r.description,
+                "price": r.price,
+                "rarity": r.rarity,
+                "preview_color": r.preview_color,
+                "owned": r.id in owned_ids,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/v1/players/{steam_id}/inventory", tags=["Shop"])
+async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """Titles + trails the player has purchased."""
+    p = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if p is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    rows = (await db.execute(
+        select(ShopItem, PlayerItem)
+        .join(PlayerItem, PlayerItem.item_id == ShopItem.id)
+        .where(PlayerItem.player_id == p.id)
+        .order_by(PlayerItem.purchased_at.desc())
+    )).all()
+    return {
+        "active_title_id": p.active_title_id,
+        "items": [
+            {
+                "id": item.id,
+                "sku": item.sku,
+                "kind": item.kind,
+                "name": item.name,
+                "rarity": item.rarity,
+                "preview_color": item.preview_color,
+                "purchased_at": pi.purchased_at.isoformat() if pi.purchased_at else None,
+                "purchase_price": pi.purchase_price,
+            }
+            for (item, pi) in rows
+        ],
+    }
+
+
+@app.post("/api/v1/shop/purchase", tags=["Shop"])
+async def purchase_item(
+    steam_id: str = Query(...),
+    sku: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Buy an item. HMAC signs 'buy:{steam_id}:{sku}'. Server rejects if:
+    already-owned, not enough gold, or item doesn't exist."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(), f"buy:{steam_id}:{sku}".encode(), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if player.deleted_at is not None:
+        raise HTTPException(status_code=410, detail="Account deleted")
+
+    item = (await db.execute(select(ShopItem).where(ShopItem.sku == sku))).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    already = (await db.execute(
+        select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item.id)
+    )).scalar_one_or_none()
+    if already is not None:
+        return {"status": "already_owned", "sku": sku}
+
+    balance = (player.gold_earned or 0) - (player.gold_spent or 0)
+    if balance < item.price:
+        raise HTTPException(status_code=402, detail=f"Insufficient gold: have {balance}, need {item.price}")
+
+    player.gold_spent = (player.gold_spent or 0) + item.price
+    db.add(PlayerItem(player_id=player.id, item_id=item.id, purchase_price=item.price))
+    db.add(GoldTransaction(
+        player_id=player.id, amount=-item.price,
+        reason="purchase", reference_id=sku,
+    ))
+    await db.commit()
+
+    return {
+        "status": "purchased",
+        "sku": sku,
+        "price": item.price,
+        "new_balance": balance - item.price,
+    }
+
+
+@app.post("/api/v1/players/{steam_id}/active-title", tags=["Shop"])
+async def set_active_title(
+    steam_id: str,
+    item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _set_active_cosmetic(db, steam_id, "title", "title", item_id, sig)
+
+
+@app.post("/api/v1/players/{steam_id}/active-trail", tags=["Shop"])
+async def set_active_trail(
+    steam_id: str,
+    item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _set_active_cosmetic(db, steam_id, "trail", "trail", item_id, sig)
+
+
+async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefix: str, item_id: int | None, sig: str):
+    """Shared set-active logic for titles and trails."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"{prefix}:{steam_id}:{item_id or 0}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    attr = "active_title_id" if kind == "title" else "active_trail_id"
+    if item_id is None:
+        setattr(player, attr, None)
+        await db.commit()
+        return {"status": "cleared"}
+
+    item = (await db.execute(select(ShopItem).where(ShopItem.id == item_id))).scalar_one_or_none()
+    if item is None or item.kind != kind:
+        raise HTTPException(status_code=400, detail=f"Not a valid {kind}")
+    owned = (await db.execute(
+        select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
+    )).scalar_one_or_none()
+    if owned is None:
+        raise HTTPException(status_code=403, detail="Item not owned")
+
+    setattr(player, attr, item_id)
+    await db.commit()
+    return {"status": "set", "item_id": item_id, "name": item.name}
+
+
+# ── Routes: Betting + Live series ────────────────────────────
+
+@app.get("/api/v1/series/active", tags=["Series"])
+async def get_active_series(db: AsyncSession = Depends(get_db)):
+    """Live (in-progress) ranked series — for the bet UI."""
+    rows = (await db.execute(text("""
+        SELECT
+            rs.id::text                AS series_id,
+            rs.player1_id              AS p1_id,
+            rs.player2_id              AS p2_id,
+            p1.steam_id                AS p1_steam_id,
+            p1.display_name            AS p1_name,
+            p2.steam_id                AS p2_steam_id,
+            p2.display_name            AS p2_name,
+            ROUND(gr1.rating)::int     AS p1_rating,
+            ROUND(gr2.rating)::int     AS p2_rating,
+            rs.p1_series_wins, rs.p2_series_wins,
+            rs.created_at
+        FROM ranked_series rs
+        JOIN players p1        ON p1.id = rs.player1_id
+        JOIN players p2        ON p2.id = rs.player2_id
+        LEFT JOIN glicko_ratings gr1 ON gr1.player_id = rs.player1_id
+        LEFT JOIN glicko_ratings gr2 ON gr2.player_id = rs.player2_id
+        WHERE rs.status = 'active'
+          AND rs.created_at > NOW() - INTERVAL '2 hours'
+        ORDER BY rs.created_at DESC
+        LIMIT 20
+    """))).mappings().all()
+
+    series = []
+    for r in rows:
+        p1_rating = r["p1_rating"] or 1500
+        p2_rating = r["p2_rating"] or 1500
+        series.append({
+            "series_id": r["series_id"],
+            "p1_steam_id": r["p1_steam_id"],
+            "p1_name": r["p1_name"],
+            "p1_rating": p1_rating,
+            "p1_wins": r["p1_series_wins"],
+            "p1_odds": round(_odds_multiplier(p1_rating, p2_rating), 2),
+            "p2_steam_id": r["p2_steam_id"],
+            "p2_name": r["p2_name"],
+            "p2_rating": p2_rating,
+            "p2_wins": r["p2_series_wins"],
+            "p2_odds": round(_odds_multiplier(p2_rating, p1_rating), 2),
+            "started_at": r["created_at"].isoformat() if r["created_at"] else None,
+        })
+    return {"series": series}
+
+
+@app.post("/api/v1/bets", tags=["Betting"])
+async def place_bet(
+    steam_id: str = Query(...),
+    series_id: str = Query(...),
+    bet_on_steam_id: str = Query(..., description="Which player's Steam ID to bet on"),
+    amount: int = Query(..., ge=1, le=100000),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Place a bet. HMAC signs 'bet:{steam_id}:{series_id}:{bet_on_steam_id}:{amount}'."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"bet:{steam_id}:{series_id}:{bet_on_steam_id}:{amount}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if bettor is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    try:
+        sid = UUID(series_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid series_id")
+    series = (await db.execute(select(RankedSeries).where(RankedSeries.id == sid))).scalar_one_or_none()
+    if series is None:
+        raise HTTPException(status_code=404, detail="Series not found")
+    if series.status != "active":
+        raise HTTPException(status_code=409, detail="Series is not active")
+    if series.p1_series_wins >= 2 or series.p2_series_wins >= 2:
+        raise HTTPException(status_code=409, detail="Series already effectively concluded")
+
+    # Bettor can't be a participant — obvious integrity issue.
+    if bettor.id in (series.player1_id, series.player2_id):
+        raise HTTPException(status_code=409, detail="Cannot bet on your own match")
+
+    bet_on = (await db.execute(select(Player).where(Player.steam_id == bet_on_steam_id))).scalar_one_or_none()
+    if bet_on is None or bet_on.id not in (series.player1_id, series.player2_id):
+        raise HTTPException(status_code=400, detail="bet_on_steam_id is not in this series")
+
+    # One bet per series per player.
+    existing = (await db.execute(
+        select(Bet).where(Bet.player_id == bettor.id, Bet.series_id == sid)
+    )).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Already bet on this series")
+
+    # Insufficient gold?
+    balance = (bettor.gold_earned or 0) - (bettor.gold_spent or 0)
+    if balance < amount:
+        raise HTTPException(status_code=402, detail=f"Insufficient gold: have {balance}, need {amount}")
+
+    # Snapshot current ratings for odds.
+    ratings = (await db.execute(text(
+        "SELECT player_id, rating FROM glicko_ratings "
+        "WHERE player_id = :p1 OR player_id = :p2"
+    ), {"p1": series.player1_id, "p2": series.player2_id})).mappings().all()
+    rmap = {r["player_id"]: float(r["rating"] or 1500) for r in ratings}
+    bet_on_r = rmap.get(bet_on.id, 1500.0)
+    other_id = series.player2_id if bet_on.id == series.player1_id else series.player1_id
+    other_r = rmap.get(other_id, 1500.0)
+    mult = _odds_multiplier(bet_on_r, other_r)
+
+    # Stake: debit now, credit payout at settlement.
+    bettor.gold_spent = (bettor.gold_spent or 0) + amount
+    db.add(GoldTransaction(
+        player_id=bettor.id, amount=-amount,
+        reason="bet_stake", reference_id=series_id,
+    ))
+    db.add(Bet(
+        player_id=bettor.id,
+        series_id=sid,
+        bet_on_player_id=bet_on.id,
+        amount=amount,
+        odds_multiplier=mult,
+    ))
+    await db.commit()
+    return {
+        "status": "placed",
+        "amount": amount,
+        "odds_multiplier": round(mult, 2),
+        "potential_payout": int(round(amount * mult)),
+    }
+
+
+@app.get("/api/v1/players/{steam_id}/bets", tags=["Betting"])
+async def get_player_bets(
+    steam_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Player's recent bets — both pending and settled."""
+    rows = (await db.execute(text("""
+        SELECT
+            b.id, b.amount, b.odds_multiplier, b.created_at, b.settled_at, b.payout,
+            bo.steam_id      AS bet_on_steam_id,
+            bo.display_name  AS bet_on_name,
+            rs.status        AS series_status,
+            rs.winner_id     AS series_winner_id,
+            rs.p1_series_wins, rs.p2_series_wins
+        FROM bets b
+        JOIN players p        ON p.id = b.player_id
+        JOIN players bo       ON bo.id = b.bet_on_player_id
+        JOIN ranked_series rs ON rs.id = b.series_id
+        WHERE p.steam_id = :sid
+        ORDER BY b.created_at DESC
+        LIMIT :limit
+    """), {"sid": steam_id, "limit": limit})).mappings().all()
+    return {
+        "bets": [
+            {
+                "id": r["id"],
+                "amount": r["amount"],
+                "odds_multiplier": round(r["odds_multiplier"], 2),
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "settled_at": r["settled_at"].isoformat() if r["settled_at"] else None,
+                "payout": r["payout"],
+                "bet_on_steam_id": r["bet_on_steam_id"],
+                "bet_on_name": r["bet_on_name"],
+                "series_status": r["series_status"],
+                "series_score": f"{r['p1_series_wins']}-{r['p2_series_wins']}",
+            }
+            for r in rows
+        ]
+    }
+
+
+# ── Routes: Privacy ──────────────────────────────────────────
+
+@app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
+async def delete_player_data(steam_id: str, sig: str = Query(...), db: AsyncSession = Depends(get_db)):
+    """
+    Anonymize a player's identity. Irreversible.
+
+    Match records, card picks, Elo history, and opponent records are kept
+    intact — deleting them would rewrite W/L counts and retroactively change
+    other players' ratings on the next Glicko recalc. Instead:
+
+      - steam_id → deleted_<short-uuid>
+      - display_name → "[Deleted User]"
+      - discord_id, discord_username → NULL
+      - ranked_enabled → false (drops from matchmaking immediately)
+      - deleted_at stamped so the row is hidden from leaderboards
+      - personal-only rows (achievements, link codes, queue entries, blocks) deleted
+
+    Requires an HMAC signature over "delete:{steam_id}" using the mod secret.
+    """
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"delete:{steam_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        return {"status": "not_found", "steam_id": steam_id}
+    if player.deleted_at is not None:
+        return {"status": "already_deleted", "steam_id": steam_id}
+
+    pid = player.id
+
+    # Drop purely personal rows — no cross-player impact.
+    await db.execute(text("DELETE FROM player_achievements WHERE player_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM ranked_queue WHERE player_id = :pid OR matched_with = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM queue_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM player_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
+
+    # Anonymize the player row. Keep rating_history / glicko / matches untouched
+    # so Glicko recalcs and opponent histories stay consistent.
+    short = uuid.uuid4().hex[:8]
+    player.steam_id = f"deleted_{short}"
+    player.display_name = "[Deleted User]"
+    player.discord_id = None
+    player.discord_username = None
+    player.ranked_enabled = False
+    player.deleted_at = datetime.now(timezone.utc)
+
+    # Record hash so a later match report from the same Steam ID can't
+    # spoof a fresh account.
+    if MATCH_HMAC_SECRET:
+        await db.execute(
+            text("INSERT INTO deleted_steam_ids (steam_id_hash) VALUES (:h) ON CONFLICT DO NOTHING"),
+            {"h": _hash_steam_id(steam_id)},
+        )
+
+    await db.commit()
+    print(f"[PRIVACY] Anonymized steam_id={steam_id} (placeholder={player.steam_id})")
+
+    return {"status": "anonymized", "steam_id": steam_id, "placeholder": player.steam_id}
+
+
 # ── Routes: Achievements ─────────────────────────────────────
 
 # Master achievement definitions — single source of truth
@@ -2079,7 +3068,19 @@ async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = D
         match_id=match_id_val,
     )
     db.add(ach)
+
+    # 25 gold per achievement — uniform for now; rarity-scaled pricing can come
+    # with the shop rollout.
+    ACHIEVEMENT_GOLD = 25
+    player.gold_earned = (player.gold_earned or 0) + ACHIEVEMENT_GOLD
+    db.add(GoldTransaction(
+        player_id=player.id,
+        amount=ACHIEVEMENT_GOLD,
+        reason="achievement",
+        reference_id=req.achievement_key,
+    ))
+
     await db.commit()
 
     name = ACHIEVEMENT_DEFS[req.achievement_key]["name"]
-    return {"status": "unlocked", "achievement_key": req.achievement_key, "name": name}
+    return {"status": "unlocked", "achievement_key": req.achievement_key, "name": name, "gold_awarded": ACHIEVEMENT_GOLD}

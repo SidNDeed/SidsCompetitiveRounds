@@ -19,11 +19,19 @@ class CardPick(BaseModel):
     round_number: int = Field(..., ge=1, examples=[1])
 
 
+class CardOfferEntry(BaseModel):
+    """A single card the local player was offered during a pick phase."""
+    card_name: str = Field(..., max_length=64)
+    round_number: int = Field(..., ge=1)
+    was_picked: bool = False
+
+
 class PlayerMatchData(BaseModel):
     """Data about one player in a match report."""
     steam_id: str = Field(..., max_length=20, examples=["76561198012345678"])
     display_name: str = Field(..., max_length=64, examples=["PlayerOne"])
     cards: list[CardPick] = Field(default_factory=list)
+    card_offers: list[CardOfferEntry] = Field(default_factory=list)
 
 
 class MatchReport(BaseModel):
@@ -62,6 +70,8 @@ class MatchResponse(BaseModel):
     level: int = 0
     series_status: str = "none"  # "none", "active", "completed"
     series_score: str = ""       # e.g. "1-0", "2-1"
+    gold_gained: int = 0
+    gold_bonuses: list[str] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -80,6 +90,14 @@ class PlayerStatsResponse(BaseModel):
     win_rate: float
     ranked_enabled: bool
     discord_id: str | None = None
+    discord_username: str | None = None
+    gold_earned: int = 0
+    gold_spent: int = 0
+    active_title: str | None = None
+    active_title_color: str | None = None
+    active_trail_sku: str | None = None
+    active_trail_color: str | None = None
+    active_trail_price: int = 0
     last_match: datetime | None
     recent_rating_history: list[dict] = Field(default_factory=list)
     top_cards: list[dict] = Field(default_factory=list)
@@ -113,6 +131,9 @@ class LeaderboardEntry(BaseModel):
     losses: int
     win_rate: float
     level: int = 0
+    gold: int = 0
+    title: str | None = None
+    title_color: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -133,6 +154,8 @@ class CardStatEntry(BaseModel):
     unique_players: int
     wins_with_card: int
     win_rate: float
+    times_offered: int = 0
+    pass_rate: float = 0.0  # Fraction of offerings rejected (0..1). Only meaningful when times_offered > 0.
 
     model_config = {"from_attributes": True}
 
@@ -155,6 +178,8 @@ class MatchHistoryEntry(BaseModel):
     series_score: str | None = None
     series_rating_change: float | None = None
     xp_gained: int = 0
+    gold_gained: int = 0
+    series_gold_gained: int = 0
 
     model_config = {"from_attributes": True}
 

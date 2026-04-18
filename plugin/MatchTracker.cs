@@ -16,6 +16,13 @@ namespace CompetitiveRounds
             public int RoundNumber;
         }
 
+        public class CardOfferData
+        {
+            public string CardName;
+            public int RoundNumber;
+            public bool WasPicked;
+        }
+
         public class MatchResult
         {
             public bool Won;

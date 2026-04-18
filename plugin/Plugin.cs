@@ -19,7 +19,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.18.7";
+        public const string ModVersion = "1.20.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -30,6 +30,16 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> ApiBaseUrl;
         internal static ConfigEntry<bool> RankedEnabled;
         internal static ConfigEntry<bool> ShowNotifications;
+        internal static ConfigEntry<bool> ShowFps;
+        internal static ConfigEntry<bool> ShowRegionPing;
+        internal static ConfigEntry<bool> ShowIngameChat;
+        internal static ConfigEntry<bool> ShowTrails;
+        // Tri-state "" (unset — ask at launch) / "granted" / "denied".
+        // Gates ALL outbound API traffic except the mod-version probe and consent-revocation calls.
+        internal static ConfigEntry<string> DataConsent;
+
+        public static bool DataConsentGranted => DataConsent != null && DataConsent.Value == "granted";
+        public static bool DataConsentAsked   => DataConsent != null && !string.IsNullOrEmpty(DataConsent.Value);
 
         private static bool spawned = false;
         internal static bool modDisabled = false;
@@ -78,7 +88,37 @@ namespace CompetitiveRounds
                 "Show in-game notifications for match results"
             );
 
-            Log.LogInfo($"{ModName} v{ModVersion} initializing...");
+            ShowFps = Config.Bind(
+                "UI", "ShowFps",
+                true,
+                "Show FPS counter in the top-left corner"
+            );
+
+            ShowRegionPing = Config.Bind(
+                "UI", "ShowRegionPing",
+                true,
+                "Show Photon ping and region alongside FPS when in a room"
+            );
+
+            ShowIngameChat = Config.Bind(
+                "UI", "ShowIngameChat",
+                true,
+                "Show the in-game chat overlay while outside the F5 menu"
+            );
+
+            ShowTrails = Config.Bind(
+                "UI", "ShowTrails",
+                true,
+                "Show cosmetic trails behind players during matches (including your own and opponents')"
+            );
+
+            DataConsent = Config.Bind(
+                "Privacy", "DataConsent",
+                "",
+                "Consent to report match data to the leaderboard. Values: \"\" (unset — you'll be asked at launch), \"granted\", or \"denied\"."
+            );
+
+            Log.LogInfo($"{ModName} v{ModVersion} initializing (consent={(string.IsNullOrEmpty(DataConsent.Value) ? "unset" : DataConsent.Value)})...");
 
             // ── Game version check ──
             string gameVer = Application.version ?? "";
@@ -476,6 +516,14 @@ namespace CompetitiveRounds
                 ApiClient.FetchBlockedPlayers(steamId);
             }
 
+            // Wire the chat pipe so incoming messages reach the UI log.
+            ChatClient.OnMessage = NativeUI.OnChatMessage;
+
+            // If the user already granted consent in a previous session, open the chat WS now.
+            // Fresh installs stay offline until the consent modal gets a Yes.
+            if (Plugin.DataConsentGranted)
+                ChatClient.Connect();
+
             Plugin.Log.LogInfo("[PERSIST] All systems active! Press F5 for overlay.");
         }
 
@@ -720,6 +768,13 @@ namespace CompetitiveRounds
                 }
                 catch { }
 
+                // Canonicalize before anything downstream consumes it. The cardInfo.cardName
+                // field and GameObject name can diverge (e.g. "Poison" vs "Poison Bullets",
+                // "Prisitne Perseverence" vs "Pristine Perseverence") — without this, match
+                // reports leak the non-canonical form and split the card in stats.
+                if (!string.IsNullOrEmpty(cardName))
+                    cardName = CardRarityLookup.GetCanonicalName(cardName);
+
                 if (!string.IsNullOrEmpty(cardName) && rarity == "Unknown")
                     rarity = CardRarityLookup.GetRarity(cardName);
 
@@ -741,6 +796,34 @@ namespace CompetitiveRounds
                 {
                     Plugin.Log.LogInfo($"[HARMONY-CARD] Opponent picked: {cardName} ({rarity})");
                     GameStateWatcher.OnOpponentCardPicked(cardName, rarity);
+                }
+
+                // Pass-tracking: if LOCAL was the picker, capture every card on offer.
+                // cardIDs[] is the full set shown in the pick UI; targetCardID is the chosen one.
+                if (!isOpponent && cardIDs != null && cardIDs.Length > 0)
+                {
+                    int round = GameStateWatcher.CurrentRound;
+                    var bflags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                    var cnField = typeof(CardInfo).GetField("cardName", bflags);
+                    foreach (int cid in cardIDs)
+                    {
+                        try
+                        {
+                            var pv = PhotonView.Find(cid);
+                            if (pv == null) continue;
+                            string cn = null;
+                            var ci = pv.GetComponent<CardInfo>();
+                            if (ci == null) ci = pv.GetComponentInChildren<CardInfo>();
+                            if (ci != null && cnField != null)
+                                cn = cnField.GetValue(ci) as string;
+                            if (string.IsNullOrEmpty(cn))
+                                cn = pv.gameObject.name.Replace("(Clone)", "").Trim();
+                            cn = CardRarityLookup.GetCanonicalName(cn);
+                            if (string.IsNullOrEmpty(cn)) continue;
+                            GameStateWatcher.OnLocalCardOffered(cn, cid == targetCardID, round);
+                        }
+                        catch { }
+                    }
                 }
             }
             catch (Exception ex)
@@ -1058,6 +1141,8 @@ namespace CompetitiveRounds
             { "Glasscannon", "Glass Cannon" },
             { "ShieldCharge", "Shield Charge" },
             { "AbyssalCountdown", "Abyssal Countdown" },
+            { "Poison", "Poison Bullets" },
+            { "Prisitne Perseverence", "Pristine Perseverence" },
         };
 
         public static void Register(string cardName, string rarity)

@@ -53,6 +53,11 @@ namespace CompetitiveRounds
         // Card tracking
         private static List<MatchTracker.CardPickData> localCards = new List<MatchTracker.CardPickData>();
         private static List<MatchTracker.CardPickData> opponentCards = new List<MatchTracker.CardPickData>();
+
+        // Pass-tracking: cards offered to the LOCAL player. Opponent's offers come from
+        // their own mod report, so we never populate opponentOffers.
+        private static List<MatchTracker.CardOfferData> localOffers = new List<MatchTracker.CardOfferData>();
+        private static readonly List<MatchTracker.CardOfferData> emptyOffers = new List<MatchTracker.CardOfferData>();
         private static int lastKnownP1CardCount = 0;
         private static int lastKnownP2CardCount = 0;
 
@@ -112,6 +117,11 @@ namespace CompetitiveRounds
         private static int lastRemainingRespawns = -1;
         private static bool achFiredShot = false;         // left mouse clicked during match
         private static bool achMoved = false;              // WASD or Space pressed during match
+        // Pick-phase gate: input gating must exclude card-pick UI (Space jump, A/D carousel,
+        // mouse click on cards) which would otherwise count as movement / firing.
+        // Set true on "PICK PHASE" log; cleared on "MOVE PLAYERS END" (combat about to begin)
+        // or any round-end marker. CharacterData often reports !dead && health>0 during pick.
+        private static bool inPickPhase = false;
 
         // Sid's Steam ID for "Regicide" achievement
         private const string SID_STEAM_ID = "76561198040410653";
@@ -508,6 +518,8 @@ namespace CompetitiveRounds
             isTracking = true;
             gameOverReported = false;
             matchStartTime = DateTime.UtcNow;
+            // Spawn the cosmetic trail for this match (if the player owns one).
+            TrailCosmetic.OnMatchStart();
 
             // Reset achievement tracking for this match
             achTookDamage = false;
@@ -519,6 +531,7 @@ namespace CompetitiveRounds
             lastRemainingRespawns = -1;
             achFiredShot = false;
             achMoved = false;
+            inPickPhase = false;
             pendingRegicideCheck = false;
 
             // Retry card rarity scan if it didn't work at startup
@@ -536,6 +549,7 @@ namespace CompetitiveRounds
             currentRound = 1;
             localCards.Clear();
             opponentCards.Clear();
+            localOffers.Clear();
             lastKnownP1CardCount = 0;
             lastKnownP2CardCount = 0;
             pickCountThisMatch = 0;
@@ -762,6 +776,8 @@ namespace CompetitiveRounds
                     p2PointsTotal: p2Points,
                     p1Cards: localTeamId == 0 ? localCards : opponentCards,
                     p2Cards: localTeamId == 0 ? opponentCards : localCards,
+                    p1Offers: localTeamId == 0 ? localOffers : emptyOffers,
+                    p2Offers: localTeamId == 0 ? emptyOffers : localOffers,
                     photonRoomId: reportRoomId,
                     region: photonRegion,
                     durationSeconds: duration,
@@ -831,11 +847,11 @@ namespace CompetitiveRounds
             }
             catch { }
 
-            // Input tracking — ONLY during active combat
-            // Card picks use Space + A/D, between-round screens use Space,
-            // so we must exclude those phases. localAliveInCombat is false
-            // during card picks and round transitions (player dead or not spawned).
-            if (localAliveInCombat)
+            // Input tracking — ONLY during active combat AND not in pick phase.
+            // CharacterData persists with !dead && health>0 during the card-pick UI, so
+            // localAliveInCombat alone is insufficient. The inPickPhase flag is driven by
+            // "PICK PHASE" / "MOVE PLAYERS END" log markers in OnUnityLog.
+            if (localAliveInCombat && !inPickPhase)
             {
                 if (!achFiredShot && Input.GetMouseButton(0))
                 {
@@ -991,6 +1007,27 @@ namespace CompetitiveRounds
         private static void OnUnityLog(string message, string stackTrace, LogType type)
         {
             if (type != LogType.Log) return;
+
+            // Pick-phase tracking for input-gating (Pacifist / Immovable Object).
+            // ROUNDS log sequence each round:
+            //   "Round over" / "Point over" → "PICK PHASE" → "MOVE PLAYERS END" → combat.
+            if (message.StartsWith("PICK PHASE"))
+            {
+                if (!inPickPhase) Plugin.Log.LogInfo("[ACH] Pick phase entered — input gating disabled");
+                inPickPhase = true;
+            }
+            else if (message.StartsWith("MOVE PLAYERS END"))
+            {
+                if (inPickPhase) Plugin.Log.LogInfo("[ACH] Combat begins — input gating enabled");
+                inPickPhase = false;
+                // Auto-close the F5 competitive menu so it doesn't intercept clicks during combat
+                try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
+            }
+            else if (message.StartsWith("Round over") || message.StartsWith("Point over"))
+            {
+                // Defensive: belt-and-suspenders in case PICK PHASE fires without MOVE PLAYERS END
+                inPickPhase = false;
+            }
 
             // The game logs "Picking Card: CardName(Clone)" only for the LOCAL player
             if (message.StartsWith("Picking Card: "))
@@ -1234,6 +1271,9 @@ namespace CompetitiveRounds
             return string.Join(" ", words);
         }
 
+        // Trail teardown on any match-state reset — next OnMatchStarted re-attaches.
+        private static void ResetMatchStateWithTrail() { TrailCosmetic.OnMatchEnd(); ResetMatchState(); }
+
         private static void ResetMatchState()
         {
             isTracking = false;
@@ -1252,6 +1292,7 @@ namespace CompetitiveRounds
             matchIsRanked = false;
             localCards.Clear();
             opponentCards.Clear();
+            localOffers.Clear();
             lastKnownP1CardCount = 0;
             lastKnownP2CardCount = 0;
             pickCountThisMatch = 0;
@@ -1277,6 +1318,7 @@ namespace CompetitiveRounds
             lastRemainingRespawns = -1;
             achFiredShot = false;
             achMoved = false;
+            inPickPhase = false;
             pendingRegicideCheck = false;
 
             // Clear our card broadcast when leaving room
@@ -1306,5 +1348,22 @@ namespace CompetitiveRounds
         public static int P1Points => p1Points;
         public static int P2Points => p2Points;
         public static int LocalTeamId => localTeamId;
+        public static int CurrentRound => currentRound;
+
+        /// <summary>
+        /// Called by the CardChoice.RPCA_DoEndPick Harmony hook for each card the local
+        /// player was OFFERED (cardIDs[]). wasPicked = (cardID == targetCardID).
+        /// One row per (round, card) — multiple offers in the same round get separate rows.
+        /// </summary>
+        public static void OnLocalCardOffered(string cardName, bool wasPicked, int round)
+        {
+            if (string.IsNullOrEmpty(cardName)) return;
+            localOffers.Add(new MatchTracker.CardOfferData
+            {
+                CardName = cardName,
+                RoundNumber = round,
+                WasPicked = wasPicked,
+            });
+        }
     }
 }
