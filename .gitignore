@@ -13,6 +13,7 @@ plugin/bin/
 plugin/obj/
 installer/bin/
 installer/obj/
+thunderstore/build/
 dist/
 
 # Log captures and one-off drops
@@ -31,12 +32,16 @@ logs-snapshot/
 Thumbs.db
 desktop.ini
 
-# Claude Code — KEEP LOCAL ONLY (contains IPs, paths, infra details)
-# Claude Code reads these from disk regardless of git tracking.
-# Only docs/learnings.md is safe to publish.
+# Internal docs — KEEP LOCAL ONLY. These contain IPs, server paths, infra
+# details, handoff notes, and task priorities that should never land in a
+# public commit. History was scrubbed in the v1.20.0 post-release pass;
+# assume anything previously published remains cached on forks/clones.
 CLAUDE.md
 SETUP.md
 .claude/
+docs/HANDOFF.md
+docs/TODO.md
+docs/learnings.md
 docs/deploy-reference.md
 scripts/
 
