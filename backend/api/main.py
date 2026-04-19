@@ -16,16 +16,17 @@ import uuid
 from uuid import UUID
 
 import json as _json
+from pydantic import BaseModel
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import case, func, or_, select, text
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import Bet, CardOffer, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerItem, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem
+from models import AdminUser, AdminAction, Bet, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -112,7 +113,7 @@ app.add_middleware(
 # wild). Once adoption of the header is universal, set REQUIRE_MOD_VERSION
 # to True to lock out anyone who removes it.
 
-MIN_MOD_VERSION = "1.20.0"
+MIN_MOD_VERSION = "1.22.0"
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
 # Endpoints that bypass the gate (mod uses these to discover the required version).
@@ -123,6 +124,7 @@ _VERSION_GATE_BYPASS = frozenset({
     "/api/v1/healthz",
     "/api/v1/chat/post",      # internal bot relay; authenticated by X-Internal-Key instead
     "/api/v1/chat/recent",    # bot uses this for scrollback on WS reconnect too
+    "/api/v1/admin/maintenance/status",  # public-readable so even pre-version-check clients can probe
 })
 
 
@@ -133,10 +135,46 @@ def _parse_version(v: str) -> tuple[int, ...]:
         return (0,)
 
 
+# Maintenance mode — set to True via /admin/maintenance/start. While True, all non-bypass
+# requests get a 503 with Retry-After:30. Internal callers (X-Internal-Key) still go through
+# so the deploy script + bot can finish work. Reset to False on container start (it's just a
+# module global), so a fresh container after a redeploy is automatically NOT in maintenance.
+_in_maintenance: bool = False
+_MAINT_BYPASS = frozenset({
+    "/api/v1/mod-version",
+    "/api/v1/health",
+    "/api/v1/healthz",
+    "/api/v1/admin/maintenance/start",
+    "/api/v1/admin/maintenance/stop",
+    "/api/v1/admin/maintenance/status",
+})
+
+
+@app.middleware("http")
+async def maintenance_gate(request: Request, call_next):
+    if _in_maintenance:
+        path = request.url.path
+        # Always allow the bypass set + internal callers + maintenance control endpoints.
+        internal_key = request.headers.get("X-Internal-Key")
+        is_internal = internal_key and internal_key == os.getenv("API_SECRET_KEY", "")
+        if path not in _MAINT_BYPASS and not is_internal:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "maintenance", "retry_after": 30},
+                headers={"Retry-After": "30"},
+            )
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def version_gate(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api/v1/") or path in _VERSION_GATE_BYPASS:
+        return await call_next(request)
+    # Internal callers (Discord bot) authenticate via X-Internal-Key and bypass the version gate.
+    # Bot doesn't have a "mod version" — locking it out broke leaderboard posting + flag relay.
+    internal_key = request.headers.get("X-Internal-Key")
+    if internal_key and internal_key == os.getenv("API_SECRET_KEY", ""):
         return await call_next(request)
     sent = request.headers.get("X-Mod-Version")
     if sent is None:
@@ -344,12 +382,234 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.20.0"
+LATEST_MOD_VERSION = "1.22.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
     """Returns the latest recommended mod version and the gating floor."""
     return {"version": LATEST_MOD_VERSION, "min_version": MIN_MOD_VERSION}
+
+
+# ── Internal endpoints (used by the Discord bot) ───────────────
+
+@app.get("/api/v1/internal/recent-flags", tags=["Internal"])
+async def get_recent_flags(
+    since_id: str | None = Query(None, description="Last flag ID the bot has already posted"),
+    limit: int = Query(50, ge=1, le=200),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only feed for the #scr-admin channel poller. Returns newly-created
+    flagged_matches rows with enough match context to render a one-line embed."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+
+    # Pull flag rows with the underlying match's relevant fields. Order by created_at ASC
+    # so the bot can post in chronological order. since_id filtering uses created_at lookup
+    # because UUIDs aren't sortable as time but the (id, created_at) pair is unique.
+    if since_id:
+        cutoff_q = await db.execute(
+            text("SELECT created_at FROM flagged_matches WHERE id = :id"),
+            {"id": since_id},
+        )
+        cutoff_row = cutoff_q.first()
+        cutoff = cutoff_row[0] if cutoff_row else None
+    else:
+        cutoff = None
+
+    if cutoff is not None:
+        rows = (await db.execute(text(
+            "SELECT fm.id, fm.match_id, fm.flag_reason, fm.flag_details, fm.auto_invalidated, "
+            "       fm.player_steam_ids, fm.created_at, "
+            "       m.is_ranked, m.duration_seconds, m.match_duration, "
+            "       p1.display_name AS p1_name, p2.display_name AS p2_name "
+            "FROM flagged_matches fm "
+            "JOIN matches m ON m.id = fm.match_id "
+            "JOIN players p1 ON p1.id = m.player1_id "
+            "JOIN players p2 ON p2.id = m.player2_id "
+            "WHERE fm.created_at > :cutoff "
+            "ORDER BY fm.created_at ASC LIMIT :limit"
+        ), {"cutoff": cutoff, "limit": limit})).mappings().all()
+    else:
+        rows = (await db.execute(text(
+            "SELECT fm.id, fm.match_id, fm.flag_reason, fm.flag_details, fm.auto_invalidated, "
+            "       fm.player_steam_ids, fm.created_at, "
+            "       m.is_ranked, m.duration_seconds, m.match_duration, "
+            "       p1.display_name AS p1_name, p2.display_name AS p2_name "
+            "FROM flagged_matches fm "
+            "JOIN matches m ON m.id = fm.match_id "
+            "JOIN players p1 ON p1.id = m.player1_id "
+            "JOIN players p2 ON p2.id = m.player2_id "
+            "ORDER BY fm.created_at ASC LIMIT :limit"
+        ), {"limit": limit})).mappings().all()
+
+    return {
+        "flags": [
+            {
+                "id": str(r["id"]),
+                "match_id": str(r["match_id"]),
+                "flag_reason": r["flag_reason"],
+                "flag_details": r["flag_details"],
+                "auto_invalidated": r["auto_invalidated"],
+                "player_steam_ids": r["player_steam_ids"],
+                "p1_name": r["p1_name"],
+                "p2_name": r["p2_name"],
+                "is_ranked": r["is_ranked"],
+                "duration_seconds": r["duration_seconds"] or r["match_duration"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+
+# ── Anti-cheat detection ───────────────────────────────────────
+#
+# Three checks run on every match submission:
+#   1. >5 cards picked by either player    → vanilla impossible, auto-invalidate
+#   2. Sub-60s pattern between same pair   → 2+ in a 2hr window for ranked, 3+ for casual.
+#                                            Auto-invalidates this match AND retroactively the prior ones.
+#   3. Reporter sat idle (0 shots, 0 blocks, duration > 30s)
+#                                          → flag only (we only see reporter's inputs; opponent could be
+#                                            the cheater instead, so manual review).
+#
+# Pattern detection definition of "session": matches between same Steam ID pair within last 2h.
+# Confirmed with Sid: false positives "should never happen" because two-player ROUNDS games
+# legitimately take 2+ minutes per game.
+
+ANTICHEAT_SHORT_DURATION_SEC = 60
+ANTICHEAT_PATTERN_WINDOW_HOURS = 2
+ANTICHEAT_MAX_CARDS_PER_PLAYER = 5
+ANTICHEAT_INACTIVE_MIN_DURATION_SEC = 30
+
+
+async def _reverse_match_gold_xp(db: AsyncSession, m: Match) -> None:
+    """Add offsetting gold/XP rows for an invalidated match. Called on retro-invalidation."""
+    txns = (await db.execute(
+        select(GoldTransaction).where(
+            GoldTransaction.reference_id == str(m.id),
+            GoldTransaction.reason.in_(["xp", "series_win"]),
+        )
+    )).scalars().all()
+    for tx in txns:
+        db.add(GoldTransaction(
+            player_id=tx.player_id, amount=-tx.amount,
+            reason="reversal", reference_id=str(m.id),
+        ))
+        player = (await db.execute(select(Player).where(Player.id == tx.player_id))).scalar_one_or_none()
+        if player is not None:
+            player.gold_earned = max(0, (player.gold_earned or 0) - tx.amount)
+    # Roll back XP. p1_xp_gained / p2_xp_gained were stored at insert time.
+    p1_obj = (await db.execute(select(Player).where(Player.id == m.player1_id))).scalar_one_or_none()
+    p2_obj = (await db.execute(select(Player).where(Player.id == m.player2_id))).scalar_one_or_none()
+    if p1_obj is not None and m.p1_xp_gained:
+        p1_obj.total_xp = max(0, (p1_obj.total_xp or 0) - m.p1_xp_gained)
+    if p2_obj is not None and m.p2_xp_gained:
+        p2_obj.total_xp = max(0, (p2_obj.total_xp or 0) - m.p2_xp_gained)
+
+
+async def _check_anti_cheat(
+    db: AsyncSession, match: Match, report: MatchReport, p1: Player, p2: Player,
+) -> dict:
+    """Returns {'flags': [(reason, details, auto_invalidate), ...], 'invalidate': bool}."""
+    flags = []
+    invalidate = False
+
+    # 1. Too many cards (vanilla cap is 5 picks per player per BO5 game).
+    p1_cards = len(report.player1.cards or [])
+    p2_cards = len(report.player2.cards or [])
+    if p1_cards > ANTICHEAT_MAX_CARDS_PER_PLAYER or p2_cards > ANTICHEAT_MAX_CARDS_PER_PLAYER:
+        flags.append((
+            "too_many_cards",
+            {
+                "p1_cards": p1_cards, "p2_cards": p2_cards,
+                "p1_steam": p1.steam_id, "p2_steam": p2.steam_id,
+                "max_allowed": ANTICHEAT_MAX_CARDS_PER_PLAYER,
+            },
+            True,
+        ))
+        invalidate = True
+
+    # 2. Sub-60s pattern. Must use COALESCE since older matches only have match_duration set.
+    duration = report.match_duration if report.match_duration is not None else 999999
+    if duration < ANTICHEAT_SHORT_DURATION_SEC:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=ANTICHEAT_PATTERN_WINDOW_HOURS)
+        prior_rows = (await db.execute(
+            select(Match).where(
+                Match.id != match.id,
+                Match.is_ranked == report.is_ranked,
+                Match.invalidated_at.is_(None),
+                Match.ended_at >= cutoff,
+                func.coalesce(Match.duration_seconds, Match.match_duration) < ANTICHEAT_SHORT_DURATION_SEC,
+                or_(
+                    and_(Match.player1_id == p1.id, Match.player2_id == p2.id),
+                    and_(Match.player1_id == p2.id, Match.player2_id == p1.id),
+                ),
+            )
+        )).scalars().all()
+        # Ranked needs 2 total (1 prior + current); casual needs 3 (2 prior + current).
+        prior_threshold = 1 if report.is_ranked else 2
+        if len(prior_rows) >= prior_threshold:
+            flags.append((
+                "short_duration_pattern",
+                {
+                    "duration_seconds": duration,
+                    "prior_match_ids": [str(m.id) for m in prior_rows],
+                    "p1_steam": p1.steam_id, "p2_steam": p2.steam_id,
+                    "is_ranked": report.is_ranked,
+                    "window_hours": ANTICHEAT_PATTERN_WINDOW_HOURS,
+                },
+                True,
+            ))
+            invalidate = True
+            # Retro-invalidate every prior sub-60s match in the window. They each
+            # get their own flag row (so the admin tab shows them all) and their
+            # gold/xp gets reversed via _reverse_match_gold_xp.
+            for prior in prior_rows:
+                if prior.invalidated_at is not None:
+                    continue
+                prior.invalidated_at = datetime.now(timezone.utc)
+                prior.invalidation_reason = "short_duration_pattern_retro"
+                db.add(FlaggedMatch(
+                    match_id=prior.id,
+                    series_id=prior.series_id,
+                    player_steam_ids=[p1.steam_id, p2.steam_id],
+                    flag_reason="short_duration_pattern",
+                    flag_details={
+                        "retroactive": True,
+                        "triggered_by_match": str(match.id),
+                        "duration_seconds": prior.duration_seconds or prior.match_duration,
+                    },
+                    auto_invalidated=True,
+                ))
+                # Cascade: if the prior match's series exists and isn't already invalid,
+                # mark the series invalidated too. Glicko reversal is left to admin manual reverse.
+                if prior.series_id is not None:
+                    s = (await db.execute(select(RankedSeries).where(RankedSeries.id == prior.series_id))).scalar_one_or_none()
+                    if s is not None and s.invalidated_at is None:
+                        s.invalidated_at = datetime.now(timezone.utc)
+                        s.invalidation_reason = "short_duration_pattern_retro"
+                await _reverse_match_gold_xp(db, prior)
+
+    # 3. Inactive reporter (advisory — flag only, no auto-invalidate).
+    shots = report.local_shots_fired
+    blocks = report.local_blocks_raised
+    if (shots is not None and blocks is not None
+            and shots == 0 and blocks == 0
+            and report.match_duration is not None
+            and report.match_duration > ANTICHEAT_INACTIVE_MIN_DURATION_SEC):
+        flags.append((
+            "inactive_player",
+            {
+                "reporter_steam": report.reported_by_steam_id,
+                "duration_seconds": report.match_duration,
+                "shots": 0, "blocks": 0,
+            },
+            False,
+        ))
+
+    return {"flags": flags, "invalidate": invalidate}
 
 
 # ── Routes: Match Submission ───────────────────────────────────
@@ -386,7 +646,10 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     # Find the reporting player
     reporter = p1 if report.reported_by_steam_id == report.player1.steam_id else p2
 
-    # Create match record
+    # Create match record. duration_seconds mirrors match_duration so anti-cheat
+    # queries can use the canonical column going forward; both populated for safety.
+    # local_bullets_fired / local_blocks_raised come from the reporter's mod and
+    # are advisory (not in HMAC). Reused field naming despite client→server casing.
     match = Match(
         player1_id=p1.id,
         player2_id=p2.id,
@@ -396,6 +659,9 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         p2_points_total=report.p2_points_total,
         winner_id=winner.id,
         match_duration=report.match_duration,
+        duration_seconds=report.match_duration,
+        local_bullets_fired=report.local_shots_fired,
+        local_blocks_raised=report.local_blocks_raised,
         photon_room_id=report.photon_room_id,
         game_version=report.game_version,
         region=report.region,
@@ -440,6 +706,35 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                 card_name=offer.card_name,
                 was_picked=offer.was_picked,
             ))
+
+    # ── Anti-cheat ────────────────────────────────────────────
+    # Run BEFORE any XP / gold / Glicko / series logic so an invalidated match
+    # short-circuits all rewards. Advisory flags (e.g. inactive_player) are
+    # recorded but don't short-circuit.
+    ac = await _check_anti_cheat(db, match, report, p1, p2)
+    if ac["invalidate"]:
+        match.invalidated_at = datetime.now(timezone.utc)
+        match.invalidation_reason = ",".join(r for r, _, ai in ac["flags"] if ai)
+    for reason, details, auto_inv in ac["flags"]:
+        db.add(FlaggedMatch(
+            match_id=match.id,
+            series_id=None,                      # set on retro-flags, not on the live one (no series yet)
+            player_steam_ids=[p1.steam_id, p2.steam_id],
+            flag_reason=reason,
+            flag_details=details,
+            auto_invalidated=auto_inv,
+        ))
+    if ac["invalidate"]:
+        await db.commit()
+        return MatchResponse(
+            match_id=match.id,
+            winner_steam_id=winner.steam_id,
+            message=f"Match flagged: {match.invalidation_reason}",
+            xp_gained=0, xp_bonuses=[], total_xp=reporter.total_xp or 0,
+            level=level_from_xp(reporter.total_xp or 0)[0],
+            series_status="invalidated", series_score="",
+            gold_gained=0, gold_bonuses=[],
+        )
 
     # Increment games_in_period for both players
     for pid in [p1.id, p2.id]:
@@ -970,13 +1265,16 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         else:
             cur_casual_streak = 0
 
-    # Active cosmetic lookups (title + trail)
+    # Active cosmetic lookups (title + trail + map color)
     active_title_name: str | None = None
     active_title_color: str | None = None
     active_trail_sku: str | None = None
     active_trail_color: str | None = None
     active_trail_price: int = 0
-    for cosmetic_id, is_title in ((player.active_title_id, True), (player.active_trail_id, False)):
+    active_color_sku: str | None = None
+    for cosmetic_id, kind in ((player.active_title_id, "title"),
+                               (player.active_trail_id, "trail"),
+                               (player.active_color_id, "color")):
         if cosmetic_id is None:
             continue
         row = (await db.execute(
@@ -984,10 +1282,12 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         )).first()
         if row is None:
             continue
-        if is_title:
+        if kind == "title":
             active_title_name, active_title_color = row[0], row[2]
-        else:
+        elif kind == "trail":
             active_trail_sku, active_trail_color, active_trail_price = row[1], row[2], row[3] or 0
+        else:
+            active_color_sku = row[1]
 
     # Casual W/L (individual casual matches only)
     casual_wl_query = text("""
@@ -1099,6 +1399,7 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         active_trail_sku=active_trail_sku,
         active_trail_color=active_trail_color,
         active_trail_price=active_trail_price,
+        active_color_sku=active_color_sku,
         last_match=stats["last_match"],
         recent_rating_history=history,
         top_cards=top_cards,
@@ -1148,6 +1449,9 @@ async def get_player_matches(
             CASE WHEN m.player1_id = :pid THEN p2.steam_id ELSE p1.steam_id END AS opp_steam_id,
             CASE WHEN m.player1_id = :pid THEN p2.display_name ELSE p1.display_name END AS opp_name,
             CASE WHEN m.player1_id = :pid THEN m.player2_id ELSE m.player1_id END AS opp_id,
+            -- Opponent's CURRENT active title (view-time, not match-time snapshot — cheaper and good enough).
+            CASE WHEN m.player1_id = :pid THEN si2.name        ELSE si1.name        END AS opp_title,
+            CASE WHEN m.player1_id = :pid THEN si2.preview_color ELSE si1.preview_color END AS opp_title_color,
             m.series_id::text AS series_id,
             rs.status AS series_status,
             rs.p1_series_wins AS s_p1w,
@@ -1170,6 +1474,8 @@ async def get_player_matches(
         FROM matches m
         JOIN players p1 ON p1.id = m.player1_id
         JOIN players p2 ON p2.id = m.player2_id
+        LEFT JOIN shop_items si1 ON si1.id = p1.active_title_id
+        LEFT JOIN shop_items si2 ON si2.id = p2.active_title_id
         LEFT JOIN ranked_series rs ON rs.id = m.series_id
         WHERE m.player1_id = :pid OR m.player2_id = :pid
         ORDER BY m.ended_at DESC
@@ -1222,6 +1528,8 @@ async def get_player_matches(
             match_id=row["match_id"],
             opponent_steam_id=row["opp_steam_id"],
             opponent_name=row["opp_name"],
+            opponent_title=row["opp_title"],
+            opponent_title_color=row["opp_title_color"],
             player_rounds_won=row["player_rounds"],
             opponent_rounds_won=row["opp_rounds"],
             player_points=row["player_points"] or 0,
@@ -1495,6 +1803,8 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
     Join the ranked matchmaking queue.
     Upserts the player into ranked_queue with status='searching'.
     """
+    # Banned players can't queue. Let them load the leaderboard so they see the status.
+    await _check_ban_or_raise(db, req.steam_id)
     # Get or create the player (auto-register on first queue join)
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
@@ -1893,8 +2203,38 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
                 )
         else:
             chosen_region = entry["room_region"] or entry["region"] or "us"
+
+        # Pre-create the ranked_series row so /series/active returns it BEFORE game 1
+        # ends. submit_match's existing find-or-create logic will reuse it whether the
+        # match report's p1/p2 ordering matches our ordering or not. Skip if a row
+        # already exists (e.g., re-ready after a brief disconnect).
+        existing_series = (await db.execute(
+            select(RankedSeries).where(
+                RankedSeries.status == "active",
+                or_(
+                    and_(RankedSeries.player1_id == player.id, RankedSeries.player2_id == opp["player_id"]),
+                    and_(RankedSeries.player1_id == opp["player_id"], RankedSeries.player2_id == player.id),
+                ),
+            )
+        )).scalar_one_or_none()
+        if existing_series is None:
+            existing_series = RankedSeries(
+                player1_id=player.id,
+                player2_id=opp["player_id"],
+                p1_series_wins=0, p2_series_wins=0,
+                live_p1_points=0, live_p2_points=0,
+                status="active",
+            )
+            db.add(existing_series)
+            await db.flush()  # get the new series_id
+
         await db.commit()
-        return {"status": "both_ready", "room_name": room_name, "photon_region": chosen_region}
+        return {
+            "status": "both_ready",
+            "room_name": room_name,
+            "photon_region": chosen_region,
+            "series_id": str(existing_series.id),
+        }
 
     await db.commit()
     return {"status": "waiting", "message": "Waiting for opponent to ready up"}
@@ -2184,10 +2524,10 @@ async def get_player_by_discord(discord_id: str, db: AsyncSession = Depends(get_
     }
 
 
-@app.get("/api/v1/series/recent", tags=["Discord"])
+@app.get("/api/v1/series/recent", tags=["Discord", "Series"])
 async def get_recent_series(
     minutes: int = Query(2, ge=1, le=43200),
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -2255,6 +2595,34 @@ async def get_recent_series(
                 break
         return count if first_won else -count
 
+    # Pull all settled bets for the series in this page in one go (avoids N+1). Joined to
+    # bettor + bet-on names so the client can render rows like "AsteRiA bet 500g on Sid → +505g".
+    series_ids = [row["series_id"] for row in rows]
+    bets_by_series: dict[str, list] = {}
+    if series_ids:
+        bet_rows = (await db.execute(text(
+            "SELECT b.series_id::text AS series_id, b.amount, b.payout, b.odds_multiplier, "
+            "       b.settled_at, "
+            "       bp.display_name AS bettor_name, bp.steam_id AS bettor_steam_id, "
+            "       bo.display_name AS bet_on_name, bo.steam_id AS bet_on_steam_id "
+            "FROM bets b "
+            "JOIN players bp ON bp.id = b.player_id "
+            "JOIN players bo ON bo.id = b.bet_on_player_id "
+            "WHERE b.series_id::text = ANY(:ids) "
+            "ORDER BY b.settled_at DESC NULLS LAST, b.created_at DESC"
+        ), {"ids": series_ids})).mappings().all()
+        for br in bet_rows:
+            bets_by_series.setdefault(br["series_id"], []).append({
+                "bettor_name": br["bettor_name"],
+                "bettor_steam_id": br["bettor_steam_id"],
+                "amount": br["amount"],
+                "payout": br["payout"],
+                "odds_multiplier": round(br["odds_multiplier"] or 1.0, 2),
+                "bet_on_name": br["bet_on_name"],
+                "bet_on_steam_id": br["bet_on_steam_id"],
+                "won": (br["payout"] or 0) > br["amount"],
+            })
+
     series_list = []
     for row in rows:
         p1_streak = await get_ranked_streak(row["p1_steam_id"])
@@ -2279,6 +2647,7 @@ async def get_recent_series(
             "winner_name": row["winner_name"],
             "winner_steam_id": row["winner_steam_id"],
             "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+            "bets": bets_by_series.get(row["series_id"], []),
         })
 
     return {"series": series_list}
@@ -2408,6 +2777,10 @@ async def ws_chat(ws: WebSocket):
             display_name = str(data.get("display_name", ""))[:64]
             if not message or not steam_id:
                 continue
+            # Banned players can't chat. Silently drop — telling them they're banned would
+            # encourage griefing on alts. The mod's queue-join 409 is the primary signal.
+            if await _is_banned_via_session(steam_id):
+                continue
             meta = await _lookup_chat_meta(steam_id=steam_id)
             out = {
                 "source": "ingame",
@@ -2444,6 +2817,22 @@ async def post_chat_from_discord(
     if not message:
         return {"status": "empty"}
     discord_id = str(payload.get("discord_id", ""))[:20] or None
+    # Look up the linked Steam ID and refuse the relay if that player is banned.
+    # Without this, a banned player can still chat from Discord (since the WS path
+    # is the in-game-only block point). Silent drop matches the WS behavior.
+    if discord_id:
+        try:
+            from database import async_session
+            async with async_session() as _bdb:
+                row = (await _bdb.execute(
+                    text("SELECT steam_id FROM players WHERE discord_id = :d AND deleted_at IS NULL"),
+                    {"d": discord_id},
+                )).first()
+            if row and row[0] and await _is_banned_via_session(row[0]):
+                print(f"[CHAT] dropped banned discord chatter discord_id={discord_id} steam={row[0]}")
+                return {"status": "banned"}
+        except Exception as e:
+            print(f"[CHAT] ban-check failed for discord {discord_id}: {e}")
     meta = await _lookup_chat_meta(discord_id=discord_id) if discord_id else {"rating": None, "title": None, "title_color": None}
     out = {
         "source": "discord",
@@ -2501,23 +2890,61 @@ async def get_recent_chat(
 
 
 # ── Betting helpers ──────────────────────────────────────────
-# Elo expectancy. At |ΔR| ≥ 800 the favorite's P → ≈0.99, so the payout
-# multiplier floors at 1/0.99 ≈ 1.01x — practically nothing for betting the
-# obvious winner (matches the requested design).
+# Glicko expectancy — factors in BOTH players' rating deviation (RD) so a
+# fresh expert with default RD=350 can't be exploited via "betting against
+# the high-rated newbie." When either player has high RD, the rating gap is
+# dampened by g(RD) → odds compress toward 50/50.
+#
+# Formulas (Glicko-2 / Glicko-1 unified):
+#   q = ln(10) / 400
+#   g(RD) = 1 / sqrt(1 + 3 * q^2 * RD^2 / pi^2)
+#   E(a beats b) = 1 / (1 + 10^( g(combined_RD) * (R_b - R_a) / 400 ))
+#   combined_RD = sqrt(RD_a^2 + RD_b^2)
+
+import math as _math
+_GLICKO_Q = _math.log(10.0) / 400.0
+
+
+def _glicko_g(rd: float) -> float:
+    return 1.0 / _math.sqrt(1.0 + 3.0 * _GLICKO_Q * _GLICKO_Q * rd * rd / (_math.pi * _math.pi))
+
+
+def _glicko_expectancy(rating_a: float, rd_a: float, rating_b: float, rd_b: float) -> float:
+    combined_rd = _math.sqrt(rd_a * rd_a + rd_b * rd_b)
+    g = _glicko_g(combined_rd)
+    return 1.0 / (1.0 + 10.0 ** (g * (rating_b - rating_a) / 400.0))
+
+
 def _elo_expectancy(rating_a: float, rating_b: float) -> float:
+    """Pure-Elo expectancy. Kept for backward compat with code paths that don't have RD on hand."""
     return 1.0 / (1.0 + 10.0 ** ((rating_b - rating_a) / 400.0))
 
 
-def _odds_multiplier(bet_on_rating: float, opponent_rating: float) -> float:
-    p = _elo_expectancy(bet_on_rating, opponent_rating)
+def _odds_multiplier(bet_on_rating: float, opponent_rating: float,
+                      bet_on_rd: float = 80.0, opponent_rd: float = 80.0) -> float:
+    """1/p with a 1.01x floor and a dynamic cap. RD-aware in two ways:
+       (a) Expectancy uses Glicko g(RD) — high-RD players compress the rating gap
+           toward 50/50 since their "true" skill is uncertain.
+       (b) The payout CAP scales DOWN as the maximum RD on either side rises, so
+           a fresh smurf can't be exploited even at small Elo gaps. With either
+           player at default RD=350, the cap drops to 1.0x (no profit possible).
+       Defaults to RD=80 (well-established player) for callers without RD."""
+    p = _glicko_expectancy(bet_on_rating, bet_on_rd, opponent_rating, opponent_rd)
     if p <= 0.0:
-        return 3.0
-    # Cap the payout multiplier at 3x so no single bet can pay more than triple
-    # your stake. Underdog bets on very-large Elo gaps still max out at 3x.
-    # Favorite bets floor at 1.01x (barely-profitable) — matches the intent of
-    # "shouldn't give anyone any gold for betting on an 800+ favorite."
+        p = 1e-6  # fall through to the cap branch below
     mult = 1.0 / p
-    return max(1.01, min(mult, 3.0))
+
+    # Dynamic cap based on the higher RD on either side. Linear ramp from 3x at
+    # RD≤100 (well-established) to 1.0x at RD≥300 (new account or high uncertainty).
+    max_rd = max(bet_on_rd or 80.0, opponent_rd or 80.0)
+    if max_rd <= 100.0:
+        cap = 3.0
+    elif max_rd >= 300.0:
+        cap = 1.0
+    else:
+        cap = 3.0 - 2.0 * (max_rd - 100.0) / 200.0   # linear: 100→3.0, 300→1.0
+
+    return max(1.01, min(mult, cap))
 
 
 async def _settle_series_bets(db: AsyncSession, series: RankedSeries):
@@ -2689,8 +3116,20 @@ async def set_active_trail(
     return await _set_active_cosmetic(db, steam_id, "trail", "trail", item_id, sig)
 
 
+@app.post("/api/v1/players/{steam_id}/active-color", tags=["Shop"])
+async def set_active_color(
+    steam_id: str,
+    item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Equip a map color preset. Local-only cosmetic — never published via Photon since
+    the override is purely client-side (patches ROUNDS' ArtHandler.NextArt)."""
+    return await _set_active_cosmetic(db, steam_id, "color", "color", item_id, sig)
+
+
 async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefix: str, item_id: int | None, sig: str):
-    """Shared set-active logic for titles and trails."""
+    """Shared set-active logic for titles, trails, and colors."""
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
@@ -2705,7 +3144,7 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    attr = "active_title_id" if kind == "title" else "active_trail_id"
+    attr = "active_title_id" if kind == "title" else ("active_trail_id" if kind == "trail" else "active_color_id")
     if item_id is None:
         setattr(player, attr, None)
         await db.commit()
@@ -2727,9 +3166,60 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
 
 # ── Routes: Betting + Live series ────────────────────────────
 
+async def _prune_stale_series(db: AsyncSession) -> int:
+    """Mark series abandoned when no match has been reported within 30 min of creation,
+    and refund any pending bets on those series. Returns the number of series pruned.
+    Called lazily at the start of /series/active so we don't need a separate scheduler."""
+    cutoff_min = 30
+    stale_rows = (await db.execute(text(
+        "SELECT rs.id FROM ranked_series rs "
+        "WHERE rs.status = 'active' "
+        "  AND rs.created_at < NOW() - (:cutoff_min || ' minutes')::interval "
+        "  AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
+        "LIMIT 50"
+    ), {"cutoff_min": str(cutoff_min)})).all()
+    if not stale_rows:
+        return 0
+    pruned = 0
+    for (sid,) in stale_rows:
+        # Refund bets on this series. Stake was charged via gold_spent at place-time;
+        # back it out and add a 'refund_abandoned' gold_transactions entry per bet.
+        bets = (await db.execute(
+            select(Bet).where(Bet.series_id == sid, Bet.settled_at.is_(None))
+        )).scalars().all()
+        for b in bets:
+            player = (await db.execute(select(Player).where(Player.id == b.player_id))).scalar_one_or_none()
+            if player is not None:
+                player.gold_spent = max(0, (player.gold_spent or 0) - b.amount)
+            db.add(GoldTransaction(
+                player_id=b.player_id, amount=b.amount,
+                reason="refund_abandoned", reference_id=str(sid),
+            ))
+            b.settled_at = datetime.now(timezone.utc)
+            b.payout = b.amount  # full stake returned
+        # Mark the series itself abandoned for the audit trail.
+        await db.execute(text(
+            "UPDATE ranked_series SET status = 'abandoned', "
+            "  invalidated_at = NOW(), invalidation_reason = 'no_match_reported' "
+            "WHERE id = :sid"
+        ), {"sid": sid})
+        pruned += 1
+        print(f"[SERIES] abandoned stale series {sid} — refunded {len(bets)} bet(s)")
+    if pruned:
+        await db.commit()
+    return pruned
+
+
 @app.get("/api/v1/series/active", tags=["Series"])
 async def get_active_series(db: AsyncSession = Depends(get_db)):
     """Live (in-progress) ranked series — for the bet UI."""
+    # Lazy cleanup: any series older than 30min with zero matches reported gets marked
+    # abandoned and bets refunded. Cheap (indexed on status + created_at) and runs only
+    # when this endpoint is queried, which is exactly when bettors are looking.
+    try:
+        await _prune_stale_series(db)
+    except Exception as e:
+        print(f"[SERIES] prune error: {e}")
     rows = (await db.execute(text("""
         SELECT
             rs.id::text                AS series_id,
@@ -2741,7 +3231,10 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
             p2.display_name            AS p2_name,
             ROUND(gr1.rating)::int     AS p1_rating,
             ROUND(gr2.rating)::int     AS p2_rating,
+            gr1.rating_deviation       AS p1_rd,
+            gr2.rating_deviation       AS p2_rd,
             rs.p1_series_wins, rs.p2_series_wins,
+            rs.live_p1_points, rs.live_p2_points,
             rs.created_at
         FROM ranked_series rs
         JOIN players p1        ON p1.id = rs.player1_id
@@ -2758,21 +3251,101 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
     for r in rows:
         p1_rating = r["p1_rating"] or 1500
         p2_rating = r["p2_rating"] or 1500
+        p1_rd = float(r["p1_rd"] or 350)
+        p2_rd = float(r["p2_rd"] or 350)
+        live_p1 = r["live_p1_points"] or 0
+        live_p2 = r["live_p2_points"] or 0
+        # Bets lock when:
+        #   - 2+ points scored in game 1 (mystery preserved)
+        #   - any game 1 result is in (series_wins > 0)
+        #   - both odds offer no profit (both sides ≤1.10x — happens when either player has
+        #     RD ≥ 280 → cap clamps low, no point letting players burn gold)
+        p1_odds = round(_odds_multiplier(p1_rating, p2_rating, p1_rd, p2_rd), 2)
+        p2_odds = round(_odds_multiplier(p2_rating, p1_rating, p2_rd, p1_rd), 2)
+        no_profit = max(p1_odds, p2_odds) < 1.10
+        score_locked = (live_p1 + live_p2) >= 2 or r["p1_series_wins"] > 0 or r["p2_series_wins"] > 0
+        bets_locked = no_profit or score_locked
+        if score_locked:
+            lock_reason = "game_in_progress"
+        elif no_profit:
+            lock_reason = "no_meaningful_odds"
+        else:
+            lock_reason = None
         series.append({
             "series_id": r["series_id"],
             "p1_steam_id": r["p1_steam_id"],
             "p1_name": r["p1_name"],
             "p1_rating": p1_rating,
+            "p1_rd": round(p1_rd, 1),
             "p1_wins": r["p1_series_wins"],
-            "p1_odds": round(_odds_multiplier(p1_rating, p2_rating), 2),
+            "p1_odds": p1_odds,
             "p2_steam_id": r["p2_steam_id"],
             "p2_name": r["p2_name"],
             "p2_rating": p2_rating,
+            "p2_rd": round(p2_rd, 1),
             "p2_wins": r["p2_series_wins"],
-            "p2_odds": round(_odds_multiplier(p2_rating, p1_rating), 2),
+            "p2_odds": p2_odds,
+            "live_p1_points": live_p1,
+            "live_p2_points": live_p2,
+            "bets_locked": bets_locked,
+            "lock_reason": lock_reason,
             "started_at": r["created_at"].isoformat() if r["created_at"] else None,
         })
     return {"series": series}
+
+
+@app.post("/api/v1/series/{series_id}/live-points", tags=["Series"])
+async def update_live_points(
+    series_id: str,
+    p1_points: int = Query(..., ge=0, le=10),
+    p2_points: int = Query(..., ge=0, le=10),
+    reporter_steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reporter posts current game-1 point counts so betting can lock when sum >= 2.
+    HMAC signs 'live-points:{series_id}:{reporter_steam_id}:{p1_points}:{p2_points}'."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"live-points:{series_id}:{reporter_steam_id}:{p1_points}:{p2_points}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    try:
+        sid = UUID(series_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid series_id")
+
+    series = (await db.execute(select(RankedSeries).where(RankedSeries.id == sid))).scalar_one_or_none()
+    if series is None:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    # Reporter must be a participant — only the two players in the match should report.
+    reporter = (await db.execute(select(Player).where(Player.steam_id == reporter_steam_id))).scalar_one_or_none()
+    if reporter is None or reporter.id not in (series.player1_id, series.player2_id):
+        raise HTTPException(status_code=403, detail="Reporter is not in this series")
+
+    # Map reporter's p1/p2 perspective to series' p1/p2 ordering.
+    if reporter.id == series.player1_id:
+        new_p1, new_p2 = p1_points, p2_points
+    else:
+        new_p1, new_p2 = p2_points, p1_points
+
+    # Monotonic: only ever increase. Prevents a stale or out-of-order report from
+    # un-locking betting after the cutoff has been hit.
+    series.live_p1_points = max(series.live_p1_points or 0, new_p1)
+    series.live_p2_points = max(series.live_p2_points or 0, new_p2)
+    await db.commit()
+    return {
+        "status": "ok",
+        "live_p1_points": series.live_p1_points,
+        "live_p2_points": series.live_p2_points,
+        "bets_locked": (series.live_p1_points + series.live_p2_points) >= 2,
+    }
 
 
 @app.post("/api/v1/bets", tags=["Betting"])
@@ -2795,6 +3368,9 @@ async def place_bet(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
+    # Banned players can't bet (alongside queue + chat).
+    await _check_ban_or_raise(db, steam_id)
+
     bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if bettor is None:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -2810,6 +3386,12 @@ async def place_bet(
         raise HTTPException(status_code=409, detail="Series is not active")
     if series.p1_series_wins >= 2 or series.p2_series_wins >= 2:
         raise HTTPException(status_code=409, detail="Series already effectively concluded")
+    # Bet cutoff: once 2 points are scored in game 1, betting locks. Preserves the
+    # "is the favorite actually going to win" mystery and prevents free-money bets
+    # placed mid-game once an outcome is obvious. Game 1 ending (any p?_series_wins
+    # > 0) also locks via the wins check above.
+    if (series.live_p1_points or 0) + (series.live_p2_points or 0) >= 2:
+        raise HTTPException(status_code=409, detail="Bets locked — game 1 has progressed past 2 points")
 
     # Bettor can't be a participant — obvious integrity issue.
     if bettor.id in (series.player1_id, series.player2_id):
@@ -2831,16 +3413,23 @@ async def place_bet(
     if balance < amount:
         raise HTTPException(status_code=402, detail=f"Insufficient gold: have {balance}, need {amount}")
 
-    # Snapshot current ratings for odds.
+    # Snapshot current ratings + RD for odds. RD-aware so a fresh expert (default RD 350)
+    # can't be exploited via bet-against — odds compress toward 50/50 until they play more.
     ratings = (await db.execute(text(
-        "SELECT player_id, rating FROM glicko_ratings "
+        "SELECT player_id, rating, rating_deviation FROM glicko_ratings "
         "WHERE player_id = :p1 OR player_id = :p2"
     ), {"p1": series.player1_id, "p2": series.player2_id})).mappings().all()
-    rmap = {r["player_id"]: float(r["rating"] or 1500) for r in ratings}
-    bet_on_r = rmap.get(bet_on.id, 1500.0)
+    rmap = {r["player_id"]: (float(r["rating"] or 1500), float(r["rating_deviation"] or 350)) for r in ratings}
+    bet_on_r, bet_on_rd = rmap.get(bet_on.id, (1500.0, 350.0))
     other_id = series.player2_id if bet_on.id == series.player1_id else series.player1_id
-    other_r = rmap.get(other_id, 1500.0)
-    mult = _odds_multiplier(bet_on_r, other_r)
+    other_r, other_rd = rmap.get(other_id, (1500.0, 350.0))
+    mult = _odds_multiplier(bet_on_r, other_r, bet_on_rd, other_rd)
+    # Defense-in-depth: refuse bets that have no meaningful upside. The /series/active
+    # response already hides the wager buttons in this case but a malicious client could
+    # still POST directly. 1.10x = 10% profit minimum.
+    if mult < 1.10:
+        raise HTTPException(status_code=409,
+            detail="Bets restricted — odds offer no meaningful profit (player rating still uncertain)")
 
     # Stake: debit now, credit payout at settlement.
     bettor.gold_spent = (bettor.gold_spent or 0) + amount
@@ -2874,6 +3463,7 @@ async def get_player_bets(
     rows = (await db.execute(text("""
         SELECT
             b.id, b.amount, b.odds_multiplier, b.created_at, b.settled_at, b.payout,
+            b.series_id::text AS series_id,
             bo.steam_id      AS bet_on_steam_id,
             bo.display_name  AS bet_on_name,
             rs.status        AS series_status,
@@ -2896,6 +3486,7 @@ async def get_player_bets(
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
                 "settled_at": r["settled_at"].isoformat() if r["settled_at"] else None,
                 "payout": r["payout"],
+                "series_id": r["series_id"],
                 "bet_on_steam_id": r["bet_on_steam_id"],
                 "bet_on_name": r["bet_on_name"],
                 "series_status": r["series_status"],
@@ -2979,6 +3570,11 @@ async def delete_player_data(steam_id: str, sig: str = Query(...), db: AsyncSess
 # ── Routes: Achievements ─────────────────────────────────────
 
 # Master achievement definitions — single source of truth
+# Module-level so admin_grant_achievement (defined later) can reference it without
+# falling back to a NameError. unlock_achievement uses the same value. Bumped 25→100 in
+# v1.22.6 — achievements are rare events and 25g felt token; 100g actually buys something.
+ACHIEVEMENT_GOLD = 100
+
 ACHIEVEMENT_DEFS = {
     "untouchable":          {"name": "Untouchable",         "desc": "Win a game without taking any damage"},
     "silent_assassin":      {"name": "Silent Assassin",     "desc": "5-0 someone with Sneaky"},
@@ -3070,8 +3666,8 @@ async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = D
     db.add(ach)
 
     # 25 gold per achievement — uniform for now; rarity-scaled pricing can come
-    # with the shop rollout.
-    ACHIEVEMENT_GOLD = 25
+    # with the shop rollout. ACHIEVEMENT_GOLD is now module-level so admin_grant_achievement
+    # can reuse the same constant without a NameError.
     player.gold_earned = (player.gold_earned or 0) + ACHIEVEMENT_GOLD
     db.add(GoldTransaction(
         player_id=player.id,
@@ -3084,3 +3680,383 @@ async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = D
 
     name = ACHIEVEMENT_DEFS[req.achievement_key]["name"]
     return {"status": "unlocked", "achievement_key": req.achievement_key, "name": name, "gold_awarded": ACHIEVEMENT_GOLD}
+
+
+# ── Routes: Admin ────────────────────────────────────────────
+#
+# Auth: every mutating admin endpoint requires
+#   admin_steam_id  — must be in admin_users
+#   hmac_signature  — HMAC-SHA256 over `admin:{admin_steam_id}:{action}:{target}` using MATCH_HMAC_SECRET
+# Banning is enforced at queue join, /chat/post, and /bets POST via _check_ban_or_raise.
+
+def _admin_canonical(admin_steam_id: str, action: str, target: str = "") -> str:
+    return f"admin:{admin_steam_id}:{action}:{target or ''}"
+
+
+def _verify_admin_hmac(admin_steam_id: str, action: str, target: str, signature):
+    if not MATCH_HMAC_SECRET:
+        return True
+    if not signature:
+        return False
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        _admin_canonical(admin_steam_id, action, target).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+async def _is_admin(db: AsyncSession, steam_id: str) -> bool:
+    if not steam_id:
+        return False
+    r = await db.execute(select(AdminUser).where(AdminUser.steam_id == steam_id))
+    return r.scalar_one_or_none() is not None
+
+
+async def _require_admin(db: AsyncSession, admin_steam_id: str, action: str, target: str, signature) -> None:
+    if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, action, target, signature):
+        raise HTTPException(403, "Bad admin signature")
+
+
+async def _is_banned(db: AsyncSession, steam_id: str):
+    if not steam_id:
+        return None
+    r = await db.execute(text(
+        "SELECT reason FROM player_bans WHERE steam_id = :sid AND unbanned_at IS NULL "
+        "ORDER BY banned_at DESC LIMIT 1"
+    ), {"sid": steam_id})
+    row = r.first()
+    return row[0] if row else None
+
+
+async def _check_ban_or_raise(db: AsyncSession, steam_id: str) -> None:
+    reason = await _is_banned(db, steam_id)
+    if reason:
+        raise HTTPException(status_code=409, detail=f"Banned: {reason}")
+
+
+async def _is_banned_via_session(steam_id: str) -> bool:
+    """Standalone version for code paths that don't have a Depends-injected session
+    (e.g., the chat WebSocket handler). Opens its own short-lived session."""
+    from database import async_session
+    if not steam_id:
+        return False
+    try:
+        async with async_session() as db:
+            return (await _is_banned(db, steam_id)) is not None
+    except Exception as e:
+        print(f"[BAN] check error: {e}")
+        return False
+
+
+@app.get("/api/v1/admin/check-status", tags=["Admin"])
+async def admin_check_status(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    return {"is_admin": await _is_admin(db, steam_id)}
+
+
+@app.get("/api/v1/admin/flagged-matches", tags=["Admin"])
+async def admin_list_flagged(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    include_reviewed: bool = Query(False),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_admin(db, admin_steam_id, "list_flagged", "", hmac_signature)
+    where = "" if include_reviewed else "WHERE fm.reviewed_at IS NULL"
+    rows = (await db.execute(text(
+        "SELECT fm.id, fm.match_id, fm.series_id, fm.flag_reason, fm.flag_details, fm.auto_invalidated, "
+        "       fm.player_steam_ids, fm.reviewed_at, fm.review_action, fm.created_at, "
+        "       m.is_ranked, m.invalidated_at, m.invalidation_reason, "
+        "       COALESCE(m.duration_seconds, m.match_duration) AS duration, "
+        "       p1.display_name AS p1_name, p2.display_name AS p2_name "
+        "FROM flagged_matches fm "
+        "JOIN matches m ON m.id = fm.match_id "
+        "JOIN players p1 ON p1.id = m.player1_id "
+        "JOIN players p2 ON p2.id = m.player2_id "
+        + where + " "
+        "ORDER BY fm.created_at DESC LIMIT :lim OFFSET :off"
+    ), {"lim": limit, "off": offset})).mappings().all()
+    return {"flags": [
+        {
+            "id": str(r["id"]),
+            "match_id": str(r["match_id"]),
+            "series_id": str(r["series_id"]) if r["series_id"] else None,
+            "flag_reason": r["flag_reason"],
+            "flag_details": r["flag_details"],
+            "auto_invalidated": r["auto_invalidated"],
+            "match_invalidated": r["invalidated_at"] is not None,
+            "match_invalidation_reason": r["invalidation_reason"],
+            "player_steam_ids": r["player_steam_ids"],
+            "p1_name": r["p1_name"],
+            "p2_name": r["p2_name"],
+            "is_ranked": r["is_ranked"],
+            "duration_seconds": r["duration"],
+            "reviewed_at": r["reviewed_at"].isoformat() if r["reviewed_at"] else None,
+            "review_action": r["review_action"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        } for r in rows
+    ]}
+
+
+@app.get("/api/v1/admin/banned-users", tags=["Admin"])
+async def admin_list_bans(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_admin(db, admin_steam_id, "list_bans", "", hmac_signature)
+    rows = (await db.execute(text(
+        "SELECT pb.id, pb.steam_id, pb.reason, pb.banned_by_steam_id, pb.banned_at, "
+        "       pb.unbanned_at, p.display_name "
+        "FROM player_bans pb "
+        "LEFT JOIN players p ON p.steam_id = pb.steam_id "
+        "WHERE pb.unbanned_at IS NULL "
+        "ORDER BY pb.banned_at DESC"
+    ))).mappings().all()
+    return {"bans": [
+        {
+            "id": str(r["id"]),
+            "steam_id": r["steam_id"],
+            "display_name": r["display_name"],
+            "reason": r["reason"],
+            "banned_by_steam_id": r["banned_by_steam_id"],
+            "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None,
+        } for r in rows
+    ]}
+
+
+class _AdminBanReq(BaseModel):
+    admin_steam_id: str
+    target_steam_id: str
+    reason: str = "violation"
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/admin/ban", tags=["Admin"])
+async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
+    await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
+    existing = await _is_banned(db, req.target_steam_id)
+    if existing:
+        return {"status": "already_banned", "reason": existing}
+    db.add(PlayerBan(steam_id=req.target_steam_id, reason=req.reason[:256], banned_by_steam_id=req.admin_steam_id))
+    db.add(AdminAction(
+        admin_steam_id=req.admin_steam_id, action="ban", target_steam_id=req.target_steam_id,
+        details={"reason": req.reason},
+    ))
+    await db.commit()
+    return {"status": "banned", "steam_id": req.target_steam_id, "reason": req.reason}
+
+
+class _AdminUnbanReq(BaseModel):
+    admin_steam_id: str
+    target_steam_id: str
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/admin/unban", tags=["Admin"])
+async def admin_unban(req: _AdminUnbanReq, db: AsyncSession = Depends(get_db)):
+    await _require_admin(db, req.admin_steam_id, "unban", req.target_steam_id, req.hmac_signature)
+    res = await db.execute(text(
+        "UPDATE player_bans SET unbanned_at = NOW(), unbanned_by_steam_id = :admin "
+        "WHERE steam_id = :sid AND unbanned_at IS NULL"
+    ), {"admin": req.admin_steam_id, "sid": req.target_steam_id})
+    db.add(AdminAction(
+        admin_steam_id=req.admin_steam_id, action="unban", target_steam_id=req.target_steam_id,
+        details={"rows": res.rowcount},
+    ))
+    await db.commit()
+    return {"status": "unbanned", "steam_id": req.target_steam_id, "rows": res.rowcount}
+
+
+class _AdminGrantAchReq(BaseModel):
+    admin_steam_id: str
+    target_steam_id: str
+    achievement_key: str
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/admin/grant-achievement", tags=["Admin"])
+async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Depends(get_db)):
+    await _require_admin(db, req.admin_steam_id, "grant_achievement", req.target_steam_id, req.hmac_signature)
+    if req.achievement_key not in ACHIEVEMENT_DEFS:
+        raise HTTPException(400, f"Unknown achievement: {req.achievement_key}")
+    target = (await db.execute(select(Player).where(Player.steam_id == req.target_steam_id))).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(404, "Target player not found")
+    existing = (await db.execute(
+        select(PlayerAchievement).where(
+            PlayerAchievement.player_id == target.id,
+            PlayerAchievement.achievement_key == req.achievement_key,
+        )
+    )).scalar_one_or_none()
+    if existing is not None:
+        return {"status": "already_unlocked"}
+    db.add(PlayerAchievement(player_id=target.id, achievement_key=req.achievement_key))
+    target.gold_earned = (target.gold_earned or 0) + ACHIEVEMENT_GOLD
+    db.add(GoldTransaction(
+        player_id=target.id, amount=ACHIEVEMENT_GOLD,
+        reason="achievement", reference_id=req.achievement_key,
+    ))
+    db.add(AdminAction(
+        admin_steam_id=req.admin_steam_id, action="grant_achievement",
+        target_steam_id=req.target_steam_id,
+        details={"achievement_key": req.achievement_key, "gold_awarded": ACHIEVEMENT_GOLD},
+    ))
+    await db.commit()
+    return {"status": "granted", "achievement_key": req.achievement_key, "gold_awarded": ACHIEVEMENT_GOLD}
+
+
+class _AdminReverseSeriesReq(BaseModel):
+    admin_steam_id: str
+    series_id: str
+    reason: str = "admin_reverse"
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/admin/reverse-series", tags=["Admin"])
+async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = Depends(get_db)):
+    await _require_admin(db, req.admin_steam_id, "reverse_series", req.series_id, req.hmac_signature)
+    series = (await db.execute(select(RankedSeries).where(RankedSeries.id == req.series_id))).scalar_one_or_none()
+    if series is None:
+        raise HTTPException(404, "Series not found")
+    if series.invalidated_at is not None:
+        return {"status": "already_invalidated"}
+
+    for pid, rc in [(series.player1_id, series.p1_rating_change),
+                    (series.player2_id, series.p2_rating_change)]:
+        if rc is None:
+            continue
+        g = (await db.execute(select(GlickoRating).where(GlickoRating.player_id == pid))).scalar_one_or_none()
+        if g is not None:
+            g.rating = float(g.rating) - float(rc)
+            g.updated_at = datetime.now(timezone.utc)
+
+    txns = (await db.execute(
+        select(GoldTransaction).where(
+            GoldTransaction.reason == "series_win",
+            GoldTransaction.reference_id == str(series.id),
+        )
+    )).scalars().all()
+    for tx in txns:
+        db.add(GoldTransaction(
+            player_id=tx.player_id, amount=-tx.amount,
+            reason="reversal", reference_id=str(series.id),
+        ))
+        player = (await db.execute(select(Player).where(Player.id == tx.player_id))).scalar_one_or_none()
+        if player is not None:
+            player.gold_earned = max(0, (player.gold_earned or 0) - tx.amount)
+
+    matches_in_series = (await db.execute(select(Match).where(Match.series_id == series.id))).scalars().all()
+    for m in matches_in_series:
+        if m.invalidated_at is not None:
+            continue
+        m.invalidated_at = datetime.now(timezone.utc)
+        m.invalidation_reason = "admin_reverse"
+        await _reverse_match_gold_xp(db, m)
+
+    series.invalidated_at = datetime.now(timezone.utc)
+    series.invalidation_reason = req.reason[:64]
+
+    db.add(AdminAction(
+        admin_steam_id=req.admin_steam_id, action="reverse_series",
+        target_series_id=series.id,
+        details={"reason": req.reason, "matches_reversed": len(matches_in_series)},
+    ))
+    await db.commit()
+    return {"status": "reversed", "series_id": req.series_id, "matches_reversed": len(matches_in_series)}
+
+
+class _AdminReviewFlagReq(BaseModel):
+    admin_steam_id: str
+    flag_id: str
+    review_action: str
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/admin/review-flag", tags=["Admin"])
+async def admin_review_flag(req: _AdminReviewFlagReq, db: AsyncSession = Depends(get_db)):
+    await _require_admin(db, req.admin_steam_id, "review_flag", req.flag_id, req.hmac_signature)
+    if req.review_action not in ("confirmed_cheat", "false_positive"):
+        raise HTTPException(400, "review_action must be 'confirmed_cheat' or 'false_positive'")
+    fm = (await db.execute(select(FlaggedMatch).where(FlaggedMatch.id == req.flag_id))).scalar_one_or_none()
+    if fm is None:
+        raise HTTPException(404, "Flag not found")
+    fm.reviewed_at = datetime.now(timezone.utc)
+    fm.reviewed_by_steam_id = req.admin_steam_id
+    fm.review_action = req.review_action
+    if req.review_action == "false_positive" and fm.auto_invalidated:
+        m = (await db.execute(select(Match).where(Match.id == fm.match_id))).scalar_one_or_none()
+        if m is not None and m.invalidated_at is not None:
+            m.invalidated_at = None
+            m.invalidation_reason = None
+    db.add(AdminAction(
+        admin_steam_id=req.admin_steam_id, action="flag_review",
+        target_match_id=fm.match_id,
+        details={"flag_id": req.flag_id, "review_action": req.review_action},
+    ))
+    await db.commit()
+    return {"status": "reviewed", "flag_id": req.flag_id, "review_action": req.review_action}
+
+
+# ── Maintenance mode endpoints ───────────────────────────────────
+# Called by the deploy script to enter maintenance ~30s before docker-compose recreate,
+# so clients see clean 503 + Retry-After:30 instead of connection-refused. Authed via
+# X-Internal-Key — same secret the bot uses for /chat/post.
+
+@app.post("/api/v1/admin/maintenance/start", tags=["Admin"])
+async def maintenance_start(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    broadcast: bool = Query(True, description="Also post a chat-bridge notice to the in-game/Discord chat"),
+):
+    """Flip the API into maintenance mode. Non-bypass, non-internal requests now 503."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    global _in_maintenance
+    _in_maintenance = True
+    print("[MAINT] Entered maintenance mode — non-bypass requests will 503 with Retry-After:30")
+    if broadcast:
+        # Use the existing chat broadcast pipeline so both in-game players and Discord see the
+        # notice. The chat WS subscribers will receive immediately; the bot relays to Discord.
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            await chat_manager.broadcast({
+                # source="ingame" so the bot's existing ingame→Discord forwarder picks this up.
+                # source="system" would be filtered out and never reach #scr-discussion.
+                "source": "ingame",
+                "steam_id": "_server",
+                "display_name": "[server]",
+                "message": "Server restarting in ~30 seconds — match reports + bets will resume automatically.",
+                "rating": None,
+                "title": None,
+                "title_color": None,
+                "timestamp": now,
+            })
+        except Exception as e:
+            print(f"[MAINT] broadcast failed: {e}")
+    return {"status": "maintenance_on"}
+
+
+@app.post("/api/v1/admin/maintenance/stop", tags=["Admin"])
+async def maintenance_stop(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+):
+    """Manually clear maintenance mode without restarting (rarely needed — fresh containers
+    boot with _in_maintenance=False)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    global _in_maintenance
+    _in_maintenance = False
+    print("[MAINT] Maintenance mode cleared manually")
+    return {"status": "maintenance_off"}
+
+
+@app.get("/api/v1/admin/maintenance/status", tags=["Admin"])
+async def maintenance_status():
+    """Public-readable — clients can poll this if they want to confirm the API is back."""
+    return {"in_maintenance": _in_maintenance}

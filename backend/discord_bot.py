@@ -5,7 +5,7 @@ Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNE
 import os, asyncio, aiohttp, discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from datetime import datetime
+from datetime import datetime, timezone
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://api:8000")
@@ -13,6 +13,7 @@ LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL", "0"))
 SERIES_LOG_CHANNEL_ID = int(os.getenv("SERIES_LOG_CHANNEL", "0"))
 QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
 CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
+ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL", "1495392567687250061"))  # #scr-admin — anti-cheat flags
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 
 RANK_ROLES = [
@@ -98,20 +99,29 @@ async def find_member(guild, discord_id):
 @bot.event
 async def on_ready():
     global http_session
-    http_session = aiohttp.ClientSession()
+    # Default the X-Internal-Key header on every request so the API's version-gate middleware
+    # bypasses the bot. (The mod sends X-Mod-Version; the bot sends X-Internal-Key. Either
+    # is sufficient.) Per-call headers can still override or add to this default.
+    default_headers = {"X-Internal-Key": API_SECRET_KEY} if API_SECRET_KEY else {}
+    http_session = aiohttp.ClientSession(headers=default_headers)
     try: await bot.tree.sync()
     except Exception as e: print(f"Tree sync error: {e}")
     if not poll_recent_series.is_running(): poll_recent_series.start()
     if not sync_roles_periodic.is_running(): sync_roles_periodic.start()
     if not poll_queue_beacon.is_running(): poll_queue_beacon.start()
+    if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
+    if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     # Chat bridge: subscribe to the WS firehose so we can forward in-game
     # messages to the Discord channel. Discord -> in-game goes the other way
-    # via on_message below.
+    # via on_message below. The poll_chat_catchup task above is a belt-and-
+    # suspenders backfill in case any WS broadcast gets silently dropped (e.g.
+    # the chat_manager broadcast loop skipped a subscriber due to a transient
+    # send failure that didn't propagate as an exception).
     asyncio.create_task(chat_ws_listener())
     # One-shot backfill — resolve Discord usernames for any player that was
     # linked before the discord_username column existed.
     asyncio.create_task(backfill_discord_usernames())
-    print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID})")
+    print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
 
 
 async def backfill_discord_usernames():
@@ -185,8 +195,114 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
+# Highest message timestamp the bot has ever forwarded to Discord. Used to
+# dedupe between catch-up (HTTP /chat/recent on WS reconnect) and the live WS
+# stream. Initialized to bot-start time on first connect so we don't spam the
+# Discord channel with the entire backlog when the bot first comes online.
+_last_relayed_ts: str | None = None
+
+# Synchronous-set dedup of recently-posted message IDs. The _last_relayed_ts gate
+# alone races: WS path and catchup poll can BOTH check ts<=last_relayed before
+# either updates it (because the update happens AFTER channel.send awaits). Using
+# this set BEFORE any await ensures only one task wins per message.
+import collections
+_RECENT_IDS_CAP = 300
+_recent_ids_q = collections.deque(maxlen=_RECENT_IDS_CAP)
+_recent_ids_set: set = set()
+def _claim_msg_id(msg_id: str) -> bool:
+    """Return False if msg_id was already seen (caller should drop the message);
+    True if we're the first to see it (caller should post). Synchronous — safe
+    for asyncio because no awaits between the check and the add."""
+    if msg_id in _recent_ids_set:
+        return False
+    if len(_recent_ids_q) == _RECENT_IDS_CAP:
+        _recent_ids_set.discard(_recent_ids_q[0])
+    _recent_ids_q.append(msg_id)
+    _recent_ids_set.add(msg_id)
+    return True
+
+
+async def _forward_ingame_to_discord(data: dict) -> bool:
+    """Render one ingame chat entry into the Discord channel. Returns True on
+    success. Two-layer dedup:
+      1. Synchronous _claim_msg_id — wins the race between WS path and catchup
+         poll (which both run concurrently and can both pass the ts check).
+      2. _last_relayed_ts — kept as a coarse "don't bother with old messages"
+         filter so cold-start catchup doesn't iterate hundreds of historical rows."""
+    global _last_relayed_ts
+    if (data.get("source") or "") != "ingame":
+        return False
+    content = (data.get("message") or "").strip()
+    if not content:
+        return False
+    ts = data.get("timestamp")
+    if ts and _last_relayed_ts and ts <= _last_relayed_ts:
+        return False
+    # Claim the message id BEFORE any await — synchronous so the second concurrent
+    # caller sees the first's add and bails. ts + steam_id + first 80 chars of msg
+    # is unique enough for chat (collisions are vanishingly unlikely).
+    msg_id = f"{data.get('steam_id') or data.get('discord_id') or ''}|{ts or ''}|{content[:80]}"
+    if not _claim_msg_id(msg_id):
+        return False
+    name = data.get("display_name") or "player"
+    rating = data.get("rating")
+    rating_str = f" ({rating:.0f})" if isinstance(rating, (int, float)) else ""
+    title = data.get("title")
+    title_str = f" [{title}]" if title else ""
+    channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
+    if channel is None:
+        print(f"[CHAT] Channel {CHAT_CHANNEL_ID} not resolvable")
+        return False
+    try:
+        await channel.send(
+            f"**{discord.utils.escape_markdown(name)}"
+            f"{discord.utils.escape_markdown(title_str)}"
+            f"{rating_str}** (in-game): "
+            f"{discord.utils.escape_markdown(content)[:1900]}"
+        )
+        if ts:
+            _last_relayed_ts = ts
+        print(f"[CHAT] Posted to Discord: {name}{title_str}: {content[:60]}")
+        return True
+    except Exception as e:
+        print(f"[CHAT] Post to Discord failed: {e}")
+        return False
+
+
+async def _catchup_ingame_since():
+    """On WS (re)connect, pull /chat/recent and forward any ingame entries
+    newer than _last_relayed_ts. Closes the gap where the bot's WS was down
+    and the server broadcast had no subscriber."""
+    if http_session is None:
+        return
+    try:
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/chat/recent",
+            params={"limit": 50},
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[CHAT] catchup fetch status={resp.status}")
+                return
+            payload = await resp.json()
+    except Exception as e:
+        print(f"[CHAT] catchup fetch failed: {e}")
+        return
+    msgs = payload.get("messages") or []
+    forwarded = 0
+    for m in msgs:  # already chronological (oldest first)
+        if await _forward_ingame_to_discord(m):
+            forwarded += 1
+    if forwarded:
+        print(f"[CHAT] catchup forwarded {forwarded} missed in-game messages")
+
+
 async def chat_ws_listener():
     """Long-lived WS subscription. Reconnects with backoff on drop."""
+    global _last_relayed_ts
+    if _last_relayed_ts is None:
+        # First-ever start: don't backfill the entire history. Anchor at boot time.
+        _last_relayed_ts = datetime.now(timezone.utc).isoformat()
     url = API_BASE_URL.replace("http://", "ws://").replace("https://", "wss://") + "/api/v1/ws/chat"
     backoff = 2
     while True:
@@ -196,6 +312,11 @@ async def chat_ws_listener():
             async with http_session.ws_connect(url, heartbeat=30) as ws:
                 print(f"[CHAT] WS connected: {url}")
                 backoff = 2
+                # Close the gap where the bot's WS was down: replay any ingame
+                # messages from /chat/recent that are newer than what we last
+                # relayed. _forward_ingame_to_discord dedupes via timestamp so
+                # the live stream below won't re-post these.
+                await _catchup_ingame_since()
                 async for msg in ws:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         print(f"[CHAT] WS non-text: {msg.type}")
@@ -211,26 +332,7 @@ async def chat_ws_listener():
                     print(f"[CHAT] WS <- source={src} name={name} msg={content[:60]}")
                     if src != "ingame":
                         continue  # Discord originals already live there
-                    if not content:
-                        continue
-                    rating = data.get("rating")
-                    rating_str = f" ({rating:.0f})" if isinstance(rating, (int, float)) else ""
-                    title = data.get("title")
-                    title_str = f" [{title}]" if title else ""
-                    channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
-                    if channel is None:
-                        print(f"[CHAT] Channel {CHAT_CHANNEL_ID} not resolvable")
-                        continue
-                    try:
-                        await channel.send(
-                            f"**{discord.utils.escape_markdown(name)}"
-                            f"{discord.utils.escape_markdown(title_str)}"
-                            f"{rating_str}** (in-game): "
-                            f"{discord.utils.escape_markdown(content)[:1900]}"
-                        )
-                        print(f"[CHAT] Posted to Discord: {name}{title_str}: {content[:60]}")
-                    except Exception as e:
-                        print(f"[CHAT] Post to Discord failed: {e}")
+                    await _forward_ingame_to_discord(data)
         except Exception as e:
             print(f"[CHAT] WS dropped: {e} (reconnect in {backoff}s)")
             await asyncio.sleep(backoff)
@@ -540,6 +642,114 @@ async def publish_lb(guild):
         if msg.author == bot.user and msg.embeds and "Ranked Leaderboard" in (msg.embeds[0].title or ""):
             await msg.edit(embed=embed); return
     await ch.send(embed=embed)
+
+# ── Anti-cheat flag relay ────────────────────────────────────────
+# Tracks the most-recently-posted flag ID so we don't repeat on bot restart.
+# Persisted in-memory only — on cold start, anchor at "now" by pulling once and
+# remembering the latest ID without posting (handled by the first poll tick).
+_last_flag_id_posted: str | None = None
+_flag_poller_initialized = False
+
+
+def _flag_color_and_emoji(reason: str, auto_inv: bool):
+    if reason == "too_many_cards":          return (0xE74C3C, "🃏")  # red
+    if reason == "short_duration_pattern":  return (0xE67E22, "⏱️")  # orange
+    if reason == "inactive_player":         return (0xF1C40F, "💤")  # yellow (advisory)
+    return (0x95A5A6, "🚩")
+
+
+@tasks.loop(seconds=30)
+async def poll_chat_catchup():
+    """Backfill any ingame chat messages the WS broadcast missed.
+
+    Background: lopidav reported that his ingame messages persisted to the DB
+    (so the server received them on the WS) but never reached Discord — the
+    bot's WS subscription appeared healthy yet only some senders' messages
+    came through. Rather than chase the broadcast bug, we poll /chat/recent
+    every 30s and replay anything newer than _last_relayed_ts. The same
+    timestamp dedup that already protects WS reconnect catchup also protects
+    this path, so live WS messages won't double-post."""
+    if not http_session:
+        return
+    await _catchup_ingame_since()
+
+
+@tasks.loop(seconds=60)
+async def poll_anticheat_flags():
+    """Poll the API for new flagged_matches entries and post them to #scr-admin."""
+    global _last_flag_id_posted, _flag_poller_initialized
+    if not http_session or not API_SECRET_KEY or not ADMIN_CHANNEL_ID:
+        return
+    try:
+        params = {"limit": 50}
+        if _last_flag_id_posted:
+            params["since_id"] = _last_flag_id_posted
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/internal/recent-flags",
+            params=params,
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[ANTICHEAT] feed status={resp.status}")
+                return
+            payload = await resp.json()
+    except Exception as e:
+        print(f"[ANTICHEAT] feed error: {e}")
+        return
+
+    flags = payload.get("flags") or []
+    if not flags:
+        return
+
+    # Cold-start: don't spam the channel with the entire history. Skip posting
+    # on the very first tick, just memo the most-recent ID.
+    if not _flag_poller_initialized:
+        _flag_poller_initialized = True
+        _last_flag_id_posted = flags[-1]["id"]
+        print(f"[ANTICHEAT] cold start, anchored at {_last_flag_id_posted[:8]}")
+        return
+
+    channel = bot.get_channel(ADMIN_CHANNEL_ID) or await bot.fetch_channel(ADMIN_CHANNEL_ID)
+    if channel is None:
+        print(f"[ANTICHEAT] admin channel {ADMIN_CHANNEL_ID} not resolvable")
+        return
+
+    for f in flags:
+        try:
+            color, emoji = _flag_color_and_emoji(f["flag_reason"], f["auto_invalidated"])
+            details = f.get("flag_details") or {}
+            mode = "Ranked" if f.get("is_ranked") else "Casual"
+            dur = f.get("duration_seconds")
+            dur_str = f"{dur}s" if dur is not None else "—"
+            verdict = "auto-invalidated" if f["auto_invalidated"] else "advisory (manual review)"
+            embed = discord.Embed(
+                title=f"{emoji} Match flagged: `{f['flag_reason']}`",
+                description=(
+                    f"**{f['p1_name']}** vs **{f['p2_name']}** ({mode}, {dur_str})\n"
+                    f"Status: **{verdict}**\n"
+                    f"Match ID: `{f['match_id']}`"
+                ),
+                color=color,
+                timestamp=datetime.fromisoformat(f["created_at"].replace("Z", "+00:00")) if f.get("created_at") else None,
+            )
+            # Per-reason context fields.
+            if f["flag_reason"] == "too_many_cards":
+                embed.add_field(name="Cards picked", value=f"P1: {details.get('p1_cards')}  P2: {details.get('p2_cards')} (max {details.get('max_allowed')})", inline=False)
+            elif f["flag_reason"] == "short_duration_pattern":
+                prior = details.get("prior_match_ids") or []
+                embed.add_field(name="Pattern", value=f"This + {len(prior)} prior match(es) under 60s in a 2hr window", inline=False)
+                if details.get("retroactive"):
+                    embed.add_field(name="Retroactive", value=f"Triggered by {details.get('triggered_by_match','')[:8]}…", inline=False)
+            elif f["flag_reason"] == "inactive_player":
+                embed.add_field(name="Reporter inputs", value=f"Shots: {details.get('shots',0)}  Blocks: {details.get('blocks',0)}  Duration: {details.get('duration_seconds')}s", inline=False)
+                embed.add_field(name="Reporter", value=f"`{details.get('reporter_steam','?')}`", inline=False)
+            embed.add_field(name="Steam IDs", value="`" + "`, `".join(f.get("player_steam_ids") or []) + "`", inline=False)
+            await channel.send(embed=embed)
+            _last_flag_id_posted = f["id"]
+        except Exception as ex:
+            print(f"[ANTICHEAT] post error for flag {f.get('id')}: {ex}")
+
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN: print("ERROR: Set DISCORD_TOKEN"); exit(1)

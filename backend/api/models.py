@@ -10,7 +10,7 @@ from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, Double, ForeignKey, Index, Integer,
     SmallInteger, String, UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
@@ -34,6 +34,7 @@ class Player(Base):
     gold_spent = Column(Integer, nullable=False, default=0)
     active_title_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_trail_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
+    active_color_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -101,6 +102,14 @@ class Match(Base):
     ended_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
+    # Anti-cheat (v1.21.0). duration_seconds replaces match_duration as the canonical name in
+    # new code; the older column is preserved so historical rows aren't disturbed.
+    duration_seconds = Column(Integer, nullable=True)
+    local_bullets_fired = Column(Integer, nullable=True)
+    local_blocks_raised = Column(Integer, nullable=True)
+    invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    invalidation_reason = Column(String(64), nullable=True)
+
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
     winner = relationship("Player", foreign_keys=[winner_id])
@@ -129,6 +138,12 @@ class RankedSeries(Base):
     p2_rating_change = Column(Double, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     completed_at = Column(DateTime(timezone=True), nullable=True)
+    invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    invalidation_reason = Column(String(64), nullable=True)
+    # v1.22 — live point counts for game 1 of the series (zeros after first match completes,
+    # since this only matters for the bet-cutoff window). Bets reject when sum >= 2.
+    live_p1_points = Column(Integer, nullable=False, default=0)
+    live_p2_points = Column(Integer, nullable=False, default=0)
 
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
@@ -271,3 +286,59 @@ class PlayerAchievement(Base):
         Index("idx_pa_player", "player_id"),
         Index("idx_pa_key", "achievement_key"),
     )
+
+
+# ── Anti-cheat & admin (v1.21.0) ──────────────────────────────
+
+class FlaggedMatch(Base):
+    """Append-only audit log of suspicious matches. Multiple flags may attach to one match."""
+    __tablename__ = "flagged_matches"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    match_id = Column(UUID(as_uuid=True), ForeignKey("matches.id", ondelete="CASCADE"), nullable=False)
+    series_id = Column(UUID(as_uuid=True), ForeignKey("ranked_series.id", ondelete="SET NULL"), nullable=True)
+    player_steam_ids = Column(ARRAY(String), nullable=False)
+    flag_reason = Column(String(64), nullable=False)
+    flag_details = Column(JSONB, nullable=True)
+    auto_invalidated = Column(Boolean, nullable=False, default=False)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by_steam_id = Column(String(20), nullable=True)
+    review_action = Column(String(32), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class AdminUser(Base):
+    """Whitelist of Steam IDs allowed to call /admin/* endpoints."""
+    __tablename__ = "admin_users"
+
+    steam_id = Column(String(20), primary_key=True)
+    granted_by_steam_id = Column(String(20), nullable=True)
+    granted_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    notes = Column(String(256), nullable=True)
+
+
+class PlayerBan(Base):
+    """Append-only ban log; player is currently banned if latest row has unbanned_at IS NULL."""
+    __tablename__ = "player_bans"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    steam_id = Column(String(20), nullable=False)
+    reason = Column(String(256), nullable=False)
+    banned_by_steam_id = Column(String(20), ForeignKey("admin_users.steam_id"), nullable=False)
+    banned_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    unbanned_at = Column(DateTime(timezone=True), nullable=True)
+    unbanned_by_steam_id = Column(String(20), nullable=True)
+
+
+class AdminAction(Base):
+    """Audit log for everything admins do — bans, achievement grants, series reversals."""
+    __tablename__ = "admin_actions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    admin_steam_id = Column(String(20), ForeignKey("admin_users.steam_id"), nullable=False)
+    action = Column(String(32), nullable=False)
+    target_steam_id = Column(String(20), nullable=True)
+    target_match_id = Column(UUID(as_uuid=True), nullable=True)
+    target_series_id = Column(UUID(as_uuid=True), nullable=True)
+    details = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

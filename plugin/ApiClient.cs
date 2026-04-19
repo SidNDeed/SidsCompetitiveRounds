@@ -38,9 +38,20 @@ namespace CompetitiveRounds
             public string winner_name;
             public string p1_name, p2_name;
             public int p1_wins, p2_wins;
+            public int p1_rating, p2_rating;       // current Glicko ratings — for inline display
             public float p1_rating_change, p2_rating_change;
             public string winner_steam_id, p1_steam_id, p2_steam_id;
             public string completed_at;
+            public List<SeriesBetEntry> bets = new List<SeriesBetEntry>();
+        }
+
+        public class SeriesBetEntry
+        {
+            public string bettor_name, bet_on_name, bettor_steam_id, bet_on_steam_id;
+            public int amount;
+            public int payout;        // 0 = lost, >amount = won (full credit)
+            public float odds_multiplier;
+            public bool won;
         }
 
         // ── Data classes ──────────────────────────────────────
@@ -109,6 +120,7 @@ namespace CompetitiveRounds
             public string active_trail_sku;
             public string active_trail_color;
             public int active_trail_price;
+            public string active_color_sku;  // ROUNDS art-profile-name override; null/empty = vanilla random
 
             // Parsed manually (JsonUtility can't handle nested arrays)
             public List<string> top_card_names;
@@ -150,6 +162,8 @@ namespace CompetitiveRounds
             public string match_id;
             public string opponent_steam_id;
             public string opponent_name;
+            public string opponent_title;        // current active title shop_items.name
+            public string opponent_title_color;  // hex like "#A040FF"
             public int player_rounds_won;
             public int opponent_rounds_won;
             public int player_points;
@@ -544,9 +558,20 @@ namespace CompetitiveRounds
             public string p2_steam_id, p2_name;
             public int p2_rating, p2_wins;
             public float p2_odds;
+            public int live_p1_points, live_p2_points;
+            public bool bets_locked;
+            public string lock_reason;  // "game_in_progress" | "no_meaningful_odds" | null
+        }
+
+        public class MyBetEntry
+        {
+            public string series_id, bet_on_steam_id, bet_on_name, series_status, series_score;
+            public int amount;
+            public float odds_multiplier;
         }
 
         public static List<ActiveSeriesEntry> CachedActiveSeries { get; private set; }
+        public static List<MyBetEntry> CachedMyBets { get; private set; } = new List<MyBetEntry>();
 
         public static void FetchActiveSeries()
         {
@@ -574,6 +599,10 @@ namespace CompetitiveRounds
                             e.p2_rating    = ExtractJsonInt(chunk, "p2_rating");
                             e.p2_wins      = ExtractJsonInt(chunk, "p2_wins");
                             e.p2_odds      = ExtractJsonFloat(chunk, "p2_odds");
+                            e.live_p1_points = ExtractJsonInt(chunk, "live_p1_points");
+                            e.live_p2_points = ExtractJsonInt(chunk, "live_p2_points");
+                            e.bets_locked   = chunk.Contains("\"bets_locked\":true") || chunk.Contains("\"bets_locked\": true");
+                            e.lock_reason   = ExtractJsonString(chunk, "lock_reason");
                             if (!string.IsNullOrEmpty(e.series_id)) list.Add(e);
                         }
                     }
@@ -582,6 +611,65 @@ namespace CompetitiveRounds
                     NativeUI.MarkDirty();
                 }
             ));
+        }
+
+        // Fetches the local player's recent bets so the live-series UI can replace the wager
+        // buttons with "You bet 500g on PlayerName" once a bet is placed (server enforces one
+        // bet per series per player; this is purely the visible feedback).
+        public static void FetchMyBets(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/{steamId}/bets?limit=50",
+                (ok, resp) =>
+                {
+                    if (!ok) return;
+                    var list = new List<MyBetEntry>();
+                    try
+                    {
+                        var parts = resp.Split(new[] { "\"id\":" }, StringSplitOptions.None);
+                        for (int i = 1; i < parts.Length; i++)
+                        {
+                            string chunk = parts[i];
+                            var b = new MyBetEntry();
+                            b.amount         = ExtractJsonInt(chunk, "amount");
+                            b.odds_multiplier= ExtractJsonFloat(chunk, "odds_multiplier");
+                            b.series_id      = ExtractJsonString(chunk, "series_id");
+                            b.bet_on_steam_id= ExtractJsonString(chunk, "bet_on_steam_id");
+                            b.bet_on_name    = ExtractJsonString(chunk, "bet_on_name");
+                            b.series_status  = ExtractJsonString(chunk, "series_status");
+                            b.series_score   = ExtractJsonString(chunk, "series_score");
+                            if (!string.IsNullOrEmpty(b.series_id)) list.Add(b);
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[BET] my-bets parse: {ex.Message}"); }
+                    CachedMyBets = list;
+                    NativeUI.MarkDirty();
+                }
+            ));
+        }
+
+        public static MyBetEntry GetMyBetForSeries(string seriesId)
+        {
+            if (string.IsNullOrEmpty(seriesId) || CachedMyBets == null) return null;
+            foreach (var b in CachedMyBets) if (b.series_id == seriesId) return b;
+            return null;
+        }
+
+        /// <summary>Report current game-1 point counts on a live ranked series. The server uses
+        /// these to lock betting once 2+ points have been scored. Fire-and-forget; failures are
+        /// logged but don't block gameplay. HMAC over "live-points:{series}:{reporter}:{p1}:{p2}".</summary>
+        public static void PostLivePoints(string seriesId, string reporterSteamId, int p1Points, int p2Points)
+        {
+            if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId)) return;
+            string sig = ComputeHmacHex($"live-points:{seriesId}:{reporterSteamId}:{p1Points}:{p2Points}");
+            string url = $"{baseUrl}/api/v1/series/{Escape(seriesId)}/live-points" +
+                         $"?p1_points={p1Points}&p2_points={p2Points}" +
+                         $"&reporter_steam_id={Escape(reporterSteamId)}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[LIVE-POINTS] series={seriesId.Substring(0, Math.Min(8, seriesId.Length))} {p1Points}-{p2Points} ok={ok}");
+            }));
         }
 
         /// <summary>Place a bet. HMAC over "bet:{bettor}:{series_id}:{bet_on}:{amount}".</summary>
@@ -704,6 +792,19 @@ namespace CompetitiveRounds
             }));
         }
 
+        public static void SetActiveColor(string steamId, long itemId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"color:{steamId}:{itemId}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/active-color?sig={sig}";
+            if (itemId > 0) url += $"&item_id={itemId}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SHOP] set color {itemId}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) FetchPlayerStats(steamId);
+            }));
+        }
+
         private static List<ShopItemData> ParseShopItems(string response)
         {
             var list = new List<ShopItemData>();
@@ -784,6 +885,160 @@ namespace CompetitiveRounds
             }
         }
 
+        // ── Admin ─────────────────────────────────────────────
+
+        public static bool IsAdmin { get; private set; }
+        // Cached lists, refreshed by FetchFlaggedMatches / FetchBannedUsers.
+        public static List<FlaggedMatchEntry> CachedFlaggedMatches { get; private set; } = new List<FlaggedMatchEntry>();
+        public static List<BannedUserEntry> CachedBannedUsers { get; private set; } = new List<BannedUserEntry>();
+
+        public class FlaggedMatchEntry
+        {
+            public string id, match_id, series_id, flag_reason;
+            public string p1_name, p2_name;
+            public List<string> player_steam_ids = new List<string>();
+            public bool auto_invalidated, match_invalidated, is_ranked;
+            public int duration_seconds;
+            public string review_action;        // null = unreviewed
+            public string created_at;
+            public string flag_details_summary; // pre-rendered short string for the UI row
+        }
+
+        public class BannedUserEntry
+        {
+            public string id, steam_id, display_name, reason, banned_by_steam_id, banned_at;
+        }
+
+        public static void CheckAdminStatus(string steamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId)) { IsAdmin = false; callback?.Invoke(false); return; }
+            string url = $"{baseUrl}/api/v1/admin/check-status?steam_id={steamId}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                bool admin = false;
+                if (ok && !string.IsNullOrEmpty(body))
+                    admin = body.Contains("\"is_admin\":true") || body.Contains("\"is_admin\": true");
+                IsAdmin = admin;
+                Plugin.Log.LogInfo($"[ADMIN] check-status for {steamId}: is_admin={admin}");
+                callback?.Invoke(admin);
+            }));
+        }
+
+        public static void FetchFlaggedMatches(string adminSteamId, bool includeReviewed = false, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:list_flagged:");
+            string url = $"{baseUrl}/api/v1/admin/flagged-matches?admin_steam_id={adminSteamId}&hmac_signature={sig}&include_reviewed={(includeReviewed?"true":"false")}&limit=50";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                if (!ok) { Plugin.Log.LogWarning($"[ADMIN] flagged fetch failed: {body}"); callback?.Invoke(false); return; }
+                try { CachedFlaggedMatches = ParseFlaggedMatches(body); callback?.Invoke(true); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[ADMIN] flagged parse: {ex.Message}"); callback?.Invoke(false); }
+            }));
+        }
+
+        public static void FetchBannedUsers(string adminSteamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:list_bans:");
+            string url = $"{baseUrl}/api/v1/admin/banned-users?admin_steam_id={adminSteamId}&hmac_signature={sig}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                if (!ok) { Plugin.Log.LogWarning($"[ADMIN] bans fetch failed: {body}"); callback?.Invoke(false); return; }
+                try { CachedBannedUsers = ParseBannedUsers(body); callback?.Invoke(true); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[ADMIN] bans parse: {ex.Message}"); callback?.Invoke(false); }
+            }));
+        }
+
+        public static void AdminBan(string adminSteamId, string targetSteamId, string reason, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:ban:{targetSteamId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"target_steam_id\":\"{Escape(targetSteamId)}\",\"reason\":\"{Escape(reason)}\",\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/ban", body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        public static void AdminUnban(string adminSteamId, string targetSteamId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:unban:{targetSteamId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"target_steam_id\":\"{Escape(targetSteamId)}\",\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/unban", body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        public static void AdminGrantAchievement(string adminSteamId, string targetSteamId, string achievementKey, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:grant_achievement:{targetSteamId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"target_steam_id\":\"{Escape(targetSteamId)}\",\"achievement_key\":\"{Escape(achievementKey)}\",\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/grant-achievement", body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        public static void AdminReverseSeries(string adminSteamId, string seriesId, string reason, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:reverse_series:{seriesId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"series_id\":\"{Escape(seriesId)}\",\"reason\":\"{Escape(reason)}\",\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/reverse-series", body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        public static void AdminReviewFlag(string adminSteamId, string flagId, string action, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:review_flag:{flagId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"flag_id\":\"{Escape(flagId)}\",\"review_action\":\"{Escape(action)}\",\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/review-flag", body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        // Manual JSON parsers (the existing pattern in this file: JsonUtility silently fails on nested arrays).
+        private static List<FlaggedMatchEntry> ParseFlaggedMatches(string json)
+        {
+            var list = new List<FlaggedMatchEntry>();
+            if (string.IsNullOrEmpty(json)) return list;
+            // Each flag begins with "id":"<uuid>" — split on that anchor and parse forward.
+            var parts = json.Split(new[] { "\"id\":\"" }, StringSplitOptions.None);
+            for (int i = 1; i < parts.Length; i++)
+            {
+                var chunk = parts[i];
+                int qend = chunk.IndexOf('"');
+                if (qend < 0) continue;
+                var e = new FlaggedMatchEntry();
+                e.id = chunk.Substring(0, qend);
+                e.match_id = ExtractJsonString(chunk, "match_id");
+                e.series_id = ExtractJsonString(chunk, "series_id");
+                e.flag_reason = ExtractJsonString(chunk, "flag_reason");
+                e.p1_name = ExtractJsonString(chunk, "p1_name");
+                e.p2_name = ExtractJsonString(chunk, "p2_name");
+                e.auto_invalidated = chunk.Contains("\"auto_invalidated\":true") || chunk.Contains("\"auto_invalidated\": true");
+                e.match_invalidated = chunk.Contains("\"match_invalidated\":true") || chunk.Contains("\"match_invalidated\": true");
+                e.is_ranked = chunk.Contains("\"is_ranked\":true") || chunk.Contains("\"is_ranked\": true");
+                e.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
+                e.review_action = ExtractJsonString(chunk, "review_action");
+                e.created_at = ExtractJsonString(chunk, "created_at");
+                // Rough single-line summary (the JSON is nested, we just hint the key signals).
+                e.flag_details_summary = $"{e.flag_reason}  {(e.is_ranked?"R":"C")}  {e.duration_seconds}s  {(e.auto_invalidated?"[auto-inv]":"[advisory]")}";
+                list.Add(e);
+            }
+            return list;
+        }
+
+        private static List<BannedUserEntry> ParseBannedUsers(string json)
+        {
+            var list = new List<BannedUserEntry>();
+            if (string.IsNullOrEmpty(json)) return list;
+            var parts = json.Split(new[] { "\"id\":\"" }, StringSplitOptions.None);
+            for (int i = 1; i < parts.Length; i++)
+            {
+                var chunk = parts[i];
+                int qend = chunk.IndexOf('"');
+                if (qend < 0) continue;
+                var e = new BannedUserEntry();
+                e.id = chunk.Substring(0, qend);
+                e.steam_id = ExtractJsonString(chunk, "steam_id");
+                e.display_name = ExtractJsonString(chunk, "display_name");
+                e.reason = ExtractJsonString(chunk, "reason");
+                e.banned_by_steam_id = ExtractJsonString(chunk, "banned_by_steam_id");
+                e.banned_at = ExtractJsonString(chunk, "banned_at");
+                list.Add(e);
+            }
+            return list;
+        }
+
         // ── Opponent ranked check ─────────────────────────────
 
         public static void CheckOpponentRanked(string steamId, Action<bool> callback)
@@ -834,7 +1089,11 @@ namespace CompetitiveRounds
             List<MatchTracker.CardOfferData> p2Offers,
             string photonRoomId, string region,
             int durationSeconds, DateTime startedAt,
-            string reporterSteamId, bool isRanked)
+            string reporterSteamId, bool isRanked,
+            // Anti-cheat: reporter's per-match input counts. Server flags reporter as
+            // "inactive" if both are 0 across a non-trivial duration. NOT included in HMAC
+            // (which is locked at exactly 7 fields) — these are advisory signals.
+            int localShotsFired = 0, int localBlocksRaised = 0)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -859,6 +1118,9 @@ namespace CompetitiveRounds
             sb.Append($"\"started_at\":\"{startedAt:yyyy-MM-ddTHH:mm:ssZ}\",");
             sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
             sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteamId)}\",");
+            // Reporter's combat input counts for inactive-player anti-cheat. Server-side advisory.
+            sb.Append($"\"local_shots_fired\":{localShotsFired},");
+            sb.Append($"\"local_blocks_raised\":{localBlocksRaised},");
             string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
@@ -940,6 +1202,11 @@ namespace CompetitiveRounds
                         {
                             string seriesStatus = ExtractJsonString(response, "series_status");
                             string seriesScore = ExtractJsonString(response, "series_score");
+
+                            // After game 1 of a series is over, live-points reporting is irrelevant
+                            // (bets are locked anyway by series_wins > 0). Clear so we don't post
+                            // stale series_id if a new series starts within the same room.
+                            ActiveRankedSeriesId = null;
 
                             if (seriesStatus == "active")
                             {
@@ -1086,7 +1353,7 @@ namespace CompetitiveRounds
             ));
         }
 
-        public static void FetchRecentSeries(int limit = 10)
+        public static void FetchRecentSeries(int limit = 100)
         {
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/series/recent?minutes=10080&limit={limit}",
@@ -1112,6 +1379,37 @@ namespace CompetitiveRounds
                                 // Parse rating changes as float
                                 try{int rc1=parts[i].IndexOf("\"p1_rating_change\":");if(rc1>=0){rc1+="\"p1_rating_change\":".Length;int rc1e=rc1;while(rc1e<parts[i].Length&&(char.IsDigit(parts[i][rc1e])||parts[i][rc1e]=='.'||parts[i][rc1e]=='-'))rc1e++;if(rc1e>rc1)e.p1_rating_change=float.Parse(parts[i].Substring(rc1,rc1e-rc1),System.Globalization.CultureInfo.InvariantCulture);}}catch{}
                                 try{int rc2=parts[i].IndexOf("\"p2_rating_change\":");if(rc2>=0){rc2+="\"p2_rating_change\":".Length;int rc2e=rc2;while(rc2e<parts[i].Length&&(char.IsDigit(parts[i][rc2e])||parts[i][rc2e]=='.'||parts[i][rc2e]=='-'))rc2e++;if(rc2e>rc2)e.p2_rating_change=float.Parse(parts[i].Substring(rc2,rc2e-rc2),System.Globalization.CultureInfo.InvariantCulture);}}catch{}
+                                e.p1_rating = ExtractJsonInt(parts[i], "p1_rating");
+                                e.p2_rating = ExtractJsonInt(parts[i], "p2_rating");
+                                // Parse the bets array. Server inlines a 'bets' list into each series — each entry has
+                                // bettor_name / amount / payout / bet_on_name / won. We isolate this series's bets chunk
+                                // (from "bets" up to the next "series_id" boundary) so we don't accidentally pull bets
+                                // from later series in the response.
+                                int betsKey = parts[i].IndexOf("\"bets\":");
+                                if (betsKey >= 0)
+                                {
+                                    int betsStart = parts[i].IndexOf('[', betsKey);
+                                    int betsEnd = parts[i].IndexOf(']', betsStart);
+                                    if (betsStart >= 0 && betsEnd > betsStart)
+                                    {
+                                        string betsBlock = parts[i].Substring(betsStart, betsEnd - betsStart + 1);
+                                        var betChunks = betsBlock.Split(new[] { "\"bettor_name\":" }, StringSplitOptions.None);
+                                        for (int bi = 1; bi < betChunks.Length; bi++)
+                                        {
+                                            string chunk = "\"bettor_name\":" + betChunks[bi];
+                                            var b = new SeriesBetEntry();
+                                            b.bettor_name = ExtractJsonString(chunk, "bettor_name");
+                                            b.bettor_steam_id = ExtractJsonString(chunk, "bettor_steam_id");
+                                            b.bet_on_name = ExtractJsonString(chunk, "bet_on_name");
+                                            b.bet_on_steam_id = ExtractJsonString(chunk, "bet_on_steam_id");
+                                            b.amount = ExtractJsonInt(chunk, "amount");
+                                            b.payout = ExtractJsonInt(chunk, "payout");
+                                            b.odds_multiplier = ExtractJsonFloat(chunk, "odds_multiplier");
+                                            b.won = chunk.Contains("\"won\":true") || chunk.Contains("\"won\": true");
+                                            if (!string.IsNullOrEmpty(b.bettor_name)) e.bets.Add(b);
+                                        }
+                                    }
+                                }
                                 if (!string.IsNullOrEmpty(e.p1_name)) list.Add(e);
                             }
                             CachedRecentSeries = list;
@@ -1479,6 +1777,8 @@ namespace CompetitiveRounds
                                 entry.match_id = ExtractJsonString(chunk, "");
                                 entry.opponent_name = ExtractJsonString(chunk, "opponent_name");
                                 entry.opponent_steam_id = ExtractJsonString(chunk, "opponent_steam_id");
+                                entry.opponent_title = ExtractJsonString(chunk, "opponent_title");
+                                entry.opponent_title_color = ExtractJsonString(chunk, "opponent_title_color");
 
                                 entry.player_rounds_won = ExtractJsonInt(chunk, "player_rounds_won");
                                 entry.opponent_rounds_won = ExtractJsonInt(chunk, "opponent_rounds_won");
@@ -1682,6 +1982,10 @@ namespace CompetitiveRounds
 
         // Current queue state (mod-side)
         public static QueueState CurrentQueueState { get; private set; } = QueueState.Idle;
+        // v1.22 — server returns this on /queue/ready when both players ready up. Used by
+        // GameStateWatcher's poll to address the correct series when posting live point counts.
+        // Cleared after the series's first match report (no longer needed; bets locked anyway).
+        public static string ActiveRankedSeriesId;
         public static QueuePollData LastPollData { get; private set; }
         public static bool IsQueuePolling { get; private set; } = false;
         private static float queuePollTimer = 0f;
@@ -1810,13 +2114,16 @@ namespace CompetitiveRounds
                         {
                             string room = ExtractJsonString(response, "room_name");
                             string region = ExtractJsonString(response, "photon_region");
+                            // v1.22 — server now pre-creates the ranked_series and returns its id.
+                            // Stash it so live-points reports during game 1 can address the right series.
+                            ActiveRankedSeriesId = ExtractJsonString(response, "series_id");
                             if (!string.IsNullOrEmpty(room))
                             {
                                 IsQueuePolling = false;
                                 CurrentQueueState = QueueState.Idle;
                                 LastPollData = null;
                                 Plugin.SetPendingRoom(room, region);
-                                Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"})");
+                                Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"}) series={ActiveRankedSeriesId}");
                                 CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
                                 NativeUI.MarkDirty();
                             }
@@ -2158,9 +2465,35 @@ namespace CompetitiveRounds
             return false;
         }
 
+        // Heartbeat — track the most recent ATTEMPT and the most recent SUCCESS, separately.
+        // Banner only shows when:  attempt within last 10s  AND  success was >5s before that attempt.
+        // This prevents false-positives during quiet periods (no API calls = no info either way).
+        public static float LastApiSuccessAt = -999f;
+        public static float LastApiAttemptAt = -999f;
+        public static bool LastResponseWasMaintenance = false;
+        private static void NoteAttempt() { LastApiAttemptAt = Time.unscaledTime; }
+        private static void NoteResult(bool success, long httpCode)
+        {
+            if (success) { LastApiSuccessAt = Time.unscaledTime; LastResponseWasMaintenance = false; }
+            else if (httpCode == 503) { LastResponseWasMaintenance = true; }
+        }
+        /// <summary>True when we've recently TRIED to talk to the API and the most recent attempt
+        /// hasn't succeeded — distinct from "haven't tried in a while".</summary>
+        public static bool ApiLooksDown
+        {
+            get
+            {
+                if (LastApiAttemptAt < 0f) return false;
+                float now = Time.unscaledTime;
+                if (now - LastApiAttemptAt > 15f) return false;        // no recent attempts → don't claim down
+                return (now - LastApiSuccessAt) > 10f;                  // attempts happening but no recent success
+            }
+        }
+
         private static IEnumerator GetRequest(string url, Action<bool, string> callback)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
+            NoteAttempt();
             using (var request = UnityWebRequest.Get(url))
             {
                 StampVersionHeader(request);
@@ -2169,6 +2502,7 @@ namespace CompetitiveRounds
 
                 if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
                 bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
                 callback(success, success ? request.downloadHandler.text : request.error);
             }
         }
@@ -2176,6 +2510,7 @@ namespace CompetitiveRounds
         private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
+            NoteAttempt();
             using (var request = new UnityWebRequest(url, "POST"))
             {
                 if (!string.IsNullOrEmpty(json))
@@ -2192,6 +2527,7 @@ namespace CompetitiveRounds
 
                 if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
                 bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
                 callback(success, success ? request.downloadHandler.text : request.error);
             }
         }
@@ -2202,6 +2538,7 @@ namespace CompetitiveRounds
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
+                NoteAttempt();
                 using (var request = new UnityWebRequest(url, "POST"))
                 {
                     if (!string.IsNullOrEmpty(json))
@@ -2219,6 +2556,7 @@ namespace CompetitiveRounds
                     if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
 
                     bool success = request.result == UnityWebRequest.Result.Success;
+                    NoteResult(success, request.responseCode);
                     if (success)
                     {
                         callback(true, request.downloadHandler.text);

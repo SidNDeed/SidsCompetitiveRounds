@@ -20,7 +20,7 @@ namespace CompetitiveRounds
     internal static class UIFactory
     {
         internal static Type tImage, tButton, tCanvas, tLE;
-        private static Type tScrollRect;internal static Type tMask;private static Type tVLG, tHLG, tCSF;
+        internal static Type tScrollRect;internal static Type tMask;private static Type tVLG, tHLG, tCSF;
         internal static Type tGR, tCanvasScaler;
         private static Type tTMP;
         private static bool typesReady = false;
@@ -156,10 +156,36 @@ namespace CompetitiveRounds
         private static bool discordRevealed = false;
         // Chat log panel (under Discord Link in My Stats). Shows last N messages.
         private static object txtChatLog;
+        // ScrollRect on the chat panel — held so RefreshChatLog can pin to the bottom on new messages.
+        private static Component chatScrollRect;
+        // Per-message length cap on the local renderer. The server already truncates at 500 on receive,
+        // but the local echo and any paste from outside the IMGUI input box can be much longer (a 9000-char
+        // changelog paste was overflowing the chat panel and trapping the scroll position). Capping here
+        // keeps a single line from blowing past TMP's reported preferred height.
+        private const int CHAT_LINE_MAX_CHARS = 500;
         // Live series + bet panel (top of Leaderboard tab, left column).
         private static object txtLiveSeries;
         private static GameObject liveBetsContainer;
         private static List<GameObject> liveBetRowPool = new List<GameObject>();
+        // Live-series pagination: 5 series per page, each consumes 3 rows (header + 2 bet rows).
+        private static GameObject liveBetsPager, liveBetsPrev, liveBetsNext;
+        private static object txtLiveBetsPage;
+        private static int liveSeriesPage = 0;
+        private const int LIVE_SERIES_PER_PAGE = 5;
+        // Server-down banner (in-menu only, replaces the in-game IMGUI version).
+        private static GameObject srvStatusRow;
+        private static object txtServerStatus;
+        // Auto-refresh of /series/active when Leaderboard tab is open. Throttled to every 10s.
+        private static float liveSeriesAutoRefreshAt;
+        public static void MaybeRefreshLiveSeries()
+        {
+            if (currentTab != 1) return;
+            if (Time.unscaledTime < liveSeriesAutoRefreshAt) return;
+            liveSeriesAutoRefreshAt = Time.unscaledTime + 10f;
+            ApiClient.FetchActiveSeries();
+            var sid = MatchTracker.LocalSteamId;
+            if (!string.IsNullOrEmpty(sid) && sid != "unknown") ApiClient.FetchMyBets(sid);
+        }
         public struct ChatEntry { public string Line; public DateTime AddedUtc; }
         private static List<ChatEntry> chatLines = new List<ChatEntry>();
         private static readonly object chatLinesLock = new object();
@@ -221,7 +247,7 @@ namespace CompetitiveRounds
             isOpen=true;dirty=true;RefreshData();ApiClient.ResetQueueCountTimer();Plugin.Log.LogInfo($"[NATIVE] Opened competitive page (inGame={inGameMode})");
         }
 
-        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
         private static float dataCheckTimer;private static int lastMatchCount=-1,lastLBCount=-1,lastCardCount=-1;
         public static void Tick()
@@ -247,9 +273,18 @@ namespace CompetitiveRounds
             UIFactory.CreateText("Title",titleRow.transform,"SID'S COMPETITIVE ROUNDS",35f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(0,42));
             var titleTxtGO=titleRow.transform.GetChild(0).gameObject;if(UIFactory.tLE!=null){var tle=titleTxtGO.GetComponent(UIFactory.tLE);if(tle!=null)UnityEngine.Object.Destroy(tle as UnityEngine.Object);}UIFactory.AddLE(titleTxtGO,flexW:1,prefH:42);
             UIFactory.CreateButton("BackBtn",titleRow.transform,"< BACK",16f,C_LABEL,C_BTN,()=>Close(),sizeDelta:new Vector2(85,34));
+            // Server-status indicator row, just below the title. Hidden when the API looks fine.
+            // Replaces the old in-game IMGUI banner, which was firing during quiet periods even
+            // when the server was healthy (no recent attempts → no recent successes either).
+            var srvRow=new GameObject("SrvRow");srvRow.transform.SetParent(content.transform,false);srvRow.AddComponent<RectTransform>();UIFactory.AddHLG(srvRow,spacing:6,forceExpandH:true);UIFactory.AddLE(srvRow,prefH:22,minH:22,flexH:0);
+            txtServerStatus=UIFactory.CreateText("SrvSt",srvRow.transform,"",14f,new Color(1f,0.7f,0.6f),UIFactory.AlignMidCenter,sizeDelta:new Vector2(0,22));
+            var srvTxtGO=(txtServerStatus as Component)?.gameObject;if(srvTxtGO!=null&&UIFactory.tLE!=null){var tle=srvTxtGO.GetComponent(UIFactory.tLE);if(tle!=null)UnityEngine.Object.Destroy(tle as UnityEngine.Object);}if(srvTxtGO!=null)UIFactory.AddLE(srvTxtGO,flexW:1,prefH:22);
+            UIFactory.SetBold(txtServerStatus,true);
+            srvRow.SetActive(false);  // off until ApiLooksDown
+            srvStatusRow=srvRow;
 
             BuildRankedRow(content.transform);BuildTabBar(content.transform);
-            tabPanels=new GameObject[6];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);
+            tabPanels=new GameObject[7];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);
 
             var bottom=new GameObject("Bottom");bottom.transform.SetParent(content.transform,false);bottom.AddComponent<RectTransform>();UIFactory.AddHLG(bottom,spacing:8,forceExpandH:true);UIFactory.AddLE(bottom,prefH:26,minH:26,flexH:0);
             UIFactory.CreateText("Ver",bottom.transform,$"<b>v{Plugin.ModVersion}</b>",13f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(90,22));
@@ -282,23 +317,37 @@ namespace CompetitiveRounds
             declineBtn=UIFactory.CreateButton("Decline",matchBtnRow.transform,"Decline",15f,C_WHITE,C_BTN,()=>{ApiClient.DeclineMatch(MatchTracker.LocalSteamId);},sizeDelta:new Vector2(70,24));qMatchPanel.SetActive(false);
         }
 
-        private static void BuildTabBar(Transform parent){var bar=new GameObject("TabBar");bar.transform.SetParent(parent,false);bar.AddComponent<RectTransform>();UIFactory.AddHLG(bar,spacing:4);UIFactory.AddLE(bar,prefH:28,minH:28,flexH:0);tabButtons=new GameObject[6];tabTexts=new object[6];for(int i=0;i<6;i++){int idx=i;var btn=UIFactory.CreateButton($"Tab{i}",bar.transform,TAB_NAMES[i],13f,C_LABEL,C_TAB,()=>SwitchTab(idx),sizeDelta:new Vector2(0,26));if(UIFactory.tLE!=null){var el=btn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(btn,prefH:26,minH:26,flexW:1,flexH:0);tabButtons[i]=btn;tabTexts[i]=UIFactory.GetButtonText(btn);}}
-        private static readonly string[] TAB_NAMES={"My Stats","Leaderboard","Card Stats","Achievements","Shop","Settings"};
-        private static void SwitchTab(int idx){currentTab=idx;for(int i=0;i<6;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);UIFactory.SetImageColor(tabButtons[i],i==idx?C_TABACT:C_TAB);if(tabTexts[i]!=null){UIFactory.SetColor(tabTexts[i],i==idx?C_WHITE:C_LABEL);UIFactory.SetBold(tabTexts[i],i==idx);}}if(idx==1){if(ApiClient.CachedLeaderboard==null){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}ApiClient.FetchActiveSeries();}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}dirty=true;}
+        private static void BuildTabBar(Transform parent){var bar=new GameObject("TabBar");bar.transform.SetParent(parent,false);bar.AddComponent<RectTransform>();UIFactory.AddHLG(bar,spacing:4);UIFactory.AddLE(bar,prefH:28,minH:28,flexH:0);tabButtons=new GameObject[7];tabTexts=new object[7];for(int i=0;i<7;i++){int idx=i;var btn=UIFactory.CreateButton($"Tab{i}",bar.transform,TAB_NAMES[i],13f,C_LABEL,C_TAB,()=>SwitchTab(idx),sizeDelta:new Vector2(0,26));if(UIFactory.tLE!=null){var el=btn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(btn,prefH:26,minH:26,flexW:1,flexH:0);tabButtons[i]=btn;tabTexts[i]=UIFactory.GetButtonText(btn);}/* Admin tab visibility flips on as soon as IsAdmin resolves true (poll-driven update from RefreshCurrentTab). */tabButtons[6].SetActive(ApiClient.IsAdmin);}
+        private static readonly string[] TAB_NAMES={"My Stats","Leaderboard","Card Stats","Achievements","Shop","Settings","Admin"};
+        private static void SwitchTab(int idx){currentTab=idx;for(int i=0;i<7;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);UIFactory.SetImageColor(tabButtons[i],i==idx?C_TABACT:C_TAB);if(tabTexts[i]!=null){UIFactory.SetColor(tabTexts[i],i==idx?C_WHITE:C_LABEL);UIFactory.SetBold(tabTexts[i],i==idx);}}if(idx==1){if(ApiClient.CachedLeaderboard==null){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);}}dirty=true;}
 
         private static GameObject BuildMyStatsTab(Transform parent){var panel=new GameObject("MyStats");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:8);UIFactory.AddLE(panel,flexH:1);var left=new GameObject("Left");left.transform.SetParent(panel.transform,false);left.AddComponent<RectTransform>();UIFactory.AddVLG(left,spacing:4);UIFactory.AddLE(left,prefW:380);var rBox=UIFactory.CreatePanel("RB",left.transform,C_PANEL);UIFactory.AddVLG(rBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(rBox,flexH:0);var glHdr=UIFactory.CreateText("RL",rBox.transform,"Glicko-2 Rating",19f,C_SUB,sizeDelta:new Vector2(250,28));UIFactory.SetCharSpacing(glHdr,1f);var rRow=new GameObject("RR");rRow.transform.SetParent(rBox.transform,false);rRow.AddComponent<RectTransform>();UIFactory.AddHLG(rRow,spacing:12);UIFactory.AddLE(rRow,prefH:38);txtRating=UIFactory.CreateText("Rat",rRow.transform,"1500",30f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,38));UIFactory.SetBold(txtRating,true);txtRD=UIFactory.CreateText("RD",rRow.transform,"RD: 350",18f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,38));var xBox=UIFactory.CreatePanel("XB",left.transform,C_PANEL);UIFactory.AddVLG(xBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(xBox,flexH:0);var lvRow=new GameObject("LR");lvRow.transform.SetParent(xBox.transform,false);lvRow.AddComponent<RectTransform>();UIFactory.AddHLG(lvRow,spacing:8);UIFactory.AddLE(lvRow,prefH:28);txtLevel=UIFactory.CreateText("Lv",lvRow.transform,"Level 1",19f,C_BLUE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(100,28));UIFactory.SetBold(txtLevel,true);txtXPProg=UIFactory.CreateText("XPP",lvRow.transform,"",16f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(130,28));var xSp=new GameObject("S");xSp.transform.SetParent(lvRow.transform,false);xSp.AddComponent<RectTransform>();UIFactory.AddLE(xSp,flexW:1);txtTotalXP=UIFactory.CreateText("TXP",lvRow.transform,"0 XP",16f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(110,28));xpFill=UIFactory.CreateFillBar("XP",xBox.transform,new Color(0.2f,0.2f,0.25f,0.8f),new Color(0.3f,0.7f,1f,0.9f),10f);var recBox=UIFactory.CreatePanel("RecB",left.transform,C_PANEL);UIFactory.AddVLG(recBox,spacing:1,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(recBox,flexH:0);UIFactory.CreateText("RecL",recBox.transform,"Record",19f,C_SUB,sizeDelta:new Vector2(340,28));txtRankedRec=UIFactory.CreateText("RR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtRankedStrk=UIFactory.CreateText("RS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtCasualRec=UIFactory.CreateText("CR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtCasualStrk=UIFactory.CreateText("CS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtSweeps=UIFactory.CreateText("SW",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTotalRec=UIFactory.CreateText("TR",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));var sesBox=UIFactory.CreatePanel("SB",left.transform,C_PANEL);UIFactory.AddVLG(sesBox,spacing:3,padL:10,padR:10,padT:8,padB:8);UIFactory.AddLE(sesBox,flexH:0);UIFactory.CreateText("SL",sesBox.transform,"Session Info",19f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(340,28));txtSessionSum=UIFactory.CreateText("SS",sesBox.transform,"No games this session",17f,C_DIM,sizeDelta:new Vector2(340,26));txtSessionSplit=UIFactory.CreateText("SSp",sesBox.transform,"",16f,C_LABEL,sizeDelta:new Vector2(340,24));txtSessionSweeps=UIFactory.CreateText("SSw",sesBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtSessionOppLifetime=UIFactory.CreateText("SOL",sesBox.transform,"",15f,new Color(0.6f,0.75f,1f),sizeDelta:new Vector2(340,22));sessionOppContainer=new GameObject("SOC");sessionOppContainer.transform.SetParent(sesBox.transform,false);sessionOppContainer.AddComponent<RectTransform>();UIFactory.AddVLG(sessionOppContainer,spacing:1);
         var linkBox=UIFactory.CreatePanel("LkB",left.transform,C_PANEL);UIFactory.AddVLG(linkBox,spacing:4,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(linkBox,flexH:0);UIFactory.CreateText("LkL",linkBox.transform,"Discord Link",19f,new Color(0.55f,0.55f,0.95f),sizeDelta:new Vector2(340,28));var lkRow=new GameObject("LkR");lkRow.transform.SetParent(linkBox.transform,false);lkRow.AddComponent<RectTransform>();UIFactory.AddHLG(lkRow,spacing:8);UIFactory.AddLE(lkRow,prefH:28);linkCodeBtn=UIFactory.CreateButton("LkBtn",lkRow.transform,"Get Link Code",15f,C_WHITE,C_BTN,()=>{var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.GenerateLinkCode(id);},sizeDelta:new Vector2(130,26));/* Click-to-reveal on the link text — Discord ID/username defaults hidden for streamers.
  * TMP text IS already a Graphic; adding an Image to the same GO throws. Just enable its own raycastTarget. */
 txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Discord",15f,C_DIM,sizeDelta:new Vector2(240,26),raycastTarget:true);{var lkTextComp=txtLinkCode as Component;if(lkTextComp!=null){var ch=lkTextComp.gameObject.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()){discordRevealed=!discordRevealed;dirty=true;}};}}
         /* In-game <-> Discord chat panel. Scrollable log fills the box; users send via hotkey T (IMGUI overlay). */
-        var chatBox=UIFactory.CreatePanel("CB",left.transform,C_PANEL);UIFactory.AddVLG(chatBox,spacing:4,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(chatBox,flexH:0);UIFactory.CreateText("CH",chatBox.transform,"Chat  <color=#888>(press T to send)</color>",17f,new Color(0.7f,0.85f,1f),sizeDelta:new Vector2(340,26));var chSV=UIFactory.CreateScrollView("ChSV",chatBox.transform,spacing:0);UIFactory.AddLE(chSV.scrollGO,prefH:160,minH:160,flexH:0);txtChatLog=UIFactory.CreateText("ChLog",chSV.content.transform,"<color=#888><i>No messages yet. Anyone chatting here or in #scr-discussion on Discord will appear.</i></color>",14f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(360,400));UIFactory.SetWordWrap(txtChatLog,true);
+        var chatBox=UIFactory.CreatePanel("CB",left.transform,C_PANEL);UIFactory.AddVLG(chatBox,spacing:4,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(chatBox,flexH:0);UIFactory.CreateText("CH",chatBox.transform,"Chat  <color=#888>(press T to send)</color>",17f,new Color(0.7f,0.85f,1f),sizeDelta:new Vector2(340,26));var chSV=UIFactory.CreateScrollView("ChSV",chatBox.transform,spacing:0);UIFactory.AddLE(chSV.scrollGO,prefH:160,minH:160,flexH:0);chatScrollRect=chSV.scrollGO.GetComponent(UIFactory.tScrollRect);txtChatLog=UIFactory.CreateText("ChLog",chSV.content.transform,"<color=#888><i>No messages yet. Anyone chatting here or in #scr-discussion on Discord will appear.</i></color>",14f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(360,400));UIFactory.SetWordWrap(txtChatLog,true);
+/* CreateText baked a LayoutElement with prefH=400 onto the chat-log GO. With the parent VLG/CSF reading
+ * that, a single very long message (e.g. a 9000-char changelog paste) renders as TMP overflow but the
+ * scroll content stays clamped at 400px → unreachable bottom. Zero out the prefH so TMP's own
+ * ILayoutElement.preferredHeight (its actual rendered height) drives the content size instead. */
+{var chatLE=(txtChatLog as Component)?.gameObject.GetComponent(UIFactory.tLE);if(chatLE!=null){var prefHProp=UIFactory.tLE.GetProperty("preferredHeight",BindingFlags.Public|BindingFlags.Instance);prefHProp?.SetValue(chatLE,-1f);}}
         var right=new GameObject("Right");right.transform.SetParent(panel.transform,false);right.AddComponent<RectTransform>();UIFactory.AddVLG(right,spacing:4);UIFactory.AddLE(right,flexW:1,flexH:1);var rkBox=UIFactory.CreatePanel("RkB",right.transform,C_PANEL);UIFactory.AddVLG(rkBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(rkBox,flexH:1);UIFactory.CreateText("RkH",rkBox.transform,"Ranked History",21f,C_GOLD,sizeDelta:new Vector2(250,30));txtOppSummary=UIFactory.CreateText("OS",rkBox.transform,"",15f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(500,22));var rkSV=UIFactory.CreateScrollView("RkSV",rkBox.transform,spacing:1);UIFactory.AddLE(rkSV.scrollGO,flexH:1);rankedContainer=rkSV.content;for(int i=0;i<15;i++)rankedRows.Add(CreateHistoryRow(rankedContainer.transform,$"rr{i}"));var rPg=new GameObject("RPg");rPg.transform.SetParent(rkBox.transform,false);rPg.AddComponent<RectTransform>();UIFactory.AddHLG(rPg,spacing:6,forceExpandH:true);UIFactory.AddLE(rPg,prefH:20,flexH:0);var rS1=new GameObject("S");rS1.transform.SetParent(rPg.transform,false);rS1.AddComponent<RectTransform>();UIFactory.AddLE(rS1,flexW:1);rPrev=UIFactory.CreateButton("rP",rPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(rankedPage>0){rankedPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtRankedPage=UIFactory.CreateText("rPI",rPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));rNext=UIFactory.CreateButton("rN",rPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{rankedPage++;dirty=true;},sizeDelta:new Vector2(50,18));var rS2=new GameObject("S");rS2.transform.SetParent(rPg.transform,false);rS2.AddComponent<RectTransform>();UIFactory.AddLE(rS2,flexW:1);
         var csBox=UIFactory.CreatePanel("CsB",right.transform,C_PANEL);UIFactory.AddVLG(csBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(csBox,flexH:1);UIFactory.CreateText("CsH",csBox.transform,"Casual History",21f,C_SUB,sizeDelta:new Vector2(250,30));var csSV=UIFactory.CreateScrollView("CsSV",csBox.transform,spacing:1);UIFactory.AddLE(csSV.scrollGO,flexH:1);casualContainer=csSV.content;for(int i=0;i<12;i++)casualRows.Add(CreateHistoryRow(casualContainer.transform,$"cr{i}"));var cPg=new GameObject("CPg");cPg.transform.SetParent(csBox.transform,false);cPg.AddComponent<RectTransform>();UIFactory.AddHLG(cPg,spacing:6,forceExpandH:true);UIFactory.AddLE(cPg,prefH:20,flexH:0);var cS1=new GameObject("S");cS1.transform.SetParent(cPg.transform,false);cS1.AddComponent<RectTransform>();UIFactory.AddLE(cS1,flexW:1);cPrev=UIFactory.CreateButton("cP",cPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(casualPage>0){casualPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtCasualPage=UIFactory.CreateText("cPI",cPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));cNext=UIFactory.CreateButton("cN",cPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{casualPage++;dirty=true;},sizeDelta:new Vector2(50,18));var cS2=new GameObject("S");cS2.transform.SetParent(cPg.transform,false);cS2.AddComponent<RectTransform>();UIFactory.AddLE(cS2,flexW:1);return panel;}
 
         private static HistoryRow CreateHistoryRow(Transform parent,string name){var row=new HistoryRow();row.seriesGO=new GameObject(name+"s");row.seriesGO.transform.SetParent(parent,false);row.seriesGO.AddComponent<RectTransform>();UIFactory.AddHLG(row.seriesGO,spacing:4,padL:4);UIFactory.AddLE(row.seriesGO,prefH:25);row.txtSeriesHead=UIFactory.CreateText("sh",row.seriesGO.transform,"",19f,C_GREEN,sizeDelta:new Vector2(500,25));row.txtSeriesElo=UIFactory.CreateText("se",row.seriesGO.transform,"",19f,C_GREEN,UIFactory.AlignMidRight,sizeDelta:new Vector2(80,25));row.seriesGO.SetActive(false);row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddVLG(row.root,spacing:0,padL:4);var main=new GameObject("m");main.transform.SetParent(row.root.transform,false);main.AddComponent<RectTransform>();UIFactory.AddHLG(main,spacing:4);UIFactory.AddLE(main,prefH:25);row.txtResult=UIFactory.CreateText("r",main.transform,"",19f,C_GREEN,UIFactory.AlignMidLeft,sizeDelta:new Vector2(200,25));row.txtOpp=UIFactory.CreateText("o",main.transform,"",18f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(180,25));var sp=new GameObject("S");sp.transform.SetParent(main.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);row.txtXP=UIFactory.CreateText("x",main.transform,"",16f,C_BLUE,UIFactory.AlignMidRight,sizeDelta:new Vector2(65,25));row.txtDate=UIFactory.CreateText("d",main.transform,"",15f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(45,25));row.txtCards=UIFactory.CreateText("c",row.root.transform,"",19f,new Color(0.6f,0.7f,0.9f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtCards,1.5f);row.txtOppCards=UIFactory.CreateText("oc",row.root.transform,"",19f,new Color(0.9f,0.6f,0.5f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtOppCards,1.5f);row.root.SetActive(false);return row;}
 
         private static object txtLBPlayerName;
-        private static GameObject BuildLeaderboardTab(Transform parent){var panel=new GameObject("Leaderboard");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:6);UIFactory.AddLE(panel,flexH:1);/* === LEFT: Recent Ranked Series === */var seriesCol=UIFactory.CreatePanel("LBSeries",panel.transform,C_PANEL);UIFactory.AddVLG(seriesCol,spacing:2,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(seriesCol,prefW:300,minW:240,flexH:1);UIFactory.CreateText("RSL",seriesCol.transform,"<color=#FF6688>● Live Ranked Games</color>",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));txtLiveSeries=UIFactory.CreateText("LIVE",seriesCol.transform,"<color=#666><i>No live games right now.</i></color>",13f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(280,24));UIFactory.SetWordWrap(txtLiveSeries,true);liveBetsContainer=new GameObject("LiveBets");liveBetsContainer.transform.SetParent(seriesCol.transform,false);liveBetsContainer.AddComponent<RectTransform>();UIFactory.AddVLG(liveBetsContainer,spacing:2);UIFactory.AddLE(liveBetsContainer,prefH:0,flexH:0);UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Series</color>",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));var rsSV=UIFactory.CreateScrollView("RSSV",seriesCol.transform,spacing:1);UIFactory.AddLE(rsSV.scrollGO,flexH:1);txtRecentSeries=UIFactory.CreateText("RST",rsSV.content.transform,"Loading...",16f,C_DIM,sizeDelta:new Vector2(280,20));var sPg=new GameObject("SPg");sPg.transform.SetParent(seriesCol.transform,false);sPg.AddComponent<RectTransform>();UIFactory.AddHLG(sPg,spacing:4,forceExpandH:true);UIFactory.AddLE(sPg,prefH:20,flexH:0);var sS1=new GameObject("S");sS1.transform.SetParent(sPg.transform,false);sS1.AddComponent<RectTransform>();UIFactory.AddLE(sS1,flexW:1);seriesPrev=UIFactory.CreateButton("sP",sPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(recentSeriesPage>0){recentSeriesPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtSeriesPage=UIFactory.CreateText("sPI",sPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));seriesNext=UIFactory.CreateButton("sN",sPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{recentSeriesPage++;dirty=true;},sizeDelta:new Vector2(50,18));var sS2=new GameObject("S");sS2.transform.SetParent(sPg.transform,false);sS2.AddComponent<RectTransform>();UIFactory.AddLE(sS2,flexW:1);/* === MIDDLE: Leaderboard list === */var mid=new GameObject("LBMid");mid.transform.SetParent(panel.transform,false);mid.AddComponent<RectTransform>();UIFactory.AddVLG(mid,spacing:2);UIFactory.AddLE(mid,prefW:560,minW:500,flexH:1);string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};var hRow=new GameObject("LBH");hRow.transform.SetParent(mid.transform,false);hRow.AddComponent<RectTransform>();UIFactory.AddHLG(hRow,spacing:2,forceExpandH:true);UIFactory.AddLE(hRow,prefH:28,minH:28,flexH:0);lbSortTexts=new object[hL.Length];lbSortBtns=new GameObject[hL.Length];var lbHSp1=new GameObject("S");lbHSp1.transform.SetParent(hRow.transform,false);lbHSp1.AddComponent<RectTransform>();UIFactory.AddLE(lbHSp1,flexW:1);for(int hi=0;hi<hL.Length;hi++){int idx=hi;string arrow=lbSort==hK[hi]?(lbSortDesc?" v":" ^"):"";var hBtn=UIFactory.CreateButton($"LH{hi}",hRow.transform,hL[hi]+arrow,14f,lbSort==hK[hi]?C_WHITE:C_LABEL,lbSort==hK[hi]?C_TABACT:C_TAB,()=>{if(lbSort==hK[idx])lbSortDesc=!lbSortDesc;else{lbSort=hK[idx];lbSortDesc=(idx>=3);}dirty=true;},sizeDelta:new Vector2(LB_COL_W[hi],22));if(UIFactory.tLE!=null){var el=hBtn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(hBtn,prefW:LB_COL_W[hi],prefH:22,flexH:0);lbSortBtns[hi]=hBtn;lbSortTexts[hi]=UIFactory.GetButtonText(hBtn);}var lbHSp2=new GameObject("S");lbHSp2.transform.SetParent(hRow.transform,false);lbHSp2.AddComponent<RectTransform>();UIFactory.AddLE(lbHSp2,flexW:1);var sv=UIFactory.CreateScrollView("LBSV",mid.transform);UIFactory.AddLE(sv.scrollGO,flexH:1);for(int i=0;i<50;i++)lbRows.Add(CreateLBRow(sv.content.transform,$"lb{i}",i));var lbPg=new GameObject("LBPg");lbPg.transform.SetParent(mid.transform,false);lbPg.AddComponent<RectTransform>();UIFactory.AddHLG(lbPg,spacing:6,forceExpandH:true);UIFactory.AddLE(lbPg,prefH:24,flexH:0);txtLBCount=UIFactory.CreateText("LBC",lbPg.transform,"",15f,C_LABEL,sizeDelta:new Vector2(160,22));var lbS1=new GameObject("S");lbS1.transform.SetParent(lbPg.transform,false);lbS1.AddComponent<RectTransform>();UIFactory.AddLE(lbS1,flexW:1);lbPrev=UIFactory.CreateButton("lbP",lbPg.transform,"< Prev",13f,C_LABEL,C_BTN,()=>{if(lbPage>0){lbPage--;dirty=true;}},sizeDelta:new Vector2(60,22));txtLBPage=UIFactory.CreateText("lbPI",lbPg.transform,"",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(40,22));lbNext=UIFactory.CreateButton("lbN",lbPg.transform,"Next >",13f,C_LABEL,C_BTN,()=>{lbPage++;dirty=true;},sizeDelta:new Vector2(60,22));/* === RIGHT: Player detail === */var right=UIFactory.CreatePanel("LBR",panel.transform,C_PANEL);UIFactory.AddVLG(right,spacing:4,padL:12,padR:12,padT:8,padB:8);UIFactory.AddLE(right,flexW:1,flexH:1);txtLBPlayerName=UIFactory.CreateText("LBName",right.transform,"Click a player",20f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,26));UIFactory.SetBold(txtLBPlayerName,true);lbGraphPanel=new GameObject("Graph");lbGraphPanel.transform.SetParent(right.transform,false);var grt=lbGraphPanel.AddComponent<RectTransform>();UIFactory.AddLE(lbGraphPanel,prefH:80,minH:80,flexH:0);/* Add mask to clip graph bars within bounds */var gMaskImg=lbGraphPanel.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMaskImg,new Color(0,0,0,0.01f));if(UIFactory.tMask!=null){var gMask=lbGraphPanel.AddComponent(UIFactory.tMask);try{UIFactory.tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMask,false);}catch{}}lbGraphPanel.SetActive(false);var lbDetailSV=UIFactory.CreateScrollView("LBDSV",right.transform,spacing:0);UIFactory.AddLE(lbDetailSV.scrollGO,flexH:1);txtLBDetail=UIFactory.CreateText("LBD",lbDetailSV.content.transform,"",16f,C_DIM,sizeDelta:new Vector2(340,24));lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.transform,false);lbBlockRow.AddComponent<RectTransform>();UIFactory.AddHLG(lbBlockRow,spacing:0);UIFactory.AddLE(lbBlockRow,prefH:28,minH:28,flexH:0);lbBlockBtn=UIFactory.CreateButton("LBBlock",lbBlockRow.transform,"Block from Ranked",14f,C_WHITE,new Color(0.5f,0.15f,0.15f,0.9f),()=>{if(string.IsNullOrEmpty(selectedSteamId)||selectedSteamId==MatchTracker.LocalSteamId)return;string myId=MatchTracker.LocalSteamId;if(ApiClient.IsPlayerBlocked(selectedSteamId))ApiClient.UnblockPlayer(myId,selectedSteamId);else ApiClient.BlockPlayer(myId,selectedSteamId);},sizeDelta:new Vector2(160,24));var lbBlockSpacer=new GameObject("S");lbBlockSpacer.transform.SetParent(lbBlockRow.transform,false);lbBlockSpacer.AddComponent<RectTransform>();UIFactory.AddLE(lbBlockSpacer,flexW:1);lbBlockBtn.SetActive(true);lbBlockRow.SetActive(false);lbBlockTxt=UIFactory.GetButtonText(lbBlockBtn);return panel;}
+        private static GameObject BuildLeaderboardTab(Transform parent){var panel=new GameObject("Leaderboard");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:6);UIFactory.AddLE(panel,flexH:1);/* === LEFT: Recent Ranked Series === */var seriesCol=UIFactory.CreatePanel("LBSeries",panel.transform,C_PANEL);UIFactory.AddVLG(seriesCol,spacing:2,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(seriesCol,prefW:400,minW:340,flexH:1);UIFactory.CreateText("RSL",seriesCol.transform,"<color=#FF6688>● Live Ranked Games</color>",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));txtLiveSeries=UIFactory.CreateText("LIVE",seriesCol.transform,"<color=#666><i>No live games right now.</i></color>",13f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(280,24));UIFactory.SetWordWrap(txtLiveSeries,true);liveBetsContainer=new GameObject("LiveBets");liveBetsContainer.transform.SetParent(seriesCol.transform,false);liveBetsContainer.AddComponent<RectTransform>();UIFactory.AddVLG(liveBetsContainer,spacing:2);/* No LayoutElement: VLG on this container already sums child preferred heights with priority 0 and reports that as its preferred height, so the parent VLG sizes us correctly. Previously an LE with prefH:0 priority:1 was overriding that sum to 0, collapsing the live series into the recent series list below. */
+/* Live-series pagination header row — shows "X live (page N/M) < >" when >5 series. */
+liveBetsPager=new GameObject("LivePg");liveBetsPager.transform.SetParent(seriesCol.transform,false);liveBetsPager.AddComponent<RectTransform>();UIFactory.AddHLG(liveBetsPager,spacing:4,forceExpandH:true);UIFactory.AddLE(liveBetsPager,prefH:18,flexH:0);
+liveBetsPrev=UIFactory.CreateButton("lvP",liveBetsPager.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(liveSeriesPage>0){liveSeriesPage--;dirty=true;}},sizeDelta:new Vector2(50,18));
+txtLiveBetsPage=UIFactory.CreateText("lvPI",liveBetsPager.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(80,18));
+liveBetsNext=UIFactory.CreateButton("lvN",liveBetsPager.transform,"Next >",10f,C_LABEL,C_BTN,()=>{liveSeriesPage++;dirty=true;},sizeDelta:new Vector2(50,18));
+liveBetsPager.SetActive(false);
+/* Visual spacer between Live and Recent panels — was visually jammed previously. */
+{var liveRecentSpacer=new GameObject("LRSp");liveRecentSpacer.transform.SetParent(seriesCol.transform,false);liveRecentSpacer.AddComponent<RectTransform>();UIFactory.AddLE(liveRecentSpacer,prefH:18,minH:18,flexH:0);}
+UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Series</color>",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));var rsSV=UIFactory.CreateScrollView("RSSV",seriesCol.transform,spacing:1);UIFactory.AddLE(rsSV.scrollGO,flexH:1);txtRecentSeries=UIFactory.CreateText("RST",rsSV.content.transform,"Loading...",16f,C_DIM,sizeDelta:new Vector2(280,20));var sPg=new GameObject("SPg");sPg.transform.SetParent(seriesCol.transform,false);sPg.AddComponent<RectTransform>();UIFactory.AddHLG(sPg,spacing:4,forceExpandH:true);UIFactory.AddLE(sPg,prefH:20,flexH:0);var sS1=new GameObject("S");sS1.transform.SetParent(sPg.transform,false);sS1.AddComponent<RectTransform>();UIFactory.AddLE(sS1,flexW:1);seriesPrev=UIFactory.CreateButton("sP",sPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(recentSeriesPage>0){recentSeriesPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtSeriesPage=UIFactory.CreateText("sPI",sPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));seriesNext=UIFactory.CreateButton("sN",sPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{recentSeriesPage++;dirty=true;},sizeDelta:new Vector2(50,18));var sS2=new GameObject("S");sS2.transform.SetParent(sPg.transform,false);sS2.AddComponent<RectTransform>();UIFactory.AddLE(sS2,flexW:1);/* === MIDDLE: Leaderboard list === */var mid=new GameObject("LBMid");mid.transform.SetParent(panel.transform,false);mid.AddComponent<RectTransform>();UIFactory.AddVLG(mid,spacing:2);UIFactory.AddLE(mid,prefW:560,minW:500,flexH:1);string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};var hRow=new GameObject("LBH");hRow.transform.SetParent(mid.transform,false);hRow.AddComponent<RectTransform>();UIFactory.AddHLG(hRow,spacing:2,forceExpandH:true);UIFactory.AddLE(hRow,prefH:28,minH:28,flexH:0);lbSortTexts=new object[hL.Length];lbSortBtns=new GameObject[hL.Length];var lbHSp1=new GameObject("S");lbHSp1.transform.SetParent(hRow.transform,false);lbHSp1.AddComponent<RectTransform>();UIFactory.AddLE(lbHSp1,flexW:1);for(int hi=0;hi<hL.Length;hi++){int idx=hi;string arrow=lbSort==hK[hi]?(lbSortDesc?" v":" ^"):"";var hBtn=UIFactory.CreateButton($"LH{hi}",hRow.transform,hL[hi]+arrow,14f,lbSort==hK[hi]?C_WHITE:C_LABEL,lbSort==hK[hi]?C_TABACT:C_TAB,()=>{if(lbSort==hK[idx])lbSortDesc=!lbSortDesc;else{lbSort=hK[idx];lbSortDesc=(idx>=3);}dirty=true;},sizeDelta:new Vector2(LB_COL_W[hi],22));if(UIFactory.tLE!=null){var el=hBtn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(hBtn,prefW:LB_COL_W[hi],prefH:22,flexH:0);lbSortBtns[hi]=hBtn;lbSortTexts[hi]=UIFactory.GetButtonText(hBtn);}var lbHSp2=new GameObject("S");lbHSp2.transform.SetParent(hRow.transform,false);lbHSp2.AddComponent<RectTransform>();UIFactory.AddLE(lbHSp2,flexW:1);var sv=UIFactory.CreateScrollView("LBSV",mid.transform);UIFactory.AddLE(sv.scrollGO,flexH:1);for(int i=0;i<50;i++)lbRows.Add(CreateLBRow(sv.content.transform,$"lb{i}",i));var lbPg=new GameObject("LBPg");lbPg.transform.SetParent(mid.transform,false);lbPg.AddComponent<RectTransform>();UIFactory.AddHLG(lbPg,spacing:6,forceExpandH:true);UIFactory.AddLE(lbPg,prefH:24,flexH:0);txtLBCount=UIFactory.CreateText("LBC",lbPg.transform,"",15f,C_LABEL,sizeDelta:new Vector2(160,22));var lbS1=new GameObject("S");lbS1.transform.SetParent(lbPg.transform,false);lbS1.AddComponent<RectTransform>();UIFactory.AddLE(lbS1,flexW:1);lbPrev=UIFactory.CreateButton("lbP",lbPg.transform,"< Prev",13f,C_LABEL,C_BTN,()=>{if(lbPage>0){lbPage--;dirty=true;}},sizeDelta:new Vector2(60,22));txtLBPage=UIFactory.CreateText("lbPI",lbPg.transform,"",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(40,22));lbNext=UIFactory.CreateButton("lbN",lbPg.transform,"Next >",13f,C_LABEL,C_BTN,()=>{lbPage++;dirty=true;},sizeDelta:new Vector2(60,22));/* === RIGHT: Player detail === */var right=UIFactory.CreatePanel("LBR",panel.transform,C_PANEL);UIFactory.AddVLG(right,spacing:4,padL:12,padR:12,padT:8,padB:8);UIFactory.AddLE(right,flexW:1,flexH:1);txtLBPlayerName=UIFactory.CreateText("LBName",right.transform,"Click a player",20f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,26));UIFactory.SetBold(txtLBPlayerName,true);lbGraphPanel=new GameObject("Graph");lbGraphPanel.transform.SetParent(right.transform,false);var grt=lbGraphPanel.AddComponent<RectTransform>();UIFactory.AddLE(lbGraphPanel,prefH:80,minH:80,flexH:0);/* Add mask to clip graph bars within bounds */var gMaskImg=lbGraphPanel.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMaskImg,new Color(0,0,0,0.01f));if(UIFactory.tMask!=null){var gMask=lbGraphPanel.AddComponent(UIFactory.tMask);try{UIFactory.tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMask,false);}catch{}}lbGraphPanel.SetActive(false);var lbDetailSV=UIFactory.CreateScrollView("LBDSV",right.transform,spacing:0);UIFactory.AddLE(lbDetailSV.scrollGO,flexH:1);txtLBDetail=UIFactory.CreateText("LBD",lbDetailSV.content.transform,"",16f,C_DIM,sizeDelta:new Vector2(340,24));lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.transform,false);lbBlockRow.AddComponent<RectTransform>();UIFactory.AddHLG(lbBlockRow,spacing:0);UIFactory.AddLE(lbBlockRow,prefH:28,minH:28,flexH:0);lbBlockBtn=UIFactory.CreateButton("LBBlock",lbBlockRow.transform,"Block from Ranked",14f,C_WHITE,new Color(0.5f,0.15f,0.15f,0.9f),()=>{if(string.IsNullOrEmpty(selectedSteamId)||selectedSteamId==MatchTracker.LocalSteamId)return;string myId=MatchTracker.LocalSteamId;if(ApiClient.IsPlayerBlocked(selectedSteamId))ApiClient.UnblockPlayer(myId,selectedSteamId);else ApiClient.BlockPlayer(myId,selectedSteamId);},sizeDelta:new Vector2(160,24));var lbBlockSpacer=new GameObject("S");lbBlockSpacer.transform.SetParent(lbBlockRow.transform,false);lbBlockSpacer.AddComponent<RectTransform>();UIFactory.AddLE(lbBlockSpacer,flexW:1);lbBlockBtn.SetActive(true);lbBlockRow.SetActive(false);lbBlockTxt=UIFactory.GetButtonText(lbBlockBtn);return panel;}
 
         private static LBRow CreateLBRow(Transform parent,string name,int rowIndex){var row=new LBRow();row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:0,forceExpandH:true);UIFactory.AddLE(row.root,prefH:28);var lsp=new GameObject("S");lsp.transform.SetParent(row.root.transform,false);lsp.AddComponent<RectTransform>();UIFactory.AddLE(lsp,flexW:1);row.hlWrap=new GameObject("W");row.hlWrap.transform.SetParent(row.root.transform,false);row.hlWrap.AddComponent<RectTransform>();UIFactory.AddHLG(row.hlWrap,spacing:2,forceExpandH:true);if(UIFactory.tImage!=null){var img=row.hlWrap.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,new Color(0.15f,0.15f,0.2f,0.01f));UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,true);}row.txtRank=UIFactory.CreateText("r",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[0],25));row.txtLv=UIFactory.CreateText("l",row.hlWrap.transform,"",15f,C_BLUE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[1],25));row.txtName=UIFactory.CreateText("n",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(LB_COL_W[2],25));row.txtRating=UIFactory.CreateText("rt",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[3],25));UIFactory.SetBold(row.txtRating,true);row.txtW=UIFactory.CreateText("w",row.hlWrap.transform,"",15f,C_GREEN,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[4],25));row.txtL=UIFactory.CreateText("ls",row.hlWrap.transform,"",15f,C_RED,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[5],25));row.txtWL=UIFactory.CreateText("wl",row.hlWrap.transform,"",15f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[6],25));row.txtGold=UIFactory.CreateText("gd",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[7],25));UIFactory.SetBold(row.txtGold,true);var rsp=new GameObject("S");rsp.transform.SetParent(row.root.transform,false);rsp.AddComponent<RectTransform>();UIFactory.AddLE(rsp,flexW:1);int idx=rowIndex;var ch=row.root.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()&&idx>=0&&idx<lbRows.Count&&!string.IsNullOrEmpty(lbRows[idx].steamId)){string sid=lbRows[idx].steamId;if(selectedSteamId==sid){selectedSteamId="";selectedStats=null;}else{selectedSteamId=sid;selectedStats=null;ApiClient.FetchPlayerStatsForView(sid,(d)=>{selectedStats=d;dirty=true;});ApiClient.FetchAchievementsForView(sid);}dirty=true;}};row.root.SetActive(false);return row;}
 
@@ -307,13 +356,29 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
         private static CardRow CreateCardRow(Transform parent,string name){var row=new CardRow();row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:2,forceExpandH:true);UIFactory.AddLE(row.root,prefH:25);var cls=new GameObject("S");cls.transform.SetParent(row.root.transform,false);cls.AddComponent<RectTransform>();UIFactory.AddLE(cls,flexW:1);row.txtName=UIFactory.CreateText("t",row.root.transform,"",16f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(CS_COL_W[0],25));row.txtRarity=UIFactory.CreateText("tr",row.root.transform,"",15f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[1],25));row.txtPicks=UIFactory.CreateText("tp",row.root.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[2],25));row.txtWins=UIFactory.CreateText("tw",row.root.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[3],25));row.txtWR=UIFactory.CreateText("wr",row.root.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[4],25));row.txtPass=UIFactory.CreateText("pr",row.root.transform,"",16f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[5],25));var sp=new GameObject("S");sp.transform.SetParent(row.root.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);row.root.SetActive(false);return row;}
 
         // ── Achievements Tab ────────────────────────────────────
-        private static GameObject BuildAchievementsTab(Transform parent){var panel=new GameObject("Achievements");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddVLG(panel,spacing:6,padL:20,padR:20,padT:10);UIFactory.AddLE(panel,flexH:1);UIFactory.CreateText("AchH",panel.transform,"Achievements",22f,C_GOLD,UIFactory.AlignTopCenter,sizeDelta:new Vector2(600,30));var countRow=new GameObject("AchCnt");countRow.transform.SetParent(panel.transform,false);countRow.AddComponent<RectTransform>();UIFactory.AddLE(countRow,prefH:22);txtAchCount=UIFactory.CreateText("AC",countRow.transform,"",15f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(400,22));var sv=UIFactory.CreateScrollView("AchSV",panel.transform,spacing:4);UIFactory.AddLE(sv.scrollGO,flexH:1);achRows.Clear();foreach(var kvp in ApiClient.AchievementDefs){var row=new AchRow();string key=kvp.Key;string[]def=kvp.Value;row.root=new GameObject($"ach_{key}");row.root.transform.SetParent(sv.content.transform,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:10,padL:8,padR:8,padT:6,padB:6,forceExpandH:true);UIFactory.AddLE(row.root,prefH:50);if(UIFactory.tImage!=null){var img=row.root.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,C_PANEL);}row.txtIcon=UIFactory.CreateText("ic",row.root.transform,"",24f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(36,40));var infoCol=new GameObject("Info");infoCol.transform.SetParent(row.root.transform,false);infoCol.AddComponent<RectTransform>();UIFactory.AddVLG(infoCol,spacing:1);UIFactory.AddLE(infoCol,flexW:1);row.txtName=UIFactory.CreateText("nm",infoCol.transform,def[0],17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,22));row.txtDesc=UIFactory.CreateText("ds",infoCol.transform,def[1],14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,20));row.txtDate=UIFactory.CreateText("dt",row.root.transform,"",13f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(120,40));row.root.SetActive(true);achRows.Add(row);}return panel;}
+        private static GameObject BuildAchievementsTab(Transform parent){var panel=new GameObject("Achievements");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddVLG(panel,spacing:6,padL:20,padR:20,padT:10);UIFactory.AddLE(panel,flexH:1);UIFactory.CreateText("AchH",panel.transform,"Achievements",22f,C_GOLD,UIFactory.AlignTopCenter,sizeDelta:new Vector2(600,30));var countRow=new GameObject("AchCnt");countRow.transform.SetParent(panel.transform,false);countRow.AddComponent<RectTransform>();UIFactory.AddLE(countRow,prefH:22);txtAchCount=UIFactory.CreateText("AC",countRow.transform,"",15f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(400,22));var sv=UIFactory.CreateScrollView("AchSV",panel.transform,spacing:4);UIFactory.AddLE(sv.scrollGO,flexH:1);achRows.Clear();foreach(var kvp in ApiClient.AchievementDefs){var row=new AchRow();string key=kvp.Key;string[]def=kvp.Value;row.root=new GameObject($"ach_{key}");row.root.transform.SetParent(sv.content.transform,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:10,padL:8,padR:8,padT:6,padB:6,forceExpandH:true);UIFactory.AddLE(row.root,prefH:50);if(UIFactory.tImage!=null){var img=row.root.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,C_PANEL);}row.txtIcon=UIFactory.CreateText("ic",row.root.transform,"",24f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(36,40));var infoCol=new GameObject("Info");infoCol.transform.SetParent(row.root.transform,false);infoCol.AddComponent<RectTransform>();UIFactory.AddVLG(infoCol,spacing:1);UIFactory.AddLE(infoCol,flexW:1);row.txtName=UIFactory.CreateText("nm",infoCol.transform,def[0],17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,22));row.txtDesc=UIFactory.CreateText("ds",infoCol.transform,def[1],14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,20));row.txtDate=UIFactory.CreateText("dt",row.root.transform,"",13f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(180,40));row.root.SetActive(true);achRows.Add(row);}return panel;}
 
         private static object txtAchCount;
-        private static void RefreshAchievements(){var ach=ApiClient.CachedAchievements;int unlocked=0,total=ApiClient.AchievementDefs.Count;int i=0;foreach(var kvp in ApiClient.AchievementDefs){if(i>=achRows.Count)break;var row=achRows[i];bool got=ach!=null&&ach.ContainsKey(kvp.Key)&&ach[kvp.Key].unlocked;if(got)unlocked++;UIFactory.SetText(row.txtIcon,got?"[X]":"[ ]");UIFactory.SetColor(row.txtIcon,got?C_GOLD:new Color(0.3f,0.3f,0.35f));UIFactory.SetColor(row.txtName,got?C_WHITE:C_DIM);UIFactory.SetColor(row.txtDesc,got?C_LABEL:new Color(0.4f,0.4f,0.45f));string dt="";if(got&&ach!=null&&ach.ContainsKey(kvp.Key)){string ua=ach[kvp.Key].unlocked_at;if(!string.IsNullOrEmpty(ua)&&ua!="null"){try{dt=DateTime.Parse(ua).ToString("M/d/yyyy");}catch{}}}UIFactory.SetText(row.txtDate,dt);UIFactory.SetColor(row.txtDate,got?C_GREEN:C_DIM);i++;}UIFactory.SetText(txtAchCount,$"{unlocked} / {total} unlocked");UIFactory.SetColor(txtAchCount,unlocked==total?C_GOLD:C_LABEL);}
+        private static void RefreshAchievements(){var ach=ApiClient.CachedAchievements;int unlocked=0,total=ApiClient.AchievementDefs.Count;int i=0;foreach(var kvp in ApiClient.AchievementDefs){if(i>=achRows.Count)break;var row=achRows[i];bool got=ach!=null&&ach.ContainsKey(kvp.Key)&&ach[kvp.Key].unlocked;if(got)unlocked++;UIFactory.SetText(row.txtIcon,got?"[X]":"[ ]");UIFactory.SetColor(row.txtIcon,got?C_GOLD:new Color(0.3f,0.3f,0.35f));UIFactory.SetColor(row.txtName,got?C_WHITE:C_DIM);UIFactory.SetColor(row.txtDesc,got?C_LABEL:new Color(0.4f,0.4f,0.45f));string dt="";if(got&&ach!=null&&ach.ContainsKey(kvp.Key)){string ua=ach[kvp.Key].unlocked_at;if(!string.IsNullOrEmpty(ua)&&ua!="null"){try{dt=DateTime.Parse(ua).ToString("M/d/yyyy");}catch{}}}/* Append "+100g" gold-awarded tag inline with the date so users see the per-trophy reward without opening the gold ledger. Per-achievement gold is uniform (ACHIEVEMENT_GOLD on the server, currently 100). */if(got&&!string.IsNullOrEmpty(dt))dt=$"{dt}  <color=#FFD94D>+100g</color>";UIFactory.SetText(row.txtDate,dt);UIFactory.SetColor(row.txtDate,got?C_GREEN:C_DIM);i++;}UIFactory.SetText(txtAchCount,$"{unlocked} / {total} unlocked");UIFactory.SetColor(txtAchCount,unlocked==total?C_GOLD:C_LABEL);}
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}if(currentTab==2)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;}}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();/* Admin tab button visibility — IsAdmin can flip on after the async check completes. */if(tabButtons!=null&&tabButtons.Length>=7&&tabButtons[6]!=null)tabButtons[6].SetActive(ApiClient.IsAdmin);switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;}}
+
+        // Hide the row entirely unless the API actually looks down — see ApiClient.ApiLooksDown.
+        // Fires from RefreshCurrentTab so it stays in sync with the rest of the UI.
+        private static void RefreshServerBanner()
+        {
+            if (srvStatusRow == null) return;
+            bool down = ApiClient.ApiLooksDown;
+            srvStatusRow.SetActive(down);
+            if (down)
+            {
+                string msg = ApiClient.LastResponseWasMaintenance
+                    ? "<color=#FFB060>● Server in maintenance — back in a moment</color>"
+                    : "<color=#FF8866>● Server reconnecting…</color>";
+                UIFactory.SetText(txtServerStatus, msg);
+            }
+        }
 
         // Active-series fetch hook — fire on leaderboard tab open in SwitchTab.
         private static void RefreshLiveSeries()
@@ -325,13 +390,20 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
             if (list == null || list.Count == 0)
             {
                 UIFactory.SetText(txtLiveSeries, "<color=#666><i>No live games right now.</i></color>");
+                if (liveBetsPager != null) liveBetsPager.SetActive(false);
                 return;
             }
             UIFactory.SetText(txtLiveSeries, "");
 
+            int totalPages = Math.Max(1, (list.Count + LIVE_SERIES_PER_PAGE - 1) / LIVE_SERIES_PER_PAGE);
+            liveSeriesPage = Math.Max(0, Math.Min(liveSeriesPage, totalPages - 1));
+            int start = liveSeriesPage * LIVE_SERIES_PER_PAGE;
+            int end = Math.Min(start + LIVE_SERIES_PER_PAGE, list.Count);
+
             int poolIdx = 0;
-            foreach (var s in list)
+            for (int i = start; i < end; i++)
             {
+                var s = list[i];
                 // Each series uses 3 rows: header, bet-on-p1 row, bet-on-p2 row.
                 var hdr = GetOrCreateLiveRow(poolIdx++);
                 ApplyHeaderRow(hdr, s);
@@ -339,6 +411,19 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                 ApplyBetRow(betP1, s, true);
                 var betP2 = GetOrCreateLiveRow(poolIdx++);
                 ApplyBetRow(betP2, s, false);
+            }
+
+            // Pagination controls: only visible when > one page's worth of series.
+            if (liveBetsPager != null)
+            {
+                bool show = totalPages > 1;
+                liveBetsPager.SetActive(show);
+                if (show)
+                {
+                    UIFactory.SetText(txtLiveBetsPage, $"{list.Count} live — {liveSeriesPage + 1}/{totalPages}");
+                    liveBetsPrev.SetActive(liveSeriesPage > 0);
+                    liveBetsNext.SetActive(liveSeriesPage < totalPages - 1);
+                }
             }
         }
 
@@ -350,7 +435,7 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                 go.transform.SetParent(liveBetsContainer.transform, false);
                 go.AddComponent<RectTransform>();
                 UIFactory.AddHLG(go, spacing: 4, forceExpandH: true);
-                UIFactory.AddLE(go, prefH: 22, flexH: 0);
+                UIFactory.AddLE(go, prefH: 26, flexH: 0);
                 liveBetRowPool.Add(go);
             }
             var row = liveBetRowPool[idx];
@@ -363,11 +448,17 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
 
         private static void ApplyHeaderRow(GameObject row, ApiClient.ActiveSeriesEntry s)
         {
+            // Names truncated to 12 chars to leave room for the rating in parens. Wrap explicitly
+            // disabled so a long name doesn't push elo onto a second visual line — the column is
+            // 400 wide and fonts are bold 16f, but TMP word-wrapping would still split the line on
+            // narrow screens.
             string line = $"<color=#AAF>{Trunc(s.p1_name, 12)}</color> ({s.p1_rating})  " +
                           $"<b>{s.p1_wins}-{s.p2_wins}</b>  " +
                           $"<color=#FAA>{Trunc(s.p2_name, 12)}</color> ({s.p2_rating})";
-            UIFactory.CreateText("h", row.transform, line, 13f, C_WHITE,
-                UIFactory.AlignMidLeft, sizeDelta: new Vector2(280, 22));
+            var t = UIFactory.CreateText("h", row.transform, line, 15f, C_WHITE,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(384, 24));
+            UIFactory.SetBold(t, true);
+            UIFactory.SetWordWrap(t, false);
         }
 
         private static void ApplyBetRow(GameObject row, ApiClient.ActiveSeriesEntry s, bool betOnP1)
@@ -376,20 +467,61 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
             string steamId = betOnP1 ? s.p1_steam_id : s.p2_steam_id;
             float odds = betOnP1 ? s.p1_odds : s.p2_odds;
 
-            // Hide bet buttons if local player is in this match — can't bet against yourself.
             string myId = MatchTracker.LocalSteamId;
             bool localIsParticipant = !string.IsNullOrEmpty(myId)
                 && (myId == s.p1_steam_id || myId == s.p2_steam_id);
 
-            UIFactory.CreateText("bl", row.transform,
+            // Three exclusive states for the right side of the row:
+            //   1. The user already bet on this series — show the bet status, hide buttons.
+            //   2. Bets are locked (game past 2 points or game 1 finished) — show locked tag.
+            //   3. User is a participant — "your match" tag.
+            //   4. Otherwise: show the wager buttons.
+            var existing = ApiClient.GetMyBetForSeries(s.series_id);
+
+            // Wider text element + disable wrap; truncate name to 10 so "Bet on <name> @1.0x:"
+            // fits even with the longest names. Was 180w with 12-char truncation → wrapped on
+            // "bobbyjoe122333" rows.
+            var betLabel = UIFactory.CreateText("bl", row.transform,
                 $"Bet on <b>{Trunc(name, 10)}</b> @{odds:F1}x:",
-                12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(150, 22));
+                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 22));
+            UIFactory.SetWordWrap(betLabel, false);
+
+            if (existing != null)
+            {
+                // Only display on the "side" the user actually bet on — the other side stays
+                // showing odds (so they can still see the live odds change as scores update).
+                bool betOnThisSide = existing.bet_on_steam_id == steamId;
+                if (betOnThisSide)
+                {
+                    var t = UIFactory.CreateText("mybet", row.transform,
+                        $"<color=#FFD94D>You bet {existing.amount}g</color>",
+                        14f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(170, 22));
+                    UIFactory.SetBold(t, true);
+                }
+                else
+                {
+                    UIFactory.CreateText("notbet", row.transform,
+                        "<color=#666>—</color>",
+                        14f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(170, 22));
+                }
+                return;
+            }
+
+            if (s.bets_locked)
+            {
+                string lockMsg = s.lock_reason == "no_meaningful_odds"
+                    ? "<color=#A07744><i>odds too uncertain</i></color>"
+                    : "<color=#A07744><i>betting period over</i></color>";
+                UIFactory.CreateText("locked", row.transform, lockMsg,
+                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 22));
+                return;
+            }
 
             if (localIsParticipant)
             {
                 UIFactory.CreateText("self", row.transform,
                     "<color=#AA9955><i>your match</i></color>",
-                    12f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(120, 22));
+                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(140, 22));
                 return;
             }
 
@@ -400,18 +532,24 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
 
         private static void AddBetButton(Transform parent, string seriesId, string betOnSteamId, int amount)
         {
+            // CreateButton already wraps onClick in ClickGuard.Claim() at both the Button.onClick
+            // listener AND the auxiliary ClickHandler. A second Claim() inside the body always
+            // returned false (the first Claim consumed the budget), so every bet click was
+            // silently dropped — Sid clicked many times and only saw "[BET]" log lines never appear.
             var btn = UIFactory.CreateButton($"b{amount}", parent,
                 $"{amount}g", 11f, C_WHITE, new Color(0.35f, 0.28f, 0.1f, 0.9f),
                 () =>
                 {
-                    if (!ClickGuard.Claim()) return;
                     string id = MatchTracker.LocalSteamId;
                     if (string.IsNullOrEmpty(id) || id == "unknown") return;
                     Plugin.Log.LogInfo($"[BET] Placing {amount}g on {betOnSteamId} (series {seriesId})");
                     ApiClient.PlaceBet(id, seriesId, betOnSteamId, amount, (ok, resp) =>
                     {
                         var col = ok ? new Color(0.4f, 1f, 0.4f) : new Color(1f, 0.5f, 0.5f);
-                        CompetitiveUI.ShowNotification(ok ? $"Bet placed: {amount}g" : $"Bet failed", col, 3f);
+                        CompetitiveUI.ShowNotification(ok ? $"Bet placed: {amount}g" : $"Bet failed: {resp}", col, 3f);
+                        // Refresh active series so the row replaces buttons with the placed-bet status
+                        // (a follow-up fetch also brings the user's gold balance back in sync).
+                        if (ok) { ApiClient.FetchActiveSeries(); ApiClient.FetchPlayerStats(id); ApiClient.FetchMyBets(id); }
                     });
                 },
                 sizeDelta: new Vector2(44, 22));
@@ -420,16 +558,18 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
 
         // ── Shop Tab ───────────────────────────────────────────
         private static object txtShopBalance, txtShopStatus;
-        private static GameObject shopRowsContainer, shopTitlesHeader, shopTrailsHeader;
+        private static GameObject shopRowsContainer, shopTitlesHeader, shopTrailsHeader, shopColorsHeader;
         private static List<GameObject> shopRowPool = new List<GameObject>();
         private class ShopRow
         {
             public GameObject root;
             public object txtName, txtDesc, txtPrice;
-            public GameObject buyBtn, setActiveBtn;
-            public object buyBtnTxt;
+            public GameObject buyBtn, setActiveBtn, previewBtn;
+            public object buyBtnTxt, previewBtnTxt;
             public long itemId;
             public string sku;
+            public string previewColor;
+            public int previewPrice;
         }
         private static List<ShopRow> shopRows = new List<ShopRow>();
 
@@ -471,9 +611,13 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                 "<color=#FFD94D>━  TITLES  ━</color>");
             shopTrailsHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHTr",
                 "<color=#A0D4FF>━  TRAILS  ━</color>");
+            shopColorsHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHC",
+                "<color=#B0FFB0>━  MAP COLORS  ━</color>");
 
-            // Pre-allocate 20 item rows; reused on refresh.
-            for (int i = 0; i < 20; i++)
+            // Pre-allocate 60 item rows; reused on refresh. v1.22.5 added 7 new map colors
+            // (Forest/Amethyst/Charcoal/Crimson/Slate/Rose/Mint/Sunset) bringing total items
+            // past 50. 60 leaves comfortable headroom for future additions.
+            for (int i = 0; i < 60; i++)
                 shopRows.Add(CreateShopRow(shopRowsContainer.transform, i));
 
             return panel;
@@ -552,6 +696,26 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
             UIFactory.AddLE(row.buyBtn, prefW: 80, prefH: 28, flexW: 0, flexH: 0);
             row.buyBtnTxt = UIFactory.GetButtonText(row.buyBtn);
 
+            // Preview button — visible on trail rows only. Spawns a cursor-following trail
+            // locally (never published via Photon, so other mod players don't see it). Toggling
+            // off, switching trails, or closing F5 all stop it.
+            row.previewBtn = UIFactory.CreateButton($"spv{idx}", row.root.transform,
+                "Preview", 13f, C_WHITE, new Color(0.25f, 0.4f, 0.55f, 0.9f),
+                () =>
+                {
+                    try
+                    {
+                        var rr = shopRows[captured];
+                        if (rr == null || string.IsNullOrEmpty(rr.sku)) return;
+                        TrailPreview.Toggle(rr.sku, rr.previewColor, rr.previewPrice);
+                        dirty = true;  // refresh button label (Preview ↔ Stop)
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[SHOP-PREVIEW] {ex.Message}"); }
+                },
+                sizeDelta: new Vector2(80, 28));
+            UIFactory.AddLE(row.previewBtn, prefW: 80, prefH: 28, flexW: 0, flexH: 0);
+            row.previewBtnTxt = UIFactory.GetButtonText(row.previewBtn);
+
             row.setActiveBtn = UIFactory.CreateButton($"sa{idx}", row.root.transform,
                 "Set Active", 13f, C_WHITE, new Color(0.3f, 0.3f, 0.5f, 0.9f),
                 () =>
@@ -587,6 +751,10 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                                 cached.active_trail_sku = itemSku;
                                 cached.active_trail_color = itemColor;
                             }
+                            else if (kind == "color")
+                            {
+                                cached.active_color_sku = itemSku;
+                            }
                             dirty = true;
                         }
 
@@ -598,6 +766,7 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                             dirty = true;
                         };
                         if (kind == "trail") ApiClient.SetActiveTrail(id, r.itemId, cb);
+                        else if (kind == "color") ApiClient.SetActiveColor(id, r.itemId, cb);
                         else ApiClient.SetActiveTitle(id, r.itemId, cb);
                     }
                     catch (Exception ex) { Plugin.Log.LogError($"[SHOP] setActive threw: {ex}"); }
@@ -617,57 +786,71 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                 UIFactory.SetText(txtShopBalance, $"Balance: <color=#FFD94D>{balance}</color> gold");
 
             var rawItems = ApiClient.CachedShopItems;
-            // Partition + sort: titles first, then trails. Cheapest first within each kind.
-            var sorted = new List<ApiClient.ShopItemData>();
+            // Partition + sort: titles → trails → colors. Cheapest first within each kind.
+            var titles = new List<ApiClient.ShopItemData>();
+            var trails = new List<ApiClient.ShopItemData>();
+            var colors = new List<ApiClient.ShopItemData>();
             if (rawItems != null)
             {
-                var titles = new List<ApiClient.ShopItemData>();
-                var trails = new List<ApiClient.ShopItemData>();
                 foreach (var it in rawItems)
                 {
                     if (it.kind == "trail") trails.Add(it);
+                    else if (it.kind == "color") colors.Add(it);
                     else titles.Add(it);
                 }
                 titles.Sort((a, b) => a.price.CompareTo(b.price));
                 trails.Sort((a, b) => a.price.CompareTo(b.price));
-                sorted.AddRange(titles);
-                sorted.AddRange(trails);
+                // Colors sort: price first, then alphabetical within tier — keeps the long
+                // 75g list predictable so users can find a specific color at a glance.
+                colors.Sort((a, b) => {
+                    int p = a.price.CompareTo(b.price);
+                    if (p != 0) return p;
+                    return string.Compare(a.name, b.name, StringComparison.OrdinalIgnoreCase);
+                });
             }
-
-            int titleCount = 0;
-            if (sorted.Count > 0) foreach (var it in sorted) if (it.kind != "trail") titleCount++;
-            bool hasTitles = titleCount > 0;
-            bool hasTrails = (sorted.Count - titleCount) > 0;
+            var sorted = new List<ApiClient.ShopItemData>();
+            sorted.AddRange(titles);
+            sorted.AddRange(trails);
+            sorted.AddRange(colors);
 
             // Slot ordering inside the container (VLG renders in sibling order):
-            //   [Titles header][title rows...][Trails header][trail rows...]
+            //   [Titles header][title rows...][Trails header][trail rows...][Colors header][color rows...]
             int sibling = 0;
-            if (hasTitles && shopTitlesHeader != null)
+            if (titles.Count > 0 && shopTitlesHeader != null)
             {
                 shopTitlesHeader.SetActive(true);
                 shopTitlesHeader.transform.SetSiblingIndex(sibling++);
             }
             else if (shopTitlesHeader != null) shopTitlesHeader.SetActive(false);
-
-            // Title rows first.
-            for (int i = 0; i < titleCount && i < shopRows.Count; i++)
+            int rowIdx = 0;
+            for (int i = 0; i < titles.Count && rowIdx < shopRows.Count; i++, rowIdx++)
             {
-                ApplyShopRow(shopRows[i], sorted[i], balance, s);
-                shopRows[i].root.transform.SetSiblingIndex(sibling++);
+                ApplyShopRow(shopRows[rowIdx], titles[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
             }
 
-            if (hasTrails && shopTrailsHeader != null)
+            if (trails.Count > 0 && shopTrailsHeader != null)
             {
                 shopTrailsHeader.SetActive(true);
                 shopTrailsHeader.transform.SetSiblingIndex(sibling++);
             }
             else if (shopTrailsHeader != null) shopTrailsHeader.SetActive(false);
-
-            // Trail rows next.
-            for (int i = titleCount; i < sorted.Count && i < shopRows.Count; i++)
+            for (int i = 0; i < trails.Count && rowIdx < shopRows.Count; i++, rowIdx++)
             {
-                ApplyShopRow(shopRows[i], sorted[i], balance, s);
-                shopRows[i].root.transform.SetSiblingIndex(sibling++);
+                ApplyShopRow(shopRows[rowIdx], trails[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (colors.Count > 0 && shopColorsHeader != null)
+            {
+                shopColorsHeader.SetActive(true);
+                shopColorsHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopColorsHeader != null) shopColorsHeader.SetActive(false);
+            for (int i = 0; i < colors.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], colors[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
             }
 
             // Hide leftovers.
@@ -699,10 +882,11 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                     ? new Color(0.25f, 0.45f, 0.18f, 0.9f)
                     : new Color(0.25f, 0.25f, 0.28f, 0.8f));
             }
-            r.setActiveBtn.SetActive(ownsThis && (it.kind == "title" || it.kind == "trail"));
+            r.setActiveBtn.SetActive(ownsThis && (it.kind == "title" || it.kind == "trail" || it.kind == "color"));
             bool isActiveTitle = s != null && it.kind == "title" && s.active_title == it.name;
             bool isActiveTrail = s != null && it.kind == "trail" && s.active_trail_sku == it.sku;
-            bool isActive = isActiveTitle || isActiveTrail;
+            bool isActiveColor = s != null && it.kind == "color" && s.active_color_sku == it.sku;
+            bool isActive = isActiveTitle || isActiveTrail || isActiveColor;
             if (r.setActiveBtn != null)
             {
                 UIFactory.SetImageColor(r.setActiveBtn, isActive
@@ -710,6 +894,25 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                     : new Color(0.3f, 0.3f, 0.5f, 0.9f));   // inactive = default
                 var txtComp = UIFactory.GetButtonText(r.setActiveBtn);
                 if (txtComp != null) UIFactory.SetText(txtComp, isActive ? "Equipped" : "Set Active");
+            }
+
+            // Preview button — trails only. Stash the color + price on the row so the click
+            // handler has everything it needs without re-looking up the item.
+            if (r.previewBtn != null)
+            {
+                bool isTrail = it.kind == "trail";
+                r.previewBtn.SetActive(isTrail);
+                if (isTrail)
+                {
+                    r.previewColor = it.preview_color ?? "";
+                    r.previewPrice = it.price;
+                    bool previewingThis = TrailPreview.IsActive && TrailPreview.ActiveSku == it.sku;
+                    if (r.previewBtnTxt != null)
+                        UIFactory.SetText(r.previewBtnTxt, previewingThis ? "Stop" : "Preview");
+                    UIFactory.SetImageColor(r.previewBtn, previewingThis
+                        ? new Color(0.5f, 0.3f, 0.25f, 0.9f)    // active preview = warm red
+                        : new Color(0.25f, 0.4f, 0.55f, 0.9f));
+                }
             }
 
             r.root.SetActive(true);
@@ -989,7 +1192,8 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
             if(txtRecentSeries==null)return;
             var series=ApiClient.CachedRecentSeries;
             if(series==null||series.Count==0){UIFactory.SetText(txtRecentSeries,"No recent series");if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;}
-            int perPage=8,totalPages=(series.Count+perPage-1)/perPage;
+            // 20 series per page (was 8). Server returns up to 100 — see FetchRecentSeries.
+            int perPage=20,totalPages=(series.Count+perPage-1)/perPage;
             recentSeriesPage=Math.Max(0,Math.Min(recentSeriesPage,totalPages-1));
             int start=recentSeriesPage*perPage,end=Math.Min(start+perPage,series.Count);
             string txt="";
@@ -1002,6 +1206,8 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                 string lName=p1Won?s.p2_name:s.p1_name;
                 int wScore=p1Won?s.p1_wins:s.p2_wins;
                 int lScore=p1Won?s.p2_wins:s.p1_wins;
+                int wRating=p1Won?s.p1_rating:s.p2_rating;
+                int lRating=p1Won?s.p2_rating:s.p1_rating;
                 float wRC=p1Won?s.p1_rating_change:s.p2_rating_change;
                 float lRC=p1Won?s.p2_rating_change:s.p1_rating_change;
                 bool iAmWinner=wName==myName;
@@ -1010,7 +1216,23 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                 string lCol=iAmLoser?"#FF6666":"#AAAAAA";
                 string wElo=wRC!=0?$" <color=#00FF00>+{wRC:F0}</color>":"";
                 string lElo=lRC!=0?$" <color=#FF6666>{lRC:F0}</color>":"";
-                txt+=$"<color={wCol}>{Trunc(wName,14)}</color>{wElo}  {wScore}-{lScore}  <color={lCol}>{Trunc(lName,14)}</color>{lElo}\n";
+                // Inline ratings: "<name> (1842) +12 ELO  2-0  (1755) <opp>"
+                string wRatingTag=wRating>0?$" <color=#888>({wRating})</color>":"";
+                string lRatingTag=lRating>0?$" <color=#888>({lRating})</color>":"";
+                txt+=$"<color={wCol}>{Trunc(wName,12)}</color>{wRatingTag}{wElo}  <b>{wScore}-{lScore}</b>  <color={lCol}>{Trunc(lName,12)}</color>{lRatingTag}{lElo}\n";
+                // Bet sub-rows under each series. Indent + smaller font + green for winners,
+                // dim grey for losers. Show "AsteRiA bet 500g on Sid → +505g" style.
+                if (s.bets != null && s.bets.Count > 0)
+                {
+                    foreach (var b in s.bets)
+                    {
+                        string bettorTag = b.bettor_name == myName ? "<b>You</b>" : Trunc(b.bettor_name ?? "?", 14);
+                        if (b.won)
+                            txt += $"    <color=#88CC88>↳ {bettorTag} bet {b.amount}g on {Trunc(b.bet_on_name ?? "?", 12)} → <b>+{b.payout}g</b></color>\n";
+                        else
+                            txt += $"    <color=#664444>↳ {bettorTag} bet {b.amount}g on {Trunc(b.bet_on_name ?? "?", 12)} — lost</color>\n";
+                    }
+                }
             }
             UIFactory.SetText(txtRecentSeries,txt);
             if(seriesPrev!=null)seriesPrev.SetActive(recentSeriesPage>0);
@@ -1021,9 +1243,20 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
         private static void RefreshVersionStatus(){if(txtVersionStatus==null)return;if(ApiClient.ForceUpdateRequired){UIFactory.SetText(txtVersionStatus,"<color=#FF4444>UPDATE REQUIRED — server is rejecting this mod version</color>");if(updateBtn!=null)updateBtn.SetActive(true);return;}if(ApiClient.UpdateReady){UIFactory.SetText(txtVersionStatus,"<color=#44FF44>Close ROUNDS to apply update</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(ApiClient.IsUpdating){UIFactory.SetText(txtVersionStatus,"<color=#66CCFF>Downloading...</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}string latest=ApiClient.LatestModVersion;if(latest==null){UIFactory.SetText(txtVersionStatus,"");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(latest==Plugin.ModVersion){UIFactory.SetText(txtVersionStatus,"<color=#44AA44>up to date</color>");if(updateBtn!=null)updateBtn.SetActive(false);}else{UIFactory.SetText(txtVersionStatus,$"<color=#FFAA33>v{latest} available!</color>");if(updateBtn!=null)updateBtn.SetActive(true);}}
 
         private static void RefreshMyStats(){var s=ApiClient.CachedPlayerStats;if(s==null){UIFactory.SetText(txtRating,"—");return;}UIFactory.SetText(txtRating,$"{s.rating:F0}");UIFactory.SetText(txtRD,$"RD: {s.rating_deviation:F0}    Peak: {s.peak_rating:F0}");UIFactory.SetText(txtLevel,$"Level {s.level}");if(s.level<100&&s.xp_for_next_level>0){UIFactory.SetText(txtXPProg,$"{s.xp_into_level}/{s.xp_for_next_level} XP");UIFactory.SetFill(xpFill,(float)s.xp_into_level/s.xp_for_next_level);}else{UIFactory.SetText(txtXPProg,"MAX");UIFactory.SetFill(xpFill,1f);}UIFactory.SetText(txtTotalXP,$"{s.total_xp:N0} XP");var history=ApiClient.CachedMatchHistory;var sR=history?.FindAll(m=>m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();var sC=history?.FindAll(m=>!m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();int cW=0,cL=0,sweepG=0,sweepT=0;foreach(var m in sC){if(m.won)cW++;else cL++;}if(history!=null)foreach(var m in history){if(m.won&&m.opponent_rounds_won==0)sweepG++;if(!m.won&&m.player_rounds_won==0)sweepT++;}int rW=s.ranked_series_wins,rL=s.ranked_series_losses;UIFactory.SetText(txtRankedRec,rW+rL>0?$"<color=#FFD94D>Ranked:</color> {rW}W / {rL}L ({(rL>0?$"{(float)rW/rL:F1}":$"{rW}:0")})":"<color=#FFD94D>Ranked:</color> —");if(sR.Count>0){int st=CalcStreak(sR);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtRankedStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_ranked_streak>0?$"  Best: {s.best_ranked_streak}W":""));}else UIFactory.SetText(txtRankedStrk,"");UIFactory.SetText(txtCasualRec,sC.Count>0?$"Casual: {cW}W / {cL}L ({(cL>0?$"{(float)cW/cL:F1}":cW>0?$"{cW}:0":"")})":"Casual: —");if(sC.Count>0){int st=CalcStreak(sC);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtCasualStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_casual_streak>0?$"  Best: {s.best_casual_streak}W":""));}else UIFactory.SetText(txtCasualStrk,"");UIFactory.SetText(txtSweeps,$"Sweeps: <color=#00FF00>5-0 x{sweepG}</color>  <color=#FF6666>0-5 x{sweepT}</color>");UIFactory.SetText(txtTotalRec,$"Total: {s.total_matches} ({s.wins}W / {s.losses}L)  <color=#FFD94D>Gold: {(s.gold_earned - s.gold_spent)}</color>");RefreshHistory(sR,sC);RefreshSession();if(linkCodeBtn!=null&&txtLinkCode!=null){bool linked=!string.IsNullOrEmpty(s.discord_id);linkCodeBtn.SetActive(!linked);if(linked){string raw=!string.IsNullOrEmpty(s.discord_username)?$"@{s.discord_username}":$"ID {s.discord_id}";string who=discordRevealed?raw:"<color=#888>••••• (click to show)</color>";UIFactory.SetText(txtLinkCode,$"<color=#00FF00>Linked to Discord</color> ({who})");}}RefreshChatLog();}
-        private static void RefreshHistory(List<ApiClient.MatchHistoryEntry> ranked,List<ApiClient.MatchHistoryEntry> casual){foreach(var r in rankedRows){r.root.SetActive(false);r.seriesGO.SetActive(false);}if(ranked.Count>0){var groups=GroupBySeries(ranked);int gpp=3,totalP=(groups.Count+gpp-1)/gpp;rankedPage=Math.Max(0,Math.Min(rankedPage,totalP-1));int start=rankedPage*gpp,end=Math.Min(start+gpp,groups.Count);int ri=0;for(int g=start;g<end&&ri<rankedRows.Count;g++){var grp=groups[g];if(grp.matches.Count==0)continue;var first=grp.matches[0];if(grp.series_id!=null&&ri<rankedRows.Count){var row=rankedRows[ri];string score=first.series_score??"?-?",opp=Trunc(first.opponent_name,18);bool complete=false,won=false;try{var p=score.Split('-');int mw=int.Parse(p[0]),tw=int.Parse(p[1]);complete=mw>=2||tw>=2;won=mw>tw;}catch{}UIFactory.SetText(row.txtSeriesHead,complete?$"Series {(won?"W":"L")} {score}  vs {opp}":$"Series {score}  vs {opp}  (in progress)");UIFactory.SetColor(row.txtSeriesHead,complete?(won?C_GREEN:C_RED):C_GOLD);if(complete&&first.series_rating_change!=0f){float rc=first.series_rating_change;UIFactory.SetText(row.txtSeriesElo,$"{(rc>0?"+":"")}{rc:F0} elo");UIFactory.SetColor(row.txtSeriesElo,rc>0?C_GREEN:C_RED);}else UIFactory.SetText(row.txtSeriesElo,"");row.seriesGO.SetActive(true);foreach(var m in grp.matches){if(ri>=rankedRows.Count)break;FillRow(rankedRows[ri],m,true);ri++;}}else{FillRow(rankedRows[ri],first,false);ri++;}}rPrev.SetActive(rankedPage>0);rNext.SetActive(rankedPage<totalP-1);UIFactory.SetText(txtRankedPage,totalP>1?$"{rankedPage+1}/{totalP}":"");}else{rPrev.SetActive(false);rNext.SetActive(false);UIFactory.SetText(txtRankedPage,"");}foreach(var r in casualRows)r.root.SetActive(false);if(casual.Count>0){int mpp=6,totalP=(casual.Count+mpp-1)/mpp;casualPage=Math.Max(0,Math.Min(casualPage,totalP-1));int start=casualPage*mpp,end=Math.Min(start+mpp,casual.Count);for(int i=start;i<end;i++){int ri=i-start;if(ri<casualRows.Count)FillRow(casualRows[ri],casual[i],false);}cPrev.SetActive(casualPage>0);cNext.SetActive(casualPage<totalP-1);UIFactory.SetText(txtCasualPage,totalP>1?$"{casualPage+1}/{totalP}":"");}else{cPrev.SetActive(false);cNext.SetActive(false);UIFactory.SetText(txtCasualPage,"");}}
+        private static void RefreshHistory(List<ApiClient.MatchHistoryEntry> ranked,List<ApiClient.MatchHistoryEntry> casual){foreach(var r in rankedRows){r.root.SetActive(false);r.seriesGO.SetActive(false);}if(ranked.Count>0){var groups=GroupBySeries(ranked);int gpp=3,totalP=(groups.Count+gpp-1)/gpp;rankedPage=Math.Max(0,Math.Min(rankedPage,totalP-1));int start=rankedPage*gpp,end=Math.Min(start+gpp,groups.Count);int ri=0;for(int g=start;g<end&&ri<rankedRows.Count;g++){var grp=groups[g];if(grp.matches.Count==0)continue;var first=grp.matches[0];if(grp.series_id!=null&&ri<rankedRows.Count){var row=rankedRows[ri];string score=first.series_score??"?-?",opp=FormatOpponentForRow(first,18);bool complete=false,won=false;try{var p=score.Split('-');int mw=int.Parse(p[0]),tw=int.Parse(p[1]);complete=mw>=2||tw>=2;won=mw>tw;}catch{}UIFactory.SetText(row.txtSeriesHead,complete?$"Series {(won?"W":"L")} {score}  vs {opp}":$"Series {score}  vs {opp}  (in progress)");UIFactory.SetColor(row.txtSeriesHead,complete?(won?C_GREEN:C_RED):C_GOLD);if(complete&&first.series_rating_change!=0f){float rc=first.series_rating_change;UIFactory.SetText(row.txtSeriesElo,$"{(rc>0?"+":"")}{rc:F0} elo");UIFactory.SetColor(row.txtSeriesElo,rc>0?C_GREEN:C_RED);}else UIFactory.SetText(row.txtSeriesElo,"");row.seriesGO.SetActive(true);foreach(var m in grp.matches){if(ri>=rankedRows.Count)break;FillRow(rankedRows[ri],m,true);ri++;}}else{FillRow(rankedRows[ri],first,false);ri++;}}rPrev.SetActive(rankedPage>0);rNext.SetActive(rankedPage<totalP-1);UIFactory.SetText(txtRankedPage,totalP>1?$"{rankedPage+1}/{totalP}":"");}else{rPrev.SetActive(false);rNext.SetActive(false);UIFactory.SetText(txtRankedPage,"");}foreach(var r in casualRows)r.root.SetActive(false);if(casual.Count>0){int mpp=6,totalP=(casual.Count+mpp-1)/mpp;casualPage=Math.Max(0,Math.Min(casualPage,totalP-1));int start=casualPage*mpp,end=Math.Min(start+mpp,casual.Count);for(int i=start;i<end;i++){int ri=i-start;if(ri<casualRows.Count)FillRow(casualRows[ri],casual[i],false);}cPrev.SetActive(casualPage>0);cNext.SetActive(casualPage<totalP-1);UIFactory.SetText(txtCasualPage,totalP>1?$"{casualPage+1}/{totalP}":"");}else{cPrev.SetActive(false);cNext.SetActive(false);UIFactory.SetText(txtCasualPage,"");}}
 
-        private static void FillRow(HistoryRow row,ApiClient.MatchHistoryEntry m,bool indent){string r=m.won?"W":"L";Color c=m.won?C_GREEN:C_RED;string pts=(m.player_points+m.opponent_points>0)?$" <color=#{(m.won?"88AA88":"AA8888")}>{m.player_points}-{m.opponent_points}p</color>":"";UIFactory.SetText(row.txtResult,$"{(indent?"    ":"  ")}{r}  {m.player_rounds_won}-{m.opponent_rounds_won}{pts}");UIFactory.SetColor(row.txtResult,c);UIFactory.SetText(row.txtOpp,indent?"":$"vs {Trunc(m.opponent_name,20)}");UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateTime.Parse(m.ended_at).ToString("M/d");}catch{}UIFactory.SetText(row.txtDate,dt);UIFactory.SetText(row.txtCards,!string.IsNullOrEmpty(m.cards_display)?$"        Cards: {m.cards_display}":"");UIFactory.SetText(row.txtOppCards,!string.IsNullOrEmpty(m.opp_cards_display)?$"        Opp:   {m.opp_cards_display}":"");row.root.SetActive(true);}
+        private static void FillRow(HistoryRow row,ApiClient.MatchHistoryEntry m,bool indent){string r=m.won?"W":"L";Color c=m.won?C_GREEN:C_RED;string pts=(m.player_points+m.opponent_points>0)?$" <color=#{(m.won?"88AA88":"AA8888")}>{m.player_points}-{m.opponent_points}p</color>":"";UIFactory.SetText(row.txtResult,$"{(indent?"    ":"  ")}{r}  {m.player_rounds_won}-{m.opponent_rounds_won}{pts}");UIFactory.SetColor(row.txtResult,c);UIFactory.SetText(row.txtOpp,indent?"":$"vs {FormatOpponentForRow(m,20)}");UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateTime.Parse(m.ended_at).ToString("M/d");}catch{}UIFactory.SetText(row.txtDate,dt);UIFactory.SetText(row.txtCards,!string.IsNullOrEmpty(m.cards_display)?$"        Cards: {m.cards_display}":"");UIFactory.SetText(row.txtOppCards,!string.IsNullOrEmpty(m.opp_cards_display)?$"        Opp:   {m.opp_cards_display}":"");row.root.SetActive(true);}
+
+        // Renders the opponent name + colored title tag for match-history rows. Title is the
+        // opponent's CURRENT active title (view-time, not snapshot-at-match) — cheap join in the
+        // history endpoint, good enough to answer "who am I looking at right now."
+        private static string FormatOpponentForRow(ApiClient.MatchHistoryEntry m,int nameMax)
+        {
+            string nm = Trunc(m?.opponent_name ?? "", nameMax);
+            if (m == null || string.IsNullOrEmpty(m.opponent_title)) return nm;
+            string col = string.IsNullOrEmpty(m.opponent_title_color) ? "#CCCCCC" : m.opponent_title_color;
+            return $"{nm} <b><color={col}>[{m.opponent_title}]</color></b>";
+        }
 
         private static void RefreshSession(){int games=GameStateWatcher.SessionMatchCount;bool inRoom=GameStateWatcher.IsInRoom;string oppSteamId=GameStateWatcher.OpponentSteamId;string oppName=GameStateWatcher.OpponentDisplayName;var history=ApiClient.CachedMatchHistory;/* Show opponent lifetime record when in room */if(inRoom&&!string.IsNullOrEmpty(oppSteamId)&&!oppSteamId.StartsWith("photon_")&&history!=null){int ltW=0,ltL=0;string lastPlayed="";foreach(var m in history){if(m.opponent_steam_id==oppSteamId){if(m.won)ltW++;else ltL++;if(string.IsNullOrEmpty(lastPlayed)){try{lastPlayed=DateTime.Parse(m.ended_at).ToString("M/d/yyyy");}catch{}}}}if(ltW+ltL>0){string col=ltW>ltL?"#00FF00":ltW<ltL?"#FF6666":"#AAAAAA";UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  <color={col}>{ltW}W-{ltL}L lifetime</color>  (last: {lastPlayed})");}else{UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  First time playing!");}UIFactory.SetColor(txtSessionOppLifetime,new Color(0.6f,0.75f,1f));}else if(inRoom&&!string.IsNullOrEmpty(oppName)&&oppName!="Opponent"){UIFactory.SetText(txtSessionOppLifetime,$"  In room with {oppName}");UIFactory.SetColor(txtSessionOppLifetime,C_DIM);}else{UIFactory.SetText(txtSessionOppLifetime,"");}if(games<=0){UIFactory.SetText(txtSessionSum,inRoom?"In game — no results yet":"No games this session");UIFactory.SetColor(txtSessionSum,C_DIM);UIFactory.SetText(txtSessionSplit,"");UIFactory.SetText(txtSessionSweeps,"");return;}int mins=(int)(DateTime.UtcNow-GameStateWatcher.SessionStartTime).TotalMinutes;string time=mins>=60?$"{mins/60}h {mins%60}m":$"{mins}m";int rw=GameStateWatcher.SessionRankedWins,rl=GameStateWatcher.SessionRankedLosses,cw=GameStateWatcher.SessionCasualWins,cl=GameStateWatcher.SessionCasualLosses;int sesSweepG=0,sesSweepT=0;if(history!=null){var sesStart=GameStateWatcher.SessionStartTime;foreach(var m in history){DateTime mTime=DateTime.UtcNow;try{if(!string.IsNullOrEmpty(m.ended_at))mTime=DateTime.Parse(m.ended_at).ToUniversalTime();}catch{}if(mTime<sesStart)continue;if(m.won&&m.opponent_rounds_won==0)sesSweepG++;if(!m.won&&m.player_rounds_won==0)sesSweepT++;}}UIFactory.SetText(txtSessionSum,$"{games} games    {rw+cw}W - {rl+cl}L    {time}");UIFactory.SetColor(txtSessionSum,C_WHITE);string splitLine="";if(rw+rl>0&&cw+cl>0)splitLine=$"  Ranked: {rw}W/{rl}L    Casual: {cw}W/{cl}L";UIFactory.SetText(txtSessionSplit,splitLine);if(sesSweepG+sesSweepT>0)UIFactory.SetText(txtSessionSweeps,$"  Sweeps: <color=#00FF00>5-0 x{sesSweepG}</color>  <color=#FF6666>0-5 x{sesSweepT}</color>");else UIFactory.SetText(txtSessionSweeps,"");var wl=GameStateWatcher.SessionWLByOpponent;var st=GameStateWatcher.SessionTimeByOpponent;int idx=0;if(wl!=null)foreach(var kvp in wl){int[]a=kvp.Value;if(a==null||a.Length<4)continue;int ow=a[0]+a[2],ol=a[1]+a[3];string line=$"  vs {kvp.Key}:  {ow}W-{ol}L";if(a[0]+a[1]>0&&a[2]+a[3]>0)line+=$"  (R:{a[0]}-{a[1]} C:{a[2]}-{a[3]})";if(st!=null&&st.ContainsKey(kvp.Key)){int m=(int)st[kvp.Key];line+=m>=60?$"   {m/60}h {m%60}m":$"   {m}m";}while(sessionOppTexts.Count<=idx)sessionOppTexts.Add(UIFactory.CreateText($"so{sessionOppTexts.Count}",sessionOppContainer.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22)));UIFactory.SetText(sessionOppTexts[idx],line);UIFactory.SetColor(sessionOppTexts[idx],ow>ol?C_GREEN:ow<ol?C_RED:C_DIM);var go=(sessionOppTexts[idx]as Component)?.gameObject;if(go)go.SetActive(true);idx++;}for(int i=idx;i<sessionOppTexts.Count;i++){var go=(sessionOppTexts[i]as Component)?.gameObject;if(go)go.SetActive(false);}}
 
@@ -1183,6 +1416,17 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                 string title = ExtractChatField(json, "title");
                 string titleColor = ExtractChatField(json, "title_color");
                 if (string.IsNullOrEmpty(message)) return;
+                // Local mute filter. Hides messages from any name in MutedChatNames.
+                // Case-insensitive comparison so /mute Sid matches "sid" too.
+                if (IsMuted(name))
+                {
+                    Plugin.Log.LogInfo($"[CHAT] muted msg from {name} dropped locally");
+                    return;
+                }
+                // Bound any single message so a giant paste can't overflow the scroll content
+                // and trap the scroll position past TMP's reachable bottom.
+                if (message.Length > CHAT_LINE_MAX_CHARS)
+                    message = message.Substring(0, CHAT_LINE_MAX_CHARS - 3) + "...";
                 string prefix = source == "discord" ? "<color=#A0B4FF>[D]</color>" : "<color=#B0FFB0>[game]</color>";
                 string ratingTag = rating > 0 ? $" <color=#CCCCCC>({rating})</color>" : "";
                 string titleTag = "";
@@ -1202,6 +1446,84 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
             catch { }
         }
 
+        // ── Local chat mute (per-display-name) ─────────────────
+        // Stored as a pipe-delimited list in Plugin.MutedChatNames (BepInEx config).
+        // Command syntax: "/mute name", "/unmute name", "/muted".
+        // Filter applied in OnChatMessage; commands handled in CompetitiveUI's chat input submit.
+
+        private static HashSet<string> _mutedCache;
+
+        private static HashSet<string> GetMutedSet()
+        {
+            // Rebuild on each access — config writes are infrequent and the list is small.
+            string raw = Plugin.MutedChatNames?.Value ?? "";
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var part in raw.Split('|'))
+            {
+                var t = (part ?? "").Trim();
+                if (!string.IsNullOrEmpty(t)) set.Add(t);
+            }
+            _mutedCache = set;
+            return set;
+        }
+
+        private static bool IsMuted(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            var s = _mutedCache ?? GetMutedSet();
+            return s.Contains(name);
+        }
+
+        private static void SaveMutedSet(HashSet<string> set)
+        {
+            if (Plugin.MutedChatNames == null) return;
+            Plugin.MutedChatNames.Value = string.Join("|", set);
+            _mutedCache = set;
+        }
+
+        public static void HandleMuteCommand(string text)
+        {
+            try
+            {
+                if (text.Equals("/muted", StringComparison.OrdinalIgnoreCase))
+                {
+                    var s = GetMutedSet();
+                    string list = s.Count == 0 ? "(none)" : string.Join(", ", s);
+                    AppendSystemChatLine($"Muted: {list}");
+                    return;
+                }
+                int sp = text.IndexOf(' ');
+                if (sp < 0) return;
+                string cmd = text.Substring(0, sp).ToLowerInvariant();
+                string target = text.Substring(sp + 1).Trim();
+                if (string.IsNullOrEmpty(target)) return;
+                var set = GetMutedSet();
+                if (cmd == "/mute")
+                {
+                    if (set.Add(target)) { SaveMutedSet(set); AppendSystemChatLine($"Muted <b>{Escape(target)}</b>"); }
+                    else AppendSystemChatLine($"<b>{Escape(target)}</b> is already muted");
+                }
+                else if (cmd == "/unmute")
+                {
+                    if (set.Remove(target)) { SaveMutedSet(set); AppendSystemChatLine($"Unmuted <b>{Escape(target)}</b>"); }
+                    else AppendSystemChatLine($"<b>{Escape(target)}</b> isn't muted");
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MUTE] {ex.Message}"); }
+        }
+
+        // Adds a local-only system line to the chat log (gold-tinted, no broadcast).
+        private static void AppendSystemChatLine(string body)
+        {
+            string line = $"<color=#FFD94D>[system]</color> {body}";
+            lock (chatLinesLock)
+            {
+                chatLines.Add(new ChatEntry { Line = line, AddedUtc = DateTime.UtcNow });
+                while (chatLines.Count > CHAT_LOG_MAX) chatLines.RemoveAt(0);
+            }
+            MarkDirty();
+        }
+
         private static void RefreshChatLog()
         {
             if (txtChatLog == null) return;
@@ -1218,6 +1540,22 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
                 text = sb.ToString();
             }
             UIFactory.SetText(txtChatLog, text);
+            // Pin to the bottom so the newest message is visible. Defer one frame so the
+            // ContentSizeFitter has actually recomputed against the new TMP-reported height.
+            Plugin.Instance?.StartCoroutine(ScrollChatToBottomNextFrame());
+        }
+
+        private static System.Collections.IEnumerator ScrollChatToBottomNextFrame()
+        {
+            yield return null;
+            if (chatScrollRect == null) yield break;
+            try
+            {
+                // ScrollRect.verticalNormalizedPosition: 0 = bottom, 1 = top.
+                var p = UIFactory.tScrollRect.GetProperty("verticalNormalizedPosition", BindingFlags.Public | BindingFlags.Instance);
+                p?.SetValue(chatScrollRect, 0f);
+            }
+            catch { }
         }
 
         private static string Escape(string s)
@@ -1289,5 +1627,199 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
         private struct SGroup{public string series_id;public List<ApiClient.MatchHistoryEntry> matches;}
         private static List<SGroup> GroupBySeries(List<ApiClient.MatchHistoryEntry> ranked){var groups=new List<SGroup>();SGroup cur=new SGroup{series_id=null,matches=null};foreach(var m in ranked){string sid=m.series_id;bool has=!string.IsNullOrEmpty(sid)&&sid!="null";if(has&&cur.matches!=null&&cur.series_id==sid)cur.matches.Add(m);else{if(cur.matches!=null&&cur.matches.Count>0)groups.Add(cur);cur=new SGroup{series_id=has?sid:null,matches=new List<ApiClient.MatchHistoryEntry>{m}};}}if(cur.matches!=null&&cur.matches.Count>0)groups.Add(cur);return groups;}
         internal static Type TImage=>UIFactory.tImage;internal static Type TButton=>UIFactory.tButton;
+
+        // ── Admin tab ──────────────────────────────────────────
+        // Visible only when ApiClient.IsAdmin == true (gated in BuildTabBar / RefreshCurrentTab).
+        // Shows: flagged matches with [Confirm Cheat]/[False Positive] buttons; banned users with
+        // [Unban] button; three buttons opening an IMGUI prompt for Ban / Grant Achievement / Reverse Series.
+        private static GameObject adminFlagsContainer;
+        private static GameObject adminBansContainer;
+        private static object txtAdminFlagsHdr, txtAdminBansHdr;
+        private static List<GameObject> adminFlagRowPool = new List<GameObject>();
+        private static List<GameObject> adminBanRowPool = new List<GameObject>();
+
+        private static GameObject BuildAdminTab(Transform parent)
+        {
+            var panel = new GameObject("AdminPanel");
+            panel.transform.SetParent(parent, false);
+            panel.AddComponent<RectTransform>();
+            UIFactory.AddVLG(panel, spacing: 6, padL: 8, padR: 8, padT: 6, padB: 6);
+            UIFactory.AddLE(panel, flexH: 1);
+
+            var hdrRow = new GameObject("AHdr"); hdrRow.transform.SetParent(panel.transform, false); hdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(hdrRow, spacing: 8); UIFactory.AddLE(hdrRow, prefH: 32, flexH: 0);
+            UIFactory.CreateText("AT", hdrRow.transform, "<b>Admin Panel</b>  <color=#888>(visible only to whitelisted Steam IDs)</color>", 18f, new Color(1f, 0.7f, 0.3f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 28));
+            UIFactory.CreateButton("ARefresh", hdrRow.transform, "Refresh", 13f, C_WHITE, C_BTN, () =>
+            {
+                var sid = MatchTracker.LocalSteamId;
+                if (!string.IsNullOrEmpty(sid)) { ApiClient.FetchFlaggedMatches(sid); ApiClient.FetchBannedUsers(sid); }
+            }, sizeDelta: new Vector2(90, 26));
+
+            var actionRow = new GameObject("AAct"); actionRow.transform.SetParent(panel.transform, false); actionRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(actionRow, spacing: 8); UIFactory.AddLE(actionRow, prefH: 30, flexH: 0);
+            UIFactory.CreateButton("ABan", actionRow.transform, "Ban Steam ID...", 13f, C_WHITE, new Color(0.55f, 0.15f, 0.15f, 0.9f), () =>
+                CompetitiveUI.OpenAdminPrompt("ban"), sizeDelta: new Vector2(140, 26));
+            UIFactory.CreateButton("AGrant", actionRow.transform, "Grant Achievement...", 13f, C_WHITE, new Color(0.2f, 0.45f, 0.2f, 0.9f), () =>
+                CompetitiveUI.OpenAdminPrompt("grant"), sizeDelta: new Vector2(170, 26));
+            UIFactory.CreateButton("ARev", actionRow.transform, "Reverse Series...", 13f, C_WHITE, new Color(0.45f, 0.3f, 0.55f, 0.9f), () =>
+                CompetitiveUI.OpenAdminPrompt("reverse"), sizeDelta: new Vector2(150, 26));
+
+            var split = new GameObject("ASplit"); split.transform.SetParent(panel.transform, false); split.AddComponent<RectTransform>();
+            UIFactory.AddHLG(split, spacing: 8); UIFactory.AddLE(split, flexH: 1);
+
+            // Left column: flagged matches.
+            var leftCol = new GameObject("AFLeft"); leftCol.transform.SetParent(split.transform, false); leftCol.AddComponent<RectTransform>();
+            UIFactory.AddVLG(leftCol, spacing: 4); UIFactory.AddLE(leftCol, flexW: 1, flexH: 1);
+            txtAdminFlagsHdr = UIFactory.CreateText("AFH", leftCol.transform, "Flagged Matches", 16f, new Color(1f, 0.55f, 0.3f), sizeDelta: new Vector2(500, 24));
+            UIFactory.SetBold(txtAdminFlagsHdr, true);
+            var flagSV = UIFactory.CreateScrollView("AFSV", leftCol.transform, spacing: 2);
+            UIFactory.AddLE(flagSV.scrollGO, flexH: 1);
+            adminFlagsContainer = flagSV.content;
+
+            // Right column: banned users.
+            var rightCol = new GameObject("AFRight"); rightCol.transform.SetParent(split.transform, false); rightCol.AddComponent<RectTransform>();
+            UIFactory.AddVLG(rightCol, spacing: 4); UIFactory.AddLE(rightCol, prefW: 360, flexH: 1);
+            txtAdminBansHdr = UIFactory.CreateText("ABH", rightCol.transform, "Banned Users", 16f, new Color(1f, 0.45f, 0.45f), sizeDelta: new Vector2(340, 24));
+            UIFactory.SetBold(txtAdminBansHdr, true);
+            var banSV = UIFactory.CreateScrollView("ABSV", rightCol.transform, spacing: 2);
+            UIFactory.AddLE(banSV.scrollGO, flexH: 1);
+            adminBansContainer = banSV.content;
+
+            return panel;
+        }
+
+        private static void RefreshAdmin()
+        {
+            // Flag rows
+            var flags = ApiClient.CachedFlaggedMatches ?? new List<ApiClient.FlaggedMatchEntry>();
+            UIFactory.SetText(txtAdminFlagsHdr, $"Flagged Matches ({flags.Count} unreviewed)");
+            // Hide pooled rows past current count
+            for (int i = flags.Count; i < adminFlagRowPool.Count; i++) adminFlagRowPool[i].SetActive(false);
+            for (int i = 0; i < flags.Count; i++)
+            {
+                if (i >= adminFlagRowPool.Count) adminFlagRowPool.Add(BuildAdminFlagRow(adminFlagsContainer.transform, i));
+                FillAdminFlagRow(adminFlagRowPool[i], flags[i]);
+            }
+
+            // Ban rows
+            var bans = ApiClient.CachedBannedUsers ?? new List<ApiClient.BannedUserEntry>();
+            UIFactory.SetText(txtAdminBansHdr, $"Banned Users ({bans.Count})");
+            for (int i = bans.Count; i < adminBanRowPool.Count; i++) adminBanRowPool[i].SetActive(false);
+            for (int i = 0; i < bans.Count; i++)
+            {
+                if (i >= adminBanRowPool.Count) adminBanRowPool.Add(BuildAdminBanRow(adminBansContainer.transform, i));
+                FillAdminBanRow(adminBanRowPool[i], bans[i]);
+            }
+        }
+
+        private static GameObject BuildAdminFlagRow(Transform parent, int idx)
+        {
+            var row = UIFactory.CreatePanel($"AF{idx}", parent, new Color(0.18f, 0.13f, 0.13f, 0.85f));
+            UIFactory.AddHLG(row, spacing: 6, padL: 6, padR: 6, padT: 4, padB: 4);
+            UIFactory.AddLE(row, prefH: 38, flexH: 0);
+            var txt = UIFactory.CreateText("AFT", row.transform, "", 13f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(420, 30));
+            UIFactory.SetWordWrap(txt, false);
+            row.transform.GetChild(0).gameObject.AddComponent<RectTransform>(); // ensure
+            // The two action buttons; their onClick is rebuilt per-row in FillAdminFlagRow.
+            var btnConfirm = UIFactory.CreateButton($"AFOK{idx}", row.transform, "Cheat", 11f, C_WHITE, new Color(0.5f, 0.15f, 0.15f, 0.9f), () => { }, sizeDelta: new Vector2(70, 26));
+            var btnFalse   = UIFactory.CreateButton($"AFNO{idx}", row.transform, "False+", 11f, C_WHITE, new Color(0.15f, 0.4f, 0.15f, 0.9f), () => { }, sizeDelta: new Vector2(70, 26));
+            row.SetActive(false);
+            return row;
+        }
+
+        private static void FillAdminFlagRow(GameObject row, ApiClient.FlaggedMatchEntry e)
+        {
+            row.SetActive(true);
+            // First child = text. The button onClicks are set below.
+            var txt = row.transform.Find("AFT");
+            if (txt != null)
+            {
+                string when = "";
+                try { if (!string.IsNullOrEmpty(e.created_at)) when = DateTime.Parse(e.created_at).ToString("HH:mm"); } catch { }
+                string verdict = e.auto_invalidated ? "<color=#FF6666>auto-inv</color>" : "<color=#DDAA44>advisory</color>";
+                string mode = e.is_ranked ? "R" : "C";
+                string line = $"[{when}] <b>{e.flag_reason}</b> {verdict}  {Trunc(e.p1_name, 12)} vs {Trunc(e.p2_name, 12)}  {mode}/{e.duration_seconds}s";
+                // tTMP isn't accessible outside UIFactory. Iterate child components by reflected name.
+                foreach (var c in txt.GetComponents<Component>())
+                    if (c.GetType().Name == "TextMeshProUGUI") { UIFactory.SetText(c, line); break; }
+            }
+            // Rebuild button click handlers — capture this entry's id.
+            var ok = row.transform.Find("AFOK" + row.name.Substring(2));
+            var no = row.transform.Find("AFNO" + row.name.Substring(2));
+            if (ok != null) WireButton(ok.gameObject, () => SubmitFlagReview(e.id, "confirmed_cheat"));
+            if (no != null) WireButton(no.gameObject, () => SubmitFlagReview(e.id, "false_positive"));
+        }
+
+        private static void SubmitFlagReview(string flagId, string action)
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            ApiClient.AdminReviewFlag(sid, flagId, action, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ADMIN] review {action} on {flagId}: {(ok?"OK":"FAIL")} {resp}");
+                if (ok) ApiClient.FetchFlaggedMatches(sid);
+            });
+        }
+
+        private static GameObject BuildAdminBanRow(Transform parent, int idx)
+        {
+            var row = UIFactory.CreatePanel($"AB{idx}", parent, new Color(0.2f, 0.13f, 0.13f, 0.85f));
+            UIFactory.AddHLG(row, spacing: 6, padL: 6, padR: 6, padT: 4, padB: 4);
+            UIFactory.AddLE(row, prefH: 32, flexH: 0);
+            UIFactory.CreateText("ABT", row.transform, "", 13f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 26));
+            UIFactory.CreateButton($"ABU{idx}", row.transform, "Unban", 11f, C_WHITE, new Color(0.2f, 0.45f, 0.2f, 0.9f), () => { }, sizeDelta: new Vector2(70, 24));
+            row.SetActive(false);
+            return row;
+        }
+
+        private static void FillAdminBanRow(GameObject row, ApiClient.BannedUserEntry e)
+        {
+            row.SetActive(true);
+            var txt = row.transform.Find("ABT");
+            if (txt != null)
+            {
+                string line = $"<b>{Trunc(e.display_name ?? e.steam_id, 16)}</b>  <color=#999>{Trunc(e.reason, 28)}</color>";
+                foreach (var c in txt.GetComponents<Component>()) if (c.GetType().Name == "TextMeshProUGUI") { UIFactory.SetText(c, line); break; }
+            }
+            var unbanBtn = row.transform.Find("ABU" + row.name.Substring(2));
+            if (unbanBtn != null) WireButton(unbanBtn.gameObject, () =>
+            {
+                var sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid)) return;
+                ApiClient.AdminUnban(sid, e.steam_id, (ok, resp) =>
+                {
+                    Plugin.Log.LogInfo($"[ADMIN] unban {e.steam_id}: {(ok?"OK":"FAIL")} {resp}");
+                    if (ok) { ApiClient.FetchBannedUsers(sid); ApiClient.FetchFlaggedMatches(sid); }
+                });
+            });
+        }
+
+        // Replace a Button's onClick listeners — clears via Button.onClick.RemoveAllListeners then re-adds.
+        // Avoids stacking handlers when we re-fill a pooled row with a new entry.
+        private static void WireButton(GameObject btn, Action onClick)
+        {
+            try
+            {
+                var btnComp = btn.GetComponent(UIFactory.tButton);
+                if (btnComp == null) return;
+                var onClickProp = UIFactory.tButton.GetProperty("onClick", BindingFlags.Public | BindingFlags.Instance);
+                var ev = onClickProp?.GetValue(btnComp);
+                if (ev != null)
+                {
+                    var removeAll = ev.GetType().GetMethod("RemoveAllListeners");
+                    removeAll?.Invoke(ev, null);
+                    var add = ev.GetType().GetMethod("AddListener");
+                    if (add != null)
+                    {
+                        UnityEngine.Events.UnityAction guarded = () => { if (ClickGuard.Claim()) onClick(); };
+                        add.Invoke(ev, new object[] { guarded });
+                    }
+                }
+                // Also rewire the secondary ClickHandler attached by CreateButton.
+                var ch = btn.GetComponent<ClickHandler>();
+                if (ch != null) ch.onClick = () => { if (ClickGuard.Claim()) onClick(); };
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[ADMIN] WireButton failed: {ex.Message}"); }
+        }
     }
 }

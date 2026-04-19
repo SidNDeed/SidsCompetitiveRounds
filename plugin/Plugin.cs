@@ -19,7 +19,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.20.0";
+        public const string ModVersion = "1.22.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -34,6 +34,9 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowIngameChat;
         internal static ConfigEntry<bool> ShowTrails;
+        // Pipe-delimited list of muted display names — local mute, doesn't leave the client.
+        // Mutated via /mute and /unmute commands typed in the F5 chat input.
+        internal static ConfigEntry<string> MutedChatNames;
         // Tri-state "" (unset — ask at launch) / "granted" / "denied".
         // Gates ALL outbound API traffic except the mod-version probe and consent-revocation calls.
         internal static ConfigEntry<string> DataConsent;
@@ -112,6 +115,12 @@ namespace CompetitiveRounds
                 "Show cosmetic trails behind players during matches (including your own and opponents')"
             );
 
+            MutedChatNames = Config.Bind(
+                "UI", "MutedChatNames",
+                "",
+                "Pipe-delimited list of display names whose chat messages are hidden from your in-game chat log. Use /mute name and /unmute name in chat."
+            );
+
             DataConsent = Config.Bind(
                 "Privacy", "DataConsent",
                 "",
@@ -150,6 +159,10 @@ namespace CompetitiveRounds
                 go.hideFlags = HideFlags.HideAndDontSave;
                 UnityEngine.Object.DontDestroyOnLoad(go);
                 Instance = go.AddComponent<CompetitiveRoundsBehaviour>();
+                // Sibling component that receives Photon IInRoomCallbacks — used by the cosmetic
+                // trail system to re-attach opponents' trails when their cr_trail_* props arrive
+                // after OnMatchStart has already iterated.
+                go.AddComponent<TrailPhotonCallbacks>();
                 spawned = true;
                 Log.LogInfo("Created persistent GameObject with DontDestroyOnLoad");
             }
@@ -458,6 +471,11 @@ namespace CompetitiveRounds
             {
                 try { ApiClient.UpdateQueueCount(); }
                 catch { }
+                // Auto-refresh Live Ranked Games while the Leaderboard tab is open. Cheaply
+                // gated by the 10s timer in NativeUI.MaybeRefreshLiveSeries so we're not
+                // hammering /series/active every frame.
+                try { NativeUI.MaybeRefreshLiveSeries(); }
+                catch { }
             }
         }
 
@@ -514,6 +532,8 @@ namespace CompetitiveRounds
                 ApiClient.FetchPlayerStats(steamId);
                 ApiClient.FetchMatchHistory(steamId);
                 ApiClient.FetchBlockedPlayers(steamId);
+                // Determine admin status once at startup. The admin tab is hidden when this is false.
+                ApiClient.CheckAdminStatus(steamId);
             }
 
             // Wire the chat pipe so incoming messages reach the UI log.
@@ -1402,6 +1422,366 @@ namespace CompetitiveRounds
             FlashWindowEx(ref fInfo);
             isFlashing = false;
             shouldFlash = false;
+        }
+    }
+
+    // ── F5 click-block: stop the LOCAL player from shooting/blocking while the
+    //    competitive menu is open. Without this, clicks on Settings buttons fire
+    //    the gun in the game world too. uGUI raycast blockers don't help because
+    //    Gun.Attack/Block.TryBlock are called from gameplay code reading Input directly.
+    //    Only the LOCAL player is gated (PhotonView.IsMine) so opponent shots still render.
+
+    [HarmonyPatch(typeof(Gun), "Attack")]
+    class GunAttackBlockOnF5Patch
+    {
+        static bool Prefix(Gun __instance)
+        {
+            if (!NativeUI.IsOpen) return true;
+            try
+            {
+                var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
+                if (pv == null || !pv.IsMine) return true;  // never block opponents — only the local player
+            }
+            catch { return true; }
+            return false;  // skip the original Attack — local shot suppressed while F5 is open
+        }
+    }
+
+    [HarmonyPatch(typeof(Block), "TryBlock")]
+    class BlockTryBlockOnF5Patch
+    {
+        static bool Prefix(Block __instance)
+        {
+            if (!NativeUI.IsOpen) return true;
+            try
+            {
+                var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
+                if (pv == null || !pv.IsMine) return true;
+            }
+            catch { return true; }
+            return false;
+        }
+    }
+
+    // ── Map color override (v1.22) ─────────────────────────────────────────
+    // ROUNDS' ArtHandler.Update polls for LeftShift in Update and calls NextArt() which
+    // picks a random art from arts[]. For users who own a "color" cosmetic AND have one
+    // active, we patch NextArt to instead apply their saved selection. SetSpecificArt
+    // already exists and matches by ArtInstance.profile.name.
+    //
+    // The Awake postfix logs every art profile name on first load — Sid uses this to
+    // identify which art-name maps to which shop SKU. Map mappings live in the static
+    // dict below; SKUs not in the dict fall through to vanilla cycling.
+
+    [HarmonyPatch(typeof(ArtHandler), "Awake")]
+    class ArtHandlerAwakePatch
+    {
+        static void Postfix(ArtHandler __instance)
+        {
+            // ArtInstance.profile is a PostProcessProfile from Unity.Postprocessing.Runtime,
+            // which we don't reference at compile time. Reflect into it so we don't have to.
+            try
+            {
+                if (__instance.arts == null) return;
+                var profileField = typeof(ArtInstance).GetField("profile",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                for (int i = 0; i < __instance.arts.Length; i++)
+                {
+                    var art = __instance.arts[i];
+                    if (art == null) continue;
+                    object profileObj = profileField?.GetValue(art);
+                    string profileName = "<no profile>";
+                    if (profileObj is UnityEngine.Object uo) profileName = uo.name;
+                    Plugin.Log.LogInfo($"[MAPCOLOR] arts[{i}] profile.name = '{profileName}'");
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] Awake log failed: {ex.Message}"); }
+        }
+    }
+
+    // Tints the physical map block renderers per the active custom-color SKU. Each Map
+    // instance is spawned per round, so this Postfix runs once per round. We use
+    // renderer.material (capital M, auto-clones) so we never poison the shared MapMaterial
+    // across maps or rounds. A null MapBlockColor (vanilla SKUs / mapcolor_default) is a no-op.
+    // Map block tint per active custom-color SKU. Last attempt set material.color but the map's
+    // visible blocks are SpriteRenderers — for those, .color on the renderer is the actual tint
+    // (material.color does nothing because the sprite shader samples sprite.color * vertex color).
+    // Now sets BOTH SpriteRenderer.color AND multiple known shader properties on the cloned
+    // material so we cover sprite, mesh, and any custom-shader renderer ROUNDS uses.
+    // Tints map blocks per active custom-color SKU. The walls/floors in ROUNDS are NOT child
+    // Renderers of the Map GameObject — they're siblings in the scene OR they use an asset-
+    // referenced shared Material (Map.MapMaterial) that we need to tint via a CLONE to not
+    // leak across rounds. Strategy here:
+    //   1. Clone Map.MapMaterial per-SKU (cached) and reassign it to __instance.MapMaterial
+    //      AND to every child Renderer whose sharedMaterial matches the original MapMaterial.
+    //   2. Also set SpriteRenderer.color on every sprite child (for moving boxes — these don't
+    //      use the shared material).
+    // Tints map blocks per active custom-color SKU. Logs verbosely so we can diagnose
+    // why walls/floors weren't getting tinted. Strategy:
+    //   1. Always tint every SpriteRenderer.color (catches moving boxes + many wall sprites).
+    //   2. Walk every renderer in the entire scene (NOT just Map's children) and re-assign
+    //      shared materials whose name matches the map material — walls/floors are sometimes
+    //      siblings of Map, not children.
+    //   3. Cache cloned materials per (sku, original-material-name) so we don't churn.
+    // We re-run on every round (Map.Start is per-round). The "glitch" between two patterns
+    // probably means another system is reassigning the original material each round — by
+    // hooking Start (which fires AFTER ROUNDS' own setup) we should win.
+    [HarmonyPatch(typeof(Map), "Start")]
+    class MapPhysicalColorPatch
+    {
+        // Cached tinted materials, keyed by "{sku}|{originalMaterialName}".
+        private static readonly Dictionary<string, Material> _matCache = new Dictionary<string, Material>();
+        private static bool _loggedTypes;
+
+        static void Postfix(Map __instance)
+        {
+            try
+            {
+                var stats = ApiClient.CachedPlayerStats;
+                string sku = stats?.active_color_sku;
+                if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku))
+                {
+                    return;
+                }
+                Color? tintN = CustomMapColors.GetMapBlockColor(sku);
+                if (!tintN.HasValue)
+                {
+                    Plugin.Log.LogInfo($"[MAPCOLOR] Map.Start sku={sku} but no MapBlockColor → SpriteRenderer-only path");
+                }
+                Color c = tintN ?? Color.white;
+
+                // Step 1: SpriteRenderer.color on every sprite child of Map.
+                int sprites = 0;
+                var typeCounts = new Dictionary<string, int>();
+                foreach (var r in __instance.GetComponentsInChildren<Renderer>(true))
+                {
+                    if (r == null) continue;
+                    string tn = r.GetType().Name;
+                    typeCounts.TryGetValue(tn, out int n); typeCounts[tn] = n + 1;
+                    if (tintN.HasValue && r is SpriteRenderer sr) { sr.color = c; sprites++; }
+                }
+                if (!_loggedTypes && typeCounts.Count > 0)
+                {
+                    _loggedTypes = true;
+                    foreach (var kv in typeCounts)
+                        Plugin.Log.LogInfo($"[MAPCOLOR] Map child renderer type {kv.Key}: {kv.Value}");
+                }
+
+                if (!tintN.HasValue) return;
+
+                // Confirmed from prior diagnostic: Map.MapMaterial is null, walls/floors aren't
+                // child renderers of Map (Map's children are 49 SpriteRenderers = the moving
+                // boxes). Walls live elsewhere in the scene. Strategy: scan EVERY SpriteRenderer
+                // in the scene and tint any that look map-like (skip player avatars, bullets,
+                // UI sprites) by inspecting parent path. Tint via SpriteRenderer.color so we
+                // don't need to clone any material.
+                int sceneSprites = 0, sceneSkipped = 0;
+                var pathSamples = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var r in UnityEngine.Object.FindObjectsOfType<SpriteRenderer>())
+                {
+                    if (r == null) continue;
+                    string path = GetTransformPath(r.transform);
+                    // Sample the first ~30 unique parent prefixes for diagnostic — tells us what
+                    // top-level objects exist so we can tighten the filter next round if needed.
+                    string topLevel = path.Split('/')[0];
+                    if (pathSamples.Count < 60)
+                    {
+                        pathSamples.TryGetValue(topLevel, out int n);
+                        pathSamples[topLevel] = n + 1;
+                    }
+                    // Skip obvious non-map renderers: players, bullets, UI, HUD, projectiles.
+                    string pl = path.ToLowerInvariant();
+                    if (pl.Contains("player") || pl.Contains("bullet") || pl.Contains("ui_") ||
+                        pl.Contains("hud") || pl.Contains("/cards") || pl.Contains("cardchoice") ||
+                        pl.Contains("particle") || pl.Contains("character"))
+                    { sceneSkipped++; continue; }
+                    r.color = c;
+                    sceneSprites++;
+                }
+                if (!_loggedScenePaths)
+                {
+                    _loggedScenePaths = true;
+                    foreach (var kv in pathSamples)
+                        Plugin.Log.LogInfo($"[MAPCOLOR] scene top-level: {kv.Key} ({kv.Value} sprites)");
+                    // Walls/floors aren't sprites — log every NON-SpriteRenderer in the scene with
+                    // its full path so we can identify what to target. One-shot.
+                    var nonSpriteByType = new Dictionary<string, int>();
+                    var nonSpritePaths = new List<string>();
+                    foreach (var rr in UnityEngine.Object.FindObjectsOfType<Renderer>())
+                    {
+                        if (rr == null || rr is SpriteRenderer) continue;
+                        string tname = rr.GetType().Name;
+                        // Skip SpriteMask — they're player limb masks (246 of them) and were
+                        // monopolizing the 80-entry dump cap, hiding the single MeshRenderer
+                        // we actually need to identify (the map wall mesh).
+                        if (tname == "SpriteMask") { nonSpriteByType.TryGetValue(tname, out int sc); nonSpriteByType[tname] = sc + 1; continue; }
+                        nonSpriteByType.TryGetValue(tname, out int cnt);
+                        nonSpriteByType[tname] = cnt + 1;
+                        if (nonSpritePaths.Count < 200)
+                        {
+                            string mn = rr.sharedMaterial != null ? rr.sharedMaterial.name : "<null>";
+                            nonSpritePaths.Add(tname + "  " + GetTransformPath(rr.transform) + "  mat=" + mn);
+                        }
+                    }
+                    foreach (var kv in nonSpriteByType)
+                        Plugin.Log.LogInfo($"[MAPCOLOR] non-sprite renderer type {kv.Key}: {kv.Value}");
+                    foreach (var p in nonSpritePaths)
+                        Plugin.Log.LogInfo($"[MAPCOLOR] non-sprite path: {p}");
+                }
+                // Step 3 — tint the wall-like particle systems. Alternate between MapBlockColor
+                // and SecondaryColor by index so the wall reads as multi-tone instead of a flat
+                // single color block. Vanilla arts achieve their "atmosphere" via per-particle
+                // color variation; this restores that feel for our custom presets.
+                Color secondary = CustomMapColors.GetSecondaryColor(sku);
+                int boundaryParts = 0, idx = 0;
+                foreach (var ps in UnityEngine.Object.FindObjectsOfType<ParticleSystem>())
+                {
+                    if (ps == null) continue;
+                    string ppath = GetTransformPath(ps.transform);
+                    if (!ppath.StartsWith("OutOfBounds/", StringComparison.OrdinalIgnoreCase)) continue;
+                    var main = ps.main;
+                    Color pc = (idx++ % 2 == 0) ? c : secondary;
+                    main.startColor = new ParticleSystem.MinMaxGradient(pc);
+                    boundaryParts++;
+                }
+
+                // Step 4 — vanilla ArtInstance particle backdrops, also alternating.
+                // We use a single counter shared across arts so the secondary color is sprinkled
+                // evenly across the active art's particles.
+                int artParts = 0;
+                try
+                {
+                    var ah = ArtHandler.instance;
+                    if (ah != null && ah.arts != null)
+                    {
+                        var partsField = typeof(ArtInstance).GetField("parts",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                        int aidx = 0;
+                        foreach (var art in ah.arts)
+                        {
+                            if (art == null) continue;
+                            var partsArr = partsField?.GetValue(art) as ParticleSystem[];
+                            if (partsArr == null) continue;
+                            foreach (var ps in partsArr)
+                            {
+                                if (ps == null) continue;
+                                var main = ps.main;
+                                Color apc = (aidx++ % 2 == 0) ? c : secondary;
+                                main.startColor = new ParticleSystem.MinMaxGradient(apc);
+                                artParts++;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] art-particle tint failed: {ex.Message}"); }
+
+                Plugin.Log.LogInfo($"[MAPCOLOR] Map.Start sku={sku}: map-children-sprites={sprites}, scene-sprites-tinted={sceneSprites}, boundary-parts={boundaryParts}, art-parts={artParts}, skipped={sceneSkipped}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] Map tint failed: {ex.Message}"); }
+        }
+
+        private static bool _loggedScenePaths;
+
+        private static string GetTransformPath(Transform t)
+        {
+            if (t == null) return "";
+            var sb = new System.Text.StringBuilder(t.name);
+            var p = t.parent;
+            while (p != null)
+            {
+                sb.Insert(0, p.name + "/");
+                p = p.parent;
+            }
+            return sb.ToString();
+        }
+    }
+
+    [HarmonyPatch(typeof(ArtHandler), "NextArt")]
+    class ArtHandlerNextArtPatch
+    {
+        // SKU → ROUNDS art profile name. Names confirmed via the [MAPCOLOR] Awake postfix log:
+        //   arts[0..8] = RainbowSequence, Rainbow, Sweden, Gold, Soviet, Poison, Gold, Sky, Poison
+        // SKUs not in this dict fall through to vanilla random behavior.
+        private static readonly Dictionary<string, string> SKU_TO_ART = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "mapcolor_default", "" },          // empty → fall through to original NextArt
+            { "mapcolor_sweden",  "Sweden" },
+            { "mapcolor_sky",     "Sky" },
+            { "mapcolor_poison",  "Poison" },
+            { "mapcolor_gold",    "Gold" },
+            { "mapcolor_soviet",  "Soviet" },
+            { "mapcolor_rainbow", "Rainbow" },
+        };
+
+        static bool Prefix(ArtHandler __instance)
+        {
+            try
+            {
+                var s = ApiClient.CachedPlayerStats;
+                string sku = s?.active_color_sku;
+                if (string.IsNullOrEmpty(sku)) return true;
+
+                // Custom-profile path: SetSpecificArt(baseArt) so the vanilla particle bg AND
+                // base profile (bloom, vignette, etc.) load. Then ApplyPost(clonedProfile) where
+                // the clone is baseArt.profile + our ColorGrading override. Cloning is critical:
+                // mutating volume.profile in place corrupts the SHARED art profile for the rest
+                // of the session — Sky's vanilla look would gain our tint permanently. The clone
+                // is cached per SKU in CustomMapColors.
+                if (CustomMapColors.IsCustomSku(sku))
+                {
+                    string baseArt = CustomMapColors.GetBaseArt(sku);
+                    if (string.IsNullOrEmpty(baseArt)) return true;
+                    __instance.SetSpecificArt(baseArt);
+                    var basePr = __instance.volume != null ? __instance.volume.profile : null;
+                    if (basePr == null)
+                    {
+                        Plugin.Log.LogWarning($"[MAPCOLOR] sku={sku} — volume.profile null after SetSpecificArt({baseArt})");
+                        return false;
+                    }
+                    var clone = CustomMapColors.BuildOrGetClone(sku, basePr);
+                    if (clone == null)
+                    {
+                        Plugin.Log.LogWarning($"[MAPCOLOR] sku={sku} — clone build failed, leaving base art active");
+                        return false;
+                    }
+                    __instance.ApplyPost(clone);
+                    Plugin.Log.LogInfo($"[MAPCOLOR] applied custom sku={sku} on base='{baseArt}' (cloned profile)");
+                    return false;
+                }
+
+                if (!SKU_TO_ART.TryGetValue(sku, out string artName)) return true;
+                if (string.IsNullOrEmpty(artName)) return true;        // explicit "default" sku
+
+                // Safety: only override if the named art actually exists on this ArtHandler
+                // instance. Earlier shipped a dict with guessed names that didn't match — the
+                // SetSpecificArt no-op left the map invisible because we'd already short-
+                // circuited the original NextArt. Now we fall through to vanilla random when
+                // the name isn't found, so a stale config can never blank the map again.
+                bool found = false;
+                if (__instance.arts != null)
+                {
+                    var profileField = typeof(ArtInstance).GetField("profile",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    foreach (var art in __instance.arts)
+                    {
+                        if (art == null) continue;
+                        var profileObj = profileField?.GetValue(art) as UnityEngine.Object;
+                        if (profileObj != null && profileObj.name == artName) { found = true; break; }
+                    }
+                }
+                if (!found)
+                {
+                    Plugin.Log.LogWarning($"[MAPCOLOR] sku={sku} mapped to art='{artName}' but no matching art on this ArtHandler — falling through to vanilla random");
+                    return true;
+                }
+                __instance.SetSpecificArt(artName);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[MAPCOLOR] NextArt prefix failed: {ex.Message}");
+                return true;
+            }
         }
     }
 }

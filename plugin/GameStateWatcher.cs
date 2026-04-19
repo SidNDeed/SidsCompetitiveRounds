@@ -117,6 +117,11 @@ namespace CompetitiveRounds
         private static int lastRemainingRespawns = -1;
         private static bool achFiredShot = false;         // left mouse clicked during match
         private static bool achMoved = false;              // WASD or Space pressed during match
+        // Anti-cheat: per-match counts of the LOCAL player's combat inputs. Sent in the match report
+        // so the server can flag a reporter who just sat idle the whole match (botting / AFK farming).
+        // Counters reset in OnMatchStarted alongside the achievement flags.
+        public static int LocalShotsThisMatch { get; private set; }
+        public static int LocalBlocksThisMatch { get; private set; }
         // Pick-phase gate: input gating must exclude card-pick UI (Space jump, A/D carousel,
         // mouse click on cards) which would otherwise count as movement / firing.
         // Set true on "PICK PHASE" log; cleared on "MOVE PLAYERS END" (combat about to begin)
@@ -472,6 +477,15 @@ namespace CompetitiveRounds
                 {
                     p1Points = curP1Points;
                     p2Points = curP2Points;
+                    // v1.22 — report live points to the server during ranked games so betting
+                    // locks once 2 points are scored in game 1. Only fires while we're in the
+                    // first match of a series (p1Rounds + p2Rounds == 0) to keep traffic low.
+                    if (matchIsRanked && curP1Rounds == 0 && curP2Rounds == 0
+                        && !string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
+                        && !string.IsNullOrEmpty(LocalSteamId))
+                    {
+                        ApiClient.PostLivePoints(ApiClient.ActiveRankedSeriesId, LocalSteamId, curP1Points, curP2Points);
+                    }
                 }
 
                 if (curP1Rounds != lastP1Rounds || curP2Rounds != lastP2Rounds)
@@ -533,6 +547,8 @@ namespace CompetitiveRounds
             achMoved = false;
             inPickPhase = false;
             pendingRegicideCheck = false;
+            LocalShotsThisMatch = 0;
+            LocalBlocksThisMatch = 0;
 
             // Retry card rarity scan if it didn't work at startup
             if (CardRarityLookup.Count == 0)
@@ -783,7 +799,9 @@ namespace CompetitiveRounds
                     durationSeconds: duration,
                     startedAt: matchStartTime,
                     reporterSteamId: localSteamId,
-                    isRanked: matchIsRanked
+                    isRanked: matchIsRanked,
+                    localShotsFired: LocalShotsThisMatch,
+                    localBlocksRaised: LocalBlocksThisMatch
                 );
             }
 
@@ -794,10 +812,14 @@ namespace CompetitiveRounds
             matchIsRanked = false; // Clear indicator immediately
         }
 
+        // Promoted: lets CompetitiveUI gate the chat-input T key so we don't swallow movement
+        // input during fighting. False during pick phase / between rounds / not in match / dead.
+        public static bool LocalAliveInCombatNow { get; private set; }
+
         // ── Achievement health/death polling ─────────────────────
         private static void PollAchievementState()
         {
-            if (!isTracking) return;
+            if (!isTracking) { LocalAliveInCombatNow = false; return; }
             bool localAliveInCombat = false;
             try
             {
@@ -847,6 +869,9 @@ namespace CompetitiveRounds
             }
             catch { }
 
+            // Sync our exposed flag — true ONLY when we're truly in combat (not pick / dead / menu).
+            LocalAliveInCombatNow = localAliveInCombat && !inPickPhase;
+
             // Input tracking — ONLY during active combat AND not in pick phase.
             // CharacterData persists with !dead && health>0 during the card-pick UI, so
             // localAliveInCombat alone is insufficient. The inPickPhase flag is driven by
@@ -858,6 +883,10 @@ namespace CompetitiveRounds
                     achFiredShot = true;
                     Plugin.Log.LogInfo("[ACH] Player fired a shot");
                 }
+                // Anti-cheat counters — increment on KeyDown so we get one per click, not one per frame held.
+                // GetMouseButton(0)/(1) above covers held-state for achievements; ButtonDown gives discrete events.
+                if (Input.GetMouseButtonDown(0)) LocalShotsThisMatch++;
+                if (Input.GetMouseButtonDown(1)) LocalBlocksThisMatch++;
                 if (!achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
                     Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
                     Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||
@@ -1020,6 +1049,14 @@ namespace CompetitiveRounds
             {
                 if (inPickPhase) Plugin.Log.LogInfo("[ACH] Combat begins — input gating enabled");
                 inPickPhase = false;
+                // Fire OnMatchStarted at the START of combat (not after the first death) so
+                // the cosmetic trail attaches immediately and the "RANKED — Recording" notice
+                // appears as soon as movement begins. The score-based trigger in PollGameState
+                // remains as a safety net for replays / edge cases that skip the log marker.
+                if (!isTracking)
+                {
+                    try { OnMatchStarted(); } catch (Exception ex) { Plugin.Log.LogWarning($"[ACH] early start hook: {ex.Message}"); }
+                }
                 // Auto-close the F5 competitive menu so it doesn't intercept clicks during combat
                 try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
             }
@@ -1320,6 +1357,8 @@ namespace CompetitiveRounds
             achMoved = false;
             inPickPhase = false;
             pendingRegicideCheck = false;
+            LocalShotsThisMatch = 0;
+            LocalBlocksThisMatch = 0;
 
             // Clear our card broadcast when leaving room
             try

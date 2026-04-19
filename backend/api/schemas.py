@@ -53,6 +53,10 @@ class MatchReport(BaseModel):
     hmac_signature: str | None = Field(None, max_length=128)
     is_ranked: bool = Field(False, description="Whether both players had ranked enabled")
     reported_by_steam_id: str = Field(..., max_length=20)
+    # Anti-cheat advisory signals. Reporter's per-match input counts. NOT in HMAC —
+    # these can be spoofed but provide a useful weak signal alongside duration + card count.
+    local_shots_fired: int | None = Field(None, ge=0)
+    local_blocks_raised: int | None = Field(None, ge=0)
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -98,6 +102,7 @@ class PlayerStatsResponse(BaseModel):
     active_trail_sku: str | None = None
     active_trail_color: str | None = None
     active_trail_price: int = 0
+    active_color_sku: str | None = None
     last_match: datetime | None
     recent_rating_history: list[dict] = Field(default_factory=list)
     top_cards: list[dict] = Field(default_factory=list)
@@ -165,6 +170,8 @@ class MatchHistoryEntry(BaseModel):
     match_id: UUID
     opponent_steam_id: str
     opponent_name: str
+    opponent_title: str | None = None
+    opponent_title_color: str | None = None
     player_rounds_won: int
     opponent_rounds_won: int
     player_points: int = 0

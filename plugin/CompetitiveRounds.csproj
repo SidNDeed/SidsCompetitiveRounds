@@ -78,6 +78,17 @@
       <HintPath>$(ManagedDir)\UnityEngine.AudioModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>$(ManagedDir)\UnityEngine.ParticleSystemModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Unity Post-Processing Stack v2 — used by the custom map color profiles
+         (CustomMapColors.cs) so we can author ColorGrading effects at runtime
+         without bundling pre-made PostProcessProfile assets. -->
+    <Reference Include="Unity.Postprocessing.Runtime">
+      <HintPath>$(ManagedDir)\Unity.Postprocessing.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- Game (publicized for direct access to private members) -->

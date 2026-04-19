@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using Photon.Pun;
 using UnityEngine;
 
@@ -97,7 +98,9 @@ namespace CompetitiveRounds
         /// <summary>Called from Update. Ticks the native UI.</summary>
         public static void Tick() => NativeUI.Tick();
 
-        /// <summary>Called from OnGUI. FPS + notifications + match status.</summary>
+        /// <summary>Called from OnGUI. FPS + notifications + match status. The server-down
+        /// banner moved to the F5 menu (NativeUI.RefreshServerBanner) — it was constantly
+        /// firing in-game during quiet periods + felt obtrusive.</summary>
         public static void DrawUI()
         {
             DrawFPS();
@@ -105,6 +108,7 @@ namespace CompetitiveRounds
             DrawMatchStatus();
             DrawInGameChat();
             DrawChatInput();
+            DrawAdminPrompt();
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
         }
@@ -175,6 +179,180 @@ namespace CompetitiveRounds
             }
         }
 
+        // ── Admin prompt (IMGUI overlay) ─────────────────────────
+        // Modal called from the Admin tab buttons. Mode determines which fields are shown:
+        //   "ban":     target_steam_id + reason
+        //   "grant":   target_steam_id + achievement_key
+        //   "reverse": series_id + reason
+        // Submit invokes the matching ApiClient.Admin* call. Closes on Submit / Cancel / Escape.
+        private static bool adminPromptOpen = false;
+        private static string adminPromptMode = "";  // "ban" | "grant" | "unban" | "reverse"
+        private static string adminInputA = "";       // primary id (steam_id or series_id)
+        private static string adminInputB = "";       // secondary (reason or achievement_key)
+        private static GUIStyle adminFieldStyle, adminLabelStyle;
+        // Achievement key list for the grant prompt. Must match the keys in
+        // ACHIEVEMENT_DEFS in backend/api/main.py — wrong keys here gave a 400
+        // when picked. (Earlier list had "first_blood", "comeback_kid", "phoenix"
+        // etc. that didn't exist server-side.)
+        private static readonly string[] ADMIN_ACHIEVEMENT_KEYS = new[] {
+            "untouchable", "silent_assassin", "total_mayhem", "fragile_perfection",
+            "no_escape", "rise_from_the_ashes", "the_comeback_kid", "stacked_deck",
+            "regicide", "pacifist", "immovable_object",
+        };
+
+        public static void OpenAdminPrompt(string mode)
+        {
+            adminPromptMode = mode ?? "";
+            adminInputA = "";
+            adminInputB = mode == "grant" ? ADMIN_ACHIEVEMENT_KEYS[0] : "";
+            adminPromptOpen = true;
+        }
+
+        private static void DrawAdminPrompt()
+        {
+            if (!adminPromptOpen) return;
+            if (!NativeUI.IsOpen) { adminPromptOpen = false; return; }
+
+            var ev = Event.current;
+            bool submit = false, cancel = false;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
+            { cancel = true; ev.Use(); }
+
+            if (adminFieldStyle == null) adminFieldStyle = new GUIStyle(GUI.skin.textField) { fontSize = 15 };
+            if (adminLabelStyle == null) adminLabelStyle = new GUIStyle(GUI.skin.label)     { fontSize = 14 };
+
+            float w = 560, h = 220;
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.92f), 0, 0);
+
+            string title = adminPromptMode switch
+            {
+                "ban"     => "Ban a player",
+                "grant"   => "Grant an achievement",
+                "reverse" => "Reverse a ranked series",
+                _         => "Admin action",
+            };
+            GUI.Label(new Rect(x + 10, y + 8, w - 20, 24), title, new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
+
+            string aLabel, bLabel;
+            switch (adminPromptMode)
+            {
+                case "ban":     aLabel = "Target Steam ID"; bLabel = "Reason"; break;
+                case "grant":   aLabel = "Target Steam ID"; bLabel = "Achievement key"; break;
+                case "reverse": aLabel = "Series ID (UUID)"; bLabel = "Reason"; break;
+                default:        aLabel = "ID"; bLabel = "Detail"; break;
+            }
+
+            GUI.Label(new Rect(x + 10, y + 38, 200, 20), aLabel, adminLabelStyle);
+            adminInputA = GUI.TextField(new Rect(x + 10, y + 60, w - 20, 26), adminInputA ?? "", adminFieldStyle);
+
+            GUI.Label(new Rect(x + 10, y + 96, 200, 20), bLabel, adminLabelStyle);
+            if (adminPromptMode == "grant")
+            {
+                // Grant: cycle through allowed achievement keys via prev/next buttons.
+                if (GUI.Button(new Rect(x + 10, y + 118, 30, 26), "<"))
+                {
+                    int i = Math.Max(0, Array.IndexOf(ADMIN_ACHIEVEMENT_KEYS, adminInputB));
+                    i = (i - 1 + ADMIN_ACHIEVEMENT_KEYS.Length) % ADMIN_ACHIEVEMENT_KEYS.Length;
+                    adminInputB = ADMIN_ACHIEVEMENT_KEYS[i];
+                }
+                GUI.Label(new Rect(x + 50, y + 122, w - 100, 22), adminInputB, adminLabelStyle);
+                if (GUI.Button(new Rect(x + w - 40, y + 118, 30, 26), ">"))
+                {
+                    int i = Math.Max(0, Array.IndexOf(ADMIN_ACHIEVEMENT_KEYS, adminInputB));
+                    i = (i + 1) % ADMIN_ACHIEVEMENT_KEYS.Length;
+                    adminInputB = ADMIN_ACHIEVEMENT_KEYS[i];
+                }
+            }
+            else
+            {
+                adminInputB = GUI.TextField(new Rect(x + 10, y + 118, w - 20, 26), adminInputB ?? "", adminFieldStyle);
+            }
+
+            if (GUI.Button(new Rect(x + 10, y + h - 36, 100, 28), "Cancel")) cancel = true;
+            if (GUI.Button(new Rect(x + w - 110, y + h - 36, 100, 28), "Submit")) submit = true;
+
+            if (cancel) { adminPromptOpen = false; return; }
+
+            if (submit)
+            {
+                var sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid))
+                {
+                    Plugin.Log.LogWarning("[ADMIN] No local Steam ID");
+                    adminPromptOpen = false; return;
+                }
+                string a = (adminInputA ?? "").Trim();
+                string b = (adminInputB ?? "").Trim();
+                if (string.IsNullOrEmpty(a)) return;  // require primary id
+                Action<bool, string> done = (ok, resp) =>
+                {
+                    Plugin.Log.LogInfo($"[ADMIN] {adminPromptMode} -> {(ok?"OK":"FAIL")} {resp}");
+                    if (ok) { ApiClient.FetchFlaggedMatches(sid); ApiClient.FetchBannedUsers(sid); }
+                };
+                switch (adminPromptMode)
+                {
+                    case "ban":     ApiClient.AdminBan(sid, a, string.IsNullOrEmpty(b) ? "violation" : b, done); break;
+                    case "grant":   ApiClient.AdminGrantAchievement(sid, a, b, done); break;
+                    case "reverse": ApiClient.AdminReverseSeries(sid, a, string.IsNullOrEmpty(b) ? "admin_reverse" : b, done); break;
+                }
+                adminPromptOpen = false;
+            }
+        }
+
+        // True when some OTHER uGUI/TMP text input field has focus — used to avoid stealing
+        // T while the user is already typing into a different chat (Photon / another mod /
+        // ROUNDS' own future chat). Detected via the EventSystem singleton's selected object;
+        // we look for any component whose type name ends in "InputField" so we don't depend
+        // on uGUI being a compile-time reference.
+        private static Type s_eventSystemType;
+        private static System.Reflection.PropertyInfo s_eventSystemCurrentProp;
+        private static System.Reflection.PropertyInfo s_eventSystemSelectedProp;
+        private static bool IsAnotherTextInputActive()
+        {
+            try
+            {
+                if (s_eventSystemType == null)
+                {
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        s_eventSystemType = asm.GetType("UnityEngine.EventSystems.EventSystem");
+                        if (s_eventSystemType != null) break;
+                    }
+                    if (s_eventSystemType == null) return false;
+                    var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static;
+                    s_eventSystemCurrentProp = s_eventSystemType.GetProperty("current", bf);
+                    s_eventSystemSelectedProp = s_eventSystemType.GetProperty("currentSelectedGameObject",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                }
+                var current = s_eventSystemCurrentProp?.GetValue(null);
+                if (current == null) return false;
+                var selected = s_eventSystemSelectedProp?.GetValue(current) as GameObject;
+                if (selected == null) return false;
+                // The selected GameObject can linger after its InputField has been hidden — closing
+                // the other chat doesn't always clear EventSystem.currentSelectedGameObject. So
+                // also require the GO to be active in the hierarchy AND the InputField component
+                // to be enabled. Without these checks, T chat stays blocked indefinitely after
+                // pressing Enter once.
+                if (!selected.activeInHierarchy) return false;
+                foreach (var co in selected.GetComponents<Component>())
+                {
+                    if (co == null) continue;
+                    string n = co.GetType().Name;
+                    if (n != "InputField" && n != "TMP_InputField" && !n.EndsWith("InputField"))
+                        continue;
+                    // Behaviour.isActiveAndEnabled covers both the GO and the component being on.
+                    var isAEProp = co.GetType().GetProperty("isActiveAndEnabled",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    bool live = isAEProp != null && (bool)isAEProp.GetValue(co);
+                    if (live) return true;
+                }
+                return false;
+            }
+            catch { return false; }
+        }
+
         // ── Chat input (IMGUI overlay) ───────────────────────────
         // Lives over the native F5 menu so we don't need TMP_InputField reflection
         // just for a one-line send box. Press T with the menu open to focus; Enter
@@ -186,12 +364,24 @@ namespace CompetitiveRounds
 
         private static void DrawChatInput()
         {
-            if (!NativeUI.IsOpen) return;
+            // Chat input is now available outside the F5 menu too. Press T anywhere (including
+            // mid-match in lobby/pick-phase/etc.) to open. Closed automatically if the player
+            // is currently in active combat — we don't want T to swallow movement input. The
+            // active-combat gate uses GameStateWatcher's existing pick/combat tracking.
             if (!Plugin.DataConsentGranted) return;
+            bool combatActive = GameStateWatcher.IsInMatch && !NativeUI.IsOpen
+                && GameStateWatcher.LocalAliveInCombatNow;
 
             var ev = Event.current;
             if (!chatInputOpen)
             {
+                if (combatActive) return;
+                // Don't open the T chat if some OTHER text input already has focus — covers
+                // the user's "Enter chat" (Photon / mod chat) and any other uGUI/TMP InputField.
+                // EventSystem.currentSelectedGameObject is non-null whenever a uGUI Selectable
+                // owns focus; we additionally inspect it for any InputField-typed component so
+                // we don't false-positive on plain buttons.
+                if (IsAnotherTextInputActive()) return;
                 if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.T)
                 {
                     chatInputOpen = true;
@@ -252,10 +442,23 @@ namespace CompetitiveRounds
                 string text = (chatInputText ?? "").Trim();
                 if (!string.IsNullOrEmpty(text))
                 {
-                    ChatClient.Send(GameStateWatcher.LocalSteamId,
-                                    GameStateWatcher.LocalDisplayName,
-                                    text);
-                    Plugin.Log.LogInfo($"[CHAT] -> sent: {text}");
+                    // Local mute commands. Stays on this client only — never sent to the server.
+                    // /mute <name>     hides that display name's messages from THIS client's chat log
+                    // /unmute <name>   removes the mute
+                    // /muted           prints the current mute list as a system line
+                    if (text.StartsWith("/mute ", StringComparison.OrdinalIgnoreCase) ||
+                        text.StartsWith("/unmute ", StringComparison.OrdinalIgnoreCase) ||
+                        text.Equals("/muted", StringComparison.OrdinalIgnoreCase))
+                    {
+                        NativeUI.HandleMuteCommand(text);
+                    }
+                    else
+                    {
+                        ChatClient.Send(GameStateWatcher.LocalSteamId,
+                                        GameStateWatcher.LocalDisplayName,
+                                        text);
+                        Plugin.Log.LogInfo($"[CHAT] -> sent: {text}");
+                    }
                 }
                 chatInputText = "";
                 chatInputOpen = false;
@@ -276,9 +479,54 @@ namespace CompetitiveRounds
         private static GUIStyle consentTitleStyle;
         private static GUIStyle consentBodyStyle;
 
+        // Full-screen uGUI raycast blocker that exists only while the consent modal is open.
+        // IMGUI Event.Use() doesn't stop uGUI/main-menu clicks behind the modal — this Image
+        // does (it sits on a high-sortingOrder Canvas with raycastTarget=true).
+        private static GameObject consentBlockerGO;
+
+        private static void EnsureConsentBlocker()
+        {
+            if (consentBlockerGO != null) return;
+            try
+            {
+                consentBlockerGO = new GameObject("CR_ConsentBlocker");
+                consentBlockerGO.hideFlags = HideFlags.HideAndDontSave;
+                UnityEngine.Object.DontDestroyOnLoad(consentBlockerGO);
+                if (UIFactory.tCanvas != null)
+                {
+                    var cv = consentBlockerGO.AddComponent(UIFactory.tCanvas);
+                    var bf = BindingFlags.Public | BindingFlags.Instance;
+                    var rmProp = UIFactory.tCanvas.GetProperty("renderMode", bf);
+                    rmProp?.SetValue(cv, Enum.ToObject(rmProp.PropertyType, 0));
+                    UIFactory.tCanvas.GetProperty("sortingOrder", bf)?.SetValue(cv, 29998);  // just under F5's 30000
+                }
+                if (UIFactory.tGR != null) consentBlockerGO.AddComponent(UIFactory.tGR);
+                var rt = consentBlockerGO.AddComponent<RectTransform>();
+                rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
+                rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+                if (UIFactory.tImage != null)
+                {
+                    var img = consentBlockerGO.AddComponent(UIFactory.tImage);
+                    var bf = BindingFlags.Public | BindingFlags.Instance;
+                    UIFactory.tImage.GetProperty("color", bf)?.SetValue(img, new Color(0f, 0f, 0f, 0.001f));
+                    UIFactory.tImage.GetProperty("raycastTarget", bf)?.SetValue(img, true);
+                }
+                Plugin.Log.LogInfo("[CONSENT] Blocker canvas created");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CONSENT] blocker create failed: {ex.Message}"); }
+        }
+
+        private static void DestroyConsentBlocker()
+        {
+            if (consentBlockerGO == null) return;
+            try { UnityEngine.Object.Destroy(consentBlockerGO); } catch { }
+            consentBlockerGO = null;
+        }
+
         private static void DrawConsentModal()
         {
-            if (Plugin.DataConsentAsked) return;
+            if (Plugin.DataConsentAsked) { DestroyConsentBlocker(); return; }
+            EnsureConsentBlocker();
 
             var bg = Texture2D.whiteTexture;
 

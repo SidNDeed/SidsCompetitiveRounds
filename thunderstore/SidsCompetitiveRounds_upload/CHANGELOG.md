@@ -1,3 +1,142 @@
+# Sid's Competitive Rounds — Changelog
+
+## v1.22.0 — Anti-cheat, Admin Tools, Map Colors, Polish
+
+Mandatory update. The server rejects any client below v1.22.0 with a 426 response.
+
+### Anti-cheat
+- Sub-60s game-pattern detection: 2+ ranked / 3+ casual sub-60s games between same pair within 2hrs → invalidate retroactively (XP + gold reversed).
+- >5 cards per player per game → instant flag + invalidation.
+- Inactive-reporter heuristic flag for manual review.
+- Stale series cleanup: 30min no-match-reported → marked abandoned, pending bets refunded.
+- All flags posted to a private `#scr-admin` Discord channel.
+
+### Admin tools
+- New Admin tab in F5 menu, visible only to whitelisted Steam IDs.
+- Lists flagged matches + ban list with action buttons.
+- Ban/Unban/Grant Achievement/Reverse Series via IMGUI prompt.
+- HMAC-signed admin endpoints. Full audit log (`admin_actions`).
+- Bans block queue, chat (in-game + Discord-relay), and betting.
+
+### Betting
+- Live series appear at matchmaking (was: only after game 1).
+- Bet cutoff at 2 points scored in game 1.
+- RD-aware Glicko odds — fresh experts can't be exploited; cap drops 3.0× → 1.0× as RD rises.
+- One bet per series enforced; client hides wager buttons after.
+- Live Ranked Games panel: bigger text, wider, auto-refresh every 10s, pagination at 5/page.
+- "You bet Ng" displayed inline after wager.
+
+### Recent Ranked Series
+- 100 most-recent series, paginated 20 per page.
+- Both players' ELO shown inline.
+- Settled bets shown as indented sub-rows: `↳ AsteRiA bet 500g on Sid → +505g`.
+
+### Cosmetic trails
+- Photon late-arrival fix — opponent's trail appears in game 1 now (was failing).
+- Trail preview button in shop. Local-only uGUI cursor trail at sortingOrder 30001 (above F5 menu).
+- Multi-stop gradients on legendary trails (Phoenix, Void).
+- Particle sparkles on Phoenix / Void / Prism / Tride.
+- **Tride trail** (5000g legendary) — trans pride flag colors, alternating cyan + pink bands.
+
+### Shop expansion
+- New titles: She/her, They/them, He/him (100g common); Idiot, Grandma, Decent (1000g uncommon).
+- New 4k rare trails: Colossus, Ascendant, Sovereign, Titan.
+- New 5k legendary trail: Tride.
+- Vanilla map color locks (75g): Sweden, Sky, Poison, Gold, Soviet, Rainbow.
+- **Custom map colors** (75g–100g, 14 presets): Soft Slate, Moss, Cream, Lavender, Dusk, Sand, Monochrome, Forest, Amethyst, Charcoal, Crimson, Slate, Rose, Mint, Sunset. Tints physical map blocks + wall particles + active art backdrop with a complementary secondary color for multi-tone variation.
+
+### Chat
+- T chat works outside the F5 menu (gated on combat / other-input focus).
+- Bot reconnect catch-up + 30s periodic poll backfills any missed broadcasts.
+- Synchronous message-id dedup so live + catch-up paths can't double-post.
+- Long paste chat scroll-lock fix.
+
+### Achievements
+- Per-trophy gold reward bumped 25g → 100g.
+- "+100g" tag shown next to each unlocked achievement's date.
+- Immovable Object & Pacifist input gate now respects ROUNDS' pick-phase log markers.
+
+### Server reliability
+- Maintenance mode endpoint with clean 503 + Retry-After:30 (no connection-refused during deploys).
+- F5 server-status banner: shows when API actually appears down (not during quiet periods).
+
+### Polish
+- Match history rows show opponent's current title: `vs Sid [Kingslayer]`.
+- Bet button silent-drop fix (was double-ClickGuarded).
+- Click-through-blocked consent modal.
+- F5 menu Gun.Attack / Block.TryBlock prefixes — clicking menu buttons no longer fires your gun.
+- Discord username backfill (no more raw IDs).
+
+### Schema migrations
+`027_anticheat` · `028_admin` · `029_shop_expansion` · `030_live_points_and_colors` · `031_fix_mapcolors` · `032_custom_mapcolors` · `033_more_mapcolors`
+
+---
+
+## v1.20.0 — Economy, Chat, Betting, Trails
+
+Mandatory update. The server rejects any client below v1.20.0 with a 426 response, and the mod auto-prompts the update on launch.
+
+### Economy / Shop
+- **Gold currency**. 100 XP = 1 gold. +25 gold per achievement. +5 gold on a ranked series win, +1 more on a 2-0 sweep.
+- **Shop tab** with titles and trails (separated into labelled sections, sorted cheapest-first per tier).
+- **Titles** (10): Beginner, Regular, Active, Clown, Sweaty, Tryhard, Competitor, Kingslayer, Grandmaster, Royal.
+- **Cosmetic trails** (7): Clean Trail, Crimson Streak, Azure Comet, Emerald Glow, Phoenix Flame, Void Ripple, Prismatic Wake.
+  - Trail **length scales with price tier** (3k short / 5k medium / 10k long).
+  - Prismatic trail cycles through the full color spectrum in real time.
+  - **Photon-synced** — other mod users see your trail behind your player during matches.
+  - Toggleable in Settings → Display → Cosmetic trails.
+- **Active title** renders in leaderboard rows (bold, colored), chat messages (both in-game and Discord), and the My Stats Discord Link row.
+- **Gold column on the leaderboard** (sortable). My Stats shows gold balance inline with W/L.
+- **Gold breakdown** in the after-match notification: `+9 gold [XP +3, Series win +5, Sweep +1]`. Match history rows show `+N xp +N g`.
+
+### Betting
+- **Live Ranked Games** panel on the Leaderboard tab shows in-progress series with current score and both players' Elo-based odds.
+- Bet preset stakes (100g / 500g / 2000g) on either player. Odds = `1 / P(win)`, capped at **3x** so the largest payout is 3× stake.
+- **Can't bet on your own match**. Bets settle the instant the series completes; winners credit gold automatically.
+
+### In-game ↔ Discord chat bridge
+- **WebSocket endpoint** `/api/v1/ws/chat` with 25-second keepalive pings and a serialized sender.
+- **Two-way bridge** via a Discord bot subscribed to `#scr-discussion`. In-game messages appear as `**Name [Title] (1946)** (in-game): ...` in Discord.
+- **Chat panel** in My Stats (under Discord Link). Press **T** while the F5 menu is open to type and send; Enter sends, Esc cancels.
+- **In-game chat overlay** (bottom-left, auto-fade after 35s). Toggle in Settings.
+- **Scrollback** — last 50 messages persisted server-side and loaded on connect.
+- **Rating + title** attached to every message. Works across both bridge directions.
+
+### Privacy & data consent
+- **First-launch consent modal** explaining exactly what gets collected. Explicit Allow or Decline required.
+- **Revoke consent** in Settings → full offline mode. Ranked mode turns off, chat disconnects, no API traffic.
+- **Delete my data** — anonymizes your row. Matches stay so other players' ratings and histories aren't retroactively disturbed.
+- **Deletion is irreversible** — server-salted hash blocklist prevents account-wipe-to-reset-rating spoofing.
+- **Version gate**: `X-Mod-Version` header. Clients below `MIN_MOD_VERSION` get 426 and are prompted to update.
+
+### Pass-tracking
+- The mod captures every card **offered** during pick phase (not just the one picked).
+- **Pass%** column in the Card Stats tab, sortable.
+
+### Achievement & gameplay fixes
+- **Immovable Object & Pacifist** gate rewritten. New `inPickPhase` flag driven by ROUNDS log markers — achievements fire only during actual combat now.
+- Retroactive grants for Stan and Noah.
+
+### Auto-update
+- Mod auto-fires the update handler on launch when it detects a newer `LATEST_MOD_VERSION` from the server.
+- Thunderstore build shows a notification to update via your mod manager (no `.bat` apply-on-exit script).
+
+### UI polish
+- **Settings tab** with Data Consent, Revoke, Delete My Data, and display toggles (FPS, Region/Ping, chat overlay, cosmetic trails).
+- **Click-to-reveal** on the Discord link row so streamers don't accidentally doxx themselves.
+- **F5 menu auto-closes** when combat starts so it can't block clicks during play.
+- F5 chat log now word-wraps.
+- Leaderboard title rendered bold + in the title's color next to the name.
+- Cosmetic trails can be toggled off mid-match without relaunching; toggling back on re-attaches.
+
+### Server fixes
+- **Card-stats materialized view unique index** fixed (REFRESH CONCURRENTLY previously failed on dupes).
+- **Poison / Poison Bullets** + **Pristine Perseverence** deduped in stream + backfilled rows.
+- **Discord username backfill** — in-game display shows `@username` instead of numeric ID.
+- **Rating-change swap fix** — `p1_rating_change` / `p2_rating_change` now map correctly to the series player order.
+
+---
+
 # Sid's Competitive Rounds — v1.18.7 Changelog
 
 ## Leaderboard Improvements
