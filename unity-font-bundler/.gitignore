@@ -1,0 +1,30 @@
+# Unity-generated caches — regenerated on project open, not meant for source control
+Library/
+Temp/
+Obj/
+Build/
+Builds/
+Logs/
+UserSettings/
+MemoryCaptures/
+*.csproj
+*.sln
+*.suo
+*.user
+*.unityproj
+.vs/
+.idea/
+.vscode/
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+sysinfo.txt
+*.apk
+*.unitypackage
+# Bundle output is generated, not versioned; the pipeline rebuilds it from TTFs in Assets/FontSources/
+build-output/
+*.bundle

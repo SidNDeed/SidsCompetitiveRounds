@@ -57,6 +57,12 @@ class MatchReport(BaseModel):
     # these can be spoofed but provide a useful weak signal alongside duration + card count.
     local_shots_fired: int | None = Field(None, ge=0)
     local_blocks_raised: int | None = Field(None, ge=0)
+    # Gun-accuracy + block-success counters (v1.23). Feed into reporter's lifetime totals so
+    # Hit %/Block % can be shown on leaderboards. Also NOT in HMAC (advisory).
+    local_bullets_fired: int | None = Field(None, ge=0)
+    local_bullets_hit: int | None = Field(None, ge=0)
+    local_blocks_activated: int | None = Field(None, ge=0)
+    local_blocks_successful: int | None = Field(None, ge=0)
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -97,12 +103,24 @@ class PlayerStatsResponse(BaseModel):
     discord_username: str | None = None
     gold_earned: int = 0
     gold_spent: int = 0
+    # Lifetime gun accuracy + block success counters (v1.23).
+    bullets_fired: int = 0
+    bullets_hit: int = 0
+    blocks_activated: int = 0
+    blocks_successful: int = 0
     active_title: str | None = None
     active_title_color: str | None = None
     active_trail_sku: str | None = None
     active_trail_color: str | None = None
     active_trail_price: int = 0
     active_color_sku: str | None = None
+    # Multi-equip map colors (v1.23+). The client cycles through this ordered list with
+    # Left Shift in-game. Empty list → no equipped map colors → ArtHandler.NextArt falls
+    # through to ROUNDS' vanilla random rotation. active_color_sku above is kept for
+    # backward compat — reflects the first entry of this list when present.
+    active_color_skus: list[str] = Field(default_factory=list)
+    # Stackable nametag rich-text styles by sku, e.g. ["nametag_bold","nametag_italic"].
+    active_nametag_skus: list[str] = Field(default_factory=list)
     last_match: datetime | None
     recent_rating_history: list[dict] = Field(default_factory=list)
     top_cards: list[dict] = Field(default_factory=list)

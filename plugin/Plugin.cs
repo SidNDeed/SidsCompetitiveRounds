@@ -8,6 +8,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using UnityEngine;
 
@@ -19,7 +20,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.22.0";
+        public const string ModVersion = "1.23.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -163,6 +164,13 @@ namespace CompetitiveRounds
                 // trail system to re-attach opponents' trails when their cr_trail_* props arrive
                 // after OnMatchStart has already iterated.
                 go.AddComponent<TrailPhotonCallbacks>();
+                // Local-only nametag renderers. Both poll scene TMP labels every 0.5s. Font
+                // renderer is attached FIRST so its coroutine runs before the glow renderer
+                // each cycle — glow clones its material from the label's current sharedMaterial,
+                // which changes after a font swap, so the glow rebuild needs to see the swapped
+                // material to reapply correctly. Order here is load-bearing.
+                go.AddComponent<NametagFontRenderer>();
+                go.AddComponent<NametagGlowRenderer>();
                 spawned = true;
                 Log.LogInfo("Created persistent GameObject with DontDestroyOnLoad");
             }
@@ -544,6 +552,12 @@ namespace CompetitiveRounds
             if (Plugin.DataConsentGranted)
                 ChatClient.Connect();
 
+            // One-shot: log every TMP_FontAsset currently loaded so we can see which fonts
+            // are actually available for in-game use (OS-font path is broken, see comments
+            // in NametagFontRenderer). Useful for choosing target fonts to map typeface SKUs
+            // onto in a follow-up pass.
+            try { NametagFontRenderer.LogAvailableTmpFonts(); } catch { }
+
             Plugin.Log.LogInfo("[PERSIST] All systems active! Press F5 for overlay.");
         }
 
@@ -823,6 +837,7 @@ namespace CompetitiveRounds
                 if (!isOpponent && cardIDs != null && cardIDs.Length > 0)
                 {
                     int round = GameStateWatcher.CurrentRound;
+                    int localOffersSnapshot = GameStateWatcher.LocalOffersCount;
                     var bflags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
                     var cnField = typeof(CardInfo).GetField("cardName", bflags);
                     foreach (int cid in cardIDs)
@@ -840,9 +855,33 @@ namespace CompetitiveRounds
                                 cn = pv.gameObject.name.Replace("(Clone)", "").Trim();
                             cn = CardRarityLookup.GetCanonicalName(cn);
                             if (string.IsNullOrEmpty(cn)) continue;
-                            GameStateWatcher.OnLocalCardOffered(cn, cid == targetCardID, round);
+                            bool wasPicked = cid == targetCardID;
+                            GameStateWatcher.OnLocalCardOffered(cn, wasPicked, round);
+                            if (wasPicked)
+                                Plugin.Log.LogInfo($"[HARMONY-CARD] offer marked picked: card={cn} cid={cid} target={targetCardID} round={round}");
                         }
-                        catch { }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning($"[HARMONY-CARD] offer loop error on cid={cid}: {ex.Message}");
+                        }
+                    }
+                    // Safety net: if none of the cardIDs[] entries resolved to a "picked"
+                    // offer (PhotonView.Find returned null for all, or targetCardID wasn't
+                    // present in the array — e.g. reroll / special card paths), manually add
+                    // one was_picked=true offer so pass_rate doesn't stay at 100%. The
+                    // fallback uses whatever card name GameStateWatcher already captured from
+                    // the Unity log "Picking Card:" line for this round, which is the
+                    // canonical source of truth for "what did the local player actually take."
+                    int newOffers = GameStateWatcher.LocalOffersCount - localOffersSnapshot;
+                    bool anyPickedRecorded = GameStateWatcher.LocalOffersPickedIn(localOffersSnapshot);
+                    if (!anyPickedRecorded)
+                    {
+                        string fallbackName = GameStateWatcher.LastLocalPickedCardName;
+                        if (!string.IsNullOrEmpty(fallbackName))
+                        {
+                            GameStateWatcher.OnLocalCardOffered(fallbackName, true, round);
+                            Plugin.Log.LogInfo($"[HARMONY-CARD] offer fallback picked: card={fallbackName} round={round} (newOffers={newOffers}, no picked row in cardIDs[])");
+                        }
                     }
                 }
             }
@@ -1153,16 +1192,42 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, string> lookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, string> canonical = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        // Known mismatches between GameObject name (log capture) and cardName field
+        // Known mismatches between GameObject name (log capture) and cardName field.
+        // Maps input (either form) → canonical card name used in the DB. Dictionary is
+        // OrdinalIgnoreCase so "abyssalcountdown" finds the same entry as "AbyssalCountdown",
+        // but both forms must still route through GetCanonicalName() to be normalized —
+        // several paths historically skipped the call (fixed one more in this pass:
+        // OnOpponentCardPicked). Entries cover every ROUNDS rename / typo / CamelCase
+        // compression we've observed producing near-duplicates in the DB.
         private static readonly Dictionary<string, string> hardAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
+            // Letter typos
             { "Leach", "Leech" },
+            { "Riccochet", "Ricochet" },
+            // CamelCase / no-space GameObject-name variants → spaced display-name canonical
             { "BombsAway", "Bombs Away" },
             { "Glasscannon", "Glass Cannon" },
             { "ShieldCharge", "Shield Charge" },
             { "AbyssalCountdown", "Abyssal Countdown" },
-            { "Poison", "Poison Bullets" },
-            { "Prisitne Perseverence", "Pristine Perseverence" },
+            { "ChillingPresence", "Chilling Presence" },
+            { "DrillAmmo", "Drill Ammo" },
+            { "RadarShot", "Radar Shot" },
+            { "TargetBounce", "Target Bounce" },
+            { "TasteOfBlood", "Taste Of Blood" },
+            { "Fastball", "Fast Ball" },
+            // "Poison Bullets" was the old pre-rename name for what ROUNDS now displays as
+            // just "Poison" — reverse the previous alias so every variant canonicalizes to
+            // the in-game display (migration 043 merged historical rows).
+            { "Poison Bullets", "Poison" },
+            { "PoisonBullets",  "Poison" },
+            // Pristine Perseverance had two independent typos accumulating: the previous
+            // canonical was itself misspelled ("Perseverence"), and at least one code path
+            // missed the alias and wrote both typos raw ("Prisitne Perseverence"). Canonical
+            // is now the correct in-game spelling; aliases below cover every observed typo.
+            { "Prisitne Perseverence", "Pristine Perseverance" },
+            { "Pristine Perseverence", "Pristine Perseverance" },
+            { "PristinePerseverance", "Pristine Perseverance" },
+            { "PristinePerseverence", "Pristine Perseverance" },
         };
 
         public static void Register(string cardName, string rarity)
@@ -1445,6 +1510,55 @@ namespace CompetitiveRounds
             catch { return true; }
             return false;  // skip the original Attack — local shot suppressed while F5 is open
         }
+
+        // Counter Postfix lives in the same class so Harmony resolves it to exactly the
+        // Attack overload the Prefix already works on (the one that fires on every user
+        // click). Earlier standalone patch classes using TargetMethod picked the wrong
+        // overload and fired once per session.
+        private static bool _postfixFirstFireLogged;
+        private static bool _postfixFirstPvRejectLogged;
+        private static bool _postfixFirstIsMineRejectLogged;
+        static void Postfix(Gun __instance)
+        {
+            if (!_postfixFirstFireLogged)
+            {
+                _postfixFirstFireLogged = true;
+                Plugin.Log.LogInfo($"[GUN-POST] Attack Postfix first invocation (gun={__instance?.name}, uiOpen={NativeUI.IsOpen})");
+            }
+            if (NativeUI.IsOpen) return;  // Prefix blocked this shot, don't credit it
+            try
+            {
+                // ROUNDS' Gun GameObject hierarchy ("WeaponBase(Clone)") doesn't walk up to a
+                // PhotonView — logs confirmed GetComponentInParent<PhotonView>() returns null
+                // for every user shot. The reliable path is Gun.player → the Player component
+                // whose PhotonView represents the match ownership. Fall back to the hierarchy
+                // lookup if the Gun.player ref is somehow null.
+                PhotonView pv = null;
+                try
+                {
+                    var gunPlayer = __instance?.player;
+                    if (gunPlayer != null)
+                        pv = gunPlayer.data?.view ?? gunPlayer.GetComponent<PhotonView>();
+                }
+                catch { }
+                if (pv == null) pv = __instance?.GetComponentInParent<PhotonView>();
+
+                if (pv == null)
+                {
+                    if (!_postfixFirstPvRejectLogged) { _postfixFirstPvRejectLogged = true; Plugin.Log.LogInfo($"[GUN-POST] first pv-null reject on gun={__instance?.name}"); }
+                    return;
+                }
+                if (!pv.IsMine)
+                {
+                    if (!_postfixFirstIsMineRejectLogged) { _postfixFirstIsMineRejectLogged = true; Plugin.Log.LogInfo($"[GUN-POST] first !IsMine reject (pv.owner={pv.Owner?.NickName})"); }
+                    return;
+                }
+                int projectiles = 1;
+                try { projectiles = Math.Max(1, __instance.numberOfProjectiles); } catch { }
+                GameStateWatcher.OnLocalBulletFired(projectiles);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[GUN-POST] exception: {ex.Message}"); }
+        }
     }
 
     [HarmonyPatch(typeof(Block), "TryBlock")]
@@ -1460,6 +1574,160 @@ namespace CompetitiveRounds
             }
             catch { return true; }
             return false;
+        }
+    }
+
+    // ── Hit % / Block % tracking (v1.23) ───────────────────────────────────
+    //
+    // Separate patches from the F5 input-gate above because the gate short-circuits the
+    // original with `return false` when F5 is open, and we must NOT count suppressed
+    // actions. Harmony Postfixes run even after a false Prefix, so each counting patch
+    // checks NativeUI.IsOpen and bails.
+    //
+    // Only the LOCAL player is tracked (PhotonView.IsMine on the Gun / Block / target).
+    // See learnings.md #4: only the lower Steam ID reports matches, so these counters
+    // accumulate on whichever side reports. The backend stores them on the reporter.
+
+    // Gun.Attack patch removed — TargetMethod(most-params) attached to an overload that's
+    // only called from internal code paths (once per session per the logs), not from user
+    // clicks. The F5-block patch uses `[HarmonyPatch(typeof(Gun), "Attack")]` without args
+    // and works, but layering a Postfix under that attribute on a different patch class
+    // disambiguates to potentially-different overloads and was unreliable in testing.
+    // Instead, bullets_fired reuses the existing mouse-click counter (LocalShotsThisMatch)
+    // which is driven by Input.GetMouseButtonDown(0) in GameStateWatcher — reliable, exactly
+    // "one trigger pull per click", good enough semantically for Hit % on the leaderboard.
+    // Each trigger pull is one "shot" even if the weapon is a shotgun — aligns with how
+    // most players intuitively think about "my accuracy."
+
+    [HarmonyPatch]
+    class HealthHandlerTakeDamageCounterPatch
+    {
+        // HealthHandler.TakeDamage has multiple overloads in ROUNDS (a public canonical one
+        // with 8 params and at least one shorter shim), which makes `[HarmonyPatch(typeof(X),
+        // "TakeDamage")]` without explicit args throw "Ambiguous match" — that aborts the
+        // entire PatchAll() call and nothing else in this assembly gets patched either.
+        // Resolve the target ourselves by picking the overload with the most parameters,
+        // which is the canonical damage path (damage, position, color, weapon, player, ...).
+        static MethodBase TargetMethod()
+        {
+            var t = typeof(HealthHandler);
+            MethodInfo best = null;
+            int bestPc = -1;
+            foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic))
+            {
+                if (m.Name != "TakeDamage") continue;
+                int pc = m.GetParameters().Length;
+                if (pc > bestPc) { bestPc = pc; best = m; }
+            }
+            return best;
+        }
+
+        // Log the first few TakeDamage events so we can see what damagingWeapon actually
+        // looks like in ROUNDS. Previous ProjectileHit-component filter rejected everything
+        // (bullets_hit stayed at 0), so we need real data on the damager GameObject to know
+        // what to filter on. Capped at 5 lines to avoid log spam during DOT-heavy matches.
+        private static int _takeDamageFirstLogRemaining = 5;
+        static void Postfix(HealthHandler __instance, Vector2 damage, GameObject damagingWeapon, Player damagingPlayer)
+        {
+            try
+            {
+                if (damagingPlayer == null) return;
+                if (damage.magnitude <= 0.01f) return;  // non-damage events (e.g. block-only pings)
+                var damagerPV = damagingPlayer.data?.view ?? damagingPlayer.GetComponent<PhotonView>();
+                if (damagerPV == null || !damagerPV.IsMine) return;
+                // Self-damage (rebounds, own explosions) shouldn't count toward Hit %.
+                var targetPV = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
+                if (targetPV != null && targetPV.IsMine) return;
+
+                if (_takeDamageFirstLogRemaining > 0)
+                {
+                    _takeDamageFirstLogRemaining--;
+                    string weaponName = damagingWeapon != null ? damagingWeapon.name : "(null)";
+                    string weaponComponents = "";
+                    if (damagingWeapon != null)
+                    {
+                        try
+                        {
+                            var comps = damagingWeapon.GetComponents<Component>();
+                            var names = new List<string>();
+                            foreach (var c in comps) if (c != null) names.Add(c.GetType().Name);
+                            weaponComponents = string.Join(",", names);
+                        }
+                        catch { }
+                    }
+                    Plugin.Log.LogInfo($"[HIT-DIAG] damage={damage.magnitude:F1} weapon='{weaponName}' components=[{weaponComponents}]");
+                }
+
+                // Relaxed filter: count every damage event by the local player on an enemy.
+                // Over-count from DOT/splash is bounded by GameStateWatcher._hitsRemaining
+                // (incremented once per fired projectile via OnLocalBulletFired), so
+                // bullets_hit ≤ bullets_fired always regardless of how many ticks fire.
+                // Once the [HIT-DIAG] logs reveal the real damager components, we can add
+                // a precise ProjectileHit-equivalent filter to drop DOT/splash cleanly.
+                GameStateWatcher.OnLocalBulletHit();
+            }
+            catch { }
+        }
+    }
+
+    // Block.TryBlock counter — drives LocalBlocksActivatedThisMatch (the blocks_activated
+    // denominator). Using the game's own TryBlock call instead of raw mouse-right-clicks so
+    // that cards like Shields Up / Empower — which invoke Block.TryBlock directly without
+    // the player pressing the mouse button — also increment the activation count. Without
+    // this hook, auto-triggered blocks would inflate the success rate (hits credited to
+    // activations we never counted). Duplicating the F5 class pattern (Prefix on the class
+    // above, Postfix here) in a separate attribute — Harmony resolves to the same method.
+    [HarmonyPatch(typeof(Block), "TryBlock")]
+    class BlockTryBlockCounterPatch
+    {
+        static void Postfix(Block __instance)
+        {
+            if (NativeUI.IsOpen) return;  // F5 Prefix blocked the call; don't credit it
+            try
+            {
+                var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
+                if (pv == null || !pv.IsMine) return;
+                GameStateWatcher.OnLocalBlockActivated();
+            }
+            catch { }
+        }
+    }
+
+    [HarmonyPatch]
+    class BlockDoBlockCounterPatch
+    {
+        // Block.DoBlock has multiple overloads across ROUNDS revisions. Target the one with
+        // the most parameters (the canonical path). Previously we filtered on
+        // triggerType=Default to exclude ShieldCharge/Echo, but empirically this suppresses
+        // real bullet-absorb events too (the engine fires DoBlock with various trigger types
+        // depending on the source of the hit, not reliably Default for projectiles). Count
+        // ANY DoBlock on the local player's block — it represents "your block timed right and
+        // stopped something," which matches the user-facing meaning of "successful block."
+        static MethodBase TargetMethod()
+        {
+            var t = typeof(Block);
+            MethodInfo best = null;
+            int bestPc = -1;
+            foreach (var m in t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic))
+            {
+                if (m.Name != "DoBlock") continue;
+                int pc = m.GetParameters().Length;
+                if (pc > bestPc) { bestPc = pc; best = m; }
+            }
+            return best;
+        }
+
+        private static bool _firstEntry;
+        static void Postfix(Block __instance)
+        {
+            if (!_firstEntry) { _firstEntry = true; Plugin.Log.LogInfo("[BLOCK] DoBlock Postfix first invocation (patch attached)"); }
+            try
+            {
+                var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
+                if (pv == null || !pv.IsMine) return;
+                GameStateWatcher.OnLocalBlockSuccessful();
+            }
+            catch { }
         }
     }
 
@@ -1526,6 +1794,16 @@ namespace CompetitiveRounds
     // We re-run on every round (Map.Start is per-round). The "glitch" between two patterns
     // probably means another system is reassigning the original material each round — by
     // hooking Start (which fires AFTER ROUNDS' own setup) we should win.
+    /// <summary>Shared current-sku holder so the post-process cycle (ArtHandler.NextArt)
+    /// and the physical-tint pass (Map.Start + cycle re-apply) agree on which equipped
+    /// color is live. Before this existed, Map.Start read the legacy single-value
+    /// active_color_sku and the cycle would update post-process alone — walls stuck on
+    /// the first sku while color grading rotated through the rest.</summary>
+    internal static class MapColorState
+    {
+        public static string CurrentSku;
+    }
+
     [HarmonyPatch(typeof(Map), "Start")]
     class MapPhysicalColorPatch
     {
@@ -1535,10 +1813,29 @@ namespace CompetitiveRounds
 
         static void Postfix(Map __instance)
         {
+            // Use whatever sku is currently live after the cycle (ArtHandlerNextArtPatch sets
+            // MapColorState.CurrentSku on every cycle advance). Fall back to the legacy single
+            // field when the cycle hasn't run yet (fresh map load before any Shift press).
+            string sku = MapColorState.CurrentSku;
+            if (string.IsNullOrEmpty(sku))
+                sku = ApiClient.CachedPlayerStats?.active_color_sku;
+            ApplyPhysicalTintsForSku(__instance, sku);
+        }
+
+        /// <summary>Apply the SKU's wall / sprite / particle tints to the current scene. Shared
+        /// between Map.Start (one-shot on map load) and the Shift cycle (invoked after each
+        /// NextArt call, so walls and post-process stay in sync when the player cycles).
+        /// Falls through gracefully for vanilla skus and null.</summary>
+        public static void ApplyPhysicalTintsForSku(Map mapInstance, string sku)
+        {
+            if (mapInstance == null)
+            {
+                // Shift cycle path — find the active Map to operate on.
+                mapInstance = UnityEngine.Object.FindObjectOfType<Map>();
+                if (mapInstance == null) return;
+            }
             try
             {
-                var stats = ApiClient.CachedPlayerStats;
-                string sku = stats?.active_color_sku;
                 if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku))
                 {
                     return;
@@ -1553,7 +1850,7 @@ namespace CompetitiveRounds
                 // Step 1: SpriteRenderer.color on every sprite child of Map.
                 int sprites = 0;
                 var typeCounts = new Dictionary<string, int>();
-                foreach (var r in __instance.GetComponentsInChildren<Renderer>(true))
+                foreach (var r in mapInstance.GetComponentsInChildren<Renderer>(true))
                 {
                     if (r == null) continue;
                     string tn = r.GetType().Name;
@@ -1713,13 +2010,42 @@ namespace CompetitiveRounds
             { "mapcolor_rainbow", "Rainbow" },
         };
 
+        // Index into the player's active_color_skus list. Advances by one per NextArt
+        // invocation (which ROUNDS fires on Left Shift). Resets to 0 when the equipped
+        // list changes so a newly-added color appears immediately instead of being
+        // skipped while the index points past the end.
+        private static int _cycleIndex = 0;
+        private static int _cycleLastListHash = 0;
+
         static bool Prefix(ArtHandler __instance)
         {
             try
             {
                 var s = ApiClient.CachedPlayerStats;
-                string sku = s?.active_color_sku;
+                // Multi-equip: pick the next sku in the equipped-colors list on each press.
+                // Empty list → fall through to ROUNDS' vanilla random rotation.
+                var equipped = s?.active_color_skus;
+                string sku = null;
+                if (equipped != null && equipped.Count > 0)
+                {
+                    int listHash = 0;
+                    for (int i = 0; i < equipped.Count; i++) listHash = (listHash * 31) + (equipped[i]?.GetHashCode() ?? 0);
+                    if (listHash != _cycleLastListHash)
+                    {
+                        _cycleIndex = 0;
+                        _cycleLastListHash = listHash;
+                    }
+                    sku = equipped[_cycleIndex % equipped.Count];
+                    Plugin.Log.LogInfo($"[MAPCOLOR] Cycle → {sku} (index {_cycleIndex}/{equipped.Count})");
+                    _cycleIndex = (_cycleIndex + 1) % equipped.Count;
+                }
+                // Backward compat: if the new list field is empty, fall back to the
+                // legacy single-value active_color_sku (older clients / transitional state).
+                if (string.IsNullOrEmpty(sku)) sku = s?.active_color_sku;
                 if (string.IsNullOrEmpty(sku)) return true;
+                // Record the cycle-selected sku so Map.Start / physical-tint re-apply reads the
+                // same sku the post-process path is using.
+                MapColorState.CurrentSku = sku;
 
                 // Custom-profile path: SetSpecificArt(baseArt) so the vanilla particle bg AND
                 // base profile (bloom, vignette, etc.) load. Then ApplyPost(clonedProfile) where
@@ -1745,7 +2071,12 @@ namespace CompetitiveRounds
                         return false;
                     }
                     __instance.ApplyPost(clone);
-                    Plugin.Log.LogInfo($"[MAPCOLOR] applied custom sku={sku} on base='{baseArt}' (cloned profile)");
+                    // Re-apply wall / sprite / particle tints for the new sku. Without this
+                    // the post-process (ColorGrading) updates on Shift but the walls stay on
+                    // whatever sku was first applied at Map.Start — user observed walls not
+                    // cycling along with the rest of the scene.
+                    MapPhysicalColorPatch.ApplyPhysicalTintsForSku(null, sku);
+                    Plugin.Log.LogInfo($"[MAPCOLOR] applied custom sku={sku} on base='{baseArt}' (cloned profile + physical tints)");
                     return false;
                 }
 

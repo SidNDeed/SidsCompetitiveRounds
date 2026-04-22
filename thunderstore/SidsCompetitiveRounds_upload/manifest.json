@@ -1,7 +1,7 @@
 {
     "name": "SidsCompetitiveRounds",
-    "version_number": "1.22.0",
+    "version_number": "1.23.0",
     "website_url": "https://github.com/SidNDeed/SidsCompetitiveRounds",
-    "description": "Ranked mod for vanilla ROUNDS v1.1.2 ONLY. Glicko-2 ratings, BO3 matchmaking, leaderboards, economy, shop with cosmetic trails + map color presets, betting with anti-cheat + admin tools, Discord chat bridge.",
+    "description": "Ranked mod for vanilla ROUNDS v1.1.2 ONLY. Glicko-2 ratings, BO3 matchmaking, leaderboards, economy, shop with multi-equip map colors + cosmetic trails + cycleable nametag styles, betting with anti-cheat + admin tools, Discord chat bridge, lifetime hit %/block %/card pass-rate stats.",
     "dependencies": ["BepInEx-BepInExPack_ROUNDS-5.4.1901"]
 }

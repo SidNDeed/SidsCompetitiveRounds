@@ -115,12 +115,23 @@ namespace CompetitiveRounds
             public string discord_username;
             public int gold_earned;
             public int gold_spent;
+            // Lifetime gun accuracy + block success counters (v1.23).
+            public long bullets_fired;
+            public long bullets_hit;
+            public long blocks_activated;
+            public long blocks_successful;
             public string active_title;
             public string active_title_color;
             public string active_trail_sku;
             public string active_trail_color;
             public int active_trail_price;
-            public string active_color_sku;  // ROUNDS art-profile-name override; null/empty = vanilla random
+            public string active_color_sku;  // legacy single-active (first entry of active_color_skus)
+            // Multi-equip map colors — player cycles between these in-game with Left Shift.
+            // Empty list → no override, ArtHandler falls through to vanilla random rotation.
+            public List<string> active_color_skus;
+            // Stackable rich-text nametag styles by sku. Parsed manually (JsonUtility can't handle
+            // string arrays without a wrapper class). Null or empty = no styling applied.
+            public List<string> active_nametag_skus;
 
             // Parsed manually (JsonUtility can't handle nested arrays)
             public List<string> top_card_names;
@@ -805,6 +816,37 @@ namespace CompetitiveRounds
             }));
         }
 
+        /// <summary>Toggle a nametag rich-text style on/off. Stackable — multiple styles can be active.
+        /// HMAC over "nametag:{steam_id}:{item_id}".</summary>
+        public static void ToggleNametagStyle(string steamId, long itemId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"nametag:{steamId}:{itemId}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/nametag-toggle?item_id={itemId}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SHOP] toggle nametag {itemId}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) FetchPlayerStats(steamId);
+            }));
+        }
+
+        /// <summary>Toggle a map color in the player's active_color_ids list. Multi-equip;
+        /// player cycles between equipped colors in-game with Left Shift. HMAC over
+        /// "color:{steam_id}:{item_id}". Distinct from the legacy SetActiveColor (single-
+        /// active, HMAC "color:{steam_id}:{item_id}" happens to match but hits different
+        /// endpoint) — new clients should always use this toggle path.</summary>
+        public static void ToggleMapColor(string steamId, long itemId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"color:{steamId}:{itemId}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/color-toggle?item_id={itemId}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SHOP] toggle color {itemId}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) FetchPlayerStats(steamId);
+            }));
+        }
+
         private static List<ShopItemData> ParseShopItems(string response)
         {
             var list = new List<ShopItemData>();
@@ -1093,7 +1135,11 @@ namespace CompetitiveRounds
             // Anti-cheat: reporter's per-match input counts. Server flags reporter as
             // "inactive" if both are 0 across a non-trivial duration. NOT included in HMAC
             // (which is locked at exactly 7 fields) — these are advisory signals.
-            int localShotsFired = 0, int localBlocksRaised = 0)
+            int localShotsFired = 0, int localBlocksRaised = 0,
+            // Hit% / Block% telemetry (v1.23). Same "advisory, not in HMAC" treatment — these
+            // are stat counters on the reporter side that feed lifetime totals on the server.
+            int localBulletsFired = 0, int localBulletsHit = 0,
+            int localBlocksActivated = 0, int localBlocksSuccessful = 0)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -1121,6 +1167,11 @@ namespace CompetitiveRounds
             // Reporter's combat input counts for inactive-player anti-cheat. Server-side advisory.
             sb.Append($"\"local_shots_fired\":{localShotsFired},");
             sb.Append($"\"local_blocks_raised\":{localBlocksRaised},");
+            // v1.23 Hit% / Block% per-match deltas; server aggregates into lifetime totals.
+            sb.Append($"\"local_bullets_fired\":{localBulletsFired},");
+            sb.Append($"\"local_bullets_hit\":{localBulletsHit},");
+            sb.Append($"\"local_blocks_activated\":{localBlocksActivated},");
+            sb.Append($"\"local_blocks_successful\":{localBlocksSuccessful},");
             string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
@@ -1438,10 +1489,16 @@ namespace CompetitiveRounds
                         try
                         {
                             CachedPlayerStats = JsonUtility.FromJson<PlayerStatsData>(response);
+                            // JsonUtility can't handle nested arrays / List<string>, so manually
+                            // parse the fields it skipped — including active_nametag_skus which
+                            // the Shop + NametagStyler both read.
+                            ParseTopCards(CachedPlayerStats, response);
                             Plugin.Log.LogInfo($"Player stats loaded for {CachedPlayerStats.display_name}");
                             // Re-publish Photon trail props whenever local stats refresh — covers
                             // the initial load + any later trail changes.
                             try { TrailCosmetic.PublishLocalProps(); } catch { }
+                            // Re-publish nametag styles into LocalPlayer.NickName for the same reason.
+                            try { NametagStyler.PublishToPhoton(); } catch { }
                         }
                         catch (Exception ex)
                         {
@@ -1567,6 +1624,62 @@ namespace CompetitiveRounds
                                 if (!string.IsNullOrEmpty(result))
                                     data.recent_form.Add(result);
                             }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Parse active_color_skus — flat string array of equipped map-color skus.
+            data.active_color_skus = new List<string>();
+            try
+            {
+                int csStart = response.IndexOf("\"active_color_skus\"");
+                if (csStart >= 0)
+                {
+                    int arrStart = response.IndexOf("[", csStart);
+                    int arrEnd = FindMatchingBracket(response, arrStart);
+                    if (arrStart >= 0 && arrEnd >= 0 && arrEnd > arrStart)
+                    {
+                        string arr = response.Substring(arrStart + 1, arrEnd - arrStart - 1);
+                        int cursor = 0;
+                        while (cursor < arr.Length)
+                        {
+                            int q1 = arr.IndexOf('"', cursor);
+                            if (q1 < 0) break;
+                            int q2 = arr.IndexOf('"', q1 + 1);
+                            if (q2 < 0) break;
+                            string sku = arr.Substring(q1 + 1, q2 - q1 - 1);
+                            if (!string.IsNullOrEmpty(sku)) data.active_color_skus.Add(sku);
+                            cursor = q2 + 1;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Parse active_nametag_skus — flat string array, one entry per active rich-text style.
+            data.active_nametag_skus = new List<string>();
+            try
+            {
+                int ntStart = response.IndexOf("\"active_nametag_skus\"");
+                if (ntStart >= 0)
+                {
+                    int arrStart = response.IndexOf("[", ntStart);
+                    int arrEnd = FindMatchingBracket(response, arrStart);
+                    if (arrStart >= 0 && arrEnd >= 0 && arrEnd > arrStart)
+                    {
+                        string arr = response.Substring(arrStart + 1, arrEnd - arrStart - 1);
+                        int cursor = 0;
+                        while (cursor < arr.Length)
+                        {
+                            int q1 = arr.IndexOf('"', cursor);
+                            if (q1 < 0) break;
+                            int q2 = arr.IndexOf('"', q1 + 1);
+                            if (q2 < 0) break;
+                            string sku = arr.Substring(q1 + 1, q2 - q1 - 1);
+                            if (!string.IsNullOrEmpty(sku)) data.active_nametag_skus.Add(sku);
+                            cursor = q2 + 1;
                         }
                     }
                 }
@@ -2125,6 +2238,11 @@ namespace CompetitiveRounds
                                 Plugin.SetPendingRoom(room, region);
                                 Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"}) series={ActiveRankedSeriesId}");
                                 CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
+                                // Refresh the Live Ranked Series list immediately so spectators
+                                // (and the betting UI) see the new series the moment it's
+                                // created, not on the 10s poll cycle. Gives spectators the full
+                                // pre-game-1 window to place bets instead of missing half of it.
+                                FetchActiveSeries();
                                 NativeUI.MarkDirty();
                             }
                         }

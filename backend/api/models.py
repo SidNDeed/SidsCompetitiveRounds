@@ -32,9 +32,21 @@ class Player(Base):
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     gold_earned = Column(Integer, nullable=False, default=0)
     gold_spent = Column(Integer, nullable=False, default=0)
+    # Lifetime gun accuracy + block success counters (migration 038).
+    # Accumulated from each submitted non-invalidated match's local_* fields on the reporter.
+    bullets_fired = Column(BigInteger, nullable=False, default=0)
+    bullets_hit = Column(BigInteger, nullable=False, default=0)
+    blocks_activated = Column(BigInteger, nullable=False, default=0)
+    blocks_successful = Column(BigInteger, nullable=False, default=0)
     active_title_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_trail_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_color_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
+    # kind='color' items are multi-equip (v1.23+): player cycles between equipped colors
+    # with Left Shift in-game. active_color_id above is the single-value legacy column,
+    # kept for backward compat — reflects active_color_ids[0] when populated.
+    active_color_ids = Column(ARRAY(BigInteger), nullable=False, default=list)
+    # kind='nametag' items are stackable, unlike the single-active cosmetics above.
+    nametag_style_ids = Column(ARRAY(BigInteger), nullable=False, default=list)
     first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 

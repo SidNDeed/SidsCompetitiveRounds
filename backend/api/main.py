@@ -330,7 +330,7 @@ async def calculate_match_xp(
     Base: 250 XP per finished game
     Win: 1.5x multiplier
     Sweep (5-0): +100 flat bonus
-    Ranked: 1.2x multiplier
+    Ranked: 1.5x multiplier (bumped from 1.2x — ranked should feel meaningfully more rewarding)
     Beat top-5 player: +150 flat bonus
     """
     base_xp = 250
@@ -342,8 +342,8 @@ async def calculate_match_xp(
         bonuses.append("Win x1.5")
 
     if is_ranked:
-        multiplier *= 1.2
-        bonuses.append("Ranked x1.2")
+        multiplier *= 1.5
+        bonuses.append("Ranked x1.5")
 
     xp = int(base_xp * multiplier)
 
@@ -382,7 +382,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.22.0"
+LATEST_MOD_VERSION = "1.23.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -481,7 +481,7 @@ async def get_recent_flags(
 ANTICHEAT_SHORT_DURATION_SEC = 60
 ANTICHEAT_PATTERN_WINDOW_HOURS = 2
 ANTICHEAT_MAX_CARDS_PER_PLAYER = 5
-ANTICHEAT_INACTIVE_MIN_DURATION_SEC = 30
+ANTICHEAT_INACTIVE_MIN_DURATION_SEC = 300  # 5 min — 30s was flagging legit short games / quick-death rounds
 
 
 async def _reverse_match_gold_xp(db: AsyncSession, m: Match) -> None:
@@ -636,6 +636,14 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     if report.p1_rounds_won > 5 or report.p2_rounds_won > 5:
         raise HTTPException(status_code=400, detail="Invalid round count")
 
+    # Reject offline / practice matches. ROUNDS' offline mode puts the photon room name as
+    # "offline room" (with a space) — a buggy client would otherwise submit those with the
+    # cached online-opponent's steam_id attached, producing phantom matches the real
+    # opponent never played. Client-side block was added in the same pass but this server
+    # check is defense in depth.
+    if report.photon_room_id and "offline" in report.photon_room_id.lower():
+        raise HTTPException(status_code=400, detail="Offline matches are not recorded")
+
     # Get or create both players
     p1 = await get_or_create_player(db, report.player1.steam_id, report.player1.display_name)
     p2 = await get_or_create_player(db, report.player2.steam_id, report.player2.display_name)
@@ -744,6 +752,19 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             glicko.games_in_period += 1
             glicko.updated_at = datetime.now(timezone.utc)
 
+    # Aggregate the reporter's hit/block counters into their lifetime totals (v1.23).
+    # Only the reporter has these numbers — the higher Steam ID's client never sees match
+    # completion — so Hit % / Block % are one-sided totals accumulated from whichever side
+    # happened to report each match. Incoming fields are Optional and default to 0.
+    if report.local_bullets_fired:
+        reporter.bullets_fired = (reporter.bullets_fired or 0) + report.local_bullets_fired
+    if report.local_bullets_hit:
+        reporter.bullets_hit = (reporter.bullets_hit or 0) + report.local_bullets_hit
+    if report.local_blocks_activated:
+        reporter.blocks_activated = (reporter.blocks_activated or 0) + report.local_blocks_activated
+    if report.local_blocks_successful:
+        reporter.blocks_successful = (reporter.blocks_successful or 0) + report.local_blocks_successful
+
     # Award XP to both players
     winner_rounds = max(report.p1_rounds_won, report.p2_rounds_won)
     loser_rounds = min(report.p1_rounds_won, report.p2_rounds_won)
@@ -841,11 +862,12 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             series_status = "completed"
             series_completed = True
 
-            # +5 gold to the series winner, +1 extra if it was a 2-0 sweep.
+            # +10 gold to the series winner, +2 extra if it was a 2-0 sweep.
+            # (Doubled from the 5/+1 payout in v1.22 to give ranked more teeth.)
             series_winner = p1 if series.p1_series_wins >= 2 else p2
-            bonus = 5
+            bonus = 10
             if series.p1_series_wins == 0 or series.p2_series_wins == 0:
-                bonus += 1
+                bonus += 2
             series_winner.gold_earned = (series_winner.gold_earned or 0) + bonus
             db.add(GoldTransaction(
                 player_id=series_winner.id, amount=bonus,
@@ -1272,6 +1294,7 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
     active_trail_color: str | None = None
     active_trail_price: int = 0
     active_color_sku: str | None = None
+    active_color_skus: list[str] = []
     for cosmetic_id, kind in ((player.active_title_id, "title"),
                                (player.active_trail_id, "trail"),
                                (player.active_color_id, "color")):
@@ -1287,7 +1310,31 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         elif kind == "trail":
             active_trail_sku, active_trail_color, active_trail_price = row[1], row[2], row[3] or 0
         else:
-            active_color_sku = row[1]
+            active_color_sku = row[1]  # kept for backward compat — "first equipped color"
+
+    # Multi-equip colors: resolve the full active_color_ids list to skus so the client
+    # can cycle between them with Left Shift in-game.
+    color_id_list = player.active_color_ids or []
+    if color_id_list:
+        color_rows = (await db.execute(
+            select(ShopItem.id, ShopItem.sku).where(ShopItem.id.in_(color_id_list), ShopItem.kind == "color")
+        )).all()
+        # Preserve the user's equipped order — the array is the source of truth.
+        id_to_sku = {r[0]: r[1] for r in color_rows}
+        active_color_skus = [id_to_sku[cid] for cid in color_id_list if cid in id_to_sku]
+        # Ensure active_color_sku (the legacy single-value field) points at the first entry.
+        if not active_color_sku and active_color_skus:
+            active_color_sku = active_color_skus[0]
+
+    # Active nametag styles (stackable). Returned as sku strings so the client can map
+    # sku → rich-text tag without another lookup.
+    active_nametag_skus: list[str] = []
+    nametag_ids = player.nametag_style_ids or []
+    if nametag_ids:
+        nt_rows = (await db.execute(
+            select(ShopItem.sku).where(ShopItem.id.in_(nametag_ids), ShopItem.kind == "nametag")
+        )).all()
+        active_nametag_skus = [r[0] for r in nt_rows]
 
     # Casual W/L (individual casual matches only)
     casual_wl_query = text("""
@@ -1394,12 +1441,18 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         discord_username=player.discord_username,
         gold_earned=player.gold_earned or 0,
         gold_spent=player.gold_spent or 0,
+        bullets_fired=player.bullets_fired or 0,
+        bullets_hit=player.bullets_hit or 0,
+        blocks_activated=player.blocks_activated or 0,
+        blocks_successful=player.blocks_successful or 0,
         active_title=active_title_name,
         active_title_color=active_title_color,
         active_trail_sku=active_trail_sku,
         active_trail_color=active_trail_color,
         active_trail_price=active_trail_price,
         active_color_sku=active_color_sku,
+        active_color_skus=active_color_skus,
+        active_nametag_skus=active_nametag_skus,
         last_match=stats["last_match"],
         recent_rating_history=history,
         top_cards=top_cards,
@@ -3123,9 +3176,147 @@ async def set_active_color(
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Equip a map color preset. Local-only cosmetic — never published via Photon since
-    the override is purely client-side (patches ROUNDS' ArtHandler.NextArt)."""
-    return await _set_active_cosmetic(db, steam_id, "color", "color", item_id, sig)
+    """Legacy single-active-color endpoint (v1.22 and older clients). New clients should
+    use /color-toggle instead. Kept so older installs don't break — writes both the single
+    active_color_id column AND replaces active_color_ids with a single-element list."""
+    result = await _set_active_cosmetic(db, steam_id, "color", "color", item_id, sig)
+    # Mirror into the multi-equip array so the two fields stay in sync.
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is not None:
+        player.active_color_ids = [item_id] if item_id else []
+        await db.commit()
+    return result
+
+
+@app.post("/api/v1/players/{steam_id}/color-toggle", tags=["Shop"])
+async def toggle_color(
+    steam_id: str,
+    item_id: int = Query(..., description="Map color shop item ID to toggle on/off"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle a map color (kind='color') in the player's active_color_ids list. Multi-
+    equip — several colors can be on at once, and the client cycles between them with
+    Left Shift in-game. Requires ownership (or that the item has been purchased)."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"color:{steam_id}:{item_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    item = (await db.execute(select(ShopItem).where(ShopItem.id == item_id))).scalar_one_or_none()
+    if item is None or item.kind != "color":
+        raise HTTPException(status_code=400, detail="Not a valid map color")
+
+    owned = (await db.execute(
+        select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
+    )).scalar_one_or_none()
+    if owned is None:
+        raise HTTPException(status_code=403, detail="Item not owned")
+
+    current = list(player.active_color_ids or [])
+    if item_id in current:
+        current.remove(item_id)
+        action = "removed"
+    else:
+        current.append(item_id)
+        action = "added"
+    # Reassign a fresh list so SQLAlchemy flags the ARRAY column as dirty.
+    player.active_color_ids = current
+    # Keep the legacy single-value column pointing at the first equipped color so any
+    # code path still reading active_color_id returns a sensible value.
+    player.active_color_id = current[0] if current else None
+    await db.commit()
+    return {"status": action, "item_id": item_id, "active_ids": current}
+
+
+@app.post("/api/v1/players/{steam_id}/nametag-toggle", tags=["Shop"])
+async def toggle_nametag_style(
+    steam_id: str,
+    item_id: int = Query(..., description="Nametag shop item ID to toggle on/off"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle a single nametag style (kind='nametag') in the player's active set.
+    Stackable — multiple styles can be on at once. Requires ownership."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"nametag:{steam_id}:{item_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    item = (await db.execute(select(ShopItem).where(ShopItem.id == item_id))).scalar_one_or_none()
+    if item is None or item.kind != "nametag":
+        raise HTTPException(status_code=400, detail="Not a valid nametag style")
+
+    owned = (await db.execute(
+        select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
+    )).scalar_one_or_none()
+    if owned is None:
+        raise HTTPException(status_code=403, detail="Item not owned")
+
+    current = list(player.nametag_style_ids or [])
+    if item_id in current:
+        current.remove(item_id)
+        action = "removed"
+    else:
+        # Subgroup enforcement: nametag SKUs prefixed nametag_color_ / nametag_glow_ /
+        # nametag_font_ are single-active within their subgroup. The bare bold/italic/
+        # underline/strike SKUs carry no prefix and stay stackable alongside everything.
+        subgroup = _nametag_subgroup(item.sku)
+        if subgroup is not None:
+            # Look up every currently-active nametag item whose sku matches this subgroup
+            # and remove them before adding the new one. Single query to resolve ids → skus.
+            if current:
+                sibling_rows = (await db.execute(
+                    select(ShopItem.id, ShopItem.sku).where(ShopItem.id.in_(current))
+                )).all()
+                for sid, ssku in sibling_rows:
+                    if _nametag_subgroup(ssku) == subgroup and sid in current:
+                        current.remove(sid)
+        current.append(item_id)
+        action = "added"
+    # Reassign a fresh list so SQLAlchemy flags ARRAY column as dirty.
+    player.nametag_style_ids = current
+    await db.commit()
+    return {"status": action, "item_id": item_id, "active_ids": current}
+
+
+def _nametag_subgroup(sku: str) -> str | None:
+    """Return the subgroup name for a nametag SKU, or None if it's stackable (bold/italic/etc).
+    Subgroups are single-active: adding an item from one replaces any existing one.
+
+    Note: "font" (caps/smallcaps/spaced transforms, inline rich text) and "typeface"
+    (Impact/Papyrus/Comic/Courier/Script OS-font swaps, local-only render) are deliberately
+    separate subgroups so a player can stack e.g. Impact typeface + ALL CAPS simultaneously."""
+    if not sku:
+        return None
+    for prefix in (
+        "nametag_color_",
+        "nametag_glow_",
+        "nametag_font_",
+        "nametag_typeface_",
+        "nametag_size_",
+    ):
+        if sku.startswith(prefix):
+            return prefix.rstrip("_")
+    return None
 
 
 async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefix: str, item_id: int | None, sig: str):

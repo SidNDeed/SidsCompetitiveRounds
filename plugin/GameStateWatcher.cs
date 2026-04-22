@@ -122,6 +122,72 @@ namespace CompetitiveRounds
         // Counters reset in OnMatchStarted alongside the achievement flags.
         public static int LocalShotsThisMatch { get; private set; }
         public static int LocalBlocksThisMatch { get; private set; }
+        // v1.23 — hit/block lifetime counters.
+        //   bullets_fired  — sum of Gun.numberOfProjectiles across every Gun.Attack call by the
+        //                    local player (counts individual pellets/bullets, not trigger pulls;
+        //                    auto-fire weapons firing 20 rounds count 20, not 1)
+        //   bullets_hit    — damage events dealt to an opposing player by a real projectile
+        //                    (damagingWeapon has a ProjectileHit component — excludes DOT ticks,
+        //                    explosion splash, card-effect damage). Bounded per match by the
+        //                    _hitsRemaining gate so bullets_hit ≤ bullets_fired always.
+        //   blocks_activated  — alias of LocalBlocksThisMatch (right-click count)
+        //   blocks_successful — Harmony Block.DoBlock → block animations that actually fired
+        public static int LocalBulletsFiredThisMatch { get; private set; }
+        public static int LocalBulletsHitThisMatch { get; private set; }
+        public static int LocalBlocksActivatedThisMatch { get; private set; }
+        public static int LocalBlocksSuccessfulThisMatch { get; private set; }
+
+        // First-fire-per-match log lines let us confirm Harmony patches attach and fire without
+        // spamming on every event. Reset in OnMatchStarted alongside the counters.
+        private static bool _loggedFirstFire, _loggedFirstHit, _loggedFirstBlockAct, _loggedFirstBlockOk;
+
+        // Block.DoBlock fires every time the block absorbs a projectile AND when the block
+        // extends (ROUNDS' block gets duration bumps per absorb). Without dedup, this
+        // produces >100% "success rate" in card-heavy matches. A 1.0s cooldown between
+        // credited successes captures "this activation window absorbed at least one bullet"
+        // which matches user-facing semantics. Block cooldown in ROUNDS is ~1.5s by default
+        // so successive activations can't realistically happen inside the dedup window.
+        private static float _lastBlockSuccessTime = -999f;
+
+        // Per-projectile hit gating. Previous binary gate "arm on click, consume on first hit"
+        // produced 1 hit max per trigger-pull, which undercounts shotguns (5 pellets hitting
+        // = 5 real hits but we'd count 1). Switch to a counter: Gun.Attack Postfix adds N to
+        // _hitsRemaining where N is numberOfProjectiles, then each filtered bullet-impact on
+        // an enemy decrements. Bounds bullets_hit ≤ bullets_fired naturally without drops on
+        // multi-projectile weapons.
+        private static int _hitsRemaining;
+
+        public static void OnLocalBulletFired(int projectiles)
+        {
+            if (!isTracking || inPickPhase) return;
+            if (projectiles < 1) projectiles = 1;
+            LocalBulletsFiredThisMatch += projectiles;
+            _hitsRemaining += projectiles;
+            if (!_loggedFirstFire) { _loggedFirstFire = true; Plugin.Log.LogInfo($"[STATS] first bullet fired this match (projectiles={projectiles})"); }
+        }
+
+        public static void OnLocalBulletHit()
+        {
+            if (!isTracking || inPickPhase) return;
+            if (_hitsRemaining <= 0) return;  // more damage events than projectiles (splash/DOT) — skip
+            _hitsRemaining--;
+            LocalBulletsHitThisMatch++;
+            if (!_loggedFirstHit) { _loggedFirstHit = true; Plugin.Log.LogInfo("[STATS] first bullet-hit this match"); }
+        }
+        public static void OnLocalBlockActivated()
+        {
+            if (!isTracking || inPickPhase) return;
+            LocalBlocksActivatedThisMatch++;
+            if (!_loggedFirstBlockAct) { _loggedFirstBlockAct = true; Plugin.Log.LogInfo("[STATS] first block activation this match"); }
+        }
+        public static void OnLocalBlockSuccessful()
+        {
+            if (!isTracking || inPickPhase) return;
+            if (Time.time - _lastBlockSuccessTime < 1.0f) return;  // extension / multi-absorb dedup
+            _lastBlockSuccessTime = Time.time;
+            LocalBlocksSuccessfulThisMatch++;
+            if (!_loggedFirstBlockOk) { _loggedFirstBlockOk = true; Plugin.Log.LogInfo("[STATS] first successful block this match"); }
+        }
         // Pick-phase gate: input gating must exclude card-pick UI (Space jump, A/D carousel,
         // mouse click on cards) which would otherwise count as movement / firing.
         // Set true on "PICK PHASE" log; cleared on "MOVE PLAYERS END" (combat about to begin)
@@ -186,6 +252,9 @@ namespace CompetitiveRounds
                 opponentIsRanked = false;
                 matchIsRanked = false;
                 Plugin.Log.LogInfo($"[POLL] Joined room: {photonRoomId} (region: {photonRegion})");
+                // Republish styled nickname on every room join — the game resets NickName back
+                // to the raw Steam persona at room creation, so our wrap needs to reapply.
+                try { NametagStyler.PublishToPhoton(); } catch { }
             }
 
             if (!inRoom && wasInRoom)
@@ -357,6 +426,15 @@ namespace CompetitiveRounds
 
         // \u2500\u2500 Local player / team \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
+        // Tracks whether we've pushed the local player's RankedEnabled config to the
+        // server's ranked_enabled column for this session. The server's /mod/toggle-ranked
+        // endpoint auto-registers the player on first hit, so this is also the new-install
+        // auto-registration path. Without this, fresh installs stay ranked_enabled=false
+        // on the server until the user manually clicks Enable in F5 — which broke
+        // ranked-matching for RoarkCats' first two games (opponent's mod-check returned
+        // ranked=false even though Sid's client had ranked ON).
+        private static bool _rankedSyncSent;
+
         private static void IdentifyLocalPlayer()
         {
             try
@@ -366,6 +444,7 @@ namespace CompetitiveRounds
                 {
                     localSteamId = steamId.m_SteamID.ToString();
                     localDisplayName = StripRichText(SteamFriends.GetPersonaName());
+                    MaybeSyncRankedStateOnce();
                     return;
                 }
             }
@@ -375,11 +454,37 @@ namespace CompetitiveRounds
             {
                 localSteamId = PhotonNetwork.LocalPlayer?.UserId ?? "unknown";
                 localDisplayName = StripRichText(PhotonNetwork.LocalPlayer?.NickName ?? "Unknown");
+                MaybeSyncRankedStateOnce();
             }
             catch
             {
                 localSteamId = "unknown";
                 localDisplayName = "Unknown";
+            }
+        }
+
+        /// <summary>One-shot per session: push the local RankedEnabled config to the server
+        /// so the server-side ranked_enabled column matches the client's intent and the mod-
+        /// check endpoint returns accurate state for opponents who query us. Idempotent on
+        /// the server (plain UPSERT) so re-calling is safe; we still gate to once-per-session
+        /// to avoid spamming. Called whenever IdentifyLocalPlayer succeeds — covers the race
+        /// where Steam's API hadn't returned the ID by the time Plugin.cs ran its startup
+        /// sync and skipped the call.</summary>
+        private static void MaybeSyncRankedStateOnce()
+        {
+            if (_rankedSyncSent) return;
+            if (string.IsNullOrEmpty(localSteamId) || localSteamId == "unknown") return;
+            try
+            {
+                bool wanted = Plugin.RankedEnabled != null && Plugin.RankedEnabled.Value;
+                ApiClient.ToggleRanked(localSteamId, wanted);
+                _rankedSyncSent = true;
+                Plugin.Log.LogInfo($"[POLL] Initial ranked state synced to server: enabled={wanted}");
+            }
+            catch (Exception ex)
+            {
+                // Leave _rankedSyncSent=false so the next IdentifyLocalPlayer call retries.
+                Plugin.Log.LogWarning($"[POLL] Initial ranked sync failed: {ex.Message}");
             }
         }
 
@@ -549,6 +654,13 @@ namespace CompetitiveRounds
             pendingRegicideCheck = false;
             LocalShotsThisMatch = 0;
             LocalBlocksThisMatch = 0;
+            LocalBulletsFiredThisMatch = 0;
+            LocalBulletsHitThisMatch = 0;
+            LocalBlocksActivatedThisMatch = 0;
+            LocalBlocksSuccessfulThisMatch = 0;
+            _hitsRemaining = 0;
+            _lastBlockSuccessTime = -999f;
+            _loggedFirstFire = _loggedFirstHit = _loggedFirstBlockAct = _loggedFirstBlockOk = false;
 
             // Retry card rarity scan if it didn't work at startup
             if (CardRarityLookup.Count == 0)
@@ -595,7 +707,19 @@ namespace CompetitiveRounds
                     card.RoundNumber = 1;
                     localCards.Add(card);
                     broadcastCardNames.Add(card.CardName);
-                    Plugin.Log.LogInfo($"[POLL] Card: Pre-match picked {card.CardName} [#{pickCountThisMatch}]");
+                    // Also synthesize an offer row so card_offers reflects the pre-match
+                    // pick. Without this, matches where the local player wins every round
+                    // (only pre-match pick ever fires) submit with zero offers and every
+                    // card reads as "100% pass rate" server-side. The Harmony EndPick hook
+                    // and the mid-match synthesize path both miss pre-match picks because
+                    // ROUNDS' pre-match auto-pick doesn't route through CardChoice.RPCA_DoEndPick.
+                    localOffers.Add(new MatchTracker.CardOfferData
+                    {
+                        CardName = card.CardName,
+                        RoundNumber = 1,
+                        WasPicked = true,
+                    });
+                    Plugin.Log.LogInfo($"[POLL] Card: Pre-match picked {card.CardName} [#{pickCountThisMatch}] (+synth offer)");
                 }
 
                 // Broadcast recovered cards to opponent
@@ -779,6 +903,27 @@ namespace CompetitiveRounds
             // Use consistent room ID (no per-PC timestamp, use round count instead)
             string reportRoomId = $"{photonRoomId}_{matchStartTime:HHmmss}_r{p1Rounds + p2Rounds}";
 
+            // Hard block: offline / practice / bot matches must never reach the server. ROUNDS'
+            // offline mode uses photon room names like "offline room" and replaces the opponent
+            // slot with an AI — our cached opponent steam_id from the previous ranked series
+            // would otherwise end up attributed to a phantom 5-0 match. Check both the Photon
+            // OfflineMode flag AND the room name as a belt-and-suspenders defense (observed two
+            // such phantom rows reported against 'Sid' from an opponent's offline practice).
+            bool isOfflineMatch = false;
+            try
+            {
+                if (PhotonNetwork.OfflineMode) isOfflineMatch = true;
+                if (!string.IsNullOrEmpty(photonRoomId)
+                    && photonRoomId.IndexOf("offline", StringComparison.OrdinalIgnoreCase) >= 0)
+                    isOfflineMatch = true;
+            }
+            catch { }
+            if (isOfflineMatch)
+            {
+                Plugin.Log.LogInfo($"[POLL] Skipping match report — offline/practice detected (room='{photonRoomId}')");
+                shouldReport = false;
+            }
+
             if (shouldReport)
             {
                 ApiClient.ReportMatch(
@@ -801,7 +946,20 @@ namespace CompetitiveRounds
                     reporterSteamId: localSteamId,
                     isRanked: matchIsRanked,
                     localShotsFired: LocalShotsThisMatch,
-                    localBlocksRaised: LocalBlocksThisMatch
+                    localBlocksRaised: LocalBlocksThisMatch,
+                    // bullets_fired = projectile count via Gun.Attack Postfix × numberOfProjectiles
+                    // (captures shotgun pellets, auto-fire, burst weapons — not just trigger pulls).
+                    // blocks_activated = right-click count. bullets_hit / blocks_successful come
+                    // from Harmony hooks (HealthHandler.TakeDamage with projectile filter, and
+                    // Block.DoBlock) wired in Plugin.cs.
+                    localBulletsFired: LocalBulletsFiredThisMatch,
+                    localBulletsHit: LocalBulletsHitThisMatch,
+                    // TryBlock-based activation counter includes manual right-click AND any
+                    // source (cards like Shields Up / Empower that trigger block via the
+                    // same code path). LocalBlocksThisMatch (mouse-only) remains the anti-
+                    // cheat advisory signal.
+                    localBlocksActivated: LocalBlocksActivatedThisMatch,
+                    localBlocksSuccessful: LocalBlocksSuccessfulThisMatch
                 );
             }
 
@@ -1101,7 +1259,32 @@ namespace CompetitiveRounds
                 };
 
                 localCards.Add(pick);
+                _lastLocalPickedCardName = cardName;  // for Harmony offer-fallback path
                 Plugin.Log.LogInfo($"[POLL] Card: Local picked {cardName} [#{pickCountThisMatch}]");
+
+                // Pass-tracking safety net: the first pick of each match routes through a
+                // different ROUNDS code path that doesn't fire CardChoice.RPCA_DoEndPick, so
+                // our Harmony offer-loop never sees it. That consistently left every match
+                // with one missing was_picked=true row, which read as "100% pass rate" in
+                // card stats for that card. If no offer row exists yet for this (round,
+                // card, picked=true), synthesize one here.
+                bool alreadyRecorded = false;
+                for (int i = 0; i < localOffers.Count; i++)
+                {
+                    var o = localOffers[i];
+                    if (o.WasPicked && o.RoundNumber == currentRound && o.CardName == cardName)
+                    { alreadyRecorded = true; break; }
+                }
+                if (!alreadyRecorded)
+                {
+                    localOffers.Add(new MatchTracker.CardOfferData
+                    {
+                        CardName = cardName,
+                        RoundNumber = currentRound,
+                        WasPicked = true,
+                    });
+                    Plugin.Log.LogInfo($"[POLL] Synthesized picked offer for {cardName} round={currentRound} (Harmony EndPick didn't fire)");
+                }
 
                 // Broadcast to opponent via Photon custom properties
                 BroadcastCardPick(cardName);
@@ -1143,7 +1326,13 @@ namespace CompetitiveRounds
         /// </summary>
         public static void OnOpponentCardPicked(string cardName, string rarity)
         {
+            // Canonicalize: without this, opponent card names landed in match_cards raw
+            // (e.g. "Chillingpresence", "Drillammo", "Prisitne Perseverence") while our
+            // OWN picks went through GetCanonicalName → the DB split cards into near-
+            // duplicate rows whenever an opponent happened to report them. Fixed by always
+            // normalizing at every write site.
             cardName = ToTitleCase(cardName);
+            cardName = CardRarityLookup.GetCanonicalName(cardName);
 
             if (!isTracking)
             {
@@ -1359,6 +1548,12 @@ namespace CompetitiveRounds
             pendingRegicideCheck = false;
             LocalShotsThisMatch = 0;
             LocalBlocksThisMatch = 0;
+            LocalBulletsFiredThisMatch = 0;
+            LocalBulletsHitThisMatch = 0;
+            LocalBlocksActivatedThisMatch = 0;
+            LocalBlocksSuccessfulThisMatch = 0;
+            _hitsRemaining = 0;
+            _lastBlockSuccessTime = -999f;
 
             // Clear our card broadcast when leaving room
             try
@@ -1403,6 +1598,26 @@ namespace CompetitiveRounds
                 RoundNumber = round,
                 WasPicked = wasPicked,
             });
+            if (wasPicked) _lastLocalPickedCardName = cardName;
         }
+
+        // Current size of the offers buffer — used as a "before the pick loop" snapshot so
+        // the Harmony hook can detect whether any new rows were added, and whether any were
+        // marked wasPicked=true. Lets us fall back to injecting a synthetic picked row when
+        // cardIDs[] resolution fails for the chosen card (the Silence pass%=100% bug).
+        public static int LocalOffersCount => localOffers.Count;
+        public static bool LocalOffersPickedIn(int fromIndex)
+        {
+            if (fromIndex < 0) fromIndex = 0;
+            for (int i = fromIndex; i < localOffers.Count; i++)
+                if (localOffers[i].WasPicked) return true;
+            return false;
+        }
+
+        // Last card name the local player picked (canonical), captured either by the
+        // Unity-log "Picking Card:" handler or the Harmony EndPick patch. Used by the
+        // pass-tracking fallback when the regular cardIDs[] loop can't identify the picked card.
+        private static string _lastLocalPickedCardName;
+        public static string LastLocalPickedCardName => _lastLocalPickedCardName;
     }
 }

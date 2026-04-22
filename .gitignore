@@ -53,3 +53,6 @@ packages/
 __pycache__/
 *.pyc
 .venv/
+
+# Thunderstore release zip artifacts — attach to GH release, don't track in git
+thunderstore/*.zip
