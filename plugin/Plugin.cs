@@ -20,7 +20,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.23.0";
+        public const string ModVersion = "1.23.1";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1847,84 +1847,14 @@ namespace CompetitiveRounds
                 }
                 Color c = tintN ?? Color.white;
 
-                // Step 1: SpriteRenderer.color on every sprite child of Map.
-                int sprites = 0;
-                var typeCounts = new Dictionary<string, int>();
-                foreach (var r in mapInstance.GetComponentsInChildren<Renderer>(true))
-                {
-                    if (r == null) continue;
-                    string tn = r.GetType().Name;
-                    typeCounts.TryGetValue(tn, out int n); typeCounts[tn] = n + 1;
-                    if (tintN.HasValue && r is SpriteRenderer sr) { sr.color = c; sprites++; }
-                }
-                if (!_loggedTypes && typeCounts.Count > 0)
-                {
-                    _loggedTypes = true;
-                    foreach (var kv in typeCounts)
-                        Plugin.Log.LogInfo($"[MAPCOLOR] Map child renderer type {kv.Key}: {kv.Value}");
-                }
-
+                // Tint ONLY the walls (OutOfBounds particle systems, Step 3 below) and the
+                // art-instance atmosphere particles (Step 4). Previously also tinted every
+                // SpriteRenderer under Map/* (the 49 moving physics boxes) and every scene
+                // SpriteRenderer that wasn't a player/bullet/UI — both passes also caught
+                // the brown boxes and their background variants, making the whole map read
+                // as a monotone color block. User feedback: "It should only be the map
+                // background and the two wall colors" — i.e. just walls + atmosphere.
                 if (!tintN.HasValue) return;
-
-                // Confirmed from prior diagnostic: Map.MapMaterial is null, walls/floors aren't
-                // child renderers of Map (Map's children are 49 SpriteRenderers = the moving
-                // boxes). Walls live elsewhere in the scene. Strategy: scan EVERY SpriteRenderer
-                // in the scene and tint any that look map-like (skip player avatars, bullets,
-                // UI sprites) by inspecting parent path. Tint via SpriteRenderer.color so we
-                // don't need to clone any material.
-                int sceneSprites = 0, sceneSkipped = 0;
-                var pathSamples = new Dictionary<string, int>(StringComparer.Ordinal);
-                foreach (var r in UnityEngine.Object.FindObjectsOfType<SpriteRenderer>())
-                {
-                    if (r == null) continue;
-                    string path = GetTransformPath(r.transform);
-                    // Sample the first ~30 unique parent prefixes for diagnostic — tells us what
-                    // top-level objects exist so we can tighten the filter next round if needed.
-                    string topLevel = path.Split('/')[0];
-                    if (pathSamples.Count < 60)
-                    {
-                        pathSamples.TryGetValue(topLevel, out int n);
-                        pathSamples[topLevel] = n + 1;
-                    }
-                    // Skip obvious non-map renderers: players, bullets, UI, HUD, projectiles.
-                    string pl = path.ToLowerInvariant();
-                    if (pl.Contains("player") || pl.Contains("bullet") || pl.Contains("ui_") ||
-                        pl.Contains("hud") || pl.Contains("/cards") || pl.Contains("cardchoice") ||
-                        pl.Contains("particle") || pl.Contains("character"))
-                    { sceneSkipped++; continue; }
-                    r.color = c;
-                    sceneSprites++;
-                }
-                if (!_loggedScenePaths)
-                {
-                    _loggedScenePaths = true;
-                    foreach (var kv in pathSamples)
-                        Plugin.Log.LogInfo($"[MAPCOLOR] scene top-level: {kv.Key} ({kv.Value} sprites)");
-                    // Walls/floors aren't sprites — log every NON-SpriteRenderer in the scene with
-                    // its full path so we can identify what to target. One-shot.
-                    var nonSpriteByType = new Dictionary<string, int>();
-                    var nonSpritePaths = new List<string>();
-                    foreach (var rr in UnityEngine.Object.FindObjectsOfType<Renderer>())
-                    {
-                        if (rr == null || rr is SpriteRenderer) continue;
-                        string tname = rr.GetType().Name;
-                        // Skip SpriteMask — they're player limb masks (246 of them) and were
-                        // monopolizing the 80-entry dump cap, hiding the single MeshRenderer
-                        // we actually need to identify (the map wall mesh).
-                        if (tname == "SpriteMask") { nonSpriteByType.TryGetValue(tname, out int sc); nonSpriteByType[tname] = sc + 1; continue; }
-                        nonSpriteByType.TryGetValue(tname, out int cnt);
-                        nonSpriteByType[tname] = cnt + 1;
-                        if (nonSpritePaths.Count < 200)
-                        {
-                            string mn = rr.sharedMaterial != null ? rr.sharedMaterial.name : "<null>";
-                            nonSpritePaths.Add(tname + "  " + GetTransformPath(rr.transform) + "  mat=" + mn);
-                        }
-                    }
-                    foreach (var kv in nonSpriteByType)
-                        Plugin.Log.LogInfo($"[MAPCOLOR] non-sprite renderer type {kv.Key}: {kv.Value}");
-                    foreach (var p in nonSpritePaths)
-                        Plugin.Log.LogInfo($"[MAPCOLOR] non-sprite path: {p}");
-                }
                 // Step 3 — tint the wall-like particle systems. Alternate between MapBlockColor
                 // and SecondaryColor by index so the wall reads as multi-tone instead of a flat
                 // single color block. Vanilla arts achieve their "atmosphere" via per-particle
@@ -1972,7 +1902,7 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] art-particle tint failed: {ex.Message}"); }
 
-                Plugin.Log.LogInfo($"[MAPCOLOR] Map.Start sku={sku}: map-children-sprites={sprites}, scene-sprites-tinted={sceneSprites}, boundary-parts={boundaryParts}, art-parts={artParts}, skipped={sceneSkipped}");
+                Plugin.Log.LogInfo($"[MAPCOLOR] tinted sku={sku}: boundary-parts={boundaryParts}, art-parts={artParts}");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] Map tint failed: {ex.Message}"); }
         }

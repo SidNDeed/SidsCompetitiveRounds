@@ -1,5 +1,9 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.23.1 — Hotfix: map cycle no longer tints the moving boxes
+
+Post-v1.23.0 ship reported a regression: pressing Left Shift to cycle map colors tinted **every** SpriteRenderer under `Map/*` (the 49 moving physics boxes) and every non-UI/non-player scene sprite, making the whole map read as a monotone color block. The fix removes those two passes so the tint now applies only where intended: the `OutOfBounds/*` wall particle systems (the primary + secondary wall colors) and the ArtInstance atmosphere particles. Moving boxes keep their vanilla art colors.
+
 ## v1.23.0 — Nametag Styles, Multi-Color Maps, Hit/Block/Pass Stats, Polish
 
 Non-mandatory update. Older clients still work against the live API, they just don't see the new stats or shop items.
