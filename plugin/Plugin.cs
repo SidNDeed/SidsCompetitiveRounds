@@ -20,7 +20,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.23.1";
+        public const string ModVersion = "1.24.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -35,6 +35,10 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowIngameChat;
         internal static ConfigEntry<bool> ShowTrails;
+        // Preferred timezone for tournament time display. Values: "Local" (use OS),
+        // "UTC", or an IANA / Windows tz ID that TimeZoneInfo.FindSystemTimeZoneById
+        // resolves. Persisted so it survives restarts; applies only to tournament UI.
+        internal static ConfigEntry<string> TournamentTimezone;
         // Pipe-delimited list of muted display names — local mute, doesn't leave the client.
         // Mutated via /mute and /unmute commands typed in the F5 chat input.
         internal static ConfigEntry<string> MutedChatNames;
@@ -114,6 +118,12 @@ namespace CompetitiveRounds
                 "UI", "ShowTrails",
                 true,
                 "Show cosmetic trails behind players during matches (including your own and opponents')"
+            );
+
+            TournamentTimezone = Config.Bind(
+                "Tournaments", "Timezone",
+                "Local",
+                "Timezone used to display tournament times. One of: Local, UTC, PT, MT, CT, ET, UK, CET, EET, MSK, JST, AEST, or a system timezone ID."
             );
 
             MutedChatNames = Config.Bind(
@@ -1819,7 +1829,21 @@ namespace CompetitiveRounds
             string sku = MapColorState.CurrentSku;
             if (string.IsNullOrEmpty(sku))
                 sku = ApiClient.CachedPlayerStats?.active_color_sku;
-            ApplyPhysicalTintsForSku(__instance, sku);
+            if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku)) return;
+            // Defer: Map.Start runs inside ROUNDS' MapTransition.Move coroutine. Mutating
+            // OutOfBounds/* + ArtInstance.parts particle systems while that coroutine is
+            // still animating produces a NullReferenceException in MapTransition+<Move>d__15
+            // that stalls the round-won animation until the next point is scored. Wait past
+            // the transition before touching particles.
+            if (__instance != null && __instance.isActiveAndEnabled)
+                __instance.StartCoroutine(DelayedApplyTints(__instance, sku));
+        }
+
+        private static System.Collections.IEnumerator DelayedApplyTints(Map mapInstance, string sku)
+        {
+            yield return new WaitForSeconds(2f);
+            if (mapInstance == null) yield break;
+            ApplyPhysicalTintsForSku(mapInstance, sku);
         }
 
         /// <summary>Apply the SKU's wall / sprite / particle tints to the current scene. Shared

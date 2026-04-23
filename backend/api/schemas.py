@@ -268,3 +268,112 @@ class AchievementListResponse(BaseModel):
     """All achievements for a player."""
     steam_id: str
     achievements: list[AchievementEntry]
+
+
+# ── Tournaments (Phase 1: sync single-elim BO3) ────────────────
+
+class TournamentSignupRequest(BaseModel):
+    steam_id: str
+    display_name: str | None = None
+    region: str | None = None  # Photon region the client is currently on
+
+
+class TournamentTimeVoteRequest(BaseModel):
+    steam_id: str
+    slot_ts: list[datetime]  # replaces player's entire vote set
+
+
+class TournamentForceVoteRequest(BaseModel):
+    steam_id: str
+
+
+class TournamentReadyRequest(BaseModel):
+    steam_id: str
+
+
+class TournamentSignupEntry(BaseModel):
+    signup_id: UUID
+    steam_id: str
+    display_name: str
+    signed_up_at: datetime
+    is_speculative: bool
+    seed: int | None
+    penalty_at_signup: float
+    ready: bool
+    forfeited: bool
+    placed_rank: int | None
+    progress_label: str | None = None  # "WB R2" / "LB R3" / "eliminated R2" / "CHAMPION" etc.
+
+
+class TournamentMatchEntry(BaseModel):
+    match_id: UUID
+    round: int
+    bracket_side: str
+    slot_idx: int
+    p1_signup_id: UUID | None
+    p2_signup_id: UUID | None
+    p1_display_name: str | None
+    p2_display_name: str | None
+    prereq_match_ids: list[UUID]
+    is_bye: bool
+    status: str
+    series_id: UUID | None
+    winner_signup_id: UUID | None
+    p1_series_wins: int | None
+    p2_series_wins: int | None
+    ready_deadline_at: datetime | None
+    deadline_at: datetime | None = None
+    started_at: datetime | None
+    ended_at: datetime | None
+
+
+class TournamentTimeSlotTally(BaseModel):
+    slot_ts: datetime
+    votes: int
+
+
+class TournamentCurrentResponse(BaseModel):
+    tournament_id: UUID | None
+    status: str | None
+    kind: str | None
+    default_start_ts: datetime | None
+    scheduled_start_ts: datetime | None
+    lock_at: datetime | None
+    voting_closes_at: datetime | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    min_players: int
+    max_players: int
+    signups: list[TournamentSignupEntry]
+    matches: list[TournamentMatchEntry]
+    my_signup_id: UUID | None
+    my_votes: list[datetime]
+    my_force_vote_at: datetime | None
+    my_ready: bool
+    my_penalty_pct: float
+    my_discord_linked: bool
+    time_slot_options: list[datetime]
+    # Tallies only filled when caller has voted; otherwise empty.
+    time_slot_tallies: list[TournamentTimeSlotTally]
+    force_vote_count: int
+    photon_region: str | None = None
+
+
+class TournamentHistoryEntry(BaseModel):
+    tournament_id: UUID
+    kind: str
+    format: str
+    ended_at: datetime | None
+    prize_tier: str | None
+    winner_display_name: str | None
+    runner_up_display_name: str | None
+    third_place_display_name: str | None
+    signup_count: int
+
+
+class TournamentPenaltyResponse(BaseModel):
+    steam_id: str
+    cached_penalty_pct: float
+    signups_90d: int
+    missed_90d: int
+    no_show_last_at: datetime | None

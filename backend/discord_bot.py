@@ -14,7 +14,20 @@ SERIES_LOG_CHANNEL_ID = int(os.getenv("SERIES_LOG_CHANNEL", "0"))
 QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
 CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL", "1495392567687250061"))  # #scr-admin — anti-cheat flags
+TOURNAMENT_CHANNEL_ID = int(os.getenv("TOURNAMENT_CHANNEL", "0"))  # set to enable #tournaments announcements
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
+
+# Tournament trophy role names (set via env if they exist in the guild).
+# Multi-win tracking uses an "(x2)" suffix variant of each role: a player with 1 win
+# has "SCR Tournament Winner"; on their 2nd win we swap them to "SCR Tournament Winner (x2)".
+# Participant uses its own "2" variant ("SCR Tournament Participant" -> "... Participant 2")
+# rather than an (x2) suffix, per the Discord roles already configured in the guild.
+TROPHY_ROLE_1 = os.getenv("TROPHY_ROLE_CHAMPION", "SCR Tournament Winner")
+TROPHY_ROLE_2 = os.getenv("TROPHY_ROLE_RUNNER_UP", "SCR Tournament Runner Up")
+TROPHY_ROLE_3 = os.getenv("TROPHY_ROLE_THIRD_PLACE", "SCR Tournament 3rd Place")
+TROPHY_ROLE_PART = os.getenv("TROPHY_ROLE_PARTICIPANT", "SCR Tournament Participant")
+TROPHY_ROLE_PART2 = os.getenv("TROPHY_ROLE_PARTICIPANT2", "SCR Tournament Participant 2")
+TROPHY_X2_SUFFIX = " (x2)"
 
 RANK_ROLES = [
     (2610, "Grand Master V 2610+"),
@@ -48,6 +61,13 @@ ALL_RANK_ROLE_NAMES = [n for _, n in RANK_ROLES]
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+# Presence intent is privileged — must be enabled at https://discord.com/developers/applications/
+# under Bot -> Privileged Gateway Intents -> PRESENCE INTENT.
+# Controlled by env var so bot can start even without the intent granted.
+# When False, /opp-online returns a friendly "presence tracking not enabled"
+# message instead of trying to read member.status.
+_PRESENCE_ENABLED = os.getenv("DISCORD_PRESENCE_INTENT", "false").lower() in ("true", "1", "yes")
+intents.presences = _PRESENCE_ENABLED
 bot = commands.Bot(command_prefix="!", intents=intents, chunk_guilds_at_startup=False)
 http_session = None
 seen_series = set()
@@ -111,6 +131,8 @@ async def on_ready():
     if not poll_queue_beacon.is_running(): poll_queue_beacon.start()
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
+    if not poll_tournaments.is_running(): poll_tournaments.start()
+    if not nag_pending_async_matches.is_running(): nag_pending_async_matches.start()
     # Chat bridge: subscribe to the WS firehose so we can forward in-game
     # messages to the Discord channel. Discord -> in-game goes the other way
     # via on_message below. The poll_chat_catchup task above is a belt-and-
@@ -749,6 +771,387 @@ async def poll_anticheat_flags():
             _last_flag_id_posted = f["id"]
         except Exception as ex:
             print(f"[ANTICHEAT] post error for flag {f.get('id')}: {ex}")
+
+
+# ── Tournaments ────────────────────────────────────────────────────────────
+#
+# Polls /api/v1/tournaments/internal/watch and DMs players on state
+# transitions. All state is in-memory (_tournament_state) — on bot restart we
+# re-establish the snapshot and skip notifications for events already past.
+# This prevents a restart from spamming old events but means a transition
+# happening DURING restart won't be announced; the /tournaments tab in-game
+# still shows the correct state.
+#
+# /dm-opponent: rate-limited (8/min per caller) message relay to your
+# current tournament opponent's DM.
+
+import collections as _coll
+from datetime import timedelta as _td
+
+_tournament_state = {}          # tournament_id -> last seen status
+_notified_match_ready = set()   # match_ids we've already DM'd "match ready" for
+_notified_completed = set()     # tournament_ids we've already paid trophies for
+_notified_deadline_warn = set() # match_ids we've already DM'd a 24h-deadline warning for (async only)
+_notified_nag_date = {}         # match_id -> YYYY-MM-DD last day we sent a "still pending" nag
+_dm_opponent_history = _coll.defaultdict(_coll.deque)  # discord_id -> deque[datetime]
+_DM_OPPONENT_LIMIT = 8
+_DM_OPPONENT_WINDOW_SECS = 60
+_watch_cache = {"tournaments": []}  # most recent /internal/watch payload
+
+def _resolve_trophy_role(guild: discord.Guild, name: str):
+    return discord.utils.get(guild.roles, name=name)
+
+async def _dm_user(discord_id, text_content):
+    if not discord_id:
+        return False
+    try:
+        user = bot.get_user(int(discord_id)) or await bot.fetch_user(int(discord_id))
+        if user is None:
+            return False
+        await user.send(text_content)
+        return True
+    except discord.Forbidden:
+        print(f"[TOURNAMENT-DM] {discord_id} has DMs closed")
+        return False
+    except Exception as e:
+        print(f"[TOURNAMENT-DM] {discord_id}: {e}")
+        return False
+
+
+async def _dm_all_signups(t, body):
+    count = 0
+    for s in t.get("signups", []):
+        if s.get("is_speculative"):
+            continue
+        if await _dm_user(s.get("discord_id"), body):
+            count += 1
+        await asyncio.sleep(0.15)  # gentle rate-limit — ~6/sec
+    print(f"[TOURNAMENT-DM] Sent '{body[:40]}...' to {count} players")
+
+
+async def _announce_in_channel(text_content):
+    if not TOURNAMENT_CHANNEL_ID:
+        return
+    try:
+        ch = bot.get_channel(TOURNAMENT_CHANNEL_ID) or await bot.fetch_channel(TOURNAMENT_CHANNEL_ID)
+        if ch:
+            await ch.send(text_content)
+    except Exception as e:
+        print(f"[TOURNAMENT-ANNOUNCE] {e}")
+
+
+def _fmt_pt(iso_str):
+    """Format a UTC ISO timestamp as human-readable 'Sat 12:00 PT'."""
+    if not iso_str:
+        return "(TBD)"
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return f"<t:{int(dt.timestamp())}:F>"  # Discord native timestamp
+    except Exception:
+        return iso_str
+
+
+async def _promote_role(member, base_name, x2_name):
+    """Grant base_name on first placement; on repeat placements, swap base -> x2.
+    Idempotent: if member already has x2_name, nothing changes."""
+    guild = member.guild
+    base = _resolve_trophy_role(guild, base_name)
+    x2 = _resolve_trophy_role(guild, x2_name)
+    if not base:
+        print(f"[TOURNAMENT-TROPHY] role '{base_name}' not in guild {guild.name}")
+        return
+    has_base = any(r.name == base_name for r in member.roles)
+    has_x2 = x2 is not None and any(r.name == x2_name for r in member.roles)
+    try:
+        if has_x2:
+            return  # already at the x2 tier; no further promotion in Phase 1
+        if has_base and x2:
+            await member.remove_roles(base, reason="Tournament x2 promotion")
+            await member.add_roles(x2, reason="Tournament x2 promotion")
+            print(f"[TOURNAMENT-TROPHY] {member.display_name} promoted to {x2_name}")
+        elif not has_base:
+            await member.add_roles(base, reason="Tournament placement")
+            print(f"[TOURNAMENT-TROPHY] {member.display_name} granted {base_name}")
+    except Exception as e:
+        print(f"[TOURNAMENT-TROPHY] {member.display_name} ({base_name}): {e}")
+
+
+async def _grant_trophy(tournament, signup_id, base_role_name):
+    if not signup_id or not base_role_name:
+        return
+    did = None
+    for s in tournament.get("signups", []):
+        if s.get("signup_id") == signup_id:
+            did = s.get("discord_id")
+            break
+    if not did:
+        return
+    x2_name = base_role_name + TROPHY_X2_SUFFIX
+    for guild in bot.guilds:
+        member = await find_member(guild, did)
+        if not member:
+            continue
+        await _promote_role(member, base_role_name, x2_name)
+
+
+async def _grant_participant(tournament):
+    """Grant SCR Tournament Participant on first-ever participation; promote to
+    Participant 2 on the second+ participation. Applied to confirmed signups
+    only (is_speculative=False) at tournament completion time."""
+    for s in tournament.get("signups", []):
+        if s.get("is_speculative"):
+            continue
+        did = s.get("discord_id")
+        if not did:
+            continue
+        for guild in bot.guilds:
+            member = await find_member(guild, did)
+            if not member:
+                continue
+            await _promote_role(member, TROPHY_ROLE_PART, TROPHY_ROLE_PART2)
+            await asyncio.sleep(0.1)
+
+
+@tasks.loop(seconds=30)
+async def poll_tournaments():
+    """Poll the internal watch endpoint, detect state transitions, DM+announce."""
+    global _watch_cache
+    if not http_session or not API_SECRET_KEY:
+        return
+    try:
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/tournaments/internal/watch",
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                return
+            payload = await resp.json()
+    except Exception as e:
+        print(f"[TOURNAMENT-POLL] {e}")
+        return
+
+    _watch_cache = payload
+    for t in payload.get("tournaments", []):
+        tid = t["tournament_id"]
+        status = t["status"]
+        kind = t.get("kind") or "sync"
+        prev = _tournament_state.get(tid)
+        _tournament_state[tid] = status
+
+        # Transition: new tournament in voting state -> channel announce
+        if prev is None and status == "voting":
+            if kind == "async":
+                await _announce_in_channel(
+                    f"**Async tournament signups open.** Double-elim BO3, 7-day match deadlines, self-paced. "
+                    f"Signups close {_fmt_pt(t['lock_at'])}. Sign up in-game via the Tournaments → ASYNC tab."
+                )
+            else:
+                await _announce_in_channel(
+                    f"**Tournament signups open.** Default start: {_fmt_pt(t['default_start_ts'])}. "
+                    f"Vote on alternate times or sign up in-game via the Tournaments tab. "
+                    f"Signups close {_fmt_pt(t['lock_at'])}."
+                )
+        # voting -> locked -> DM every signup their seed + scheduled start
+        if prev == "voting" and status == "locked":
+            scheduled = _fmt_pt(t.get("scheduled_start_ts"))
+            await _announce_in_channel(
+                f"**Tournament locked.** {len([s for s in t['signups'] if not s['is_speculative']])} players confirmed. "
+                f"Starts {scheduled}. Bracket visible in-game."
+            )
+            # Individual DMs with seed.
+            for s in t.get("signups", []):
+                if s.get("is_speculative"):
+                    continue
+                body = (f"Tournament locked. You're in — match starts {scheduled}. "
+                        f"Open the Tournaments tab in-game to see your bracket. "
+                        f"You must be ready in the tab within 5 minutes of each match starting or you forfeit.")
+                await _dm_user(s.get("discord_id"), body)
+                await asyncio.sleep(0.1)
+        # locked -> running -> channel announce
+        if prev == "locked" and status == "running":
+            await _announce_in_channel("**Tournament started.** Round 1 is live.")
+        # Any state: DM players whose match just became ready
+        if status == "running":
+            for m in t.get("matches", []):
+                if m.get("status") != "ready":
+                    continue
+                mid = m["match_id"]
+                p1d = m.get("p1_discord_id"); p2d = m.get("p2_discord_id")
+                p1n = m.get("p1_name") or "opponent"
+                p2n = m.get("p2_name") or "opponent"
+                # Initial match-ready DM (once per match).
+                if mid not in _notified_match_ready:
+                    _notified_match_ready.add(mid)
+                    if kind == "async":
+                        dl_str = _fmt_pt(m.get("deadline_at"))
+                        await _dm_user(p1d, f"Your async tournament match vs **{p2n}** is live. Deadline to play: {dl_str}. "
+                                             f"Coordinate via `/dm-opponent` or Discord. Use the Tournaments → ASYNC tab in-game to see the bracket + room code.")
+                        await _dm_user(p2d, f"Your async tournament match vs **{p1n}** is live. Deadline to play: {dl_str}. "
+                                             f"Coordinate via `/dm-opponent` or Discord. Use the Tournaments → ASYNC tab in-game to see the bracket + room code.")
+                    else:
+                        await _dm_user(p1d, f"Your tournament match vs **{p2n}** is ready. Open the Tournaments tab and ready up within 5 minutes or you forfeit.")
+                        await _dm_user(p2d, f"Your tournament match vs **{p1n}** is ready. Open the Tournaments tab and ready up within 5 minutes or you forfeit.")
+                # Async 24h deadline warning (once per match).
+                if kind == "async" and mid not in _notified_deadline_warn and m.get("deadline_at"):
+                    try:
+                        from datetime import datetime as _dt
+                        dl = _dt.fromisoformat(m["deadline_at"].replace("Z", "+00:00"))
+                        remaining = (dl - _dt.now(dl.tzinfo)).total_seconds()
+                        if 0 < remaining <= 24 * 3600:
+                            _notified_deadline_warn.add(mid)
+                            await _dm_user(p1d, f"**24h deadline reminder**: your async match vs **{p2n}** must be played within {int(remaining/3600)}h or you forfeit.")
+                            await _dm_user(p2d, f"**24h deadline reminder**: your async match vs **{p1n}** must be played within {int(remaining/3600)}h or you forfeit.")
+                    except Exception as e:
+                        print(f"[TOURNAMENT-POLL] deadline parse: {e}")
+        # Completion: grant trophies + announce
+        if status == "completed" and tid not in _notified_completed:
+            _notified_completed.add(tid)
+            await _grant_trophy(t, t.get("winner_signup_id"), TROPHY_ROLE_1)
+            await _grant_trophy(t, t.get("runner_up_signup_id"), TROPHY_ROLE_2)
+            await _grant_trophy(t, t.get("third_place_signup_id"), TROPHY_ROLE_3)
+            await _grant_participant(t)
+            # Build podium announcement
+            name_for = {s["signup_id"]: s["display_name"] for s in t.get("signups", [])}
+            winner = name_for.get(t.get("winner_signup_id"), "?")
+            runner = name_for.get(t.get("runner_up_signup_id"), "?")
+            third = name_for.get(t.get("third_place_signup_id"), "?")
+            tier = t.get("prize_tier") or "none"
+            prize_txt = {
+                "full": "500g / 300g / 60g + trophy roles",
+                "sixty": "300g / 180g / 36g + trophy roles",
+                "thirty": "150g / 90g / 18g + trophy roles",
+                "none": "(cancelled)",
+            }.get(tier, tier)
+            await _announce_in_channel(
+                f"**Tournament complete.**  1st: **{winner}** · 2nd: {runner} · 3rd: {third}  ({prize_txt})"
+            )
+
+
+def _dm_opponent_rate_ok(discord_id):
+    now = datetime.now(timezone.utc)
+    window_start = now - _td(seconds=_DM_OPPONENT_WINDOW_SECS)
+    q = _dm_opponent_history[discord_id]
+    while q and q[0] < window_start:
+        q.popleft()
+    if len(q) >= _DM_OPPONENT_LIMIT:
+        return False
+    q.append(now)
+    return True
+
+
+def _find_active_opponent_discord_id(caller_discord_id):
+    """Walk the cached watch payload, find the match where caller is p1 or p2
+    with status 'ready' or 'active', return the opponent's discord_id + name."""
+    cid = str(caller_discord_id)
+    for t in _watch_cache.get("tournaments", []):
+        if t.get("status") not in ("locked", "running"):
+            continue
+        for m in t.get("matches", []):
+            if m.get("status") not in ("ready", "active", "pending"):
+                continue
+            p1d = str(m.get("p1_discord_id") or "")
+            p2d = str(m.get("p2_discord_id") or "")
+            if cid == p1d and p2d:
+                return p2d, m.get("p2_name") or "opponent"
+            if cid == p2d and p1d:
+                return p1d, m.get("p1_name") or "opponent"
+    return None, None
+
+
+@bot.hybrid_command(name="opp-online", description="Check if your tournament opponent is online in Discord right now")
+async def opp_online(ctx):
+    opp_id, opp_name = _find_active_opponent_discord_id(str(ctx.author.id))
+    if not opp_id:
+        await ctx.reply("You're not in an active tournament match.", ephemeral=True)
+        return
+    if not _PRESENCE_ENABLED:
+        await ctx.reply("Presence tracking isn't enabled on this bot — enable the Presence Intent in the "
+                        "Discord dev portal and set `DISCORD_PRESENCE_INTENT=true` to use this command.",
+                        ephemeral=True)
+        return
+    try:
+        member = None
+        for guild in bot.guilds:
+            member = guild.get_member(int(opp_id))
+            if member:
+                break
+        if member is None:
+            await ctx.reply(f"{opp_name}: Discord presence unknown (not in guild cache).", ephemeral=True)
+            return
+        status = str(member.status)  # online|idle|dnd|offline
+        icon = {"online": "🟢", "idle": "🟡", "dnd": "🔴"}.get(status, "⚫")
+        label = {"online": "online", "idle": "idle", "dnd": "do not disturb"}.get(status, "offline")
+        await ctx.reply(f"{icon} **{opp_name}** is currently **{label}** in Discord.", ephemeral=True)
+    except Exception as e:
+        await ctx.reply(f"Couldn't resolve presence: {e}", ephemeral=True)
+
+
+@bot.hybrid_command(name="dm-opponent", description="DM your current tournament opponent (8/min)")
+@app_commands.describe(message="Message to forward to your tournament opponent")
+async def dm_opponent(ctx, *, message: str):
+    caller_id = str(ctx.author.id)
+    opp_id, opp_name = _find_active_opponent_discord_id(caller_id)
+    if not opp_id:
+        await ctx.reply("You're not in an active tournament match, or your opponent doesn't have Discord linked.", ephemeral=True)
+        return
+    if not _dm_opponent_rate_ok(caller_id):
+        await ctx.reply(f"Rate limit: {_DM_OPPONENT_LIMIT} messages per {_DM_OPPONENT_WINDOW_SECS}s. Wait a moment.", ephemeral=True)
+        return
+    sender = getattr(ctx.author, "global_name", None) or ctx.author.name
+    body = f"**[Tournament Relay from {sender}]** {message[:1500]}"
+    ok = await _dm_user(opp_id, body)
+    if ok:
+        await ctx.reply(f"Relayed to {opp_name}.", ephemeral=True)
+    else:
+        await ctx.reply(f"Couldn't DM {opp_name} — they may have DMs closed.", ephemeral=True)
+
+
+@tasks.loop(hours=24)
+async def nag_pending_async_matches():
+    """Once a day, DM players whose async tournament match has been 'ready'
+    for more than 3 days without completing. Deduped by match_id + date so
+    if the bot restarts on the same day, the same nag doesn't fire twice.
+    Runs 24h cadence so players get at most a couple of nags over the 7-day
+    deadline before the auto-forfeit fires."""
+    if not _watch_cache:
+        return
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now = datetime.now(timezone.utc)
+    nagged = 0
+    for t in _watch_cache.get("tournaments", []):
+        if t.get("kind") != "async" or t.get("status") != "running":
+            continue
+        for m in t.get("matches", []):
+            if m.get("status") != "ready":
+                continue
+            mid = m["match_id"]
+            # Only nag matches that have been ready > 3 days.
+            started_ready = m.get("started_at") or m.get("ready_deadline_at")
+            if not started_ready:
+                continue
+            try:
+                ready_since = datetime.fromisoformat(started_ready.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if (now - ready_since).total_seconds() < 3 * 86400:
+                continue
+            # Dedup per day
+            if _notified_nag_date.get(mid) == today:
+                continue
+            _notified_nag_date[mid] = today
+            p1d, p2d = m.get("p1_discord_id"), m.get("p2_discord_id")
+            p1n = m.get("p1_name") or "opponent"
+            p2n = m.get("p2_name") or "opponent"
+            dl_str = _fmt_pt(m.get("deadline_at"))
+            await _dm_user(p1d, f"**Async match still pending**: vs **{p2n}**. Deadline: {dl_str}. "
+                                 f"Use `/dm-opponent` to coordinate a time.")
+            await _dm_user(p2d, f"**Async match still pending**: vs **{p1n}**. Deadline: {dl_str}. "
+                                 f"Use `/dm-opponent` to coordinate a time.")
+            nagged += 1
+            await asyncio.sleep(0.2)
+    if nagged:
+        print(f"[TOURNAMENT-NAG] Sent {nagged} pending-match reminders")
 
 
 if __name__ == "__main__":

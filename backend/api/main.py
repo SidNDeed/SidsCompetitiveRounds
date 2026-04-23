@@ -61,8 +61,11 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     print("Competitive ROUNDS API starting up")
     task = asyncio.create_task(queue_cleanup_loop())
+    from tournaments import tournament_tick
+    task_t = asyncio.create_task(tournament_tick())
     yield
     task.cancel()
+    task_t.cancel()
     print("Competitive ROUNDS API shutting down")
 
 
@@ -102,6 +105,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Tournament endpoints (router module).
+from tournaments import router as tournaments_router
+app.include_router(tournaments_router)
 
 
 # ── Version gate ───────────────────────────────────────────────
@@ -382,7 +389,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.23.1"
+LATEST_MOD_VERSION = "1.24.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -820,7 +827,11 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     series_completed = False
 
     if report.is_ranked:
-        # Find active series between these two players (order-independent)
+        # Find active series between these two players (order-independent).
+        # Use the MOST RECENTLY CREATED active series so a player in multiple
+        # tournaments against the same opponent doesn't crash the handler with
+        # MultipleResultsFound. Tournament series are inserted when a match
+        # becomes ready, so "newest active series" = "current match context."
         series_query = (
             select(RankedSeries)
             .where(
@@ -830,6 +841,8 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                     (RankedSeries.player1_id == p2.id) & (RankedSeries.player2_id == p1.id),
                 )
             )
+            .order_by(RankedSeries.created_at.desc())
+            .limit(1)
         )
         series_result = await db.execute(series_query)
         series = series_result.scalar_one_or_none()
@@ -986,6 +999,15 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                     print(f"[ACH] Regicide auto-granted to {winner_steam} for beating Sid in ranked series (+25 gold)")
         except Exception as ex:
             print(f"Regicide auto-grant error: {ex}")
+
+        # Tournament bracket advancement. Noop for non-tournament series.
+        try:
+            if series.is_tournament:
+                from tournaments import advance_tournament_match
+                await advance_tournament_match(db, series.id)
+                await db.commit()
+        except Exception as ex:
+            print(f"[TOURNAMENT] advance_tournament_match error: {ex}")
 
     # Compile gold breakdown for the reporter so the notification can show
     # "+3 gold [XP]  [Series win +5]  [Sweep +1]" type details.

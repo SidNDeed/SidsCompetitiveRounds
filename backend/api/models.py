@@ -354,3 +354,102 @@ class AdminAction(Base):
     target_series_id = Column(UUID(as_uuid=True), nullable=True)
     details = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+# ── Tournaments (migration 047) ──────────────────────────────────────────
+
+class Tournament(Base):
+    __tablename__ = "tournaments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    kind = Column(String(8), nullable=False, default="sync")
+    status = Column(String(16), nullable=False, default="voting")
+    format = Column(String(24), nullable=False, default="single_elim_bo3")
+    default_start_ts = Column(DateTime(timezone=True), nullable=False)
+    scheduled_start_ts = Column(DateTime(timezone=True), nullable=True)
+    voting_closes_at = Column(DateTime(timezone=True), nullable=True)
+    lock_at = Column(DateTime(timezone=True), nullable=False)
+    locked_at = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    min_players = Column(SmallInteger, nullable=False, default=8)
+    max_players = Column(SmallInteger, nullable=False, default=16)
+    prize_tier = Column(String(8), nullable=True)
+    winner_signup_id = Column(UUID(as_uuid=True), nullable=True)
+    runner_up_signup_id = Column(UUID(as_uuid=True), nullable=True)
+    third_place_signup_id = Column(UUID(as_uuid=True), nullable=True)
+    photon_region = Column(String(16), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_by = Column(String(16), nullable=False, default="cron")
+
+
+class TournamentSignup(Base):
+    __tablename__ = "tournament_signups"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tournament_id = Column(UUID(as_uuid=True), ForeignKey("tournaments.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    signed_up_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    is_speculative = Column(Boolean, nullable=False, default=False)
+    penalty_at_signup = Column(Double, nullable=False, default=0)
+    seed = Column(SmallInteger, nullable=True)
+    cached_elo_at_lock = Column(Double, nullable=True)
+    ready_at = Column(DateTime(timezone=True), nullable=True)
+    forfeited = Column(Boolean, nullable=False, default=False)
+    placed_rank = Column(SmallInteger, nullable=True)
+    region_at_signup = Column(String(16), nullable=True)
+
+    __table_args__ = (UniqueConstraint("tournament_id", "player_id"),)
+
+
+class TournamentMatch(Base):
+    __tablename__ = "tournament_matches"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tournament_id = Column(UUID(as_uuid=True), ForeignKey("tournaments.id", ondelete="CASCADE"), nullable=False)
+    round = Column(SmallInteger, nullable=False)
+    bracket_side = Column(String(4), nullable=False, default="W")
+    slot_idx = Column(SmallInteger, nullable=False)
+    p1_signup_id = Column(UUID(as_uuid=True), ForeignKey("tournament_signups.id", ondelete="SET NULL"), nullable=True)
+    p2_signup_id = Column(UUID(as_uuid=True), ForeignKey("tournament_signups.id", ondelete="SET NULL"), nullable=True)
+    prereq_match_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
+    prereq_roles = Column(ARRAY(String), nullable=False, default=list)
+    is_bye = Column(Boolean, nullable=False, default=False)
+    status = Column(String(16), nullable=False, default="pending")
+    deadline_at = Column(DateTime(timezone=True), nullable=True)
+    series_id = Column(UUID(as_uuid=True), ForeignKey("ranked_series.id", ondelete="SET NULL"), nullable=True)
+    winner_signup_id = Column(UUID(as_uuid=True), ForeignKey("tournament_signups.id", ondelete="SET NULL"), nullable=True)
+    ready_deadline_at = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (UniqueConstraint("tournament_id", "round", "bracket_side", "slot_idx"),)
+
+
+class TournamentTimeVote(Base):
+    __tablename__ = "tournament_time_votes"
+
+    tournament_id = Column(UUID(as_uuid=True), ForeignKey("tournaments.id", ondelete="CASCADE"), primary_key=True)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    slot_ts = Column(DateTime(timezone=True), primary_key=True)
+    voted_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class TournamentForceVote(Base):
+    __tablename__ = "tournament_force_votes"
+
+    tournament_id = Column(UUID(as_uuid=True), ForeignKey("tournaments.id", ondelete="CASCADE"), primary_key=True)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    voted_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PlayerTournamentPenalty(Base):
+    __tablename__ = "player_tournament_penalty"
+
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    cached_penalty_pct = Column(Double, nullable=False, default=0)
+    signups_90d = Column(SmallInteger, nullable=False, default=0)
+    missed_90d = Column(SmallInteger, nullable=False, default=0)
+    no_show_last_at = Column(DateTime(timezone=True), nullable=True)
+    latest_signup_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

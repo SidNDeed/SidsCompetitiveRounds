@@ -235,6 +235,41 @@ namespace CompetitiveRounds
             baseUrl = url.TrimEnd('/');
             Plugin.Log.LogInfo($"API client initialized: {baseUrl}");
             CheckModVersion();
+            // Start the tournament heartbeat loop. This runs forever and fires
+            // ready-up heartbeats any time the player has an active tournament
+            // match — regardless of which UI tab is open or whether the
+            // competitive page is even visible. Needed because sync matches
+            // happen in ROUNDS gameplay (outside the F5 menu), and without
+            // this the player's ready_at would go stale during their match
+            // and the server would auto-forfeit their NEXT match.
+            Plugin.Instance.StartCoroutine(TournamentHeartbeatLoop());
+        }
+
+        private static IEnumerator TournamentHeartbeatLoop()
+        {
+            // Small initial delay so the mod finishes initializing before the
+            // first call tries to resolve the local Steam ID.
+            yield return new WaitForSeconds(10f);
+            while (true)
+            {
+                yield return new WaitForSeconds(20f);
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown") continue;
+                // Pull fresh active-match state. FetchMyActiveTournamentMatches
+                // has its own 20s throttle so back-to-back calls are safe.
+                FetchMyActiveTournamentMatches(sid);
+                if (CachedMyActiveTournamentMatches == null) continue;
+                // Heartbeat each tournament once per loop (dedupe by tournament_id
+                // in case the player has multiple active matches somehow).
+                var seen = new HashSet<string>();
+                foreach (var m in CachedMyActiveTournamentMatches)
+                {
+                    if (string.IsNullOrEmpty(m.tournament_id) || seen.Contains(m.tournament_id)) continue;
+                    seen.Add(m.tournament_id);
+                    TournamentReady(m.tournament_id, sid);
+                    yield return new WaitForSeconds(0.2f); // space the requests
+                }
+            }
         }
 
         public static void CheckModVersion()
@@ -2805,6 +2840,535 @@ namespace CompetitiveRounds
                     .Replace("\"", "\\\"")
                     .Replace("\n", "\\n")
                     .Replace("\r", "\\r");
+        }
+
+
+        // ── Tournaments ──────────────────────────────────────────────────────
+        //
+        // Raw-JSON caching + field-level extraction for the Tournaments tab. We
+        // avoid JsonUtility-with-nested-arrays per the codebase convention (see
+        // CLAUDE.md learnings 25). Top-level flat fields are parsed into
+        // TournamentSnapshot; signups/matches/time_slots stay as raw JSON and
+        // are sliced into per-row strings that the UI re-parses lazily.
+
+        public static string CachedTournamentJson;
+        public static TournamentSnapshot CachedTournament;
+        private static float _tournamentRefreshAt;
+
+        [Serializable]
+        public class TournamentSnapshot
+        {
+            public string tournament_id;
+            public string status;            // voting | locked | running | completed | null
+            public string kind;              // sync | async
+            public string default_start_ts;
+            public string scheduled_start_ts;
+            public string lock_at;
+            public string started_at;
+            public string ended_at;
+            public int min_players;
+            public int max_players;
+            public string my_signup_id;
+            public bool my_ready;
+            public float my_penalty_pct;
+            public bool my_discord_linked;
+            public int force_vote_count;
+            public string photon_region;         // tournament's canonical Photon region (null until lock)
+            public string[] my_votes;            // ISO datetimes
+            public string[] time_slot_options;   // ISO datetimes
+            public TimeVoteTally[] time_slot_tallies;
+            public TournamentSignupRow[] signups;
+            public TournamentMatchRow[] matches;
+        }
+
+        [Serializable]
+        public class TimeVoteTally
+        {
+            public string slot_ts;
+            public int votes;
+        }
+
+        [Serializable]
+        public class TournamentSignupRow
+        {
+            public string signup_id;
+            public string steam_id;
+            public string display_name;
+            public bool is_speculative;
+            public int seed;        // 0 until lock
+            public float penalty_at_signup;
+            public bool ready;
+            public bool forfeited;
+            public int placed_rank; // 0 if not placed
+            public string progress_label;  // "WB R2" / "LB R3" / "eliminated WB R2" / "CHAMPION"
+        }
+
+        [Serializable]
+        public class TournamentMatchRow
+        {
+            public string match_id;
+            public int round;
+            public string bracket_side;   // W | TP | L | GF | GF_RESET
+            public int slot_idx;
+            public string p1_signup_id;
+            public string p2_signup_id;
+            public string p1_display_name;
+            public string p2_display_name;
+            public bool is_bye;
+            public string status;         // pending | ready | forfeit | completed | bye_auto
+            public string series_id;
+            public string winner_signup_id;
+            public int p1_series_wins;
+            public int p2_series_wins;
+            public string deadline_at;    // async 7-day match deadline (null for sync)
+        }
+
+        // Tracks which kind (sync | async) the client is currently viewing. Set
+        // by the UI's sub-tab; defaults to sync so existing callers keep the
+        // Phase 1 behavior.
+        public static string TournamentKind = "sync";
+
+        public static void FetchTournamentCurrent(string steamId, bool force = false)
+        {
+            if (!force && Time.unscaledTime < _tournamentRefreshAt) return;
+            _tournamentRefreshAt = Time.unscaledTime + 5f;   // throttle
+            string kindParam = string.IsNullOrEmpty(TournamentKind) ? "sync" : TournamentKind;
+            string q = string.IsNullOrEmpty(steamId) || steamId == "unknown"
+                ? $"?kind={kindParam}"
+                : $"?steam_id={Escape(steamId)}&kind={kindParam}";
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/tournaments/current{q}",
+                (success, response) =>
+                {
+                    if (!success || string.IsNullOrEmpty(response)) return;
+                    try
+                    {
+                        CachedTournamentJson = response;
+                        CachedTournament = ParseTournament(response);
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception e)
+                    {
+                        Plugin.Log.LogWarning($"[TOURNAMENT] parse failed: {e.Message}");
+                    }
+                }
+            ));
+        }
+
+        private static TournamentSnapshot ParseTournament(string json)
+        {
+            var t = new TournamentSnapshot();
+            t.tournament_id = ExtractString(json, "tournament_id");
+            t.status = ExtractString(json, "status");
+            t.kind = ExtractString(json, "kind");
+            t.default_start_ts = ExtractString(json, "default_start_ts");
+            t.scheduled_start_ts = ExtractString(json, "scheduled_start_ts");
+            t.lock_at = ExtractString(json, "lock_at");
+            t.started_at = ExtractString(json, "started_at");
+            t.ended_at = ExtractString(json, "ended_at");
+            t.min_players = ExtractInt(json, "min_players", 8);
+            t.max_players = ExtractInt(json, "max_players", 16);
+            t.my_signup_id = ExtractString(json, "my_signup_id");
+            t.my_ready = ExtractBool(json, "my_ready");
+            t.my_penalty_pct = ExtractFloat(json, "my_penalty_pct");
+            t.my_discord_linked = ExtractBool(json, "my_discord_linked");
+            t.force_vote_count = ExtractInt(json, "force_vote_count", 0);
+            t.photon_region = ExtractString(json, "photon_region");
+            t.my_votes = ExtractStringArray(json, "my_votes");
+            t.time_slot_options = ExtractStringArray(json, "time_slot_options");
+            t.time_slot_tallies = ExtractObjectArray(json, "time_slot_tallies",
+                raw => new TimeVoteTally
+                {
+                    slot_ts = ExtractString(raw, "slot_ts"),
+                    votes = ExtractInt(raw, "votes", 0),
+                });
+            t.signups = ExtractObjectArray(json, "signups", raw => new TournamentSignupRow
+            {
+                signup_id = ExtractString(raw, "signup_id"),
+                steam_id = ExtractString(raw, "steam_id"),
+                display_name = ExtractString(raw, "display_name"),
+                is_speculative = ExtractBool(raw, "is_speculative"),
+                seed = ExtractInt(raw, "seed", 0),
+                penalty_at_signup = ExtractFloat(raw, "penalty_at_signup"),
+                ready = ExtractBool(raw, "ready"),
+                forfeited = ExtractBool(raw, "forfeited"),
+                placed_rank = ExtractInt(raw, "placed_rank", 0),
+                progress_label = ExtractString(raw, "progress_label"),
+            });
+            t.matches = ExtractObjectArray(json, "matches", raw => new TournamentMatchRow
+            {
+                match_id = ExtractString(raw, "match_id"),
+                round = ExtractInt(raw, "round", 0),
+                bracket_side = ExtractString(raw, "bracket_side"),
+                slot_idx = ExtractInt(raw, "slot_idx", 0),
+                p1_signup_id = ExtractString(raw, "p1_signup_id"),
+                p2_signup_id = ExtractString(raw, "p2_signup_id"),
+                p1_display_name = ExtractString(raw, "p1_display_name"),
+                p2_display_name = ExtractString(raw, "p2_display_name"),
+                is_bye = ExtractBool(raw, "is_bye"),
+                status = ExtractString(raw, "status"),
+                series_id = ExtractString(raw, "series_id"),
+                winner_signup_id = ExtractString(raw, "winner_signup_id"),
+                p1_series_wins = ExtractInt(raw, "p1_series_wins", 0),
+                p2_series_wins = ExtractInt(raw, "p2_series_wins", 0),
+                deadline_at = ExtractString(raw, "deadline_at"),
+            });
+            return t;
+        }
+
+        // Small, forgiving JSON extractors. NOT a full parser — they handle the
+        // shapes we control (API response) and ignore the rest.
+        private static string ExtractString(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            int i = json.IndexOf("\"" + key + "\"");
+            if (i < 0) return null;
+            int c = json.IndexOf(':', i);
+            if (c < 0) return null;
+            int p = c + 1;
+            while (p < json.Length && (json[p] == ' ' || json[p] == '\t')) p++;
+            if (p >= json.Length) return null;
+            if (json[p] == 'n' && json.Length >= p + 4 && json.Substring(p, 4) == "null") return null;
+            if (json[p] != '"') return null;
+            int start = p + 1;
+            var sb = new System.Text.StringBuilder();
+            for (int k = start; k < json.Length; k++)
+            {
+                char ch = json[k];
+                if (ch == '\\' && k + 1 < json.Length) { sb.Append(json[k + 1]); k++; continue; }
+                if (ch == '"') break;
+                sb.Append(ch);
+            }
+            return sb.ToString();
+        }
+
+        private static int ExtractInt(string json, string key, int def)
+        {
+            if (string.IsNullOrEmpty(json)) return def;
+            int i = json.IndexOf("\"" + key + "\"");
+            if (i < 0) return def;
+            int c = json.IndexOf(':', i);
+            if (c < 0) return def;
+            int p = c + 1;
+            while (p < json.Length && (json[p] == ' ' || json[p] == '\t')) p++;
+            if (p >= json.Length) return def;
+            int e = p;
+            while (e < json.Length && (char.IsDigit(json[e]) || json[e] == '-')) e++;
+            if (e == p) return def;
+            int v; return int.TryParse(json.Substring(p, e - p), out v) ? v : def;
+        }
+
+        private static float ExtractFloat(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json)) return 0f;
+            int i = json.IndexOf("\"" + key + "\"");
+            if (i < 0) return 0f;
+            int c = json.IndexOf(':', i);
+            if (c < 0) return 0f;
+            int p = c + 1;
+            while (p < json.Length && (json[p] == ' ' || json[p] == '\t')) p++;
+            if (p >= json.Length) return 0f;
+            int e = p;
+            while (e < json.Length && (char.IsDigit(json[e]) || json[e] == '-' || json[e] == '.' || json[e] == 'e' || json[e] == 'E' || json[e] == '+')) e++;
+            if (e == p) return 0f;
+            float v; return float.TryParse(json.Substring(p, e - p), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v) ? v : 0f;
+        }
+
+        private static bool ExtractBool(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json)) return false;
+            int i = json.IndexOf("\"" + key + "\"");
+            if (i < 0) return false;
+            int c = json.IndexOf(':', i);
+            if (c < 0) return false;
+            int p = c + 1;
+            while (p < json.Length && (json[p] == ' ' || json[p] == '\t')) p++;
+            return p + 4 <= json.Length && json.Substring(p, 4) == "true";
+        }
+
+        private static string[] ExtractStringArray(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json)) return Array.Empty<string>();
+            int i = json.IndexOf("\"" + key + "\"");
+            if (i < 0) return Array.Empty<string>();
+            int b = json.IndexOf('[', i);
+            if (b < 0) return Array.Empty<string>();
+            int e = json.IndexOf(']', b);
+            if (e < 0) return Array.Empty<string>();
+            string inner = json.Substring(b + 1, e - b - 1);
+            var list = new List<string>();
+            int p = 0;
+            while (p < inner.Length)
+            {
+                int q = inner.IndexOf('"', p);
+                if (q < 0) break;
+                int q2 = inner.IndexOf('"', q + 1);
+                if (q2 < 0) break;
+                list.Add(inner.Substring(q + 1, q2 - q - 1));
+                p = q2 + 1;
+            }
+            return list.ToArray();
+        }
+
+        private static T[] ExtractObjectArray<T>(string json, string key, Func<string, T> parse)
+        {
+            if (string.IsNullOrEmpty(json)) return Array.Empty<T>();
+            int i = json.IndexOf("\"" + key + "\"");
+            if (i < 0) return Array.Empty<T>();
+            int b = json.IndexOf('[', i);
+            if (b < 0) return Array.Empty<T>();
+            // Scan forward, tracking brace depth, collect { ... } segments at depth 1.
+            var list = new List<T>();
+            int depth = 0;
+            int objStart = -1;
+            for (int k = b; k < json.Length; k++)
+            {
+                char ch = json[k];
+                if (ch == '[') { depth++; continue; }
+                if (ch == ']') { depth--; if (depth == 0) break; continue; }
+                if (ch == '{')
+                {
+                    if (objStart < 0) objStart = k;
+                    depth++;
+                    continue;
+                }
+                if (ch == '}')
+                {
+                    depth--;
+                    if (depth == 1 && objStart >= 0)
+                    {
+                        list.Add(parse(json.Substring(objStart, k - objStart + 1)));
+                        objStart = -1;
+                    }
+                }
+            }
+            return list.ToArray();
+        }
+
+        public static void TournamentSignup(string tournamentId, string steamId, string displayName)
+        {
+            // Include the client's current Photon region so the server can pick the
+            // tournament's canonical region at lock time (mode of all signups'
+            // regions). Auto-connect then pins every match to that region.
+            string region = "";
+            try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            string body = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{Escape(displayName ?? steamId)}\",\"region\":\"{Escape(region)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/tournaments/{tournamentId}/signup", body,
+                (s, r) =>
+                {
+                    if (s) { FetchTournamentCurrent(steamId, force: true); CompetitiveUI.ShowNotification("Signed up for tournament", new Color(0.4f, 1f, 0.5f)); }
+                    else { CompetitiveUI.ShowNotification(ExtractErrorDetail(r) ?? "Signup failed", new Color(1f, 0.4f, 0.4f)); }
+                }));
+        }
+
+        public static void TournamentUnsignup(string tournamentId, string steamId)
+        {
+            string body = $"{{\"steam_id\":\"{Escape(steamId)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/tournaments/{tournamentId}/unsignup", body,
+                (s, r) =>
+                {
+                    if (s) { FetchTournamentCurrent(steamId, force: true); CompetitiveUI.ShowNotification("Left tournament signup", new Color(0.9f, 0.9f, 0.4f)); }
+                    else { CompetitiveUI.ShowNotification(ExtractErrorDetail(r) ?? "Failed", new Color(1f, 0.4f, 0.4f)); }
+                }));
+        }
+
+        public static void TournamentTimeVote(string tournamentId, string steamId, string[] slotIsos)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{\"steam_id\":\"").Append(Escape(steamId)).Append("\",\"slot_ts\":[");
+            for (int i = 0; i < slotIsos.Length; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append('"').Append(Escape(slotIsos[i])).Append('"');
+            }
+            sb.Append("]}");
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/tournaments/{tournamentId}/time-vote", sb.ToString(),
+                (s, r) => { if (s) FetchTournamentCurrent(steamId, force: true); }));
+        }
+
+        public static void TournamentForceStartVote(string tournamentId, string steamId)
+        {
+            string body = $"{{\"steam_id\":\"{Escape(steamId)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/tournaments/{tournamentId}/force-start-vote", body,
+                (s, r) => { if (s) FetchTournamentCurrent(steamId, force: true); }));
+        }
+
+        public static void TournamentReady(string tournamentId, string steamId)
+        {
+            string body = $"{{\"steam_id\":\"{Escape(steamId)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/tournaments/{tournamentId}/ready", body,
+                (s, r) => { if (s) FetchTournamentCurrent(steamId, force: true); }));
+        }
+
+        private static string ExtractErrorDetail(string response)
+        {
+            if (string.IsNullOrEmpty(response)) return null;
+            try
+            {
+                // FastAPI returns {"detail":"..."} on HTTPException
+                return ExtractString(response, "detail");
+            }
+            catch { return null; }
+        }
+
+
+        // ── Tournament history (per-player trophy counts + recent tournaments) ─
+        //
+        // Populated lazily: FetchPlayerTournaments hits /api/v1/tournaments/players/{steam}/tournaments
+        // and stores the parsed PlayerTournamentHistory keyed by steam_id. Used by the
+        // Leaderboard click-a-player detail (shows trophy summary for the viewed player)
+        // and the Tournaments tab (shows the local player's own history line).
+
+        [Serializable]
+        public class PlayerTournamentHistory
+        {
+            public string steam_id;
+            public int winner_count;
+            public int runner_up_count;
+            public int third_place_count;
+            public int participant_count;
+            public PlayerTournamentEntry[] recent;
+        }
+
+        [Serializable]
+        public class PlayerTournamentEntry
+        {
+            public string tournament_id;
+            public string ended_at;
+            public int placed_rank;
+            public string kind;
+            public int signup_count;
+            public string winner_display_name;
+        }
+
+        public static readonly Dictionary<string, PlayerTournamentHistory> CachedPlayerTournaments
+            = new Dictionary<string, PlayerTournamentHistory>();
+
+        public static void FetchPlayerTournaments(string steamId, Action onDone = null)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/tournaments/players/{Escape(steamId)}/tournaments?limit=8",
+                (success, response) =>
+                {
+                    if (!success || string.IsNullOrEmpty(response)) return;
+                    try
+                    {
+                        var h = new PlayerTournamentHistory
+                        {
+                            steam_id = ExtractString(response, "steam_id") ?? steamId,
+                            winner_count = ExtractInt(response, "winner_count", 0),
+                            runner_up_count = ExtractInt(response, "runner_up_count", 0),
+                            third_place_count = ExtractInt(response, "third_place_count", 0),
+                            participant_count = ExtractInt(response, "participant_count", 0),
+                            recent = ExtractObjectArray(response, "recent", raw => new PlayerTournamentEntry
+                            {
+                                tournament_id = ExtractString(raw, "tournament_id"),
+                                ended_at = ExtractString(raw, "ended_at"),
+                                placed_rank = ExtractInt(raw, "placed_rank", 0),
+                                kind = ExtractString(raw, "kind"),
+                                signup_count = ExtractInt(raw, "signup_count", 0),
+                                winner_display_name = ExtractString(raw, "winner_display_name"),
+                            }),
+                        };
+                        CachedPlayerTournaments[steamId] = h;
+                        NativeUI.MarkDirty();
+                        onDone?.Invoke();
+                    }
+                    catch (Exception e) { Plugin.Log.LogWarning($"[TOURNAMENT-HIST] parse: {e.Message}"); }
+                }
+            ));
+        }
+
+        // "Am I in a tournament match right now?" — polled every 20s regardless
+        // of tab so the TOURNAMENT GAME indicator at the top of the competitive
+        // page can light up when in a room with a tournament opponent. Spans
+        // both sync and async so a player in both doesn't miss either.
+        [Serializable]
+        public class ActiveTournamentMatch
+        {
+            public string tournament_id;
+            public string kind;
+            public string match_id;
+            public string status;
+            public string bracket_side;
+            public int round;
+            public string opponent_steam_id;
+            public string opponent_display_name;
+        }
+        public static List<ActiveTournamentMatch> CachedMyActiveTournamentMatches = new List<ActiveTournamentMatch>();
+        private static float _myActiveMatchesRefreshAt;
+        public static void FetchMyActiveTournamentMatches(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            if (Time.unscaledTime < _myActiveMatchesRefreshAt) return;
+            _myActiveMatchesRefreshAt = Time.unscaledTime + 20f;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/tournaments/my-active-matches?steam_id={Escape(steamId)}",
+                (success, response) =>
+                {
+                    if (!success || string.IsNullOrEmpty(response)) return;
+                    try
+                    {
+                        var list = new List<ActiveTournamentMatch>();
+                        foreach (var raw in ExtractObjectArray(response, "matches", r => r))
+                        {
+                            list.Add(new ActiveTournamentMatch
+                            {
+                                tournament_id = ExtractString(raw, "tournament_id"),
+                                kind = ExtractString(raw, "kind"),
+                                match_id = ExtractString(raw, "match_id"),
+                                status = ExtractString(raw, "status"),
+                                bracket_side = ExtractString(raw, "bracket_side"),
+                                round = ExtractInt(raw, "round", 0),
+                                opponent_steam_id = ExtractString(raw, "opponent_steam_id"),
+                                opponent_display_name = ExtractString(raw, "opponent_display_name"),
+                            });
+                        }
+                        CachedMyActiveTournamentMatches = list;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception e) { Plugin.Log.LogWarning($"[TOURNAMENT-ACTIVE] parse: {e.Message}"); }
+                }
+            ));
+        }
+
+        // Recent completed tournaments (site-wide history), used by the Tournaments
+        // tab's "Recent Tournaments" section. Returns a JSON array which we
+        // slice row-by-row.
+        public static PlayerTournamentEntry[] CachedSiteTournamentHistory;
+        public static string[] CachedSiteTournamentHistoryNames;  // aligned with ^, each entry's winner_display_name
+        public static void FetchSiteTournamentHistory()
+        {
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/tournaments/history?limit=12",
+                (success, response) =>
+                {
+                    if (!success || string.IsNullOrEmpty(response)) return;
+                    try
+                    {
+                        // /tournaments/history returns a bare array [ {...}, ... ].
+                        // Reuse ExtractObjectArray by wrapping it under a synthetic key.
+                        string wrapped = "{\"_hist\":" + response + "}";
+                        CachedSiteTournamentHistory = ExtractObjectArray(wrapped, "_hist", raw => new PlayerTournamentEntry
+                        {
+                            tournament_id = ExtractString(raw, "tournament_id"),
+                            ended_at = ExtractString(raw, "ended_at"),
+                            placed_rank = 0,
+                            kind = ExtractString(raw, "kind"),
+                            signup_count = ExtractInt(raw, "signup_count", 0),
+                            winner_display_name = ExtractString(raw, "winner_display_name"),
+                        });
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception e) { Plugin.Log.LogWarning($"[TOURNAMENT-SITEHIST] parse: {e.Message}"); }
+                }
+            ));
         }
     }
 }
