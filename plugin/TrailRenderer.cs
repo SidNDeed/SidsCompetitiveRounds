@@ -427,7 +427,10 @@ namespace CompetitiveRounds
         void OnDisable() { try { PhotonNetwork.RemoveCallbackTarget(this); } catch { } }
 
         public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps)
-            => TrailCosmetic.OnPlayerPropertiesChanged(target, changedProps);
+        {
+            try { TrailCosmetic.OnPlayerPropertiesChanged(target, changedProps); } catch { }
+            try { PlayerColorCosmetic.OnPlayerPropertiesChanged(target, changedProps); } catch { }
+        }
 
         // Unused interface methods — IInRoomCallbacks requires all of them.
         public void OnPlayerEnteredRoom(Photon.Realtime.Player newPlayer) { }

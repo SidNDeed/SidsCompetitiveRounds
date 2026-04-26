@@ -129,6 +129,8 @@ async def on_ready():
     if not poll_recent_series.is_running(): poll_recent_series.start()
     if not sync_roles_periodic.is_running(): sync_roles_periodic.start()
     if not poll_queue_beacon.is_running(): poll_queue_beacon.start()
+    if not poll_team_queue_beacon.is_running(): poll_team_queue_beacon.start()
+    if not poll_team_recent_series.is_running(): poll_team_recent_series.start()
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
@@ -560,6 +562,124 @@ async def poll_queue_beacon():
     except Exception as e:
         print(f"Queue beacon error: {e}")
 
+
+# ── 2v2 Queue Beacon ─────────────────────────────────────────────
+# Posts in the same channel as the 1v1 beacon. Different emoji + " for 2v2!"
+# wording so it's distinguishable in a glance. Includes the running queue size
+# (X/4) so people can see if joining now will fill the lobby.
+seen_team_queue_joins = {}  # steam_id -> timestamp
+
+@tasks.loop(seconds=15)
+async def poll_team_queue_beacon():
+    if not QUEUE_BEACON_CHANNEL_ID:
+        return
+    try:
+        now = datetime.utcnow()
+        expired = [k for k, v in seen_team_queue_joins.items() if (now - v).total_seconds() > 300]
+        for k in expired:
+            del seen_team_queue_joins[k]
+
+        data = await api_get("/team/queue/recent-joins?seconds=20")
+        if not data or not data.get("joins"):
+            return
+        qsize = data.get("queue_size", 0)
+        for j in data["joins"]:
+            sid = j["steam_id"]
+            if sid in seen_team_queue_joins:
+                continue
+            seen_team_queue_joins[sid] = now
+            name = j["display_name"] or sid
+            rating = j.get("rating", 1500)
+            channel = bot.get_channel(QUEUE_BEACON_CHANNEL_ID)
+            if not channel:
+                try:
+                    channel = await bot.fetch_channel(QUEUE_BEACON_CHANNEL_ID)
+                except:
+                    continue
+            await channel.send(
+                f"🎯 **{name}** ({rating}) is searching for **2v2** — **{qsize}/4** queued!"
+            )
+    except Exception as e:
+        print(f"Team queue beacon error: {e}")
+
+
+# ── 2v2 Series Result Posting ─────────────────────────────────────
+seen_team_series = set()
+
+@tasks.loop(seconds=30)
+async def poll_team_recent_series():
+    """Posts an embed in SERIES_LOG_CHANNEL when a 2v2 BO3 series completes.
+    Mirrors the 1v1 series log path. De-dupes via in-memory seen_team_series
+    set; capped at 500 entries (older ones aren't relevant after 24h)."""
+    try:
+        data = await api_get("/team/series/recent?minutes=2")
+        if not data or not data.get("series"):
+            return
+        for s in data["series"]:
+            sid = s["series_id"]
+            if sid in seen_team_series:
+                continue
+            seen_team_series.add(sid)
+            if len(seen_team_series) > 500:
+                seen_team_series.clear()
+            for guild in bot.guilds:
+                try:
+                    await log_team_series_result(guild, s)
+                except Exception as e:
+                    print(f"Team series log error: {e}")
+    except Exception as e:
+        print(f"poll_team_recent_series error: {e}")
+
+
+@poll_team_recent_series.before_loop
+async def before_team_series_poll():
+    await bot.wait_until_ready()
+    data = await api_get("/team/series/recent?minutes=10")
+    if data and data.get("series"):
+        for s in data["series"]:
+            seen_team_series.add(s["series_id"])
+    print(f"Pre-loaded {len(seen_team_series)} recent 2v2 series")
+
+
+async def log_team_series_result(guild, s):
+    if SERIES_LOG_CHANNEL_ID <= 0:
+        return
+    ch = guild.get_channel(SERIES_LOG_CHANNEL_ID)
+    if not ch:
+        return
+
+    winner = s["winner_team"]
+    if winner == 1:
+        winners = (s["t1a"], s["t1b"]); losers = (s["t2a"], s["t2b"])
+        score = f"{s['t1_series_wins']}-{s['t2_series_wins']}"
+    else:
+        winners = (s["t2a"], s["t2b"]); losers = (s["t1a"], s["t1b"])
+        score = f"{s['t2_series_wins']}-{s['t1_series_wins']}"
+
+    def fmt_player(p):
+        rc = p.get("rating_change", 0) or 0
+        rc_s = f"+{rc:.0f}" if rc > 0 else f"{rc:.0f}"
+        return f"**{p['name']}** {p['rating']:.0f} ({rc_s})"
+
+    embed = discord.Embed(title="⚔️ 2v2 Series Complete", color=discord.Color.gold())
+    embed.description = (
+        f"👑 **{winners[0]['name']} + {winners[1]['name']}** "
+        f"def. **{losers[0]['name']} + {losers[1]['name']}** "
+        f"`{score}`"
+    )
+    embed.add_field(name="Winners",
+                    value=f"{fmt_player(winners[0])}\n{fmt_player(winners[1])}",
+                    inline=True)
+    embed.add_field(name="Losers",
+                    value=f"{fmt_player(losers[0])}\n{fmt_player(losers[1])}",
+                    inline=True)
+    try:
+        if s.get("completed_at"):
+            embed.timestamp = datetime.fromisoformat(s["completed_at"].replace("Z", "+00:00"))
+    except Exception:
+        pass
+    await ch.send(embed=embed)
+
 # ── Series Polling (30s) ─────────────────────────────────────────
 
 @tasks.loop(seconds=30)
@@ -647,23 +767,85 @@ async def sync_roles_periodic():
 @sync_roles_periodic.before_loop
 async def before_sync(): await bot.wait_until_ready()
 
+LB_PAGE_SIZE = 20
+LB_TOTAL_FETCH = 100  # we cache this many; pages of 20 ⇒ up to 5 pages
+
+
+def _build_lb_embed(entries: list, total_players: int, page: int, total_pages: int) -> discord.Embed:
+    """Render one page of the auto-posted leaderboard. Pure function so the
+    paginator view + initial post share the rendering."""
+    lines = []
+    start = page * LB_PAGE_SIZE
+    end = min(start + LB_PAGE_SIZE, len(entries))
+    for e in entries[start:end]:
+        emoji = rank_emoji(get_rank_name(e["rating"]))
+        lines.append(f"`#{e['rank']:>3}` {emoji} **{e['display_name']}** — {e['rating']} ({e['wins']}W/{e['losses']}L)")
+    embed = discord.Embed(
+        title="🏆 Ranked Leaderboard",
+        description="\n".join(lines) if lines else "(no players)",
+        color=discord.Color.gold(),
+        timestamp=datetime.utcnow(),
+    )
+    embed.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} ranked players • Auto-updated")
+    return embed
+
+
+class LeaderboardPaginator(discord.ui.View):
+    """Prev/Next buttons for the auto-posted leaderboard. Caches the entries list
+    so page flips don't re-hit the API. Long timeout (24h) — refreshed on every
+    publish_lb tick (sync_roles_periodic loop, every 30 min) so users always have
+    a working set of buttons within an hour of clicking."""
+    def __init__(self, entries: list, total_players: int):
+        super().__init__(timeout=86400)
+        self.entries = entries
+        self.total_players = total_players
+        self.total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
+        self.page = 0
+
+    def _update_buttons(self):
+        # Disable Prev on first page, Next on last page. Children list order = button order.
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.label and child.label.startswith("◀"):
+                    child.disabled = (self.page <= 0)
+                elif child.label and child.label.startswith("Next"):
+                    child.disabled = (self.page >= self.total_pages - 1)
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev(self, interaction: discord.Interaction, _: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        self._update_buttons()
+        await interaction.response.edit_message(
+            embed=_build_lb_embed(self.entries, self.total_players, self.page, self.total_pages),
+            view=self,
+        )
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def nxt(self, interaction: discord.Interaction, _: discord.ui.Button):
+        self.page = min(self.total_pages - 1, self.page + 1)
+        self._update_buttons()
+        await interaction.response.edit_message(
+            embed=_build_lb_embed(self.entries, self.total_players, self.page, self.total_pages),
+            view=self,
+        )
+
+
 async def publish_lb(guild):
     if LEADERBOARD_CHANNEL_ID <= 0: return
     ch = guild.get_channel(LEADERBOARD_CHANNEL_ID)
     if not ch: return
-    data = await api_get("/leaderboard?limit=20&min_matches=1")
+    data = await api_get(f"/leaderboard?limit={LB_TOTAL_FETCH}&min_matches=1")
     if not data or not data.get("entries"): return
-    lines = []
-    for e in data["entries"]:
-        emoji = rank_emoji(get_rank_name(e["rating"]))
-        lines.append(f"`#{e['rank']:>2}` {emoji} **{e['display_name']}** — {e['rating']} ({e['wins']}W/{e['losses']}L)")
-    embed = discord.Embed(title="🏆 Ranked Leaderboard", description="\n".join(lines),
-                          color=discord.Color.gold(), timestamp=datetime.utcnow())
-    embed.set_footer(text=f"{data.get('total_players',0)} ranked players • Auto-updated")
+    entries = data["entries"]
+    total_players = data.get("total_players", 0)
+    total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
+    embed = _build_lb_embed(entries, total_players, 0, total_pages)
+    view = LeaderboardPaginator(entries, total_players)
+    view._update_buttons()
     async for msg in ch.history(limit=5):
         if msg.author == bot.user and msg.embeds and "Ranked Leaderboard" in (msg.embeds[0].title or ""):
-            await msg.edit(embed=embed); return
-    await ch.send(embed=embed)
+            await msg.edit(embed=embed, view=view); return
+    await ch.send(embed=embed, view=view)
 
 # ── Anti-cheat flag relay ────────────────────────────────────────
 # Tracks the most-recently-posted flag ID so we don't repeat on bot restart.

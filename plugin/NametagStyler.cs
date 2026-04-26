@@ -44,6 +44,22 @@ namespace CompetitiveRounds
                 { "nametag_color_green",  ("<color=#77DD88>", "</color>") },
                 { "nametag_color_pink",   ("<color=#FF99CC>", "</color>") },
 
+                // Neon — premium tier (500g). Rich-text color is a more saturated
+                // version of the regular color set; the matching glow side fires
+                // automatically for modded clients via GetGlowColor below. Subgroup
+                // is "color" so a Neon and a regular Color name can't both equip.
+                { "nametag_neon_pink",   ("<color=#FF1F8C>", "</color>") },
+                { "nametag_neon_cyan",   ("<color=#1FF0FF>", "</color>") },
+                { "nametag_neon_lime",   ("<color=#5BFF1F>", "</color>") },
+                { "nametag_neon_orange", ("<color=#FF7A1F>", "</color>") },
+                { "nametag_neon_violet", ("<color=#D420FF>", "</color>") },
+                { "nametag_neon_toxic",  ("<color=#A8FF1F>", "</color>") },
+                // The "Steam glow yellow" the user remembers — a near-white pale yellow
+                // that reads as a soft luminous glow when ROUNDS' TMP renders it. People
+                // used this exact hex in their Steam display name (raw <color> tag) before
+                // we started stripping rich-text on incoming nicknames.
+                { "nametag_neon_glowyellow", ("<color=#FFFB9D>", "</color>") },
+
                 // Glows are NOT in this map. Inline <mark> was too flat/underwhelming and
                 // leaked a visible rectangle to non-modded clients. Glow is now applied
                 // locally on modded clients only, via NametagGlowRenderer which clones the
@@ -77,6 +93,15 @@ namespace CompetitiveRounds
                 case "nametag_glow_blue": return new Color(0.27f, 0.53f, 1.00f, 1f);
                 case "nametag_glow_gold": return new Color(1.00f, 0.80f, 0.27f, 1f);
                 case "nametag_glow_pink": return new Color(1.00f, 0.53f, 0.80f, 1f);
+                // Neon items double as their own glow source. Brighter / more saturated
+                // than the regular glow set so they read as "neon" rather than just tinted.
+                case "nametag_neon_pink":   return new Color(1.00f, 0.12f, 0.55f, 1f);
+                case "nametag_neon_cyan":   return new Color(0.12f, 0.94f, 1.00f, 1f);
+                case "nametag_neon_lime":   return new Color(0.36f, 1.00f, 0.12f, 1f);
+                case "nametag_neon_orange": return new Color(1.00f, 0.48f, 0.12f, 1f);
+                case "nametag_neon_violet": return new Color(0.83f, 0.13f, 1.00f, 1f);
+                case "nametag_neon_toxic":  return new Color(0.66f, 1.00f, 0.12f, 1f);
+                case "nametag_neon_glowyellow": return new Color(1.00f, 0.98f, 0.61f, 1f);
                 default: return Color.clear;
             }
         }
@@ -88,6 +113,11 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(sku)) return null;
             if (sku.StartsWith("nametag_color_",    StringComparison.OrdinalIgnoreCase)) return "color";
+            // Neon items occupy the "color" slot — equipping a neon swaps any plain
+            // color name out (and vice versa). Their glow side fires for free via
+            // GetGlowColor without colliding with the separate "glow" subgroup, so
+            // a player can stack a Neon + a separate plain Glow if they want to.
+            if (sku.StartsWith("nametag_neon_",     StringComparison.OrdinalIgnoreCase)) return "color";
             if (sku.StartsWith("nametag_glow_",     StringComparison.OrdinalIgnoreCase)) return "glow";
             if (sku.StartsWith("nametag_size_",     StringComparison.OrdinalIgnoreCase)) return "size";
             if (sku.StartsWith("nametag_typeface_", StringComparison.OrdinalIgnoreCase)) return "typeface";
@@ -153,7 +183,14 @@ namespace CompetitiveRounds
                 new[] { "nametag_font_caps", "nametag_font_smallcaps", "nametag_font_spaced" },
                 new[] { "nametag_size_smaller", "nametag_size_bigger", "nametag_size_huge" },
                 new[] { "nametag_color_red", "nametag_color_cyan", "nametag_color_gold",
-                        "nametag_color_purple", "nametag_color_green", "nametag_color_pink" },
+                        "nametag_color_purple", "nametag_color_green", "nametag_color_pink",
+                        // Neon items occupy the color slot (single-active vs plain colors)
+                        // and ALSO drive the glow side via GetGlowColor — so they need to
+                        // appear in this color-wrapping layer or the rich-text color tag
+                        // never gets emitted into NickName and the name reads as plain white.
+                        "nametag_neon_pink", "nametag_neon_cyan", "nametag_neon_lime",
+                        "nametag_neon_orange", "nametag_neon_violet", "nametag_neon_toxic",
+                        "nametag_neon_glowyellow" },
                 new[] { "nametag_strike" },
                 new[] { "nametag_underline" },
                 new[] { "nametag_italic" },
@@ -181,9 +218,16 @@ namespace CompetitiveRounds
         public static string GetActiveGlowSku(List<string> activeSkus)
         {
             if (activeSkus == null) return "";
+            // Plain glow items take precedence (they're in the dedicated 'glow'
+            // subgroup), but if none is equipped, an active neon doubles as the
+            // glow source.
             foreach (var s in activeSkus)
                 if (!string.IsNullOrEmpty(s)
                     && s.StartsWith("nametag_glow_", StringComparison.OrdinalIgnoreCase))
+                    return s;
+            foreach (var s in activeSkus)
+                if (!string.IsNullOrEmpty(s)
+                    && s.StartsWith("nametag_neon_", StringComparison.OrdinalIgnoreCase))
                     return s;
             return "";
         }

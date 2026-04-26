@@ -1,5 +1,40 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.0 — Body colors, neon nametags, FPS tracking, polish
+
+Non-mandatory update.
+
+### Body Color shop tab
+- New **Body Color** category in the F5 Shop. Override the default orange/blue team color with a tint of your choice. Visible to everyone with the mod.
+- 21 colors across 4 tiers — 10 × 3000g solid (Crimson, Emerald, Sapphire, Amethyst, Amber, Rose, Teal, Charcoal, Ivory, Slate); 5 × 4000g jewel/metallic (Obsidian, Mint, Lavender, Cobalt, Sunset); 4 × 5000g neons (Pink, Lime, Cyan, Violet); 2 × 8000g animated specials — **Prismatic** cycles the rainbow during combat, **Chrome** does a soft shifting cool-grey.
+- Cosmetic-aware tinting filters out the face / gun / block-orb / cosmetic trails so you don't end up looking like an outline. Only what was originally team-colored gets repainted.
+- Colors apply from the moment you spawn (pick phase #1 included), not just at combat start.
+- Re-equipping mid-match swaps cleanly without a relog — restores the previous tint then applies the new one.
+- New Settings toggle **`Custom player body colors: ON / OFF`** for anyone who finds the cross-player tints distracting; off = everyone reverts to vanilla orange/blue locally.
+
+### Neon nametag tier
+- 7 new **Neon** name styles at 500g each (Pink, Cyan, Lime, Orange, Violet, Toxic, Glow Yellow).
+- Brighter than the regular color set, AND each carries a matching SDF-glow halo (visible to other modded players via the existing glow renderer; non-modded players still see the bright color via Photon NickName rich-text).
+- Single-active within the color slot — equipping a Neon swaps any plain color out (and vice versa). The glow side rides for free, so you can still stack a separate plain Glow halo on top in a different color.
+- Sort order in the Name Styles section now clusters Neons together as a premium block instead of interleaving them alphabetically with the 100g colors.
+
+### FPS in match history
+- Average FPS for both players is now captured per match and shown in the History row. Player side renders blue, opponent side red — same color theme as the cards/opp panel below.
+- Lives in its own dedicated field next to the opponent name so it doesn't crash into long usernames.
+- Opponent FPS only fills in if your opponent also has v1.25+; older builds report a `-` for that side.
+
+### Block debug overlay (opt-in)
+- New Settings toggle **`Block debug overlay`**. When on, a corner panel during matches shows live counters for block activations vs successful absorbs vs deduped raw events, plus per-hit timing classification (`TOO SLOW`, `TOO EARLY`, `unblockable?`, `no recent block`) so you can see exactly why a particular block didn't land. Default off.
+
+### Misc
+- **Leaderboard** now shows the top 100 players on the first page (was 50). Pagination kicks in past 100.
+- **Discord auto-leaderboard** expanded to top 100 with `◀ Prev` / `Next ▶` buttons (20/page, 5 pages).
+- **Immovable Object achievement** no longer false-flags when you press Enter and type in chat. The input check is now gated on whether the chat overlay or F5 menu has focus.
+
+### Backend / data
+- New `matches.p1_fps_avg` / `p2_fps_avg` columns (migration 052).
+- 21 player_color shop items (migration 054), 7 neon nametag items (migration 056).
+
 ## v1.24.0 — Automated tournaments (Phase 1 + Phase 2)
 
 Non-mandatory update. Older clients still work against the live API — they just don't see the Tournaments tab or the auto-connect flow.

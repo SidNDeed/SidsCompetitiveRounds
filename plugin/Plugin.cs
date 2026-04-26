@@ -20,7 +20,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.24.0";
+        public const string ModVersion = "1.25.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -35,10 +35,19 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowIngameChat;
         internal static ConfigEntry<bool> ShowTrails;
+        internal static ConfigEntry<bool> ShowBlockDebug;
+        internal static ConfigEntry<bool> ShowPlayerColors;
         // Preferred timezone for tournament time display. Values: "Local" (use OS),
         // "UTC", or an IANA / Windows tz ID that TimeZoneInfo.FindSystemTimeZoneById
         // resolves. Persisted so it survives restarts; applies only to tournament UI.
         internal static ConfigEntry<string> TournamentTimezone;
+        // Preferred date/time format. Values:
+        //   "ISO" = 2026-04-24 14:30       (unambiguous, ASCII, 24h)
+        //   "US"  = Sat 04/24 2:30 PM      (Anglophone default)
+        //   "EU"  = Sat 24/04 14:30        (most of Europe + others)
+        // All formats emit ASCII-only using CultureInfo.InvariantCulture so the
+        // Gravity SDF font renders them cleanly regardless of OS locale.
+        internal static ConfigEntry<string> TournamentDateFormat;
         // Pipe-delimited list of muted display names — local mute, doesn't leave the client.
         // Mutated via /mute and /unmute commands typed in the F5 chat input.
         internal static ConfigEntry<string> MutedChatNames;
@@ -120,10 +129,28 @@ namespace CompetitiveRounds
                 "Show cosmetic trails behind players during matches (including your own and opponents')"
             );
 
+            ShowBlockDebug = Config.Bind(
+                "UI", "ShowBlockDebug",
+                false,
+                "Show the Block Debug overlay (top-right corner) during matches. Displays live counts of block activations vs successful absorbs, dedup drops, and per-hit timing ('too early' / 'too slow') so you can see why a block didn't land."
+            );
+
+            ShowPlayerColors = Config.Bind(
+                "UI", "ShowPlayerColors",
+                true,
+                "Render custom player body colors (purchased from the Body Color shop tab) — your own and other modded players'. Off = everyone falls back to the default orange/blue team colors."
+            );
+
             TournamentTimezone = Config.Bind(
                 "Tournaments", "Timezone",
                 "Local",
                 "Timezone used to display tournament times. One of: Local, UTC, PT, MT, CT, ET, UK, CET, EET, MSK, JST, AEST, or a system timezone ID."
+            );
+
+            TournamentDateFormat = Config.Bind(
+                "Tournaments", "DateFormat",
+                "ISO",
+                "Date/time display format: ISO (2026-04-24 14:30), US (Sat 04/24 2:30 PM), or EU (Sat 24/04 14:30). All formats emit ASCII-only so any locale renders cleanly."
             );
 
             MutedChatNames = Config.Bind(
@@ -360,15 +387,22 @@ namespace CompetitiveRounds
                     try
                     {
                         Plugin.Log.LogInfo($"[QUEUE-JOINER] Connected! JoinOrCreate: {capturedRoom}");
+                        // 2v2 rooms have a `team_` prefix (set by /team/queue/ready
+                        // server-side). Bump MaxPlayers to 4 + flag the room as
+                        // friendly-fire-on so a Harmony patch can read it during
+                        // ProjectileCollision and let teammate shots through.
+                        bool is2v2 = capturedRoom != null && capturedRoom.StartsWith("team_");
+                        var roomProps = new ExitGames.Client.Photon.Hashtable
+                        {
+                            { "C2", capturedRoom }
+                        };
+                        if (is2v2) roomProps["cr_ff"] = true;
                         var roomOptions = new Photon.Realtime.RoomOptions
                         {
-                            MaxPlayers = 2,
+                            MaxPlayers = (byte)(is2v2 ? 4 : 2),
                             IsOpen = true,
                             IsVisible = true,
-                            CustomRoomProperties = new ExitGames.Client.Photon.Hashtable
-                            {
-                                { "C2", capturedRoom }
-                            },
+                            CustomRoomProperties = roomProps,
                             CustomRoomPropertiesForLobby = new string[] { "C2" }
                         };
                         var lobby = new Photon.Realtime.TypedLobby("RoomCodeLobby", Photon.Realtime.LobbyType.SqlLobby);
@@ -464,6 +498,9 @@ namespace CompetitiveRounds
                 CompetitiveUI.ToggleOverlay();
             }
 
+            // Per-frame FPS sampling (active only while a match is being tracked).
+            try { GameStateWatcher.TickFrame(); } catch { }
+
             // Poll game state
             try
             {
@@ -484,10 +521,19 @@ namespace CompetitiveRounds
                 catch { }
             }
 
+            // Poll 2v2 queue if searching
+            if (ApiClient.IsTeamQueuePolling)
+            {
+                try { ApiClient.UpdateTeamQueuePoll(GameStateWatcher.LocalSteamId); }
+                catch { }
+            }
+
             // Poll queue count when competitive page is open (every 10s)
             if (NativeUI.IsOpen)
             {
                 try { ApiClient.UpdateQueueCount(); }
+                catch { }
+                try { ApiClient.UpdateTeamQueueCount(); }
                 catch { }
                 // Auto-refresh Live Ranked Games while the Leaderboard tab is open. Cheaply
                 // gated by the 10s timer in NativeUI.MaybeRefreshLiveSeries so we're not
@@ -1637,16 +1683,57 @@ namespace CompetitiveRounds
         // (bullets_hit stayed at 0), so we need real data on the damager GameObject to know
         // what to filter on. Capped at 5 lines to avoid log spam during DOT-heavy matches.
         private static int _takeDamageFirstLogRemaining = 5;
+        // FF-DIAG: in 2v2 rooms (cr_ff Photon room property = true), log when a teammate's
+        // damage REACHES TakeDamage. If we see it: the team-filter is downstream of TakeDamage
+        // (we'd patch HealthHandler.CallTakeDamage's bail-out). If we DON'T: filter is upstream
+        // (in ProjectileCollision / MoveTransform). Capped at 8 lines/match.
+        private static int _ffDiagRemaining = 8;
+        private static int _ffDiagLastResetRound = -1;
         static void Postfix(HealthHandler __instance, Vector2 damage, GameObject damagingWeapon, Player damagingPlayer)
         {
             try
             {
                 if (damagingPlayer == null) return;
                 if (damage.magnitude <= 0.01f) return;  // non-damage events (e.g. block-only pings)
+
+                // FF telemetry — fires on any damage event so we can see ALL hits in a 2v2,
+                // not just enemy ones. Enabled when cr_ff Photon room property is true.
+                try
+                {
+                    if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
+                        && PhotonNetwork.CurrentRoom.CustomProperties != null
+                        && PhotonNetwork.CurrentRoom.CustomProperties.ContainsKey("cr_ff")
+                        && _ffDiagRemaining > 0)
+                    {
+                        var srcCD = damagingPlayer != null ? damagingPlayer.GetComponent<CharacterData>() : null;
+                        var tgtCD = __instance != null ? __instance.GetComponentInParent<CharacterData>() : null;
+                        var teamField = typeof(CharacterData).GetField("teamID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        int srcTeam = (srcCD != null && teamField != null) ? (int)teamField.GetValue(srcCD) : -1;
+                        int tgtTeam = (tgtCD != null && teamField != null) ? (int)teamField.GetValue(tgtCD) : -1;
+                        bool sameTeam = (srcTeam >= 0 && srcTeam == tgtTeam);
+                        _ffDiagRemaining--;
+                        Plugin.Log.LogInfo($"[FF-DIAG] dmg={damage.magnitude:F1} src_team={srcTeam} tgt_team={tgtTeam} same_team={sameTeam} weapon='{(damagingWeapon != null ? damagingWeapon.name : "(null)")}'");
+                    }
+                }
+                catch { }
+
                 var damagerPV = damagingPlayer.data?.view ?? damagingPlayer.GetComponent<PhotonView>();
+                var targetPV = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
+
+                // Block-debug: if WE are the target and the damager is someone else, record
+                // the hit so the overlay can classify it against the last activation time.
+                // Owned by the target client — damagerPV.IsMine check is from the wrong side.
+                try
+                {
+                    if (targetPV != null && targetPV.IsMine && damagerPV != null && !damagerPV.IsMine)
+                    {
+                        GameStateWatcher.OnLocalPlayerHit(damage.magnitude);
+                    }
+                }
+                catch { }
+
                 if (damagerPV == null || !damagerPV.IsMine) return;
                 // Self-damage (rebounds, own explosions) shouldn't count toward Hit %.
-                var targetPV = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
                 if (targetPV != null && targetPV.IsMine) return;
 
                 if (_takeDamageFirstLogRemaining > 0)

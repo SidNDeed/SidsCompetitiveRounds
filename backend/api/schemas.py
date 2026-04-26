@@ -63,6 +63,11 @@ class MatchReport(BaseModel):
     local_bullets_hit: int | None = Field(None, ge=0)
     local_blocks_activated: int | None = Field(None, ge=0)
     local_blocks_successful: int | None = Field(None, ge=0)
+    # Per-match average FPS. local_avg_fps = reporter's, opponent_avg_fps = sniffed
+    # off the opponent's Photon `cr_fps` custom property (only present when the
+    # opponent also has the mod). Display-only; never feeds Glicko or anti-cheat.
+    local_avg_fps: int | None = Field(None, ge=0, le=10000)
+    opponent_avg_fps: int | None = Field(None, ge=0, le=10000)
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -114,6 +119,10 @@ class PlayerStatsResponse(BaseModel):
     active_trail_color: str | None = None
     active_trail_price: int = 0
     active_color_sku: str | None = None
+    # Player body color (kind=player_color) — overrides default team color.
+    active_player_color_sku: str | None = None
+    active_player_color_hex: str | None = None
+    active_player_color_name: str | None = None
     # Multi-equip map colors (v1.23+). The client cycles through this ordered list with
     # Left Shift in-game. Empty list → no equipped map colors → ArtHandler.NextArt falls
     # through to ROUNDS' vanilla random rotation. active_color_sku above is kept for
@@ -205,6 +214,10 @@ class MatchHistoryEntry(BaseModel):
     xp_gained: int = 0
     gold_gained: int = 0
     series_gold_gained: int = 0
+    # Per-match avg FPS. None when the reporting client predates v1.25 or the opponent
+    # didn't have the mod. Display-only.
+    player_fps_avg: int | None = None
+    opponent_fps_avg: int | None = None
 
     model_config = {"from_attributes": True}
 
@@ -377,3 +390,148 @@ class TournamentPenaltyResponse(BaseModel):
     signups_90d: int
     missed_90d: int
     no_show_last_at: datetime | None
+
+
+# ── 2v2 Ranked ────────────────────────────────────────────────
+
+class TeamQueueJoinRequest(BaseModel):
+    steam_id: str = Field(..., max_length=20)
+    display_name: str | None = Field(None, max_length=64)
+    region: str | None = Field(None, max_length=8)
+
+
+class TeamQueueMember(BaseModel):
+    """One occupant of the queue or a locked match. Surface for the F5 tab."""
+    steam_id: str
+    display_name: str
+    rating: int
+    region: str | None = None
+    team_assigned: int | None = None  # 1, 2, or null while still searching
+
+
+class TeamQueuePollResponse(BaseModel):
+    """
+    Polled by all four would-be participants; the response shape is union-flat.
+    Status semantics match the 1v1 queue:
+      searching        — still pooling, queue_count = N/4
+      matched          — locked, balancer ran, ready-up window open
+      ready_join       — both teams readied, room name + region populated
+      not_in_queue     — never joined or removed/expired
+      expired          — timed out before lock
+    """
+    status: str
+    queue_count: int = 0  # 0..4
+    elo_range: int = 0
+    series_id: str | None = None
+    team_assigned: int | None = None
+    teammates: list[TeamQueueMember] = Field(default_factory=list)
+    opponents: list[TeamQueueMember] = Field(default_factory=list)
+    room_name: str | None = None
+    room_region: str | None = None
+    match_age_seconds: int = 0
+
+
+class TeamMatchReport(BaseModel):
+    """
+    Submitted by the lowest-Steam-ID participant after a 2v2 game ends.
+    HMAC canonical (11 fields, ':' separated):
+      t1a:t1b:t2a:t2b:t1_rounds:t2_rounds:is_ranked:reporter:room_id:winner_team:series_id
+    """
+    series_id: str
+    t1a: PlayerMatchData
+    t1b: PlayerMatchData
+    t2a: PlayerMatchData
+    t2b: PlayerMatchData
+    t1_rounds_won: int = Field(..., ge=0, le=10)
+    t2_rounds_won: int = Field(..., ge=0, le=10)
+    t1_points_total: int = Field(0, ge=0)
+    t2_points_total: int = Field(0, ge=0)
+    winner_team: int = Field(..., ge=1, le=2)
+    photon_room_id: str | None = Field(None, max_length=64)
+    game_version: str | None = Field(None, max_length=32)
+    region: str | None = Field(None, max_length=8)
+    match_duration: int | None = Field(None, ge=0)
+    started_at: datetime | None = None
+    hmac_signature: str | None = Field(None, max_length=128)
+    is_ranked: bool = True
+    reported_by_steam_id: str = Field(..., max_length=20)
+    # Per-player FPS averages from each participant's mod (0/None = no data).
+    t1a_fps: int | None = Field(None, ge=0, le=10000)
+    t1b_fps: int | None = Field(None, ge=0, le=10000)
+    t2a_fps: int | None = Field(None, ge=0, le=10000)
+    t2b_fps: int | None = Field(None, ge=0, le=10000)
+
+
+class TeamMatchResponse(BaseModel):
+    match_id: UUID
+    series_id: UUID
+    series_status: str  # "active" or "completed"
+    series_score: str   # "1-0" / "2-0" / "2-1" — from the reporter's team perspective
+    winner_team: int
+    rebalance_assignments: dict[str, int] | None = None  # filled if a rebalance triggered
+    new_t1a_rating: float | None = None
+    new_t1b_rating: float | None = None
+    new_t2a_rating: float | None = None
+    new_t2b_rating: float | None = None
+    message: str = "Team match recorded"
+
+
+class Team2v2LeaderboardEntry(BaseModel):
+    rank: int
+    steam_id: str
+    display_name: str
+    rating: int
+    rd: int
+    completed_series: int
+    series_wins: int
+    series_losses: int
+    win_rate: float
+    level: int = 0
+
+
+class Team2v2LeaderboardResponse(BaseModel):
+    entries: list[Team2v2LeaderboardEntry]
+    total_players: int
+    last_updated: datetime
+
+
+class TeamStatsResponse(BaseModel):
+    """Per-player 2v2 stats. Surfaced on the My Stats tab beside the 1v1 figures."""
+    steam_id: str
+    display_name: str
+    rating: float
+    rating_deviation: float
+    peak_rating: float
+    completed_series: int
+    series_wins: int
+    series_losses: int
+    series_win_rate: float
+    match_wins: int    # individual game wins inside completed/active series
+    match_losses: int
+    current_streak: int  # +N for win streak, -N for loss streak (counts series, not games)
+
+
+class TeamMatchHistoryEntry(BaseModel):
+    match_id: UUID
+    series_id: str
+    ended_at: datetime
+    won: bool
+    my_team: int
+    t1a_steam_id: str
+    t1a_name: str
+    t1b_steam_id: str
+    t1b_name: str
+    t2a_steam_id: str
+    t2a_name: str
+    t2b_steam_id: str
+    t2b_name: str
+    t1_rounds_won: int
+    t2_rounds_won: int
+    t1_points_total: int = 0
+    t2_points_total: int = 0
+    cards_by_player: dict[str, list[CardPick]] = Field(default_factory=dict)  # keyed by steam_id
+    series_score: str | None = None
+    series_rating_change: float | None = None
+    fps_by_player: dict[str, int] = Field(default_factory=dict)  # keyed by steam_id, 0 = missing
+
+

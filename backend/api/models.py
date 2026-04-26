@@ -41,6 +41,9 @@ class Player(Base):
     active_title_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_trail_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_color_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
+    # Player BODY color (kind=player_color), overrides the default team-based
+    # orange/blue. Single-equip; sync via Photon cr_pbody_color custom prop.
+    active_player_color_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     # kind='color' items are multi-equip (v1.23+): player cycles between equipped colors
     # with Left Shift in-game. active_color_id above is the single-value legacy column,
     # kept for backward compat — reflects active_color_ids[0] when populated.
@@ -121,6 +124,8 @@ class Match(Base):
     local_blocks_raised = Column(Integer, nullable=True)
     invalidated_at = Column(DateTime(timezone=True), nullable=True)
     invalidation_reason = Column(String(64), nullable=True)
+    p1_fps_avg = Column(SmallInteger, nullable=True)
+    p2_fps_avg = Column(SmallInteger, nullable=True)
 
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
@@ -453,3 +458,114 @@ class PlayerTournamentPenalty(Base):
     no_show_last_at = Column(DateTime(timezone=True), nullable=True)
     latest_signup_at = Column(DateTime(timezone=True), nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+# ── 2v2 ranked (separate path from 1v1; see migration 053) ────────────
+
+class GlickoRating2v2(Base):
+    __tablename__ = "glicko_ratings_2v2"
+
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    rating = Column(Double, nullable=False, default=1500.0)
+    rating_deviation = Column(Double, nullable=False, default=350.0)
+    volatility = Column(Double, nullable=False, default=0.06)
+    peak_rating = Column(Double, nullable=True)
+    games_in_period = Column(Integer, nullable=False, default=0)
+    completed_series = Column(Integer, nullable=False, default=0)
+    last_calculated = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class TeamQueue(Base):
+    __tablename__ = "team_queue"
+
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    steam_id = Column(String(20), nullable=False)
+    display_name = Column(String(64), nullable=False)
+    rating = Column(Double, nullable=False, default=1500.0)
+    rating_deviation = Column(Double, nullable=False, default=350.0)
+    completed_series = Column(Integer, nullable=False, default=0)
+    fallback_rating = Column(Double, nullable=False, default=1500.0)
+    region = Column(String(8), nullable=True)
+    status = Column(String(16), nullable=False, default="searching")
+    series_id = Column(UUID(as_uuid=True), nullable=True)
+    team_assigned = Column(SmallInteger, nullable=True)
+    room_name = Column(String(64), nullable=True)
+    room_region = Column(String(8), nullable=True)
+    ready = Column(Boolean, nullable=False, default=False)
+    joined_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    matched_at = Column(DateTime(timezone=True), nullable=True)
+    last_polled = Column(DateTime(timezone=True), nullable=True, default=lambda: datetime.now(timezone.utc))
+
+
+class TeamSeries(Base):
+    __tablename__ = "team_series"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    t1a_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    t1b_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    t2a_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    t2b_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    t1_series_wins = Column(SmallInteger, nullable=False, default=0)
+    t2_series_wins = Column(SmallInteger, nullable=False, default=0)
+    status = Column(String(16), nullable=False, default="active")
+    winner_team = Column(SmallInteger, nullable=True)
+    t1a_rating_change = Column(Double, nullable=True)
+    t1b_rating_change = Column(Double, nullable=True)
+    t2a_rating_change = Column(Double, nullable=True)
+    t2b_rating_change = Column(Double, nullable=True)
+    photon_room_id = Column(String(64), nullable=True)
+    region = Column(String(8), nullable=True)
+    rebalance_count = Column(SmallInteger, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    invalidation_reason = Column(String(64), nullable=True)
+
+
+class TeamMatch(Base):
+    __tablename__ = "team_matches"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    series_id = Column(UUID(as_uuid=True), ForeignKey("team_series.id"), nullable=True)
+    t1a_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    t1b_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    t2a_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    t2b_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    t1_rounds_won = Column(SmallInteger, nullable=False)
+    t2_rounds_won = Column(SmallInteger, nullable=False)
+    t1_points_total = Column(SmallInteger, nullable=False, default=0)
+    t2_points_total = Column(SmallInteger, nullable=False, default=0)
+    winner_team = Column(SmallInteger, nullable=False)
+    t1a_fps_avg = Column(SmallInteger, nullable=True)
+    t1b_fps_avg = Column(SmallInteger, nullable=True)
+    t2a_fps_avg = Column(SmallInteger, nullable=True)
+    t2b_fps_avg = Column(SmallInteger, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    photon_room_id = Column(String(64), nullable=True)
+    game_version = Column(String(32), nullable=True)
+    region = Column(String(8), nullable=True)
+    hmac_signature = Column(String(128), nullable=True)
+    reported_by = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=True)
+    is_ranked = Column(Boolean, nullable=False, default=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    invalidation_reason = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("photon_room_id", "t1a_id", "t1b_id", "t2a_id", "t2b_id", name="uq_team_match"),
+    )
+
+
+class TeamMatchCard(Base):
+    __tablename__ = "team_match_cards"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    match_id = Column(UUID(as_uuid=True), ForeignKey("team_matches.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), nullable=False)
+    card_name = Column(String(64), nullable=False)
+    card_rarity = Column(String(16), nullable=True)
+    pick_order = Column(SmallInteger, nullable=False)
+    round_number = Column(SmallInteger, nullable=False)

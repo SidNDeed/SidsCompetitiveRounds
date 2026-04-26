@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import AdminUser, AdminAction, Bet, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem
+from models import AdminUser, AdminAction, Bet, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -42,6 +42,15 @@ from schemas import (
     QueueJoinRequest,
     QueueDeclineRequest,
     QueuePollResponse,
+    TeamQueueJoinRequest,
+    TeamQueueMember,
+    TeamQueuePollResponse,
+    TeamMatchReport,
+    TeamMatchResponse,
+    TeamStatsResponse,
+    Team2v2LeaderboardEntry,
+    Team2v2LeaderboardResponse,
+    TeamMatchHistoryEntry,
 )
 
 # ── Config from environment ────────────────────────────────────
@@ -61,32 +70,103 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     print("Competitive ROUNDS API starting up")
     task = asyncio.create_task(queue_cleanup_loop())
+    task_t2 = asyncio.create_task(team_queue_cleanup_loop())
     from tournaments import tournament_tick
     task_t = asyncio.create_task(tournament_tick())
     yield
     task.cancel()
     task_t.cancel()
+    task_t2.cancel()
     print("Competitive ROUNDS API shutting down")
 
 
-async def queue_cleanup_loop():
-    """Delete stale queue entries every 60 seconds."""
+async def team_queue_cleanup_loop():
+    """Delete stale 2v2 queue rows. Mirrors queue_cleanup_loop with one extra
+    safety net: when a 'matched' or 'ready' row goes stale we also cancel the
+    series and boot the other 3 back to searching, since the queue cascade in
+    /team/queue/leave only fires on explicit user action."""
     import asyncio as _aio
     from database import async_session
     while True:
         try:
             await _aio.sleep(60)
             async with async_session() as db:
-                result = await db.execute(
-                    text("""DELETE FROM ranked_queue 
-                        WHERE last_polled < NOW() - INTERVAL '30 seconds'
-                           OR joined_at < NOW() - INTERVAL '30 minutes'
-                        RETURNING steam_id, display_name""")
+                # Cancel any series whose queue rows have all gone stale (no poll in 30s).
+                # This handles the case where a client crashed mid-lock without /leave.
+                stale_series = await db.execute(
+                    text("""
+                        SELECT DISTINCT series_id FROM team_queue
+                        WHERE series_id IS NOT NULL
+                          AND last_polled < NOW() - INTERVAL '60 seconds'
+                    """)
                 )
-                rows = result.fetchall()
-                if rows:
-                    names = [r[1] for r in rows]
-                    print(f"[QUEUE-CLEANUP] Expired {len(rows)} stale entries: {', '.join(names)}")
+                for srow in stale_series.fetchall():
+                    sid = srow[0]
+                    await db.execute(
+                        text("""UPDATE team_series
+                               SET status='cancelled', invalidated_at=NOW(),
+                                   invalidation_reason='stale_queue_rows'
+                               WHERE id=:sid AND status='active'"""),
+                        {"sid": sid},
+                    )
+                # Stale-poll cleanup
+                stale_q = await db.execute(
+                    text("""DELETE FROM team_queue
+                        WHERE last_polled < NOW() - INTERVAL '30 seconds'
+                          AND joined_at >= NOW() - INTERVAL '30 minutes'
+                        RETURNING steam_id, display_name, status, series_id""")
+                )
+                stale_rows = stale_q.fetchall()
+                # Absolute-timeout cleanup (joined > 30 min ago, never matched)
+                timeout_q = await db.execute(
+                    text("""DELETE FROM team_queue
+                        WHERE joined_at < NOW() - INTERVAL '30 minutes'
+                        RETURNING steam_id, display_name, status, series_id""")
+                )
+                timeout_rows = timeout_q.fetchall()
+                for r in stale_rows:
+                    sid_part = f", series_id={r[3]}" if r[3] else ""
+                    print(f"[TEAM-QUEUE-CLEANUP] Stale poll: {r[1]} status={r[2]}{sid_part}")
+                for r in timeout_rows:
+                    sid_part = f", series_id={r[3]}" if r[3] else ""
+                    print(f"[TEAM-QUEUE-CLEANUP] Absolute timeout: {r[1]} status={r[2]}{sid_part}")
+                await db.commit()
+        except Exception as e:
+            print(f"[TEAM-QUEUE-CLEANUP] Error: {e}")
+
+
+async def queue_cleanup_loop():
+    """Delete stale queue entries every 60 seconds.
+    Logs enough detail to diagnose matchmaking reports like lopi+NotNic where
+    one player's log showed repeated 'Match canceled' with no apparent cause —
+    the cancel reason (stale poll vs absolute timeout) tells us whether it was
+    a network hiccup or the player actually went idle."""
+    import asyncio as _aio
+    from database import async_session
+    while True:
+        try:
+            await _aio.sleep(60)
+            async with async_session() as db:
+                # Separate the two cleanup reasons so we can attribute each one.
+                stale_result = await db.execute(
+                    text("""DELETE FROM ranked_queue
+                        WHERE last_polled < NOW() - INTERVAL '30 seconds'
+                          AND joined_at >= NOW() - INTERVAL '30 minutes'
+                        RETURNING steam_id, display_name, status, matched_with""")
+                )
+                stale_rows = stale_result.fetchall()
+                timeout_result = await db.execute(
+                    text("""DELETE FROM ranked_queue
+                        WHERE joined_at < NOW() - INTERVAL '30 minutes'
+                        RETURNING steam_id, display_name, status, matched_with""")
+                )
+                timeout_rows = timeout_result.fetchall()
+                for r in stale_rows:
+                    partner = f", matched_with={r[3]}" if r[3] else ""
+                    print(f"[QUEUE-CLEANUP] Stale poll (>30s no poll): {r[1]} status={r[2]}{partner}")
+                for r in timeout_rows:
+                    partner = f", matched_with={r[3]}" if r[3] else ""
+                    print(f"[QUEUE-CLEANUP] Absolute timeout (>30min in queue): {r[1]} status={r[2]}{partner}")
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] Error: {e}")
@@ -389,7 +469,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.24.0"
+LATEST_MOD_VERSION = "1.25.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -488,7 +568,12 @@ async def get_recent_flags(
 ANTICHEAT_SHORT_DURATION_SEC = 60
 ANTICHEAT_PATTERN_WINDOW_HOURS = 2
 ANTICHEAT_MAX_CARDS_PER_PLAYER = 5
-ANTICHEAT_INACTIVE_MIN_DURATION_SEC = 300  # 5 min — 30s was flagging legit short games / quick-death rounds
+# Duration floor for the AFK check. Combined with cards_picked=0 AND shots=0
+# AND blocks=0, this catches real AFK (never-at-keyboard) without firing on
+# legitimate-but-inputless play like Pacifist, Melee, Echo+Decay, or
+# trap-and-run builds. Dropped from 300s since cards_picked=0 is the strong
+# signal now; duration just filters out match-abort races.
+ANTICHEAT_INACTIVE_MIN_DURATION_SEC = 120
 
 
 async def _reverse_match_gold_xp(db: AsyncSession, m: Match) -> None:
@@ -600,10 +685,26 @@ async def _check_anti_cheat(
                 await _reverse_match_gold_xp(db, prior)
 
     # 3. Inactive reporter (advisory — flag only, no auto-invalidate).
+    # Real AFK = player was never at the keyboard. Shots/blocks = 0 alone is
+    # NOT sufficient — Pacifist, Melee, Empower+body, Echo+Decay, and trap-
+    # and-run builds legitimately finish matches with zero bullets fired. Add
+    # the reporter's cards_picked count to the criteria: you can't pick a
+    # card without clicking at the keyboard, so any card pick proves
+    # presence. First audit of flagged_matches (see /flag 74af9629..) showed
+    # every historical "inactive_player" flag had 1-5 cards picked by the
+    # reporter, meaning every one was a false positive.
     shots = report.local_shots_fired
     blocks = report.local_blocks_raised
+    # Reporter's cards live under their PlayerMatchData sub-object (player1
+    # or player2 depending on who reported). Look up by steam_id match.
+    reporter_cards = 0
+    if report.reported_by_steam_id == report.player1.steam_id:
+        reporter_cards = len(report.player1.cards or [])
+    elif report.reported_by_steam_id == report.player2.steam_id:
+        reporter_cards = len(report.player2.cards or [])
     if (shots is not None and blocks is not None
             and shots == 0 and blocks == 0
+            and reporter_cards == 0
             and report.match_duration is not None
             and report.match_duration > ANTICHEAT_INACTIVE_MIN_DURATION_SEC):
         flags.append((
@@ -611,7 +712,7 @@ async def _check_anti_cheat(
             {
                 "reporter_steam": report.reported_by_steam_id,
                 "duration_seconds": report.match_duration,
-                "shots": 0, "blocks": 0,
+                "shots": 0, "blocks": 0, "cards_picked": 0,
             },
             False,
         ))
@@ -665,6 +766,15 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     # queries can use the canonical column going forward; both populated for safety.
     # local_bullets_fired / local_blocks_raised come from the reporter's mod and
     # are advisory (not in HMAC). Reused field naming despite client→server casing.
+    # FPS comes in as (local_avg_fps, opponent_avg_fps) on the reporter's side. Map onto
+    # (p1_fps_avg, p2_fps_avg) by who the reporter actually was. Zero or missing → NULL
+    # so the row stays unambiguous (no "0 fps" false-positives).
+    reporter_is_p1 = reporter.id == p1.id
+    _local_fps = report.local_avg_fps if (report.local_avg_fps or 0) > 0 else None
+    _opp_fps = report.opponent_avg_fps if (report.opponent_avg_fps or 0) > 0 else None
+    p1_fps = _local_fps if reporter_is_p1 else _opp_fps
+    p2_fps = _opp_fps if reporter_is_p1 else _local_fps
+
     match = Match(
         player1_id=p1.id,
         player2_id=p2.id,
@@ -684,6 +794,8 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         reported_by=reporter.id,
         is_ranked=report.is_ranked,
         started_at=report.started_at,
+        p1_fps_avg=p1_fps,
+        p2_fps_avg=p2_fps,
     )
     db.add(match)
     await db.flush()  # Get match.id
@@ -1317,9 +1429,13 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
     active_trail_price: int = 0
     active_color_sku: str | None = None
     active_color_skus: list[str] = []
+    active_player_color_sku: str | None = None
+    active_player_color_hex: str | None = None
+    active_player_color_name: str | None = None
     for cosmetic_id, kind in ((player.active_title_id, "title"),
                                (player.active_trail_id, "trail"),
-                               (player.active_color_id, "color")):
+                               (player.active_color_id, "color"),
+                               (player.active_player_color_id, "player_color")):
         if cosmetic_id is None:
             continue
         row = (await db.execute(
@@ -1331,8 +1447,12 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
             active_title_name, active_title_color = row[0], row[2]
         elif kind == "trail":
             active_trail_sku, active_trail_color, active_trail_price = row[1], row[2], row[3] or 0
-        else:
+        elif kind == "color":
             active_color_sku = row[1]  # kept for backward compat — "first equipped color"
+        else:  # player_color
+            active_player_color_name = row[0]
+            active_player_color_sku = row[1]
+            active_player_color_hex = row[2]
 
     # Multi-equip colors: resolve the full active_color_ids list to skus so the client
     # can cycle between them with Left Shift in-game.
@@ -1474,6 +1594,9 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         active_trail_price=active_trail_price,
         active_color_sku=active_color_sku,
         active_color_skus=active_color_skus,
+        active_player_color_sku=active_player_color_sku,
+        active_player_color_hex=active_player_color_hex,
+        active_player_color_name=active_player_color_name,
         active_nametag_skus=active_nametag_skus,
         last_match=stats["last_match"],
         recent_rating_history=history,
@@ -1536,6 +1659,8 @@ async def get_player_matches(
                  ELSE rs.p2_rating_change END AS series_rating_change,
             CASE WHEN m.player1_id = :pid THEN m.p1_xp_gained
                  ELSE m.p2_xp_gained END AS xp_gained,
+            CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg ELSE m.p2_fps_avg END AS player_fps_avg,
+            CASE WHEN m.player1_id = :pid THEN m.p2_fps_avg ELSE m.p1_fps_avg END AS opponent_fps_avg,
             -- Gold earned ON this match (xp crossings), and series bonus if applicable.
             COALESCE((
                 SELECT SUM(gt.amount) FROM gold_transactions gt
@@ -1620,6 +1745,8 @@ async def get_player_matches(
             xp_gained=row["xp_gained"] or 0,
             gold_gained=row["gold_gained"] or 0,
             series_gold_gained=row["series_gold_gained"] or 0,
+            player_fps_avg=row["player_fps_avg"],
+            opponent_fps_avg=row["opponent_fps_avg"],
         ))
 
     return entries
@@ -1857,7 +1984,13 @@ async def toggle_ranked(steam_id: str, enabled: bool = Query(...), db: AsyncSess
 
 QUEUE_EXPIRE_MINUTES = 30
 QUEUE_BLOCK_MINUTES = 5
-READY_TIMEOUT_SECONDS = 30
+# Window for both players to click Ready Up after being matched. Was 30s but
+# lopi/NotNic reported "both readied, match canceled" — both alt-tabbed into
+# ROUNDS, found the F5 menu, clicked Ready, and one of them consistently
+# tripped the timeout. 90s gives real humans enough slack for Discord-to-game
+# context switching. Additionally, /queue/ready resets matched_at on the
+# first-to-ready so the slower player gets a fresh window, not leftover time.
+READY_TIMEOUT_SECONDS = 90
 
 
 def compute_elo_range(wait_seconds: int) -> int:
@@ -2069,6 +2202,9 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             match_age = int((now - entry["matched_at"]).total_seconds())
             if match_age > READY_TIMEOUT_SECONDS and not (my_ready and opp_ready):
                 # Timeout — cancel match, both back to searching
+                print(f"[QUEUE-CANCEL] {steam_id} vs opp={opp['steam_id']} "
+                      f"timed out at match_age={match_age}s "
+                      f"my_ready={my_ready} opp_ready={opp_ready}")
                 for pid in [my_pid, opp["player_id"]]:
                     await db.execute(
                         text("""
@@ -2245,16 +2381,18 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
     entry = entry_result.mappings().first()
 
     if not entry or entry["status"] != "matched":
+        print(f"[QUEUE-READY] {steam_id} NOT_MATCHED — entry={'none' if not entry else entry['status']}")
         await db.commit()
         return {"status": "not_matched", "message": "Not currently in a matched state"}
 
-    # Set ourselves as ready
+    # Set ourselves as ready.
     await db.execute(
         text("UPDATE ranked_queue SET ready = true WHERE player_id = :pid"),
         {"pid": player.id},
     )
 
-    # Check if opponent is also ready
+    # Check if opponent is also ready (must FOR UPDATE-lock their row before
+    # the matched_at reset below so polls don't see a half-state).
     opp_result = await db.execute(
         text("""
             SELECT player_id, ready, room_name, region
@@ -2264,6 +2402,19 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
         {"oid": entry["matched_with"]},
     )
     opp = opp_result.mappings().first()
+
+    # Refresh matched_at on BOTH rows so the opponent's ready timeout window
+    # resets from NOW. Their normal 90s starts the moment anyone clicks Ready,
+    # not whatever is left from the original pairing. Fixes the "both readied
+    # but match canceled" race where the slower player clicked Ready at T=85s
+    # and their partner's poll timed out at T=90s from the OLD matched_at.
+    await db.execute(
+        text("UPDATE ranked_queue SET matched_at = NOW() WHERE player_id = ANY(:pids)"),
+        {"pids": [player.id, entry["matched_with"]]},
+    )
+
+    print(f"[QUEUE-READY] {steam_id} ready=true, opp={entry['matched_with']} opp_ready="
+          f"{opp['ready'] if opp else 'opp_row_missing'}")
 
     if opp and opp["ready"]:
         # Both ready — generate room if not already done
@@ -3210,6 +3361,18 @@ async def set_active_color(
     return result
 
 
+@app.post("/api/v1/players/{steam_id}/active-player-color", tags=["Shop"])
+async def set_active_player_color(
+    steam_id: str,
+    item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Equip / unequip a player body color (kind='player_color'). Single-equip:
+    setting a new color displaces the previous one. Pass item_id=null to clear."""
+    return await _set_active_cosmetic(db, steam_id, "player_color", "player_color", item_id, sig)
+
+
 @app.post("/api/v1/players/{steam_id}/color-toggle", tags=["Shop"])
 async def toggle_color(
     steam_id: str,
@@ -3329,6 +3492,12 @@ def _nametag_subgroup(sku: str) -> str | None:
     separate subgroups so a player can stack e.g. Impact typeface + ALL CAPS simultaneously."""
     if not sku:
         return None
+    # Neon items occupy the same single-active slot as plain colors — equipping
+    # one displaces any plain `nametag_color_*` (and vice versa). The glow side
+    # of a neon rides along automatically, so neon does NOT collide with the
+    # separate `nametag_glow_*` subgroup.
+    if sku.startswith("nametag_neon_"):
+        return "nametag_color"
     for prefix in (
         "nametag_color_",
         "nametag_glow_",
@@ -3357,7 +3526,10 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    attr = "active_title_id" if kind == "title" else ("active_trail_id" if kind == "trail" else "active_color_id")
+    attr = ("active_title_id" if kind == "title"
+            else "active_trail_id" if kind == "trail"
+            else "active_color_id" if kind == "color"
+            else "active_player_color_id")
     if item_id is None:
         setattr(player, attr, None)
         await db.commit()
@@ -4273,3 +4445,1133 @@ async def maintenance_stop(
 async def maintenance_status():
     """Public-readable — clients can poll this if they want to confirm the API is back."""
     return {"in_maintenance": _in_maintenance}
+
+
+# ════════════════════════════════════════════════════════════════════
+# 2v2 RANKED (Phase 1 — Backend foundation)
+# ════════════════════════════════════════════════════════════════════
+# Parallel path to 1v1 ranked. Reuses Glicko-2 helper but separate ratings,
+# separate queue, separate matches. See migration 053_2v2_schema.sql.
+
+# Tunables. Wider ranges than 1v1 because the team-balancer absorbs some
+# imbalance — 4-player matches don't need as tight a per-player Elo window.
+TEAM_QUEUE_EXPIRE_MINUTES = 30
+TEAM_READY_TIMEOUT_SECONDS = 120  # +30s vs 1v1 — 4 players coordinating is slower
+# Min completed 2v2 series before we trust the 2v2 rating; below that the balancer
+# falls back to 1v1 rating for that player (lesson: new accounts shouldn't drag a
+# matchmaking decision around with a 1500-default 2v2 rating that means nothing).
+TEAM_TRUST_2V2_RATING_AFTER = 10
+
+
+def _verify_team_hmac(report: TeamMatchReport) -> bool:
+    """11-field canonical: t1a:t1b:t2a:t2b:t1r:t2r:is_ranked:reporter:room_id:winner_team:series_id"""
+    if not MATCH_HMAC_SECRET:
+        return True
+    if not report.hmac_signature:
+        print(f"[TEAM-HMAC] No signature provided")
+        return False
+    msg = (
+        f"{report.t1a.steam_id}:{report.t1b.steam_id}:"
+        f"{report.t2a.steam_id}:{report.t2b.steam_id}:"
+        f"{report.t1_rounds_won}:{report.t2_rounds_won}:"
+        f"{str(report.is_ranked).lower()}:{report.reported_by_steam_id}:"
+        f"{report.photon_room_id or ''}:{report.winner_team}:{report.series_id}"
+    )
+    expected = hmac.new(MATCH_HMAC_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    ok = hmac.compare_digest(report.hmac_signature, expected)
+    if not ok:
+        print(f"[TEAM-HMAC] mismatch. canonical='{msg}'")
+    return ok
+
+
+def _balance_teams(players: list[dict]) -> tuple[list[str], list[str]]:
+    """Pick the partition (AB-CD / AC-BD / AD-BC) with the smallest |Δ-Elo|.
+    `players` is a list of 4 dicts with keys: player_id, balance_rating.
+    Returns (team1_ids, team2_ids) in original order — the caller assigns
+    team_assigned=1/2 by membership."""
+    assert len(players) == 4
+    p = players  # alias
+    partitions = [
+        ([p[0], p[1]], [p[2], p[3]]),
+        ([p[0], p[2]], [p[1], p[3]]),
+        ([p[0], p[3]], [p[1], p[2]]),
+    ]
+    def diff(team1, team2):
+        s1 = sum(x["balance_rating"] for x in team1)
+        s2 = sum(x["balance_rating"] for x in team2)
+        return abs(s1 - s2)
+    best = min(partitions, key=lambda part: diff(part[0], part[1]))
+    return ([x["player_id"] for x in best[0]], [x["player_id"] for x in best[1]])
+
+
+def _team_balance_rating(rating: float, completed_series: int, fallback_rating: float) -> float:
+    """Use 2v2 rating once a player has enough 2v2 series; otherwise pull their 1v1 rating
+    forward. Floor at the fallback when the 2v2 rating is provisional."""
+    if completed_series >= TEAM_TRUST_2V2_RATING_AFTER:
+        return rating
+    return fallback_rating
+
+
+@app.post("/api/v1/team/queue/join", tags=["Team Queue"])
+async def team_queue_join(req: TeamQueueJoinRequest, db: AsyncSession = Depends(get_db)):
+    """Upsert player into team_queue. Snapshots their 2v2 + 1v1 ratings so the
+    balancer at lock-time uses queue-join values (not drifted live ratings)."""
+    await _check_ban_or_raise(db, req.steam_id)
+    name = req.display_name or req.steam_id
+    player = await get_or_create_player(db, req.steam_id, name)
+
+    # Snapshot 2v2 rating (default if no row yet)
+    g2_r = await db.execute(select(GlickoRating2v2).where(GlickoRating2v2.player_id == player.id))
+    g2 = g2_r.scalar_one_or_none()
+    rating_2v2 = g2.rating if g2 else GLICKO2_DEFAULT_RATING
+    rd_2v2 = g2.rating_deviation if g2 else GLICKO2_DEFAULT_RD
+    completed = g2.completed_series if g2 else 0
+
+    # Snapshot 1v1 rating for the balancer fallback
+    g1_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == player.id))
+    g1 = g1_r.scalar_one_or_none()
+    fallback_rating = g1.rating if g1 else GLICKO2_DEFAULT_RATING
+
+    stmt = pg_insert(TeamQueue).values(
+        player_id=player.id,
+        steam_id=req.steam_id,
+        display_name=player.display_name,
+        rating=rating_2v2,
+        rating_deviation=rd_2v2,
+        completed_series=completed,
+        fallback_rating=fallback_rating,
+        region=req.region,
+        status="searching",
+        series_id=None,
+        team_assigned=None,
+        room_name=None,
+        room_region=None,
+        ready=False,
+        joined_at=datetime.now(timezone.utc),
+        matched_at=None,
+        last_polled=datetime.now(timezone.utc),
+    ).on_conflict_do_update(
+        index_elements=[TeamQueue.player_id],
+        set_={
+            "status": "searching",
+            "rating": rating_2v2,
+            "rating_deviation": rd_2v2,
+            "completed_series": completed,
+            "fallback_rating": fallback_rating,
+            "region": req.region,
+            "series_id": None,
+            "team_assigned": None,
+            "room_name": None,
+            "room_region": None,
+            "ready": False,
+            "joined_at": datetime.now(timezone.utc),
+            "matched_at": None,
+            "last_polled": datetime.now(timezone.utc),
+        },
+    )
+    await db.execute(stmt)
+    await db.commit()
+    return {"status": "searching", "message": "Joined 2v2 queue"}
+
+
+@app.post("/api/v1/team/queue/leave", tags=["Team Queue"])
+async def team_queue_leave(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Player).where(Player.steam_id == steam_id))
+    player = result.scalar_one_or_none()
+    if player:
+        # If player is in a locked match (status='matched'), tearing down their row
+        # alone would strand the other 3. Cascade: cancel the whole series and
+        # release the other 3 back to searching, rather than leave them locked
+        # against a ghost teammate.
+        row = await db.execute(
+            text("SELECT series_id, status FROM team_queue WHERE player_id = :pid"),
+            {"pid": player.id},
+        )
+        r = row.mappings().first()
+        if r and r["series_id"] and r["status"] in ("matched", "ready"):
+            await db.execute(
+                text("""
+                    UPDATE team_queue
+                    SET status='searching', series_id=NULL, team_assigned=NULL,
+                        room_name=NULL, room_region=NULL, ready=false,
+                        matched_at=NULL, joined_at=NOW()
+                    WHERE series_id = :sid AND player_id != :pid
+                """),
+                {"sid": r["series_id"], "pid": player.id},
+            )
+            # Mark the series invalidated so the post-lock /matches submit can't
+            # accidentally write to it after a no-show.
+            await db.execute(
+                text("""
+                    UPDATE team_series
+                    SET status='cancelled', invalidated_at=NOW(),
+                        invalidation_reason='pre_match_leaver'
+                    WHERE id = :sid AND status='active'
+                """),
+                {"sid": r["series_id"]},
+            )
+        await db.execute(
+            text("DELETE FROM team_queue WHERE player_id = :pid"),
+            {"pid": player.id},
+        )
+        await db.commit()
+    return {"status": "left"}
+
+
+@app.get("/api/v1/team/queue/count", tags=["Team Queue"])
+async def team_queue_count(db: AsyncSession = Depends(get_db)):
+    """Lightweight: live queue size for the F5 tab "X searching" banner."""
+    result = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status = 'searching'"))
+    searching = result.scalar() or 0
+    return {"searching": searching}
+
+
+@app.get("/api/v1/team/queue/recent-joins", tags=["Team Queue"])
+async def team_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
+    """Players who joined the 2v2 queue in the last N seconds. Drives the Discord
+    beacon `🎯 NAME searching for 2v2!` post."""
+    result = await db.execute(
+        text("""
+            SELECT tq.display_name, tq.steam_id, tq.rating, tq.joined_at
+            FROM team_queue tq
+            WHERE tq.status = 'searching'
+              AND tq.joined_at > NOW() - INTERVAL '1 second' * :secs
+            ORDER BY tq.joined_at DESC
+        """), {"secs": seconds},
+    )
+    rows = result.mappings().all()
+    cnt_q = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status='searching'"))
+    cnt = cnt_q.scalar() or 0
+    return {
+        "joins": [
+            {"display_name": r["display_name"], "steam_id": r["steam_id"],
+             "rating": round(r["rating"]), "joined_at": r["joined_at"].isoformat()}
+            for r in rows
+        ],
+        "queue_size": cnt,
+    }
+
+
+@app.get("/api/v1/team/queue/poll/{steam_id}", response_model=TeamQueuePollResponse, tags=["Team Queue"])
+async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """Polled by all 4 participants. Drives the searching → matched → ready_join state machine.
+    At lock time, runs the balancer to assign teams. Identical safety pattern to 1v1:
+    SELECT FOR UPDATE SKIP LOCKED on the candidate set, atomic update of all 4 rows."""
+    import uuid as uuid_mod
+
+    # Find caller's queue row (locked).
+    me_q = await db.execute(
+        text("""
+            SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
+                   tq.completed_series, tq.fallback_rating, tq.region, tq.status, tq.series_id,
+                   tq.team_assigned, tq.room_name, tq.room_region, tq.ready,
+                   tq.joined_at, tq.matched_at
+            FROM team_queue tq
+            JOIN players p ON tq.player_id = p.id
+            WHERE p.steam_id = :sid
+            FOR UPDATE OF tq
+        """),
+        {"sid": steam_id},
+    )
+    me = me_q.mappings().first()
+    if not me:
+        await db.commit()
+        return TeamQueuePollResponse(status="not_in_queue")
+
+    now = datetime.now(timezone.utc)
+    wait_seconds = int((now - me["joined_at"]).total_seconds())
+    my_pid = me["player_id"]
+
+    # Heartbeat
+    await db.execute(
+        text("UPDATE team_queue SET last_polled = NOW() WHERE player_id = :pid"),
+        {"pid": my_pid},
+    )
+
+    # Searching expiry
+    if me["status"] == "searching" and wait_seconds > TEAM_QUEUE_EXPIRE_MINUTES * 60:
+        await db.execute(text("DELETE FROM team_queue WHERE player_id = :pid"), {"pid": my_pid})
+        await db.commit()
+        return TeamQueuePollResponse(status="expired")
+
+    # ── MATCHED / READY state ────────────────────────────────
+    if me["status"] in ("matched", "ready") and me["series_id"]:
+        # Pull the other 3 in this series
+        peers_q = await db.execute(
+            text("""
+                SELECT player_id, steam_id, display_name, rating, region, ready, team_assigned
+                FROM team_queue
+                WHERE series_id = :sid AND player_id != :pid
+            """),
+            {"sid": me["series_id"], "pid": my_pid},
+        )
+        peers = list(peers_q.mappings().all())
+        if len(peers) < 3:
+            # Someone left — cascade was handled in /leave; we degrade back to searching here.
+            await db.execute(
+                text("""UPDATE team_queue
+                       SET status='searching', series_id=NULL, team_assigned=NULL,
+                           room_name=NULL, room_region=NULL, ready=false,
+                           matched_at=NULL, joined_at=NOW()
+                       WHERE player_id = :pid"""),
+                {"pid": my_pid},
+            )
+            await db.commit()
+            return TeamQueuePollResponse(status="searching")
+
+        my_team = me["team_assigned"]
+        teammates = [p for p in peers if p["team_assigned"] == my_team]
+        opponents = [p for p in peers if p["team_assigned"] != my_team]
+        all_4 = peers + [me]
+        all_ready = all(p["ready"] for p in all_4)
+
+        # Ready timeout
+        if me["matched_at"]:
+            match_age = int((now - me["matched_at"]).total_seconds())
+            if match_age > TEAM_READY_TIMEOUT_SECONDS and not all_ready:
+                # Cancel the series — boot all 4 back to searching.
+                ids = [p["player_id"] for p in all_4]
+                await db.execute(
+                    text("""UPDATE team_queue
+                           SET status='searching', series_id=NULL, team_assigned=NULL,
+                               room_name=NULL, room_region=NULL, ready=false,
+                               matched_at=NULL, joined_at=NOW()
+                           WHERE player_id = ANY(:ids)"""),
+                    {"ids": ids},
+                )
+                await db.execute(
+                    text("UPDATE team_series SET status='cancelled', invalidated_at=NOW(), invalidation_reason='ready_timeout' WHERE id = :sid"),
+                    {"sid": me["series_id"]},
+                )
+                await db.commit()
+                return TeamQueuePollResponse(status="searching")
+
+        # Build response payload
+        def to_member(row):
+            return TeamQueueMember(
+                steam_id=row["steam_id"],
+                display_name=row["display_name"],
+                rating=int(round(row["rating"])),
+                region=row["region"],
+                team_assigned=row["team_assigned"],
+            )
+        teammates_pl = [to_member(r) for r in teammates]
+        opponents_pl = [to_member(r) for r in opponents]
+
+        if all_ready:
+            # Generate room if not yet set (any one of the 4 can establish it).
+            if not me["room_name"]:
+                room_name = f"team_{uuid_mod.uuid4().hex[:12]}"
+                # Pick region by mode of the 4 region values; fallback to 'us'.
+                regions = [p["region"] for p in all_4 if p["region"]]
+                if regions:
+                    chosen_region = max(set(regions), key=regions.count)
+                else:
+                    chosen_region = "us"
+                await db.execute(
+                    text("""UPDATE team_queue
+                           SET room_name = :rn, room_region = :rr
+                           WHERE series_id = :sid"""),
+                    {"rn": room_name, "rr": chosen_region, "sid": me["series_id"]},
+                )
+                await db.execute(
+                    text("UPDATE team_series SET photon_room_id = :rn, region = :rr WHERE id = :sid"),
+                    {"rn": room_name, "rr": chosen_region, "sid": me["series_id"]},
+                )
+                # Re-read so the response reflects the new room name.
+                me_re = await db.execute(
+                    text("SELECT room_name, room_region FROM team_queue WHERE player_id = :pid"),
+                    {"pid": my_pid},
+                )
+                rr = me_re.mappings().first()
+                room_out = rr["room_name"]
+                region_out = rr["room_region"]
+            else:
+                room_out = me["room_name"]
+                region_out = me["room_region"]
+
+            await db.commit()
+            return TeamQueuePollResponse(
+                status="ready_join",
+                series_id=str(me["series_id"]),
+                team_assigned=my_team,
+                teammates=teammates_pl,
+                opponents=opponents_pl,
+                room_name=room_out,
+                room_region=region_out,
+                match_age_seconds=int((now - me["matched_at"]).total_seconds()) if me["matched_at"] else 0,
+            )
+
+        # Matched but not all-ready
+        await db.commit()
+        return TeamQueuePollResponse(
+            status="matched",
+            series_id=str(me["series_id"]),
+            team_assigned=my_team,
+            teammates=teammates_pl,
+            opponents=opponents_pl,
+            match_age_seconds=int((now - me["matched_at"]).total_seconds()) if me["matched_at"] else 0,
+        )
+
+    # ── SEARCHING ── try to lock 4 mutually-acceptable players
+    elo_range = compute_elo_range(wait_seconds)
+    my_balance = _team_balance_rating(me["rating"], me["completed_series"], me["fallback_rating"])
+
+    # Find 3 other compatible players. Bilateral Elo overlap, no mutual blocks.
+    # Use the SAME elo_range as the caller's tier — wider tier callers find each
+    # other faster but a 60s-old caller can't lock with a brand-new 100-Elo-band caller.
+    cands = await db.execute(
+        text("""
+            SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
+                   tq.completed_series, tq.fallback_rating, tq.region, tq.joined_at
+            FROM team_queue tq
+            WHERE tq.status = 'searching'
+              AND tq.player_id != :pid
+              AND ABS(tq.rating - :my_r) <= :range
+              AND tq.player_id NOT IN (
+                  SELECT blocked_id FROM player_blocks WHERE blocker_id = :pid
+                  UNION SELECT blocker_id FROM player_blocks WHERE blocked_id = :pid
+                  UNION SELECT blocked_id FROM queue_blocks WHERE blocker_id = :pid AND expires_at > now()
+                  UNION SELECT blocker_id FROM queue_blocks WHERE blocked_id = :pid AND expires_at > now()
+              )
+            ORDER BY ABS(tq.rating - :my_r), tq.joined_at
+            LIMIT 3
+            FOR UPDATE SKIP LOCKED
+        """),
+        {"pid": my_pid, "my_r": me["rating"], "range": elo_range},
+    )
+    others = list(cands.mappings().all())
+
+    if len(others) < 3:
+        # Not enough — count searching, return.
+        cnt_q = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status='searching'"))
+        cnt = cnt_q.scalar() or 0
+        await db.commit()
+        return TeamQueuePollResponse(status="searching", queue_count=cnt, elo_range=elo_range)
+
+    # 4 candidates total (caller + others). Run balancer.
+    pool = [
+        {"player_id": me["player_id"], "balance_rating": my_balance,
+         "rating": me["rating"], "rd": me["rating_deviation"],
+         "steam_id": me["steam_id"]},
+    ]
+    for o in others:
+        pool.append({
+            "player_id": o["player_id"],
+            "balance_rating": _team_balance_rating(o["rating"], o["completed_series"], o["fallback_rating"]),
+            "rating": o["rating"],
+            "rd": o["rating_deviation"],
+            "steam_id": o["steam_id"],
+        })
+
+    team1_ids, team2_ids = _balance_teams(pool)
+
+    # Within each team, canonicalize the t-a / t-b slot order by sorting on
+    # steam_id. The client reconstructs the same canonical order without any
+    # extra metadata, so its 11-field HMAC byte-matches what the server
+    # rebuilds at /team/matches submit time. Without this canonicalization
+    # the balancer's arbitrary partition order would break HMAC verification.
+    pid_to_steam = {p["player_id"]: p["steam_id"] for p in pool}
+    team1_ids_sorted = sorted(team1_ids, key=lambda pid: pid_to_steam[pid])
+    team2_ids_sorted = sorted(team2_ids, key=lambda pid: pid_to_steam[pid])
+
+    # Create the team_series row.
+    series_id = uuid_mod.uuid4()
+    await db.execute(
+        text("""
+            INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status, created_at)
+            VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', NOW())
+        """),
+        {
+            "sid": series_id,
+            "t1a": team1_ids_sorted[0], "t1b": team1_ids_sorted[1],
+            "t2a": team2_ids_sorted[0], "t2b": team2_ids_sorted[1],
+        },
+    )
+    team1_ids = team1_ids_sorted
+    team2_ids = team2_ids_sorted
+
+    # Auto-clear permanent player_blocks within each team. If A blocked B from
+    # 1v1 ranked but they ended up paired as teammates by the balancer, the
+    # block would otherwise persist into 1v1 (annoying after a friendly 2v2).
+    # Mirror of the tournament-lock behavior — clearing only WITHIN-team pairs.
+    all_pairs = []
+    for team in (team1_ids, team2_ids):
+        all_pairs.extend([(team[0], team[1]), (team[1], team[0])])
+    if all_pairs:
+        await db.execute(
+            text("""
+                DELETE FROM player_blocks
+                WHERE (blocker_id, blocked_id) IN (
+                    SELECT UNNEST(:b1::uuid[]), UNNEST(:b2::uuid[])
+                )
+            """),
+            {"b1": [p[0] for p in all_pairs], "b2": [p[1] for p in all_pairs]},
+        )
+    # Update all 4 queue rows in one statement using arrays.
+    matched_at = datetime.now(timezone.utc)
+    await db.execute(
+        text("""
+            UPDATE team_queue
+            SET status='matched',
+                series_id=:sid,
+                team_assigned = CASE WHEN player_id = ANY(:t1) THEN 1 ELSE 2 END,
+                matched_at = :mat,
+                ready = false,
+                room_name = NULL, room_region = NULL
+            WHERE player_id = ANY(:all4)
+        """),
+        {
+            "sid": series_id,
+            "t1": team1_ids,
+            "mat": matched_at,
+            "all4": team1_ids + team2_ids,
+        },
+    )
+    await db.commit()
+
+    # Reload our row to figure out our team.
+    me_re = await db.execute(
+        text("""SELECT team_assigned, matched_at FROM team_queue WHERE player_id = :pid"""),
+        {"pid": my_pid},
+    )
+    me_row = me_re.mappings().first()
+    my_team = me_row["team_assigned"]
+
+    # Build initial matched response.
+    peers_q = await db.execute(
+        text("""SELECT player_id, steam_id, display_name, rating, region, team_assigned
+               FROM team_queue WHERE series_id = :sid AND player_id != :pid"""),
+        {"sid": series_id, "pid": my_pid},
+    )
+    peers = list(peers_q.mappings().all())
+    teammates_pl = [
+        TeamQueueMember(steam_id=p["steam_id"], display_name=p["display_name"],
+                        rating=int(round(p["rating"])), region=p["region"], team_assigned=p["team_assigned"])
+        for p in peers if p["team_assigned"] == my_team
+    ]
+    opponents_pl = [
+        TeamQueueMember(steam_id=p["steam_id"], display_name=p["display_name"],
+                        rating=int(round(p["rating"])), region=p["region"], team_assigned=p["team_assigned"])
+        for p in peers if p["team_assigned"] != my_team
+    ]
+
+    return TeamQueuePollResponse(
+        status="matched",
+        series_id=str(series_id),
+        team_assigned=my_team,
+        teammates=teammates_pl,
+        opponents=opponents_pl,
+        match_age_seconds=0,
+    )
+
+
+@app.post("/api/v1/team/queue/ready", tags=["Team Queue"])
+async def team_queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    """Mark caller ready. Resets matched_at on all 4 rows so the timeout window
+    refreshes for whoever is the slowest of the four. (Lesson 51 from 1v1.)"""
+    result = await db.execute(select(Player).where(Player.steam_id == steam_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        return {"status": "error", "message": "Unknown player"}
+    me_q = await db.execute(
+        text("SELECT series_id, status FROM team_queue WHERE player_id = :pid"),
+        {"pid": player.id},
+    )
+    me = me_q.mappings().first()
+    if not me or not me["series_id"] or me["status"] not in ("matched", "ready"):
+        return {"status": "error", "message": "Not in a matched 2v2 series"}
+    await db.execute(
+        text("""UPDATE team_queue
+               SET ready = (player_id = :pid OR ready),
+                   matched_at = NOW(),
+                   status = 'ready'
+               WHERE series_id = :sid"""),
+        {"pid": player.id, "sid": me["series_id"]},
+    )
+    await db.commit()
+    print(f"[TEAM-READY] {steam_id} ready in series {me['series_id']}")
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/team/matches", response_model=TeamMatchResponse, tags=["Team Matches"])
+async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(get_db)):
+    """Submitted by the lowest-Steam-ID participant after a 2v2 game ends.
+    HMAC verifies the canonical 11-field message. On series completion, applies
+    Glicko-2 update to all 4 players (each player has 2 opponents = the other team)."""
+    if not _verify_team_hmac(report):
+        raise HTTPException(403, "Invalid team match signature")
+    try:
+        series_uuid = UUID(report.series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id format")
+    # Sanity validations.
+    steams = {report.t1a.steam_id, report.t1b.steam_id, report.t2a.steam_id, report.t2b.steam_id}
+    if len(steams) != 4:
+        raise HTTPException(400, "All four players must be distinct")
+    if report.t1_rounds_won == report.t2_rounds_won:
+        raise HTTPException(400, "Match must have a winner")
+    if report.t1_rounds_won > 5 or report.t2_rounds_won > 5:
+        raise HTTPException(400, "Invalid round count")
+    expected_winner = 1 if report.t1_rounds_won > report.t2_rounds_won else 2
+    if expected_winner != report.winner_team:
+        raise HTTPException(400, "winner_team disagrees with rounds")
+    if report.photon_room_id and "offline" in report.photon_room_id.lower():
+        raise HTTPException(400, "Offline matches are not recorded")
+
+    # Resolve players.
+    p_t1a = await get_or_create_player(db, report.t1a.steam_id, report.t1a.display_name)
+    p_t1b = await get_or_create_player(db, report.t1b.steam_id, report.t1b.display_name)
+    p_t2a = await get_or_create_player(db, report.t2a.steam_id, report.t2a.display_name)
+    p_t2b = await get_or_create_player(db, report.t2b.steam_id, report.t2b.display_name)
+
+    # Series must exist and be active. Lock to prevent advance races.
+    s_q = await db.execute(
+        text("""SELECT * FROM team_series WHERE id = :sid FOR UPDATE"""),
+        {"sid": series_uuid},
+    )
+    series = s_q.mappings().first()
+    if not series:
+        raise HTTPException(404, "team_series not found")
+    if series["status"] != "active":
+        raise HTTPException(400, f"team_series is {series['status']}")
+
+    # Reporter
+    by_steam = {report.t1a.steam_id: p_t1a, report.t1b.steam_id: p_t1b,
+                report.t2a.steam_id: p_t2a, report.t2b.steam_id: p_t2b}
+    reporter = by_steam.get(report.reported_by_steam_id)
+    if not reporter:
+        raise HTTPException(400, "Reporter must be one of the four participants")
+
+    # Insert team_matches row.
+    new_match = TeamMatch(
+        series_id=series_uuid,
+        t1a_id=p_t1a.id, t1b_id=p_t1b.id, t2a_id=p_t2a.id, t2b_id=p_t2b.id,
+        t1_rounds_won=report.t1_rounds_won,
+        t2_rounds_won=report.t2_rounds_won,
+        t1_points_total=report.t1_points_total,
+        t2_points_total=report.t2_points_total,
+        winner_team=report.winner_team,
+        t1a_fps_avg=(report.t1a_fps if (report.t1a_fps or 0) > 0 else None),
+        t1b_fps_avg=(report.t1b_fps if (report.t1b_fps or 0) > 0 else None),
+        t2a_fps_avg=(report.t2a_fps if (report.t2a_fps or 0) > 0 else None),
+        t2b_fps_avg=(report.t2b_fps if (report.t2b_fps or 0) > 0 else None),
+        duration_seconds=report.match_duration,
+        photon_room_id=report.photon_room_id,
+        game_version=report.game_version,
+        region=report.region,
+        hmac_signature=report.hmac_signature,
+        reported_by=reporter.id,
+        is_ranked=report.is_ranked,
+        started_at=report.started_at,
+    )
+    db.add(new_match)
+    await db.flush()
+
+    # Card picks (4 lists)
+    for player_obj, side in (
+        (p_t1a, report.t1a), (p_t1b, report.t1b),
+        (p_t2a, report.t2a), (p_t2b, report.t2b),
+    ):
+        for card in side.cards:
+            db.add(TeamMatchCard(
+                match_id=new_match.id,
+                player_id=player_obj.id,
+                card_name=card.card_name,
+                card_rarity=card.card_rarity,
+                pick_order=card.pick_order,
+                round_number=card.round_number,
+            ))
+
+    # Advance series counters.
+    if report.winner_team == 1:
+        new_t1w = (series["t1_series_wins"] or 0) + 1
+        new_t2w = series["t2_series_wins"] or 0
+    else:
+        new_t1w = series["t1_series_wins"] or 0
+        new_t2w = (series["t2_series_wins"] or 0) + 1
+
+    series_completed = new_t1w >= 2 or new_t2w >= 2
+    series_status = "completed" if series_completed else "active"
+    winner_team = (1 if new_t1w > new_t2w else 2) if series_completed else None
+
+    rebalance_assignments: dict[str, int] | None = None
+    new_ratings: dict[str, float] = {}
+
+    if series_completed:
+        await db.execute(
+            text("""UPDATE team_series
+                   SET t1_series_wins = :t1, t2_series_wins = :t2,
+                       status = 'completed', winner_team = :w, completed_at = NOW()
+                   WHERE id = :sid"""),
+            {"t1": new_t1w, "t2": new_t2w, "w": winner_team, "sid": report.series_id},
+        )
+        # Apply Glicko-2 updates. Each player's "rating period" = this series.
+        # Their two opponents are the two players on the other team.
+        team1_ps = [p_t1a, p_t1b]
+        team2_ps = [p_t2a, p_t2b]
+        team1_won = (winner_team == 1)
+        # Snapshot current ratings before any update.
+        gids = [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id]
+        gres = await db.execute(
+            text("SELECT player_id, rating, rating_deviation, volatility, peak_rating, completed_series "
+                 "FROM glicko_ratings_2v2 WHERE player_id = ANY(:ids) FOR UPDATE"),
+            {"ids": gids},
+        )
+        existing = {r["player_id"]: dict(r) for r in gres.mappings().all()}
+        # Default rows for first-timers.
+        for pid in gids:
+            if pid not in existing:
+                existing[pid] = {
+                    "player_id": pid,
+                    "rating": GLICKO2_DEFAULT_RATING,
+                    "rating_deviation": GLICKO2_DEFAULT_RD,
+                    "volatility": GLICKO2_DEFAULT_VOLATILITY,
+                    "peak_rating": GLICKO2_DEFAULT_RATING,
+                    "completed_series": 0,
+                    "_new": True,
+                }
+        # Compute new ratings using PRE-update opponent values.
+        def update_player(p, opps_pre, won: bool):
+            opps = [(o["rating"], o["rating_deviation"], 1.0 if won else 0.0) for o in opps_pre]
+            return calculate_new_rating(
+                p["rating"], p["rating_deviation"], p["volatility"], opps, GLICKO2_TAU,
+            )
+        # Snapshot inputs first so each player's update sees the pre-update opp values.
+        inputs = {pid: existing[pid] for pid in gids}
+        results: dict[str, tuple[float, float, float]] = {}
+        for p in team1_ps:
+            results[p.id] = update_player(
+                inputs[p.id],
+                [inputs[p_t2a.id], inputs[p_t2b.id]],
+                team1_won,
+            )
+        for p in team2_ps:
+            results[p.id] = update_player(
+                inputs[p.id],
+                [inputs[p_t1a.id], inputs[p_t1b.id]],
+                not team1_won,
+            )
+        # Persist.
+        for pid, (new_r, new_rd, new_vol) in results.items():
+            existing_pre = inputs[pid]
+            new_peak = max(existing_pre.get("peak_rating") or new_r, new_r)
+            if existing_pre.get("_new"):
+                db.add(GlickoRating2v2(
+                    player_id=pid,
+                    rating=new_r,
+                    rating_deviation=new_rd,
+                    volatility=new_vol,
+                    peak_rating=new_peak,
+                    games_in_period=0,
+                    completed_series=1,
+                    last_calculated=datetime.now(timezone.utc),
+                ))
+            else:
+                await db.execute(
+                    text("""UPDATE glicko_ratings_2v2
+                           SET rating=:r, rating_deviation=:rd, volatility=:v,
+                               peak_rating=GREATEST(COALESCE(peak_rating,:r), :r),
+                               completed_series = completed_series + 1,
+                               last_calculated=NOW(), updated_at=NOW()
+                           WHERE player_id=:pid"""),
+                    {"r": new_r, "rd": new_rd, "v": new_vol, "pid": pid},
+                )
+            new_ratings[str(pid)] = round(new_r, 1)
+        # Persist the per-player series Elo deltas for UI display.
+        await db.execute(
+            text("""UPDATE team_series SET
+                       t1a_rating_change = :t1a_d, t1b_rating_change = :t1b_d,
+                       t2a_rating_change = :t2a_d, t2b_rating_change = :t2b_d
+                   WHERE id = :sid"""),
+            {
+                "sid": report.series_id,
+                "t1a_d": round(results[p_t1a.id][0] - inputs[p_t1a.id]["rating"], 1),
+                "t1b_d": round(results[p_t1b.id][0] - inputs[p_t1b.id]["rating"], 1),
+                "t2a_d": round(results[p_t2a.id][0] - inputs[p_t2a.id]["rating"], 1),
+                "t2b_d": round(results[p_t2b.id][0] - inputs[p_t2b.id]["rating"], 1),
+            },
+        )
+        # Free the queue rows so all 4 can re-queue.
+        await db.execute(
+            text("DELETE FROM team_queue WHERE series_id = :sid"),
+            {"sid": series_uuid},
+        )
+    else:
+        # Mid-series advance.
+        await db.execute(
+            text("""UPDATE team_series SET t1_series_wins = :t1, t2_series_wins = :t2 WHERE id = :sid"""),
+            {"t1": new_t1w, "t2": new_t2w, "sid": report.series_id},
+        )
+
+    await db.commit()
+
+    # Build response: series_score from the reporter's team perspective.
+    reporter_team = 1 if reporter.id in (p_t1a.id, p_t1b.id) else 2
+    if reporter_team == 1:
+        score_str = f"{new_t1w}-{new_t2w}"
+    else:
+        score_str = f"{new_t2w}-{new_t1w}"
+
+    return TeamMatchResponse(
+        match_id=new_match.id,
+        series_id=series_uuid,
+        series_status=series_status,
+        series_score=score_str,
+        winner_team=(winner_team or report.winner_team),
+        rebalance_assignments=rebalance_assignments,
+        new_t1a_rating=new_ratings.get(str(p_t1a.id)),
+        new_t1b_rating=new_ratings.get(str(p_t1b.id)),
+        new_t2a_rating=new_ratings.get(str(p_t2a.id)),
+        new_t2b_rating=new_ratings.get(str(p_t2b.id)),
+    )
+
+
+@app.get("/api/v1/team/players/{steam_id}/team-stats", response_model=TeamStatsResponse, tags=["Team Matches"])
+async def get_player_team_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """Per-player 2v2 stats — drives the My Stats tab 2v2 row + 2v2 leaderboard
+    detail panel. Includes current series-level streak (positive=W streak,
+    negative=L streak) by walking completed series in time order."""
+    result = await db.execute(select(Player).where(Player.steam_id == steam_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(404, "Player not found")
+    g_q = await db.execute(select(GlickoRating2v2).where(GlickoRating2v2.player_id == player.id))
+    g = g_q.scalar_one_or_none()
+    rating = g.rating if g else GLICKO2_DEFAULT_RATING
+    rd = g.rating_deviation if g else GLICKO2_DEFAULT_RD
+    peak = g.peak_rating if (g and g.peak_rating) else rating
+    completed_series = g.completed_series if g else 0
+
+    # Series wins/losses — UNION across all 4 slots.
+    sw_q = await db.execute(
+        text("""
+            SELECT
+                SUM(CASE WHEN s.winner_team = 1 AND :pid IN (s.t1a_id, s.t1b_id) THEN 1
+                         WHEN s.winner_team = 2 AND :pid IN (s.t2a_id, s.t2b_id) THEN 1
+                         ELSE 0 END) AS wins,
+                SUM(CASE WHEN s.winner_team = 1 AND :pid IN (s.t2a_id, s.t2b_id) THEN 1
+                         WHEN s.winner_team = 2 AND :pid IN (s.t1a_id, s.t1b_id) THEN 1
+                         ELSE 0 END) AS losses
+            FROM team_series s
+            WHERE s.status = 'completed'
+              AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)
+        """),
+        {"pid": player.id},
+    )
+    sw_row = sw_q.mappings().first()
+    series_wins = int(sw_row["wins"] or 0)
+    series_losses = int(sw_row["losses"] or 0)
+
+    # Match wins/losses inside team_matches.
+    mw_q = await db.execute(
+        text("""
+            SELECT
+                SUM(CASE WHEN m.winner_team = 1 AND :pid IN (m.t1a_id, m.t1b_id) THEN 1
+                         WHEN m.winner_team = 2 AND :pid IN (m.t2a_id, m.t2b_id) THEN 1
+                         ELSE 0 END) AS wins,
+                SUM(CASE WHEN m.winner_team = 1 AND :pid IN (m.t2a_id, m.t2b_id) THEN 1
+                         WHEN m.winner_team = 2 AND :pid IN (m.t1a_id, m.t1b_id) THEN 1
+                         ELSE 0 END) AS losses
+            FROM team_matches m
+            WHERE m.invalidated_at IS NULL
+              AND :pid IN (m.t1a_id, m.t1b_id, m.t2a_id, m.t2b_id)
+        """),
+        {"pid": player.id},
+    )
+    mw_row = mw_q.mappings().first()
+    match_wins = int(mw_row["wins"] or 0)
+    match_losses = int(mw_row["losses"] or 0)
+
+    # Series streak — walk completed series newest first, count consecutive same-result.
+    streak_q = await db.execute(
+        text("""
+            SELECT s.winner_team,
+                   CASE WHEN :pid IN (s.t1a_id, s.t1b_id) THEN 1 ELSE 2 END AS my_team
+            FROM team_series s
+            WHERE s.status = 'completed'
+              AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)
+            ORDER BY s.completed_at DESC
+            LIMIT 50
+        """),
+        {"pid": player.id},
+    )
+    rows = streak_q.mappings().all()
+    streak = 0
+    last_was_win = None
+    for r in rows:
+        won = (r["winner_team"] == r["my_team"])
+        if last_was_win is None:
+            last_was_win = won
+            streak = 1 if won else -1
+        elif won == last_was_win:
+            streak = streak + 1 if won else streak - 1
+        else:
+            break
+
+    total_series = series_wins + series_losses
+    return TeamStatsResponse(
+        steam_id=steam_id,
+        display_name=player.display_name,
+        rating=round(rating, 1),
+        rating_deviation=round(rd, 1),
+        peak_rating=round(peak, 1),
+        completed_series=completed_series,
+        series_wins=series_wins,
+        series_losses=series_losses,
+        series_win_rate=round(series_wins / total_series, 4) if total_series > 0 else 0.0,
+        match_wins=match_wins,
+        match_losses=match_losses,
+        current_streak=streak,
+    )
+
+
+@app.get("/api/v1/team/players/{steam_id}/team-matches", response_model=list[TeamMatchHistoryEntry], tags=["Team Matches"])
+async def get_player_team_matches(
+    steam_id: str,
+    limit: int = Query(50, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recent 2v2 matches played by a given player. Used by the F5 2v2 tab
+    history list. Renders the 4 names + win/loss + series score + per-player
+    cards + FPS averages."""
+    result = await db.execute(select(Player).where(Player.steam_id == steam_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(404, "Player not found")
+
+    q = text("""
+        SELECT
+            tm.id AS match_id, tm.ended_at, tm.winner_team, tm.series_id,
+            tm.t1_rounds_won, tm.t2_rounds_won,
+            tm.t1_points_total, tm.t2_points_total,
+            tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id,
+            tm.t1a_fps_avg, tm.t1b_fps_avg, tm.t2a_fps_avg, tm.t2b_fps_avg,
+            p1a.steam_id AS t1a_sid, p1a.display_name AS t1a_name,
+            p1b.steam_id AS t1b_sid, p1b.display_name AS t1b_name,
+            p2a.steam_id AS t2a_sid, p2a.display_name AS t2a_name,
+            p2b.steam_id AS t2b_sid, p2b.display_name AS t2b_name,
+            ts.t1_series_wins, ts.t2_series_wins, ts.winner_team AS series_winner_team,
+            ts.t1a_id AS s_t1a, ts.t1b_id AS s_t1b,
+            CASE
+                WHEN :pid IN (ts.t1a_id, ts.t1b_id) THEN
+                    CASE WHEN ts.t1a_id = :pid THEN ts.t1a_rating_change ELSE ts.t1b_rating_change END
+                ELSE
+                    CASE WHEN ts.t2a_id = :pid THEN ts.t2a_rating_change ELSE ts.t2b_rating_change END
+            END AS rating_change
+        FROM team_matches tm
+        JOIN players p1a ON p1a.id = tm.t1a_id
+        JOIN players p1b ON p1b.id = tm.t1b_id
+        JOIN players p2a ON p2a.id = tm.t2a_id
+        JOIN players p2b ON p2b.id = tm.t2b_id
+        LEFT JOIN team_series ts ON ts.id = tm.series_id
+        WHERE :pid IN (tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id)
+          AND tm.invalidated_at IS NULL
+        ORDER BY tm.ended_at DESC
+        LIMIT :lim
+    """)
+    rows = (await db.execute(q, {"pid": player.id, "lim": limit})).mappings().all()
+
+    entries: list[TeamMatchHistoryEntry] = []
+    for r in rows:
+        my_team = 1 if player.id in (r["t1a_id"], r["t1b_id"]) else 2
+        won = (r["winner_team"] == my_team)
+        # Card picks per (match_id, player_id)
+        cards_q = await db.execute(
+            text("""SELECT player_id, card_name, card_rarity, pick_order, round_number
+                   FROM team_match_cards
+                   WHERE match_id = :mid
+                   ORDER BY player_id, round_number, pick_order"""),
+            {"mid": r["match_id"]},
+        )
+        cards_by_player: dict[str, list] = {}
+        for c in cards_q.mappings().all():
+            pid_str = str(c["player_id"])
+            cards_by_player.setdefault(pid_str, []).append({
+                "card_name": c["card_name"], "card_rarity": c["card_rarity"],
+                "pick_order": c["pick_order"], "round_number": c["round_number"],
+            })
+        # Re-key by Steam ID for the response (client doesn't know UUIDs).
+        pid_to_sid = {
+            str(r["t1a_id"]): r["t1a_sid"], str(r["t1b_id"]): r["t1b_sid"],
+            str(r["t2a_id"]): r["t2a_sid"], str(r["t2b_id"]): r["t2b_sid"],
+        }
+        cards_by_steam: dict[str, list] = {}
+        for pid_str, lst in cards_by_player.items():
+            sid_for = pid_to_sid.get(pid_str)
+            if sid_for:
+                cards_by_steam[sid_for] = lst
+
+        fps_by_steam: dict[str, int] = {}
+        if r["t1a_fps_avg"]: fps_by_steam[r["t1a_sid"]] = int(r["t1a_fps_avg"])
+        if r["t1b_fps_avg"]: fps_by_steam[r["t1b_sid"]] = int(r["t1b_fps_avg"])
+        if r["t2a_fps_avg"]: fps_by_steam[r["t2a_sid"]] = int(r["t2a_fps_avg"])
+        if r["t2b_fps_avg"]: fps_by_steam[r["t2b_sid"]] = int(r["t2b_fps_avg"])
+
+        # Series score from caller's team perspective.
+        series_score = None
+        if r["series_id"] is not None and r["t1_series_wins"] is not None:
+            t1w, t2w = r["t1_series_wins"] or 0, r["t2_series_wins"] or 0
+            # Determine which team the caller was on FOR THIS SERIES (the series
+            # uses balancer-time assignments; team_assigned in the match row may
+            # have been rebalanced — we don't rebalance yet so they're identical
+            # but keeping the logic explicit so future Phase 3 changes don't break it).
+            in_series_team1 = player.id in (r["s_t1a"], r["s_t1b"])
+            if in_series_team1:
+                series_score = f"{t1w}-{t2w}"
+            else:
+                series_score = f"{t2w}-{t1w}"
+
+        rating_change = None
+        if r["rating_change"] is not None:
+            rating_change = float(r["rating_change"])
+
+        entries.append(TeamMatchHistoryEntry(
+            match_id=r["match_id"],
+            series_id=str(r["series_id"]) if r["series_id"] else "",
+            ended_at=r["ended_at"],
+            won=won,
+            my_team=my_team,
+            t1a_steam_id=r["t1a_sid"], t1a_name=r["t1a_name"],
+            t1b_steam_id=r["t1b_sid"], t1b_name=r["t1b_name"],
+            t2a_steam_id=r["t2a_sid"], t2a_name=r["t2a_name"],
+            t2b_steam_id=r["t2b_sid"], t2b_name=r["t2b_name"],
+            t1_rounds_won=r["t1_rounds_won"],
+            t2_rounds_won=r["t2_rounds_won"],
+            t1_points_total=r["t1_points_total"] or 0,
+            t2_points_total=r["t2_points_total"] or 0,
+            cards_by_player=cards_by_steam,
+            series_score=series_score,
+            series_rating_change=rating_change,
+            fps_by_player=fps_by_steam,
+        ))
+    return entries
+
+
+@app.get("/api/v1/team/series/recent", tags=["Team Matches"])
+async def team_series_recent(minutes: int = Query(5, ge=1, le=60), db: AsyncSession = Depends(get_db)):
+    """Series completed in the last N minutes — drives the Discord 2v2 announcement.
+    Returns names + ratings + Elo changes per player so the bot can render the embed
+    without further fetches."""
+    q = text("""
+        SELECT
+            s.id AS series_id,
+            s.completed_at,
+            s.t1_series_wins, s.t2_series_wins, s.winner_team,
+            s.t1a_rating_change, s.t1b_rating_change, s.t2a_rating_change, s.t2b_rating_change,
+            p1a.steam_id AS t1a_sid, p1a.display_name AS t1a_name, p1a.discord_id AS t1a_did,
+            p1b.steam_id AS t1b_sid, p1b.display_name AS t1b_name, p1b.discord_id AS t1b_did,
+            p2a.steam_id AS t2a_sid, p2a.display_name AS t2a_name, p2a.discord_id AS t2a_did,
+            p2b.steam_id AS t2b_sid, p2b.display_name AS t2b_name, p2b.discord_id AS t2b_did,
+            g1a.rating AS t1a_rating, g1b.rating AS t1b_rating,
+            g2a.rating AS t2a_rating, g2b.rating AS t2b_rating
+        FROM team_series s
+        JOIN players p1a ON p1a.id = s.t1a_id
+        JOIN players p1b ON p1b.id = s.t1b_id
+        JOIN players p2a ON p2a.id = s.t2a_id
+        JOIN players p2b ON p2b.id = s.t2b_id
+        LEFT JOIN glicko_ratings_2v2 g1a ON g1a.player_id = s.t1a_id
+        LEFT JOIN glicko_ratings_2v2 g1b ON g1b.player_id = s.t1b_id
+        LEFT JOIN glicko_ratings_2v2 g2a ON g2a.player_id = s.t2a_id
+        LEFT JOIN glicko_ratings_2v2 g2b ON g2b.player_id = s.t2b_id
+        WHERE s.status = 'completed'
+          AND s.completed_at > NOW() - INTERVAL '1 minute' * :mins
+        ORDER BY s.completed_at DESC
+    """)
+    rows = (await db.execute(q, {"mins": minutes})).mappings().all()
+    return {"series": [
+        {
+            "series_id": str(r["series_id"]),
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            "winner_team": r["winner_team"],
+            "t1_series_wins": r["t1_series_wins"], "t2_series_wins": r["t2_series_wins"],
+            "t1a": {"steam_id": r["t1a_sid"], "name": r["t1a_name"], "discord_id": r["t1a_did"],
+                    "rating": float(r["t1a_rating"]) if r["t1a_rating"] is not None else 1500.0,
+                    "rating_change": float(r["t1a_rating_change"] or 0)},
+            "t1b": {"steam_id": r["t1b_sid"], "name": r["t1b_name"], "discord_id": r["t1b_did"],
+                    "rating": float(r["t1b_rating"]) if r["t1b_rating"] is not None else 1500.0,
+                    "rating_change": float(r["t1b_rating_change"] or 0)},
+            "t2a": {"steam_id": r["t2a_sid"], "name": r["t2a_name"], "discord_id": r["t2a_did"],
+                    "rating": float(r["t2a_rating"]) if r["t2a_rating"] is not None else 1500.0,
+                    "rating_change": float(r["t2a_rating_change"] or 0)},
+            "t2b": {"steam_id": r["t2b_sid"], "name": r["t2b_name"], "discord_id": r["t2b_did"],
+                    "rating": float(r["t2b_rating"]) if r["t2b_rating"] is not None else 1500.0,
+                    "rating_change": float(r["t2b_rating_change"] or 0)},
+        }
+        for r in rows
+    ]}
+
+
+@app.get("/api/v1/team/leaderboard", response_model=Team2v2LeaderboardResponse, tags=["Team Matches"])
+async def team_leaderboard(
+    limit: int = Query(100, ge=1, le=200),
+    min_series: int = Query(3, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """Top players by 2v2 Glicko rating. min_series gates rookies out of the top
+    of the board the same way 1v1 leaderboard does with min_matches."""
+    q = text("""
+        WITH series_stats AS (
+            SELECT player_id, SUM(won) AS wins, SUM(lost) AS losses, COUNT(*) AS total
+            FROM (
+                SELECT t1a_id AS player_id,
+                       CASE WHEN winner_team = 1 THEN 1 ELSE 0 END AS won,
+                       CASE WHEN winner_team = 2 THEN 1 ELSE 0 END AS lost
+                FROM team_series WHERE status='completed'
+                UNION ALL
+                SELECT t1b_id, CASE WHEN winner_team = 1 THEN 1 ELSE 0 END,
+                       CASE WHEN winner_team = 2 THEN 1 ELSE 0 END
+                FROM team_series WHERE status='completed'
+                UNION ALL
+                SELECT t2a_id, CASE WHEN winner_team = 2 THEN 1 ELSE 0 END,
+                       CASE WHEN winner_team = 1 THEN 1 ELSE 0 END
+                FROM team_series WHERE status='completed'
+                UNION ALL
+                SELECT t2b_id, CASE WHEN winner_team = 2 THEN 1 ELSE 0 END,
+                       CASE WHEN winner_team = 1 THEN 1 ELSE 0 END
+                FROM team_series WHERE status='completed'
+            ) sub
+            GROUP BY player_id
+        )
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY g2.rating DESC) AS rank,
+            p.steam_id,
+            p.display_name,
+            ROUND(g2.rating::numeric, 0) AS rating,
+            ROUND(g2.rating_deviation::numeric, 0) AS rd,
+            g2.completed_series,
+            COALESCE(ss.wins, 0) AS wins,
+            COALESCE(ss.losses, 0) AS losses,
+            CASE WHEN COALESCE(ss.total, 0) > 0
+                 THEN ROUND(COALESCE(ss.wins, 0)::numeric / ss.total, 4)
+                 ELSE 0 END AS win_rate,
+            COALESCE(p.total_xp, 0) AS total_xp
+        FROM glicko_ratings_2v2 g2
+        JOIN players p ON p.id = g2.player_id
+        LEFT JOIN series_stats ss ON ss.player_id = p.id
+        WHERE g2.completed_series >= :min_series
+          AND p.deleted_at IS NULL
+        ORDER BY g2.rating DESC
+        LIMIT :limit
+    """)
+    rows = (await db.execute(q, {"min_series": min_series, "limit": limit})).mappings().all()
+    entries = [
+        Team2v2LeaderboardEntry(
+            rank=r["rank"],
+            steam_id=r["steam_id"],
+            display_name=r["display_name"],
+            rating=int(r["rating"]),
+            rd=int(r["rd"]),
+            completed_series=r["completed_series"],
+            series_wins=r["wins"],
+            series_losses=r["losses"],
+            win_rate=float(r["win_rate"]),
+            level=level_from_xp(r["total_xp"])[0],
+        )
+        for r in rows
+    ]
+    cnt = (await db.execute(
+        text("SELECT COUNT(*) FROM glicko_ratings_2v2 WHERE completed_series >= :m"),
+        {"m": min_series},
+    )).scalar() or 0
+    return Team2v2LeaderboardResponse(entries=entries, total_players=cnt, last_updated=datetime.now(timezone.utc))

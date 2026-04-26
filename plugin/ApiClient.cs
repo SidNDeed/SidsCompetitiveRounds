@@ -129,6 +129,10 @@ namespace CompetitiveRounds
             // Multi-equip map colors — player cycles between these in-game with Left Shift.
             // Empty list → no override, ArtHandler falls through to vanilla random rotation.
             public List<string> active_color_skus;
+            // Player BODY color (kind=player_color). Single-equip; overrides team color.
+            public string active_player_color_sku;
+            public string active_player_color_hex;
+            public string active_player_color_name;
             // Stackable rich-text nametag styles by sku. Parsed manually (JsonUtility can't handle
             // string arrays without a wrapper class). Null or empty = no styling applied.
             public List<string> active_nametag_skus;
@@ -190,6 +194,9 @@ namespace CompetitiveRounds
             public int xp_gained; // XP earned for this match
             public int gold_gained; // Gold earned on this specific match (from XP crossings)
             public int series_gold_gained; // Gold earned from the series this match is part of (only set on the last-match-of-series row)
+            // v1.25 average FPS. 0 = no data (row predates v1.25 OR opponent didn't have the mod).
+            public int player_fps_avg;
+            public int opponent_fps_avg;
         }
 
         [Serializable]
@@ -851,6 +858,21 @@ namespace CompetitiveRounds
             }));
         }
 
+        /// <summary>Equip / unequip a player body color (kind=player_color). itemId=0
+        /// clears the current selection. HMAC over "player_color:{steam_id}:{item_id}".</summary>
+        public static void SetActivePlayerColor(string steamId, long itemId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"player_color:{steamId}:{itemId}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/active-player-color?sig={sig}";
+            if (itemId > 0) url += $"&item_id={itemId}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SHOP] set player_color {itemId}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) FetchPlayerStats(steamId);
+            }));
+        }
+
         /// <summary>Toggle a nametag rich-text style on/off. Stackable — multiple styles can be active.
         /// HMAC over "nametag:{steam_id}:{item_id}".</summary>
         public static void ToggleNametagStyle(string steamId, long itemId, Action<bool, string> callback = null)
@@ -1174,7 +1196,10 @@ namespace CompetitiveRounds
             // Hit% / Block% telemetry (v1.23). Same "advisory, not in HMAC" treatment — these
             // are stat counters on the reporter side that feed lifetime totals on the server.
             int localBulletsFired = 0, int localBulletsHit = 0,
-            int localBlocksActivated = 0, int localBlocksSuccessful = 0)
+            int localBlocksActivated = 0, int localBlocksSuccessful = 0,
+            // v1.25 — average FPS this match. localAvgFps from our own counter, opponentAvgFps
+            // sniffed from their Photon `cr_fps` custom property (0 = no data / no mod).
+            int localAvgFps = 0, int opponentAvgFps = 0)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -1207,6 +1232,8 @@ namespace CompetitiveRounds
             sb.Append($"\"local_bullets_hit\":{localBulletsHit},");
             sb.Append($"\"local_blocks_activated\":{localBlocksActivated},");
             sb.Append($"\"local_blocks_successful\":{localBlocksSuccessful},");
+            sb.Append($"\"local_avg_fps\":{localAvgFps},");
+            sb.Append($"\"opponent_avg_fps\":{opponentAvgFps},");
             string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
@@ -1347,7 +1374,7 @@ namespace CompetitiveRounds
 
         // ── Data fetching ─────────────────────────────────────
 
-        public static void FetchLeaderboard(int limit = 20, int minMatches = 1)
+        public static void FetchLeaderboard(int limit = 100, int minMatches = 1)
         {
             IsLoading = true;
             Plugin.Instance.StartCoroutine(GetRequest(
@@ -1532,6 +1559,7 @@ namespace CompetitiveRounds
                             // Re-publish Photon trail props whenever local stats refresh — covers
                             // the initial load + any later trail changes.
                             try { TrailCosmetic.PublishLocalProps(); } catch { }
+                            try { PlayerColorCosmetic.PublishLocalProps(); } catch { }
                             // Re-publish nametag styles into LocalPlayer.NickName for the same reason.
                             try { NametagStyler.PublishToPhoton(); } catch { }
                         }
@@ -1949,6 +1977,8 @@ namespace CompetitiveRounds
                                 entry.xp_gained = ExtractJsonInt(chunk, "xp_gained");
                                 entry.gold_gained = ExtractJsonInt(chunk, "gold_gained");
                                 entry.series_gold_gained = ExtractJsonInt(chunk, "series_gold_gained");
+                                entry.player_fps_avg = ExtractJsonInt(chunk, "player_fps_avg");
+                                entry.opponent_fps_avg = ExtractJsonInt(chunk, "opponent_fps_avg");
 
                                 entries.Add(entry);
                             }
@@ -2283,7 +2313,13 @@ namespace CompetitiveRounds
                         }
                         else
                         {
-                            Plugin.Log.LogInfo("[QUEUE] Waiting for opponent to ready up");
+                            // Echo the server response so if a "canceled despite both ready"
+                            // report comes in again we can see if the server actually said
+                            // "waiting" or something weirder like "not_matched" (which would
+                            // indicate the matched state was already lost before the ready hit).
+                            string detail = ExtractJsonString(response, "status") ?? "(no status)";
+                            string msg = ExtractJsonString(response, "message") ?? "";
+                            Plugin.Log.LogInfo($"[QUEUE] Waiting for opponent to ready up (server: {detail} — {msg})");
                         }
                     }
                     else
@@ -2437,6 +2473,525 @@ namespace CompetitiveRounds
         }
 
         public static void ResetQueueCountTimer() { queueCountTimer = queueCountInterval; }
+
+        // ════════════════════════════════════════════════════════════
+        // 2v2 RANKED (Phase 2 — client side)
+        // ════════════════════════════════════════════════════════════
+
+        public enum TeamQueueState { Idle, Searching, Matched, ReadySent }
+
+        [Serializable]
+        public class TeamQueueMember
+        {
+            public string steam_id;
+            public string display_name;
+            public int rating;
+            public string region;
+            public int team_assigned; // 1, 2, or 0 if unassigned
+        }
+
+        [Serializable]
+        public class TeamQueuePollData
+        {
+            public string status;
+            public int queue_count;
+            public int elo_range;
+            public string series_id;
+            public int team_assigned;
+            public List<TeamQueueMember> teammates = new List<TeamQueueMember>();
+            public List<TeamQueueMember> opponents = new List<TeamQueueMember>();
+            public string room_name;
+            public string room_region;
+            public int match_age_seconds;
+        }
+
+        public static TeamQueueState CurrentTeamQueueState { get; private set; } = TeamQueueState.Idle;
+        public static TeamQueuePollData LastTeamPollData { get; private set; }
+        public static string ActiveTeamSeriesId { get; set; }
+        public static bool IsTeamQueuePolling { get; private set; } = false;
+        public static int CachedTeamQueueSearching { get; private set; } = 0;
+        private static float teamQueuePollTimer = 0f;
+        private static float teamQueueCountTimer = 0f;
+        private const float TEAM_QUEUE_POLL_INTERVAL = 3f;
+        private const float TEAM_QUEUE_COUNT_INTERVAL = 10f;
+
+        public static void JoinTeamQueue(string steamId, string displayName, string region)
+        {
+            if (string.IsNullOrEmpty(region))
+            {
+                try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            }
+            string safeName = Escape(displayName ?? steamId);
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/team/queue/join", json,
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        CurrentTeamQueueState = TeamQueueState.Searching;
+                        IsTeamQueuePolling = true;
+                        teamQueuePollTimer = 0f;
+                        Plugin.Log.LogInfo("[TEAM-QUEUE] Joined 2v2 queue");
+                        CompetitiveUI.ShowNotification("Searching for 2v2 match...", new Color(0.4f, 0.8f, 1f));
+                        NativeUI.MarkDirty();
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[TEAM-QUEUE] Join failed: {response}");
+                        CompetitiveUI.ShowNotification("Failed to join 2v2 queue", new Color(1f, 0.4f, 0.4f));
+                    }
+                }
+            ));
+        }
+
+        public static void LeaveTeamQueue(string steamId)
+        {
+            if (CurrentTeamQueueState == TeamQueueState.Idle && !IsTeamQueuePolling) return;
+            CurrentTeamQueueState = TeamQueueState.Idle;
+            IsTeamQueuePolling = false;
+            LastTeamPollData = null;
+            ActiveTeamSeriesId = null;
+            NativeUI.MarkDirty();
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/team/queue/leave?steam_id={Escape(steamId)}", "",
+                (success, response) => { Plugin.Log.LogInfo("[TEAM-QUEUE] Left 2v2 queue"); }
+            ));
+        }
+
+        public static void ReadyUpTeam(string steamId)
+        {
+            if (CurrentTeamQueueState != TeamQueueState.Matched) return;
+            CurrentTeamQueueState = TeamQueueState.ReadySent;
+            NativeUI.MarkDirty();
+            Plugin.Log.LogInfo("[TEAM-QUEUE] Ready Up sent");
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                $"{baseUrl}/api/v1/team/queue/ready?steam_id={Escape(steamId)}", "",
+                (success, response) =>
+                {
+                    if (!success)
+                    {
+                        Plugin.Log.LogWarning($"[TEAM-QUEUE] Ready failed after retries: {response}");
+                        CompetitiveUI.ShowNotification("Ready-up failed — retrying search", new Color(1f, 0.6f, 0.2f), 5f);
+                        CurrentTeamQueueState = TeamQueueState.Matched;
+                        NativeUI.MarkDirty();
+                    }
+                },
+                maxRetries: 3, retryDelay: 2f
+            ));
+        }
+
+        public static void UpdateTeamQueuePoll(string steamId)
+        {
+            if (!IsTeamQueuePolling) return;
+            teamQueuePollTimer += Time.deltaTime;
+            if (teamQueuePollTimer < TEAM_QUEUE_POLL_INTERVAL) return;
+            teamQueuePollTimer = 0f;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/team/queue/poll/{steamId}",
+                (success, response) =>
+                {
+                    if (!success || !IsTeamQueuePolling) return;
+                    try { ParseTeamQueuePoll(response); }
+                    catch (Exception ex) { Plugin.Log.LogError($"[TEAM-QUEUE] poll parse: {ex.Message}"); }
+                }
+            ));
+        }
+
+        private static void ParseTeamQueuePoll(string response)
+        {
+            string status = ExtractJsonString(response, "status");
+            var data = new TeamQueuePollData
+            {
+                status = status,
+                queue_count = ExtractJsonInt(response, "queue_count"),
+                elo_range = ExtractJsonInt(response, "elo_range"),
+                series_id = ExtractJsonString(response, "series_id"),
+                team_assigned = ExtractJsonInt(response, "team_assigned"),
+                room_name = ExtractJsonString(response, "room_name"),
+                room_region = ExtractJsonString(response, "room_region"),
+                match_age_seconds = ExtractJsonInt(response, "match_age_seconds"),
+            };
+            data.teammates = ExtractTeamMemberList(response, "teammates");
+            data.opponents = ExtractTeamMemberList(response, "opponents");
+            LastTeamPollData = data;
+
+            if (status == "ready_join")
+            {
+                if (!string.IsNullOrEmpty(data.room_name))
+                {
+                    IsTeamQueuePolling = false;
+                    CurrentTeamQueueState = TeamQueueState.Idle;
+                    ActiveTeamSeriesId = data.series_id;
+                    Plugin.SetPendingRoom(data.room_name, data.room_region);
+                    Plugin.Log.LogInfo($"[TEAM-QUEUE] All ready! Room: {data.room_name} (region: {data.room_region ?? "auto"}) series={data.series_id}");
+                    CompetitiveUI.ShowNotification("4/4 ready! Joining 2v2...", Color.green, 5f);
+                    NativeUI.MarkDirty();
+                }
+            }
+            else if (status == "matched")
+            {
+                if (CurrentTeamQueueState != TeamQueueState.ReadySent)
+                    CurrentTeamQueueState = TeamQueueState.Matched;
+                ActiveTeamSeriesId = data.series_id;
+                NativeUI.MarkDirty();
+            }
+            else if (status == "searching")
+            {
+                if (CurrentTeamQueueState != TeamQueueState.Searching)
+                {
+                    // Was matched, got bumped back (someone left)
+                    CurrentTeamQueueState = TeamQueueState.Searching;
+                    ActiveTeamSeriesId = null;
+                    CompetitiveUI.ShowNotification("Match canceled — re-searching", new Color(1f, 0.6f, 0.2f), 5f);
+                }
+                NativeUI.MarkDirty();
+            }
+            else if (status == "expired" || status == "not_in_queue")
+            {
+                IsTeamQueuePolling = false;
+                CurrentTeamQueueState = TeamQueueState.Idle;
+                LastTeamPollData = null;
+                ActiveTeamSeriesId = null;
+                NativeUI.MarkDirty();
+            }
+        }
+
+        /// <summary>Manual TeamQueueMember[] parser. Photon JsonUtility chokes on
+        /// nested arrays so we hand-extract the slice for `key`. Format:
+        /// `"key":[{...},{...}]`. Returns empty list on missing/malformed.</summary>
+        private static List<TeamQueueMember> ExtractTeamMemberList(string json, string key)
+        {
+            var list = new List<TeamQueueMember>();
+            try
+            {
+                int kIdx = json.IndexOf("\"" + key + "\":[");
+                if (kIdx < 0) return list;
+                int start = kIdx + key.Length + 4;
+                int depth = 1, i = start;
+                while (i < json.Length && depth > 0)
+                {
+                    if (json[i] == '[') depth++;
+                    else if (json[i] == ']') depth--;
+                    i++;
+                }
+                if (depth != 0) return list;
+                string slice = json.Substring(start, i - start - 1);
+                int oIdx = 0;
+                while (oIdx < slice.Length)
+                {
+                    int objStart = slice.IndexOf('{', oIdx);
+                    if (objStart < 0) break;
+                    int oDepth = 1, j = objStart + 1;
+                    while (j < slice.Length && oDepth > 0)
+                    {
+                        if (slice[j] == '{') oDepth++;
+                        else if (slice[j] == '}') oDepth--;
+                        j++;
+                    }
+                    if (oDepth != 0) break;
+                    string obj = slice.Substring(objStart, j - objStart);
+                    list.Add(new TeamQueueMember
+                    {
+                        steam_id = ExtractJsonString(obj, "steam_id"),
+                        display_name = ExtractJsonString(obj, "display_name"),
+                        rating = ExtractJsonInt(obj, "rating"),
+                        region = ExtractJsonString(obj, "region"),
+                        team_assigned = ExtractJsonInt(obj, "team_assigned"),
+                    });
+                    oIdx = j;
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        public static void UpdateTeamQueueCount()
+        {
+            teamQueueCountTimer += Time.deltaTime;
+            if (teamQueueCountTimer < TEAM_QUEUE_COUNT_INTERVAL) return;
+            teamQueueCountTimer = 0f;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/team/queue/count",
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        int s = ExtractJsonInt(response, "searching");
+                        if (s != CachedTeamQueueSearching)
+                        {
+                            CachedTeamQueueSearching = s;
+                            NativeUI.MarkDirty();
+                        }
+                    }
+                }
+            ));
+        }
+
+        /// <summary>Submit a 2v2 match. Reporter is the lowest Steam ID across
+        /// all 4 participants. Builds the 11-field HMAC over
+        /// t1a:t1b:t2a:t2b:t1r:t2r:is_ranked:reporter:room_id:winner_team:series_id.</summary>
+        public static void ReportTeamMatch(
+            string seriesId,
+            string t1aSteam, string t1aName, List<MatchTracker.CardPickData> t1aCards,
+            string t1bSteam, string t1bName, List<MatchTracker.CardPickData> t1bCards,
+            string t2aSteam, string t2aName, List<MatchTracker.CardPickData> t2aCards,
+            string t2bSteam, string t2bName, List<MatchTracker.CardPickData> t2bCards,
+            int t1Rounds, int t2Rounds, int t1Points, int t2Points,
+            string photonRoomId, string region, int durationSeconds, DateTime startedAt,
+            string reporterSteamId, bool isRanked, int winnerTeam,
+            int t1aFps, int t1bFps, int t2aFps, int t2bFps)
+        {
+            var sb = new StringBuilder();
+            sb.Append("{");
+            sb.Append($"\"series_id\":\"{Escape(seriesId)}\",");
+            void appendPlayer(string field, string sid, string name, List<MatchTracker.CardPickData> cards)
+            {
+                sb.Append($"\"{field}\":{{\"steam_id\":\"{Escape(sid)}\",\"display_name\":\"{Escape(name)}\",\"cards\":[");
+                AppendCards(sb, cards);
+                sb.Append("],\"card_offers\":[]},");
+            }
+            appendPlayer("t1a", t1aSteam, t1aName, t1aCards);
+            appendPlayer("t1b", t1bSteam, t1bName, t1bCards);
+            appendPlayer("t2a", t2aSteam, t2aName, t2aCards);
+            appendPlayer("t2b", t2bSteam, t2bName, t2bCards);
+            sb.Append($"\"t1_rounds_won\":{t1Rounds},");
+            sb.Append($"\"t2_rounds_won\":{t2Rounds},");
+            sb.Append($"\"t1_points_total\":{t1Points},");
+            sb.Append($"\"t2_points_total\":{t2Points},");
+            sb.Append($"\"winner_team\":{winnerTeam},");
+            sb.Append($"\"photon_room_id\":\"{Escape(photonRoomId)}\",");
+            sb.Append($"\"game_version\":\"v{Application.version}\",");
+            sb.Append($"\"region\":\"{Escape(region)}\",");
+            sb.Append($"\"match_duration\":{durationSeconds},");
+            sb.Append($"\"started_at\":\"{startedAt:yyyy-MM-ddTHH:mm:ssZ}\",");
+            sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
+            sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteamId)}\",");
+            sb.Append($"\"t1a_fps\":{t1aFps},\"t1b_fps\":{t1bFps},\"t2a_fps\":{t2aFps},\"t2b_fps\":{t2bFps},");
+
+            string canonical =
+                $"{t1aSteam}:{t1bSteam}:{t2aSteam}:{t2bSteam}:" +
+                $"{t1Rounds}:{t2Rounds}:" +
+                $"{(isRanked ? "true" : "false")}:{reporterSteamId}:" +
+                $"{photonRoomId ?? ""}:{winnerTeam}:{seriesId}";
+            string sig = ComputeHmacHex(canonical);
+            sb.Append($"\"hmac_signature\":\"{sig}\"");
+            sb.Append("}");
+
+            string json = sb.ToString();
+            Plugin.Log.LogInfo($"Reporting 2v2 match (series={seriesId}, winner=T{winnerTeam}, {t1Rounds}-{t2Rounds})...");
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                $"{baseUrl}/api/v1/team/matches", json,
+                (success, response) =>
+                {
+                    if (success)
+                    {
+                        Plugin.Log.LogInfo($"2v2 match reported: {response}");
+                        string sStatus = ExtractJsonString(response, "series_status");
+                        string sScore = ExtractJsonString(response, "series_score");
+                        if (sStatus == "completed")
+                        {
+                            CompetitiveUI.ShowNotification($"Series complete: {sScore}", Color.green, 6f);
+                            ActiveTeamSeriesId = null;
+                        }
+                        else if (!string.IsNullOrEmpty(sScore))
+                        {
+                            CompetitiveUI.ShowNotification($"Series: {sScore}", new Color(0.6f, 0.8f, 1f), 4f);
+                        }
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"2v2 match report failed: {response}");
+                    }
+                },
+                maxRetries: 3, retryDelay: 2f
+            ));
+        }
+
+        public static void ResetTeamQueue()
+        {
+            CurrentTeamQueueState = TeamQueueState.Idle;
+            IsTeamQueuePolling = false;
+            LastTeamPollData = null;
+        }
+
+        // ── 2v2 Leaderboard ──────────────────────────────────────
+        [Serializable]
+        public class TeamLeaderboardEntry
+        {
+            public int rank;
+            public string steam_id;
+            public string display_name;
+            public int rating;
+            public int rd;
+            public int completed_series;
+            public int series_wins;
+            public int series_losses;
+            public float win_rate;
+            public int level;
+        }
+        public static List<TeamLeaderboardEntry> CachedTeamLeaderboard { get; private set; } = new List<TeamLeaderboardEntry>();
+        public static int CachedTeamLeaderboardTotal { get; private set; } = 0;
+
+        [Serializable]
+        public class TeamMatchHistoryEntry
+        {
+            public string match_id, series_id, ended_at;
+            public bool won;
+            public int my_team;
+            public string t1a_steam_id, t1a_name, t1b_steam_id, t1b_name;
+            public string t2a_steam_id, t2a_name, t2b_steam_id, t2b_name;
+            public int t1_rounds_won, t2_rounds_won;
+            public int t1_points_total, t2_points_total;
+            public string series_score;
+            public float series_rating_change;
+            // FPS keyed by Steam ID; absent = no data
+            public Dictionary<string, int> fps_by_player = new Dictionary<string, int>();
+        }
+        public static List<TeamMatchHistoryEntry> CachedTeamMatchHistory { get; private set; } = new List<TeamMatchHistoryEntry>();
+
+        [Serializable]
+        public class TeamStatsData
+        {
+            public string steam_id, display_name;
+            public float rating, rating_deviation, peak_rating;
+            public int completed_series, series_wins, series_losses;
+            public float series_win_rate;
+            public int match_wins, match_losses, current_streak;
+        }
+        public static TeamStatsData CachedTeamStats { get; private set; }
+
+        public static void FetchTeamStats(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/team/players/{steamId}/team-stats",
+                (success, response) =>
+                {
+                    if (!success) return;
+                    try
+                    {
+                        var d = new TeamStatsData
+                        {
+                            steam_id = ExtractJsonString(response, "steam_id"),
+                            display_name = ExtractJsonString(response, "display_name"),
+                            rating = ExtractJsonFloat(response, "rating"),
+                            rating_deviation = ExtractJsonFloat(response, "rating_deviation"),
+                            peak_rating = ExtractJsonFloat(response, "peak_rating"),
+                            completed_series = ExtractJsonInt(response, "completed_series"),
+                            series_wins = ExtractJsonInt(response, "series_wins"),
+                            series_losses = ExtractJsonInt(response, "series_losses"),
+                            series_win_rate = ExtractJsonFloat(response, "series_win_rate"),
+                            match_wins = ExtractJsonInt(response, "match_wins"),
+                            match_losses = ExtractJsonInt(response, "match_losses"),
+                            current_streak = ExtractJsonInt(response, "current_streak"),
+                        };
+                        CachedTeamStats = d;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogError($"[TEAM-STATS] parse: {ex.Message}"); }
+                }
+            ));
+        }
+
+        public static void FetchTeamMatchHistory(string steamId, int limit = 50)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/team/players/{steamId}/team-matches?limit={limit}",
+                (success, response) =>
+                {
+                    if (!success) return;
+                    try
+                    {
+                        var entries = new List<TeamMatchHistoryEntry>();
+                        if (string.IsNullOrEmpty(response) || response.Trim() == "[]")
+                        {
+                            CachedTeamMatchHistory = entries;
+                            NativeUI.MarkDirty();
+                            return;
+                        }
+                        var parts = response.Split(new[] { "\"match_id\"" }, StringSplitOptions.None);
+                        for (int i = 1; i < parts.Length; i++)
+                        {
+                            var chunk = parts[i];
+                            var e = new TeamMatchHistoryEntry
+                            {
+                                match_id = ExtractJsonString(chunk, ""),
+                                series_id = ExtractJsonString(chunk, "series_id"),
+                                ended_at = ExtractJsonString(chunk, "ended_at"),
+                                won = chunk.Contains("\"won\":true"),
+                                my_team = ExtractJsonInt(chunk, "my_team"),
+                                t1a_steam_id = ExtractJsonString(chunk, "t1a_steam_id"),
+                                t1a_name = ExtractJsonString(chunk, "t1a_name"),
+                                t1b_steam_id = ExtractJsonString(chunk, "t1b_steam_id"),
+                                t1b_name = ExtractJsonString(chunk, "t1b_name"),
+                                t2a_steam_id = ExtractJsonString(chunk, "t2a_steam_id"),
+                                t2a_name = ExtractJsonString(chunk, "t2a_name"),
+                                t2b_steam_id = ExtractJsonString(chunk, "t2b_steam_id"),
+                                t2b_name = ExtractJsonString(chunk, "t2b_name"),
+                                t1_rounds_won = ExtractJsonInt(chunk, "t1_rounds_won"),
+                                t2_rounds_won = ExtractJsonInt(chunk, "t2_rounds_won"),
+                                t1_points_total = ExtractJsonInt(chunk, "t1_points_total"),
+                                t2_points_total = ExtractJsonInt(chunk, "t2_points_total"),
+                                series_score = ExtractJsonString(chunk, "series_score"),
+                                series_rating_change = ExtractJsonFloat(chunk, "series_rating_change"),
+                            };
+                            entries.Add(e);
+                        }
+                        CachedTeamMatchHistory = entries;
+                        Plugin.Log.LogInfo($"[TEAM-HIST] loaded {entries.Count} 2v2 matches");
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogError($"[TEAM-HIST] parse: {ex.Message}");
+                    }
+                }
+            ));
+        }
+
+        public static void FetchTeamLeaderboard(int limit = 100)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/team/leaderboard?limit={limit}",
+                (success, response) =>
+                {
+                    if (!success) return;
+                    try
+                    {
+                        var entries = new List<TeamLeaderboardEntry>();
+                        var parts = response.Split(new[] { "\"rank\":" }, StringSplitOptions.None);
+                        for (int i = 1; i < parts.Length; i++)
+                        {
+                            var chunk = parts[i];
+                            int rankVal = 0; try { int comma = chunk.IndexOf(','); rankVal = int.Parse(chunk.Substring(0, comma)); } catch { }
+                            entries.Add(new TeamLeaderboardEntry
+                            {
+                                rank = rankVal,
+                                steam_id = ExtractJsonString(chunk, "steam_id"),
+                                display_name = ExtractJsonString(chunk, "display_name"),
+                                rating = ExtractJsonInt(chunk, "rating"),
+                                rd = ExtractJsonInt(chunk, "rd"),
+                                completed_series = ExtractJsonInt(chunk, "completed_series"),
+                                series_wins = ExtractJsonInt(chunk, "series_wins"),
+                                series_losses = ExtractJsonInt(chunk, "series_losses"),
+                                win_rate = ExtractJsonFloat(chunk, "win_rate"),
+                                level = ExtractJsonInt(chunk, "level"),
+                            });
+                        }
+                        CachedTeamLeaderboard = entries;
+                        CachedTeamLeaderboardTotal = ExtractJsonInt(response, "total_players");
+                        NativeUI.MarkDirty();
+                        Plugin.Log.LogInfo($"[TEAM-LB] Loaded {entries.Count} 2v2 ranked players");
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogError($"[TEAM-LB] parse error: {ex.Message}");
+                    }
+                }
+            ));
+        }
 
         // ── Player Blocks (permanent, from leaderboard) ──────────
 

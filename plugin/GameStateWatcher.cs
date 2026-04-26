@@ -19,6 +19,10 @@ namespace CompetitiveRounds
         // \u2500\u2500 Match state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         private static bool isTracking = false;
         private static bool wasGameInProgress = false;
+        // Pick-phase color apply latch. Fires once per room as soon as both player
+        // GOs exist, so body colors render during the very first pick phase (before
+        // OnMatchStarted, which only triggers once combat begins).
+        private static bool pcolorRoomApplied = false;
         private static DateTime matchStartTime;
 
         // Score tracking
@@ -65,6 +69,20 @@ namespace CompetitiveRounds
         private static List<string> broadcastCardNames = new List<string>();
         private static int lastKnownOpponentBroadcastCount = 0;
         private const string CARD_PROP_KEY = "cr_cards";
+
+        // FPS sampling (v1.25). TickFrame() runs every Unity frame while a match is
+        // being tracked; LocalAvgFps = frame_count / wall_seconds at any point.
+        // Periodically broadcast via Photon custom prop so the opponent can read ours.
+        // Display-only — never feeds Glicko / anti-cheat / matchmaking.
+        private const string FPS_PROP_KEY = "cr_fps";
+        private static int fpsFrameCount = 0;
+        private static float fpsTimeAccum = 0f;
+        private static float fpsBroadcastTimer = 0f;
+        private static int opponentAvgFps = 0;
+        public static int LocalAvgFps => fpsTimeAccum > 0.5f
+            ? (int)Math.Round(fpsFrameCount / (double)fpsTimeAccum)
+            : 0;
+        public static int OpponentAvgFps => opponentAvgFps;
 
         // Pre-match card picks (cards picked before isTracking = true)
         // These get moved into localCards when OnMatchStarted fires
@@ -174,18 +192,92 @@ namespace CompetitiveRounds
             LocalBulletsHitThisMatch++;
             if (!_loggedFirstHit) { _loggedFirstHit = true; Plugin.Log.LogInfo("[STATS] first bullet-hit this match"); }
         }
+        // Debug-visible signals for the Block % investigation overlay. Populated
+        // unconditionally during a tracked match; CompetitiveUI reads them to flash
+        // the corner panel. Remove once the block% stat is trusted.
+        public static int LocalBlockRawAbsorbs { get; private set; }   // every DoBlock fire, pre-dedup
+        public static int LocalBlockDedupeDrops { get; private set; }  // DoBlock events rejected by the 1.0s dedup
+        public static float LastBlockActivatedTime { get; private set; } = -999f;
+        public static float LastBlockSuccessfulTime { get; private set; } = -999f;
+        public static float LastBlockAbsorbTime { get; private set; } = -999f;
+        public static float LastLocalHitTime { get; private set; } = -999f;
+        public static float LastBlockMissTime { get; private set; } = -999f;  // when overlay should flash red
+        public static string LastBlockEventLabel { get; private set; } = "";
+        // ROUNDS block window — empirically ~0.5s active. Tuned from observation; tweak
+        // if "too early" feedback fires when it shouldn't. Only affects the overlay
+        // classification, never the actual success count.
+        private const float BLOCK_ACTIVE_WINDOW = 0.5f;
+
         public static void OnLocalBlockActivated()
         {
             if (!isTracking || inPickPhase) return;
             LocalBlocksActivatedThisMatch++;
+            LastBlockActivatedTime = Time.time;
+            // Retro-classify: did this activation happen right AFTER a hit? That's the
+            // "too slow" case. Under 250ms after a hit is human reaction-time territory
+            // — they panic-blocked after seeing the bullet connect.
+            float sinceHit = Time.time - LastLocalHitTime;
+            if (sinceHit >= 0 && sinceHit < 0.25f)
+            {
+                LastBlockMissTime = Time.time;
+                LastBlockEventLabel = $"TOO SLOW (block +{sinceHit*1000:F0}ms after hit)";
+                Plugin.Log.LogInfo($"[BLOCK-DBG] TOO-SLOW   act={LocalBlocksActivatedThisMatch}  hit_to_block={sinceHit*1000:F0}ms");
+            }
+            else
+            {
+                LastBlockEventLabel = $"ACTIVATED #{LocalBlocksActivatedThisMatch}";
+                Plugin.Log.LogInfo($"[BLOCK-DBG] ACTIVATED  act={LocalBlocksActivatedThisMatch}  succ={LocalBlocksSuccessfulThisMatch}/{LocalBlockRawAbsorbs}");
+            }
             if (!_loggedFirstBlockAct) { _loggedFirstBlockAct = true; Plugin.Log.LogInfo("[STATS] first block activation this match"); }
+        }
+
+        /// <summary>Called when the local player takes damage. Classifies the hit against
+        /// the most-recent block activation time so the overlay can tell the user whether
+        /// their block was too early (window ended) or no-block-at-all.
+        /// Too-slow is detected asymmetrically in OnLocalBlockActivated (activation after hit).</summary>
+        public static void OnLocalPlayerHit(float damage)
+        {
+            if (!isTracking || inPickPhase) return;
+            LastLocalHitTime = Time.time;
+            LastBlockMissTime = Time.time;
+            float sinceAct = Time.time - LastBlockActivatedTime;
+            // sinceAct == +∞ → no block activation this match yet (< 0 impossible since act is always past).
+            if (sinceAct > 0 && sinceAct < BLOCK_ACTIVE_WINDOW)
+            {
+                // Activated before hit, within window — but the block still didn't absorb.
+                // Likely card-specific unblockable damage (e.g. Poison tick, Lifesteal pen).
+                LastBlockEventLabel = $"HIT (block active, {sinceAct*1000:F0}ms in) — unblockable?";
+                Plugin.Log.LogInfo($"[BLOCK-DBG] HIT-ACTIVE act={LocalBlocksActivatedThisMatch} since_act={sinceAct*1000:F0}ms dmg={damage:F1}");
+            }
+            else if (sinceAct > BLOCK_ACTIVE_WINDOW && sinceAct < 2.0f)
+            {
+                LastBlockEventLabel = $"TOO EARLY (blocked {sinceAct*1000:F0}ms before hit)";
+                Plugin.Log.LogInfo($"[BLOCK-DBG] TOO-EARLY  since_act={sinceAct*1000:F0}ms dmg={damage:F1}");
+            }
+            else
+            {
+                LastBlockEventLabel = $"HIT (no recent block)";
+                Plugin.Log.LogInfo($"[BLOCK-DBG] HIT-NOBLK  since_act={sinceAct:F1}s dmg={damage:F1}");
+            }
         }
         public static void OnLocalBlockSuccessful()
         {
             if (!isTracking || inPickPhase) return;
-            if (Time.time - _lastBlockSuccessTime < 1.0f) return;  // extension / multi-absorb dedup
+            LocalBlockRawAbsorbs++;
+            LastBlockAbsorbTime = Time.time;
+            float timeSincePrev = Time.time - _lastBlockSuccessTime;
+            if (timeSincePrev < 1.0f)
+            {
+                LocalBlockDedupeDrops++;
+                LastBlockEventLabel = $"ABSORB (deduped, +{timeSincePrev:F2}s)";
+                Plugin.Log.LogInfo($"[BLOCK-DBG] ABSORB-DEDUP  raw={LocalBlockRawAbsorbs}  since_last_credit={timeSincePrev:F2}s  credited={LocalBlocksSuccessfulThisMatch}");
+                return;
+            }
             _lastBlockSuccessTime = Time.time;
             LocalBlocksSuccessfulThisMatch++;
+            LastBlockSuccessfulTime = Time.time;
+            LastBlockEventLabel = $"SUCCESSFUL #{LocalBlocksSuccessfulThisMatch}";
+            Plugin.Log.LogInfo($"[BLOCK-DBG] SUCCESS    act={LocalBlocksActivatedThisMatch}  succ={LocalBlocksSuccessfulThisMatch}  raw={LocalBlockRawAbsorbs}  drops={LocalBlockDedupeDrops}");
             if (!_loggedFirstBlockOk) { _loggedFirstBlockOk = true; Plugin.Log.LogInfo("[STATS] first successful block this match"); }
         }
         // Pick-phase gate: input gating must exclude card-pick UI (Space jump, A/D carousel,
@@ -232,6 +324,59 @@ namespace CompetitiveRounds
 
             PollRoomState();
             PollMatchState();
+        }
+
+        /// <summary>Per-Unity-frame tick; counts frames + accumulates real time so we
+        /// can report a true average FPS for this match. Cheap (no allocations, no
+        /// reflection); also broadcasts the running average via Photon every ~3s so
+        /// the opponent can read it. Only active while a match is being tracked.</summary>
+        public static void TickFrame()
+        {
+            if (!isTracking) return;
+            float dt = Time.unscaledDeltaTime;
+            if (dt <= 0f || dt > 1f) return; // skip pause / first-frame outliers
+            fpsFrameCount++;
+            fpsTimeAccum += dt;
+            fpsBroadcastTimer += dt;
+            if (fpsBroadcastTimer >= 3f)
+            {
+                fpsBroadcastTimer = 0f;
+                BroadcastFps();
+                PollOpponentFps();
+            }
+        }
+
+        private static void BroadcastFps()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.LocalPlayer == null) return;
+                int avg = LocalAvgFps;
+                if (avg <= 0) return;
+                var props = new Hashtable();
+                props[FPS_PROP_KEY] = avg;
+                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+            }
+            catch { }
+        }
+
+        private static void PollOpponentFps()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom) return;
+                var players = PhotonNetwork.PlayerList;
+                if (players == null) return;
+                foreach (var p in players)
+                {
+                    if (p == null || p.IsLocal || p.CustomProperties == null) continue;
+                    if (!p.CustomProperties.ContainsKey(FPS_PROP_KEY)) continue;
+                    try { opponentAvgFps = Convert.ToInt32(p.CustomProperties[FPS_PROP_KEY]); }
+                    catch { }
+                    return; // first non-local mod-reporting peer wins; 1v1 only has one
+                }
+            }
+            catch { }
         }
 
         // \u2500\u2500 Room state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -563,6 +708,26 @@ namespace CompetitiveRounds
                 if (!fieldsResolved) return;
             }
 
+            // Pick-phase body-color apply. Fires the moment both player GameObjects
+            // are present in PlayerManager — that happens during pick phase #1, well
+            // before OnMatchStarted (which waits on rounds/points to tick). One-shot
+            // per room; subsequent rounds reuse the persisted Player GOs so the tint
+            // doesn't need re-applying.
+            if (!pcolorRoomApplied)
+            {
+                try
+                {
+                    var pm = PlayerManager.instance;
+                    int pc = pm != null && pm.players != null ? pm.players.Count : 0;
+                    if (pc >= 2)
+                    {
+                        pcolorRoomApplied = true;
+                        PlayerColorCosmetic.OnMatchStart();
+                    }
+                }
+                catch { }
+            }
+
             int curP1Points = GetFieldInt(gm, f_p1Points);
             int curP2Points = GetFieldInt(gm, f_p2Points);
             int curP1Rounds = GetFieldInt(gm, f_p1Rounds);
@@ -639,6 +804,7 @@ namespace CompetitiveRounds
             matchStartTime = DateTime.UtcNow;
             // Spawn the cosmetic trail for this match (if the player owns one).
             TrailCosmetic.OnMatchStart();
+            PlayerColorCosmetic.OnMatchStart();
 
             // Reset achievement tracking for this match
             achTookDamage = false;
@@ -658,6 +824,18 @@ namespace CompetitiveRounds
             LocalBulletsHitThisMatch = 0;
             LocalBlocksActivatedThisMatch = 0;
             LocalBlocksSuccessfulThisMatch = 0;
+            LocalBlockRawAbsorbs = 0;
+            LocalBlockDedupeDrops = 0;
+            LastBlockActivatedTime = -999f;
+            LastBlockSuccessfulTime = -999f;
+            LastBlockAbsorbTime = -999f;
+            LastLocalHitTime = -999f;
+            LastBlockMissTime = -999f;
+            LastBlockEventLabel = "";
+            fpsFrameCount = 0;
+            fpsTimeAccum = 0f;
+            fpsBroadcastTimer = 0f;
+            opponentAvgFps = 0;
             _hitsRemaining = 0;
             _lastBlockSuccessTime = -999f;
             _loggedFirstFire = _loggedFirstHit = _loggedFirstBlockAct = _loggedFirstBlockOk = false;
@@ -690,6 +868,7 @@ namespace CompetitiveRounds
                 {
                     var props = new Hashtable();
                     props[CARD_PROP_KEY] = "";
+                    props[FPS_PROP_KEY] = 0;
                     PhotonNetwork.LocalPlayer.SetCustomProperties(props);
                 }
             }
@@ -924,6 +1103,34 @@ namespace CompetitiveRounds
                 shouldReport = false;
             }
 
+            // ── 2v2 routing ────────────────────────────────────────
+            // If this room has 4 players AND we have an active team series id, route through
+            // the 2v2 match report instead of 1v1. The reporter (lowest Steam ID across the 4)
+            // assembles the canonical t1a/t1b/t2a/t2b ordering by sorting each team's Steam IDs
+            // — server canonicalizes the same way at lock, so the 11-field HMAC byte-matches.
+            bool routedTeamMatch = false;
+            try
+            {
+                if (shouldReport
+                    && !string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId)
+                    && PhotonNetwork.PlayerList != null
+                    && PhotonNetwork.PlayerList.Length == 4)
+                {
+                    routedTeamMatch = TryReportTeamMatch(reportRoomId, duration);
+                    if (routedTeamMatch)
+                    {
+                        EvaluateAchievements(localWon);
+                        isTracking = false;
+                        matchIsRanked = false;
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[POLL] 2v2 routing error: {ex.Message}");
+            }
+
             if (shouldReport)
             {
                 ApiClient.ReportMatch(
@@ -959,7 +1166,9 @@ namespace CompetitiveRounds
                     // same code path). LocalBlocksThisMatch (mouse-only) remains the anti-
                     // cheat advisory signal.
                     localBlocksActivated: LocalBlocksActivatedThisMatch,
-                    localBlocksSuccessful: LocalBlocksSuccessfulThisMatch
+                    localBlocksSuccessful: LocalBlocksSuccessfulThisMatch,
+                    localAvgFps: LocalAvgFps,
+                    opponentAvgFps: OpponentAvgFps
                 );
             }
 
@@ -968,6 +1177,182 @@ namespace CompetitiveRounds
 
             isTracking = false;
             matchIsRanked = false; // Clear indicator immediately
+        }
+
+        /// <summary>Build + submit a 2v2 match report. Reads each peer's broadcast cards
+        /// (cr_cards) + FPS (cr_fps) off Photon custom properties. Reporter selection:
+        /// lowest Steam ID across the 4 participants. Canonical slot ordering: t1a/t1b/t2a/t2b
+        /// where team1 = team-with-localTeamId-0, sorted within each team by Steam ID — same
+        /// rule the server applies at lock-time so the 11-field HMAC matches.</summary>
+        private static bool TryReportTeamMatch(string reportRoomId, int duration)
+        {
+            if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 4) return false;
+
+            var pm = PlayerManager.instance;
+            if (pm == null || pm.players == null) return false;
+
+            // Map each in-game Player → (steam_id, display_name, team_id from CharacterData,
+            //   cards from cr_cards, fps from cr_fps).
+            var teamFieldInfo = typeof(CharacterData).GetField("teamID",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (teamFieldInfo == null) return false;
+
+            // Resolve Photon ActorNumber → Steam ID via the same ck_id hint our existing
+            // resolver writes; if missing, fall back to UserId. We also need each player's
+            // teamID to know who's on team 1 vs team 2.
+            var photonPlayers = PhotonNetwork.PlayerList;
+            var bySteam = new Dictionary<string, (string name, int teamId, List<MatchTracker.CardPickData> cards, int fps)>();
+
+            foreach (var pp in photonPlayers)
+            {
+                if (pp == null) continue;
+                string sid = ResolvePhotonSteamId(pp);
+                if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_"))
+                {
+                    Plugin.Log.LogWarning($"[2v2-REPORT] couldn't resolve Steam ID for actor {pp.ActorNumber}");
+                    return false;
+                }
+                string name = pp.NickName ?? sid;
+                // Find their CharacterData → teamID
+                int peerTeamId = -1;
+                foreach (var po in pm.players)
+                {
+                    if (po == null) continue;
+                    var pv = po.GetComponent<PhotonView>();
+                    if (pv == null || pv.Owner == null) continue;
+                    if (pv.Owner.ActorNumber != pp.ActorNumber) continue;
+                    var cd = po.GetComponent<CharacterData>();
+                    if (cd != null) { peerTeamId = (int)teamFieldInfo.GetValue(cd); }
+                    break;
+                }
+                // Cards from Photon cr_cards
+                var pickList = new List<MatchTracker.CardPickData>();
+                if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(CARD_PROP_KEY))
+                {
+                    string raw = pp.CustomProperties[CARD_PROP_KEY]?.ToString() ?? "";
+                    if (!string.IsNullOrEmpty(raw))
+                    {
+                        int order = 1;
+                        foreach (var nm in raw.Split('|'))
+                        {
+                            string cn = ToTitleCase(nm.Trim());
+                            cn = CardRarityLookup.GetCanonicalName(cn);
+                            if (string.IsNullOrEmpty(cn)) continue;
+                            pickList.Add(new MatchTracker.CardPickData
+                            {
+                                CardName = cn,
+                                CardRarity = CardRarityLookup.GetRarity(cn),
+                                PickOrder = order++,
+                                RoundNumber = 1,
+                            });
+                        }
+                    }
+                }
+                int fps = 0;
+                if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(FPS_PROP_KEY))
+                {
+                    try { fps = Convert.ToInt32(pp.CustomProperties[FPS_PROP_KEY]); } catch { }
+                }
+                // For the local player, prefer locally-tracked cards/FPS over the broadcast.
+                if (pp.IsLocal)
+                {
+                    if (localCards != null && localCards.Count > 0) pickList = new List<MatchTracker.CardPickData>(localCards);
+                    int myFps = LocalAvgFps;
+                    if (myFps > 0) fps = myFps;
+                }
+                bySteam[sid] = (name, peerTeamId, pickList, fps);
+            }
+
+            if (bySteam.Count != 4)
+            {
+                Plugin.Log.LogWarning($"[2v2-REPORT] resolved {bySteam.Count}/4 players, aborting");
+                return false;
+            }
+
+            // Reporter election: lowest Steam ID across all 4. (Same rule as 1v1.)
+            string lowestSid = null;
+            long lowestVal = long.MaxValue;
+            foreach (var sid in bySteam.Keys)
+            {
+                if (long.TryParse(sid, out long v) && v < lowestVal) { lowestVal = v; lowestSid = sid; }
+            }
+            if (lowestSid == null) lowestSid = localSteamId;
+            if (lowestSid != localSteamId)
+            {
+                Plugin.Log.LogInfo($"[2v2-REPORT] reporter is {lowestSid}, not me ({localSteamId}) — skipping");
+                return true; // routed correctly; just not by us
+            }
+
+            // Group by in-game team_id. ROUNDS uses 0/1 for the 2 teams.
+            var team0Sids = new List<string>();
+            var team1Sids = new List<string>();
+            foreach (var kv in bySteam)
+            {
+                if (kv.Value.teamId == 0) team0Sids.Add(kv.Key);
+                else if (kv.Value.teamId == 1) team1Sids.Add(kv.Key);
+            }
+            if (team0Sids.Count != 2 || team1Sids.Count != 2)
+            {
+                Plugin.Log.LogWarning($"[2v2-REPORT] team split is {team0Sids.Count}/{team1Sids.Count}, aborting");
+                return false;
+            }
+            // Convention: team1_in_db corresponds to in-game team_id=0 by default. We don't actually
+            // know which DB team is which — but the server stores by player_id and the client computes
+            // p1Rounds/p2Rounds via localTeamId. Map: t1 = team0 (where localTeamId==0 player lives)
+            // → matches the existing p1/p2 convention. Within each team, sort by Steam ID so client
+            // and server canonical orderings agree.
+            team0Sids.Sort(StringComparer.Ordinal);
+            team1Sids.Sort(StringComparer.Ordinal);
+
+            int t1Rounds = p1Rounds, t2Rounds = p2Rounds;
+            int t1Points = p1Points, t2Points = p2Points;
+            int winnerTeam = (t1Rounds > t2Rounds) ? 1 : 2;
+
+            string t1aSid = team0Sids[0], t1bSid = team0Sids[1];
+            string t2aSid = team1Sids[0], t2bSid = team1Sids[1];
+
+            ApiClient.ReportTeamMatch(
+                seriesId: ApiClient.ActiveTeamSeriesId,
+                t1aSteam: t1aSid, t1aName: bySteam[t1aSid].name, t1aCards: bySteam[t1aSid].cards,
+                t1bSteam: t1bSid, t1bName: bySteam[t1bSid].name, t1bCards: bySteam[t1bSid].cards,
+                t2aSteam: t2aSid, t2aName: bySteam[t2aSid].name, t2aCards: bySteam[t2aSid].cards,
+                t2bSteam: t2bSid, t2bName: bySteam[t2bSid].name, t2bCards: bySteam[t2bSid].cards,
+                t1Rounds: t1Rounds, t2Rounds: t2Rounds, t1Points: t1Points, t2Points: t2Points,
+                photonRoomId: reportRoomId, region: photonRegion,
+                durationSeconds: duration, startedAt: matchStartTime,
+                reporterSteamId: localSteamId, isRanked: matchIsRanked, winnerTeam: winnerTeam,
+                t1aFps: bySteam[t1aSid].fps, t1bFps: bySteam[t1bSid].fps,
+                t2aFps: bySteam[t2aSid].fps, t2bFps: bySteam[t2bSid].fps
+            );
+            Plugin.Log.LogInfo($"[2v2-REPORT] submitted: t1={t1aSid},{t1bSid} t2={t2aSid},{t2bSid} winner=T{winnerTeam}");
+            return true;
+        }
+
+        /// <summary>Maps a Photon player to a Steam ID. ROUNDS publishes the Steam
+        /// ID under the `u_id` custom prop (with `unity_id` as a legacy fallback);
+        /// UserId is also Steam-set for Steam-launched clients.</summary>
+        private static string ResolvePhotonSteamId(Photon.Realtime.Player pp)
+        {
+            try
+            {
+                var props = pp.CustomProperties;
+                if (props != null)
+                {
+                    if (props.ContainsKey("u_id"))
+                    {
+                        string s = props["u_id"]?.ToString();
+                        if (!string.IsNullOrEmpty(s) && long.TryParse(s, out _)) return s;
+                    }
+                    if (props.ContainsKey("unity_id"))
+                    {
+                        string s = props["unity_id"]?.ToString();
+                        if (!string.IsNullOrEmpty(s) && long.TryParse(s, out _)) return s;
+                    }
+                }
+                if (!string.IsNullOrEmpty(pp.UserId) && long.TryParse(pp.UserId, out _)) return pp.UserId;
+            }
+            catch { }
+            return $"photon_{pp.ActorNumber}";
         }
 
         // Promoted: lets CompetitiveUI gate the chat-input T key so we don't swallow movement
@@ -1045,7 +1430,14 @@ namespace CompetitiveRounds
                 // GetMouseButton(0)/(1) above covers held-state for achievements; ButtonDown gives discrete events.
                 if (Input.GetMouseButtonDown(0)) LocalShotsThisMatch++;
                 if (Input.GetMouseButtonDown(1)) LocalBlocksThisMatch++;
-                if (!achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
+                // Skip key-down sampling while the chat overlay has focus — typing
+                // "wasd" in a Discord-bridged message previously false-flagged
+                // Immovable Object. Same gate applies to Pacifist's mouse-shot
+                // detection above, but mouse buttons aren't generally used while
+                // typing so it's a non-issue. Same for the F5 menu.
+                bool typingInChat = false;
+                try { typingInChat = CompetitiveUI.IsChatInputOpen || NativeUI.IsOpen; } catch { }
+                if (!typingInChat && !achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
                     Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
                     Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||
                     Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.LeftArrow) ||
@@ -1498,13 +1890,14 @@ namespace CompetitiveRounds
         }
 
         // Trail teardown on any match-state reset — next OnMatchStarted re-attaches.
-        private static void ResetMatchStateWithTrail() { TrailCosmetic.OnMatchEnd(); ResetMatchState(); }
+        private static void ResetMatchStateWithTrail() { TrailCosmetic.OnMatchEnd(); PlayerColorCosmetic.OnMatchEnd(); ResetMatchState(); }
 
         private static void ResetMatchState()
         {
             isTracking = false;
             gameOverReported = false;
             wasGameInProgress = false;
+            pcolorRoomApplied = false;
             p1Points = 0; p2Points = 0;
             p1Rounds = 0; p2Rounds = 0;
             lastP1Points = 0; lastP2Points = 0;
@@ -1552,6 +1945,18 @@ namespace CompetitiveRounds
             LocalBulletsHitThisMatch = 0;
             LocalBlocksActivatedThisMatch = 0;
             LocalBlocksSuccessfulThisMatch = 0;
+            LocalBlockRawAbsorbs = 0;
+            LocalBlockDedupeDrops = 0;
+            LastBlockActivatedTime = -999f;
+            LastBlockSuccessfulTime = -999f;
+            LastBlockAbsorbTime = -999f;
+            LastLocalHitTime = -999f;
+            LastBlockMissTime = -999f;
+            LastBlockEventLabel = "";
+            fpsFrameCount = 0;
+            fpsTimeAccum = 0f;
+            fpsBroadcastTimer = 0f;
+            opponentAvgFps = 0;
             _hitsRemaining = 0;
             _lastBlockSuccessTime = -999f;
 

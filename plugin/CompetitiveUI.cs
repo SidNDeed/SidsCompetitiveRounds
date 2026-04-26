@@ -109,8 +109,103 @@ namespace CompetitiveRounds
             DrawInGameChat();
             DrawChatInput();
             DrawAdminPrompt();
+            DrawBlockDebug();  // debug-only; toggle via BlockDebugEnabled below
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
+        }
+
+        // ── Block debug overlay (opt-in, UI.ShowBlockDebug config) ────────
+        // Top-right floating panel showing live Act/Succ counters plus the last
+        // event type + flash, so players can eyeball every TryBlock + DoBlock
+        // fire during a match. Also classifies hits (too early / too slow /
+        // unblockable).
+        private static GUIStyle blockDbgStyle;
+        private static GUIStyle blockDbgSmallStyle;
+
+        private static void DrawBlockDebug()
+        {
+            if (Plugin.ShowBlockDebug == null || !Plugin.ShowBlockDebug.Value) return;
+            if (!GameStateWatcher.IsInMatch) return;
+
+            if (blockDbgStyle == null)
+            {
+                blockDbgStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 15, richText = true, alignment = TextAnchor.UpperLeft,
+                    fontStyle = FontStyle.Bold,
+                };
+                blockDbgSmallStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 12, richText = true, alignment = TextAnchor.UpperLeft,
+                };
+            }
+
+            int act = GameStateWatcher.LocalBlocksActivatedThisMatch;
+            int succ = GameStateWatcher.LocalBlocksSuccessfulThisMatch;
+            int raw = GameStateWatcher.LocalBlockRawAbsorbs;
+            int drops = GameStateWatcher.LocalBlockDedupeDrops;
+            float now = Time.time;
+            float sinceAct = now - GameStateWatcher.LastBlockActivatedTime;
+            float sinceSucc = now - GameStateWatcher.LastBlockSuccessfulTime;
+            float sinceAbs = now - GameStateWatcher.LastBlockAbsorbTime;
+            float sinceMiss = now - GameStateWatcher.LastBlockMissTime;
+            string lastEvent = GameStateWatcher.LastBlockEventLabel ?? "";
+
+            // Panel geometry — top-right, about 260×120.
+            float w = 270, h = 110, pad = 6;
+            float x = Screen.width - w - 12, y = 12;
+
+            // Flash: most-recent of {success, activation, deduped-absorb, miss}
+            // wins the backdrop tint for ~0.35s. Miss = red (too slow/early/etc),
+            // success = green, activation = blue, absorb-deduped = yellow.
+            Color bg = new Color(0, 0, 0, 0.72f);
+            float minAge = Mathf.Min(sinceAct, Mathf.Min(sinceSucc, Mathf.Min(sinceAbs, sinceMiss)));
+            if (minAge >= 0f && minAge < 0.35f)
+            {
+                float t = 1f - (minAge / 0.35f);  // 1 → 0
+                Color flash;
+                if (sinceMiss <= minAge + 0.001f)
+                    flash = new Color(0.95f, 0.25f, 0.25f, 0.9f);  // red = hit/miss
+                else if (sinceSucc <= minAge + 0.001f)
+                    flash = new Color(0.2f, 0.9f, 0.2f, 0.85f);    // green = credited success
+                else if (sinceAct <= minAge + 0.001f)
+                    flash = new Color(0.3f, 0.55f, 1f, 0.85f);     // blue = activation
+                else
+                    flash = new Color(0.95f, 0.7f, 0.1f, 0.85f);   // yellow = absorb-but-deduped
+                bg = Color.Lerp(bg, flash, t);
+            }
+
+            GUI.DrawTexture(new Rect(x, y, w, h),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, bg, 0, 0);
+            GUI.DrawTexture(new Rect(x, y, w, 1),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(1,1,1,0.5f), 0, 0);
+
+            var prev = GUI.contentColor;
+            GUI.contentColor = Color.white;
+            GUI.Label(new Rect(x + pad, y + pad, w - pad*2, 20), "<color=#FFE580>BLOCK DEBUG</color>", blockDbgStyle);
+
+            // Big counters line
+            string counters =
+                $"<color=#88CCFF>Act:</color> <b>{act}</b>   " +
+                $"<color=#88FF88>Succ:</color> <b>{succ}</b>   " +
+                $"<color=#CCCCCC>Raw:</color> {raw}";
+            GUI.Label(new Rect(x + pad, y + pad + 22, w - pad*2, 20), counters, blockDbgStyle);
+
+            // Secondary line — dedupe drops + pct
+            string pct = act > 0 ? $"{(float)succ * 100f / act:F0}%" : "-";
+            string line3 = $"<color=#AAAAAA>Drops:</color> {drops}   <color=#AAAAAA>Rate:</color> <b>{pct}</b>";
+            GUI.Label(new Rect(x + pad, y + pad + 44, w - pad*2, 18), line3, blockDbgSmallStyle);
+
+            // Last event
+            string ageTxt = "";
+            if (!string.IsNullOrEmpty(lastEvent) && minAge < 5f && minAge >= 0)
+                ageTxt = $"{lastEvent}  <color=#888>(+{minAge:F1}s)</color>";
+            GUI.Label(new Rect(x + pad, y + pad + 64, w - pad*2, 18), ageTxt, blockDbgSmallStyle);
+
+            GUI.Label(new Rect(x + pad, y + pad + 82, w - pad*2, 14),
+                "<color=#666><i>debug overlay — CompetitiveUI.BlockDebugEnabled</i></color>",
+                blockDbgSmallStyle);
+            GUI.contentColor = prev;
         }
 
         // ── In-game chat overlay ─────────────────────────────────
@@ -358,6 +453,10 @@ namespace CompetitiveRounds
         // just for a one-line send box. Press T with the menu open to focus; Enter
         // sends, Escape cancels.
         private static bool chatInputOpen = false;
+        /// <summary>True while the in-game chat IMGUI text field has focus. Used to
+        /// suppress raw-key input tracking (Immovable Object achievement) so typing
+        /// "wasd" in chat doesn't falsely flag movement.</summary>
+        public static bool IsChatInputOpen => chatInputOpen;
         private static bool chatJustOpened = false;  // eats the 't' KeyDown-with-character event
         private static string chatInputText = "";
         private static GUIStyle chatStyle;
