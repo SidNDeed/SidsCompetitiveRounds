@@ -48,6 +48,19 @@ namespace CompetitiveRounds
         // Ranked status
         private static bool opponentIsRanked = false;
         private static bool opponentRankChecked = false;
+        // Time of the last /mod/check call. We keep re-checking every ~5s while
+        // in the room with a not-yet-ranked-but-modded opponent — handles the
+        // race where the opponent's mod hasn't finished posting their initial
+        // /toggle-ranked sync by the time we asked. Without retries, two new
+        // mod users meeting for the first time get a permanent casual flag for
+        // the whole room session.
+        private static float lastOpponentRankCheck = -999f;
+        // Pre-flight latch: once per room, when matchIsRanked first goes true
+        // AND we don't already have a queue-issued series_id, ask the server
+        // to create the ranked_series row. Surfaces non-queue (private room)
+        // ranked matches in /series/active immediately rather than after the
+        // first match completes.
+        private static bool seriesPreflightSent = false;
         private static bool matchIsRanked = false;
 
         // Harmony opponent card tracking
@@ -396,6 +409,8 @@ namespace CompetitiveRounds
                 opponentRankChecked = false;
                 opponentIsRanked = false;
                 matchIsRanked = false;
+                seriesPreflightSent = false;
+                lastOpponentRankCheck = -999f;
                 Plugin.Log.LogInfo($"[POLL] Joined room: {photonRoomId} (region: {photonRegion})");
                 // Republish styled nickname on every room join — the game resets NickName back
                 // to the raw Steam persona at room creation, so our wrap needs to reapply.
@@ -421,24 +436,35 @@ namespace CompetitiveRounds
                         CompetitiveUI.ShowNotification("Left match for ranked queue", new Color(0.4f, 0.8f, 1f));
                         LeavingForRanked = false;
                     }
+                    else if (localRounds >= 4 && oppRounds >= 4)
+                    {
+                        // Both at match point and someone DC'd — give the win to the
+                        // local player (the one still in the room). Closes the
+                        // 4-4 DC exploit (where the DC'er would otherwise get the win
+                        // because they had ≥4 rounds at disconnect time).
+                        Plugin.Log.LogInfo($"[POLL] === {matchType} DC Win (4-4 tiebreak) === Opponent DC'd at {localRounds}-{oppRounds}");
+                        int winnerTeam = localTeamId;
+                        OnGameOver(winnerTeam);
+                    }
                     else if (localRounds >= 4)
                     {
-                        // Local player had dominant lead \u2014 count as a win
+                        // Local player had dominant lead — count as a win
                         Plugin.Log.LogInfo($"[POLL] === {matchType} DC Win === Opponent disconnected at {localRounds}-{oppRounds}");
                         int winnerTeam = localTeamId;
                         OnGameOver(winnerTeam);
                     }
-                    else if (oppRounds >= 4)
-                    {
-                        // Opponent had dominant lead \u2014 count as a loss (we DC'd or opponent won)
-                        Plugin.Log.LogInfo($"[POLL] === {matchType} DC Loss === Disconnected at {localRounds}-{oppRounds}");
-                        int winnerTeam = localTeamId == 0 ? 1 : 0;
-                        OnGameOver(winnerTeam);
-                    }
                     else
                     {
-                        // No clear winner \u2014 log as canceled, don't report
-                        Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Disconnect at {localRounds}-{oppRounds} (not counted)");
+                        // No clear winner OR opponent led but DC'd before clinching.
+                        // Cancel the match — opponent doesn't get an undeserved win
+                        // for DCing while ahead, and we don't get an undeserved
+                        // loss either. Leave % still tracks them via the DC-detection
+                        // path below (opponentDCReported), so habitual rage-quitters
+                        // still face the leave-percentage penalty.
+                        if (oppRounds >= 4)
+                            Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Opp DC'd while ahead at {localRounds}-{oppRounds} (no win awarded)");
+                        else
+                            Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Disconnect at {localRounds}-{oppRounds} (not counted)");
                         CompetitiveUI.ShowNotification("Match canceled (DC)", new Color(1f, 0.7f, 0.3f));
                     }
                 }
@@ -452,18 +478,43 @@ namespace CompetitiveRounds
                 TryResolveOpponent();
             }
 
-            // Once we have the opponent's REAL Steam ID, check if they're ranked
-            if (inRoom && opponentSteamIdResolved && !opponentRankChecked)
+            // Opponent ranked-check + retry. Initial check fires as soon as their
+            // Steam ID is resolved; subsequent retries fire every 5s while in room
+            // IF the previous check returned false but we can see they have the mod
+            // (cr_* Photon props). That covers the race where their mod's startup
+            // /toggle-ranked sync hasn't reached the server yet by the time we ask.
+            if (inRoom && opponentSteamIdResolved
+                && !opponentSteamId.StartsWith("photon_"))
             {
-                // Don't check photon_ placeholder IDs
-                if (!opponentSteamId.StartsWith("photon_"))
+                bool firstCheck = !opponentRankChecked;
+                bool shouldRetry = !firstCheck
+                    && !opponentIsRanked
+                    && OpponentHasMod()
+                    && (Time.realtimeSinceStartup - lastOpponentRankCheck) >= 5f;
+                if (firstCheck || shouldRetry)
                 {
                     opponentRankChecked = true;
+                    lastOpponentRankCheck = Time.realtimeSinceStartup;
                     ApiClient.CheckOpponentRanked(opponentSteamId, (isRanked) =>
                     {
+                        bool oldRanked = opponentIsRanked;
                         opponentIsRanked = isRanked;
                         matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && OpponentHasMod();
-                        Plugin.Log.LogInfo($"[POLL] Opponent ranked: {opponentIsRanked}, hasMod: {OpponentHasMod()}, Match ranked: {matchIsRanked}");
+                        if (oldRanked != opponentIsRanked || firstCheck)
+                            Plugin.Log.LogInfo($"[POLL] Opponent ranked: {opponentIsRanked}, hasMod: {OpponentHasMod()}, Match ranked: {matchIsRanked}{(shouldRetry ? " (retry)" : "")}");
+                        // Series pre-flight: now that we know the match is ranked, if
+                        // this isn't a queue-issued series (ActiveRankedSeriesId is
+                        // empty), ask the server to create the ranked_series row so it
+                        // appears in /series/active immediately. One-shot per room.
+                        if (matchIsRanked && !seriesPreflightSent
+                            && string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
+                            && !string.IsNullOrEmpty(localSteamId)
+                            && !string.IsNullOrEmpty(opponentSteamId)
+                            && !opponentSteamId.StartsWith("photon_"))
+                        {
+                            seriesPreflightSent = true;
+                            ApiClient.SendSeriesPreflight(localSteamId, opponentSteamId);
+                        }
                     });
                 }
             }

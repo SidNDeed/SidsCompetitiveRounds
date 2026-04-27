@@ -469,7 +469,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.25.2"
+LATEST_MOD_VERSION = "1.25.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -3679,6 +3679,72 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
     return {"series": series}
 
 
+@app.post("/api/v1/series/preflight", tags=["Series"])
+async def series_preflight(
+    p1_steam_id: str = Query(...),
+    p2_steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pre-create a ranked_series for two players who are about to play a
+    ranked match in a private room. Idempotent — if an active series for the
+    pair already exists, returns its id. Used to surface non-queue ranked
+    matches in /series/active immediately rather than only after the first
+    match completes (the prior visibility gap that left private-room games
+    invisible until ~5 minutes in).
+
+    HMAC signs 'preflight:{lower}:{higher}' where the two steam IDs are sorted
+    so either player can compute it without knowing who's p1/p2 server-side.
+    Server returns the series_id which the client then uses for live-points
+    reports during game 1."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    if p1_steam_id == p2_steam_id:
+        raise HTTPException(status_code=400, detail="Players must be distinct")
+    a, b = sorted([p1_steam_id, p2_steam_id])
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"preflight:{a}:{b}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    p1 = await get_or_create_player(db, p1_steam_id, p1_steam_id)
+    p2 = await get_or_create_player(db, p2_steam_id, p2_steam_id)
+    if not p1.ranked_enabled or not p2.ranked_enabled:
+        # Don't create series for casual matches. Client should re-call after
+        # both have toggled ranked on.
+        await db.commit()
+        return {"status": "skipped", "reason": "one_or_both_not_ranked"}
+
+    # Idempotent: reuse existing active series between this pair.
+    existing = (await db.execute(
+        select(RankedSeries).where(
+            RankedSeries.status == "active",
+            or_(
+                and_(RankedSeries.player1_id == p1.id, RankedSeries.player2_id == p2.id),
+                and_(RankedSeries.player1_id == p2.id, RankedSeries.player2_id == p1.id),
+            ),
+        )
+    )).scalar_one_or_none()
+    if existing is not None:
+        await db.commit()
+        return {"status": "exists", "series_id": str(existing.id)}
+
+    series = RankedSeries(
+        player1_id=p1.id, player2_id=p2.id,
+        p1_series_wins=0, p2_series_wins=0,
+        live_p1_points=0, live_p2_points=0,
+        status="active",
+    )
+    db.add(series)
+    await db.flush()
+    await db.commit()
+    print(f"[SERIES-PREFLIGHT] created series {series.id} for {p1_steam_id} vs {p2_steam_id} (private room)")
+    return {"status": "created", "series_id": str(series.id)}
+
+
 @app.post("/api/v1/series/{series_id}/live-points", tags=["Series"])
 async def update_live_points(
     series_id: str,
@@ -4846,10 +4912,18 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         # Not enough — count searching, return.
         cnt_q = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status='searching'"))
         cnt = cnt_q.scalar() or 0
+        # Diagnostic: when the searching queue has >= 4 players but our lock
+        # only finds < 3 candidates from THIS poller's perspective, something
+        # filter-side is rejecting them (Elo band too tight, mutual block, or
+        # SKIP LOCKED on a concurrent poll). This log is the primary signal
+        # for "queue is full but match isn't locking".
+        if cnt >= 4:
+            print(f"[TEAM-QUEUE-LOCK] caller={steam_id} q_size={cnt} found_others={len(others)} elo_range={elo_range} my_rating={me['rating']:.0f}")
         await db.commit()
         return TeamQueuePollResponse(status="searching", queue_count=cnt, elo_range=elo_range)
 
     # 4 candidates total (caller + others). Run balancer.
+    print(f"[TEAM-QUEUE-LOCK] caller={steam_id} locking 4-player series with {[o['steam_id'] for o in others]}")
     pool = [
         {"player_id": me["player_id"], "balance_rating": my_balance,
          "rating": me["rating"], "rd": me["rating_deviation"],
@@ -4899,11 +4973,16 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     for team in (team1_ids, team2_ids):
         all_pairs.extend([(team[0], team[1]), (team[1], team[0])])
     if all_pairs:
+        # Use CAST(...) instead of `:bind::type` — asyncpg's parameter parser
+        # can't distinguish PG's `::` cast operator from a bind-parameter prefix
+        # when they're adjacent (`:b1::uuid[]` was throwing PostgresSyntaxError
+        # on every lock attempt, silently rolling back the whole 4-player lock
+        # transaction so no series ever materialized).
         await db.execute(
             text("""
                 DELETE FROM player_blocks
                 WHERE (blocker_id, blocked_id) IN (
-                    SELECT UNNEST(:b1::uuid[]), UNNEST(:b2::uuid[])
+                    SELECT UNNEST(CAST(:b1 AS uuid[])), UNNEST(CAST(:b2 AS uuid[]))
                 )
             """),
             {"b1": [p[0] for p in all_pairs], "b2": [p[1] for p in all_pairs]},
@@ -4990,8 +5069,15 @@ async def team_queue_ready(steam_id: str = Query(...), db: AsyncSession = Depend
         {"pid": player.id, "sid": me["series_id"]},
     )
     await db.commit()
-    print(f"[TEAM-READY] {steam_id} ready in series {me['series_id']}")
-    return {"status": "ok"}
+    # Log how many of the 4 are now ready so the lobby state is observable
+    # without firing a separate poll log per player.
+    cnt_q = await db.execute(
+        text("SELECT COUNT(*) FROM team_queue WHERE series_id = :sid AND ready = true"),
+        {"sid": me["series_id"]},
+    )
+    ready_cnt = cnt_q.scalar() or 0
+    print(f"[TEAM-READY] {steam_id} ready ({ready_cnt}/4) in series {me['series_id']}")
+    return {"status": "ok", "ready_count": ready_cnt}
 
 
 @app.post("/api/v1/team/matches", response_model=TeamMatchResponse, tags=["Team Matches"])
@@ -5043,7 +5129,41 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
     if not reporter:
         raise HTTPException(400, "Reporter must be one of the four participants")
 
-    # Insert team_matches row.
+    # First-match-of-series team_series slot alignment. The server's balancer
+    # assigned team1/team2 at lock time, but the client's t1a/t1b/t2a/t2b
+    # labels in the match report come from ROUNDS' in-game teamID — those
+    # don't have to align. Re-stamp team_series.t1a_id/t1b_id/t2a_id/t2b_id
+    # to mirror the report's grouping ONLY on the first match (so winner_team
+    # increments + per-slot rating_change persistence stay consistent across
+    # all 3 BO3 matches). Once any match is recorded, the slot mapping is
+    # frozen and subsequent matches just have to use the same grouping.
+    is_first_match = (series["t1_series_wins"] or 0) == 0 and (series["t2_series_wins"] or 0) == 0
+    if is_first_match:
+        client_t1_set = frozenset([p_t1a.id, p_t1b.id])
+        server_t1_set = frozenset([series["t1a_id"], series["t1b_id"]])
+        if client_t1_set != server_t1_set:
+            await db.execute(
+                text("""UPDATE team_series
+                       SET t1a_id=:t1a, t1b_id=:t1b, t2a_id=:t2a, t2b_id=:t2b
+                       WHERE id = :sid"""),
+                {"sid": series_uuid,
+                 "t1a": p_t1a.id, "t1b": p_t1b.id,
+                 "t2a": p_t2a.id, "t2b": p_t2b.id},
+            )
+            # Re-read for downstream slot lookups.
+            s_q2 = await db.execute(
+                text("SELECT * FROM team_series WHERE id = :sid"), {"sid": series_uuid},
+            )
+            series = s_q2.mappings().first()
+            print(f"[TEAM-MATCH] series {series_uuid} slots realigned to client grouping")
+
+    # Insert team_matches row. is_ranked is server-authoritative for 2v2 since
+    # the team_series row was created by /queue/poll's lock — by definition
+    # all 4 players queued through ranked matchmaking. The client's matchIsRanked
+    # heuristic is computed from the FIRST resolved peer's flags, which can
+    # legitimately drop to false in 4-player rooms (only one peer is the "primary
+    # opponent" the resolver picks). Forcing true here keeps the leaderboard +
+    # series Glicko-update path aligned with the queue-was-ranked invariant.
     new_match = TeamMatch(
         series_id=series_uuid,
         t1a_id=p_t1a.id, t1b_id=p_t1b.id, t2a_id=p_t2a.id, t2b_id=p_t2b.id,
@@ -5062,7 +5182,7 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
         region=report.region,
         hmac_signature=report.hmac_signature,
         reported_by=reporter.id,
-        is_ranked=report.is_ranked,
+        is_ranked=True,
         started_at=report.started_at,
     )
     db.add(new_match)
@@ -5178,18 +5298,30 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
                     {"r": new_r, "rd": new_rd, "v": new_vol, "pid": pid},
                 )
             new_ratings[str(pid)] = round(new_r, 1)
-        # Persist the per-player series Elo deltas for UI display.
+        # Persist the per-player series Elo deltas in the team_series slot that
+        # holds each player's player_id — NOT in the slot whose label happens to
+        # match the report's t1a/t1b/t2a/t2b naming. The two can disagree
+        # because the balancer assigns server-team1/team2 at lock time but
+        # ROUNDS' in-game teamID (which the client uses to label t1a/t1b/t2a/t2b
+        # in the report) is independent of that. Joining by player_id keeps the
+        # team-matches history endpoint reading the correct rating_change for
+        # each player no matter how the labels happen to align this game.
+        delta_by_pid = {pid: round(results[pid][0] - inputs[pid]["rating"], 1) for pid in gids}
+        slot_to_pid = {
+            "t1a": series["t1a_id"], "t1b": series["t1b_id"],
+            "t2a": series["t2a_id"], "t2b": series["t2b_id"],
+        }
         await db.execute(
             text("""UPDATE team_series SET
                        t1a_rating_change = :t1a_d, t1b_rating_change = :t1b_d,
                        t2a_rating_change = :t2a_d, t2b_rating_change = :t2b_d
                    WHERE id = :sid"""),
             {
-                "sid": report.series_id,
-                "t1a_d": round(results[p_t1a.id][0] - inputs[p_t1a.id]["rating"], 1),
-                "t1b_d": round(results[p_t1b.id][0] - inputs[p_t1b.id]["rating"], 1),
-                "t2a_d": round(results[p_t2a.id][0] - inputs[p_t2a.id]["rating"], 1),
-                "t2b_d": round(results[p_t2b.id][0] - inputs[p_t2b.id]["rating"], 1),
+                "sid": series_uuid,
+                "t1a_d": delta_by_pid[slot_to_pid["t1a"]],
+                "t1b_d": delta_by_pid[slot_to_pid["t1b"]],
+                "t2a_d": delta_by_pid[slot_to_pid["t2a"]],
+                "t2b_d": delta_by_pid[slot_to_pid["t2b"]],
             },
         )
         # Free the queue rows so all 4 can re-queue.

@@ -2116,6 +2116,42 @@ namespace CompetitiveRounds
             ));
         }
 
+        /// <summary>Pre-create a ranked_series row on the server for a private-room
+        /// match between two ranked-enabled mod users. Idempotent — server reuses
+        /// any existing active series for the pair. Without this, private-room
+        /// games don't appear in /series/active until the first match completes,
+        /// so spectators can't see them in the Live Ranked Games panel.</summary>
+        public static void SendSeriesPreflight(string mySteamId, string oppSteamId)
+        {
+            if (string.IsNullOrEmpty(mySteamId) || string.IsNullOrEmpty(oppSteamId)) return;
+            // Server signs HMAC over the sorted-pair canonical so either side can
+            // post the preflight without coordinating who's p1/p2.
+            string a = string.Compare(mySteamId, oppSteamId, StringComparison.Ordinal) <= 0 ? mySteamId : oppSteamId;
+            string b = a == mySteamId ? oppSteamId : mySteamId;
+            string sig = ComputeHmacHex($"preflight:{a}:{b}");
+            string url = $"{baseUrl}/api/v1/series/preflight?p1_steam_id={Escape(mySteamId)}&p2_steam_id={Escape(oppSteamId)}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                if (ok)
+                {
+                    string sid = ExtractJsonString(resp, "series_id");
+                    if (!string.IsNullOrEmpty(sid))
+                    {
+                        ActiveRankedSeriesId = sid;
+                        Plugin.Log.LogInfo($"[PREFLIGHT] series_id={sid} (private room)");
+                    }
+                    else
+                    {
+                        Plugin.Log.LogInfo($"[PREFLIGHT] response: {resp}");
+                    }
+                }
+                else
+                {
+                    Plugin.Log.LogWarning($"[PREFLIGHT] failed: {resp}");
+                }
+            }));
+        }
+
         public static void ToggleRanked(string steamId, bool enabled)
         {
             Plugin.Instance.StartCoroutine(PostRequest(

@@ -3363,8 +3363,14 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     break;
                 case ApiClient.TeamQueueState.Searching:
-                    int found = 1 + (poll?.teammates?.Count ?? 0) + (poll?.opponents?.Count ?? 0);
+                    // Use the server-reported queue_count (number of currently-searching
+                    // players) — clamped to [1,4] for display. Old logic counted
+                    // teammates + opponents in the poll response, but those are only
+                    // populated AFTER lock; pre-lock they're empty so the UI was
+                    // stuck on 1/4 even when 4 were queued.
+                    int found = poll != null && poll.queue_count > 0 ? poll.queue_count : 1;
                     if (found < 1) found = 1;
+                    if (found > 4) found = 4;
                     status = $"<color=#66CCFF>Searching for 2v2...</color>  <b>{found}/4</b>";
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(true);
