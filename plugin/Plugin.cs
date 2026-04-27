@@ -20,7 +20,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.0";
+        public const string ModVersion = "1.25.1";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1777,9 +1777,47 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(Block), "TryBlock")]
     class BlockTryBlockCounterPatch
     {
-        static void Postfix(Block __instance)
+        // Cache the reflected counter/cooldown FieldInfo once. ROUNDS' Block uses
+        // `counter` (elapsed cooldown timer, resets to 0 on a successful activation)
+        // and `cooldown` (max cooldown duration). When `counter < cooldown` the
+        // block is still cooling down and TryBlock no-ops — the Postfix would still
+        // fire, falsely incrementing our activation count. Capture the readiness
+        // state in __state and gate the increment on it.
+        private static System.Reflection.FieldInfo _fCounter;
+        private static System.Reflection.FieldInfo _fCooldown;
+        private static bool _fieldsResolved;
+        private static void ResolveFields()
+        {
+            if (_fieldsResolved) return;
+            try
+            {
+                var t = typeof(Block);
+                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                _fCounter  = t.GetField("counter", bf);
+                _fCooldown = t.GetField("cooldown", bf);
+            }
+            catch { }
+            _fieldsResolved = true;
+        }
+        static void Prefix(Block __instance, out bool __state)
+        {
+            __state = false;
+            try
+            {
+                ResolveFields();
+                if (_fCounter == null || _fCooldown == null) { __state = true; return; } // can't tell, fall back to old behavior
+                float counter  = (float)_fCounter.GetValue(__instance);
+                float cooldown = (float)_fCooldown.GetValue(__instance);
+                // Ready when the elapsed counter has reached the cooldown duration.
+                __state = counter >= cooldown;
+            }
+            catch { __state = true; }
+        }
+
+        static void Postfix(Block __instance, bool __state)
         {
             if (NativeUI.IsOpen) return;  // F5 Prefix blocked the call; don't credit it
+            if (!__state) return;          // block was on cooldown — TryBlock didn't actually activate
             try
             {
                 var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;

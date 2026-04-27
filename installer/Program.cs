@@ -292,8 +292,15 @@ namespace CompetitiveRoundsInstaller
                 byte[] bytes = File.ReadAllBytes(dllPath);
                 string content = System.Text.Encoding.UTF8.GetString(bytes);
 
-                // Look for version pattern like "1.18.4" near "com.competitiverounds.mod"
-                var match = Regex.Match(content, @"1\.(1[0-9]+\.[0-9]+)");
+                // Anchor on "com.competitiverounds.mod" then take the next short
+                // dotted-version literal that follows — that's the BepInPlugin
+                // ModVersion constant. Previous regex hardcoded "1.1X.Y" and
+                // started reporting "vunknown" for the 1.20+ range.
+                int anchor = content.IndexOf("com.competitiverounds.mod", StringComparison.Ordinal);
+                string scope = anchor >= 0 && anchor + 4096 < content.Length
+                    ? content.Substring(anchor, 4096)
+                    : content;
+                var match = Regex.Match(scope, @"\b\d+\.\d{1,2}\.\d{1,2}\b");
                 if (match.Success) return match.Value;
             }
             catch { }

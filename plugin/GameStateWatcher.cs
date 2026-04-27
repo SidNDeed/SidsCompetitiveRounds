@@ -462,8 +462,8 @@ namespace CompetitiveRounds
                     ApiClient.CheckOpponentRanked(opponentSteamId, (isRanked) =>
                     {
                         opponentIsRanked = isRanked;
-                        matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked;
-                        Plugin.Log.LogInfo($"[POLL] Opponent ranked: {opponentIsRanked}, Match ranked: {matchIsRanked}");
+                        matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && IsCompetitiveRoom();
+                        Plugin.Log.LogInfo($"[POLL] Opponent ranked: {opponentIsRanked}, Match ranked: {matchIsRanked} (room='{photonRoomId}')");
                     });
                 }
             }
@@ -959,8 +959,12 @@ namespace CompetitiveRounds
             TryResolveOpponent();
             DetermineLocalTeam();
 
-            // Re-evaluate ranked status at match start
-            matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked;
+            // Re-evaluate ranked status at match start. Both flags + the room
+            // must be a queue-issued room (ranked_* / team_* / sct-* tournament).
+            // Without the room gate, two ranked-enabled players hopping into any
+            // private room together would have all their casual matches counted
+            // as ranked — which is the bug Lemon vs Ghelici tripped.
+            matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && IsCompetitiveRoom();
 
             string matchType = matchIsRanked ? "RANKED" : "CASUAL";
             Plugin.Log.LogInfo($"[POLL] === {matchType} Match Started ===");
@@ -1868,6 +1872,19 @@ namespace CompetitiveRounds
             if (field == null || obj == null) return 0;
             try { return (int)field.GetValue(obj); }
             catch { return 0; }
+        }
+
+        /// <summary>True only when the current Photon room is a queue-issued room
+        /// (ranked_* / team_* / sct-* tournament). Private rooms — even between two
+        /// players who both have Ranked toggled on — are NEVER ranked. Prevents
+        /// the "two ranked-enabled friends hop into a custom room and accidentally
+        /// burn Elo on casual practice" failure mode.</summary>
+        public static bool IsCompetitiveRoom()
+        {
+            if (string.IsNullOrEmpty(photonRoomId)) return false;
+            return photonRoomId.StartsWith("ranked_", StringComparison.Ordinal)
+                || photonRoomId.StartsWith("team_",   StringComparison.Ordinal)
+                || photonRoomId.StartsWith("sct-",    StringComparison.Ordinal);
         }
 
         private static string StripRichText(string input)
