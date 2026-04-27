@@ -462,8 +462,8 @@ namespace CompetitiveRounds
                     ApiClient.CheckOpponentRanked(opponentSteamId, (isRanked) =>
                     {
                         opponentIsRanked = isRanked;
-                        matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && IsCompetitiveRoom();
-                        Plugin.Log.LogInfo($"[POLL] Opponent ranked: {opponentIsRanked}, Match ranked: {matchIsRanked} (room='{photonRoomId}')");
+                        matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && OpponentHasMod();
+                        Plugin.Log.LogInfo($"[POLL] Opponent ranked: {opponentIsRanked}, hasMod: {OpponentHasMod()}, Match ranked: {matchIsRanked}");
                     });
                 }
             }
@@ -959,12 +959,18 @@ namespace CompetitiveRounds
             TryResolveOpponent();
             DetermineLocalTeam();
 
-            // Re-evaluate ranked status at match start. Both flags + the room
-            // must be a queue-issued room (ranked_* / team_* / sct-* tournament).
-            // Without the room gate, two ranked-enabled players hopping into any
-            // private room together would have all their casual matches counted
-            // as ranked — which is the bug Lemon vs Ghelici tripped.
-            matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && IsCompetitiveRoom();
+            // Re-evaluate ranked status at match start. Three gates:
+            //   1. WE have ranked enabled
+            //   2. Opponent's player record has ranked_enabled=true (server-checked)
+            //   3. Opponent's mod is actually running — detected by the presence of
+            //      any cr_* Photon custom property they've published (cr_cards,
+            //      cr_trail_*, cr_pcolor_*, cr_fps, cr_nametag_*, etc).
+            // Gate #3 is the Lemon-vs-Ghelici fix: vanilla players with no mod
+            // can never be put into a ranked match, even if their DB record
+            // somehow shows ranked_enabled=true (e.g. tombstoned mod install,
+            // server-side data drift). 1v1 random-queue between two real mod
+            // users is still ranked — that's an intended feature.
+            matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && OpponentHasMod();
 
             string matchType = matchIsRanked ? "RANKED" : "CASUAL";
             Plugin.Log.LogInfo($"[POLL] === {matchType} Match Started ===");
@@ -1874,17 +1880,33 @@ namespace CompetitiveRounds
             catch { return 0; }
         }
 
-        /// <summary>True only when the current Photon room is a queue-issued room
-        /// (ranked_* / team_* / sct-* tournament). Private rooms — even between two
-        /// players who both have Ranked toggled on — are NEVER ranked. Prevents
-        /// the "two ranked-enabled friends hop into a custom room and accidentally
-        /// burn Elo on casual practice" failure mode.</summary>
-        public static bool IsCompetitiveRoom()
+        /// <summary>True iff at least one non-local player in the current Photon
+        /// room has published a cr_* custom property — our mod's signature.
+        /// Cards, trails, FPS, body colors, nametags, etc. all set their own
+        /// cr_* keys at room-join / match-start time, so by the time this is
+        /// evaluated (a few frames after combat begins) any peer running the
+        /// mod will have at least one of them. Vanilla players have none.</summary>
+        public static bool OpponentHasMod()
         {
-            if (string.IsNullOrEmpty(photonRoomId)) return false;
-            return photonRoomId.StartsWith("ranked_", StringComparison.Ordinal)
-                || photonRoomId.StartsWith("team_",   StringComparison.Ordinal)
-                || photonRoomId.StartsWith("sct-",    StringComparison.Ordinal);
+            try
+            {
+                if (!PhotonNetwork.InRoom) return false;
+                var players = PhotonNetwork.PlayerList;
+                if (players == null) return false;
+                foreach (var p in players)
+                {
+                    if (p == null || p.IsLocal) continue;
+                    var props = p.CustomProperties;
+                    if (props == null) continue;
+                    foreach (var key in props.Keys)
+                    {
+                        string k = key as string;
+                        if (k != null && k.StartsWith("cr_", StringComparison.Ordinal)) return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
         }
 
         private static string StripRichText(string input)

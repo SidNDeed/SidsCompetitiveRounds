@@ -292,16 +292,16 @@ namespace CompetitiveRoundsInstaller
                 byte[] bytes = File.ReadAllBytes(dllPath);
                 string content = System.Text.Encoding.UTF8.GetString(bytes);
 
-                // Anchor on "com.competitiverounds.mod" then take the next short
-                // dotted-version literal that follows — that's the BepInPlugin
-                // ModVersion constant. Previous regex hardcoded "1.1X.Y" and
-                // started reporting "vunknown" for the 1.20+ range.
-                int anchor = content.IndexOf("com.competitiverounds.mod", StringComparison.Ordinal);
-                string scope = anchor >= 0 && anchor + 4096 < content.Length
-                    ? content.Substring(anchor, 4096)
-                    : content;
-                var match = Regex.Match(scope, @"\b\d+\.\d{1,2}\.\d{1,2}\b");
-                if (match.Success) return match.Value;
+                // Custom attribute blobs in .NET metadata serialize string args as
+                // length-prefixed UTF-8 in order. BepInPlugin(ModId, ModName, ModVersion)
+                // stores them as: <len>"com.competitiverounds.mod" <len>"Competitive ROUNDS"
+                // <len>"1.X.Y". Anchor on the ModName since it's unique to our DLL and
+                // the ModVersion is GUARANTEED to be the next short string after it
+                // (separated only by a 1-byte length prefix). Skips the dependent-
+                // assembly version refs (netstandard 2.1.0, BepInEx 5.4.22, etc.) that
+                // the previous broad-window regex was picking up.
+                var match = Regex.Match(content, @"Competitive ROUNDS.{0,2}(\d+\.\d{1,2}\.\d{1,2})");
+                if (match.Success) return match.Groups[1].Value;
             }
             catch { }
 
