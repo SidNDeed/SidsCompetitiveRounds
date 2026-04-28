@@ -521,6 +521,8 @@ class TeamSeries(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     invalidated_at = Column(DateTime(timezone=True), nullable=True)
     invalidation_reason = Column(String(64), nullable=True)
+    spawn_confirmations = Column(SmallInteger, nullable=False, default=0)
+    spawn_confirmed_by = Column(JSONB, nullable=False, default=list)
 
 
 class TeamMatch(Base):

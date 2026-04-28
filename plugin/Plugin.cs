@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.10";
+        public const string ModVersion = "1.25.11";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -520,7 +520,20 @@ namespace CompetitiveRounds
                     bool ok = false;
                     try { pa.CreatePlayer(device, false); ok = true; }
                     catch (Exception ex) { Plugin.Log.LogError($"[2v2] Auto-spawn CreatePlayer failed: {ex.Message}"); }
-                    if (ok) yield break;
+                    if (ok)
+                    {
+                        // Tell server we spawned, so it can detect when fewer than
+                        // 4 of 4 confirm within the assembly deadline and cancel.
+                        try
+                        {
+                            string sid = MatchTracker.LocalSteamId;
+                            string seriesId = ApiClient.ActiveTeamSeriesId;
+                            if (!string.IsNullOrEmpty(sid) && !string.IsNullOrEmpty(seriesId))
+                                ApiClient.SendTeamSpawnConfirm(seriesId, sid);
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] spawn-confirm send error: {ex.Message}"); }
+                        yield break;
+                    }
                 }
                 else if (tickLogCount < 6)
                 {
@@ -1194,6 +1207,61 @@ namespace CompetitiveRounds
                 Plugin.Instance.StartCoroutine(Force2v2StartGameWhenReady());
                 Plugin.Instance.StartCoroutine(Setup4PlayerCardBarsWhenReady());
                 Plugin.Instance.StartCoroutine(Repeated2v2PCColorReapply());
+                Plugin.Instance.StartCoroutine(PollAssemblyStateLoop());
+            }
+        }
+
+        /// <summary>Poll /team/series/{id}/state every 2s for the first ~20s
+        /// after joining a cr_ff room. Server cancels the series after 15s if
+        /// fewer than 4 of 4 spawn-confirms have arrived. When we see status=
+        /// 'canceled' with reason 'assembly_timeout', show a notification and
+        /// leave the room — saves the remaining clients from sitting on the
+        /// ready screen until our 30s force-StartGame timeout.</summary>
+        private static System.Collections.IEnumerator PollAssemblyStateLoop()
+        {
+            yield return new WaitForSeconds(3f);
+            float deadline = Time.realtimeSinceStartup + 22f;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                if (Plugin.Pending2v2Slot < 0) yield break;
+                if (!PhotonNetwork.InRoom) yield break;
+                string sid = ApiClient.ActiveTeamSeriesId;
+                if (string.IsNullOrEmpty(sid)) yield break;
+
+                bool gotResponse = false;
+                ApiClient.PollTeamSeriesState(sid, (status, reason, conf) =>
+                {
+                    gotResponse = true;
+                    if (status == "canceled" && reason == "assembly_timeout")
+                    {
+                        Plugin.Log.LogWarning($"[2v2] Server canceled series (assembly_timeout, {conf}/4 confirmed) — leaving room");
+                        try
+                        {
+                            CompetitiveUI.ShowNotification(
+                                $"Match couldn't assemble — only {conf} of 4 connected. Returning to menu.",
+                                new Color(1f, 0.55f, 0.2f), 6f);
+                        }
+                        catch { }
+                        try
+                        {
+                            Plugin.ClearPending2v2Slot();
+                            if (PhotonNetwork.InRoom) PhotonNetwork.LeaveRoom();
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] LeaveRoom on assembly cancel failed: {ex.Message}"); }
+                    }
+                    else if (status == "active" && conf >= 4)
+                    {
+                        // All 4 confirmed — assembly succeeded, no need to keep polling.
+                    }
+                });
+                // Wait for response or timeout, then sleep before next poll.
+                float waitUntil = Time.realtimeSinceStartup + 1.5f;
+                while (!gotResponse && Time.realtimeSinceStartup < waitUntil) yield return null;
+                // If status is 'canceled' or assembly succeeded we can stop early.
+                if (ApiClient.LastSeriesStateStatus == "canceled") yield break;
+                if (ApiClient.LastSeriesStateStatus == "active" && ApiClient.LastSeriesStateConfirmations >= 4)
+                    yield break;
+                yield return new WaitForSeconds(2f);
             }
         }
 

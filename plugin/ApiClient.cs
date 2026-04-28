@@ -2821,6 +2821,48 @@ namespace CompetitiveRounds
             ));
         }
 
+        /// <summary>Tracks the most recent series-state poll response so the
+        /// dispatcher coroutine can react. Set by PollTeamSeriesState.</summary>
+        public static string LastSeriesStateStatus = null;
+        public static string LastSeriesStateReason = null;
+        public static int LastSeriesStateConfirmations = 0;
+
+        /// <summary>POST /team/series/{id}/spawn-confirm. Called from the auto-spawn
+        /// coroutine when CreatePlayer override successfully creates the local
+        /// Player in a cr_ff room. Idempotent server-side.</summary>
+        public static void SendTeamSpawnConfirm(string seriesId, string steamId)
+        {
+            if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(steamId)) return;
+            string sig = ComputeHmacHex($"{steamId}:{seriesId}:spawn");
+            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/spawn-confirm" +
+                         $"?steam_id={UnityWebRequest.EscapeURL(steamId)}" +
+                         $"&hmac_sig={UnityWebRequest.EscapeURL(sig)}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                if (ok) Plugin.Log.LogInfo($"[2v2] spawn-confirm OK: {resp}");
+                else Plugin.Log.LogWarning($"[2v2] spawn-confirm failed: {resp}");
+            }));
+        }
+
+        /// <summary>GET /team/series/{id}/state. Polled during the first 20s
+        /// after ready_join to detect server-side assembly cancel.</summary>
+        public static void PollTeamSeriesState(string seriesId, Action<string, string, int> onResponse)
+        {
+            if (string.IsNullOrEmpty(seriesId)) return;
+            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                if (!ok || string.IsNullOrEmpty(resp)) return;
+                string status = ExtractJsonString(resp, "status") ?? "";
+                string reason = ExtractJsonString(resp, "reason") ?? "";
+                int conf = ExtractJsonInt(resp, "confirmations");
+                LastSeriesStateStatus = status;
+                LastSeriesStateReason = reason;
+                LastSeriesStateConfirmations = conf;
+                onResponse?.Invoke(status, reason, conf);
+            }));
+        }
+
         /// <summary>Submit a 2v2 match. Reporter is the lowest Steam ID across
         /// all 4 participants. Builds the 11-field HMAC over
         /// t1a:t1b:t2a:t2b:t1r:t2r:is_ranked:reporter:room_id:winner_team:series_id.</summary>

@@ -499,7 +499,26 @@ namespace CompetitiveRounds
                     {
                         bool oldRanked = opponentIsRanked;
                         opponentIsRanked = isRanked;
-                        matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && OpponentHasMod();
+                        // 2v2 cr_ff rooms are queue-issued team rooms — definitionally
+                        // ranked. The 1v1 "opponent has mod + ranked toggled on" check
+                        // races against /mod/check responses for the 3 other players,
+                        // and even one slow response would flip the entire match to
+                        // casual. In cr_ff, force ranked.
+                        bool inCrFf = false;
+                        try
+                        {
+                            var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
+                            inCrFf = rp != null && rp.ContainsKey("cr_ff");
+                        }
+                        catch { }
+                        if (inCrFf)
+                        {
+                            matchIsRanked = true;
+                        }
+                        else
+                        {
+                            matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && OpponentHasMod();
+                        }
                         if (oldRanked != opponentIsRanked || firstCheck)
                             Plugin.Log.LogInfo($"[POLL] Opponent ranked: {opponentIsRanked}, hasMod: {OpponentHasMod()}, Match ranked: {matchIsRanked}{(shouldRetry ? " (retry)" : "")}");
                         // Series pre-flight: now that we know the match is ranked, if
@@ -1263,16 +1282,28 @@ namespace CompetitiveRounds
         /// rule the server applies at lock-time so the 11-field HMAC matches.</summary>
         private static bool TryReportTeamMatch(string reportRoomId, int duration)
         {
-            if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 4) return false;
+            if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 4)
+            {
+                Plugin.Log.LogWarning($"[2v2-REPORT] aborting: PlayerList.Length={PhotonNetwork.PlayerList?.Length ?? -1} (expected 4)");
+                return false;
+            }
 
             var pm = PlayerManager.instance;
-            if (pm == null || pm.players == null) return false;
+            if (pm == null || pm.players == null)
+            {
+                Plugin.Log.LogWarning($"[2v2-REPORT] aborting: PlayerManager.instance={(pm == null ? "null" : "set")} pm.players={(pm?.players == null ? "null" : "set")}");
+                return false;
+            }
 
             // Map each in-game Player → (steam_id, display_name, team_id from CharacterData,
             //   cards from cr_cards, fps from cr_fps).
             var teamFieldInfo = typeof(CharacterData).GetField("teamID",
                 BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (teamFieldInfo == null) return false;
+            if (teamFieldInfo == null)
+            {
+                Plugin.Log.LogWarning("[2v2-REPORT] aborting: CharacterData.teamID field not found via reflection");
+                return false;
+            }
 
             // Resolve Photon ActorNumber → Steam ID via the same ck_id hint our existing
             // resolver writes; if missing, fall back to UserId. We also need each player's

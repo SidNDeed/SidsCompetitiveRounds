@@ -469,7 +469,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.25.10"
+LATEST_MOD_VERSION = "1.25.11"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -5078,6 +5078,149 @@ async def team_queue_ready(steam_id: str = Query(...), db: AsyncSession = Depend
     ready_cnt = cnt_q.scalar() or 0
     print(f"[TEAM-READY] {steam_id} ready ({ready_cnt}/4) in series {me['series_id']}")
     return {"status": "ok", "ready_count": ready_cnt}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Match-assembly tracking (added v1.25.11). Each client posts spawn-confirm
+# when its auto-spawn override successfully creates the local Player. Server
+# bumps spawn_confirmations + records the player_id (idempotent). When state
+# is polled and the series has been active >15s with <4 confirmations, the
+# server cancels the series with reason='assembly_timeout' so all 4 clients
+# can bail to menu instead of sitting on the ready screen for 30s.
+# ─────────────────────────────────────────────────────────────────────────
+
+_ASSEMBLY_DEADLINE_SECONDS = 15
+
+
+def _verify_spawn_confirm_hmac(steam_id: str, series_id: str, signature: str) -> bool:
+    """HMAC for spawn-confirm = sha256(secret, "{steam_id}:{series_id}:spawn")."""
+    if not MATCH_HMAC_SECRET:
+        return True  # dev mode without secret
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"{steam_id}:{series_id}:spawn".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature or "")
+
+
+@app.post("/api/v1/team/series/{series_id}/spawn-confirm", tags=["Team Matches"])
+async def team_series_spawn_confirm(
+    series_id: str,
+    steam_id: str = Query(...),
+    hmac_sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Client posts this when its 2v2 auto-spawn override successfully creates
+    the local Player. Idempotent per (series, player) — safe to retry."""
+    if not _verify_spawn_confirm_hmac(steam_id, series_id, hmac_sig):
+        raise HTTPException(403, "Invalid spawn-confirm signature")
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+    # Resolve player to UUID for the idempotency record.
+    p_row = await db.execute(select(Player.id).where(Player.steam_id == steam_id))
+    pid = p_row.scalar_one_or_none()
+    if pid is None:
+        raise HTTPException(404, "Unknown player")
+
+    # Idempotent atomic update: only increment if this player hasn't already
+    # been recorded. asyncpg + jsonb @> for membership.
+    res = await db.execute(
+        text("""
+            UPDATE team_series
+               SET spawn_confirmations = spawn_confirmations + 1,
+                   spawn_confirmed_by = spawn_confirmed_by || to_jsonb(:pid::text)
+             WHERE id = :sid
+               AND status = 'active'
+               AND NOT (spawn_confirmed_by @> to_jsonb(:pid::text))
+            RETURNING spawn_confirmations
+        """),
+        {"sid": sid_uuid, "pid": str(pid)},
+    )
+    new_count = res.scalar_one_or_none()
+    await db.commit()
+    if new_count is None:
+        # Either series not active, or player already confirmed. Read current
+        # value to return — useful for clients to see "already done".
+        row = await db.execute(
+            text("SELECT spawn_confirmations, status FROM team_series WHERE id = :sid"),
+            {"sid": sid_uuid},
+        )
+        cur = row.first()
+        if cur is None:
+            raise HTTPException(404, "Series not found")
+        return {"confirmations": int(cur[0] or 0), "status": cur[1], "already_recorded": True}
+    return {"confirmations": int(new_count), "status": "active", "already_recorded": False}
+
+
+@app.get("/api/v1/team/series/{series_id}/state", tags=["Team Matches"])
+async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
+    """Per-series assembly + lifecycle state. Polled by clients during the
+    first ~20 seconds after ready_join. If the series has been active for
+    longer than the assembly deadline (15s) and fewer than 4 players have
+    posted spawn-confirm, transitions to status='canceled' with reason
+    'assembly_timeout' so all 4 clients can bail back to menu."""
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+
+    row = await db.execute(
+        text("""
+            SELECT id, status, created_at, spawn_confirmations,
+                   invalidation_reason, completed_at
+              FROM team_series
+             WHERE id = :sid
+        """),
+        {"sid": sid_uuid},
+    )
+    r = row.first()
+    if r is None:
+        raise HTTPException(404, "Series not found")
+
+    s_status = r[1]
+    s_created = r[2]
+    s_confirms = int(r[3] or 0)
+    s_reason = r[4]
+
+    age_seconds = (datetime.now(timezone.utc) - s_created).total_seconds()
+
+    # Auto-cancel if the assembly deadline has passed and we still don't have 4.
+    if (
+        s_status == "active"
+        and s_confirms < 4
+        and age_seconds > _ASSEMBLY_DEADLINE_SECONDS
+    ):
+        await db.execute(
+            text("""
+                UPDATE team_series
+                   SET status = 'canceled',
+                       invalidated_at = NOW(),
+                       invalidation_reason = 'assembly_timeout'
+                 WHERE id = :sid AND status = 'active'
+            """),
+            {"sid": sid_uuid},
+        )
+        await db.commit()
+        return {
+            "status": "canceled",
+            "reason": "assembly_timeout",
+            "confirmations": s_confirms,
+            "expected": 4,
+            "age_seconds": int(age_seconds),
+            "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+        }
+
+    return {
+        "status": s_status,
+        "reason": s_reason,
+        "confirmations": s_confirms,
+        "expected": 4,
+        "age_seconds": int(age_seconds),
+        "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+    }
 
 
 @app.post("/api/v1/team/matches", response_model=TeamMatchResponse, tags=["Team Matches"])
