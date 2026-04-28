@@ -469,7 +469,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.25.16"
+LATEST_MOD_VERSION = "1.25.17"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -3679,6 +3679,77 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
     return {"series": series}
 
 
+@app.get("/api/v1/team/series/active", tags=["Team Matches"])
+async def get_active_team_series(db: AsyncSession = Depends(get_db)):
+    """Live (in-progress) 2v2 team series — for the bet UI's 4-player panel."""
+    rows = (await db.execute(text("""
+        SELECT
+            ts.id::text                AS series_id,
+            ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id,
+            p1a.steam_id  AS t1a_steam, p1a.display_name AS t1a_name,
+            p1b.steam_id  AS t1b_steam, p1b.display_name AS t1b_name,
+            p2a.steam_id  AS t2a_steam, p2a.display_name AS t2a_name,
+            p2b.steam_id  AS t2b_steam, p2b.display_name AS t2b_name,
+            ts.t1_series_wins, ts.t2_series_wins,
+            ts.created_at, ts.dc_grace_until,
+            -- Team-aggregated 2v2 ratings (avg of the 2 members), 1v1 fallback for low-confidence.
+            (SELECT AVG(CASE WHEN g2.completed_series >= :trust THEN g2.rating ELSE g1.rating END)
+               FROM glicko_ratings_2v2 g2
+               JOIN glicko_ratings g1 ON g1.player_id = g2.player_id
+              WHERE g2.player_id IN (ts.t1a_id, ts.t1b_id))         AS t1_avg_rating,
+            (SELECT AVG(CASE WHEN g2.completed_series >= :trust THEN g2.rating ELSE g1.rating END)
+               FROM glicko_ratings_2v2 g2
+               JOIN glicko_ratings g1 ON g1.player_id = g2.player_id
+              WHERE g2.player_id IN (ts.t2a_id, ts.t2b_id))         AS t2_avg_rating,
+            (SELECT AVG(g2.rating_deviation)
+               FROM glicko_ratings_2v2 g2
+              WHERE g2.player_id IN (ts.t1a_id, ts.t1b_id))         AS t1_avg_rd,
+            (SELECT AVG(g2.rating_deviation)
+               FROM glicko_ratings_2v2 g2
+              WHERE g2.player_id IN (ts.t2a_id, ts.t2b_id))         AS t2_avg_rd
+        FROM team_series ts
+        JOIN players p1a ON p1a.id = ts.t1a_id
+        JOIN players p1b ON p1b.id = ts.t1b_id
+        JOIN players p2a ON p2a.id = ts.t2a_id
+        JOIN players p2b ON p2b.id = ts.t2b_id
+        WHERE ts.status IN ('active', 'dc_paused')
+          AND ts.created_at > NOW() - INTERVAL '2 hours'
+        ORDER BY ts.created_at DESC
+        LIMIT 20
+    """), {"trust": TEAM_TRUST_2V2_RATING_AFTER})).mappings().all()
+
+    series = []
+    for r in rows:
+        t1_r = float(r["t1_avg_rating"] or 1500.0)
+        t2_r = float(r["t2_avg_rating"] or 1500.0)
+        t1_rd = float(r["t1_avg_rd"] or 350.0)
+        t2_rd = float(r["t2_avg_rd"] or 350.0)
+        t1_odds = round(_odds_multiplier(t1_r, t2_r, t1_rd, t2_rd), 2)
+        t2_odds = round(_odds_multiplier(t2_r, t1_r, t2_rd, t1_rd), 2)
+        no_profit = max(t1_odds, t2_odds) < 1.10
+        # Lock when series has any games done (t1_series_wins > 0 OR t2 > 0)
+        # — the "is the favorite holding up" mystery has been resolved.
+        score_locked = (r["t1_series_wins"] or 0) > 0 or (r["t2_series_wins"] or 0) > 0
+        bets_locked = no_profit or score_locked
+        lock_reason = "game_in_progress" if score_locked else ("no_meaningful_odds" if no_profit else None)
+        series.append({
+            "series_id": r["series_id"],
+            "t1a_steam": r["t1a_steam"], "t1a_name": r["t1a_name"],
+            "t1b_steam": r["t1b_steam"], "t1b_name": r["t1b_name"],
+            "t2a_steam": r["t2a_steam"], "t2a_name": r["t2a_name"],
+            "t2b_steam": r["t2b_steam"], "t2b_name": r["t2b_name"],
+            "t1_rating": int(round(t1_r)), "t2_rating": int(round(t2_r)),
+            "t1_wins": r["t1_series_wins"] or 0,
+            "t2_wins": r["t2_series_wins"] or 0,
+            "t1_odds": t1_odds, "t2_odds": t2_odds,
+            "bets_locked": bets_locked,
+            "lock_reason": lock_reason,
+            "started_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "dc_grace_until": r["dc_grace_until"].isoformat() if r["dc_grace_until"] else None,
+        })
+    return {"series": series}
+
+
 @app.post("/api/v1/series/preflight", tags=["Series"])
 async def series_preflight(
     p1_steam_id: str = Query(...),
@@ -3901,6 +3972,163 @@ async def place_bet(
         "amount": amount,
         "odds_multiplier": round(mult, 2),
         "potential_payout": int(round(amount * mult)),
+    }
+
+
+@app.post("/api/v1/team-bets", tags=["Betting"])
+async def place_team_bet(
+    steam_id: str = Query(...),
+    team_series_id: str = Query(...),
+    bet_on_team: int = Query(..., ge=1, le=2),
+    amount: int = Query(..., ge=1, le=100000),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Place a bet on a 2v2 team_series. HMAC over
+    `team-bet:{steam_id}:{team_series_id}:{bet_on_team}:{amount}`.
+    Mirrors `place_bet` for 1v1 — same odds-uncertainty floor (>=1.10x),
+    same one-bet-per-series-per-player rule, same gold debit-now /
+    credit-on-settle flow."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"team-bet:{steam_id}:{team_series_id}:{bet_on_team}:{amount}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    await _check_ban_or_raise(db, steam_id)
+    bettor = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if bettor is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    try:
+        sid = UUID(team_series_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid team_series_id")
+    series = (await db.execute(text("""
+        SELECT id, status, t1a_id, t1b_id, t2a_id, t2b_id, t1_series_wins, t2_series_wins
+          FROM team_series WHERE id = :sid
+    """), {"sid": sid})).mappings().first()
+    if series is None:
+        raise HTTPException(status_code=404, detail="Team series not found")
+    if series["status"] != "active":
+        raise HTTPException(status_code=409, detail=f"Series is {series['status']}")
+    if (series["t1_series_wins"] or 0) >= 2 or (series["t2_series_wins"] or 0) >= 2:
+        raise HTTPException(status_code=409, detail="Series already effectively concluded")
+
+    # Bettor can't be a participant.
+    if bettor.id in (series["t1a_id"], series["t1b_id"], series["t2a_id"], series["t2b_id"]):
+        raise HTTPException(status_code=409, detail="Cannot bet on your own match")
+
+    # One bet per series per player.
+    existing = (await db.execute(text("""
+        SELECT 1 FROM team_bets WHERE player_id = :pid AND team_series_id = :sid
+    """), {"pid": bettor.id, "sid": sid})).first()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Already bet on this series")
+
+    balance = (bettor.gold_earned or 0) - (bettor.gold_spent or 0)
+    if balance < amount:
+        raise HTTPException(status_code=402, detail=f"Insufficient gold: have {balance}, need {amount}")
+
+    # Compute team-aggregated odds. Each team's "rating" for odds is the
+    # average of its 2 members' 2v2 ratings (RD-weighted falls back to 1v1
+    # via _team_balance_rating for low-confidence accounts).
+    pair_ids = [series["t1a_id"], series["t1b_id"], series["t2a_id"], series["t2b_id"]]
+    g_rows = (await db.execute(text("""
+        SELECT g2.player_id, g2.rating, g2.rating_deviation, g2.completed_series,
+               g.rating AS rating_1v1
+          FROM glicko_ratings_2v2 g2
+          JOIN glicko_ratings g ON g.player_id = g2.player_id
+         WHERE g2.player_id = ANY(:pids)
+    """), {"pids": pair_ids})).mappings().all()
+    rmap = {r["player_id"]: r for r in g_rows}
+
+    def team_balance(pid):
+        r = rmap.get(pid)
+        if r is None:
+            return 1500.0, 350.0
+        cs = int(r["completed_series"] or 0)
+        rd = float(r["rating_deviation"] or 350.0)
+        rating = float(r["rating"] if cs >= TEAM_TRUST_2V2_RATING_AFTER else (r["rating_1v1"] or 1500.0))
+        return rating, rd
+
+    t1_ratings = [team_balance(series["t1a_id"]), team_balance(series["t1b_id"])]
+    t2_ratings = [team_balance(series["t2a_id"]), team_balance(series["t2b_id"])]
+    t1_avg = sum(r[0] for r in t1_ratings) / 2
+    t2_avg = sum(r[0] for r in t2_ratings) / 2
+    t1_rd_avg = sum(r[1] for r in t1_ratings) / 2
+    t2_rd_avg = sum(r[1] for r in t2_ratings) / 2
+
+    if bet_on_team == 1:
+        mult = _odds_multiplier(t1_avg, t2_avg, t1_rd_avg, t2_rd_avg)
+    else:
+        mult = _odds_multiplier(t2_avg, t1_avg, t2_rd_avg, t1_rd_avg)
+    if mult < 1.10:
+        raise HTTPException(status_code=409,
+            detail="Bets restricted — odds offer no meaningful profit (low team rating confidence)")
+
+    bettor.gold_spent = (bettor.gold_spent or 0) + amount
+    db.add(GoldTransaction(
+        player_id=bettor.id, amount=-amount,
+        reason="team_bet_stake", reference_id=team_series_id,
+    ))
+    await db.execute(text("""
+        INSERT INTO team_bets (player_id, team_series_id, bet_on_team, amount, odds_multiplier)
+        VALUES (:pid, :sid, :tm, :amt, :mult)
+    """), {"pid": bettor.id, "sid": sid, "tm": bet_on_team, "amt": amount, "mult": mult})
+    await db.commit()
+    return {
+        "status": "placed",
+        "amount": amount,
+        "bet_on_team": bet_on_team,
+        "odds_multiplier": round(mult, 2),
+        "potential_payout": int(amount * mult),
+    }
+
+
+@app.get("/api/v1/players/{steam_id}/team-bets", tags=["Betting"])
+async def get_player_team_bets(
+    steam_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Player's recent 2v2 bets."""
+    rows = (await db.execute(text("""
+        SELECT
+            b.id, b.amount, b.odds_multiplier, b.created_at, b.settled_at,
+            b.payout, b.bet_on_team,
+            b.team_series_id::text AS series_id,
+            ts.status AS series_status,
+            ts.winner_team AS series_winner_team,
+            ts.t1_series_wins, ts.t2_series_wins
+        FROM team_bets b
+        JOIN players p ON p.id = b.player_id
+        JOIN team_series ts ON ts.id = b.team_series_id
+        WHERE p.steam_id = :sid
+        ORDER BY b.created_at DESC
+        LIMIT :limit
+    """), {"sid": steam_id, "limit": limit})).mappings().all()
+    return {
+        "bets": [
+            {
+                "id": r["id"],
+                "amount": r["amount"],
+                "odds_multiplier": round(r["odds_multiplier"], 2),
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "settled_at": r["settled_at"].isoformat() if r["settled_at"] else None,
+                "payout": r["payout"],
+                "series_id": r["series_id"],
+                "bet_on_team": r["bet_on_team"],
+                "series_status": r["series_status"],
+                "series_winner_team": r["series_winner_team"],
+                "series_score": f"{r['t1_series_wins']}-{r['t2_series_wins']}",
+            }
+            for r in rows
+        ]
     }
 
 
@@ -4692,6 +4920,60 @@ async def team_queue_count(db: AsyncSession = Depends(get_db)):
     return {"searching": searching}
 
 
+@app.get("/api/v1/team/queue/list", tags=["Team Queue"])
+async def team_queue_list(db: AsyncSession = Depends(get_db)):
+    """Snapshot of every player currently in the 2v2 queue. Powers the
+    "who else is queueing" panel on the F5 2v2 tab. No privacy filter
+    (Discord queue beacons already publish names — no point hiding here).
+    Includes the balancer rating + fallback-flag so the user can see at
+    a glance which queuers' 2v2 elo is being used vs which fell back to
+    their 1v1 elo."""
+    result = await db.execute(
+        text("""
+            SELECT tq.steam_id, tq.display_name, tq.rating, tq.completed_series,
+                   tq.fallback_rating, tq.region, tq.joined_at, tq.status,
+                   tq.team_assigned, tq.series_id,
+                   tq.manual_pick_enabled, tq.preferred_team
+            FROM team_queue tq
+            WHERE tq.status IN ('searching', 'matched', 'ready')
+            ORDER BY tq.joined_at ASC
+        """),
+    )
+    rows = result.mappings().all()
+    out = []
+    manual_quorum = 0
+    for r in rows:
+        cs = int(r["completed_series"] or 0)
+        using_fb = cs < TEAM_TRUST_2V2_RATING_AFTER
+        fb = float(r["fallback_rating"] or 0)
+        balance = int(round(fb)) if using_fb else int(round(r["rating"]))
+        if r["manual_pick_enabled"]:
+            manual_quorum += 1
+        out.append({
+            "steam_id": r["steam_id"],
+            "display_name": r["display_name"],
+            "rating": int(round(r["rating"] or 0)),
+            "balance_rating": balance,
+            "using_fallback_rating": using_fb,
+            "completed_series": cs,
+            "region": r["region"],
+            "status": r["status"],
+            "team_assigned": r["team_assigned"],
+            "series_id": str(r["series_id"]) if r["series_id"] else None,
+            "joined_at": r["joined_at"].isoformat() if r["joined_at"] else None,
+            "wait_seconds": int((datetime.now(timezone.utc) - r["joined_at"]).total_seconds()) if r["joined_at"] else 0,
+            "manual_pick_enabled": bool(r["manual_pick_enabled"]),
+            "preferred_team": r["preferred_team"],
+        })
+    return {
+        "queuers": out,
+        "count": len(out),
+        "manual_pick_quorum": manual_quorum,
+        "manual_pick_required": 3,  # threshold for the quorum to unlock side-buttons
+        "manual_pick_active": manual_quorum >= 3,
+    }
+
+
 @app.get("/api/v1/team/queue/recent-joins", tags=["Team Queue"])
 async def team_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
     """Players who joined the 2v2 queue in the last N seconds. Drives the Discord
@@ -4814,12 +5096,19 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
         # Build response payload
         def to_member(row):
+            cs = int(row.get("completed_series") or 0)
+            using_fb = cs < TEAM_TRUST_2V2_RATING_AFTER
+            fb = float(row.get("fallback_rating") or 0)
+            balance = int(round(fb)) if using_fb else int(round(row["rating"]))
             return TeamQueueMember(
                 steam_id=row["steam_id"],
                 display_name=row["display_name"],
                 rating=int(round(row["rating"])),
                 region=row["region"],
                 team_assigned=row["team_assigned"],
+                using_fallback_rating=using_fb,
+                balance_rating=balance,
+                completed_series=cs,
             )
         teammates_pl = [to_member(r) for r in teammates]
         opponents_pl = [to_member(r) for r in opponents]
@@ -4889,7 +5178,8 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     cands = await db.execute(
         text("""
             SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
-                   tq.completed_series, tq.fallback_rating, tq.region, tq.joined_at
+                   tq.completed_series, tq.fallback_rating, tq.region, tq.joined_at,
+                   tq.manual_pick_enabled, tq.preferred_team
             FROM team_queue tq
             WHERE tq.status = 'searching'
               AND tq.player_id != :pid
@@ -4908,6 +5198,86 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     )
     others = list(cands.mappings().all())
 
+    # ── Sticky-team requeue resume ──────────────────────────────────
+    # If this caller belongs to a `dc_paused` series whose grace deadline
+    # hasn't expired, and the other 3 original players are ALSO in queue,
+    # resume the existing series with the SAME teams instead of creating
+    # a fresh one. Falls through to the normal balancer path otherwise.
+    dc_resume_series = await db.execute(
+        text("""
+            SELECT id, t1a_id, t1b_id, t2a_id, t2b_id, dc_grace_until
+              FROM team_series
+             WHERE status = 'dc_paused'
+               AND dc_grace_until > NOW()
+               AND :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)
+             ORDER BY dc_grace_until DESC
+             LIMIT 1
+        """),
+        {"pid": my_pid},
+    )
+    dc_row = dc_resume_series.mappings().first()
+    if dc_row is not None:
+        original_pids = [dc_row["t1a_id"], dc_row["t1b_id"], dc_row["t2a_id"], dc_row["t2b_id"]]
+        # Are the OTHER 3 original players currently in queue (any status)?
+        rs = await db.execute(
+            text("""
+                SELECT player_id, steam_id, display_name, rating, region
+                  FROM team_queue
+                 WHERE player_id = ANY(:pids)
+                   AND status IN ('searching', 'matched', 'ready')
+                   AND player_id != :me
+                FOR UPDATE SKIP LOCKED
+            """),
+            {"pids": original_pids, "me": my_pid},
+        )
+        present = list(rs.mappings().all())
+        if len(present) == 3:
+            # All 4 originals are here. Re-lock them with the EXISTING series.
+            print(f"[TEAM-QUEUE-LOCK] sticky-team resume: series={dc_row['id']} caller={steam_id}")
+            # Map original team to t1/t2 — keep the original assignments so the
+            # balancer-time slot order remains canonical for HMAC matching.
+            t1a, t1b = dc_row["t1a_id"], dc_row["t1b_id"]
+            t2a, t2b = dc_row["t2a_id"], dc_row["t2b_id"]
+            for pid in [my_pid] + [p["player_id"] for p in present]:
+                t = 1 if pid in (t1a, t1b) else 2
+                await db.execute(
+                    text("""
+                        UPDATE team_queue
+                           SET status = 'matched',
+                               series_id = :sid,
+                               team_assigned = :t,
+                               matched_at = NOW()
+                         WHERE player_id = :pid
+                    """),
+                    {"sid": dc_row["id"], "t": t, "pid": pid},
+                )
+            # Flip the series back to active and clear DC fields so the next
+            # match plays through normally.
+            await db.execute(
+                text("""
+                    UPDATE team_series
+                       SET status = 'active',
+                           dc_grace_until = NULL,
+                           dc_team_remaining = NULL,
+                           dc_player_id = NULL
+                     WHERE id = :sid
+                """),
+                {"sid": dc_row["id"]},
+            )
+            await db.commit()
+            # The poll responder reads the queue rows again on its next pass —
+            # return matched here so the caller sees the resume and surfaces
+            # the ready-up button.
+            my_team = 1 if my_pid in (t1a, t1b) else 2
+            return TeamQueuePollResponse(
+                status="matched",
+                series_id=str(dc_row["id"]),
+                team_assigned=my_team,
+                teammates=[],   # filled by next poll tick from the queue rows
+                opponents=[],
+                match_age_seconds=0,
+            )
+
     if len(others) < 3:
         # Not enough — count searching, return.
         cnt_q = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status='searching'"))
@@ -4922,12 +5292,14 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         await db.commit()
         return TeamQueuePollResponse(status="searching", queue_count=cnt, elo_range=elo_range)
 
-    # 4 candidates total (caller + others). Run balancer.
+    # 4 candidates total (caller + others). Run balancer (or honor manual picks).
     print(f"[TEAM-QUEUE-LOCK] caller={steam_id} locking 4-player series with {[o['steam_id'] for o in others]}")
     pool = [
         {"player_id": me["player_id"], "balance_rating": my_balance,
          "rating": me["rating"], "rd": me["rating_deviation"],
-         "steam_id": me["steam_id"]},
+         "steam_id": me["steam_id"],
+         "manual_pick_enabled": bool(me.get("manual_pick_enabled")),
+         "preferred_team": me.get("preferred_team")},
     ]
     for o in others:
         pool.append({
@@ -4936,9 +5308,34 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             "rating": o["rating"],
             "rd": o["rating_deviation"],
             "steam_id": o["steam_id"],
+            "manual_pick_enabled": bool(o.get("manual_pick_enabled")),
+            "preferred_team": o.get("preferred_team"),
         })
 
-    team1_ids, team2_ids = _balance_teams(pool)
+    # Manual pick: if 3+ of the 4 have the toggle enabled, honor each player's
+    # preferred_team. Players without a preference fill the remaining slots.
+    manual_count = sum(1 for p in pool if p["manual_pick_enabled"])
+    was_auto_balanced = True
+    if manual_count >= 3:
+        team1_ids, team2_ids, unassigned = [], [], []
+        for p in pool:
+            pt = p["preferred_team"]
+            if pt == 1 and len(team1_ids) < 2:
+                team1_ids.append(p["player_id"])
+            elif pt == 2 and len(team2_ids) < 2:
+                team2_ids.append(p["player_id"])
+            else:
+                unassigned.append(p["player_id"])
+        # Distribute leftover players into whichever team has space.
+        for pid in unassigned:
+            if len(team1_ids) < 2:
+                team1_ids.append(pid)
+            elif len(team2_ids) < 2:
+                team2_ids.append(pid)
+        was_auto_balanced = False
+        print(f"[TEAM-QUEUE-LOCK] manual-pick honored: t1={team1_ids} t2={team2_ids}")
+    else:
+        team1_ids, team2_ids = _balance_teams(pool)
 
     # Within each team, canonicalize the t-a / t-b slot order by sorting on
     # steam_id. The client reconstructs the same canonical order without any
@@ -4953,13 +5350,15 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     series_id = uuid_mod.uuid4()
     await db.execute(
         text("""
-            INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id, status, created_at)
-            VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', NOW())
+            INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
+                                     status, was_auto_balanced, created_at)
+            VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', :wab, NOW())
         """),
         {
             "sid": series_id,
             "t1a": team1_ids_sorted[0], "t1b": team1_ids_sorted[1],
             "t2a": team2_ids_sorted[0], "t2b": team2_ids_sorted[1],
+            "wab": was_auto_balanced,
         },
     )
     team1_ids = team1_ids_sorted
@@ -5043,6 +5442,58 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         opponents=opponents_pl,
         match_age_seconds=0,
     )
+
+
+@app.post("/api/v1/team/queue/manual-pick-toggle", tags=["Team Queue"])
+async def team_queue_manual_pick_toggle(
+    steam_id: str = Query(...),
+    enabled: bool = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Flip the per-queuer manual_pick_enabled flag. The matchmaker respects
+    `preferred_team` only when at least 3 queuers have the flag enabled
+    (otherwise it auto-balances by elo). When disabling, the queuer's
+    preferred_team is cleared."""
+    pid = (await db.execute(select(Player.id).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if pid is None:
+        raise HTTPException(404, "Player not found")
+    if enabled:
+        await db.execute(
+            text("UPDATE team_queue SET manual_pick_enabled = TRUE WHERE player_id = :pid"),
+            {"pid": pid},
+        )
+    else:
+        await db.execute(
+            text("UPDATE team_queue SET manual_pick_enabled = FALSE, preferred_team = NULL WHERE player_id = :pid"),
+            {"pid": pid},
+        )
+    await db.commit()
+    return {"status": "ok", "enabled": enabled}
+
+
+@app.post("/api/v1/team/queue/preferred-team", tags=["Team Queue"])
+async def team_queue_preferred_team(
+    steam_id: str = Query(...),
+    team: int = Query(..., ge=1, le=2),
+    db: AsyncSession = Depends(get_db),
+):
+    """Claim Team 1 or Team 2. No effect unless `manual_pick_enabled` is true
+    (toggled separately) AND the matchmaker quorum (3+ enabled queuers) is
+    met at lock time. Pass team=0 to clear via the manual-pick-toggle off
+    endpoint instead."""
+    pid = (await db.execute(select(Player.id).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if pid is None:
+        raise HTTPException(404, "Player not found")
+    await db.execute(
+        text("""
+            UPDATE team_queue
+               SET preferred_team = :team
+             WHERE player_id = :pid AND manual_pick_enabled = TRUE
+        """),
+        {"pid": pid, "team": team},
+    )
+    await db.commit()
+    return {"status": "ok", "preferred_team": team}
 
 
 @app.post("/api/v1/team/queue/ready", tags=["Team Queue"])
@@ -5172,7 +5623,9 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     row = await db.execute(
         text("""
             SELECT id, status, created_at, spawn_confirmations,
-                   invalidation_reason, completed_at
+                   invalidation_reason, completed_at,
+                   dc_grace_until, dc_team_remaining, dc_player_id,
+                   t1_series_wins, t2_series_wins
               FROM team_series
              WHERE id = :sid
         """),
@@ -5186,6 +5639,9 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     s_created = r[2]
     s_confirms = int(r[3] or 0)
     s_reason = r[4]
+    s_dc_grace_until = r[6]
+    s_dc_team = r[7]
+    s_dc_player = r[8]
 
     age_seconds = (datetime.now(timezone.utc) - s_created).total_seconds()
 
@@ -5215,6 +5671,38 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
             "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
         }
 
+    # 5-min sticky-team requeue grace window: if the deadline has passed and
+    # the series is still flagged dc_paused, resolve it. The non-DC team takes
+    # the series win by forfeit (their 2 members were ready to keep going).
+    dc_grace_seconds_remaining = 0
+    if s_dc_grace_until is not None:
+        dc_grace_seconds_remaining = max(0, int((s_dc_grace_until - datetime.now(timezone.utc)).total_seconds()))
+        if dc_grace_seconds_remaining == 0 and s_status == "dc_paused":
+            # Grace expired without the original 4 re-queueing. Forfeit-win
+            # to whichever team was still around.
+            await db.execute(
+                text("""
+                    UPDATE team_series
+                       SET status = 'completed',
+                           winner_team = COALESCE(:wt, winner_team),
+                           completed_at = NOW(),
+                           invalidation_reason = 'dc_forfeit'
+                     WHERE id = :sid AND status = 'dc_paused'
+                """),
+                {"sid": sid_uuid, "wt": s_dc_team},
+            )
+            await db.commit()
+            return {
+                "status": "completed",
+                "reason": "dc_forfeit",
+                "winner_team": s_dc_team,
+                "confirmations": s_confirms,
+                "expected": 4,
+                "age_seconds": int(age_seconds),
+                "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+                "dc_grace_seconds_remaining": 0,
+            }
+
     return {
         "status": s_status,
         "reason": s_reason,
@@ -5222,6 +5710,149 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
         "expected": 4,
         "age_seconds": int(age_seconds),
         "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+        "dc_grace_seconds_remaining": dc_grace_seconds_remaining,
+        "dc_team_remaining": s_dc_team,
+        "dc_player_id": str(s_dc_player) if s_dc_player else None,
+        "t1_series_wins": int(r[9] or 0),
+        "t2_series_wins": int(r[10] or 0),
+    }
+
+
+_DC_GRACE_SECONDS = 300  # 5-minute sticky-team requeue window
+
+
+def _verify_team_dc_hmac(steam_id: str, series_id: str, dc_player_steam_id: str, signature: str) -> bool:
+    """HMAC for team-DC reports: sha256(secret, "{reporter}:{series}:{dc_player}:dc")."""
+    if not MATCH_HMAC_SECRET:
+        return True
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"{steam_id}:{series_id}:{dc_player_steam_id}:dc".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature or "")
+
+
+@app.post("/api/v1/team/series/{series_id}/report-dc", tags=["Team Matches"])
+async def team_series_report_dc(
+    series_id: str,
+    reporter_steam_id: str = Query(...),
+    dc_player_steam_id: str = Query(...),
+    t1_points_total: int = Query(0, ge=0),
+    t2_points_total: int = Query(0, ge=0),
+    hmac_sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mid-series disconnect report. The 2v2 DC rule: if the abandoned match
+    had >=2 total points scored across both teams, award the match win to the
+    non-DC team (different from 1v1 which usually cancels). Series stays
+    active but flips to status='dc_paused' for 5 minutes — if the same 4
+    re-queue within that window the matchmaker resumes the existing series;
+    otherwise the team that was still around takes the series by forfeit
+    (handled by the state-poll endpoint when the deadline expires)."""
+    if not _verify_team_dc_hmac(reporter_steam_id, series_id, dc_player_steam_id, hmac_sig):
+        raise HTTPException(403, "Invalid DC report signature")
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+
+    # Resolve players.
+    pid_row = await db.execute(select(Player.id).where(Player.steam_id == dc_player_steam_id))
+    dc_pid = pid_row.scalar_one_or_none()
+    if dc_pid is None:
+        raise HTTPException(404, "DC'd player unknown")
+
+    s_row = await db.execute(
+        text("""
+            SELECT id, status, t1a_id, t1b_id, t2a_id, t2b_id,
+                   t1_series_wins, t2_series_wins
+              FROM team_series WHERE id = :sid
+        """),
+        {"sid": sid_uuid},
+    )
+    s = s_row.mappings().first()
+    if s is None:
+        raise HTTPException(404, "Series not found")
+    if s["status"] not in ("active", "dc_paused"):
+        return {"status": s["status"], "ignored": True}
+
+    # Determine which team the DC'd player was on.
+    dc_team = 1 if dc_pid in (s["t1a_id"], s["t1b_id"]) else 2 if dc_pid in (s["t2a_id"], s["t2b_id"]) else None
+    if dc_team is None:
+        raise HTTPException(400, "DC'd player isn't part of this series")
+    other_team = 2 if dc_team == 1 else 1
+    total_points = (t1_points_total or 0) + (t2_points_total or 0)
+
+    # Award the match if any meaningful play happened (>= 2 total points).
+    # Below that we treat it as a clean restart — no match recorded.
+    if total_points >= 2:
+        # Synthetic team_match row reflecting the forfeit.
+        new_t1_wins = (s["t1_series_wins"] or 0) + (1 if other_team == 1 else 0)
+        new_t2_wins = (s["t2_series_wins"] or 0) + (1 if other_team == 2 else 0)
+        await db.execute(
+            text("""
+                INSERT INTO team_matches
+                    (series_id, t1a_id, t1b_id, t2a_id, t2b_id,
+                     t1_rounds_won, t2_rounds_won, t1_points_total, t2_points_total,
+                     winner_team, dc_player_id, dc_at, ended_at, photon_room_id)
+                VALUES
+                    (:sid, :t1a, :t1b, :t2a, :t2b,
+                     0, 0, :t1p, :t2p,
+                     :wt, :dpid, NOW(), NOW(), 'dc_forfeit')
+            """),
+            {
+                "sid": sid_uuid, "t1a": s["t1a_id"], "t1b": s["t1b_id"],
+                "t2a": s["t2a_id"], "t2b": s["t2b_id"],
+                "t1p": t1_points_total or 0, "t2p": t2_points_total or 0,
+                "wt": other_team, "dpid": dc_pid,
+            },
+        )
+        await db.execute(
+            text("""
+                UPDATE team_series
+                   SET t1_series_wins = :t1w, t2_series_wins = :t2w
+                 WHERE id = :sid
+            """),
+            {"sid": sid_uuid, "t1w": new_t1_wins, "t2w": new_t2_wins},
+        )
+        # If the series is now decided (someone has 2 wins in a BO3),
+        # complete it directly. Otherwise drop into the 5-min grace window.
+        if new_t1_wins >= 2 or new_t2_wins >= 2:
+            await db.execute(
+                text("""
+                    UPDATE team_series
+                       SET status = 'completed',
+                           winner_team = :wt,
+                           completed_at = NOW(),
+                           invalidation_reason = 'dc_decided',
+                           dc_player_id = :dpid
+                     WHERE id = :sid
+                """),
+                {"sid": sid_uuid, "wt": other_team, "dpid": dc_pid},
+            )
+            await db.commit()
+            return {"status": "completed", "winner_team": other_team, "reason": "dc_decided"}
+
+    # Series isn't decided — start the sticky-team requeue grace.
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=_DC_GRACE_SECONDS)
+    await db.execute(
+        text("""
+            UPDATE team_series
+               SET status = 'dc_paused',
+                   dc_grace_until = :gd,
+                   dc_team_remaining = :ot,
+                   dc_player_id = :dpid
+             WHERE id = :sid
+        """),
+        {"sid": sid_uuid, "gd": deadline, "ot": other_team, "dpid": dc_pid},
+    )
+    await db.commit()
+    return {
+        "status": "dc_paused",
+        "dc_team_remaining": other_team,
+        "dc_grace_seconds_remaining": _DC_GRACE_SECONDS,
+        "deadline": deadline.isoformat(),
     }
 
 
@@ -5371,6 +6002,37 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
                    WHERE id = :sid"""),
             {"t1": new_t1w, "t2": new_t2w, "w": winner_team, "sid": report.series_id},
         )
+        # Settle 2v2 bets. Winning bets pay amount × odds; losing bets close
+        # with payout=0. Mirrors the 1v1 bet settlement that runs on
+        # ranked_series completion (in submit_match elsewhere).
+        try:
+            unsettled = (await db.execute(text("""
+                SELECT b.id, b.player_id, b.amount, b.odds_multiplier, b.bet_on_team
+                  FROM team_bets b
+                 WHERE b.team_series_id = :sid AND b.settled_at IS NULL
+            """), {"sid": series_uuid})).mappings().all()
+            for b in unsettled:
+                won = (b["bet_on_team"] == winner_team)
+                payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
+                await db.execute(text("""
+                    UPDATE team_bets
+                       SET settled_at = NOW(), payout = :p
+                     WHERE id = :id
+                """), {"p": payout, "id": b["id"]})
+                if payout > 0:
+                    # Credit the bettor's gold.
+                    await db.execute(text("""
+                        UPDATE players
+                           SET gold_earned = COALESCE(gold_earned, 0) + :p
+                         WHERE id = :pid
+                    """), {"p": payout, "pid": b["player_id"]})
+                    db.add(GoldTransaction(
+                        player_id=b["player_id"], amount=payout,
+                        reason="team_bet_payout", reference_id=str(series_uuid),
+                    ))
+        except Exception as bex:
+            # Don't let bet settlement failures block the team-match write.
+            print(f"[TEAM-BET-SETTLE] error settling for series {series_uuid}: {bex}")
         # Apply Glicko-2 updates. Each player's "rating period" = this series.
         # Their two opponents are the two players on the other team.
         team1_ps = [p_t1a, p_t1b]
@@ -5782,11 +6444,12 @@ async def team_series_recent(minutes: int = Query(5, ge=1, le=60), db: AsyncSess
 @app.get("/api/v1/team/leaderboard", response_model=Team2v2LeaderboardResponse, tags=["Team Matches"])
 async def team_leaderboard(
     limit: int = Query(100, ge=1, le=200),
-    min_series: int = Query(3, ge=0),
+    min_series: int = Query(1, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
     """Top players by 2v2 Glicko rating. min_series gates rookies out of the top
-    of the board the same way 1v1 leaderboard does with min_matches."""
+    of the board the same way 1v1 leaderboard does with min_matches.
+    Default lowered to 1 during 2v2 beta — bump back once volume picks up."""
     q = text("""
         WITH series_stats AS (
             SELECT player_id, SUM(won) AS wins, SUM(lost) AS losses, COUNT(*) AS total

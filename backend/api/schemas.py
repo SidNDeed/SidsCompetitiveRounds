@@ -407,6 +407,11 @@ class TeamQueueMember(BaseModel):
     rating: int
     region: str | None = None
     team_assigned: int | None = None  # 1, 2, or null while still searching
+    # Balancer transparency — surfaced so the F5 tab can show the user
+    # whether the matchmaker used 2v2 elo or fell back to 1v1 elo.
+    using_fallback_rating: bool = False
+    balance_rating: int = 0           # the rating the balancer actually used
+    completed_series: int = 0         # 2v2 series count at queue join time
 
 
 class TeamQueuePollResponse(BaseModel):

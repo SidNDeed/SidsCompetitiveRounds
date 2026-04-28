@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.16";
+        public const string ModVersion = "1.25.17";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1151,6 +1151,52 @@ namespace CompetitiveRounds
             if (!Diag2v2.IsActive()) return;
             try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
             catch { }
+
+            // 2v2 DC reporting: when a player drops mid-series, the lowest-Steam-ID
+            // remaining client reports the DC to the server. Server awards the
+            // current match to the non-DC team (if total points >= 2) and starts
+            // the 5-min sticky-team requeue grace window.
+            try
+            {
+                if (p == null) return;
+                string seriesId = ApiClient.ActiveTeamSeriesId;
+                if (string.IsNullOrEmpty(seriesId)) return;
+                // Resolve the DC'd player's Steam ID from their custom props.
+                string dcSteamId = null;
+                if (p.CustomProperties != null)
+                {
+                    if (p.CustomProperties.ContainsKey("u_id")) dcSteamId = p.CustomProperties["u_id"]?.ToString();
+                    if (string.IsNullOrEmpty(dcSteamId) && p.CustomProperties.ContainsKey("unity_id"))
+                        dcSteamId = p.CustomProperties["unity_id"]?.ToString();
+                }
+                if (string.IsNullOrEmpty(dcSteamId) && !string.IsNullOrEmpty(p.UserId)) dcSteamId = p.UserId;
+                if (string.IsNullOrEmpty(dcSteamId) || dcSteamId.StartsWith("photon_")) return;
+
+                // Reporter election: lowest steam_id of those still in the room.
+                string myId = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(myId)) return;
+                long myVal; if (!long.TryParse(myId, out myVal)) return;
+                bool iAmLowest = true;
+                foreach (var pp in PhotonNetwork.PlayerList)
+                {
+                    if (pp == null || pp.ActorNumber == p.ActorNumber) continue;  // skip the leaver
+                    if (pp.IsLocal) continue;
+                    string ppSid = null;
+                    if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("u_id"))
+                        ppSid = pp.CustomProperties["u_id"]?.ToString();
+                    if (string.IsNullOrEmpty(ppSid) || ppSid.StartsWith("photon_")) continue;
+                    if (long.TryParse(ppSid, out long ppVal) && ppVal < myVal) { iAmLowest = false; break; }
+                }
+                if (!iAmLowest) return;
+
+                // Pull current point totals from the in-game state. Per the DC rule,
+                // a match with combined points >= 2 awards the match to the non-DC team.
+                int t1Points = GameStateWatcher.LastP1Points;
+                int t2Points = GameStateWatcher.LastP2Points;
+                ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points);
+                Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} pts={t1Points}/{t2Points}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
         }
 
         public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps) { }
@@ -1497,6 +1543,28 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>Vanilla `NetworkConnectionHandler.OnJoinedRoom` resets
+    /// `PhotonNetwork.LocalPlayer.NickName` to the Steam persona name. That
+    /// happens AFTER our pre-join `NametagStyler.PublishToPhoton()` (which
+    /// set the styled rich-text version), so by the time remote clients see
+    /// our actor's join broadcast they get the unstyled persona name. This
+    /// Postfix re-publishes the styled NickName immediately after vanilla's
+    /// reset, racing as little as possible against the remote actor-join
+    /// broadcasts on other clients.</summary>
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "OnJoinedRoom")]
+    class NetworkConnectionHandler_OnJoinedRoom_RestyleNick_Patch
+    {
+        static void Postfix()
+        {
+            try
+            {
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
+                NametagStyler.PublishToPhoton();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] OnJoinedRoom restyle failed: {ex.Message}"); }
+        }
+    }
+
     /// <summary>Patches NetworkRestart to log entry with caller context. Vanilla
     /// flips m_restarting=true and bails on subsequent calls, so we only see the
     /// first trigger — but that's the one we want.</summary>
@@ -1612,6 +1680,21 @@ namespace CompetitiveRounds
                 var face = cch.selectedPlayerFaces[0];
                 if (face == null) return;
                 if (PhotonNetwork.LocalPlayer == null) return;
+                // If the local face is fully default (all four item IDs zero), skip
+                // publishing. Accounts that never opened the character creator
+                // have an uninitialized face — publishing all-zeros causes
+                // CharacterCreatorItemEquipper.EquipFace to call Equip(null) on
+                // each slot, which destroys the visualizer's stock face entirely
+                // and renders a featureless body. User reported: "2 of 4 missing
+                // in card-pick phase" pointed at Sid3/Sid4 (alts that never
+                // customized their face). Without our publish, vanilla's
+                // RPCA_SetFace on the picker's client falls back to the local
+                // visualizer's saved face.
+                if (face.eyeID == 0 && face.mouthID == 0 && face.detailID == 0 && face.detail2ID == 0)
+                {
+                    Plugin.Log.LogInfo("[2v2] FacePublisher: skipping publish (face is all-zero defaults — let vanilla RPC handle it)");
+                    return;
+                }
 
                 string serialized = string.Join("|", new[] {
                     face.eyeID.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -1657,6 +1740,10 @@ namespace CompetitiveRounds
                 float dOx = float.Parse(parts[7], ic), dOy = float.Parse(parts[8], ic);
                 int detail2ID = int.Parse(parts[9], ic);
                 float d2Ox = float.Parse(parts[10], ic), d2Oy = float.Parse(parts[11], ic);
+                // Skip all-zero faces (uninitialized accounts). Applying a
+                // default face wipes the visualizer's stock face. Caller will
+                // see TryReadAndApply return false and won't log "applied".
+                if (eyeID == 0 && mouthID == 0 && detailID == 0 && detail2ID == 0) return false;
                 var face = PlayerFace.CreateFace(
                     eyeID, new Vector2(eOx, eOy),
                     mouthID, new Vector2(mOx, mOy),

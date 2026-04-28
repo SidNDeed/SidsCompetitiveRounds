@@ -162,7 +162,7 @@ namespace CompetitiveRounds
         private static int currentTab;
         private static Component listMenu;
         private static GameObject[] tabPanels,tabButtons;private static object[] tabTexts;
-        private static object txtRating,txtRD,txtLevel,txtXPProg,txtTotalXP;private static Component xpFill;
+        private static object txtRating,txtRD,txtLevel,txtXPProg,txtTotalXP,txtTopLeftName;private static Component xpFill;
         private static object txtRankedRec,txtRankedStrk,txtCasualRec,txtCasualStrk,txtSweeps,txtTotalRec,txtAccuracy,txtSessionSum,txtSessionSplit,txtSessionSweeps,txtOppSummary,txtSessionOppLifetime,txtTeam2v2Rec,txtTeam2v2Strk;
         private static GameObject sessionOppContainer;private static List<object> sessionOppTexts=new List<object>();
         private static object txtLinkCode;private static GameObject linkCodeBtn;
@@ -216,6 +216,7 @@ namespace CompetitiveRounds
             if (Time.unscaledTime < liveSeriesAutoRefreshAt) return;
             liveSeriesAutoRefreshAt = Time.unscaledTime + 5f;
             ApiClient.FetchActiveSeries();
+            ApiClient.FetchActiveTeamSeries();
             var sid = MatchTracker.LocalSteamId;
             if (!string.IsNullOrEmpty(sid) && sid != "unknown") ApiClient.FetchMyBets(sid);
         }
@@ -352,7 +353,7 @@ namespace CompetitiveRounds
         private static void BuildRankedRow(Transform parent)
         {
             var row=new GameObject("RankedRow");row.transform.SetParent(parent,false);row.AddComponent<RectTransform>();UIFactory.AddHLG(row,spacing:10,padL:4,padR:4,forceExpandH:true);UIFactory.AddLE(row,prefH:26,minH:26,flexH:0);
-            var pn=UIFactory.CreateText("PName",row.transform,ApiClient.CachedPlayerStats?.display_name??MatchTracker.LocalDisplayName??"",20f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,28));UIFactory.SetBold(pn,true);
+            var pn=UIFactory.CreateText("PName",row.transform,ApiClient.CachedPlayerStats?.display_name??MatchTracker.LocalDisplayName??"",20f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,28));UIFactory.SetBold(pn,true);txtTopLeftName=pn;
             txtRankedStatus=UIFactory.CreateText("RS",row.transform,"RANKED: OFF",18f,Color.gray,UIFactory.AlignMidLeft,sizeDelta:new Vector2(140,28));UIFactory.SetBold(txtRankedStatus,true);
             qSearchBtn=UIFactory.CreateButton("Search",row.transform,"Search Ranked",15f,C_WHITE,C_BTN,()=>{var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.JoinQueue(id,MatchTracker.LocalDisplayName,null,false);},sizeDelta:new Vector2(130,26));
             qCancelBtn=UIFactory.CreateButton("Cancel",row.transform,"Cancel",15f,C_WHITE,C_BTN,()=>ApiClient.LeaveQueue(MatchTracker.LocalSteamId),sizeDelta:new Vector2(70,26));
@@ -550,6 +551,23 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 ApplyBetRow(betP2, s, false);
             }
 
+            // 2v2 active series — same 3-row layout (header + bet-on-team1 + bet-on-team2)
+            // appended below the 1v1 list. Pagination is shared but 2v2 series rarely
+            // outnumber 1v1, so we render all of them rather than slice.
+            var teamList = ApiClient.CachedActiveTeamSeries;
+            if (teamList != null)
+            {
+                foreach (var ts in teamList)
+                {
+                    var hdr = GetOrCreateLiveRow(poolIdx++);
+                    ApplyTeamHeaderRow(hdr, ts);
+                    var bT1 = GetOrCreateLiveRow(poolIdx++);
+                    ApplyTeamBetRow(bT1, ts, 1);
+                    var bT2 = GetOrCreateLiveRow(poolIdx++);
+                    ApplyTeamBetRow(bT2, ts, 2);
+                }
+            }
+
             // Pagination controls: only visible when > one page's worth of series.
             if (liveBetsPager != null)
             {
@@ -665,6 +683,77 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             AddBetButton(row.transform, s.series_id, steamId, 100);
             AddBetButton(row.transform, s.series_id, steamId, 500);
             AddBetButton(row.transform, s.series_id, steamId, 2000);
+        }
+
+        // 2v2 live-series row builders (parallel to ApplyHeaderRow / ApplyBetRow).
+        private static void ApplyTeamHeaderRow(GameObject row, ApiClient.ActiveTeamSeriesEntry s)
+        {
+            string line = $"<color=#FFB347>2v2</color>  " +
+                          $"<color=#AAF>{Trunc(s.t1a_name, 8)}+{Trunc(s.t1b_name, 8)}</color> ({s.t1_rating})  " +
+                          $"<b>{s.t1_wins}-{s.t2_wins}</b>  " +
+                          $"<color=#FAA>{Trunc(s.t2a_name, 8)}+{Trunc(s.t2b_name, 8)}</color> ({s.t2_rating})";
+            var t = UIFactory.CreateText("hdr", row.transform, line,
+                14f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(420, 24));
+            UIFactory.SetWordWrap(t, false);
+            UIFactory.SetBold(t, true);
+        }
+
+        private static void ApplyTeamBetRow(GameObject row, ApiClient.ActiveTeamSeriesEntry s, int team)
+        {
+            float odds = team == 1 ? s.t1_odds : s.t2_odds;
+            string teamLabel = team == 1
+                ? $"Team 1 ({Trunc(s.t1a_name, 6)}+{Trunc(s.t1b_name, 6)})"
+                : $"Team 2 ({Trunc(s.t2a_name, 6)}+{Trunc(s.t2b_name, 6)})";
+
+            string myId = MatchTracker.LocalSteamId;
+            bool localIsParticipant = !string.IsNullOrEmpty(myId)
+                && (myId == s.t1a_steam || myId == s.t1b_steam || myId == s.t2a_steam || myId == s.t2b_steam);
+
+            var betLabel = UIFactory.CreateText("tbl", row.transform,
+                $"Bet on <b>{teamLabel}</b> @{odds:F1}x:",
+                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 22));
+            UIFactory.SetWordWrap(betLabel, false);
+
+            if (s.bets_locked)
+            {
+                string lockMsg = s.lock_reason == "no_meaningful_odds"
+                    ? "<color=#A07744><i>odds too uncertain</i></color>"
+                    : "<color=#A07744><i>betting period over</i></color>";
+                UIFactory.CreateText("tlocked", row.transform, lockMsg,
+                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 22));
+                return;
+            }
+            if (localIsParticipant)
+            {
+                UIFactory.CreateText("tself", row.transform,
+                    "<color=#AA9955><i>your match</i></color>",
+                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(140, 22));
+                return;
+            }
+            AddTeamBetButton(row.transform, s.series_id, team, 100);
+            AddTeamBetButton(row.transform, s.series_id, team, 500);
+            AddTeamBetButton(row.transform, s.series_id, team, 2000);
+        }
+
+        private static void AddTeamBetButton(Transform parent, string seriesId, int team, int amount)
+        {
+            var btn = UIFactory.CreateButton($"tb{team}_{amount}", parent,
+                $"{amount}g", 11f, C_WHITE, new Color(0.35f, 0.28f, 0.1f, 0.9f),
+                () =>
+                {
+                    string id = MatchTracker.LocalSteamId;
+                    if (string.IsNullOrEmpty(id) || id == "unknown") return;
+                    Plugin.Log.LogInfo($"[TEAM-BET] Placing {amount}g on team {team} (series {seriesId})");
+                    ApiClient.PlaceTeamBet(id, seriesId, team, amount, (ok, resp) =>
+                    {
+                        var col = ok ? new Color(0.4f, 1f, 0.4f) : new Color(1f, 0.5f, 0.5f);
+                        CompetitiveUI.ShowNotification(
+                            ok ? $"Bet placed: {amount}g on Team {team}" : $"Bet failed: {resp}", col, 3f);
+                        if (ok) { ApiClient.FetchActiveTeamSeries(); ApiClient.FetchPlayerStats(id); }
+                    });
+                },
+                sizeDelta: new Vector2(44, 22));
+            UIFactory.AddLE(btn, prefW: 44, prefH: 22, flexW: 0, flexH: 0);
         }
 
         private static void AddBetButton(Transform parent, string seriesId, string betOnSteamId, int amount)
@@ -1679,7 +1768,12 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
 
         private static void RefreshVersionStatus(){if(txtVersionStatus==null)return;if(ApiClient.ForceUpdateRequired){UIFactory.SetText(txtVersionStatus,"<color=#FF4444>UPDATE REQUIRED - server is rejecting this mod version</color>");if(updateBtn!=null)updateBtn.SetActive(true);return;}if(ApiClient.UpdateReady){UIFactory.SetText(txtVersionStatus,"<color=#44FF44>Close ROUNDS to apply update</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(ApiClient.IsUpdating){UIFactory.SetText(txtVersionStatus,"<color=#66CCFF>Downloading...</color>");if(updateBtn!=null)updateBtn.SetActive(false);return;}string latest=ApiClient.LatestModVersion;if(latest==null){UIFactory.SetText(txtVersionStatus,"");if(updateBtn!=null)updateBtn.SetActive(false);return;}if(latest==Plugin.ModVersion){UIFactory.SetText(txtVersionStatus,"<color=#44AA44>up to date</color>");if(updateBtn!=null)updateBtn.SetActive(false);}else{UIFactory.SetText(txtVersionStatus,$"<color=#FFAA33>v{latest} available!</color>");if(updateBtn!=null)updateBtn.SetActive(true);}}
 
-        private static void RefreshMyStats(){var s=ApiClient.CachedPlayerStats;if(s==null){UIFactory.SetText(txtRating,"-");return;}UIFactory.SetText(txtRating,$"{s.rating:F0}");UIFactory.SetText(txtRD,$"RD: {s.rating_deviation:F0}    Peak: {s.peak_rating:F0}");UIFactory.SetText(txtLevel,$"Level {s.level}");if(s.level<100&&s.xp_for_next_level>0){UIFactory.SetText(txtXPProg,$"{s.xp_into_level}/{s.xp_for_next_level} XP");UIFactory.SetFill(xpFill,(float)s.xp_into_level/s.xp_for_next_level);}else{UIFactory.SetText(txtXPProg,"MAX");UIFactory.SetFill(xpFill,1f);}UIFactory.SetText(txtTotalXP,$"{s.total_xp:N0} XP");var history=ApiClient.CachedMatchHistory;var sR=history?.FindAll(m=>m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();var sC=history?.FindAll(m=>!m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();int cW=0,cL=0,sweepG=0,sweepT=0;foreach(var m in sC){if(m.won)cW++;else cL++;}if(history!=null)foreach(var m in history){if(m.won&&m.opponent_rounds_won==0)sweepG++;if(!m.won&&m.player_rounds_won==0)sweepT++;}int rW=s.ranked_series_wins,rL=s.ranked_series_losses;UIFactory.SetText(txtRankedRec,rW+rL>0?$"<color=#FFD94D>Ranked:</color> {rW}W / {rL}L ({(rL>0?$"{(float)rW/rL:F1}":$"{rW}:0")})":"<color=#FFD94D>Ranked:</color> -");if(sR.Count>0){int st=CalcStreak(sR);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtRankedStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_ranked_streak>0?$"  Best: {s.best_ranked_streak}W":""));}else UIFactory.SetText(txtRankedStrk,"");/* 2v2 line — shows the parallel Glicko / W-L / streak. Hidden when no 2v2 series played, since the row otherwise reads as a confusing 0-0/1500 default. */{var t2=ApiClient.CachedTeamStats;if(t2!=null&&(t2.series_wins+t2.series_losses)>0){string ratio=t2.series_losses>0?$"{(float)t2.series_wins/t2.series_losses:F1}":t2.series_wins>0?$"{t2.series_wins}:0":"0:0";UIFactory.SetText(txtTeam2v2Rec,$"<color=#FFB347>2v2:</color> {t2.series_wins}W / {t2.series_losses}L ({ratio})  <color=#888>Rating:</color> {t2.rating:F0}  <color=#888>Peak:</color> {t2.peak_rating:F0}");int st2=t2.current_streak;if(st2!=0){string c2=st2>0?"#00FF00":"#FF6666";UIFactory.SetText(txtTeam2v2Strk,$"  <color={c2}>Streak: {(st2>0?$"{st2}W":$"{-st2}L")}</color>");}else UIFactory.SetText(txtTeam2v2Strk,"");}else{UIFactory.SetText(txtTeam2v2Rec,"<color=#FFB347>2v2:</color> -");UIFactory.SetText(txtTeam2v2Strk,"");}}UIFactory.SetText(txtCasualRec,sC.Count>0?$"Casual: {cW}W / {cL}L ({(cL>0?$"{(float)cW/cL:F1}":cW>0?$"{cW}:0":"")})":"Casual: -");if(sC.Count>0){int st=CalcStreak(sC);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtCasualStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_casual_streak>0?$"  Best: {s.best_casual_streak}W":""));}else UIFactory.SetText(txtCasualStrk,"");UIFactory.SetText(txtSweeps,$"Sweeps: <color=#00FF00>5-0 x{sweepG}</color>  <color=#FF6666>0-5 x{sweepT}</color>");UIFactory.SetText(txtTotalRec,$"Total: {s.total_matches} ({s.wins}W / {s.losses}L)  <color=#FFD94D>Gold: {(s.gold_earned - s.gold_spent)}</color>");/* Hit% / Block% lifetime - one-sided totals (only the reporter-side's client has these
+        private static void RefreshMyStats(){var s=ApiClient.CachedPlayerStats;if(s==null){UIFactory.SetText(txtRating,"-");return;}/* Top-left player name. Refresh on every stats reload — was set ONCE
+        at panel build time from CachedPlayerStats which could be empty/wrong (e.g., display_name
+        defaulted to steam_id during the get_or_create_player initial creation). User reported
+        "all of my names are showing up as the steam id instead of the name in the top left". */
+        if(txtTopLeftName!=null){string nm=!string.IsNullOrEmpty(s.display_name)&&s.display_name!=s.steam_id?s.display_name:(MatchTracker.LocalDisplayName??s.display_name??"");UIFactory.SetText(txtTopLeftName,nm);}
+        UIFactory.SetText(txtRating,$"{s.rating:F0}");UIFactory.SetText(txtRD,$"RD: {s.rating_deviation:F0}    Peak: {s.peak_rating:F0}");UIFactory.SetText(txtLevel,$"Level {s.level}");if(s.level<100&&s.xp_for_next_level>0){UIFactory.SetText(txtXPProg,$"{s.xp_into_level}/{s.xp_for_next_level} XP");UIFactory.SetFill(xpFill,(float)s.xp_into_level/s.xp_for_next_level);}else{UIFactory.SetText(txtXPProg,"MAX");UIFactory.SetFill(xpFill,1f);}UIFactory.SetText(txtTotalXP,$"{s.total_xp:N0} XP");var history=ApiClient.CachedMatchHistory;var sR=history?.FindAll(m=>m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();var sC=history?.FindAll(m=>!m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();int cW=0,cL=0,sweepG=0,sweepT=0;foreach(var m in sC){if(m.won)cW++;else cL++;}if(history!=null)foreach(var m in history){if(m.won&&m.opponent_rounds_won==0)sweepG++;if(!m.won&&m.player_rounds_won==0)sweepT++;}int rW=s.ranked_series_wins,rL=s.ranked_series_losses;UIFactory.SetText(txtRankedRec,rW+rL>0?$"<color=#FFD94D>Ranked:</color> {rW}W / {rL}L ({(rL>0?$"{(float)rW/rL:F1}":$"{rW}:0")})":"<color=#FFD94D>Ranked:</color> -");if(sR.Count>0){int st=CalcStreak(sR);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtRankedStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_ranked_streak>0?$"  Best: {s.best_ranked_streak}W":""));}else UIFactory.SetText(txtRankedStrk,"");/* 2v2 line — shows the parallel Glicko / W-L / streak. Hidden when no 2v2 series played, since the row otherwise reads as a confusing 0-0/1500 default. */{var t2=ApiClient.CachedTeamStats;if(t2!=null&&(t2.series_wins+t2.series_losses)>0){string ratio=t2.series_losses>0?$"{(float)t2.series_wins/t2.series_losses:F1}":t2.series_wins>0?$"{t2.series_wins}:0":"0:0";UIFactory.SetText(txtTeam2v2Rec,$"<color=#FFB347>2v2:</color> {t2.series_wins}W / {t2.series_losses}L ({ratio})  <color=#888>Rating:</color> {t2.rating:F0}  <color=#888>Peak:</color> {t2.peak_rating:F0}");int st2=t2.current_streak;if(st2!=0){string c2=st2>0?"#00FF00":"#FF6666";UIFactory.SetText(txtTeam2v2Strk,$"  <color={c2}>Streak: {(st2>0?$"{st2}W":$"{-st2}L")}</color>");}else UIFactory.SetText(txtTeam2v2Strk,"");}else{UIFactory.SetText(txtTeam2v2Rec,"<color=#FFB347>2v2:</color> -");UIFactory.SetText(txtTeam2v2Strk,"");}}UIFactory.SetText(txtCasualRec,sC.Count>0?$"Casual: {cW}W / {cL}L ({(cL>0?$"{(float)cW/cL:F1}":cW>0?$"{cW}:0":"")})":"Casual: -");if(sC.Count>0){int st=CalcStreak(sC);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtCasualStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_casual_streak>0?$"  Best: {s.best_casual_streak}W":""));}else UIFactory.SetText(txtCasualStrk,"");UIFactory.SetText(txtSweeps,$"Sweeps: <color=#00FF00>5-0 x{sweepG}</color>  <color=#FF6666>0-5 x{sweepT}</color>");UIFactory.SetText(txtTotalRec,$"Total: {s.total_matches} ({s.wins}W / {s.losses}L)  <color=#FFD94D>Gold: {(s.gold_earned - s.gold_spent)}</color>");/* Hit% / Block% lifetime - one-sided totals (only the reporter-side's client has these
  * counters). Split across two lines in the 44px-tall txtAccuracy field because the
  * combined string overflows 340px at 15pt and TMP wordwrap clips the second line
  * when the field is only 22px tall. Newline gives TMP a proper 2-line render. */
@@ -1703,7 +1797,7 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             return $"{nm} <b><color={col}>[{m.opponent_title}]</color></b>";
         }
 
-        private static void RefreshSession(){int games=GameStateWatcher.SessionMatchCount;bool inRoom=GameStateWatcher.IsInRoom;string oppSteamId=GameStateWatcher.OpponentSteamId;string oppName=GameStateWatcher.OpponentDisplayName;var history=ApiClient.CachedMatchHistory;/* Show opponent lifetime record when in room */if(inRoom&&!string.IsNullOrEmpty(oppSteamId)&&!oppSteamId.StartsWith("photon_")&&history!=null){int ltW=0,ltL=0;string lastPlayed="";foreach(var m in history){if(m.opponent_steam_id==oppSteamId){if(m.won)ltW++;else ltL++;if(string.IsNullOrEmpty(lastPlayed)){try{lastPlayed=DateTime.Parse(m.ended_at).ToString("M/d/yyyy");}catch{}}}}if(ltW+ltL>0){string col=ltW>ltL?"#00FF00":ltW<ltL?"#FF6666":"#AAAAAA";UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  <color={col}>{ltW}W-{ltL}L lifetime</color>  (last: {lastPlayed})");}else{UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  First time playing!");}UIFactory.SetColor(txtSessionOppLifetime,new Color(0.6f,0.75f,1f));}else if(inRoom&&!string.IsNullOrEmpty(oppName)&&oppName!="Opponent"){UIFactory.SetText(txtSessionOppLifetime,$"  In room with {oppName}");UIFactory.SetColor(txtSessionOppLifetime,C_DIM);}else{UIFactory.SetText(txtSessionOppLifetime,"");}if(games<=0){UIFactory.SetText(txtSessionSum,inRoom?"In game - no results yet":"No games this session");UIFactory.SetColor(txtSessionSum,C_DIM);UIFactory.SetText(txtSessionSplit,"");UIFactory.SetText(txtSessionSweeps,"");return;}int mins=(int)(DateTime.UtcNow-GameStateWatcher.SessionStartTime).TotalMinutes;string time=mins>=60?$"{mins/60}h {mins%60}m":$"{mins}m";int rw=GameStateWatcher.SessionRankedWins,rl=GameStateWatcher.SessionRankedLosses,cw=GameStateWatcher.SessionCasualWins,cl=GameStateWatcher.SessionCasualLosses;int sesSweepG=0,sesSweepT=0;if(history!=null){var sesStart=GameStateWatcher.SessionStartTime;foreach(var m in history){DateTime mTime=DateTime.UtcNow;try{if(!string.IsNullOrEmpty(m.ended_at))mTime=DateTime.Parse(m.ended_at).ToUniversalTime();}catch{}if(mTime<sesStart)continue;if(m.won&&m.opponent_rounds_won==0)sesSweepG++;if(!m.won&&m.player_rounds_won==0)sesSweepT++;}}UIFactory.SetText(txtSessionSum,$"{games} games    {rw+cw}W - {rl+cl}L    {time}");UIFactory.SetColor(txtSessionSum,C_WHITE);string splitLine="";if(rw+rl>0&&cw+cl>0)splitLine=$"  Ranked: {rw}W/{rl}L    Casual: {cw}W/{cl}L";UIFactory.SetText(txtSessionSplit,splitLine);if(sesSweepG+sesSweepT>0)UIFactory.SetText(txtSessionSweeps,$"  Sweeps: <color=#00FF00>5-0 x{sesSweepG}</color>  <color=#FF6666>0-5 x{sesSweepT}</color>");else UIFactory.SetText(txtSessionSweeps,"");var wl=GameStateWatcher.SessionWLByOpponent;var st=GameStateWatcher.SessionTimeByOpponent;int idx=0;if(wl!=null)foreach(var kvp in wl){int[]a=kvp.Value;if(a==null||a.Length<4)continue;int ow=a[0]+a[2],ol=a[1]+a[3];string line=$"  vs {kvp.Key}:  {ow}W-{ol}L";if(a[0]+a[1]>0&&a[2]+a[3]>0)line+=$"  (R:{a[0]}-{a[1]} C:{a[2]}-{a[3]})";if(st!=null&&st.ContainsKey(kvp.Key)){int m=(int)st[kvp.Key];line+=m>=60?$"   {m/60}h {m%60}m":$"   {m}m";}while(sessionOppTexts.Count<=idx)sessionOppTexts.Add(UIFactory.CreateText($"so{sessionOppTexts.Count}",sessionOppContainer.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22)));UIFactory.SetText(sessionOppTexts[idx],line);UIFactory.SetColor(sessionOppTexts[idx],ow>ol?C_GREEN:ow<ol?C_RED:C_DIM);var go=(sessionOppTexts[idx]as Component)?.gameObject;if(go)go.SetActive(true);idx++;}for(int i=idx;i<sessionOppTexts.Count;i++){var go=(sessionOppTexts[i]as Component)?.gameObject;if(go)go.SetActive(false);}}
+        private static void RefreshSession(){int games=GameStateWatcher.SessionMatchCount;bool inRoom=GameStateWatcher.IsInRoom;string oppSteamId=GameStateWatcher.OpponentSteamId;string oppName=GameStateWatcher.OpponentDisplayName;var history=ApiClient.CachedMatchHistory;/* Show opponent lifetime record when in room */if(inRoom&&!string.IsNullOrEmpty(oppSteamId)&&!oppSteamId.StartsWith("photon_")&&history!=null){int ltW=0,ltL=0;string lastPlayed="";foreach(var m in history){if(m.opponent_steam_id==oppSteamId){if(m.won)ltW++;else ltL++;if(string.IsNullOrEmpty(lastPlayed)){try{lastPlayed=DateTime.Parse(m.ended_at).ToString("M/d/yyyy");}catch{}}}}if(ltW+ltL>0){string col=ltW>ltL?"#00FF00":ltW<ltL?"#FF6666":"#AAAAAA";UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  <color={col}>{ltW}W-{ltL}L lifetime</color>  (last: {lastPlayed})");}else{UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  First time playing!");}UIFactory.SetColor(txtSessionOppLifetime,new Color(0.6f,0.75f,1f));}else if(inRoom&&!string.IsNullOrEmpty(oppName)&&oppName!="Opponent"){UIFactory.SetText(txtSessionOppLifetime,$"  In room with {oppName}");UIFactory.SetColor(txtSessionOppLifetime,C_DIM);}else{UIFactory.SetText(txtSessionOppLifetime,"");}if(games<=0){UIFactory.SetText(txtSessionSum,inRoom?"In game - no results yet":"No games this session");UIFactory.SetColor(txtSessionSum,C_DIM);UIFactory.SetText(txtSessionSplit,"");UIFactory.SetText(txtSessionSweeps,"");return;}int mins=(int)(DateTime.UtcNow-GameStateWatcher.SessionStartTime).TotalMinutes;string time=mins>=60?$"{mins/60}h {mins%60}m":$"{mins}m";int rw=GameStateWatcher.SessionRankedWins,rl=GameStateWatcher.SessionRankedLosses,cw=GameStateWatcher.SessionCasualWins,cl=GameStateWatcher.SessionCasualLosses;int t2w=GameStateWatcher.SessionTeamSeriesWins,t2l=GameStateWatcher.SessionTeamSeriesLosses;int sesSweepG=0,sesSweepT=0;if(history!=null){var sesStart=GameStateWatcher.SessionStartTime;foreach(var m in history){DateTime mTime=DateTime.UtcNow;try{if(!string.IsNullOrEmpty(m.ended_at))mTime=DateTime.Parse(m.ended_at).ToUniversalTime();}catch{}if(mTime<sesStart)continue;if(m.won&&m.opponent_rounds_won==0)sesSweepG++;if(!m.won&&m.player_rounds_won==0)sesSweepT++;}}UIFactory.SetText(txtSessionSum,$"{games} games    {rw+cw}W - {rl+cl}L    {time}");UIFactory.SetColor(txtSessionSum,C_WHITE);string splitLine="";var splitParts=new List<string>();if(rw+rl>0)splitParts.Add($"<color=#FFD94D>Ranked:</color> {rw}W/{rl}L");if(t2w+t2l>0)splitParts.Add($"<color=#FFB347>2v2:</color> {t2w}W/{t2l}L");if(cw+cl>0)splitParts.Add($"Casual: {cw}W/{cl}L");if(splitParts.Count>0)splitLine="  "+string.Join("    ",splitParts.ToArray());UIFactory.SetText(txtSessionSplit,splitLine);if(sesSweepG+sesSweepT>0)UIFactory.SetText(txtSessionSweeps,$"  Sweeps: <color=#00FF00>5-0 x{sesSweepG}</color>  <color=#FF6666>0-5 x{sesSweepT}</color>");else UIFactory.SetText(txtSessionSweeps,"");var wl=GameStateWatcher.SessionWLByOpponent;var st=GameStateWatcher.SessionTimeByOpponent;int idx=0;if(wl!=null)foreach(var kvp in wl){int[]a=kvp.Value;if(a==null||a.Length<4)continue;int ow=a[0]+a[2],ol=a[1]+a[3];string line=$"  vs {kvp.Key}:  {ow}W-{ol}L";if(a[0]+a[1]>0&&a[2]+a[3]>0)line+=$"  (R:{a[0]}-{a[1]} C:{a[2]}-{a[3]})";if(st!=null&&st.ContainsKey(kvp.Key)){int m=(int)st[kvp.Key];line+=m>=60?$"   {m/60}h {m%60}m":$"   {m}m";}while(sessionOppTexts.Count<=idx)sessionOppTexts.Add(UIFactory.CreateText($"so{sessionOppTexts.Count}",sessionOppContainer.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22)));UIFactory.SetText(sessionOppTexts[idx],line);UIFactory.SetColor(sessionOppTexts[idx],ow>ol?C_GREEN:ow<ol?C_RED:C_DIM);var go=(sessionOppTexts[idx]as Component)?.gameObject;if(go)go.SetActive(true);idx++;}for(int i=idx;i<sessionOppTexts.Count;i++){var go=(sessionOppTexts[i]as Component)?.gameObject;if(go)go.SetActive(false);}}
 
         private static void RefreshLeaderboard(){string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,14);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);UIFactory.SetText(row.txtRating,$"{e.rating}");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");bool sel=e.steam_id==selectedSteamId;UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):new Color(0.15f,0.15f,0.2f,0.01f));row.root.SetActive(true);}UIFactory.SetText(txtLBCount,$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string detail=$"\nRating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked: {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head */var history=ApiClient.CachedMatchHistory;if(history!=null&&selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=0,h2hL=0,h2hCW=0,h2hCL=0,h2hSW=0,h2hSL=0;var seenSeries=new HashSet<string>();foreach(var m in history){if(m.opponent_steam_id==selectedSteamId){if(m.is_ranked){/* Count individual ranked for overall */if(m.won)h2hW++;else h2hL++;/* Count series wins/losses (deduplicate by series_id) */if(!string.IsNullOrEmpty(m.series_id)&&m.series_id!="null"&&!seenSeries.Contains(m.series_id)){string ss=m.series_score;if(!string.IsNullOrEmpty(ss)&&ss.Contains("-")){try{var sp=ss.Split('-');int sw=int.Parse(sp[0]),sl=int.Parse(sp[1]);if(sw>=2||sl>=2){seenSeries.Add(m.series_id);if(sw>sl)h2hSW++;else h2hSL++;}}catch{}}}}else{if(m.won)h2hCW++;else h2hCL++;}}}int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+=$"\n<b>vs You:</b> <color={h2hColor}>{h2hAll}W - {h2hAllL}L ({h2hAll+h2hAllL} games)</color>\n";if(h2hSW+h2hSL>0)detail+=$"  Ranked Series: {h2hSW}W / {h2hSL}L\n";if(h2hCW+h2hCL>0)detail+=$"  Casual: {h2hCW}W / {h2hCL}L\n";}}/* Top cards with win rates */if(ps.top_card_names!=null&&ps.top_card_names.Count>0){detail+="\n<color=#99AAEE>Top Cards:</color>\n";for(int ci=0;ci<ps.top_card_names.Count&&ci<8;ci++){string picks=ps.top_card_picks.Count>ci?$" ({ps.top_card_picks[ci]}x)":"";float wr=ps.top_card_win_rates!=null&&ps.top_card_win_rates.Count>ci?ps.top_card_win_rates[ci]*100f:0f;string wrCol=wr>=55?"#00FF00":wr<=45?"#FF6666":"#AAAAAA";detail+=$"  {ps.top_card_names[ci]}{picks}  <color={wrCol}>{wr:F0}%</color>\n";}}/* Tournament placements + recent results for the viewed player. Trophy counts stay inline (compact), recent list is capped to 4 rows so the detail doesn't grow off-screen. */if(ApiClient.CachedPlayerTournaments.TryGetValue(selectedSteamId,out var _tHist)&&_tHist!=null&&(_tHist.participant_count>0)){detail+="\n<color=#FFD94D>Tournaments:</color> ";detail+=$"<color=#FFE580>1stx{_tHist.winner_count}</color>  <color=#C8C8C8>2ndx{_tHist.runner_up_count}</color>  <color=#D4894A>3rdx{_tHist.third_place_count}</color>  <color=#888>(played {_tHist.participant_count})</color>\n";if(_tHist.recent!=null&&_tHist.recent.Length>0){int shown=0;foreach(var te in _tHist.recent){if(shown>=4)break;string dt=te.ended_at;try{if(!string.IsNullOrEmpty(dt))dt=TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at,null,System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),_ResolveTz()).ToString("M/d/yy");}catch{}string placeTxt=te.placed_rank==1?"<color=#FFE580>1st</color>":te.placed_rank==2?"<color=#C8C8C8>2nd</color>":te.placed_rank==3?"<color=#D4894A>3rd</color>":$"<color=#888>-</color>";detail+=$"  {dt}  {placeTxt}  <color=#888>({te.signup_count}p)</color>\n";shown++;}}}UIFactory.SetText(txtLBDetail,detail+GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Unblock from Ranked":"Block from Ranked");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}}else{UIFactory.SetText(txtLBPlayerName,"Click a player");UIFactory.SetText(txtLBDetail,"");BuildFormGraph(null,null);if(lbBlockRow!=null)lbBlockRow.SetActive(false);}}
 
@@ -3220,6 +3314,16 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 15f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 60));
             UIFactory.SetWordWrap(txtTeamMembers, true);
 
+            // DC sticky-team grace banner: when a player drops mid-series, the
+            // server enters a 5-minute window where the same 4 can re-queue and
+            // resume the existing series with the same teams. Otherwise the
+            // remaining team takes the series win by forfeit at the deadline.
+            txtTeamDcGrace = UIFactory.CreateText("TDC", statusBox.transform, "",
+                16f, new Color(1f, 0.7f, 0.3f), UIFactory.AlignMidLeft,
+                sizeDelta: new Vector2(900, 26));
+            UIFactory.SetBold(txtTeamDcGrace, true);
+            (txtTeamDcGrace as Component)?.gameObject?.SetActive(false);
+
             // Buttons row
             var btnRow = new GameObject("TBR");
             btnRow.transform.SetParent(statusBox.transform, false);
@@ -3269,6 +3373,53 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 sizeDelta: new Vector2(160, 28));
             teamReadyBtn.SetActive(false);
 
+            // Manual team picking row: "Allow team picking" checkbox + Team 1 / Team 2 buttons.
+            // Buttons greyed (uninteractive + dim) until 3+ queuers have the checkbox on.
+            var pickRow = new GameObject("TPR");
+            pickRow.transform.SetParent(statusBox.transform, false);
+            pickRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(pickRow, spacing: 8);
+            UIFactory.AddLE(pickRow, prefH: 30, minH: 30, flexH: 0);
+            teamPickToggleBtn = UIFactory.CreateButton("TPCB", pickRow.transform,
+                "[ ] Allow team picking", 14f, C_LABEL,
+                new Color(0.25f, 0.25f, 0.30f, 0.90f),
+                () =>
+                {
+                    var sid = MatchTracker.LocalSteamId;
+                    if (string.IsNullOrEmpty(sid)) return;
+                    bool currentlyEnabled = false;
+                    if (ApiClient.CachedTeamQueueList != null)
+                        foreach (var q in ApiClient.CachedTeamQueueList)
+                            if (q.steam_id == sid) { currentlyEnabled = q.manual_pick_enabled; break; }
+                    ApiClient.ToggleTeamManualPick(sid, !currentlyEnabled);
+                },
+                sizeDelta: new Vector2(220, 26));
+            teamPickT1Btn = UIFactory.CreateButton("TPT1", pickRow.transform, "Team 1 (Orange)",
+                14f, C_WHITE, new Color(0.55f, 0.30f, 0.10f, 0.5f),
+                () => { var sid = MatchTracker.LocalSteamId; if (!string.IsNullOrEmpty(sid)) ApiClient.SetTeamPreferredTeam(sid, 1); },
+                sizeDelta: new Vector2(140, 26));
+            teamPickT2Btn = UIFactory.CreateButton("TPT2", pickRow.transform, "Team 2 (Blue)",
+                14f, C_WHITE, new Color(0.10f, 0.30f, 0.55f, 0.5f),
+                () => { var sid = MatchTracker.LocalSteamId; if (!string.IsNullOrEmpty(sid)) ApiClient.SetTeamPreferredTeam(sid, 2); },
+                sizeDelta: new Vector2(140, 26));
+            txtPickStatus = UIFactory.CreateText("TPS", pickRow.transform,
+                "<color=#888>Auto-balance by elo (need 3+ checking 'Allow' to enable side picking)</color>",
+                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(380, 26));
+
+            // "In Queue" panel — all players currently queueing for 2v2,
+            // populated by /team/queue/list every 5s. Shows each queuer's
+            // wait time + which rating the balancer is using (their 2v2
+            // rating, or their 1v1 rating if their 2v2 sample is too small).
+            var queueListPanel = UIFactory.CreatePanel("TQL", panel.transform, C_PANEL);
+            UIFactory.AddVLG(queueListPanel, spacing: 2, padL: 12, padR: 12, padT: 6, padB: 6);
+            UIFactory.AddLE(queueListPanel, flexH: 0);
+            txtTeamQueueListHeader = UIFactory.CreateText("TQLH", queueListPanel.transform,
+                "<b>In Queue</b>", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
+            txtTeamQueueListBody = UIFactory.CreateText("TQLB", queueListPanel.transform,
+                "<color=#888>Loading…</color>", 15f, C_LABEL, UIFactory.AlignTopLeft,
+                sizeDelta: new Vector2(900, 60));
+            UIFactory.SetWordWrap(txtTeamQueueListBody, true);
+
             // Bottom row: leaderboard (left) + recent history (right).
             var bottom = new GameObject("TBot");
             bottom.transform.SetParent(panel.transform, false);
@@ -3311,6 +3462,11 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
         private static GameObject teamHistContainer;
         private static List<TeamHistRow> teamHistRows = new List<TeamHistRow>();
         private class TeamHistRow { public GameObject root; public object txtLine1, txtLine2; }
+        private static object txtTeamQueueListHeader;
+        private static object txtTeamQueueListBody;
+        private static object txtTeamDcGrace;
+        private static GameObject teamPickToggleBtn, teamPickT1Btn, teamPickT2Btn;
+        private static object txtPickStatus;
 
         private static TeamHistRow CreateTeamHistRow(Transform parent, string name)
         {
@@ -3397,6 +3553,101 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             UIFactory.SetText(txtTeamStatus, status);
             UIFactory.SetText(txtTeamMembers, members);
 
+            // DC grace banner. Driven by ApiClient.LastSeriesStateStatus etc. —
+            // poll the most-recent series's state when we have one cached and
+            // the user might be in a sticky-team requeue window.
+            ApiClient.UpdateTeamSeriesStatePoll(force: false);
+            int dcRemaining = ApiClient.LastSeriesDcGraceSeconds;
+            string dcStatus = ApiClient.LastSeriesStateStatus;
+            var dcBanner = (txtTeamDcGrace as Component)?.gameObject;
+            if (dcBanner != null)
+            {
+                if (dcStatus == "dc_paused" && dcRemaining > 0)
+                {
+                    int mm = dcRemaining / 60, ss = dcRemaining % 60;
+                    int t1w = ApiClient.LastSeriesT1Wins, t2w = ApiClient.LastSeriesT2Wins;
+                    UIFactory.SetText(txtTeamDcGrace,
+                        $"<color=#FFB347>Series paused — same 4 can re-queue to resume</color>  <color=#FF6688>{mm}:{ss:D2}</color>  <color=#888>(score {t1w}-{t2w})</color>");
+                    dcBanner.SetActive(true);
+                }
+                else
+                {
+                    dcBanner.SetActive(false);
+                }
+            }
+
+            // In Queue panel — refresh from /team/queue/list (5s throttle).
+            ApiClient.UpdateTeamQueueList(force: false);
+            var qlist = ApiClient.CachedTeamQueueList;
+
+            // Manual-pick controls: only meaningful while in queue. Show our
+            // checkbox state and quorum progress; light up Team buttons only
+            // when the matchmaker quorum (3 of 4) is met.
+            bool meEnabled = false;
+            int myPreferred = 0;
+            if (qlist != null)
+            {
+                foreach (var q in qlist)
+                {
+                    if (q.steam_id == MatchTracker.LocalSteamId)
+                    { meEnabled = q.manual_pick_enabled; myPreferred = q.preferred_team; break; }
+                }
+            }
+            UIFactory.SetText(UIFactory.GetButtonText(teamPickToggleBtn),
+                meEnabled ? "[X] Allow team picking" : "[ ] Allow team picking");
+            UIFactory.SetImageColor(teamPickToggleBtn,
+                meEnabled ? new Color(0.20f, 0.45f, 0.20f, 0.90f) : new Color(0.25f, 0.25f, 0.30f, 0.90f));
+            int quorum = ApiClient.CachedManualPickQuorum;
+            int needed = ApiClient.CachedManualPickRequired > 0 ? ApiClient.CachedManualPickRequired : 3;
+            bool active = ApiClient.CachedManualPickActive;
+            // Greyed when quorum not met OR caller hasn't enabled their own checkbox.
+            float t1Alpha = (active && meEnabled) ? 0.95f : 0.35f;
+            float t2Alpha = (active && meEnabled) ? 0.95f : 0.35f;
+            // Highlight the user's currently-selected team.
+            var t1Color = myPreferred == 1
+                ? new Color(0.85f, 0.50f, 0.20f, t1Alpha)
+                : new Color(0.55f, 0.30f, 0.10f, t1Alpha);
+            var t2Color = myPreferred == 2
+                ? new Color(0.20f, 0.50f, 0.85f, t2Alpha)
+                : new Color(0.10f, 0.30f, 0.55f, t2Alpha);
+            UIFactory.SetImageColor(teamPickT1Btn, t1Color);
+            UIFactory.SetImageColor(teamPickT2Btn, t2Color);
+            // Status text.
+            string pickStatus;
+            if (qlist == null || qlist.Count == 0)
+                pickStatus = "<color=#888>Join the queue to enable team picking.</color>";
+            else if (active)
+                pickStatus = $"<color=#88FF88>Side picking unlocked</color>  <color=#888>({quorum}/{needed} allowing)</color>";
+            else
+                pickStatus = $"<color=#888>Auto-balance by elo  ({quorum}/{needed} allowing — need {Math.Max(0, needed - quorum)} more)</color>";
+            UIFactory.SetText(txtPickStatus, pickStatus);
+            if (qlist == null || qlist.Count == 0)
+            {
+                UIFactory.SetText(txtTeamQueueListHeader, "<b>In Queue</b>  <color=#888>(empty)</color>");
+                UIFactory.SetText(txtTeamQueueListBody, "<color=#888>No one is queueing for 2v2 right now.</color>");
+            }
+            else
+            {
+                UIFactory.SetText(txtTeamQueueListHeader, $"<b>In Queue</b>  <color=#888>({qlist.Count})</color>");
+                var sb = new StringBuilder();
+                foreach (var q in qlist)
+                {
+                    bool isMe = q.steam_id == MatchTracker.LocalSteamId;
+                    string nameC = isMe ? "<color=#88FF88>" : "<color=#FFFFFF>";
+                    string ratingDisplay = q.using_fallback_rating
+                        ? $"<color=#FFB347>{q.balance_rating}</color> <color=#888>1v1</color>"
+                        : $"<color=#FFFFFF>{q.rating}</color>";
+                    string statusTag = q.status == "searching"
+                        ? $"<color=#66CCFF>searching</color>"
+                        : q.status == "matched" ? $"<color=#FFD94D>matched</color>" : $"<color=#88FF88>{q.status}</color>";
+                    int waitMin = q.wait_seconds / 60;
+                    int waitSec = q.wait_seconds % 60;
+                    string waitStr = waitMin > 0 ? $"{waitMin}m{waitSec:D2}s" : $"{waitSec}s";
+                    sb.Append($"  {nameC}{Trunc(q.display_name, 18)}</color>  {ratingDisplay}  {statusTag}  <color=#888>{waitStr}</color>\n");
+                }
+                UIFactory.SetText(txtTeamQueueListBody, sb.ToString());
+            }
+
             // Leaderboard
             var lb = ApiClient.CachedTeamLeaderboard ?? new List<ApiClient.TeamLeaderboardEntry>();
             for (int i = 0; i < teamLBRows.Count; i++)
@@ -3422,17 +3673,43 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 UIFactory.SetText(txtTeamLBHeader, $"<b>2v2 Leaderboard</b>  <color=#888>(top {lb.Count})</color>");
             }
 
-            // Recent 2v2 matches column
+            // Recent 2v2 SERIES (group matches by series_id and render one row
+            // per series — same shape as 1v1 Ranked Series). Per-match elo
+            // change repeats across all matches in a series (it's a series-
+            // level value), so showing one row per series + the final series
+            // score + the single elo delta matches the user's mental model
+            // for ranked progression.
             var hist = ApiClient.CachedTeamMatchHistory ?? new List<ApiClient.TeamMatchHistoryEntry>();
+            // Hist is ordered DESC by ended_at server-side — first occurrence
+            // of each series_id is the latest (completing) match, so it has
+            // the final series_score the user wants to see.
+            var seriesOrder = new List<string>();
+            var bySeries = new Dictionary<string, ApiClient.TeamMatchHistoryEntry>();
+            foreach (var m in hist)
+            {
+                if (string.IsNullOrEmpty(m.series_id)) continue;  // stray match without series id (shouldn't happen for 2v2)
+                if (!bySeries.ContainsKey(m.series_id))
+                {
+                    seriesOrder.Add(m.series_id);
+                    bySeries[m.series_id] = m;
+                }
+            }
+
             for (int i = 0; i < teamHistRows.Count; i++)
             {
                 var r = teamHistRows[i];
-                if (i >= hist.Count) { r.root.SetActive(false); continue; }
-                var m = hist[i];
-                string outcome = m.won ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>";
-                int myRounds = m.my_team == 1 ? m.t1_rounds_won : m.t2_rounds_won;
-                int oppRounds = m.my_team == 1 ? m.t2_rounds_won : m.t1_rounds_won;
-                string score = $"{myRounds}-{oppRounds}";
+                if (i >= seriesOrder.Count) { r.root.SetActive(false); continue; }
+                var m = bySeries[seriesOrder[i]];
+                // Parse series_score (always from caller's perspective, e.g. "2-1" if I won 2-1)
+                int mySW = 0, oppSW = 0;
+                if (!string.IsNullOrEmpty(m.series_score))
+                {
+                    var parts = m.series_score.Split('-');
+                    if (parts.Length == 2) { int.TryParse(parts[0], out mySW); int.TryParse(parts[1], out oppSW); }
+                }
+                bool seriesWon = mySW > oppSW;
+                string outcome = seriesWon ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>";
+                string score = $"{mySW}-{oppSW}";
                 string mate = m.my_team == 1
                     ? (m.t1a_steam_id == MatchTracker.LocalSteamId ? m.t1b_name : m.t1a_name)
                     : (m.t2a_steam_id == MatchTracker.LocalSteamId ? m.t2b_name : m.t2a_name);
@@ -3444,17 +3721,17 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                     string rcCol = m.series_rating_change > 0 ? "#00FF00" : "#FF6666";
                     ratingDelta = $"  <color={rcCol}>{(m.series_rating_change > 0 ? "+" : "")}{m.series_rating_change:F0} elo</color>";
                 }
-                string seriesTag = !string.IsNullOrEmpty(m.series_score) ? $"  <color=#888>(series {m.series_score})</color>" : "";
                 string dt = "";
                 try { if (!string.IsNullOrEmpty(m.ended_at) && m.ended_at.Length >= 10) dt = DateTime.Parse(m.ended_at).ToString("M/d"); } catch { }
-                UIFactory.SetText(r.txtLine1, $"{outcome} {score}  <color=#999>{dt}</color>{ratingDelta}{seriesTag}");
+                UIFactory.SetText(r.txtLine1, $"{outcome} Series {score}  <color=#999>{dt}</color>{ratingDelta}");
                 UIFactory.SetText(r.txtLine2, $"  + <color=#88CCFF>{Trunc(mate, 14)}</color>  vs  {Trunc(opp1, 14)}, {Trunc(opp2, 14)}");
                 r.root.SetActive(true);
             }
-            if (hist.Count == 0)
-                UIFactory.SetText(txtTeamHistHeader, "<b>Recent 2v2 Matches</b>  <color=#888>— none yet</color>");
+            int seriesCount = seriesOrder.Count;
+            if (seriesCount == 0)
+                UIFactory.SetText(txtTeamHistHeader, "<b>Recent 2v2 Series</b>  <color=#888>— none yet</color>");
             else
-                UIFactory.SetText(txtTeamHistHeader, $"<b>Recent 2v2 Matches</b>  <color=#888>({hist.Count})</color>");
+                UIFactory.SetText(txtTeamHistHeader, $"<b>Recent 2v2 Series</b>  <color=#888>({seriesCount})</color>");
         }
 
         private static string BuildTeamMembersString(ApiClient.TeamQueuePollData poll)
@@ -3464,7 +3741,7 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             sb.Append("<color=#66CCFF>Your Team:</color> ");
             sb.Append("<b>YOU</b>");
             if (poll.teammates != null)
-                foreach (var t in poll.teammates) sb.Append($", {Trunc(t.display_name, 16)} ({t.rating})");
+                foreach (var t in poll.teammates) sb.Append($", {Trunc(t.display_name, 16)} {FmtMemberRating(t)}");
             sb.Append("\n<color=#FF6688>Opponents:</color> ");
             if (poll.opponents != null)
             {
@@ -3472,11 +3749,21 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 foreach (var o in poll.opponents)
                 {
                     if (!first) sb.Append(", ");
-                    sb.Append($"{Trunc(o.display_name, 16)} ({o.rating})");
+                    sb.Append($"{Trunc(o.display_name, 16)} {FmtMemberRating(o)}");
                     first = false;
                 }
             }
             return sb.ToString();
+        }
+
+        // Format the queuer's rating with a hint if the balancer is using their
+        // 1v1 rating instead of their 2v2 rating (low completed_series). Lets
+        // testers verify the elo-fallback path is firing as expected.
+        private static string FmtMemberRating(ApiClient.TeamQueueMember m)
+        {
+            if (m.using_fallback_rating && m.balance_rating > 0)
+                return $"(<color=#FFB347>{m.balance_rating}</color> <color=#888>1v1, {m.completed_series}/10 2v2 series</color>)";
+            return $"({m.rating})";
         }
     }
 }

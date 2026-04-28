@@ -137,6 +137,10 @@ namespace CompetitiveRounds
         private static int sessionRankedLosses = 0;
         private static int sessionCasualWins = 0;
         private static int sessionCasualLosses = 0;
+        // 2v2 series tally for the in-mod Session Info panel. Incremented from
+        // the team-match report success callback when series_status=='completed'.
+        private static int sessionTeamSeriesWins = 0;
+        private static int sessionTeamSeriesLosses = 0;
 
         // Achievement tracking within current match
         private static bool achTookDamage = false;       // health ever < MaxHealth during a round
@@ -306,6 +310,8 @@ namespace CompetitiveRounds
         public static MatchTracker.MatchResult LastResult { get; private set; }
         public static bool HasPendingResult { get; private set; } = false;
         public static bool MatchIsRanked => matchIsRanked;
+        public static int LastP1Points => p1Points;
+        public static int LastP2Points => p2Points;
 
         // Session accessors
         public static Dictionary<string, float> SessionTimeByOpponent => sessionTimeByOpponent;
@@ -315,6 +321,13 @@ namespace CompetitiveRounds
         public static int SessionRankedLosses => sessionRankedLosses;
         public static int SessionCasualWins => sessionCasualWins;
         public static int SessionCasualLosses => sessionCasualLosses;
+        public static int SessionTeamSeriesWins => sessionTeamSeriesWins;
+        public static int SessionTeamSeriesLosses => sessionTeamSeriesLosses;
+        public static void RecordSessionTeamSeries(bool won)
+        {
+            if (won) sessionTeamSeriesWins++;
+            else sessionTeamSeriesLosses++;
+        }
         public static DateTime SessionStartTime => sessionStartTime;
 
         // \u2500\u2500 Initialization \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500

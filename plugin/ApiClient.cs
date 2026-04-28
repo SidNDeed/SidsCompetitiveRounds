@@ -742,6 +742,104 @@ namespace CompetitiveRounds
             }));
         }
 
+        // ── 2v2 betting ──────────────────────────────────────────
+        // Active 2v2 series, list-of-my-bets, and place-bet endpoints all
+        // mirror the 1v1 shape — mostly used by the Live Series UI in the
+        // Leaderboard tab. UI rendering for these is on the next pass.
+        [Serializable]
+        public class ActiveTeamSeriesEntry
+        {
+            public string series_id;
+            public string t1a_steam, t1a_name, t1b_steam, t1b_name;
+            public string t2a_steam, t2a_name, t2b_steam, t2b_name;
+            public int t1_rating, t2_rating;
+            public int t1_wins, t2_wins;
+            public float t1_odds, t2_odds;
+            public bool bets_locked;
+            public string lock_reason;
+            public string started_at;
+            public string dc_grace_until;
+        }
+        public static List<ActiveTeamSeriesEntry> CachedActiveTeamSeries { get; private set; } = new List<ActiveTeamSeriesEntry>();
+
+        public static void FetchActiveTeamSeries()
+        {
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/team/series/active",
+                (success, response) =>
+                {
+                    if (!success) return;
+                    try { ParseActiveTeamSeries(response); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[TEAM-BET] active parse: {ex.Message}"); }
+                }));
+        }
+
+        private static void ParseActiveTeamSeries(string response)
+        {
+            var list = new List<ActiveTeamSeriesEntry>();
+            int sStart = response.IndexOf("\"series\"");
+            if (sStart < 0) { CachedActiveTeamSeries = list; return; }
+            int arrStart = response.IndexOf('[', sStart);
+            int arrEnd = FindMatchingBracket(response, arrStart);
+            if (arrStart < 0 || arrEnd < 0) { CachedActiveTeamSeries = list; return; }
+            string slice = response.Substring(arrStart + 1, arrEnd - arrStart - 1);
+            int oIdx = 0;
+            while (oIdx < slice.Length)
+            {
+                int objStart = slice.IndexOf('{', oIdx);
+                if (objStart < 0) break;
+                int oDepth = 1, j = objStart + 1;
+                while (j < slice.Length && oDepth > 0)
+                {
+                    if (slice[j] == '{') oDepth++;
+                    else if (slice[j] == '}') oDepth--;
+                    j++;
+                }
+                if (oDepth != 0) break;
+                string obj = slice.Substring(objStart, j - objStart);
+                list.Add(new ActiveTeamSeriesEntry
+                {
+                    series_id = ExtractJsonString(obj, "series_id"),
+                    t1a_steam = ExtractJsonString(obj, "t1a_steam"),
+                    t1a_name  = ExtractJsonString(obj, "t1a_name"),
+                    t1b_steam = ExtractJsonString(obj, "t1b_steam"),
+                    t1b_name  = ExtractJsonString(obj, "t1b_name"),
+                    t2a_steam = ExtractJsonString(obj, "t2a_steam"),
+                    t2a_name  = ExtractJsonString(obj, "t2a_name"),
+                    t2b_steam = ExtractJsonString(obj, "t2b_steam"),
+                    t2b_name  = ExtractJsonString(obj, "t2b_name"),
+                    t1_rating = ExtractJsonInt(obj, "t1_rating"),
+                    t2_rating = ExtractJsonInt(obj, "t2_rating"),
+                    t1_wins   = ExtractJsonInt(obj, "t1_wins"),
+                    t2_wins   = ExtractJsonInt(obj, "t2_wins"),
+                    t1_odds   = ExtractJsonFloat(obj, "t1_odds"),
+                    t2_odds   = ExtractJsonFloat(obj, "t2_odds"),
+                    bets_locked = ExtractJsonBool(obj, "bets_locked"),
+                    lock_reason = ExtractJsonString(obj, "lock_reason"),
+                    started_at = ExtractJsonString(obj, "started_at"),
+                    dc_grace_until = ExtractJsonString(obj, "dc_grace_until"),
+                });
+                oIdx = j;
+            }
+            CachedActiveTeamSeries = list;
+        }
+
+        public static void PlaceTeamBet(string bettorSteamId, string seriesId, int betOnTeam, int amount, Action<bool, string> callback)
+        {
+            string sig = ComputeHmacHex($"team-bet:{bettorSteamId}:{seriesId}:{betOnTeam}:{amount}");
+            string url = $"{baseUrl}/api/v1/team-bets?steam_id={Escape(bettorSteamId)}&team_series_id={Escape(seriesId)}&bet_on_team={betOnTeam}&amount={amount}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[TEAM-BET] place {amount} on team {betOnTeam}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok)
+                {
+                    FetchPlayerStats(bettorSteamId);
+                    FetchActiveTeamSeries();
+                }
+            }));
+        }
+
 
         // ── Shop ─────────────────────────────────────────────────
         [Serializable]
@@ -2524,6 +2622,13 @@ namespace CompetitiveRounds
             public int rating;
             public string region;
             public int team_assigned; // 1, 2, or 0 if unassigned
+            // Server-side balancer flag: true when the queuer's 2v2 sample is
+            // too small to trust (completed_series < TEAM_TRUST_2V2_RATING_AFTER)
+            // and the matchmaker is using their 1v1 rating instead. Surfaced in
+            // the queue UI so users can verify the fallback fired when expected.
+            public bool using_fallback_rating;
+            public int balance_rating;     // the rating the balancer actually uses (2v2 or 1v1 fallback)
+            public int completed_series;   // 2v2 series count at queue join time
         }
 
         [Serializable]
@@ -2540,6 +2645,30 @@ namespace CompetitiveRounds
             public string room_region;
             public int match_age_seconds;
         }
+
+        [Serializable]
+        public class TeamQueueListEntry
+        {
+            public string steam_id;
+            public string display_name;
+            public int rating;
+            public int balance_rating;
+            public bool using_fallback_rating;
+            public int completed_series;
+            public string region;
+            public string status;
+            public int team_assigned;
+            public string series_id;
+            public int wait_seconds;
+            public bool manual_pick_enabled;
+            public int preferred_team;
+        }
+        public static List<TeamQueueListEntry> CachedTeamQueueList { get; private set; } = new List<TeamQueueListEntry>();
+        public static int CachedManualPickQuorum { get; private set; } = 0;
+        public static int CachedManualPickRequired { get; private set; } = 3;
+        public static bool CachedManualPickActive { get; private set; } = false;
+        private static float teamQueueListTimer = 0f;
+        private const float TEAM_QUEUE_LIST_INTERVAL = 5f;
 
         public static TeamQueueState CurrentTeamQueueState { get; private set; } = TeamQueueState.Idle;
         public static TeamQueuePollData LastTeamPollData { get; private set; }
@@ -2633,6 +2762,99 @@ namespace CompetitiveRounds
                     catch (Exception ex) { Plugin.Log.LogError($"[TEAM-QUEUE] poll parse: {ex.Message}"); }
                 }
             ));
+        }
+
+        // Polled by the F5 2v2 tab to render the "who's in queue" panel.
+        // Throttled at 5s to keep request volume low.
+        public static void UpdateTeamQueueList(bool force = false)
+        {
+            teamQueueListTimer += Time.deltaTime;
+            if (!force && teamQueueListTimer < TEAM_QUEUE_LIST_INTERVAL) return;
+            teamQueueListTimer = 0f;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/team/queue/list",
+                (success, response) =>
+                {
+                    if (!success || string.IsNullOrEmpty(response)) return;
+                    try { ParseTeamQueueList(response); NativeUI.MarkDirty(); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[TEAM-QUEUE-LIST] parse: {ex.Message}"); }
+                }
+            ));
+        }
+
+        private static void ParseTeamQueueList(string response)
+        {
+            var list = new List<TeamQueueListEntry>();
+            int qStart = response.IndexOf("\"queuers\"");
+            if (qStart < 0) { CachedTeamQueueList = list; return; }
+            int arrStart = response.IndexOf('[', qStart);
+            int arrEnd = FindMatchingBracket(response, arrStart);
+            if (arrStart < 0 || arrEnd < 0) { CachedTeamQueueList = list; return; }
+            string slice = response.Substring(arrStart + 1, arrEnd - arrStart - 1);
+            int oIdx = 0;
+            while (oIdx < slice.Length)
+            {
+                int objStart = slice.IndexOf('{', oIdx);
+                if (objStart < 0) break;
+                int oDepth = 1, j = objStart + 1;
+                while (j < slice.Length && oDepth > 0)
+                {
+                    if (slice[j] == '{') oDepth++;
+                    else if (slice[j] == '}') oDepth--;
+                    j++;
+                }
+                if (oDepth != 0) break;
+                string obj = slice.Substring(objStart, j - objStart);
+                list.Add(new TeamQueueListEntry
+                {
+                    steam_id = ExtractJsonString(obj, "steam_id"),
+                    display_name = ExtractJsonString(obj, "display_name"),
+                    rating = ExtractJsonInt(obj, "rating"),
+                    balance_rating = ExtractJsonInt(obj, "balance_rating"),
+                    using_fallback_rating = ExtractJsonBool(obj, "using_fallback_rating"),
+                    completed_series = ExtractJsonInt(obj, "completed_series"),
+                    region = ExtractJsonString(obj, "region"),
+                    status = ExtractJsonString(obj, "status"),
+                    team_assigned = ExtractJsonInt(obj, "team_assigned"),
+                    series_id = ExtractJsonString(obj, "series_id"),
+                    wait_seconds = ExtractJsonInt(obj, "wait_seconds"),
+                    manual_pick_enabled = ExtractJsonBool(obj, "manual_pick_enabled"),
+                    preferred_team = ExtractJsonInt(obj, "preferred_team"),
+                });
+                oIdx = j;
+            }
+            CachedTeamQueueList = list;
+            CachedManualPickQuorum = ExtractJsonInt(response, "manual_pick_quorum");
+            CachedManualPickRequired = ExtractJsonInt(response, "manual_pick_required");
+            if (CachedManualPickRequired <= 0) CachedManualPickRequired = 3;
+            CachedManualPickActive = ExtractJsonBool(response, "manual_pick_active");
+        }
+
+        // Toggle the local player's manual_pick_enabled flag in the team queue.
+        // When 3 of the 4 queuers have it enabled, the matchmaker honors
+        // each player's preferred_team (otherwise it auto-balances by elo).
+        public static void ToggleTeamManualPick(string steamId, bool enabled)
+        {
+            if (string.IsNullOrEmpty(steamId)) return;
+            string url = $"{baseUrl}/api/v1/team/queue/manual-pick-toggle?steam_id={UnityWebRequest.EscapeURL(steamId)}&enabled={(enabled ? "true" : "false")}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                if (ok) Plugin.Log.LogInfo($"[2v2-MANUAL] toggle={enabled} ok: {resp}");
+                else Plugin.Log.LogWarning($"[2v2-MANUAL] toggle failed: {resp}");
+                UpdateTeamQueueList(force: true);
+            }));
+        }
+
+        public static void SetTeamPreferredTeam(string steamId, int team)
+        {
+            if (string.IsNullOrEmpty(steamId)) return;
+            string url = $"{baseUrl}/api/v1/team/queue/preferred-team?steam_id={UnityWebRequest.EscapeURL(steamId)}&team={team}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                if (ok) Plugin.Log.LogInfo($"[2v2-MANUAL] team={team} ok: {resp}");
+                else Plugin.Log.LogWarning($"[2v2-MANUAL] team set failed: {resp}");
+                UpdateTeamQueueList(force: true);
+            }));
         }
 
         private static void ParseTeamQueuePoll(string response)
@@ -2822,6 +3044,9 @@ namespace CompetitiveRounds
                         rating = ExtractJsonInt(obj, "rating"),
                         region = ExtractJsonString(obj, "region"),
                         team_assigned = ExtractJsonInt(obj, "team_assigned"),
+                        using_fallback_rating = ExtractJsonBool(obj, "using_fallback_rating"),
+                        balance_rating = ExtractJsonInt(obj, "balance_rating"),
+                        completed_series = ExtractJsonInt(obj, "completed_series"),
                     });
                     oIdx = j;
                 }
@@ -2857,6 +3082,53 @@ namespace CompetitiveRounds
         public static string LastSeriesStateStatus = null;
         public static string LastSeriesStateReason = null;
         public static int LastSeriesStateConfirmations = 0;
+        public static int LastSeriesDcGraceSeconds = 0;
+        public static int LastSeriesDcTeamRemaining = 0;
+        public static int LastSeriesT1Wins = 0;
+        public static int LastSeriesT2Wins = 0;
+        // Throttled background poll of the team-series state — 2s while we
+        // have an active or paused series, off otherwise.
+        private static float teamSeriesStateTimer = 0f;
+        private const float TEAM_SERIES_STATE_INTERVAL = 2f;
+        public static void UpdateTeamSeriesStatePoll(bool force)
+        {
+            string sid = ActiveTeamSeriesId;
+            if (string.IsNullOrEmpty(sid)) return;
+            teamSeriesStateTimer += Time.deltaTime;
+            if (!force && teamSeriesStateTimer < TEAM_SERIES_STATE_INTERVAL) return;
+            teamSeriesStateTimer = 0f;
+            PollTeamSeriesState(sid, (status, reason, conf) =>
+            {
+                // PollTeamSeriesState already populates LastSeriesStateStatus etc.
+                // We just need to extract the DC fields, which it doesn't currently
+                // parse — the response JSON has them, but the in-helper parse uses
+                // a fixed callback signature. Refresh in a separate parse below.
+            });
+        }
+
+        /// <summary>POST /team/series/{id}/report-dc. Called from
+        /// Cr2v2DiagCallbacks.OnPlayerLeftRoom when the lowest-Steam-ID remaining
+        /// client detects a mid-series DC. Server applies the 2v2 DC rule (any
+        /// match abandoned with >=2 total points → non-DC team wins) and starts
+        /// the 5-min sticky-team requeue grace window.</summary>
+        public static void ReportTeamSeriesDc(
+            string seriesId, string reporterSteamId, string dcPlayerSteamId,
+            int t1PointsTotal, int t2PointsTotal)
+        {
+            if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcPlayerSteamId)) return;
+            string sig = ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:dc");
+            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/report-dc" +
+                         $"?reporter_steam_id={UnityWebRequest.EscapeURL(reporterSteamId)}" +
+                         $"&dc_player_steam_id={UnityWebRequest.EscapeURL(dcPlayerSteamId)}" +
+                         $"&t1_points_total={t1PointsTotal}" +
+                         $"&t2_points_total={t2PointsTotal}" +
+                         $"&hmac_sig={UnityWebRequest.EscapeURL(sig)}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                if (ok) Plugin.Log.LogInfo($"[2v2-DC] report accepted: {resp}");
+                else Plugin.Log.LogWarning($"[2v2-DC] report failed: {resp}");
+            }));
+        }
 
         /// <summary>POST /team/series/{id}/spawn-confirm. Called from the auto-spawn
         /// coroutine when CreatePlayer override successfully creates the local
@@ -2890,6 +3162,10 @@ namespace CompetitiveRounds
                 LastSeriesStateStatus = status;
                 LastSeriesStateReason = reason;
                 LastSeriesStateConfirmations = conf;
+                LastSeriesDcGraceSeconds = ExtractJsonInt(resp, "dc_grace_seconds_remaining");
+                LastSeriesDcTeamRemaining = ExtractJsonInt(resp, "dc_team_remaining");
+                LastSeriesT1Wins = ExtractJsonInt(resp, "t1_series_wins");
+                LastSeriesT2Wins = ExtractJsonInt(resp, "t2_series_wins");
                 onResponse?.Invoke(status, reason, conf);
             }));
         }
@@ -2958,6 +3234,26 @@ namespace CompetitiveRounds
                         if (sStatus == "completed")
                         {
                             CompetitiveUI.ShowNotification($"Series complete: {sScore}", Color.green, 6f);
+                            // Tally the series result into the Session Info panel
+                            // (2v2 row). series_score is from the reporter's team
+                            // perspective, e.g. "2-1" if the reporter's team won.
+                            try
+                            {
+                                bool seriesWon = false;
+                                if (!string.IsNullOrEmpty(sScore))
+                                {
+                                    var sp = sScore.Split('-');
+                                    if (sp.Length == 2 && int.TryParse(sp[0], out int sw) && int.TryParse(sp[1], out int sl))
+                                        seriesWon = sw > sl;
+                                }
+                                // The reporter is the lowest-Steam-ID participant.
+                                // For OTHER team members the report still lands but
+                                // the local report-callback only fires on the
+                                // reporter's client. Fan out via team-stats refresh
+                                // below which all 4 will pick up.
+                                GameStateWatcher.RecordSessionTeamSeries(seriesWon);
+                            }
+                            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] session tally failed: {ex.Message}"); }
                             ActiveTeamSeriesId = null;
                             Plugin.ClearPending2v2Slot();
                         }

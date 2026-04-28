@@ -1,5 +1,49 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.17 — 2v2 mega-pass: queue visibility, manual team selection, DC tracking + sticky teams, 2v2 betting
+
+Big multi-feature pass building on the 2v2 ranked foundation.
+
+**Bug fixes:**
+- Card-pick face=null guard (Sid3/Sid4 unconfigured face wiped the visualizer's stock face — now suppressed when all 4 face IDs are zero)
+- 2v2 history grouped by series (one row per series with final score + single elo delta — same shape as 1v1 ranked history)
+- Session Info 2v2 row (`Ranked: AW/BL  2v2: CW/DL  Casual: EW/FL`)
+- Top-left F5 player name refreshes from `CachedPlayerStats.display_name` (was set once at panel build)
+- Vanilla `NCH.OnJoinedRoom` Postfix re-styles NickName immediately after vanilla resets it (race fix for "Sid's name styling didn't show")
+- 2v2 leaderboard `min_series` default 3 → 1 so testers with one completed series show up
+
+**Queue visibility (#8):**
+- New `GET /api/v1/team/queue/list` endpoint returns every queuer with name, balance rating, status, wait time, manual-pick state
+- F5 2v2 tab "In Queue" panel renders the list, refreshes every 5s
+
+**Elo-fallback transparency (#10):**
+- Queue rows now expose `using_fallback_rating` + `balance_rating` + `completed_series`
+- UI shows e.g. `(1547 1v1, 2/10 2v2 series)` when matchmaker is using a player's 1v1 elo because their 2v2 sample is too small
+
+**Manual team selection (#9, #11):**
+- Migration 062: `team_queue.manual_pick_enabled`, `team_queue.preferred_team`, `team_series.was_auto_balanced`
+- `POST /team/queue/manual-pick-toggle` and `POST /team/queue/preferred-team` endpoints
+- Matchmaker honors `preferred_team` when 3+ queuers have the toggle on; otherwise auto-balances by elo (records `was_auto_balanced` accordingly)
+- F5 UI: `[ ] Allow team picking` checkbox + `Team 1 (Orange)` / `Team 2 (Blue)` buttons (greyed when quorum not met or your checkbox is off; status shows e.g. `Auto-balance by elo (1/3 allowing — need 2 more)`)
+
+**DC tracking + sticky teams + grace window (#7):**
+- Migration 061: `team_matches.dc_player_id`/`dc_at`, `team_series.dc_grace_until`/`dc_team_remaining`/`dc_player_id`
+- `POST /team/series/{id}/report-dc` endpoint applying the 2v2 DC rule (combined points >= 2 → match awarded to non-DC team; series may complete or pause for 5min grace)
+- Lowest-Steam-ID-remaining client auto-reports the DC from `OnPlayerLeftRoom`
+- `GET /team/series/{id}/state` extended with `dc_grace_seconds_remaining`, `dc_team_remaining`, `t1/t2_series_wins`; auto-completes series with forfeit-win to remaining team when grace expires
+- Server queue-match: when a queuer rejoining is part of a `dc_paused` series with grace remaining and the other 3 originals are also queueing, locks them into the EXISTING series with the SAME teams (sticky-team requeue resume)
+- F5 2v2 tab DC banner: `Series paused — same 4 can re-queue to resume X:XX (score N-N)`
+
+**2v2 betting (#6):**
+- Migration 063: `team_bets` table (player_id, team_series_id, bet_on_team, amount, odds_multiplier, payout)
+- `POST /team-bets` endpoint with HMAC-signed payload mirroring 1v1 (one bet per series per player, gold debit-now / credit-on-settle, odds-uncertainty floor 1.10x)
+- `GET /players/{steam_id}/team-bets` for personal bet history
+- `GET /team/series/active` returns active 2v2 series with team-aggregated odds for the bet UI
+- Settlement: when `submit_team_match` flips a series to completed, unsettled team_bets are paid out (winning team) or closed at 0 (losing team)
+- F5 Live Series UI: 2v2 series render below 1v1 with header (`2v2  Sid+Sid2 (1547)  0-0  Sid3+Sid4 (1452)`) + 2 bet rows (one per team) with 100/500/2000g buttons
+
+**Auto-balance after series (#12) — already implicit:** every fresh series re-balances using the latest ratings via the existing matchmaker. No new code needed; the `was_auto_balanced` flag is now stored on team_series for future "stay in room and re-roll teams" features if we add them.
+
 ## v1.25.16 — 422 fix on 2v2 report, pre-join nametag publish, card-pick diagnostic, test data cleanup
 
 Three fixes plus test-data cleanup.
