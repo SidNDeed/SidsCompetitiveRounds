@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using InControl;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -20,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.3";
+        public const string ModVersion = "1.25.4";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -81,6 +82,26 @@ namespace CompetitiveRounds
             pendingRankedRoom = null;
             pendingRankedRegion = null;
             pendingRoomLeaving = false;
+        }
+
+        // 2v2 slot 0-3 the server-side balancer assigned to us. Set when the
+        // poll returns ready_join (computed from team_assigned + steam-id sort
+        // within team). Read by PlayerAssigner_CreatePlayer_2v2_Patch to give
+        // each of the 4 players a unique m_playerId — vanilla ROUNDS hardcodes
+        // 0 for master, 1 for everyone else, which makes all 3 non-masters
+        // collide on slot 1 and overwrite each other in PlayerManager.players.
+        // Reset on room leave or series end.
+        private static int pending2v2Slot = -1;
+        public static int Pending2v2Slot => pending2v2Slot;
+        public static void SetPending2v2Slot(int slot)
+        {
+            pending2v2Slot = slot;
+            Log.LogInfo($"[2v2] Pending slot set: {slot} (team={(slot < 2 ? 1 : 2)})");
+        }
+        public static void ClearPending2v2Slot()
+        {
+            if (pending2v2Slot >= 0) Log.LogInfo("[2v2] Pending slot cleared");
+            pending2v2Slot = -1;
         }
 
         private void Awake()
@@ -723,6 +744,133 @@ namespace CompetitiveRounds
             CardRarityLookup.ScanAll();
             if (CardRarityLookup.Count == 0)
                 Plugin.Log.LogInfo("[HARMONY] No cards found yet — will retry on match start");
+        }
+    }
+
+    /// <summary>
+    /// Force GM_ArmsRace.playersNeededToStart = 4 in 2v2 rooms. Vanilla OnEnable
+    /// hardcodes it to 2 — the rest of the engine handles 4 players fine (there's
+    /// even a debug keybind on '4' that toggles this exact field), but our normal
+    /// game-start would fire as soon as 2 players joined, leaving the 3rd + 4th
+    /// dangling without GameObjects → RPCO_RequestSyncUp targets a viewID that
+    /// doesn't exist locally → MapManager.UnloadAfterSeconds throws on the bad
+    /// scene state → Photon network restart → all 4 drop. Setting it to 4 makes
+    /// the engine wait for all 4 before StartGame fires, which is what 4-player
+    /// mode in vanilla local play does.
+    ///
+    /// Detection: the Photon room's `cr_ff` custom property (set by QueueJoiner
+    /// when the room name starts with `team_`) doubles as a 2v2-mode signal.
+    /// </summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "OnEnable")]
+    class GMArmsRaceOnEnable_4Player_Patch
+    {
+        static void Postfix(GM_ArmsRace __instance)
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return;
+                var props = PhotonNetwork.CurrentRoom.CustomProperties;
+                if (props == null || !props.ContainsKey("cr_ff")) return;
+                __instance.playersNeededToStart = 4;
+                if (PlayerAssigner.instance != null)
+                    PlayerAssigner.instance.maxPlayers = 4;
+                Plugin.Log.LogInfo("[2v2] Forced playersNeededToStart=4 (cr_ff room detected)");
+            }
+            catch (Exception ex) { Plugin.Log.LogError($"[2v2] OnEnable patch error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// Skip-and-replace PlayerAssigner.CreatePlayer in 2v2 rooms. Vanilla logic
+    /// hardcodes m_playerId = 0 for master / 1 for everyone else, so all 3 non-
+    /// master clients collide on slot 1 in PlayerManager.players (RegisterPlayer
+    /// does `players[forceIndex] = player`, overwriting). This patch uses the
+    /// server-issued slot 0-3 (Plugin.Pending2v2Slot, set when /queue/poll
+    /// returns ready_join) so each of the 4 players lands at a unique slot and
+    /// the team mapping (slot/2 = team 0 or 1) matches the balancer's output.
+    ///
+    /// Critical ordering: we set VAR_PLAYERID + VAR_TEAMID custom properties on
+    /// LocalPlayer BEFORE PhotonNetwork.Instantiate, so the message order on
+    /// remote clients is "props update → instantiate" — when their Player.Start
+    /// runs ReadPlayerID/ReadTeamID, the right values are already on Owner.
+    /// </summary>
+    [HarmonyPatch(typeof(PlayerAssigner), "CreatePlayer")]
+    class PlayerAssigner_CreatePlayer_2v2_Patch
+    {
+        static bool Prefix(PlayerAssigner __instance, InputDevice inputDevice, bool isAI)
+        {
+            if (Plugin.Pending2v2Slot < 0) return true;            // not in 2v2 mode
+            if (PhotonNetwork.OfflineMode) return true;
+            if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return true;
+            var roomProps = PhotonNetwork.CurrentRoom.CustomProperties;
+            if (roomProps == null || !roomProps.ContainsKey("cr_ff")) return true;
+            if (__instance.hasCreatedLocalPlayer) return false;     // already done
+
+            int slot = Plugin.Pending2v2Slot;
+            int teamID = slot / 2;        // 0 for slots 0,1; 1 for slots 2,3
+            int playerID = slot;
+
+            try
+            {
+                var fM_playerId = typeof(PlayerAssigner).GetField("m_playerId",
+                    BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public);
+                fM_playerId?.SetValue(__instance, slot);
+                __instance.hasCreatedLocalPlayer = true;
+
+                // Pre-set Photon LocalPlayer custom props so remote clients reading
+                // VAR_PLAYERID / VAR_TEAMID inside Player.Start (after they receive
+                // our Instantiate message) see the right values. Photon serializes
+                // operations: SetCustomProperties → Instantiate guarantees props
+                // arrive first.
+                var pre = new ExitGames.Client.Photon.Hashtable();
+                pre[Player.VAR_PLAYERID] = playerID;
+                pre[Player.VAR_TEAMID] = teamID;
+                PhotonNetwork.LocalPlayer.SetCustomProperties(pre);
+
+                Vector3 position = Vector3.up * 100f;
+                var component = PhotonNetwork.Instantiate(
+                    __instance.playerPrefab.name, position, Quaternion.identity, 0
+                ).GetComponent<CharacterData>();
+
+                // Online 4-player ranked is keyboard-only (no split-screen). Vanilla
+                // CreatePlayer chooses keyboard/controller based on inputDevice; for
+                // our ranked path everyone is keyboard.
+                component.input.inputType = GeneralInput.InputType.Keyboard;
+                component.playerActions = PlayerActions.CreateWithKeyboardBindings();
+                component.playerActions.Device = inputDevice;
+                __instance.players.Add(component);
+
+                int forceIndex = playerID;
+                PlayerManager.RegisterPlayer(component.player, forceIndex);
+                component.player.AssignPlayerID(playerID);
+                component.player.AssignTeamID(teamID);
+                // Skip Platform/UserID/UnityID assignments — they're identity metadata
+                // for cross-platform matchmaking + the in-game block-list. Not required
+                // for a ranked 4-player match to function. Optional best-effort attempt
+                // via reflection so we don't pull in extra ROUNDS namespaces here.
+                try
+                {
+                    var t = typeof(Player);
+                    foreach (var (name, val) in new (string, object)[] {
+                        ("AssignPlatform", null),
+                        ("AssignUserID", null),
+                        ("AssignUnityID", null),
+                    })
+                    {
+                        var m = t.GetMethod(name);
+                        if (m != null && val != null) m.Invoke(component.player, new[] { val });
+                    }
+                }
+                catch { }
+
+                Plugin.Log.LogInfo($"[2v2] CreatePlayer override: slot={slot} team={teamID} pid={playerID}");
+                return false;  // skip vanilla
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[2v2] CreatePlayer override failed: {ex.Message} — falling back to vanilla");
+                return true;  // fall back to vanilla CreatePlayer (still wrong but at least game runs)
+            }
         }
     }
 

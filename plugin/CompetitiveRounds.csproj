@@ -38,6 +38,12 @@
       <HintPath>$(BepInExDir)\core\BepInEx.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="InControl">
+      <!-- Needed because the InputDevice type appears in the signature of
+           PlayerAssigner.CreatePlayer, which we Harmony-patch for 2v2. -->
+      <HintPath>$(ManagedDir)\InControl.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <!-- Unity -->

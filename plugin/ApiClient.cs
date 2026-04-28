@@ -2588,6 +2588,7 @@ namespace CompetitiveRounds
             IsTeamQueuePolling = false;
             LastTeamPollData = null;
             ActiveTeamSeriesId = null;
+            Plugin.ClearPending2v2Slot();
             NativeUI.MarkDirty();
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/team/queue/leave?steam_id={Escape(steamId)}", "",
@@ -2659,8 +2660,14 @@ namespace CompetitiveRounds
                     IsTeamQueuePolling = false;
                     CurrentTeamQueueState = TeamQueueState.Idle;
                     ActiveTeamSeriesId = data.series_id;
+                    // Compute MY slot in the 4-player lineup: team_assigned (1 or 2)
+                    // determines team-half, and steam-id sort within team determines
+                    // which of the 2 within-team slots is mine. Server's lock-time
+                    // canonicalization sorts the same way, so all 4 clients agree.
+                    int slot = ComputeMy2v2Slot(MatchTracker.LocalSteamId, data.team_assigned, data.teammates);
+                    Plugin.SetPending2v2Slot(slot);
                     Plugin.SetPendingRoom(data.room_name, data.room_region);
-                    Plugin.Log.LogInfo($"[TEAM-QUEUE] All ready! Room: {data.room_name} (region: {data.room_region ?? "auto"}) series={data.series_id}");
+                    Plugin.Log.LogInfo($"[TEAM-QUEUE] All ready! Room: {data.room_name} (region: {data.room_region ?? "auto"}) series={data.series_id} my_slot={slot}");
                     CompetitiveUI.ShowNotification("4/4 ready! Joining 2v2...", Color.green, 5f);
                     NativeUI.MarkDirty();
                 }
@@ -2679,6 +2686,7 @@ namespace CompetitiveRounds
                     // Was matched, got bumped back (someone left)
                     CurrentTeamQueueState = TeamQueueState.Searching;
                     ActiveTeamSeriesId = null;
+                    Plugin.ClearPending2v2Slot();
                     CompetitiveUI.ShowNotification("Match canceled — re-searching", new Color(1f, 0.6f, 0.2f), 5f);
                 }
                 NativeUI.MarkDirty();
@@ -2689,8 +2697,38 @@ namespace CompetitiveRounds
                 CurrentTeamQueueState = TeamQueueState.Idle;
                 LastTeamPollData = null;
                 ActiveTeamSeriesId = null;
+                Plugin.ClearPending2v2Slot();
                 NativeUI.MarkDirty();
             }
+        }
+
+        /// <summary>Compute the local player's 0-3 slot in the 4-player ROUNDS
+        /// lineup. Team 1 → slots 0,1; team 2 → slots 2,3. Within each team,
+        /// the 2 slots are assigned by steam-id ordinal sort — same canonical
+        /// rule the server uses at lock time, so all 4 clients independently
+        /// arrive at consistent unique slots without any extra coordination.</summary>
+        public static int ComputeMy2v2Slot(string mySteamId, int teamAssigned, List<TeamQueueMember> teammates)
+        {
+            int teamBase = (teamAssigned == 2) ? 2 : 0;
+            // Find my one teammate (same team_assigned). If we can't, fall
+            // back to slot 0 within team — better than collision.
+            string mateSteamId = null;
+            if (teammates != null)
+            {
+                foreach (var t in teammates)
+                {
+                    if (t == null) continue;
+                    if (t.team_assigned == teamAssigned && t.steam_id != mySteamId)
+                    {
+                        mateSteamId = t.steam_id;
+                        break;
+                    }
+                }
+            }
+            if (string.IsNullOrEmpty(mateSteamId)) return teamBase;
+            // Within-team sort by steam_id ordinal. Lower = slot 0; higher = slot 1.
+            int withinTeam = string.Compare(mySteamId, mateSteamId, StringComparison.Ordinal) <= 0 ? 0 : 1;
+            return teamBase + withinTeam;
         }
 
         /// <summary>Manual TeamQueueMember[] parser. Photon JsonUtility chokes on
@@ -2829,6 +2867,7 @@ namespace CompetitiveRounds
                         {
                             CompetitiveUI.ShowNotification($"Series complete: {sScore}", Color.green, 6f);
                             ActiveTeamSeriesId = null;
+                            Plugin.ClearPending2v2Slot();
                         }
                         else if (!string.IsNullOrEmpty(sScore))
                         {
