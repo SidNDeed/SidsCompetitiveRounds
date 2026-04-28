@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.9";
+        public const string ModVersion = "1.25.10";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -972,6 +972,34 @@ namespace CompetitiveRounds
                 }
                 catch { }
 
+                // Force PlayerSkinHandler to re-bake using the correct PlayerID.
+                // PlayerSkinHandler.Init() reads `data.player.PlayerID` and instantiates
+                // a skin GameObject keyed off it. If Init runs DURING PhotonNetwork.Instantiate
+                // (before our AssignPlayerID call lands), m_playerID is the field-default 0
+                // and every local 2v2 player ends up rendered with skin index 0 (orange).
+                // That's why the user reported themselves as orange but their teammate as
+                // blue — local was wrong, remote was right (Player.Start.ReadPlayerID sets
+                // it correctly for non-mine players before PlayerSkinHandler.Start runs).
+                try
+                {
+                    var psh = component.GetComponentInChildren<PlayerSkinHandler>(true);
+                    if (psh != null)
+                    {
+                        // Destroy whatever skin GameObject was already baked
+                        for (int i = psh.transform.childCount - 1; i >= 0; i--)
+                        {
+                            var ch = psh.transform.GetChild(i);
+                            if (ch != null) UnityEngine.Object.Destroy(ch.gameObject);
+                        }
+                        psh.inited = false;
+                        var initMethod = typeof(PlayerSkinHandler).GetMethod("Init",
+                            BindingFlags.NonPublic | BindingFlags.Instance);
+                        initMethod?.Invoke(psh, null);
+                        Plugin.Log.LogInfo($"[2v2] Re-baked local PlayerSkin for slot={slot} (post-AssignPlayerID)");
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] PlayerSkin re-bake failed: {ex.Message}"); }
+
                 Plugin.Log.LogInfo($"[2v2] CreatePlayer override: slot={slot} team={teamID} pid={playerID}");
                 return false;  // skip vanilla
             }
@@ -1165,6 +1193,43 @@ namespace CompetitiveRounds
             {
                 Plugin.Instance.StartCoroutine(Force2v2StartGameWhenReady());
                 Plugin.Instance.StartCoroutine(Setup4PlayerCardBarsWhenReady());
+                Plugin.Instance.StartCoroutine(Repeated2v2PCColorReapply());
+            }
+        }
+
+        /// <summary>Aggressively re-apply PlayerColorCosmetic for every actor in the
+        /// room over the first ~10 seconds after joining a cr_ff room. Photon's
+        /// `OnPlayerPropertiesUpdate` callback fires on PROP UPDATES — but late
+        /// joiners receive the room's existing player prop state without an update
+        /// event, so the cosmetic apply path is never triggered for them. Result:
+        /// some clients see other players' custom body colors as "white" (no tint
+        /// applied because cr_pcolor_color is empty until prop arrives) or stale
+        /// (off-cycle prismatic frame). Polling re-apply catches the late arrivals
+        /// AND nudges the animation tick state into existence for animated SKUs.</summary>
+        private static System.Collections.IEnumerator Repeated2v2PCColorReapply()
+        {
+            // Wait for the spawned player GameObjects to settle.
+            yield return new WaitForSeconds(2f);
+            float deadline = Time.realtimeSinceStartup + 12f;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                if (Plugin.Pending2v2Slot < 0) yield break;
+                if (!PhotonNetwork.InRoom) yield break;
+                try
+                {
+                    var list = PhotonNetwork.PlayerList;
+                    if (list != null)
+                    {
+                        foreach (var pp in list)
+                        {
+                            if (pp == null) continue;
+                            if (PhotonNetwork.LocalPlayer != null && pp.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber) continue;
+                            PlayerColorCosmetic.ReapplyForActor(pp.ActorNumber);
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] PCColor reapply tick error: {ex.Message}"); }
+                yield return new WaitForSeconds(2f);
             }
         }
 
@@ -1388,6 +1453,36 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>In cr_ff rooms, auto-confirm the post-game "Continue?" popup so all
+    /// 4 clients advance together. Vanilla `PopUpHandler.StartPicking` waits for any
+    /// local-mine player to press Jump on a directional Yes/No selector — there's no
+    /// network sync of the choice, each client decides independently. In 2v2 this
+    /// breaks: player 1 hits Yes locally → their `DoContinue` runs → next-round
+    /// transition starts on their client only. Players who didn't press yet stay
+    /// stuck on the popup, can't input cards, and the room desyncs. Bypass: Prefix
+    /// fires the supplied callback with `Yes` immediately and skips the picker
+    /// setup, so all 4 clients call `DoContinue` simultaneously.</summary>
+    [HarmonyPatch(typeof(PopUpHandler), "StartPicking")]
+    class PopUpHandler_StartPicking_2v2_Patch
+    {
+        static bool Prefix(global::Player player, Action<PopUpHandler.YesNo> functionToCall)
+        {
+            try
+            {
+                if (!Diag2v2.IsActive()) return true;
+                Plugin.Log.LogInfo("[2v2] Auto-confirming Continue prompt (cr_ff bypass)");
+                try { functionToCall?.Invoke(PopUpHandler.YesNo.Yes); }
+                catch (Exception ex) { Plugin.Log.LogError($"[2v2] Continue auto-invoke failed: {ex.Message}"); }
+                return false;  // skip vanilla picker setup entirely
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[2v2] PopUpHandler prefix error: {ex.Message}");
+                return true;
+            }
+        }
+    }
+
     /// <summary>Sort the SpawnPoint[] array left-to-right by X position in cr_ff
     /// rooms. PlayerManager.MovePlayers indexes spawnPoints[i] for players[i],
     /// but the prefab child order isn't guaranteed to be left-then-right. With
@@ -1419,13 +1514,29 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(PlayerSkinBank), "GetPlayerSkinColors")]
     class PlayerSkinBank_GetPlayerSkinColors_2v2_Patch
     {
+        // throttle: log once per (original→mapped, sec) tuple so we don't spam every frame
+        private static readonly System.Collections.Generic.HashSet<string> _loggedKeys =
+            new System.Collections.Generic.HashSet<string>();
+        private static float _lastClear;
+
         static void Prefix(ref int playerID)
         {
             try
             {
                 if (!Diag2v2.IsActive()) return;
                 if (playerID < 0 || playerID > 3) return;
+                int original = playerID;
                 playerID = (playerID / 2) * 2;
+                // Light diagnostic so we can see when/whether the patch fires.
+                // Throttle to one log per (original, mapped) per 5 seconds.
+                if (Time.realtimeSinceStartup - _lastClear > 5f)
+                {
+                    _loggedKeys.Clear();
+                    _lastClear = Time.realtimeSinceStartup;
+                }
+                string key = $"{original}→{playerID}";
+                if (_loggedKeys.Add(key))
+                    Plugin.Log.LogInfo($"[2v2-COLOR] PlayerSkinBank.GetPlayerSkinColors mapped {key}");
             }
             catch { }
         }
