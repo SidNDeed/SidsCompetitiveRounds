@@ -2677,6 +2677,20 @@ namespace CompetitiveRounds
                         var prejoin = new ExitGames.Client.Photon.Hashtable();
                         prejoin["p_id"] = slot;
                         prejoin["t_id"] = slot / 2;
+                        // Publish our Steam ID under "u_id" so peers can resolve
+                        // actor → Steam ID at match-end time. Vanilla
+                        // PlayerAssigner.CreatePlayer normally calls AssignUserID
+                        // which writes this — our 2v2 CreatePlayer override skips
+                        // it (intentionally, to avoid pulling in extra ROUNDS
+                        // identity machinery). Without u_id, ResolvePhotonSteamId
+                        // falls back to "photon_<actor>", TryReportTeamMatch
+                        // aborts with "couldn't resolve Steam ID for actor X",
+                        // and the match silently routes to the 1v1 casual path.
+                        // That's why every 2v2 was logging in the My Stats tab
+                        // instead of the 2v2 tab.
+                        string mySid = MatchTracker.LocalSteamId;
+                        if (!string.IsNullOrEmpty(mySid) && mySid != "unknown")
+                            prejoin["u_id"] = mySid;
                         if (PhotonNetwork.LocalPlayer != null)
                             PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
                     }

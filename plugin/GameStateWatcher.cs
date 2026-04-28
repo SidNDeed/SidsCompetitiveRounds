@@ -434,9 +434,17 @@ namespace CompetitiveRounds
                 seriesPreflightSent = false;
                 lastOpponentRankCheck = -999f;
                 Plugin.Log.LogInfo($"[POLL] Joined room: {photonRoomId} (region: {photonRegion})");
-                // Republish styled nickname on every room join — the game resets NickName back
-                // to the raw Steam persona at room creation, so our wrap needs to reapply.
+                // Republish all local cosmetic props on every room join. Photon
+                // resets state at room creation; without re-publish, remote clients
+                // can't see our nametag/color/trail until our stats happen to
+                // reload (which only fires on /stats endpoint hits, not on a
+                // schedule). User reported: "my body color didn't show for
+                // everyone else until the first game finished" — that was
+                // because the only PCColor publish was the periodic stats
+                // refresh, which landed mid-game-1.
                 try { NametagStyler.PublishToPhoton(); } catch { }
+                try { PlayerColorCosmetic.PublishLocalProps(); } catch { }
+                try { TrailCosmetic.PublishLocalProps(); } catch { }
             }
 
             if (!inRoom && wasInRoom)

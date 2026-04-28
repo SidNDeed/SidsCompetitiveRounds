@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.14";
+        public const string ModVersion = "1.25.15";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -970,6 +970,21 @@ namespace CompetitiveRounds
                 var pre = new ExitGames.Client.Photon.Hashtable();
                 pre[Player.VAR_PLAYERID] = playerID;
                 pre[Player.VAR_TEAMID] = teamID;
+                // Also publish u_id (our Steam ID). Vanilla CreatePlayer relies on
+                // AssignUserID() to do this; our 2v2 override skips that to avoid
+                // pulling in ROUNDS identity machinery. Without u_id, peers can't
+                // resolve actor→Steam ID at match-end and TryReportTeamMatch
+                // aborts → match falls through to the 1v1 casual report path.
+                // (The /queue/poll ready_join handler also publishes u_id before
+                // room join — this is belt-and-suspenders for the CreatePlayer
+                // path.)
+                try
+                {
+                    string mySid = MatchTracker.LocalSteamId;
+                    if (!string.IsNullOrEmpty(mySid) && mySid != "unknown")
+                        pre["u_id"] = mySid;
+                }
+                catch { }
                 PhotonNetwork.LocalPlayer.SetCustomProperties(pre);
 
                 Vector3 position = Vector3.up * 100f;
@@ -1772,31 +1787,64 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(PlayerSkinBank), "GetPlayerSkinColors")]
     class PlayerSkinBank_GetPlayerSkinColors_2v2_Patch
     {
-        // throttle: log once per (original→mapped, sec) tuple so we don't spam every frame
+        // CRITICAL: the parameter MUST be named `team` to match vanilla's
+        // signature — HarmonyX binds Prefix parameters by NAME. v1.25.10
+        // shipped this with `playerID` which broke `PatchAll()` entirely.
+
+        // Class names whose calls to GetPlayerSkinColors should map slot→team_skin
+        // in 2v2. UI code (PointVisualizer, UIHandler) passes literal team-index
+        // values (0 or 1) and shouldn't be mapped — that's what made the round
+        // counter fill BOTH dots orange in v1.25.14 (team 1's `1` got mapped to
+        // `0` and returned orange instead of blue).
+        private static readonly System.Collections.Generic.HashSet<string> _bodyCallers =
+            new System.Collections.Generic.HashSet<string>
+        {
+            "PlayerSkinHandler",   // body skin instantiate
+            "Player",              // SetColors / GetTeamColors / SetCardLevelTeam
+            "PlayerAssigner",      // initial body color setup
+            "HealthHandler",       // hp sprite + death effect colors
+            "CharacterData",       // any direct player-data path
+            "Holdable",            // gun/block trail colors
+            "DeathEffect",         // death particle colors
+            "PlayerSkinParticle",  // body particle colors
+            "DamageHandler",       // hit-blink / damage flash
+            "CardChoiceVisuals",   // card-pick body skin
+        };
+
         private static readonly System.Collections.Generic.HashSet<string> _loggedKeys =
             new System.Collections.Generic.HashSet<string>();
         private static float _lastClear;
 
-        // CRITICAL: the parameter MUST be named `team` (matching vanilla
-        // `GetPlayerSkinColors(int team)`) — HarmonyX binds Prefix parameters
-        // by NAME and throws "Parameter not found" if the names don't match.
-        // v1.25.10 shipped this with `playerID` which silently failed Harmony
-        // patching, aborted the entire PatchAll iteration, and disabled every
-        // patch that came after PlayerSkinBank in declaration order — including
-        // the ArtHandlerNextArtPatch that custom map colors depend on.
         static void Prefix(ref int team)
         {
             try
             {
                 if (!Diag2v2.IsActive()) return;
                 if (team < 0 || team > 3) return;
+
+                // Walk a few stack frames up to determine if this call is for a
+                // player BODY (where we want slot→team_skin mapping) vs a UI
+                // ELEMENT (where the input is already a team index). UI bypass
+                // is what restores the round-counter blue fill.
+                bool isBodyCaller = false;
+                try
+                {
+                    var st = new System.Diagnostics.StackTrace(1, false);
+                    int n = Math.Min(st.FrameCount, 6);
+                    for (int i = 0; i < n; i++)
+                    {
+                        var m = st.GetFrame(i)?.GetMethod();
+                        if (m == null) continue;
+                        string typeName = m.DeclaringType?.Name ?? "";
+                        if (_bodyCallers.Contains(typeName)) { isBodyCaller = true; break; }
+                    }
+                }
+                catch { }
+                if (!isBodyCaller) return;
+
                 int original = team;
-                // PlayerSkinBank has 4 skin entries: index 0 = orange (1v1 team 0),
-                // index 1 = blue (1v1 team 1), 2/3 = whatever extras (red/green
-                // variants) for 4-player local. We want strict 2-team orange/blue
-                // in 2v2 ranked, so map slot → team_index (slot/2): slots 0,1 → 0
-                // (orange); slots 2,3 → 1 (blue).
                 team = team / 2;
+
                 if (Time.realtimeSinceStartup - _lastClear > 5f)
                 {
                     _loggedKeys.Clear();
@@ -1804,7 +1852,7 @@ namespace CompetitiveRounds
                 }
                 string key = $"{original}→{team}";
                 if (_loggedKeys.Add(key))
-                    Plugin.Log.LogInfo($"[2v2-COLOR] PlayerSkinBank.GetPlayerSkinColors mapped {key}");
+                    Plugin.Log.LogInfo($"[2v2-COLOR] body-call mapped {key}");
             }
             catch { }
         }
