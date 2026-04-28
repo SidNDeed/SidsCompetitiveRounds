@@ -3281,7 +3281,7 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
 
         // ── 2v2 tab ───────────────────────────────────────────────
         private static object txtTeamHeader, txtTeamStatus, txtTeamMembers, txtTeamLBHeader;
-        private static GameObject teamSearchBtn, teamLeaveBtn, teamReadyBtn, teamLBContainer;
+        private static GameObject teamSearchBtn, teamSearchCustomBtn, teamLeaveBtn, teamReadyBtn, teamLBContainer;
         private static List<TeamLBRow> teamLBRows = new List<TeamLBRow>();
         private class TeamLBRow { public GameObject root; public object txtRank, txtName, txtRating, txtSeries, txtWR; }
 
@@ -3334,11 +3334,11 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             // UIFactory.CreateButton already wraps onClick in ClickGuard.Claim() (line 102).
             // Adding another guard inside the lambda double-claims and silently absorbs every
             // click — see logs-snapshot bepinex-20260424_161027.log for the smoking gun.
-            teamSearchBtn = UIFactory.CreateButton("TSB", btnRow.transform, "Search 2v2", 16f, C_WHITE,
+            teamSearchBtn = UIFactory.CreateButton("TSB", btnRow.transform, "Search Random", 16f, C_WHITE,
                 new Color(0.20f, 0.55f, 0.30f, 0.95f),
                 () =>
                 {
-                    Plugin.Log.LogInfo("[TEAM-QUEUE-UI] Search 2v2 clicked");
+                    Plugin.Log.LogInfo("[TEAM-QUEUE-UI] Search Random clicked");
                     var sid = MatchTracker.LocalSteamId;
                     if (string.IsNullOrEmpty(sid) || sid == "unknown")
                     {
@@ -3348,10 +3348,28 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                     }
                     string region = "";
                     try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { }
-                    Plugin.Log.LogInfo($"[TEAM-QUEUE-UI] joining team queue sid={sid} region='{region}'");
-                    ApiClient.JoinTeamQueue(sid, MatchTracker.LocalDisplayName, region);
+                    Plugin.Log.LogInfo($"[TEAM-QUEUE-UI] joining auto team queue sid={sid} region='{region}'");
+                    ApiClient.JoinTeamQueue(sid, MatchTracker.LocalDisplayName, region, "auto");
                 },
                 sizeDelta: new Vector2(160, 28));
+
+            teamSearchCustomBtn = UIFactory.CreateButton("TSC", btnRow.transform, "Find Custom Lobby", 16f, C_WHITE,
+                new Color(0.40f, 0.30f, 0.55f, 0.95f),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[TEAM-QUEUE-UI] Find Custom Lobby clicked");
+                    var sid = MatchTracker.LocalSteamId;
+                    if (string.IsNullOrEmpty(sid) || sid == "unknown")
+                    {
+                        CompetitiveUI.ShowNotification("Steam ID not ready yet — try again in a few seconds", new Color(1f, 0.6f, 0.2f), 4f);
+                        return;
+                    }
+                    string region = "";
+                    try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { }
+                    Plugin.Log.LogInfo($"[TEAM-QUEUE-UI] joining manual team queue sid={sid} region='{region}'");
+                    ApiClient.JoinTeamQueue(sid, MatchTracker.LocalDisplayName, region, "manual");
+                },
+                sizeDelta: new Vector2(180, 28));
 
             teamLeaveBtn = UIFactory.CreateButton("TLB", btnRow.transform, "Leave Queue", 16f, C_WHITE,
                 new Color(0.55f, 0.20f, 0.20f, 0.95f),
@@ -3373,27 +3391,14 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 sizeDelta: new Vector2(160, 28));
             teamReadyBtn.SetActive(false);
 
-            // Manual team picking row: "Allow team picking" checkbox + Team 1 / Team 2 buttons.
-            // Buttons greyed (uninteractive + dim) until 3+ queuers have the checkbox on.
+            // Pick-teams row: visible inside the manual (custom-lobby) queue.
+            // Hidden when in the random queue or not queueing — choosing a queue
+            // type is the consent now, not a separate checkbox.
             var pickRow = new GameObject("TPR");
             pickRow.transform.SetParent(statusBox.transform, false);
             pickRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(pickRow, spacing: 8);
             UIFactory.AddLE(pickRow, prefH: 30, minH: 30, flexH: 0);
-            teamPickToggleBtn = UIFactory.CreateButton("TPCB", pickRow.transform,
-                "[ ] Allow team picking", 14f, C_LABEL,
-                new Color(0.25f, 0.25f, 0.30f, 0.90f),
-                () =>
-                {
-                    var sid = MatchTracker.LocalSteamId;
-                    if (string.IsNullOrEmpty(sid)) return;
-                    bool currentlyEnabled = false;
-                    if (ApiClient.CachedTeamQueueList != null)
-                        foreach (var q in ApiClient.CachedTeamQueueList)
-                            if (q.steam_id == sid) { currentlyEnabled = q.manual_pick_enabled; break; }
-                    ApiClient.ToggleTeamManualPick(sid, !currentlyEnabled);
-                },
-                sizeDelta: new Vector2(220, 26));
             teamPickT1Btn = UIFactory.CreateButton("TPT1", pickRow.transform, "Team 1 (Orange)",
                 14f, C_WHITE, new Color(0.55f, 0.30f, 0.10f, 0.5f),
                 () => { var sid = MatchTracker.LocalSteamId; if (!string.IsNullOrEmpty(sid)) ApiClient.SetTeamPreferredTeam(sid, 1); },
@@ -3403,22 +3408,26 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 () => { var sid = MatchTracker.LocalSteamId; if (!string.IsNullOrEmpty(sid)) ApiClient.SetTeamPreferredTeam(sid, 2); },
                 sizeDelta: new Vector2(140, 26));
             txtPickStatus = UIFactory.CreateText("TPS", pickRow.transform,
-                "<color=#888>Auto-balance by elo (need 3+ checking 'Allow' to enable side picking)</color>",
-                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(380, 26));
+                "<color=#888>Custom lobby — claim Team 1 or Team 2.</color>",
+                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 26));
 
-            // "In Queue" panel — all players currently queueing for 2v2,
-            // populated by /team/queue/list every 5s. Shows each queuer's
-            // wait time + which rating the balancer is using (their 2v2
-            // rating, or their 1v1 rating if their 2v2 sample is too small).
+            // "In Queue" panel — split into Random and Custom sections so the
+            // user can see who's in either queue independently. Polled every 2s.
             var queueListPanel = UIFactory.CreatePanel("TQL", panel.transform, C_PANEL);
             UIFactory.AddVLG(queueListPanel, spacing: 2, padL: 12, padR: 12, padT: 6, padB: 6);
             UIFactory.AddLE(queueListPanel, flexH: 0);
             txtTeamQueueListHeader = UIFactory.CreateText("TQLH", queueListPanel.transform,
-                "<b>In Queue</b>", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
+                "<b>Random Queue</b>", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
             txtTeamQueueListBody = UIFactory.CreateText("TQLB", queueListPanel.transform,
                 "<color=#888>Loading…</color>", 15f, C_LABEL, UIFactory.AlignTopLeft,
                 sizeDelta: new Vector2(900, 60));
             UIFactory.SetWordWrap(txtTeamQueueListBody, true);
+            txtTeamQueueManualHeader = UIFactory.CreateText("TQMH", queueListPanel.transform,
+                "<b>Custom Lobbies</b>", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
+            txtTeamQueueManualBody = UIFactory.CreateText("TQMB", queueListPanel.transform,
+                "<color=#888>Loading…</color>", 15f, C_LABEL, UIFactory.AlignTopLeft,
+                sizeDelta: new Vector2(900, 60));
+            UIFactory.SetWordWrap(txtTeamQueueManualBody, true);
 
             // Bottom row: leaderboard (left) + recent history (right).
             var bottom = new GameObject("TBot");
@@ -3464,8 +3473,10 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
         private class TeamHistRow { public GameObject root; public object txtLine1, txtLine2; }
         private static object txtTeamQueueListHeader;
         private static object txtTeamQueueListBody;
+        private static object txtTeamQueueManualHeader;
+        private static object txtTeamQueueManualBody;
         private static object txtTeamDcGrace;
-        private static GameObject teamPickToggleBtn, teamPickT1Btn, teamPickT2Btn;
+        private static GameObject teamPickT1Btn, teamPickT2Btn;
         private static object txtPickStatus;
 
         private static TeamHistRow CreateTeamHistRow(Transform parent, string name)
@@ -3502,9 +3513,11 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
 
         private static void RefreshTeamTab()
         {
-            // Header live count
+            // Header live count — green when anyone's searching (matches the 1v1 vibe).
+            int searchingCount = ApiClient.CachedTeamQueueSearching;
+            string countCol = searchingCount > 0 ? "#88FF88" : "#888";
             UIFactory.SetText(txtTeamHeader,
-                $"<b>2v2 Ranked</b>  <color=#888>({ApiClient.CachedTeamQueueSearching} searching)</color>");
+                $"<b>2v2 Ranked</b>  <color={countCol}>({searchingCount} searching)</color>");
 
             // Queue state UI
             var st = ApiClient.CurrentTeamQueueState;
@@ -3513,28 +3526,27 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             switch (st)
             {
                 case ApiClient.TeamQueueState.Idle:
-                    status = "<color=#888>Click <b>Search</b> to start finding a 2v2.</color>";
+                    status = "<color=#888>Pick <b>Search Random</b> for matchmaking, or <b>Find Custom Lobby</b> to choose teams.</color>";
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(true);
+                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(true);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(false);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     break;
                 case ApiClient.TeamQueueState.Searching:
-                    // Use the server-reported queue_count (number of currently-searching
-                    // players) — clamped to [1,4] for display. Old logic counted
-                    // teammates + opponents in the poll response, but those are only
-                    // populated AFTER lock; pre-lock they're empty so the UI was
-                    // stuck on 1/4 even when 4 were queued.
                     int found = poll != null && poll.queue_count > 0 ? poll.queue_count : 1;
                     if (found < 1) found = 1;
                     if (found > 4) found = 4;
-                    status = $"<color=#66CCFF>Searching for 2v2...</color>  <b>{found}/4</b>";
+                    string qLabel = ApiClient.CurrentTeamQueueType == "manual" ? "custom 2v2 lobby" : "2v2";
+                    status = $"<color=#66CCFF>Searching for {qLabel}...</color>  <b>{found}/4</b>";
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
+                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(true);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     break;
                 case ApiClient.TeamQueueState.Matched:
                     status = "<color=#FFD94D>Match found! Click <b>Ready Up</b>.</color>";
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
+                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(true);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(true);
                     members = BuildTeamMembersString(poll);
@@ -3542,6 +3554,7 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 case ApiClient.TeamQueueState.ReadySent:
                     status = "<color=#88FF88>Ready! Waiting for the other 3...</color>";
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
+                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(true);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     members = BuildTeamMembersString(poll);
@@ -3576,77 +3589,53 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 }
             }
 
-            // In Queue panel — refresh from /team/queue/list (5s throttle).
+            // In Queue panel — refresh from /team/queue/list (2s throttle).
             ApiClient.UpdateTeamQueueList(force: false);
-            var qlist = ApiClient.CachedTeamQueueList;
+            var autoList = ApiClient.CachedTeamQueueAuto;
+            var manualList = ApiClient.CachedTeamQueueManual;
 
-            // Manual-pick controls: only meaningful while in queue. Show our
-            // checkbox state and quorum progress; light up Team buttons only
-            // when the matchmaker quorum (3 of 4) is met.
-            bool meEnabled = false;
+            // Pick-teams row: only shown inside the manual queue. Highlight
+            // the user's currently-claimed team (✓ in label + bright color).
             int myPreferred = 0;
-            if (qlist != null)
+            bool inManualQueue = ApiClient.CurrentTeamQueueType == "manual"
+                && (st == ApiClient.TeamQueueState.Searching || st == ApiClient.TeamQueueState.Matched);
+            if (manualList != null)
             {
-                foreach (var q in qlist)
+                foreach (var q in manualList)
                 {
-                    if (q.steam_id == MatchTracker.LocalSteamId)
-                    { meEnabled = q.manual_pick_enabled; myPreferred = q.preferred_team; break; }
+                    if (q.steam_id == MatchTracker.LocalSteamId) { myPreferred = q.preferred_team; break; }
                 }
             }
-            UIFactory.SetText(UIFactory.GetButtonText(teamPickToggleBtn),
-                meEnabled ? "[X] Allow team picking" : "[ ] Allow team picking");
-            UIFactory.SetImageColor(teamPickToggleBtn,
-                meEnabled ? new Color(0.20f, 0.45f, 0.20f, 0.90f) : new Color(0.25f, 0.25f, 0.30f, 0.90f));
-            int quorum = ApiClient.CachedManualPickQuorum;
-            int needed = ApiClient.CachedManualPickRequired > 0 ? ApiClient.CachedManualPickRequired : 3;
-            bool active = ApiClient.CachedManualPickActive;
-            // Greyed when quorum not met OR caller hasn't enabled their own checkbox.
-            float t1Alpha = (active && meEnabled) ? 0.95f : 0.35f;
-            float t2Alpha = (active && meEnabled) ? 0.95f : 0.35f;
-            // Highlight the user's currently-selected team.
-            var t1Color = myPreferred == 1
-                ? new Color(0.85f, 0.50f, 0.20f, t1Alpha)
-                : new Color(0.55f, 0.30f, 0.10f, t1Alpha);
-            var t2Color = myPreferred == 2
-                ? new Color(0.20f, 0.50f, 0.85f, t2Alpha)
-                : new Color(0.10f, 0.30f, 0.55f, t2Alpha);
-            UIFactory.SetImageColor(teamPickT1Btn, t1Color);
-            UIFactory.SetImageColor(teamPickT2Btn, t2Color);
-            // Status text.
-            string pickStatus;
-            if (qlist == null || qlist.Count == 0)
-                pickStatus = "<color=#888>Join the queue to enable team picking.</color>";
-            else if (active)
-                pickStatus = $"<color=#88FF88>Side picking unlocked</color>  <color=#888>({quorum}/{needed} allowing)</color>";
-            else
-                pickStatus = $"<color=#888>Auto-balance by elo  ({quorum}/{needed} allowing — need {Math.Max(0, needed - quorum)} more)</color>";
-            UIFactory.SetText(txtPickStatus, pickStatus);
-            if (qlist == null || qlist.Count == 0)
+            if (teamPickT1Btn != null) teamPickT1Btn.SetActive(inManualQueue);
+            if (teamPickT2Btn != null) teamPickT2Btn.SetActive(inManualQueue);
+            var pickStatusComp = txtPickStatus as Component;
+            if (pickStatusComp != null) pickStatusComp.gameObject.SetActive(inManualQueue);
+            if (inManualQueue)
             {
-                UIFactory.SetText(txtTeamQueueListHeader, "<b>In Queue</b>  <color=#888>(empty)</color>");
-                UIFactory.SetText(txtTeamQueueListBody, "<color=#888>No one is queueing for 2v2 right now.</color>");
+                float t1Alpha = 0.95f, t2Alpha = 0.95f;
+                var t1Color = myPreferred == 1
+                    ? new Color(1.00f, 0.65f, 0.20f, t1Alpha)
+                    : new Color(0.40f, 0.25f, 0.10f, t1Alpha * 0.7f);
+                var t2Color = myPreferred == 2
+                    ? new Color(0.30f, 0.70f, 1.00f, t2Alpha)
+                    : new Color(0.10f, 0.25f, 0.45f, t2Alpha * 0.7f);
+                UIFactory.SetImageColor(teamPickT1Btn, t1Color);
+                UIFactory.SetImageColor(teamPickT2Btn, t2Color);
+                UIFactory.SetText(UIFactory.GetButtonText(teamPickT1Btn),
+                    myPreferred == 1 ? "<b>✓ Team 1 (Orange)</b>" : "Team 1 (Orange)");
+                UIFactory.SetText(UIFactory.GetButtonText(teamPickT2Btn),
+                    myPreferred == 2 ? "<b>✓ Team 2 (Blue)</b>" : "Team 2 (Blue)");
+                int manualSearching = 0;
+                if (manualList != null)
+                    foreach (var q in manualList) if (q.status == "searching") manualSearching++;
+                string ps = myPreferred == 0
+                    ? $"<color=#FFB347>Claim Team 1 or Team 2.</color>  <color=#888>({manualSearching}/4 in lobby)</color>"
+                    : $"<color=#88FF88>Locked in to Team {myPreferred}.</color>  <color=#888>({manualSearching}/4 in lobby)</color>";
+                UIFactory.SetText(txtPickStatus, ps);
             }
-            else
-            {
-                UIFactory.SetText(txtTeamQueueListHeader, $"<b>In Queue</b>  <color=#888>({qlist.Count})</color>");
-                var sb = new StringBuilder();
-                foreach (var q in qlist)
-                {
-                    bool isMe = q.steam_id == MatchTracker.LocalSteamId;
-                    string nameC = isMe ? "<color=#88FF88>" : "<color=#FFFFFF>";
-                    string ratingDisplay = q.using_fallback_rating
-                        ? $"<color=#FFB347>{q.balance_rating}</color> <color=#888>1v1</color>"
-                        : $"<color=#FFFFFF>{q.rating}</color>";
-                    string statusTag = q.status == "searching"
-                        ? $"<color=#66CCFF>searching</color>"
-                        : q.status == "matched" ? $"<color=#FFD94D>matched</color>" : $"<color=#88FF88>{q.status}</color>";
-                    int waitMin = q.wait_seconds / 60;
-                    int waitSec = q.wait_seconds % 60;
-                    string waitStr = waitMin > 0 ? $"{waitMin}m{waitSec:D2}s" : $"{waitSec}s";
-                    sb.Append($"  {nameC}{Trunc(q.display_name, 18)}</color>  {ratingDisplay}  {statusTag}  <color=#888>{waitStr}</color>\n");
-                }
-                UIFactory.SetText(txtTeamQueueListBody, sb.ToString());
-            }
+
+            RenderTeamQueueSection(autoList, txtTeamQueueListHeader, txtTeamQueueListBody, "Random Queue");
+            RenderTeamQueueSection(manualList, txtTeamQueueManualHeader, txtTeamQueueManualBody, "Custom Lobbies");
 
             // Leaderboard
             var lb = ApiClient.CachedTeamLeaderboard ?? new List<ApiClient.TeamLeaderboardEntry>();
@@ -3673,65 +3662,172 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 UIFactory.SetText(txtTeamLBHeader, $"<b>2v2 Leaderboard</b>  <color=#888>(top {lb.Count})</color>");
             }
 
-            // Recent 2v2 SERIES (group matches by series_id and render one row
-            // per series — same shape as 1v1 Ranked Series). Per-match elo
-            // change repeats across all matches in a series (it's a series-
-            // level value), so showing one row per series + the final series
-            // score + the single elo delta matches the user's mental model
-            // for ranked progression.
+            // Recent 2v2 history. Group matches by series_id, render a HEADER
+            // row per series (outcome + final score + elo + teams), then the
+            // individual game rows beneath it (Game 1: 5-2  cards: ...).
+            // Server returns hist in time-DESC order; within a series we want
+            // Game 1 → Game N ascending.
             var hist = ApiClient.CachedTeamMatchHistory ?? new List<ApiClient.TeamMatchHistoryEntry>();
-            // Hist is ordered DESC by ended_at server-side — first occurrence
-            // of each series_id is the latest (completing) match, so it has
-            // the final series_score the user wants to see.
             var seriesOrder = new List<string>();
-            var bySeries = new Dictionary<string, ApiClient.TeamMatchHistoryEntry>();
+            var bySeries = new Dictionary<string, List<ApiClient.TeamMatchHistoryEntry>>();
             foreach (var m in hist)
             {
-                if (string.IsNullOrEmpty(m.series_id)) continue;  // stray match without series id (shouldn't happen for 2v2)
+                if (string.IsNullOrEmpty(m.series_id)) continue;
                 if (!bySeries.ContainsKey(m.series_id))
                 {
                     seriesOrder.Add(m.series_id);
-                    bySeries[m.series_id] = m;
+                    bySeries[m.series_id] = new List<ApiClient.TeamMatchHistoryEntry>();
                 }
+                bySeries[m.series_id].Add(m);
             }
+            // Within each series flip to ASC by ended_at so Game 1 renders first.
+            foreach (var sid in seriesOrder)
+                bySeries[sid].Sort((a, b) => string.Compare(a.ended_at, b.ended_at, StringComparison.Ordinal));
 
-            for (int i = 0; i < teamHistRows.Count; i++)
+            int rowIdx = 0;
+            int seriesCount = 0;
+            foreach (var sid in seriesOrder)
             {
-                var r = teamHistRows[i];
-                if (i >= seriesOrder.Count) { r.root.SetActive(false); continue; }
-                var m = bySeries[seriesOrder[i]];
-                // Parse series_score (always from caller's perspective, e.g. "2-1" if I won 2-1)
+                var matches = bySeries[sid];
+                if (matches.Count == 0) continue;
+                if (rowIdx >= teamHistRows.Count) break;
+                var first = matches[0];
+                seriesCount++;
+
+                // ── HEADER row ───────────────────────────────────────
                 int mySW = 0, oppSW = 0;
-                if (!string.IsNullOrEmpty(m.series_score))
+                if (!string.IsNullOrEmpty(first.series_score))
                 {
-                    var parts = m.series_score.Split('-');
+                    var parts = first.series_score.Split('-');
                     if (parts.Length == 2) { int.TryParse(parts[0], out mySW); int.TryParse(parts[1], out oppSW); }
+                }
+                // If series_score missing, derive from match wins.
+                if (mySW == 0 && oppSW == 0)
+                {
+                    foreach (var mm in matches)
+                    {
+                        if (mm.won) mySW++; else oppSW++;
+                    }
                 }
                 bool seriesWon = mySW > oppSW;
                 string outcome = seriesWon ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>";
-                string score = $"{mySW}-{oppSW}";
-                string mate = m.my_team == 1
-                    ? (m.t1a_steam_id == MatchTracker.LocalSteamId ? m.t1b_name : m.t1a_name)
-                    : (m.t2a_steam_id == MatchTracker.LocalSteamId ? m.t2b_name : m.t2a_name);
-                string opp1 = m.my_team == 1 ? m.t2a_name : m.t1a_name;
-                string opp2 = m.my_team == 1 ? m.t2b_name : m.t1b_name;
+                string mate = first.my_team == 1
+                    ? (first.t1a_steam_id == MatchTracker.LocalSteamId ? first.t1b_name : first.t1a_name)
+                    : (first.t2a_steam_id == MatchTracker.LocalSteamId ? first.t2b_name : first.t2a_name);
+                string opp1 = first.my_team == 1 ? first.t2a_name : first.t1a_name;
+                string opp2 = first.my_team == 1 ? first.t2b_name : first.t1b_name;
                 string ratingDelta = "";
-                if (Mathf.Abs(m.series_rating_change) > 0.01f)
+                if (Mathf.Abs(first.series_rating_change) > 0.01f)
                 {
-                    string rcCol = m.series_rating_change > 0 ? "#00FF00" : "#FF6666";
-                    ratingDelta = $"  <color={rcCol}>{(m.series_rating_change > 0 ? "+" : "")}{m.series_rating_change:F0} elo</color>";
+                    string rcCol = first.series_rating_change > 0 ? "#00FF00" : "#FF6666";
+                    ratingDelta = $"  <color={rcCol}>{(first.series_rating_change > 0 ? "+" : "")}{first.series_rating_change:F0} elo</color>";
                 }
                 string dt = "";
-                try { if (!string.IsNullOrEmpty(m.ended_at) && m.ended_at.Length >= 10) dt = DateTime.Parse(m.ended_at).ToString("M/d"); } catch { }
-                UIFactory.SetText(r.txtLine1, $"{outcome} Series {score}  <color=#999>{dt}</color>{ratingDelta}");
-                UIFactory.SetText(r.txtLine2, $"  + <color=#88CCFF>{Trunc(mate, 14)}</color>  vs  {Trunc(opp1, 14)}, {Trunc(opp2, 14)}");
-                r.root.SetActive(true);
+                try
+                {
+                    var latest = matches[matches.Count - 1].ended_at;
+                    if (!string.IsNullOrEmpty(latest) && latest.Length >= 10)
+                        dt = DateTime.Parse(latest).ToString("M/d");
+                }
+                catch { }
+
+                var hdr = teamHistRows[rowIdx++];
+                UIFactory.SetText(hdr.txtLine1,
+                    $"{outcome} <b>Series {mySW}-{oppSW}</b>  <color=#999>{dt}</color>{ratingDelta}");
+                UIFactory.SetText(hdr.txtLine2,
+                    $"  <color=#88CCFF>YOU + {Trunc(mate, 12)}</color>  vs  <color=#FFB088>{Trunc(opp1, 12)}, {Trunc(opp2, 12)}</color>");
+                hdr.root.SetActive(true);
+
+                // ── Per-match rows ───────────────────────────────────
+                int gameNum = 0;
+                foreach (var m in matches)
+                {
+                    if (rowIdx >= teamHistRows.Count) break;
+                    gameNum++;
+                    int myR = m.my_team == 1 ? m.t1_rounds_won : m.t2_rounds_won;
+                    int oppR = m.my_team == 1 ? m.t2_rounds_won : m.t1_rounds_won;
+                    bool gameWon = myR > oppR;
+                    string gOut = gameWon ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>";
+
+                    // Team-aggregate cards. Show as "YOU+mate took: ..." vs
+                    // "opp1+opp2 took: ..." — combine each team's cards into one list.
+                    string myTeamCards = JoinTeamCards(m, m.my_team);
+                    string oppTeamCards = JoinTeamCards(m, m.my_team == 1 ? 2 : 1);
+
+                    var row = teamHistRows[rowIdx++];
+                    UIFactory.SetText(row.txtLine1,
+                        $"  <color=#666>—</color>  Game {gameNum}: {gOut} {myR}-{oppR}");
+                    string cardsLine = "";
+                    if (!string.IsNullOrEmpty(myTeamCards) || !string.IsNullOrEmpty(oppTeamCards))
+                    {
+                        cardsLine = $"     <color=#88CCFF>{(string.IsNullOrEmpty(myTeamCards) ? "—" : myTeamCards)}</color>  <color=#666>·</color>  <color=#FFB088>{(string.IsNullOrEmpty(oppTeamCards) ? "—" : oppTeamCards)}</color>";
+                    }
+                    UIFactory.SetText(row.txtLine2, cardsLine);
+                    row.root.SetActive(true);
+                }
             }
-            int seriesCount = seriesOrder.Count;
+            // Hide unused rows.
+            for (int i = rowIdx; i < teamHistRows.Count; i++) teamHistRows[i].root.SetActive(false);
+
             if (seriesCount == 0)
                 UIFactory.SetText(txtTeamHistHeader, "<b>Recent 2v2 Series</b>  <color=#888>— none yet</color>");
             else
                 UIFactory.SetText(txtTeamHistHeader, $"<b>Recent 2v2 Series</b>  <color=#888>({seriesCount})</color>");
+        }
+
+        // Render one half of the split In Queue panel (Random or Custom).
+        private static void RenderTeamQueueSection(
+            List<ApiClient.TeamQueueListEntry> list, object header, object body, string label)
+        {
+            int n = list != null ? list.Count : 0;
+            if (n == 0)
+            {
+                UIFactory.SetText(header, $"<b>{label}</b>  <color=#888>(empty)</color>");
+                UIFactory.SetText(body, $"<color=#888>No one in {label.ToLower()} right now.</color>");
+                return;
+            }
+            UIFactory.SetText(header, $"<b>{label}</b>  <color=#888>({n})</color>");
+            var sb = new StringBuilder();
+            foreach (var q in list)
+            {
+                bool isMe = q.steam_id == MatchTracker.LocalSteamId;
+                string nameC = isMe ? "<color=#88FF88>" : "<color=#FFFFFF>";
+                string ratingDisplay = q.using_fallback_rating
+                    ? $"<color=#FFB347>{q.balance_rating}</color> <color=#888>1v1</color>"
+                    : $"<color=#FFFFFF>{q.rating}</color>";
+                string statusTag = q.status == "searching"
+                    ? $"<color=#66CCFF>searching</color>"
+                    : q.status == "matched" ? $"<color=#FFD94D>matched</color>" : $"<color=#88FF88>{q.status}</color>";
+                int waitMin = q.wait_seconds / 60;
+                int waitSec = q.wait_seconds % 60;
+                string waitStr = waitMin > 0 ? $"{waitMin}m{waitSec:D2}s" : $"{waitSec}s";
+                string teamTag = "";
+                if (q.preferred_team == 1) teamTag = "  <color=#FFB347>T1</color>";
+                else if (q.preferred_team == 2) teamTag = "  <color=#88AAFF>T2</color>";
+                sb.Append($"  {nameC}{Trunc(q.display_name, 18)}</color>  {ratingDisplay}  {statusTag}  <color=#888>{waitStr}</color>{teamTag}\n");
+            }
+            UIFactory.SetText(body, sb.ToString());
+        }
+
+        // Helpers for the per-match cards line.
+        private static string JoinTeamCards(ApiClient.TeamMatchHistoryEntry m, int team)
+        {
+            if (m.cards_by_player == null || m.cards_by_player.Count == 0) return "";
+            string aSid = team == 1 ? m.t1a_steam_id : m.t2a_steam_id;
+            string bSid = team == 1 ? m.t1b_steam_id : m.t2b_steam_id;
+            string aName = team == 1 ? m.t1a_name : m.t2a_name;
+            string bName = team == 1 ? m.t1b_name : m.t2b_name;
+            var sb = new StringBuilder();
+            sb.Append(Trunc(aName, 8)).Append(": ");
+            if (m.cards_by_player.TryGetValue(aSid, out var aCards) && aCards.Count > 0)
+                sb.Append(string.Join(", ", aCards.GetRange(0, Math.Min(aCards.Count, 6)).ToArray()));
+            else sb.Append("(no cards)");
+            sb.Append("  |  ");
+            sb.Append(Trunc(bName, 8)).Append(": ");
+            if (m.cards_by_player.TryGetValue(bSid, out var bCards) && bCards.Count > 0)
+                sb.Append(string.Join(", ", bCards.GetRange(0, Math.Min(bCards.Count, 6)).ToArray()));
+            else sb.Append("(no cards)");
+            return sb.ToString();
         }
 
         private static string BuildTeamMembersString(ApiClient.TeamQueuePollData poll)

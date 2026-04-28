@@ -469,7 +469,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.25.17"
+LATEST_MOD_VERSION = "1.25.18"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -4826,6 +4826,12 @@ async def team_queue_join(req: TeamQueueJoinRequest, db: AsyncSession = Depends(
     g1 = g1_r.scalar_one_or_none()
     fallback_rating = g1.rating if g1 else GLICKO2_DEFAULT_RATING
 
+    qtype = (req.queue_type or "auto").lower()
+    if qtype not in ("auto", "manual"):
+        qtype = "auto"
+
+    # Switching queue type clears any stale preferred_team — manual queue starts
+    # fresh with no team claimed; auto queue ignores preferred_team entirely.
     stmt = pg_insert(TeamQueue).values(
         player_id=player.id,
         steam_id=req.steam_id,
@@ -4844,6 +4850,7 @@ async def team_queue_join(req: TeamQueueJoinRequest, db: AsyncSession = Depends(
         joined_at=datetime.now(timezone.utc),
         matched_at=None,
         last_polled=datetime.now(timezone.utc),
+        queue_type=qtype,
     ).on_conflict_do_update(
         index_elements=[TeamQueue.player_id],
         set_={
@@ -4861,11 +4868,14 @@ async def team_queue_join(req: TeamQueueJoinRequest, db: AsyncSession = Depends(
             "joined_at": datetime.now(timezone.utc),
             "matched_at": None,
             "last_polled": datetime.now(timezone.utc),
+            "queue_type": qtype,
+            "preferred_team": None,
+            "manual_pick_enabled": (qtype == "manual"),
         },
     )
     await db.execute(stmt)
     await db.commit()
-    return {"status": "searching", "message": "Joined 2v2 queue"}
+    return {"status": "searching", "queue_type": qtype, "message": f"Joined 2v2 {qtype} queue"}
 
 
 @app.post("/api/v1/team/queue/leave", tags=["Team Queue"])
@@ -4923,33 +4933,31 @@ async def team_queue_count(db: AsyncSession = Depends(get_db)):
 @app.get("/api/v1/team/queue/list", tags=["Team Queue"])
 async def team_queue_list(db: AsyncSession = Depends(get_db)):
     """Snapshot of every player currently in the 2v2 queue. Powers the
-    "who else is queueing" panel on the F5 2v2 tab. No privacy filter
-    (Discord queue beacons already publish names — no point hiding here).
-    Includes the balancer rating + fallback-flag so the user can see at
-    a glance which queuers' 2v2 elo is being used vs which fell back to
-    their 1v1 elo."""
+    "who else is queueing" panels on the F5 2v2 tab. Returns the unified
+    `queuers` list (legacy) PLUS split `auto` / `manual` buckets so the
+    client can render two side-by-side panels without re-filtering."""
     result = await db.execute(
         text("""
             SELECT tq.steam_id, tq.display_name, tq.rating, tq.completed_series,
                    tq.fallback_rating, tq.region, tq.joined_at, tq.status,
                    tq.team_assigned, tq.series_id,
-                   tq.manual_pick_enabled, tq.preferred_team
+                   tq.manual_pick_enabled, tq.preferred_team, tq.queue_type
             FROM team_queue tq
             WHERE tq.status IN ('searching', 'matched', 'ready')
             ORDER BY tq.joined_at ASC
         """),
     )
     rows = result.mappings().all()
-    out = []
-    manual_quorum = 0
+    out: list[dict] = []
+    auto_bucket: list[dict] = []
+    manual_bucket: list[dict] = []
     for r in rows:
         cs = int(r["completed_series"] or 0)
         using_fb = cs < TEAM_TRUST_2V2_RATING_AFTER
         fb = float(r["fallback_rating"] or 0)
         balance = int(round(fb)) if using_fb else int(round(r["rating"]))
-        if r["manual_pick_enabled"]:
-            manual_quorum += 1
-        out.append({
+        qt = (r["queue_type"] or "auto").lower()
+        entry = {
             "steam_id": r["steam_id"],
             "display_name": r["display_name"],
             "rating": int(round(r["rating"] or 0)),
@@ -4964,13 +4972,17 @@ async def team_queue_list(db: AsyncSession = Depends(get_db)):
             "wait_seconds": int((datetime.now(timezone.utc) - r["joined_at"]).total_seconds()) if r["joined_at"] else 0,
             "manual_pick_enabled": bool(r["manual_pick_enabled"]),
             "preferred_team": r["preferred_team"],
-        })
+            "queue_type": qt,
+        }
+        out.append(entry)
+        (manual_bucket if qt == "manual" else auto_bucket).append(entry)
     return {
         "queuers": out,
         "count": len(out),
-        "manual_pick_quorum": manual_quorum,
-        "manual_pick_required": 3,  # threshold for the quorum to unlock side-buttons
-        "manual_pick_active": manual_quorum >= 3,
+        "auto": auto_bucket,
+        "manual": manual_bucket,
+        "auto_count": len(auto_bucket),
+        "manual_count": len(manual_bucket),
     }
 
 
@@ -5013,7 +5025,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
                    tq.completed_series, tq.fallback_rating, tq.region, tq.status, tq.series_id,
                    tq.team_assigned, tq.room_name, tq.room_region, tq.ready,
-                   tq.joined_at, tq.matched_at
+                   tq.joined_at, tq.matched_at, tq.queue_type
             FROM team_queue tq
             JOIN players p ON tq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -5175,14 +5187,16 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     # Find 3 other compatible players. Bilateral Elo overlap, no mutual blocks.
     # Use the SAME elo_range as the caller's tier — wider tier callers find each
     # other faster but a 60s-old caller can't lock with a brand-new 100-Elo-band caller.
+    my_qtype = (me.get("queue_type") or "auto").lower()
     cands = await db.execute(
         text("""
             SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
                    tq.completed_series, tq.fallback_rating, tq.region, tq.joined_at,
-                   tq.manual_pick_enabled, tq.preferred_team
+                   tq.manual_pick_enabled, tq.preferred_team, tq.queue_type
             FROM team_queue tq
             WHERE tq.status = 'searching'
               AND tq.player_id != :pid
+              AND tq.queue_type = :qt
               AND ABS(tq.rating - :my_r) <= :range
               AND tq.player_id NOT IN (
                   SELECT blocked_id FROM player_blocks WHERE blocker_id = :pid
@@ -5194,7 +5208,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             LIMIT 3
             FOR UPDATE SKIP LOCKED
         """),
-        {"pid": my_pid, "my_r": me["rating"], "range": elo_range},
+        {"pid": my_pid, "my_r": me["rating"], "range": elo_range, "qt": my_qtype},
     )
     others = list(cands.mappings().all())
 
@@ -5312,11 +5326,11 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             "preferred_team": o.get("preferred_team"),
         })
 
-    # Manual pick: if 3+ of the 4 have the toggle enabled, honor each player's
-    # preferred_team. Players without a preference fill the remaining slots.
-    manual_count = sum(1 for p in pool if p["manual_pick_enabled"])
+    # Manual queue: honor each player's preferred_team (queue membership IS the
+    # opt-in). Players without a preference fill remaining slots. Auto queue:
+    # always run the elo balancer regardless of any stale preferred_team.
     was_auto_balanced = True
-    if manual_count >= 3:
+    if my_qtype == "manual":
         team1_ids, team2_ids, unassigned = [], [], []
         for p in pool:
             pt = p["preferred_team"]
@@ -5326,7 +5340,6 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 team2_ids.append(p["player_id"])
             else:
                 unassigned.append(p["player_id"])
-        # Distribute leftover players into whichever team has space.
         for pid in unassigned:
             if len(team1_ids) < 2:
                 team1_ids.append(pid)
@@ -5477,10 +5490,9 @@ async def team_queue_preferred_team(
     team: int = Query(..., ge=1, le=2),
     db: AsyncSession = Depends(get_db),
 ):
-    """Claim Team 1 or Team 2. No effect unless `manual_pick_enabled` is true
-    (toggled separately) AND the matchmaker quorum (3+ enabled queuers) is
-    met at lock time. Pass team=0 to clear via the manual-pick-toggle off
-    endpoint instead."""
+    """Claim Team 1 or Team 2. Only honored when the queuer is in the manual
+    (pick-teams) queue. Auto-queue calls are no-ops because the matchmaker
+    ignores preferred_team for that queue."""
     pid = (await db.execute(select(Player.id).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if pid is None:
         raise HTTPException(404, "Player not found")
@@ -5488,7 +5500,7 @@ async def team_queue_preferred_team(
         text("""
             UPDATE team_queue
                SET preferred_team = :team
-             WHERE player_id = :pid AND manual_pick_enabled = TRUE
+             WHERE player_id = :pid AND queue_type = 'manual'
         """),
         {"pid": pid, "team": team},
     )

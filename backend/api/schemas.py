@@ -398,6 +398,7 @@ class TeamQueueJoinRequest(BaseModel):
     steam_id: str = Field(..., max_length=20)
     display_name: str | None = Field(None, max_length=64)
     region: str | None = Field(None, max_length=8)
+    queue_type: str | None = Field(None, max_length=8)  # 'auto' (default) or 'manual'
 
 
 class TeamQueueMember(BaseModel):

@@ -496,6 +496,7 @@ class TeamQueue(Base):
     joined_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     matched_at = Column(DateTime(timezone=True), nullable=True)
     last_polled = Column(DateTime(timezone=True), nullable=True, default=lambda: datetime.now(timezone.utc))
+    queue_type = Column(String(8), nullable=False, default="auto")
 
 
 class TeamSeries(Base):

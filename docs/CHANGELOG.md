@@ -1,5 +1,25 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.18 — 2v2 polish pass: decoupled queues, per-game cards in history, queue UX
+
+Follow-up to v1.25.17 testing. Splits Random matchmaking from the Pick-Teams flow into two independent queues, restores per-game detail in 2v2 history, and tightens queue-list responsiveness.
+
+**Decoupled queues (#1, #5):**
+- Migration 064: `team_queue.queue_type` (`'auto'` | `'manual'`) + CHECK + index
+- Matchmaker filters candidates by `queue_type` so the two queues never cross-match
+- Manual queue: always honors each player's `preferred_team` (joining IS the consent — no quorum gate). Auto queue: always runs the elo balancer.
+- F5 tab: two buttons — `Search Random` (auto) and `Find Custom Lobby` (manual). Team 1 / Team 2 buttons render only inside a custom lobby.
+- `In Queue` panel split into two sections: `Random Queue (N)` and `Custom Lobbies (N)`. Each lists every queuer with name, balance rating, status, wait time, plus a `T1`/`T2` tag when a side is claimed.
+
+**2v2 history detail (#6, #7):**
+- `cards_by_player` (Steam-id keyed) now flows from `/team/match-history` so the F5 history can render each game's cards
+- Per-series header (outcome + final score + elo delta + teams) followed by per-game rows beneath: `Game N: 5-2` plus `PlayerA: card1, card2 | PlayerB: card3, card4`
+
+**Queue UX:**
+- `(N searching)` count in the 2v2 header is green when anyone is searching (parity with 1v1 ranked)
+- Team 1 / Team 2 buttons highlight the claimed side with `✓ Team N` and a brighter color
+- Queue-list polling tightened from 5s → 2s so newly-arriving queuers appear without backing out
+
 ## v1.25.17 — 2v2 mega-pass: queue visibility, manual team selection, DC tracking + sticky teams, 2v2 betting
 
 Big multi-feature pass building on the 2v2 ranked foundation.

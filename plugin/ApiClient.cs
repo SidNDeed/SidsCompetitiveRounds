@@ -2662,13 +2662,17 @@ namespace CompetitiveRounds
             public int wait_seconds;
             public bool manual_pick_enabled;
             public int preferred_team;
+            public string queue_type;  // "auto" or "manual" — empty defaults to auto
         }
         public static List<TeamQueueListEntry> CachedTeamQueueList { get; private set; } = new List<TeamQueueListEntry>();
-        public static int CachedManualPickQuorum { get; private set; } = 0;
-        public static int CachedManualPickRequired { get; private set; } = 3;
-        public static bool CachedManualPickActive { get; private set; } = false;
+        // Pre-bucketed views for the F5 panel — saves the renderer from re-filtering every frame.
+        public static List<TeamQueueListEntry> CachedTeamQueueAuto { get; private set; } = new List<TeamQueueListEntry>();
+        public static List<TeamQueueListEntry> CachedTeamQueueManual { get; private set; } = new List<TeamQueueListEntry>();
         private static float teamQueueListTimer = 0f;
-        private const float TEAM_QUEUE_LIST_INTERVAL = 5f;
+        // Tight 2s polling so the panel reflects new queuers within ~2s of them
+        // joining. User reported: "In Queue doesn't seem to update with new
+        // players when someone joins until i back out and rejoin the queue".
+        private const float TEAM_QUEUE_LIST_INTERVAL = 2f;
 
         public static TeamQueueState CurrentTeamQueueState { get; private set; } = TeamQueueState.Idle;
         public static TeamQueuePollData LastTeamPollData { get; private set; }
@@ -2680,14 +2684,21 @@ namespace CompetitiveRounds
         private const float TEAM_QUEUE_POLL_INTERVAL = 3f;
         private const float TEAM_QUEUE_COUNT_INTERVAL = 10f;
 
-        public static void JoinTeamQueue(string steamId, string displayName, string region)
+        // Tracks which queue (auto / manual) the local player joined. Read by
+        // the F5 tab to render the team-pick controls only inside the manual
+        // queue and to highlight the active "Search Random" / "Find Custom"
+        // button.
+        public static string CurrentTeamQueueType { get; private set; } = "auto";
+
+        public static void JoinTeamQueue(string steamId, string displayName, string region, string queueType = "auto")
         {
             if (string.IsNullOrEmpty(region))
             {
                 try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
             }
+            string qt = (queueType == "manual") ? "manual" : "auto";
             string safeName = Escape(displayName ?? steamId);
-            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\"}}";
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"queue_type\":\"{qt}\"}}";
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/team/queue/join", json,
                 (success, response) =>
@@ -2695,10 +2706,12 @@ namespace CompetitiveRounds
                     if (success)
                     {
                         CurrentTeamQueueState = TeamQueueState.Searching;
+                        CurrentTeamQueueType = qt;
                         IsTeamQueuePolling = true;
                         teamQueuePollTimer = 0f;
-                        Plugin.Log.LogInfo("[TEAM-QUEUE] Joined 2v2 queue");
-                        CompetitiveUI.ShowNotification("Searching for 2v2 match...", new Color(0.4f, 0.8f, 1f));
+                        Plugin.Log.LogInfo($"[TEAM-QUEUE] Joined 2v2 {qt} queue");
+                        string msg = qt == "manual" ? "Searching for custom 2v2 lobby..." : "Searching for 2v2 match...";
+                        CompetitiveUI.ShowNotification(msg, new Color(0.4f, 0.8f, 1f));
                         NativeUI.MarkDirty();
                     }
                     else
@@ -2805,6 +2818,8 @@ namespace CompetitiveRounds
                 }
                 if (oDepth != 0) break;
                 string obj = slice.Substring(objStart, j - objStart);
+                string qt = ExtractJsonString(obj, "queue_type");
+                if (string.IsNullOrEmpty(qt)) qt = "auto";
                 list.Add(new TeamQueueListEntry
                 {
                     steam_id = ExtractJsonString(obj, "steam_id"),
@@ -2820,14 +2835,19 @@ namespace CompetitiveRounds
                     wait_seconds = ExtractJsonInt(obj, "wait_seconds"),
                     manual_pick_enabled = ExtractJsonBool(obj, "manual_pick_enabled"),
                     preferred_team = ExtractJsonInt(obj, "preferred_team"),
+                    queue_type = qt,
                 });
                 oIdx = j;
             }
             CachedTeamQueueList = list;
-            CachedManualPickQuorum = ExtractJsonInt(response, "manual_pick_quorum");
-            CachedManualPickRequired = ExtractJsonInt(response, "manual_pick_required");
-            if (CachedManualPickRequired <= 0) CachedManualPickRequired = 3;
-            CachedManualPickActive = ExtractJsonBool(response, "manual_pick_active");
+            var autoB = new List<TeamQueueListEntry>();
+            var manB = new List<TeamQueueListEntry>();
+            foreach (var e in list)
+            {
+                if (e.queue_type == "manual") manB.Add(e); else autoB.Add(e);
+            }
+            CachedTeamQueueAuto = autoB;
+            CachedTeamQueueManual = manB;
         }
 
         // Toggle the local player's manual_pick_enabled flag in the team queue.
@@ -3310,6 +3330,10 @@ namespace CompetitiveRounds
             public float series_rating_change;
             // FPS keyed by Steam ID; absent = no data
             public Dictionary<string, int> fps_by_player = new Dictionary<string, int>();
+            // Card names picked, keyed by Steam ID. Drives the per-match cards
+            // section in the F5 2v2 history UI ("Sid+Sid2 took: Shields Up,
+            // Big Bullet  vs  Sid3+Sid4 took: Dazzle, Cold Bullets").
+            public Dictionary<string, List<string>> cards_by_player = new Dictionary<string, List<string>>();
         }
         public static List<TeamMatchHistoryEntry> CachedTeamMatchHistory { get; private set; } = new List<TeamMatchHistoryEntry>();
 
@@ -3400,6 +3424,55 @@ namespace CompetitiveRounds
                                 series_score = ExtractJsonString(chunk, "series_score"),
                                 series_rating_change = ExtractJsonFloat(chunk, "series_rating_change"),
                             };
+                            // Parse cards_by_player: dict keyed by steam_id, value
+                            // is a list of card-objects each with a card_name.
+                            try
+                            {
+                                int cStart = chunk.IndexOf("\"cards_by_player\"");
+                                if (cStart >= 0)
+                                {
+                                    int oStart = chunk.IndexOf('{', cStart);
+                                    int oEnd = FindMatchingBracket(chunk, oStart);
+                                    if (oStart >= 0 && oEnd > oStart)
+                                    {
+                                        string slice = chunk.Substring(oStart + 1, oEnd - oStart - 1);
+                                        int cursor = 0;
+                                        while (cursor < slice.Length)
+                                        {
+                                            int kS = slice.IndexOf('"', cursor);
+                                            if (kS < 0) break;
+                                            int kE = slice.IndexOf('"', kS + 1);
+                                            if (kE < 0) break;
+                                            string sid = slice.Substring(kS + 1, kE - kS - 1);
+                                            int aS = slice.IndexOf('[', kE);
+                                            int aE = FindMatchingBracket(slice, aS);
+                                            if (aS < 0 || aE < 0) break;
+                                            string aSlice = slice.Substring(aS + 1, aE - aS - 1);
+                                            var cardList = new List<string>();
+                                            int oC = 0;
+                                            while (oC < aSlice.Length)
+                                            {
+                                                int oS = aSlice.IndexOf('{', oC);
+                                                if (oS < 0) break;
+                                                int oD = 1, j = oS + 1;
+                                                while (j < aSlice.Length && oD > 0)
+                                                {
+                                                    if (aSlice[j] == '{') oD++;
+                                                    else if (aSlice[j] == '}') oD--;
+                                                    j++;
+                                                }
+                                                string objStr = aSlice.Substring(oS, j - oS);
+                                                string cn = ExtractJsonString(objStr, "card_name");
+                                                if (!string.IsNullOrEmpty(cn)) cardList.Add(cn);
+                                                oC = j;
+                                            }
+                                            e.cards_by_player[sid] = cardList;
+                                            cursor = aE + 1;
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
                             entries.Add(e);
                         }
                         CachedTeamMatchHistory = entries;
