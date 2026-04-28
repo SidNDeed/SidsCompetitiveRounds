@@ -2695,6 +2695,23 @@ namespace CompetitiveRounds
                             PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] pre-join SetCustomProperties: {ex.Message}"); }
+
+                    // Publish styled NickName + cosmetic props BEFORE the Photon
+                    // room join completes, so when remote clients receive the
+                    // join broadcast for our actor, our NickName is already the
+                    // styled version. Otherwise they cache the unstyled persona
+                    // name when they first see our actor and the in-game
+                    // nametag label never picks up the styling — user reported:
+                    // "Sid didn't show up with all the name stylizing on
+                    // anyone's screen in the first game" (then it appeared in
+                    // game 2 because the periodic stats-reload publish
+                    // eventually re-broadcast the styled NickName). The
+                    // PublishToPhoton at room-join (GameStateWatcher) is
+                    // post-join — too late for the initial spawn read.
+                    try { NametagStyler.PublishToPhoton(); } catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] pre-join nametag publish: {ex.Message}"); }
+                    try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] pre-join pcolor publish: {ex.Message}"); }
+                    try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] pre-join trail publish: {ex.Message}"); }
+
                     Plugin.SetPendingRoom(data.room_name, data.room_region);
                     Plugin.Log.LogInfo($"[TEAM-QUEUE] All ready! Room: {data.room_name} (region: {data.room_region ?? "auto"}) series={data.series_id} my_slot={slot}");
                     CompetitiveUI.ShowNotification("4/4 ready! Joining 2v2...", Color.green, 5f);

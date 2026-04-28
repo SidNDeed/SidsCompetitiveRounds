@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.15";
+        public const string ModVersion = "1.25.16";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1699,6 +1699,27 @@ namespace CompetitiveRounds
                 bool ok = FacePublisher.TryReadAndApply(pv.Owner.ActorNumber, __instance.gameObject);
                 if (ok)
                     Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face from Photon (pickerID={pickerID}, actor={pv.Owner.ActorNumber})");
+
+                // Diagnostic for "2 of 4 pickers don't show a character" bug.
+                // Log currentSkin state + transform so we can tell if the GO
+                // exists, is active, has children, and where it's positioned.
+                try
+                {
+                    var fSkin = typeof(CardChoiceVisuals).GetField("currentSkin",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    var skin = fSkin?.GetValue(__instance) as GameObject;
+                    string skinDesc;
+                    if (skin == null) skinDesc = "(null)";
+                    else
+                    {
+                        var lp = skin.transform.localPosition;
+                        var ls = skin.transform.localScale;
+                        int childCount = skin.transform.childCount;
+                        skinDesc = $"name={skin.name} active={skin.activeInHierarchy} layer={skin.layer} children={childCount} localPos=({lp.x:F1},{lp.y:F1},{lp.z:F1}) localScale=({ls.x:F2},{ls.y:F2},{ls.z:F2})";
+                    }
+                    Plugin.Log.LogInfo($"[CARDPICK-DIAG] pickerID={pickerID} actor={pv.Owner.ActorNumber} pid={picker.PlayerID} team={picker.TeamID} isLocal={picker.IsLocal} currentSkin: {skinDesc}");
+                }
+                catch (Exception dex) { Plugin.Log.LogWarning($"[CARDPICK-DIAG] log error: {dex.Message}"); }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] CardChoiceVisuals.Show postfix error: {ex.Message}"); }
         }

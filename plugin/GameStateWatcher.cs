@@ -1366,7 +1366,13 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning($"[2v2-REPORT] couldn't resolve Steam ID for actor {pp.ActorNumber}");
                     return false;
                 }
-                string name = pp.NickName ?? sid;
+                // Strip rich-text from NickName before sending to server. The schema
+                // limits display_name to 64 chars; styled nicknames (e.g. neon-pink
+                // wrap with bold/italic/underline/size tags) easily exceed that.
+                // Pydantic rejects with 422 → the entire 2v2 report fails silently.
+                string name = StripRichText(pp.NickName ?? sid);
+                if (string.IsNullOrEmpty(name)) name = sid;
+                if (name.Length > 60) name = name.Substring(0, 60);
                 // Find their Player → TeamID. PlayerManager.players is List<Player>;
                 // each entry has IsLocal/TeamID/PlayerID + a CharacterData on the
                 // same GameObject. Match by Photon ActorNumber via PhotonView.
