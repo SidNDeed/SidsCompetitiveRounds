@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.6";
+        public const string ModVersion = "1.25.7";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -229,6 +229,10 @@ namespace CompetitiveRounds
                 // material to reapply correctly. Order here is load-bearing.
                 go.AddComponent<NametagFontRenderer>();
                 go.AddComponent<NametagGlowRenderer>();
+                // 2v2 diagnostics — Photon callback target. Logs every
+                // PlayerEntered / PlayerLeft / Disconnect / LeftRoom / etc.
+                // when in (or recently in) a cr_ff room.
+                go.AddComponent<Cr2v2DiagCallbacks>();
                 spawned = true;
                 Log.LogInfo("Created persistent GameObject with DontDestroyOnLoad");
             }
@@ -469,6 +473,67 @@ namespace CompetitiveRounds
             string steamId = GameStateWatcher.LocalSteamId;
             if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
                 ApiClient.LeaveQueue(steamId);
+
+            // 2v2: bypass ROUNDS' character-select press-any-key gate. Vanilla
+            // PlayerAssigner.Update polls input devices and only fires CreatePlayer
+            // when the user mashes a key — but in 2v2 the character-select widget
+            // container only has 2 child slots, so players assigned to slots 2/3
+            // don't see a prompt and never trigger their local CreatePlayer. Result:
+            // 2 of 4 spawn correctly, the other 2 sit on the menu while the room
+            // sits empty from their perspective. Auto-fire CreatePlayer ourselves
+            // (which routes through PlayerAssigner_CreatePlayer_2v2_Patch and uses
+            // the server-issued slot 0-3).
+            if (Plugin.Pending2v2Slot >= 0)
+                StartCoroutine(Auto2v2SpawnCoroutine());
+        }
+
+        private System.Collections.IEnumerator Auto2v2SpawnCoroutine()
+        {
+            // Wait briefly for scene + PlayerAssigner to spin up. The scene
+            // reload to "Main" happens around the same time as the Photon room
+            // join, so PlayerAssigner.instance is usually null for ~1 second.
+            float deadline = Time.realtimeSinceStartup + 12f;
+            int tickLogCount = 0;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                if (Plugin.Pending2v2Slot < 0)
+                {
+                    Plugin.Log.LogInfo("[2v2] Auto-spawn aborted — Pending2v2Slot cleared mid-wait");
+                    yield break;
+                }
+                if (!PhotonNetwork.InRoom)
+                {
+                    Plugin.Log.LogInfo("[2v2] Auto-spawn aborted — not in Photon room mid-wait");
+                    yield break;
+                }
+                var pa = PlayerAssigner.instance;
+                if (pa != null && !pa.hasCreatedLocalPlayer)
+                {
+                    InputDevice device = null;
+                    try
+                    {
+                        if (InputManager.ActiveDevices != null && InputManager.ActiveDevices.Count > 0)
+                            device = InputManager.ActiveDevices[0];
+                    }
+                    catch { }
+                    Plugin.Log.LogInfo($"[2v2] Auto-spawning local player (slot={Plugin.Pending2v2Slot}, device={(device != null ? "keyboard" : "null")})");
+                    bool ok = false;
+                    try { pa.CreatePlayer(device, false); ok = true; }
+                    catch (Exception ex) { Plugin.Log.LogError($"[2v2] Auto-spawn CreatePlayer failed: {ex.Message}"); }
+                    if (ok) yield break;
+                }
+                else if (tickLogCount < 6)
+                {
+                    string reason = pa == null ? "PlayerAssigner.instance == null"
+                                  : pa.hasCreatedLocalPlayer ? "local player already exists"
+                                  : "?";
+                    Plugin.Log.LogInfo($"[2v2] Auto-spawn waiting: {reason} (tick {tickLogCount})");
+                    tickLogCount++;
+                }
+                yield return new WaitForSeconds(0.5f);
+            }
+            if (PlayerAssigner.instance == null || !PlayerAssigner.instance.hasCreatedLocalPlayer)
+                Plugin.Log.LogWarning("[2v2] Auto-spawn timed out — PlayerAssigner never initialized or local player never spawned");
         }
     }
 
@@ -935,6 +1000,255 @@ namespace CompetitiveRounds
                 Plugin.Log.LogError($"[2v2] CreatePlayer override failed: {ex.Message} — falling back to vanilla");
                 return true;  // fall back to vanilla CreatePlayer (still wrong but at least game runs)
             }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 2v2 diagnostics — heavy logging gated on Pending2v2Slot >= 0 OR cr_ff
+    // room presence. Goal: when a 4-player attempt fails, the BepInEx log
+    // names exactly who triggered the disconnect / room-leave / restart.
+    // Remove when 2v2 is stable.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    internal static class Diag2v2
+    {
+        public static bool IsActive()
+        {
+            if (Plugin.Pending2v2Slot >= 0) return true;
+            try
+            {
+                if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null)
+                {
+                    var p = PhotonNetwork.CurrentRoom.CustomProperties;
+                    if (p != null && p.ContainsKey("cr_ff")) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        public static string ShortStack()
+        {
+            try
+            {
+                var st = new System.Diagnostics.StackTrace(2, false);
+                var sb = new System.Text.StringBuilder();
+                int n = Math.Min(st.FrameCount, 8);
+                for (int i = 0; i < n; i++)
+                {
+                    var m = st.GetFrame(i)?.GetMethod();
+                    if (m == null) continue;
+                    sb.Append(m.DeclaringType?.Name ?? "?").Append('.').Append(m.Name);
+                    if (i < n - 1) sb.Append(" <- ");
+                }
+                return sb.ToString();
+            }
+            catch { return "<stack-unavailable>"; }
+        }
+
+        public static string DescribeRoom()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return "(not in room)";
+                var r = PhotonNetwork.CurrentRoom;
+                int pcount = r.PlayerCount;
+                int max = r.MaxPlayers;
+                return $"room={r.Name} players={pcount}/{max}";
+            }
+            catch { return "(room-describe failed)"; }
+        }
+    }
+
+    /// <summary>Photon callback target for 2v2 diagnostics. Logs every player
+    /// enter/leave/disconnect with the relevant Photon state so we can trace
+    /// which client dropped first and why.</summary>
+    public class Cr2v2DiagCallbacks : MonoBehaviour,
+        Photon.Realtime.IInRoomCallbacks,
+        Photon.Realtime.IConnectionCallbacks,
+        Photon.Realtime.IMatchmakingCallbacks
+    {
+        void OnEnable()  { try { PhotonNetwork.AddCallbackTarget(this); } catch { } }
+        void OnDisable() { try { PhotonNetwork.RemoveCallbackTarget(this); } catch { } }
+
+        public void OnPlayerEnteredRoom(Photon.Realtime.Player p)
+        {
+            if (!Diag2v2.IsActive()) return;
+            try
+            {
+                int slot = -1, team = -1;
+                if (p.CustomProperties != null)
+                {
+                    if (p.CustomProperties.ContainsKey("p_id")) int.TryParse(p.CustomProperties["p_id"].ToString(), out slot);
+                    if (p.CustomProperties.ContainsKey("t_id")) int.TryParse(p.CustomProperties["t_id"].ToString(), out team);
+                }
+                Plugin.Log.LogInfo($"[2v2-DIAG] PlayerEntered: nick='{p.NickName}' actor={p.ActorNumber} p_id={slot} t_id={team} {Diag2v2.DescribeRoom()}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DIAG] PlayerEntered log error: {ex.Message}"); }
+        }
+
+        public void OnPlayerLeftRoom(Photon.Realtime.Player p)
+        {
+            if (!Diag2v2.IsActive()) return;
+            try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
+            catch { }
+        }
+
+        public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps) { }
+        public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) { }
+        public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
+        {
+            if (!Diag2v2.IsActive()) return;
+            try { Plugin.Log.LogInfo($"[2v2-DIAG] MasterClientSwitched: new='{newMasterClient?.NickName}' actor={newMasterClient?.ActorNumber}"); }
+            catch { }
+        }
+
+        public void OnConnected() { }
+        public void OnConnectedToMaster() { }
+        public void OnDisconnected(Photon.Realtime.DisconnectCause cause)
+        {
+            if (Plugin.Pending2v2Slot < 0) return;
+            try { Plugin.Log.LogWarning($"[2v2-DIAG] Disconnected: cause={cause} stack={Diag2v2.ShortStack()}"); }
+            catch { }
+        }
+        public void OnRegionListReceived(Photon.Realtime.RegionHandler regionHandler) { }
+        public void OnCustomAuthenticationResponse(System.Collections.Generic.Dictionary<string, object> data) { }
+        public void OnCustomAuthenticationFailed(string debugMessage) { }
+
+        public void OnFriendListUpdate(System.Collections.Generic.List<Photon.Realtime.FriendInfo> friendList) { }
+        public void OnCreatedRoom() { }
+        public void OnCreateRoomFailed(short returnCode, string message)
+        {
+            if (Plugin.Pending2v2Slot < 0) return;
+            Plugin.Log.LogWarning($"[2v2-DIAG] CreateRoomFailed: code={returnCode} msg={message}");
+        }
+        public void OnJoinedRoom()
+        {
+            if (!Diag2v2.IsActive()) return;
+            try { Plugin.Log.LogInfo($"[2v2-DIAG] JoinedRoom: {Diag2v2.DescribeRoom()} masterClient={(PhotonNetwork.LocalPlayer?.IsMasterClient ?? false)}"); }
+            catch { }
+        }
+        public void OnJoinRoomFailed(short returnCode, string message)
+        {
+            if (Plugin.Pending2v2Slot < 0) return;
+            Plugin.Log.LogWarning($"[2v2-DIAG] JoinRoomFailed: code={returnCode} msg={message}");
+        }
+        public void OnJoinRandomFailed(short returnCode, string message) { }
+        public void OnLeftRoom()
+        {
+            if (Plugin.Pending2v2Slot < 0) return;
+            try { Plugin.Log.LogWarning($"[2v2-DIAG] LeftRoom (Photon callback) stack={Diag2v2.ShortStack()}"); }
+            catch { }
+        }
+    }
+
+    /// <summary>Patches NetworkRestart to log entry with caller context. Vanilla
+    /// flips m_restarting=true and bails on subsequent calls, so we only see the
+    /// first trigger — but that's the one we want.</summary>
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "NetworkRestart")]
+    class NetworkConnectionHandler_NetworkRestart_Diag_Patch
+    {
+        static void Prefix()
+        {
+            if (Plugin.Pending2v2Slot < 0) return;
+            try
+            {
+                var nch = NetworkConnectionHandler.instance;
+                bool already = nch != null && nch.m_restarting;
+                Plugin.Log.LogWarning($"[2v2-DIAG] NetworkRestart() entered (already_restarting={already}) {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}");
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>Patches PhotonNetwork.LeaveRoom to log the caller. Catches any
+    /// non-vanilla code path that yanks us out of the room.</summary>
+    [HarmonyPatch(typeof(PhotonNetwork), "LeaveRoom", new Type[] { typeof(bool) })]
+    class PhotonNetwork_LeaveRoom_Diag_Patch
+    {
+        static void Prefix(bool becomeInactive)
+        {
+            if (Plugin.Pending2v2Slot < 0) return;
+            try { Plugin.Log.LogWarning($"[2v2-DIAG] PhotonNetwork.LeaveRoom(becomeInactive={becomeInactive}) {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}"); }
+            catch { }
+        }
+    }
+
+    /// <summary>Patch GM_ArmsRace.PlayerJoined to log every fire so we can see
+    /// where the count gets stuck. Vanilla does:
+    ///   if (num &lt; playersNeededToStart) return;
+    ///   StartGame();
+    /// — if `num` never reaches 4, StartGame never fires.</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "PlayerJoined")]
+    class GMArmsRace_PlayerJoined_Diag_Patch
+    {
+        static void Prefix(GM_ArmsRace __instance, global::Player player)
+        {
+            if (!Diag2v2.IsActive()) return;
+            try
+            {
+                int num = 0;
+                int total = 0;
+                if (PlayerManager.instance != null && PlayerManager.instance.players != null)
+                {
+                    total = PlayerManager.instance.players.Count;
+                    foreach (var p in PlayerManager.instance.players) if (p != null) num++;
+                }
+                int needed = __instance.playersNeededToStart;
+                Plugin.Log.LogInfo($"[2v2-DIAG] GM_ArmsRace.PlayerJoined fired: counted={num} listSize={total} playersNeededToStart={needed}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DIAG] GM_ArmsRace.PlayerJoined log error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Log when GM_ArmsRace.StartGame fires — if all 4 join but this
+    /// never triggers, the gating in PlayerJoined is the problem.</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "StartGame")]
+    class GMArmsRace_StartGame_Diag_Patch
+    {
+        static void Prefix()
+        {
+            if (!Diag2v2.IsActive()) return;
+            try { Plugin.Log.LogInfo($"[2v2-DIAG] GM_ArmsRace.StartGame() fired {Diag2v2.DescribeRoom()}"); }
+            catch { }
+        }
+    }
+
+    /// <summary>Player.Start sets PlayerID/TeamID from custom properties. Log
+    /// the values we see so we can confirm slots/teams arrive correctly on
+    /// remote clients.</summary>
+    [HarmonyPatch(typeof(global::Player), "Start")]
+    class Player_Start_Diag_Patch
+    {
+        static void Postfix(global::Player __instance)
+        {
+            if (!Diag2v2.IsActive()) return;
+            try
+            {
+                bool isLocal = false;
+                int actor = -1;
+                try { isLocal = __instance.data?.view?.IsMine ?? false; } catch { }
+                try { actor = __instance.data?.view?.OwnerActorNr ?? -1; } catch { }
+                Plugin.Log.LogInfo($"[2v2-DIAG] Player.Start: pid={__instance.PlayerID} team={__instance.TeamID} isLocal={isLocal} actor={actor}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DIAG] Player.Start log error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>MapManager.UnloadAfterSeconds was the original v1.25.4-era crash
+    /// site (NRE on a missing PhotonView). Wrap to catch and log instead of
+    /// letting the throw propagate into Photon's network restart path.</summary>
+    [HarmonyPatch(typeof(MapManager), "UnloadAfterSeconds")]
+    class MapManager_UnloadAfterSeconds_Diag_Patch
+    {
+        static Exception Finalizer(Exception __exception)
+        {
+            if (__exception != null && Diag2v2.IsActive())
+            {
+                try { Plugin.Log.LogError($"[2v2-DIAG] MapManager.UnloadAfterSeconds threw: {__exception.GetType().Name}: {__exception.Message}"); }
+                catch { }
+            }
+            return __exception;  // rethrow normally — don't swallow
         }
     }
 

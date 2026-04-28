@@ -2684,6 +2684,10 @@ namespace CompetitiveRounds
                     Plugin.SetPendingRoom(data.room_name, data.room_region);
                     Plugin.Log.LogInfo($"[TEAM-QUEUE] All ready! Room: {data.room_name} (region: {data.room_region ?? "auto"}) series={data.series_id} my_slot={slot}");
                     CompetitiveUI.ShowNotification("4/4 ready! Joining 2v2...", Color.green, 5f);
+                    // Auto-close the F5 panel so testers don't sit on the queue screen
+                    // while the Photon room is loading. Otherwise they have to manually
+                    // close before they can see ROUNDS' character-select / game scene.
+                    try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
                     NativeUI.MarkDirty();
                 }
             }
