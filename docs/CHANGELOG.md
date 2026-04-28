@@ -1,5 +1,13 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.6 — 2v2 character-select OOB fix
+
+Internal-facing release — continued 2v2 stabilization after v1.25.5.
+
+- **`CharacterSelectionMenu.PlayerJoined` no longer aborts on player 3.** v1.25.5 successfully spawned all 4 players via the `/queue/poll → SetCustomProperties → join Photon room → CreatePlayer` chain, but vanilla's `CharacterSelectionMenu.PlayerJoined` does `transform.GetChild(0).GetChild(players.Count - 1)` to grab the per-slot face-select widget — and the menu container only has 2 children. Player 3's join threw `Transform child out of bounds`, which aborted the multicast `PlayerJoined` event before `GM_ArmsRace.PlayerJoined` could fire. So `playersNeededToStart` never decremented past 2 and the game never started. Patched with a Prefix that skips the menu wiring when `slot >= childCount`; players 3 and 4 just don't get the per-slot face-customize widget (which isn't shown in 2v2 anyway), and `GM_ArmsRace` now sees all 4 joins and starts the round.
+
+Scoped to `cr_ff` rooms only — 1v1 ranked, tournaments, and private rooms unaffected.
+
 ## v1.25.5 — 2v2 spawn race + cascade-disconnect fixes
 
 Internal-facing release — continued 2v2 stabilization.

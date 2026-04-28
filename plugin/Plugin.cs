@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.5";
+        public const string ModVersion = "1.25.6";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -777,6 +777,40 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo("[2v2] Forced playersNeededToStart=4 (cr_ff room detected)");
             }
             catch (Exception ex) { Plugin.Log.LogError($"[2v2] OnEnable patch error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// Don't crash on the 3rd / 4th player joining a 2v2 room. Vanilla
+    /// CharacterSelectionMenu.PlayerJoined does:
+    ///   transform.GetChild(0).GetChild(players.Count - 1).GetComponent&lt;…&gt;().StartPicking(p)
+    /// The container at GetChild(0) only has 2 children (one per 1v1 slot), so
+    /// when players.Count hits 3, GetChild(2) throws "Transform child out of
+    /// bounds". The exception aborts PlayerJoined's multicast invocation,
+    /// meaning GM_ArmsRace.PlayerJoined never fires for players 3 and 4 →
+    /// playersNeededToStart=4 never gets reached → StartGame never fires.
+    /// Players 3 and 4 don't get the face-customization step (they spawn
+    /// with their last-saved face) but the game continues normally.
+    /// </summary>
+    [HarmonyPatch(typeof(CharacterSelectionMenu), "PlayerJoined")]
+    class CharacterSelectionMenu_PlayerJoined_2v2_Patch
+    {
+        static bool Prefix(CharacterSelectionMenu __instance)
+        {
+            try
+            {
+                if (__instance == null || __instance.transform.childCount == 0) return true;
+                int slot = (PlayerManager.instance != null && PlayerManager.instance.players != null)
+                    ? PlayerManager.instance.players.Count - 1 : -1;
+                var container = __instance.transform.GetChild(0);
+                if (slot < 0 || slot >= container.childCount)
+                {
+                    Plugin.Log.LogInfo($"[2v2] CharacterSelectionMenu skipped (slot={slot} >= children={container.childCount})");
+                    return false;
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] CharacterSelectionMenu prefix error: {ex.Message}"); }
+            return true;
         }
     }
 
