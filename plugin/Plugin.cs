@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.7";
+        public const string ModVersion = "1.25.8";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1127,6 +1127,64 @@ namespace CompetitiveRounds
             if (!Diag2v2.IsActive()) return;
             try { Plugin.Log.LogInfo($"[2v2-DIAG] JoinedRoom: {Diag2v2.DescribeRoom()} masterClient={(PhotonNetwork.LocalPlayer?.IsMasterClient ?? false)}"); }
             catch { }
+
+            // Activate GM_ArmsRace.gameObject ASAP (in the same Photon callback,
+            // BEFORE remote-player Photon Instantiations fire Player.Start). In
+            // vanilla, NetworkConnectionHandler.OnPlayerEnteredRoom fires
+            // RPCA_FoundGame (RpcTarget.All, NOT AllBuffered) when
+            // PlayerList.Length == MAX_PLAYERS (vanilla const = 2). That RPC is
+            // the *only* path that calls LoadingScreen.StopLoading() →
+            // gameMode.SetActive(true) → GM_ArmsRace activated. In a 4-player
+            // room, the master fires the RPC the moment player #2 joins; players
+            // 3 and 4 (joining later) miss it forever. So their GM_ArmsRace stays
+            // inactive → instance is null → NCH.Update's untilTryOtherRegionCounter
+            // timer (gated on !GM_ArmsRace.instance) ticks → PlayOnBestActiveRegion
+            // → LeaveRoom. Plus PlayerJoined never subscribes to PlayerManager's
+            // events, so StartGame never fires either. Idempotent for early joiners
+            // (vanilla activates first, our SetActive is a no-op).
+            try
+            {
+                var gm = UnityEngine.Object.FindObjectOfType<GM_ArmsRace>(true);
+                if (gm != null && !gm.gameObject.activeInHierarchy)
+                {
+                    gm.gameObject.SetActive(true);
+                    Plugin.Log.LogInfo("[2v2] Force-activated GM_ArmsRace.gameObject (vanilla path missed late joiner)");
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogError($"[2v2] GM_ArmsRace activate failed: {ex.Message}"); }
+
+            // Kick off a fallback that manually invokes GM_ArmsRace.StartGame
+            // once all 4 players are spawned. Belt-and-suspenders: if any
+            // Player.Start fires BEFORE our SetActive lands (race), GM_ArmsRace
+            // wouldn't have subscribed PlayerJoined yet for that player and the
+            // count won't reach 4 organically.
+            if (Plugin.Instance != null)
+                Plugin.Instance.StartCoroutine(Force2v2StartGameWhenReady());
+        }
+
+        private static System.Collections.IEnumerator Force2v2StartGameWhenReady()
+        {
+            float deadline = Time.realtimeSinceStartup + 30f;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                if (Plugin.Pending2v2Slot < 0) yield break;
+                if (!PhotonNetwork.InRoom) yield break;
+                var gm = GM_ArmsRace.instance;
+                if (gm != null && gm.gameObject.activeInHierarchy && PlayerManager.instance != null)
+                {
+                    int counted = 0;
+                    foreach (var p in PlayerManager.instance.players) if (p != null) counted++;
+                    if (counted >= 4 && !GameManager.instance.isPlaying)
+                    {
+                        Plugin.Log.LogInfo($"[2v2] Force-invoking GM_ArmsRace.StartGame (counted={counted}, gm.isPlaying={GameManager.instance.isPlaying})");
+                        try { gm.StartGame(); }
+                        catch (Exception ex) { Plugin.Log.LogError($"[2v2] StartGame invoke failed: {ex.Message}"); }
+                        yield break;
+                    }
+                }
+                yield return new WaitForSeconds(0.5f);
+            }
+            Plugin.Log.LogWarning("[2v2] Force-StartGame timed out — never reached 4 spawned players");
         }
         public void OnJoinRoomFailed(short returnCode, string message)
         {
