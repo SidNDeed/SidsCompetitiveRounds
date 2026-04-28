@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.19";
+        public const string ModVersion = "1.25.20";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1785,6 +1785,149 @@ namespace CompetitiveRounds
     /// see stale faces from the previous picker, or nothing if the RPC arrived
     /// AFTER the next picker's Show tore down and re-instantiated the skin). Reading
     /// from custom props each Show() guarantees the right face on every client.</summary>
+    /// <summary>Re-tint the card-pick visualizer body to match the picker's
+    /// actual team. Vanilla CardChoiceVisuals spawns a skin clone that displays
+    /// fine in 1v1, but in 2v2 our PlayerSkinBank patch can't reach the visualizer
+    /// because the body's color is baked at clone time from a path that runs
+    /// before children spawn. User report: "Sid4 was on blue, his character
+    /// color showed as orange at the card pick screen" while in-game body
+    /// renders blue correctly. Fix: wait a couple frames for the visualizer
+    /// hierarchy to populate, then walk SpriteRenderer + ParticleSystem and
+    /// recolor anything that looks team-baseline (the wrong team's hue).</summary>
+    internal static class CardPickBodyTinter
+    {
+        // Vanilla ROUNDS team colors. These match the in-game player body for
+        // each team — used as both the "wrong-team baseline to detect" and
+        // the "right-team color to apply" depending on which side we're on.
+        // Read from PlayerSkinBank.instance.skins[] at first call so the values
+        // track whatever ROUNDS ships rather than hardcoded hex.
+        private static Color teamColor0 = new Color(0.95f, 0.45f, 0.32f); // orange-ish fallback
+        private static Color teamColor1 = new Color(0.45f, 0.62f, 0.95f); // blue-ish fallback
+        private static bool teamColorsResolved = false;
+
+        private static void TryResolveTeamColors()
+        {
+            if (teamColorsResolved) return;
+            try
+            {
+                var bank = PlayerSkinBank.instance;
+                if (bank == null) return;
+                var t = bank.GetType();
+                var fSkins = t.GetField("skins", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                var arr = fSkins?.GetValue(bank) as System.Array;
+                if (arr == null || arr.Length < 2) return;
+                Color SniffSkin(object skin)
+                {
+                    if (skin == null) return Color.white;
+                    var st = skin.GetType();
+                    Color best = Color.white; float bestSat = -1f;
+                    foreach (var f in st.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                    {
+                        if (f.FieldType != typeof(Color)) continue;
+                        try
+                        {
+                            var v = (Color)f.GetValue(skin);
+                            float sat = Math.Max(v.r, Math.Max(v.g, v.b)) - Math.Min(v.r, Math.Min(v.g, v.b));
+                            if (sat > bestSat) { bestSat = sat; best = v; }
+                        }
+                        catch { }
+                    }
+                    return best;
+                }
+                teamColor0 = SniffSkin(arr.GetValue(0));
+                teamColor1 = SniffSkin(arr.GetValue(1));
+                teamColorsResolved = true;
+                Plugin.Log.LogInfo($"[CARDPICK-TINT] resolved team colors: t0={ColorHex(teamColor0)} t1={ColorHex(teamColor1)}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-TINT] resolve failed: {ex.Message}"); }
+        }
+
+        private static string ColorHex(Color c) =>
+            $"#{(int)(c.r * 255):X2}{(int)(c.g * 255):X2}{(int)(c.b * 255):X2}";
+
+        public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID)
+        {
+            // Wait for the visualizer's body parts to populate. The Postfix fires
+            // immediately after Show(), before vanilla's child spawn coroutine runs.
+            for (int i = 0; i < 4; i++) yield return null;
+            if (visualizer == null) yield break;
+
+            TryResolveTeamColors();
+            Color desired = (pickerTeamID == 1) ? teamColor1 : teamColor0;
+            Color wrongTeam = (pickerTeamID == 1) ? teamColor0 : teamColor1;
+
+            int sprites = 0, particles = 0, skinFields = 0;
+            try
+            {
+                // 1) Replace SpriteRenderer colors that look like the WRONG team's hue.
+                var sprs = visualizer.GetComponentsInChildren<SpriteRenderer>(true);
+                foreach (var sr in sprs)
+                {
+                    if (sr == null) continue;
+                    if (IsCloseHue(sr.color, wrongTeam))
+                    {
+                        sr.color = new Color(desired.r, desired.g, desired.b, sr.color.a);
+                        sprites++;
+                    }
+                }
+
+                // 2) ParticleSystems — main module + colorOverLifetime.
+                var pss = visualizer.GetComponentsInChildren<ParticleSystem>(true);
+                foreach (var ps in pss)
+                {
+                    if (ps == null) continue;
+                    var main = ps.main;
+                    var sc = main.startColor;
+                    Color current = sc.color;
+                    if (IsCloseHue(current, wrongTeam))
+                    {
+                        sc.color = new Color(desired.r, desired.g, desired.b, current.a);
+                        main.startColor = sc;
+                        particles++;
+                    }
+                }
+
+                // 3) PlayerSkin / PlayerSkinHandler MonoBehaviours within the visualizer.
+                //    Some hue propagation goes via these field-color reads at render time,
+                //    not via the spawned sprites — set the fields too.
+                var comps = visualizer.GetComponentsInChildren<MonoBehaviour>(true);
+                foreach (var c in comps)
+                {
+                    if (c == null) continue;
+                    var t = c.GetType();
+                    if (t.Name != "PlayerSkin" && t.Name != "PlayerSkinHandler") continue;
+                    foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                    {
+                        if (f.FieldType != typeof(Color)) continue;
+                        try
+                        {
+                            var v = (Color)f.GetValue(c);
+                            if (IsCloseHue(v, wrongTeam))
+                            {
+                                f.SetValue(c, new Color(desired.r, desired.g, desired.b, v.a));
+                                skinFields++;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-TINT] retint failed: {ex.Message}"); }
+
+            if (sprites > 0 || particles > 0 || skinFields > 0)
+                Plugin.Log.LogInfo($"[CARDPICK-TINT] pickerID={pickerID} team={pickerTeamID} retinted: sprites={sprites} particles={particles} skinFields={skinFields}");
+        }
+
+        // RGB distance — works for any hue without needing to convert to HSV.
+        // Threshold 0.35 matches PlayerColorCosmetic.IsTeamLike so we get the
+        // same "look like the team's color, not face/gun/accent" filter.
+        private static bool IsCloseHue(Color a, Color b)
+        {
+            float dr = a.r - b.r, dg = a.g - b.g, db = a.b - b.b;
+            return Mathf.Sqrt(dr * dr + dg * dg + db * db) < 0.35f;
+        }
+    }
+
     [HarmonyPatch(typeof(CardChoiceVisuals), "Show")]
     class CardChoiceVisuals_Show_Competitive_Patch
     {
@@ -1819,6 +1962,13 @@ namespace CompetitiveRounds
                         var ls = skin.transform.localScale;
                         int childCount = skin.transform.childCount;
                         skinDesc = $"name={skin.name} active={skin.activeInHierarchy} layer={skin.layer} children={childCount} localPos=({lp.x:F1},{lp.y:F1},{lp.z:F1}) localScale=({ls.x:F2},{ls.y:F2},{ls.z:F2})";
+
+                        // Re-tint the card-pick visualizer to the picker's actual
+                        // team color. The Postfix fires before children are populated,
+                        // so dispatch a coroutine that waits a few frames then walks
+                        // the spawned hierarchy.
+                        if (Plugin.Instance != null && skin != null)
+                            Plugin.Instance.StartCoroutine(CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID));
                     }
                     Plugin.Log.LogInfo($"[CARDPICK-DIAG] pickerID={pickerID} actor={pv.Owner.ActorNumber} pid={picker.PlayerID} team={picker.TeamID} isLocal={picker.IsLocal} currentSkin: {skinDesc}");
                 }
