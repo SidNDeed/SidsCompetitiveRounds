@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.13";
+        public const string ModVersion = "1.25.14";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -199,16 +199,39 @@ namespace CompetitiveRounds
             }
             Log.LogInfo($"[COMPAT] Game version OK: {gameVer}");
 
-            // Try Harmony patching
+            // Patch each [HarmonyPatch] class individually so one bad patch
+            // (e.g. parameter-name mismatch with vanilla, missing target method)
+            // doesn't abort the rest. v1.25.10-13 silently shipped with a single
+            // mis-named Prefix parameter on PlayerSkinBank.GetPlayerSkinColors —
+            // PatchAll aborted there, every patch declared after it (including
+            // ArtHandler.NextArt for map colors, MapManager spawn-point sort,
+            // and several diag patches) never applied for 4 releases. With
+            // per-class isolation, we lose just the broken class and keep
+            // everything else.
             try
             {
                 HarmonyInstance = new Harmony(ModId);
-                HarmonyInstance.PatchAll();
-                Log.LogInfo("Harmony patches applied successfully!");
+                int applied = 0, failed = 0;
+                foreach (var type in Assembly.GetExecutingAssembly().GetTypes())
+                {
+                    var attrs = type.GetCustomAttributes(typeof(HarmonyPatch), true);
+                    if (attrs == null || attrs.Length == 0) continue;
+                    try
+                    {
+                        HarmonyInstance.CreateClassProcessor(type).Patch();
+                        applied++;
+                    }
+                    catch (Exception ex)
+                    {
+                        failed++;
+                        Log.LogError($"[HARMONY] Failed to patch {type.Name}: {ex.Message}");
+                    }
+                }
+                Log.LogInfo($"[HARMONY] Patches applied: {applied} ok, {failed} failed");
             }
             catch (Exception ex)
             {
-                Log.LogWarning($"Harmony patching failed (mod will work without it): {ex.Message}");
+                Log.LogWarning($"Harmony patching bootstrap failed (mod will work without it): {ex.Message}");
             }
 
             // Create persistent object with maximum protection
@@ -1145,6 +1168,29 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+            // Competitive-wide setup runs for any mod-issued ranked room
+            // (1v1 ranked / 2v2 / sync tournament). Cosmetic late-prop reapply
+            // helps every flow — opponents' custom colors / trails sometimes
+            // miss the OnPlayerPropertiesUpdate event when their props were
+            // already cached at room-join time. Face publish is also useful
+            // as a fallback for the CardChoiceVisuals RPC timing race.
+            bool isCompetitive = CompetitiveRoomDetect.IsCompetitiveRoom();
+            if (isCompetitive)
+            {
+                try { FacePublisher.PublishLocal(); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] Face publish hook error: {ex.Message}"); }
+
+                if (Plugin.Instance != null)
+                {
+                    Plugin.Instance.StartCoroutine(RepeatedCompetitiveCosmeticReapply());
+                }
+            }
+
+            // Everything below is 2v2-specific: GM_ArmsRace late-joiner
+            // activation, LoadingScreen clear, force-StartGame fallback,
+            // 4-player card bars, assembly state poll. None of these
+            // matter for 1v1 (vanilla path handles it) or for tournaments
+            // (sync tournaments are 1v1-shaped).
             if (!Diag2v2.IsActive()) return;
             try { Plugin.Log.LogInfo($"[2v2-DIAG] JoinedRoom: {Diag2v2.DescribeRoom()} masterClient={(PhotonNetwork.LocalPlayer?.IsMasterClient ?? false)}"); }
             catch { }
@@ -1202,16 +1248,10 @@ namespace CompetitiveRounds
             // Player.Start fires BEFORE our SetActive lands (race), GM_ArmsRace
             // wouldn't have subscribed PlayerJoined yet for that player and the
             // count won't reach 4 organically.
-            // Publish local face to Photon so other clients can read it during
-            // CardChoiceVisuals.Show without depending on RPC timing.
-            try { FacePublisher.PublishLocal(); }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish hook error: {ex.Message}"); }
-
             if (Plugin.Instance != null)
             {
                 Plugin.Instance.StartCoroutine(Force2v2StartGameWhenReady());
                 Plugin.Instance.StartCoroutine(Setup4PlayerCardBarsWhenReady());
-                Plugin.Instance.StartCoroutine(Repeated2v2PCColorReapply());
                 Plugin.Instance.StartCoroutine(PollAssemblyStateLoop());
             }
         }
@@ -1271,23 +1311,25 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Aggressively re-apply PlayerColorCosmetic AND TrailCosmetic for
-        /// every actor in the room over the first ~12 seconds after joining a cr_ff
-        /// room. Photon's `OnPlayerPropertiesUpdate` callback fires on PROP UPDATES
-        /// only — but late joiners receive the room's existing player prop state
-        /// without an update event, so cosmetic apply paths are never triggered for
-        /// them. Result: some clients see other players' custom body colors as
-        /// "white" (no tint applied because cr_pcolor_color was empty when the
-        /// initial DelayedApplyAll ran), and trails simply don't appear at all.
+        /// every non-local actor in the room over the first ~12 seconds after
+        /// joining ANY mod-issued competitive room (1v1 ranked, 2v2, sync
+        /// tournament). Photon's `OnPlayerPropertiesUpdate` callback fires on PROP
+        /// UPDATES only — but late joiners receive the room's existing player prop
+        /// state without an update event, so cosmetic apply paths are never
+        /// triggered for them. Result: some clients see opponents' custom body
+        /// colors as "white" (no tint applied because cr_pcolor_color was empty
+        /// when the initial DelayedApplyAll ran), and trails simply don't appear.
         /// Polling re-apply catches the late arrivals AND nudges the PCOLOR
-        /// animation tick into existence for animated SKUs.</summary>
-        private static System.Collections.IEnumerator Repeated2v2PCColorReapply()
+        /// animation tick into existence for animated SKUs. Originally added for
+        /// 2v2 but generalized to all competitive paths in v1.25.14.</summary>
+        private static System.Collections.IEnumerator RepeatedCompetitiveCosmeticReapply()
         {
             // Wait for the spawned player GameObjects to settle.
             yield return new WaitForSeconds(2f);
             float deadline = Time.realtimeSinceStartup + 12f;
             while (Time.realtimeSinceStartup < deadline)
             {
-                if (Plugin.Pending2v2Slot < 0) yield break;
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) yield break;
                 if (!PhotonNetwork.InRoom) yield break;
                 try
                 {
@@ -1303,7 +1345,7 @@ namespace CompetitiveRounds
                         }
                     }
                 }
-                catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] cosmetic reapply tick error: {ex.Message}"); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] cosmetic reapply tick error: {ex.Message}"); }
                 yield return new WaitForSeconds(2f);
             }
         }
@@ -1626,13 +1668,13 @@ namespace CompetitiveRounds
     /// AFTER the next picker's Show tore down and re-instantiated the skin). Reading
     /// from custom props each Show() guarantees the right face on every client.</summary>
     [HarmonyPatch(typeof(CardChoiceVisuals), "Show")]
-    class CardChoiceVisuals_Show_2v2_Patch
+    class CardChoiceVisuals_Show_Competitive_Patch
     {
         static void Postfix(CardChoiceVisuals __instance, int pickerID)
         {
             try
             {
-                if (!Diag2v2.IsActive()) return;
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null || pickerID < 0 || pickerID >= pm.players.Count) return;
                 var picker = pm.players[pickerID];
@@ -1641,37 +1683,59 @@ namespace CompetitiveRounds
                 if (pv == null || pv.Owner == null) return;
                 bool ok = FacePublisher.TryReadAndApply(pv.Owner.ActorNumber, __instance.gameObject);
                 if (ok)
-                    Plugin.Log.LogInfo($"[2v2] CardChoiceVisuals: applied picker face from Photon (pickerID={pickerID}, actor={pv.Owner.ActorNumber})");
+                    Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face from Photon (pickerID={pickerID}, actor={pv.Owner.ActorNumber})");
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] CardChoiceVisuals.Show postfix error: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] CardChoiceVisuals.Show postfix error: {ex.Message}"); }
         }
     }
 
-    /// <summary>In cr_ff rooms, auto-confirm the post-game "Continue?" popup so all
-    /// 4 clients advance together. Vanilla `PopUpHandler.StartPicking` waits for any
-    /// local-mine player to press Jump on a directional Yes/No selector — there's no
-    /// network sync of the choice, each client decides independently. In 2v2 this
-    /// breaks: player 1 hits Yes locally → their `DoContinue` runs → next-round
-    /// transition starts on their client only. Players who didn't press yet stay
-    /// stuck on the popup, can't input cards, and the room desyncs. Bypass: Prefix
-    /// fires the supplied callback with `Yes` immediately and skips the picker
-    /// setup, so all 4 clients call `DoContinue` simultaneously.</summary>
+    /// <summary>True when we're in a mod-issued competitive room — 2v2 (cr_ff /
+    /// team_*), 1v1 ranked (ranked_*), or sync tournament (sct-*). Used to scope
+    /// behaviors that should apply uniformly across competitive paths but NOT to
+    /// vanilla casual/private rooms (which may have mixed mod / non-mod players).
+    /// </summary>
+    internal static class CompetitiveRoomDetect
+    {
+        public static bool IsCompetitiveRoom()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return false;
+                var props = PhotonNetwork.CurrentRoom.CustomProperties;
+                if (props != null && props.ContainsKey("cr_ff")) return true;
+                string n = PhotonNetwork.CurrentRoom.Name ?? "";
+                return n.StartsWith("ranked_") || n.StartsWith("team_") || n.StartsWith("sct-");
+            }
+            catch { return false; }
+        }
+    }
+
+    /// <summary>Auto-confirm the post-game "Continue?" popup so all clients advance
+    /// together. Vanilla `PopUpHandler.StartPicking` waits for the local-mine player
+    /// to press Jump on a directional Yes/No selector — there's no network sync of
+    /// the choice, each client decides independently. In 2v2 with 4 sequential
+    /// pickers this caused desync (player 1 hits Yes → DoContinue locally → next
+    /// round on their client; others stuck). Even in 1v1, players found the prompt
+    /// annoying and "really don't like hitting Yes". Bypass: Prefix fires the
+    /// supplied callback with `Yes` immediately and skips the picker setup. Gated
+    /// to mod-issued rooms only (ranked_*, team_*, sct-*) — vanilla casual /
+    /// private rooms still get the vanilla popup so non-mod opponents don't desync.</summary>
     [HarmonyPatch(typeof(PopUpHandler), "StartPicking")]
-    class PopUpHandler_StartPicking_2v2_Patch
+    class PopUpHandler_StartPicking_Competitive_Patch
     {
         static bool Prefix(global::Player player, Action<PopUpHandler.YesNo> functionToCall)
         {
             try
             {
-                if (!Diag2v2.IsActive()) return true;
-                Plugin.Log.LogInfo("[2v2] Auto-confirming Continue prompt (cr_ff bypass)");
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return true;
+                Plugin.Log.LogInfo("[POPUP] Auto-confirming Continue prompt (competitive room bypass)");
                 try { functionToCall?.Invoke(PopUpHandler.YesNo.Yes); }
-                catch (Exception ex) { Plugin.Log.LogError($"[2v2] Continue auto-invoke failed: {ex.Message}"); }
+                catch (Exception ex) { Plugin.Log.LogError($"[POPUP] Continue auto-invoke failed: {ex.Message}"); }
                 return false;  // skip vanilla picker setup entirely
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning($"[2v2] PopUpHandler prefix error: {ex.Message}");
+                Plugin.Log.LogWarning($"[POPUP] StartPicking prefix error: {ex.Message}");
                 return true;
             }
         }
@@ -1713,27 +1777,32 @@ namespace CompetitiveRounds
             new System.Collections.Generic.HashSet<string>();
         private static float _lastClear;
 
-        static void Prefix(ref int playerID)
+        // CRITICAL: the parameter MUST be named `team` (matching vanilla
+        // `GetPlayerSkinColors(int team)`) — HarmonyX binds Prefix parameters
+        // by NAME and throws "Parameter not found" if the names don't match.
+        // v1.25.10 shipped this with `playerID` which silently failed Harmony
+        // patching, aborted the entire PatchAll iteration, and disabled every
+        // patch that came after PlayerSkinBank in declaration order — including
+        // the ArtHandlerNextArtPatch that custom map colors depend on.
+        static void Prefix(ref int team)
         {
             try
             {
                 if (!Diag2v2.IsActive()) return;
-                if (playerID < 0 || playerID > 3) return;
-                int original = playerID;
+                if (team < 0 || team > 3) return;
+                int original = team;
                 // PlayerSkinBank has 4 skin entries: index 0 = orange (1v1 team 0),
                 // index 1 = blue (1v1 team 1), 2/3 = whatever extras (red/green
                 // variants) for 4-player local. We want strict 2-team orange/blue
                 // in 2v2 ranked, so map slot → team_index (slot/2): slots 0,1 → 0
-                // (orange); slots 2,3 → 1 (blue). v1.25.10 used (slot/2)*2 which
-                // gave 0/0/2/2 — that's why team 1 showed as the offshoot index-2
-                // color (red/green) instead of blue.
-                playerID = playerID / 2;
+                // (orange); slots 2,3 → 1 (blue).
+                team = team / 2;
                 if (Time.realtimeSinceStartup - _lastClear > 5f)
                 {
                     _loggedKeys.Clear();
                     _lastClear = Time.realtimeSinceStartup;
                 }
-                string key = $"{original}→{playerID}";
+                string key = $"{original}→{team}";
                 if (_loggedKeys.Add(key))
                     Plugin.Log.LogInfo($"[2v2-COLOR] PlayerSkinBank.GetPlayerSkinColors mapped {key}");
             }

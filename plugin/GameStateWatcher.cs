@@ -409,19 +409,25 @@ namespace CompetitiveRounds
                 opponentRankChecked = false;
                 opponentIsRanked = false;
                 matchIsRanked = false;
-                // 2v2 cr_ff rooms are queue-issued team rooms — definitionally
-                // ranked. Set immediately at room join so the [POLL] === Match
-                // Started === log doesn't show CASUAL and the routing decision
-                // doesn't need to wait for the racy single-opponent CheckOpponentRanked
-                // callback that fires later (and only checks one of 3 opponents).
+                // Mod-issued competitive rooms are definitionally ranked. Set
+                // immediately at room-join so [POLL] === Match Started === doesn't
+                // log CASUAL while CheckOpponentRanked is still racing. cr_ff
+                // covers 2v2; ranked_* covers 1v1 ranked queue; sct-* covers
+                // sync tournament matches. Vanilla casual / private rooms still
+                // go through the regular self-healing CheckOpponentRanked path.
                 try
                 {
                     var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
-                    if (rp != null && rp.ContainsKey("cr_ff"))
+                    string rname = PhotonNetwork.CurrentRoom?.Name ?? "";
+                    bool isModIssued = (rp != null && rp.ContainsKey("cr_ff"))
+                                    || rname.StartsWith("ranked_")
+                                    || rname.StartsWith("team_")
+                                    || rname.StartsWith("sct-");
+                    if (isModIssued)
                     {
                         matchIsRanked = true;
                         opponentIsRanked = true;
-                        Plugin.Log.LogInfo("[POLL] cr_ff room detected — matchIsRanked forced true");
+                        Plugin.Log.LogInfo($"[POLL] mod-issued competitive room detected ({rname}) — matchIsRanked forced true");
                     }
                 }
                 catch { }
@@ -1252,6 +1258,18 @@ namespace CompetitiveRounds
 
             if (shouldReport)
             {
+                // Diagnostic for the 1v1 / tournament report path. Same shape as
+                // [2v2-REPORT-ROUTE] — surfaces the key signals so silent
+                // mis-routing (e.g., ranked match logged casual, tournament match
+                // logged 1v1 ranked) is diagnosable instead of invisible.
+                try
+                {
+                    string rn = PhotonNetwork.CurrentRoom?.Name ?? "(no room)";
+                    bool isTour = rn.StartsWith("sct-");
+                    bool isRk = rn.StartsWith("ranked_");
+                    Plugin.Log.LogInfo($"[REPORT-ROUTE] 1v1 path: room={rn} isRanked={matchIsRanked} tournament={isTour} ranked_queue={isRk} reporter={localSteamId} opponent={opponentSteamId}");
+                }
+                catch { }
                 ApiClient.ReportMatch(
                     p1SteamId: p1SteamId,
                     p1Name: p1Name,
