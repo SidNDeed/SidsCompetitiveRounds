@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.8";
+        public const string ModVersion = "1.25.9";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -879,35 +879,15 @@ namespace CompetitiveRounds
         }
     }
 
-    /// <summary>
-    /// Suppress NetworkConnectionHandler.OnPlayerLeftRoom's auto-disconnect cascade
-    /// in 2v2 rooms. Vanilla treats ANY player leaving as "the other player left,
-    /// abort the match" — that was fine for 1v1 but in a 4-player room, if any one
-    /// of the 4 has a problem and bails, all 3 others get force-disconnected too.
-    /// During the spawn race we observed: 2 of 4 spawn correctly, the 2 that
-    /// hit a race bail, OnPlayerLeftRoom fires on the working clients, all 4 drop.
-    ///
-    /// Fix: in cr_ff rooms, skip the DoDisconnect call so the match keeps running.
-    /// Players can manually leave if they want via the in-game escape menu.
-    /// (A future pass should detect a teammate-left scenario and forfeit the
-    /// affected team's series, but for now just keep the connection alive.)
-    /// </summary>
-    [HarmonyPatch(typeof(NetworkConnectionHandler), "OnPlayerLeftRoom")]
-    class NetworkConnectionHandler_OnPlayerLeftRoom_2v2_Patch
-    {
-        static bool Prefix()
-        {
-            try
-            {
-                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return true;
-                var props = PhotonNetwork.CurrentRoom.CustomProperties;
-                if (props == null || !props.ContainsKey("cr_ff")) return true;
-                Plugin.Log.LogInfo("[2v2] OnPlayerLeftRoom suppressed (cr_ff room) — match continues");
-                return false;  // skip vanilla DoDisconnect cascade
-            }
-            catch { return true; }
-        }
-    }
+    // NetworkConnectionHandler_OnPlayerLeftRoom_2v2_Patch removed in v1.25.9.
+    // Originally added in v1.25.5 to suppress vanilla's cascade-DC during the
+    // 2v2 spawn race (where 2 of 4 bailed mid-spawn and dragged the others).
+    // Spawn race is fixed by v1.25.4–v1.25.8 (PlayerAssigner slot collision,
+    // late-joiner GM_ArmsRace activation, character-select OOB, auto-spawn).
+    // Now when a player leaves mid-game we want vanilla's DoDisconnect →
+    // NetworkRestart → GoToMenu cascade to fire so the remaining 3 don't sit
+    // forever — matches user-reported expectation that a quit ends the match
+    // for everyone.
 
     /// <summary>
     /// Skip-and-replace PlayerAssigner.CreatePlayer in 2v2 rooms. Vanilla logic
@@ -1153,13 +1133,128 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Plugin.Log.LogError($"[2v2] GM_ArmsRace activate failed: {ex.Message}"); }
 
+            // Clear LoadingScreen state so the giant "Searching" overlay disappears
+            // for late joiners. RPCA_FoundGame normally calls LoadingScreen.StopLoading
+            // (which sets m_isLoading=false + stops the searching particle systems +
+            // hides the cancel text) but late joiners miss that RPC. Do it manually.
+            try
+            {
+                var ls = LoadingScreen.instance;
+                if (ls != null)
+                {
+                    try { ls.searchingSystem?.Stop(); } catch { }
+                    try { ls.matchFoundSystem?.Stop(); } catch { }
+                    if (ls.playerNamesSystem != null)
+                        foreach (var pns in ls.playerNamesSystem)
+                            try { pns?.Stop(); } catch { }
+                    try { if (ls.m_cancelText != null) ls.m_cancelText.SetActive(false); } catch { }
+                    var fIsLoading = typeof(LoadingScreen).GetField("m_isLoading",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    fIsLoading?.SetValue(ls, false);
+                    Plugin.Log.LogInfo("[2v2] Cleared LoadingScreen searching overlay (late joiner)");
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] LoadingScreen clear failed: {ex.Message}"); }
+
             // Kick off a fallback that manually invokes GM_ArmsRace.StartGame
             // once all 4 players are spawned. Belt-and-suspenders: if any
             // Player.Start fires BEFORE our SetActive lands (race), GM_ArmsRace
             // wouldn't have subscribed PlayerJoined yet for that player and the
             // count won't reach 4 organically.
             if (Plugin.Instance != null)
+            {
                 Plugin.Instance.StartCoroutine(Force2v2StartGameWhenReady());
+                Plugin.Instance.StartCoroutine(Setup4PlayerCardBarsWhenReady());
+            }
+        }
+
+        /// <summary>Extend CardBarHandler.cardBars to length 4 in cr_ff rooms so
+        /// each of the 4 players gets their own card-pick bar. Vanilla prefab is
+        /// 1v1-shaped (2 CardBars: cardBars[0]=team 0/left, cardBars[1]=team 1/right).
+        /// CardBarHandler.AddCard(int teamId, ...) at vanilla call site receives
+        /// PlayerID, so PlayerID 2 and 3 hit IndexOutOfRange and their picks
+        /// vanish. Strategy: try includeInactive children first (in case the
+        /// prefab actually has 4 slots that 1v1 mode hides); else clone bars
+        /// 0 and 1 with a vertical offset so all 4 are visible.</summary>
+        private static System.Collections.IEnumerator Setup4PlayerCardBarsWhenReady()
+        {
+            float deadline = Time.realtimeSinceStartup + 15f;
+            while (Time.realtimeSinceStartup < deadline)
+            {
+                if (Plugin.Pending2v2Slot < 0) yield break;
+                if (!PhotonNetwork.InRoom) yield break;
+                var cbh = CardBarHandler.instance;
+                if (cbh == null || cbh.cardBars == null || cbh.cardBars.Length < 2)
+                {
+                    yield return new WaitForSeconds(0.5f);
+                    continue;
+                }
+
+                // Already extended to 4? bail.
+                if (cbh.cardBars.Length >= 4)
+                {
+                    Plugin.Log.LogInfo($"[2v2] CardBars already {cbh.cardBars.Length} — no extension needed");
+                    yield break;
+                }
+
+                try
+                {
+                    // Probe the prefab tree for any inactive CardBars first — vanilla
+                    // 4-player local mode might have 4 in the hierarchy with 2 hidden.
+                    var allInTree = cbh.GetComponentsInChildren<CardBar>(true);
+                    if (allInTree != null && allInTree.Length >= 4)
+                    {
+                        foreach (var b in allInTree)
+                            if (b != null && !b.gameObject.activeSelf) b.gameObject.SetActive(true);
+                        cbh.cardBars = allInTree;
+                        Plugin.Log.LogInfo($"[2v2] CardBars: found {allInTree.Length} in tree (incl. inactive), activated all");
+                        yield break;
+                    }
+
+                    // Prefab only has 2 — clone each with a vertical offset.
+                    var bar0 = cbh.cardBars[0];
+                    var bar1 = cbh.cardBars[1];
+                    if (bar0 == null || bar1 == null)
+                    {
+                        Plugin.Log.LogWarning("[2v2] CardBars: original bar0/bar1 is null, skipping extension");
+                        yield break;
+                    }
+
+                    var clone0Obj = UnityEngine.Object.Instantiate(bar0.gameObject, bar0.transform.parent);
+                    var clone1Obj = UnityEngine.Object.Instantiate(bar1.gameObject, bar1.transform.parent);
+                    clone0Obj.name = bar0.gameObject.name + "_2v2_p1";
+                    clone1Obj.name = bar1.gameObject.name + "_2v2_p3";
+
+                    // Offset clones vertically so they don't overlap originals.
+                    // ROUNDS' bars use RectTransform anchored to top corners.
+                    OffsetBar(clone0Obj.transform, new Vector2(0f, -180f));
+                    OffsetBar(clone1Obj.transform, new Vector2(0f, -180f));
+
+                    var clone0CB = clone0Obj.GetComponent<CardBar>();
+                    var clone1CB = clone1Obj.GetComponent<CardBar>();
+                    if (clone0CB == null || clone1CB == null)
+                    {
+                        Plugin.Log.LogWarning("[2v2] CardBars: clone missing CardBar component");
+                        yield break;
+                    }
+
+                    cbh.cardBars = new CardBar[] { bar0, clone0CB, bar1, clone1CB };
+                    Plugin.Log.LogInfo("[2v2] CardBars: cloned to 4 entries [team0_p0, team0_p1, team1_p2, team1_p3]");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogError($"[2v2] CardBar extension failed: {ex.Message}");
+                }
+                yield break;
+            }
+            Plugin.Log.LogWarning("[2v2] CardBar setup timed out — CardBarHandler.instance never appeared");
+        }
+
+        private static void OffsetBar(Transform t, Vector2 offset)
+        {
+            var rt = t as RectTransform;
+            if (rt != null) rt.anchoredPosition += offset;
+            else t.localPosition += new Vector3(offset.x, offset.y, 0f);
         }
 
         private static System.Collections.IEnumerator Force2v2StartGameWhenReady()
@@ -1290,6 +1385,49 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[2v2-DIAG] Player.Start: pid={__instance.PlayerID} team={__instance.TeamID} isLocal={isLocal} actor={actor}");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DIAG] Player.Start log error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Sort the SpawnPoint[] array left-to-right by X position in cr_ff
+    /// rooms. PlayerManager.MovePlayers indexes spawnPoints[i] for players[i],
+    /// but the prefab child order isn't guaranteed to be left-then-right. With
+    /// our slot mapping (slots 0/1 = team 0, slots 2/3 = team 1), sorting X
+    /// ascending puts team 0 on the left half, team 1 on the right half — same
+    /// layout as 1v1.</summary>
+    [HarmonyPatch(typeof(MapManager), "GetSpawnPoints")]
+    class MapManager_GetSpawnPoints_2v2_Patch
+    {
+        static void Postfix(ref SpawnPoint[] __result)
+        {
+            try
+            {
+                if (__result == null || __result.Length < 2) return;
+                if (!Diag2v2.IsActive()) return;
+                Array.Sort(__result, (a, b) =>
+                    (a == null ? 0f : a.localStartPos.x).CompareTo(b == null ? 0f : b.localStartPos.x));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] SpawnPoint sort failed: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>In cr_ff rooms, force teammates to share a team color. Vanilla
+    /// PlayerSkinBank.GetPlayerSkinColors(playerID) returns a different skin
+    /// per slot (orange/pink/blue/something), so 2v2 ends up with 4 visually
+    /// distinct players. Map slot → team-base (slots 0,1 → 0; slots 2,3 → 2)
+    /// so both team-0 players look orange and both team-1 players look blue.
+    /// PlayerColorCosmetic's custom body-color override still applies on top.</summary>
+    [HarmonyPatch(typeof(PlayerSkinBank), "GetPlayerSkinColors")]
+    class PlayerSkinBank_GetPlayerSkinColors_2v2_Patch
+    {
+        static void Prefix(ref int playerID)
+        {
+            try
+            {
+                if (!Diag2v2.IsActive()) return;
+                if (playerID < 0 || playerID > 3) return;
+                playerID = (playerID / 2) * 2;
+            }
+            catch { }
         }
     }
 

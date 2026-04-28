@@ -1172,8 +1172,19 @@ namespace CompetitiveRounds
             bool routedTeamMatch = false;
             try
             {
+                int playerListLen = PhotonNetwork.PlayerList?.Length ?? -1;
+                bool hasSeries = !string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId);
+                bool roomIsCrFf = false;
+                try
+                {
+                    var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
+                    roomIsCrFf = rp != null && rp.ContainsKey("cr_ff");
+                }
+                catch { }
+                Plugin.Log.LogInfo($"[2v2-REPORT-ROUTE] shouldReport={shouldReport} ActiveTeamSeriesId={(hasSeries ? ApiClient.ActiveTeamSeriesId : "(null)")} PlayerList.Length={playerListLen} cr_ff={roomIsCrFf}");
+
                 if (shouldReport
-                    && !string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId)
+                    && hasSeries
                     && PhotonNetwork.PlayerList != null
                     && PhotonNetwork.PlayerList.Length == 4)
                 {
@@ -1185,6 +1196,11 @@ namespace CompetitiveRounds
                         matchIsRanked = false;
                         return;
                     }
+                }
+                else if (roomIsCrFf || hasSeries)
+                {
+                    // Caught a partial-state mismatch — log loudly so we can diagnose.
+                    Plugin.Log.LogWarning($"[2v2-REPORT-ROUTE] FELL THROUGH to 1v1 path despite 2v2 signals: shouldReport={shouldReport} hasSeries={hasSeries} playerListLen={playerListLen} cr_ff={roomIsCrFf}");
                 }
             }
             catch (Exception ex)
