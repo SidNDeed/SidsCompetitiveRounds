@@ -409,6 +409,22 @@ namespace CompetitiveRounds
                 opponentRankChecked = false;
                 opponentIsRanked = false;
                 matchIsRanked = false;
+                // 2v2 cr_ff rooms are queue-issued team rooms — definitionally
+                // ranked. Set immediately at room join so the [POLL] === Match
+                // Started === log doesn't show CASUAL and the routing decision
+                // doesn't need to wait for the racy single-opponent CheckOpponentRanked
+                // callback that fires later (and only checks one of 3 opponents).
+                try
+                {
+                    var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
+                    if (rp != null && rp.ContainsKey("cr_ff"))
+                    {
+                        matchIsRanked = true;
+                        opponentIsRanked = true;
+                        Plugin.Log.LogInfo("[POLL] cr_ff room detected — matchIsRanked forced true");
+                    }
+                }
+                catch { }
                 seriesPreflightSent = false;
                 lastOpponentRankCheck = -999f;
                 Plugin.Log.LogInfo($"[POLL] Joined room: {photonRoomId} (region: {photonRegion})");
@@ -793,6 +809,13 @@ namespace CompetitiveRounds
                     {
                         pcolorRoomApplied = true;
                         PlayerColorCosmetic.OnMatchStart();
+                        // Also trigger TrailCosmetic — it has its own DelayedAttachAll
+                        // pass that iterates players + reads their cr_trail_* props.
+                        // Previously only PCColor was kicked here, so trails on
+                        // remote players weren't being attached until OnMatchStarted
+                        // fired (which can be much later in 2v2 due to the late-joiner
+                        // assembly path).
+                        try { TrailCosmetic.OnMatchStart(); } catch { }
                     }
                 }
                 catch { }
@@ -1295,15 +1318,12 @@ namespace CompetitiveRounds
                 return false;
             }
 
-            // Map each in-game Player → (steam_id, display_name, team_id from CharacterData,
-            //   cards from cr_cards, fps from cr_fps).
-            var teamFieldInfo = typeof(CharacterData).GetField("teamID",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (teamFieldInfo == null)
-            {
-                Plugin.Log.LogWarning("[2v2-REPORT] aborting: CharacterData.teamID field not found via reflection");
-                return false;
-            }
+            // Map each Photon player → in-game Player → TeamID. The teamID
+            // lives on Player (public property TeamID; private field m_teamID),
+            // NOT on CharacterData. v1.25.11 used reflection on
+            // CharacterData.teamID which returned null silently and aborted
+            // the entire 2v2 report path — that's why every match was logging
+            // as 1v1 casual. PlayerManager.players is List<Player>.
 
             // Resolve Photon ActorNumber → Steam ID via the same ck_id hint our existing
             // resolver writes; if missing, fall back to UserId. We also need each player's
@@ -1321,7 +1341,9 @@ namespace CompetitiveRounds
                     return false;
                 }
                 string name = pp.NickName ?? sid;
-                // Find their CharacterData → teamID
+                // Find their Player → TeamID. PlayerManager.players is List<Player>;
+                // each entry has IsLocal/TeamID/PlayerID + a CharacterData on the
+                // same GameObject. Match by Photon ActorNumber via PhotonView.
                 int peerTeamId = -1;
                 foreach (var po in pm.players)
                 {
@@ -1329,8 +1351,7 @@ namespace CompetitiveRounds
                     var pv = po.GetComponent<PhotonView>();
                     if (pv == null || pv.Owner == null) continue;
                     if (pv.Owner.ActorNumber != pp.ActorNumber) continue;
-                    var cd = po.GetComponent<CharacterData>();
-                    if (cd != null) { peerTeamId = (int)teamFieldInfo.GetValue(cd); }
+                    peerTeamId = po.TeamID;
                     break;
                 }
                 // Cards from Photon cr_cards

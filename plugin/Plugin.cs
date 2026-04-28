@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.11";
+        public const string ModVersion = "1.25.12";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1265,15 +1265,16 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>Aggressively re-apply PlayerColorCosmetic for every actor in the
-        /// room over the first ~10 seconds after joining a cr_ff room. Photon's
-        /// `OnPlayerPropertiesUpdate` callback fires on PROP UPDATES — but late
-        /// joiners receive the room's existing player prop state without an update
-        /// event, so the cosmetic apply path is never triggered for them. Result:
-        /// some clients see other players' custom body colors as "white" (no tint
-        /// applied because cr_pcolor_color is empty until prop arrives) or stale
-        /// (off-cycle prismatic frame). Polling re-apply catches the late arrivals
-        /// AND nudges the animation tick state into existence for animated SKUs.</summary>
+        /// <summary>Aggressively re-apply PlayerColorCosmetic AND TrailCosmetic for
+        /// every actor in the room over the first ~12 seconds after joining a cr_ff
+        /// room. Photon's `OnPlayerPropertiesUpdate` callback fires on PROP UPDATES
+        /// only — but late joiners receive the room's existing player prop state
+        /// without an update event, so cosmetic apply paths are never triggered for
+        /// them. Result: some clients see other players' custom body colors as
+        /// "white" (no tint applied because cr_pcolor_color was empty when the
+        /// initial DelayedApplyAll ran), and trails simply don't appear at all.
+        /// Polling re-apply catches the late arrivals AND nudges the PCOLOR
+        /// animation tick into existence for animated SKUs.</summary>
         private static System.Collections.IEnumerator Repeated2v2PCColorReapply()
         {
             // Wait for the spawned player GameObjects to settle.
@@ -1293,10 +1294,11 @@ namespace CompetitiveRounds
                             if (pp == null) continue;
                             if (PhotonNetwork.LocalPlayer != null && pp.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber) continue;
                             PlayerColorCosmetic.ReapplyForActor(pp.ActorNumber);
+                            TrailCosmetic.ReattachForActor(pp.ActorNumber);
                         }
                     }
                 }
-                catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] PCColor reapply tick error: {ex.Message}"); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] cosmetic reapply tick error: {ex.Message}"); }
                 yield return new WaitForSeconds(2f);
             }
         }
@@ -1397,14 +1399,19 @@ namespace CompetitiveRounds
             {
                 if (Plugin.Pending2v2Slot < 0) yield break;
                 if (!PhotonNetwork.InRoom) yield break;
+                // Vanilla path took over and the game is rolling — exit success.
+                // Without this, the coroutine loops until deadline and emits a
+                // misleading "never reached 4 spawned players" warning even
+                // when the match is mid-play.
+                try { if (GameManager.instance != null && GameManager.instance.isPlaying) yield break; } catch { }
                 var gm = GM_ArmsRace.instance;
                 if (gm != null && gm.gameObject.activeInHierarchy && PlayerManager.instance != null)
                 {
                     int counted = 0;
                     foreach (var p in PlayerManager.instance.players) if (p != null) counted++;
-                    if (counted >= 4 && !GameManager.instance.isPlaying)
+                    if (counted >= 4)
                     {
-                        Plugin.Log.LogInfo($"[2v2] Force-invoking GM_ArmsRace.StartGame (counted={counted}, gm.isPlaying={GameManager.instance.isPlaying})");
+                        Plugin.Log.LogInfo($"[2v2] Force-invoking GM_ArmsRace.StartGame (counted={counted})");
                         try { gm.StartGame(); }
                         catch (Exception ex) { Plugin.Log.LogError($"[2v2] StartGame invoke failed: {ex.Message}"); }
                         yield break;
@@ -1594,9 +1601,14 @@ namespace CompetitiveRounds
                 if (!Diag2v2.IsActive()) return;
                 if (playerID < 0 || playerID > 3) return;
                 int original = playerID;
-                playerID = (playerID / 2) * 2;
-                // Light diagnostic so we can see when/whether the patch fires.
-                // Throttle to one log per (original, mapped) per 5 seconds.
+                // PlayerSkinBank has 4 skin entries: index 0 = orange (1v1 team 0),
+                // index 1 = blue (1v1 team 1), 2/3 = whatever extras (red/green
+                // variants) for 4-player local. We want strict 2-team orange/blue
+                // in 2v2 ranked, so map slot → team_index (slot/2): slots 0,1 → 0
+                // (orange); slots 2,3 → 1 (blue). v1.25.10 used (slot/2)*2 which
+                // gave 0/0/2/2 — that's why team 1 showed as the offshoot index-2
+                // color (red/green) instead of blue.
+                playerID = playerID / 2;
                 if (Time.realtimeSinceStartup - _lastClear > 5f)
                 {
                     _loggedKeys.Clear();

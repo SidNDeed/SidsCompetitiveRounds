@@ -401,6 +401,22 @@ namespace CompetitiveRounds
 
             animByActor[actor] = st;
             Plugin.Log.LogInfo($"[PCOLOR] Applied actor={actor} sku={sku} hex={colorHex}  baseline=({teamBaseline.r:F2},{teamBaseline.g:F2},{teamBaseline.b:F2})  skins={st.tintedSkins.Count} particles={st.tintedParticles.Count} sprites={st.tintedSprites.Count}");
+
+            // Kick the anim loop if this is an animated sku and the loop isn't
+            // already running. Previously only DelayedApplyAll started the loop,
+            // so any apply via ReapplyForActor (late prop arrivals, our 2v2
+            // forced reapply pass) added animByActor entries but never animated —
+            // prismatic stayed stuck on the static color (white when colorHex
+            // was the empty-string fallback) and chrome stayed at one shade.
+            try
+            {
+                if (IsAnimatedSku(sku) && animLoop == null && Plugin.Instance != null)
+                {
+                    animLoop = Plugin.Instance.StartCoroutine(AnimTickLoop());
+                    Plugin.Log.LogInfo($"[PCOLOR] Started anim tick loop (triggered by actor={actor} sku={sku})");
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] anim loop start failed: {ex.Message}"); }
         }
 
         /// <summary>True if `c` is recognizable as a tint of `teamBaseline`. Filter
