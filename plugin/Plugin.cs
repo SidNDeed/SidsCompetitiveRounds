@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.4";
+        public const string ModVersion = "1.25.5";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -777,6 +777,36 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo("[2v2] Forced playersNeededToStart=4 (cr_ff room detected)");
             }
             catch (Exception ex) { Plugin.Log.LogError($"[2v2] OnEnable patch error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// Suppress NetworkConnectionHandler.OnPlayerLeftRoom's auto-disconnect cascade
+    /// in 2v2 rooms. Vanilla treats ANY player leaving as "the other player left,
+    /// abort the match" — that was fine for 1v1 but in a 4-player room, if any one
+    /// of the 4 has a problem and bails, all 3 others get force-disconnected too.
+    /// During the spawn race we observed: 2 of 4 spawn correctly, the 2 that
+    /// hit a race bail, OnPlayerLeftRoom fires on the working clients, all 4 drop.
+    ///
+    /// Fix: in cr_ff rooms, skip the DoDisconnect call so the match keeps running.
+    /// Players can manually leave if they want via the in-game escape menu.
+    /// (A future pass should detect a teammate-left scenario and forfeit the
+    /// affected team's series, but for now just keep the connection alive.)
+    /// </summary>
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "OnPlayerLeftRoom")]
+    class NetworkConnectionHandler_OnPlayerLeftRoom_2v2_Patch
+    {
+        static bool Prefix()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return true;
+                var props = PhotonNetwork.CurrentRoom.CustomProperties;
+                if (props == null || !props.ContainsKey("cr_ff")) return true;
+                Plugin.Log.LogInfo("[2v2] OnPlayerLeftRoom suppressed (cr_ff room) — match continues");
+                return false;  // skip vanilla DoDisconnect cascade
+            }
+            catch { return true; }
         }
     }
 

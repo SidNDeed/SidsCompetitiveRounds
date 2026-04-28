@@ -2666,6 +2666,21 @@ namespace CompetitiveRounds
                     // canonicalization sorts the same way, so all 4 clients agree.
                     int slot = ComputeMy2v2Slot(MatchTracker.LocalSteamId, data.team_assigned, data.teammates);
                     Plugin.SetPending2v2Slot(slot);
+                    // Pre-populate Photon LocalPlayer custom properties NOW, before the
+                    // room is even joined. When we join the team_ room these props ride
+                    // along with the Photon Player record sent to all room members, so
+                    // remote clients reading Owner.CustomProperties[p_id]/[t_id] inside
+                    // Player.Start always see the correct slot — no race against
+                    // PhotonNetwork.Instantiate's broadcast order.
+                    try
+                    {
+                        var prejoin = new ExitGames.Client.Photon.Hashtable();
+                        prejoin["p_id"] = slot;
+                        prejoin["t_id"] = slot / 2;
+                        if (PhotonNetwork.LocalPlayer != null)
+                            PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] pre-join SetCustomProperties: {ex.Message}"); }
                     Plugin.SetPendingRoom(data.room_name, data.room_region);
                     Plugin.Log.LogInfo($"[TEAM-QUEUE] All ready! Room: {data.room_name} (region: {data.room_region ?? "auto"}) series={data.series_id} my_slot={slot}");
                     CompetitiveUI.ShowNotification("4/4 ready! Joining 2v2...", Color.green, 5f);
