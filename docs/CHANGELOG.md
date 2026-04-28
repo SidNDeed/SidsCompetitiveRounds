@@ -1,5 +1,15 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.13 — 2v2 card-pick character face + Thunderstore push
+
+Internal-facing release — fixes the card-pick visualizer showing wrong/missing faces in 2v2.
+
+- **Card-pick face now reads from Photon custom props instead of relying on RPC timing.** Vanilla `CardChoiceVisuals.Show` fires `RPCA_SetFace` with `RpcTarget.All` only from the picker's client. In 2v2 with 4 sequential pickers, the RPC for picker N can land *after* picker N+1's `Show()` has torn down the visualizer and re-instantiated the skin — so remote clients show "yesterday's picker" face, or no face at all if the timing is bad. New `FacePublisher.PublishLocal()` serializes the local player's `selectedPlayerFaces[0]` (eye/mouth/detail/detail2 IDs + offsets) to a Photon LocalPlayer custom prop `cr_face` at room-join. New `CardChoiceVisuals.Show` Postfix reads the picker's `cr_face` from their cached Photon state and applies via `CharacterCreatorItemEquipper.EquipFace` directly — eliminates the timing race entirely. Each client renders the right face on every pick, locally.
+
+This release also pushes a fresh Thunderstore bundle alongside the GitHub release.
+
+Scoped to `cr_ff` rooms only — 1v1 ranked, tournaments, and private rooms unaffected.
+
 ## v1.25.12 — 2v2 reporting + colors + trails actually working
 
 Internal-facing release — third 2v2 testing session caught five distinct bugs from v1.25.11. All five addressed root-cause.

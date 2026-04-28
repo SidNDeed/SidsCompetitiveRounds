@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.12";
+        public const string ModVersion = "1.25.13";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1202,6 +1202,11 @@ namespace CompetitiveRounds
             // Player.Start fires BEFORE our SetActive lands (race), GM_ArmsRace
             // wouldn't have subscribed PlayerJoined yet for that player and the
             // count won't reach 4 organically.
+            // Publish local face to Photon so other clients can read it during
+            // CardChoiceVisuals.Show without depending on RPC timing.
+            try { FacePublisher.PublishLocal(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish hook error: {ex.Message}"); }
+
             if (Plugin.Instance != null)
             {
                 Plugin.Instance.StartCoroutine(Force2v2StartGameWhenReady());
@@ -1525,6 +1530,120 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[2v2-DIAG] Player.Start: pid={__instance.PlayerID} team={__instance.TeamID} isLocal={isLocal} actor={actor}");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DIAG] Player.Start log error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Publishes the local player's selected face to a Photon LocalPlayer
+    /// custom property `cr_face` so that in cr_ff rooms, every client can read any
+    /// other player's face without depending on RPC timing. Vanilla's
+    /// CardChoiceVisuals.Show fires `RPCA_SetFace` with `RpcTarget.All` only from
+    /// the picker's client — in 2v2 with 4 sequential pickers, the RPC for picker N
+    /// can arrive AFTER picker N+1's Show() has already torn down and re-rendered
+    /// the visualizer locally, so remote clients see "yesterday's picker" or no
+    /// face at all. Reading from custom props on each Show() call eliminates the
+    /// timing race entirely.</summary>
+    internal static class FacePublisher
+    {
+        public const string PROP_FACE = "cr_face";
+
+        public static void PublishLocal()
+        {
+            try
+            {
+                var cch = CharacterCreatorHandler.instance;
+                if (cch == null || cch.selectedPlayerFaces == null || cch.selectedPlayerFaces.Length == 0) return;
+                var face = cch.selectedPlayerFaces[0];
+                if (face == null) return;
+                if (PhotonNetwork.LocalPlayer == null) return;
+
+                string serialized = string.Join("|", new[] {
+                    face.eyeID.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    face.eyeOffset.x.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                    face.eyeOffset.y.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                    face.mouthID.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    face.mouthOffset.x.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                    face.mouthOffset.y.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                    face.detailID.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    face.detailOffset.x.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                    face.detailOffset.y.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                    face.detail2ID.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    face.detail2Offset.x.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                    face.detail2Offset.y.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
+                });
+                var props = new ExitGames.Client.Photon.Hashtable();
+                props[PROP_FACE] = serialized;
+                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                Plugin.Log.LogInfo($"[2v2] Published local face to Photon: {serialized}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish failed: {ex.Message}"); }
+        }
+
+        public static bool TryReadAndApply(int pickerActorNumber, GameObject visualizerRoot)
+        {
+            try
+            {
+                Photon.Realtime.Player photonPlayer = null;
+                foreach (var pp in PhotonNetwork.PlayerList)
+                    if (pp != null && pp.ActorNumber == pickerActorNumber) { photonPlayer = pp; break; }
+                if (photonPlayer == null || photonPlayer.CustomProperties == null) return false;
+                if (!photonPlayer.CustomProperties.ContainsKey(PROP_FACE)) return false;
+                string s = photonPlayer.CustomProperties[PROP_FACE]?.ToString() ?? "";
+                if (string.IsNullOrEmpty(s)) return false;
+                var parts = s.Split('|');
+                if (parts.Length < 12) return false;
+                var ic = System.Globalization.CultureInfo.InvariantCulture;
+                int eyeID = int.Parse(parts[0], ic);
+                float eOx = float.Parse(parts[1], ic), eOy = float.Parse(parts[2], ic);
+                int mouthID = int.Parse(parts[3], ic);
+                float mOx = float.Parse(parts[4], ic), mOy = float.Parse(parts[5], ic);
+                int detailID = int.Parse(parts[6], ic);
+                float dOx = float.Parse(parts[7], ic), dOy = float.Parse(parts[8], ic);
+                int detail2ID = int.Parse(parts[9], ic);
+                float d2Ox = float.Parse(parts[10], ic), d2Oy = float.Parse(parts[11], ic);
+                var face = PlayerFace.CreateFace(
+                    eyeID, new Vector2(eOx, eOy),
+                    mouthID, new Vector2(mOx, mOy),
+                    detailID, new Vector2(dOx, dOy),
+                    detail2ID, new Vector2(d2Ox, d2Oy)
+                );
+                var equipper = visualizerRoot?.GetComponentInChildren<CharacterCreatorItemEquipper>(true);
+                if (equipper == null) return false;
+                equipper.EquipFace(face);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[2v2] Face read+apply failed: {ex.Message}");
+                return false;
+            }
+        }
+    }
+
+    /// <summary>Patch CardChoiceVisuals.Show Postfix to apply the picker's face from
+    /// Photon custom props after vanilla's RPC-broadcast attempt. In 2v2 the vanilla
+    /// RPC has timing races (only the picker's client fires it; remote clients can
+    /// see stale faces from the previous picker, or nothing if the RPC arrived
+    /// AFTER the next picker's Show tore down and re-instantiated the skin). Reading
+    /// from custom props each Show() guarantees the right face on every client.</summary>
+    [HarmonyPatch(typeof(CardChoiceVisuals), "Show")]
+    class CardChoiceVisuals_Show_2v2_Patch
+    {
+        static void Postfix(CardChoiceVisuals __instance, int pickerID)
+        {
+            try
+            {
+                if (!Diag2v2.IsActive()) return;
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null || pickerID < 0 || pickerID >= pm.players.Count) return;
+                var picker = pm.players[pickerID];
+                if (picker == null) return;
+                var pv = picker.GetComponent<PhotonView>();
+                if (pv == null || pv.Owner == null) return;
+                bool ok = FacePublisher.TryReadAndApply(pv.Owner.ActorNumber, __instance.gameObject);
+                if (ok)
+                    Plugin.Log.LogInfo($"[2v2] CardChoiceVisuals: applied picker face from Photon (pickerID={pickerID}, actor={pv.Owner.ActorNumber})");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] CardChoiceVisuals.Show postfix error: {ex.Message}"); }
         }
     }
 
