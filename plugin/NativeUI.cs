@@ -296,6 +296,23 @@ namespace CompetitiveRounds
             dataCheckTimer+=Time.deltaTime;if(dataCheckTimer>=0.3f){dataCheckTimer=0f;int mc=ApiClient.CachedMatchHistory?.Count??0,lc=ApiClient.CachedLeaderboard?.entries?.Length??0,cc=ApiClient.CachedCardStats?.Count??0;if(mc!=lastMatchCount||lc!=lastLBCount||cc!=lastCardCount){lastMatchCount=mc;lastLBCount=lc;lastCardCount=cc;dirty=true;}}
             if(dirty){dirty=false;RefreshCurrentTab();}
             MaybeRefreshTournament();
+            MaybeRefreshTeamTab();
+        }
+
+        // Pulled out of RefreshTeamTab so the queue lists keep updating while
+        // the tab is open even when nothing else flips the dirty bit. Without
+        // this the Random Queue / Custom Lobbies panels stay frozen until the
+        // user navigates away and back. Throttled to 2s to match the existing
+        // /team/queue/list cadence in ApiClient.
+        private static float teamTabRefreshAt;
+        public static void MaybeRefreshTeamTab()
+        {
+            if (currentTab != 8) return;
+            if (Time.unscaledTime < teamTabRefreshAt) return;
+            teamTabRefreshAt = Time.unscaledTime + 2f;
+            ApiClient.UpdateTeamQueueList(force: true);
+            // Header count auto-refreshes via its own internal 10s timer.
+            ApiClient.UpdateTeamQueueCount();
         }
 
         private static void FindMainMenuGroup(){var all=UnityEngine.Object.FindObjectsOfType<ListMenuButton>();Type tt=null;PropertyInfo tp=null;foreach(var a in AppDomain.CurrentDomain.GetAssemblies()){tt=a.GetType("TMPro.TMP_Text");if(tt!=null)break;}if(tt!=null)tp=tt.GetProperty("text",BindingFlags.Public|BindingFlags.Instance);foreach(var b in all){if(tp==null)break;try{var tc=b.GetComponentInChildren(tt,true);if(tc==null)continue;if((tp.GetValue(tc)as string??"").Trim().ToUpper()=="QUIT"){mainMenuGroup=b.transform.parent.gameObject;Plugin.Log.LogInfo($"[NATIVE] Found main menu group: {mainMenuGroup.name}");return;}}catch{}}Plugin.Log.LogWarning("[NATIVE] Could not find QUIT button");}

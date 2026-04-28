@@ -568,7 +568,13 @@ namespace CompetitiveRounds
                         // this isn't a queue-issued series (ActiveRankedSeriesId is
                         // empty), ask the server to create the ranked_series row so it
                         // appears in /series/active immediately. One-shot per room.
-                        if (matchIsRanked && !seriesPreflightSent
+                        //
+                        // Skip the 1v1 preflight in 2v2 (cr_ff) rooms — the team_series
+                        // row already exists from the queue lock, and creating a 1v1
+                        // ranked_series here pollutes the live-bets panel + 1v1 stats
+                        // with phantom rows for arbitrary opponent pairs (whichever
+                        // opponentSteamId the poll happened to latch onto first).
+                        if (matchIsRanked && !inCrFf && !seriesPreflightSent
                             && string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
                             && !string.IsNullOrEmpty(localSteamId)
                             && !string.IsNullOrEmpty(opponentSteamId)

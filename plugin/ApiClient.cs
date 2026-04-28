@@ -1939,6 +1939,21 @@ namespace CompetitiveRounds
             return -1;
         }
 
+        // Brace-pair finder for {} — same semantics as FindMatchingBracket. Used
+        // by the cards_by_player parser, which has to extract a nested JSON
+        // object (not an array) keyed by steam_id.
+        private static int FindMatchingBrace(string s, int openPos)
+        {
+            if (openPos < 0 || openPos >= s.Length) return -1;
+            int depth = 0;
+            for (int i = openPos; i < s.Length; i++)
+            {
+                if (s[i] == '{') depth++;
+                else if (s[i] == '}') { depth--; if (depth == 0) return i; }
+            }
+            return -1;
+        }
+
         public static void FetchCardStats(int limit = 30, string steamId = null, string sortBy = "times_picked", string isRanked = null)
         {
             IsLoading = true;
@@ -3432,7 +3447,7 @@ namespace CompetitiveRounds
                                 if (cStart >= 0)
                                 {
                                     int oStart = chunk.IndexOf('{', cStart);
-                                    int oEnd = FindMatchingBracket(chunk, oStart);
+                                    int oEnd = FindMatchingBrace(chunk, oStart);
                                     if (oStart >= 0 && oEnd > oStart)
                                     {
                                         string slice = chunk.Substring(oStart + 1, oEnd - oStart - 1);

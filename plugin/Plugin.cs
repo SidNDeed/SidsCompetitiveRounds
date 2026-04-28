@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.18";
+        public const string ModVersion = "1.25.19";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1725,12 +1725,28 @@ namespace CompetitiveRounds
                 Photon.Realtime.Player photonPlayer = null;
                 foreach (var pp in PhotonNetwork.PlayerList)
                     if (pp != null && pp.ActorNumber == pickerActorNumber) { photonPlayer = pp; break; }
-                if (photonPlayer == null || photonPlayer.CustomProperties == null) return false;
-                if (!photonPlayer.CustomProperties.ContainsKey(PROP_FACE)) return false;
+                if (photonPlayer == null || photonPlayer.CustomProperties == null)
+                {
+                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: photonPlayer={(photonPlayer == null ? "null" : "found")} props={(photonPlayer?.CustomProperties == null ? "null" : "ok")}");
+                    return false;
+                }
+                if (!photonPlayer.CustomProperties.ContainsKey(PROP_FACE))
+                {
+                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: cr_face property not set on remote player (their client never published, or property not yet replicated)");
+                    return false;
+                }
                 string s = photonPlayer.CustomProperties[PROP_FACE]?.ToString() ?? "";
-                if (string.IsNullOrEmpty(s)) return false;
+                if (string.IsNullOrEmpty(s))
+                {
+                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: cr_face value is empty string");
+                    return false;
+                }
                 var parts = s.Split('|');
-                if (parts.Length < 12) return false;
+                if (parts.Length < 12)
+                {
+                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: cr_face has {parts.Length} parts (expected 12) — likely truncated");
+                    return false;
+                }
                 var ic = System.Globalization.CultureInfo.InvariantCulture;
                 int eyeID = int.Parse(parts[0], ic);
                 float eOx = float.Parse(parts[1], ic), eOy = float.Parse(parts[2], ic);
