@@ -5127,14 +5127,16 @@ async def team_series_spawn_confirm(
 
     # Idempotent atomic update: only increment if this player hasn't already
     # been recorded. asyncpg + jsonb @> for membership.
+    # asyncpg's parameter parser collides with PostgreSQL's `::` cast operator
+    # (learning #46 — same bug we hit with `:b1::uuid[]`). Use CAST(...) form.
     res = await db.execute(
         text("""
             UPDATE team_series
                SET spawn_confirmations = spawn_confirmations + 1,
-                   spawn_confirmed_by = spawn_confirmed_by || to_jsonb(:pid::text)
+                   spawn_confirmed_by = spawn_confirmed_by || to_jsonb(CAST(:pid AS text))
              WHERE id = :sid
                AND status = 'active'
-               AND NOT (spawn_confirmed_by @> to_jsonb(:pid::text))
+               AND NOT (spawn_confirmed_by @> to_jsonb(CAST(:pid AS text)))
             RETURNING spawn_confirmations
         """),
         {"sid": sid_uuid, "pid": str(pid)},
