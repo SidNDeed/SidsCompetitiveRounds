@@ -3296,6 +3296,30 @@ namespace CompetitiveRounds
                         {
                             CompetitiveUI.ShowNotification($"Series: {sScore}", new Color(0.6f, 0.8f, 1f), 4f);
                         }
+                        // Mid-series rebalance — server sends rebalance_assignments
+                        // when the previous match was lopsided enough to swap a
+                        // weakest-winner with strongest-loser. Parse + log so we
+                        // can verify the trigger; full client-side team mutation
+                        // (TeamID + spawn + body color updates) ships next round.
+                        try
+                        {
+                            int rIdx = response.IndexOf("\"rebalance_assignments\":");
+                            if (rIdx >= 0)
+                            {
+                                int oStart = response.IndexOf('{', rIdx);
+                                int oEnd = oStart >= 0 ? FindMatchingBrace(response, oStart) : -1;
+                                if (oStart > 0 && oEnd > oStart)
+                                {
+                                    string slice = response.Substring(oStart + 1, oEnd - oStart - 1);
+                                    if (!string.IsNullOrEmpty(slice.Trim()))
+                                    {
+                                        Plugin.Log.LogInfo($"[2v2-REBALANCE] server says swap teams next match: {slice}");
+                                        CompetitiveUI.ShowNotification("Teams will rebalance next match!", new Color(1f, 0.8f, 0.4f), 5f);
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception rex) { Plugin.Log.LogWarning($"[2v2-REBALANCE] parse: {rex.Message}"); }
                     }
                     else
                     {

@@ -1,5 +1,26 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.22 — 2v2 UI/UX polish: scrollable tab, aligned leaderboard, mid-series auto-balance leg work
+
+**Scrollable 2v2 tab:** the whole tab is now wrapped in a vertical ScrollView so the queue panels can grow to fit 8+ queuers each without crushing the leaderboard / history below. Bottom row sized to 720px so its internal scrollviews still work for tall data.
+
+**2v2 Leaderboard rework:**
+- Floating sort buttons replaced with clickable column headers above each data column (mirrors 1v1 leaderboard pattern). Active sort highlighted with a brighter button + `v` indicator.
+- Columns: `# | Player | Rating | W-L | WR | Avg Mate Elo | Gold | XP`
+- Title moved to suffix `Name [Title]` (was prefix). "Mate Elo" → "Avg Mate Elo".
+- Capacity bumped to 100 visible rows (outer scroll handles overflow if more).
+
+**Recent 2v2 Series:**
+- Pagination buttons grouped on the same row as the header label, page indicator (`1/3`) sits between `<` / `>` buttons. Buttons hide when at first/last page.
+- Per-game cards row: word-wrap enabled, row height bumped 44 → 64 so two-line wraps don't clip. Each card name capped at 14 chars + 4 cards per team max with `…` for overflow.
+- Title also moved to suffix in opponent names.
+
+**Mid-series auto-balance (backend leg work):**
+- New `AUTO_BALANCE_SWAP_MARGIN = 3` constant on the server. After each match in an auto-balanced series whose point margin ≥ 3 (e.g., 5-2, 5-1, 5-0), the server swaps the weakest player on the winning team with the strongest player on the losing team for the NEXT match.
+- `team_series.t1a/t1b/t2a/t2b` updated with the new partition; `team_queue.team_assigned` updated for all 4 so polls reflect the swap; `rebalance_count` incremented.
+- `TeamMatchResponse.rebalance_assignments` populated as `{steam_id: 1|2}`.
+- Client parses + logs `[2v2-REBALANCE]` and shows a notification ("Teams will rebalance next match!"). **Full client-side mid-match team mutation (TeamID + spawn + body color update propagation) is the next round's work** — the assignments arrive but the in-game swap still requires a Photon property update flow + skin re-bake.
+
 ## v1.25.21 — 2v2 mega follow-up: economy, leaderboard expansion, paginated history, queue/face/UI fixes
 
 Heavy batch addressing tester feedback after v1.25.20.

@@ -469,7 +469,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.25.21"
+LATEST_MOD_VERSION = "1.25.22"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -4769,6 +4769,12 @@ TEAM_MATCH_XP_BASE       = 600
 TEAM_MATCH_WIN_MULT      = 1.5  # 600 → 900 on win
 TEAM_SERIES_WIN_GOLD     = 50
 TEAM_SERIES_LOSS_GOLD    = 25
+# Mid-series auto-balance trigger. Fires after a match in an auto-balanced
+# series whose total point margin >= this threshold (e.g., 5-2 = margin 3).
+# Lower → swap more often (every close-ish game), higher → swap only on
+# blowouts. Tester request: "make sure colors/spawns/etc get properly
+# swapped" — server emits rebalance_assignments and the client follows.
+AUTO_BALANCE_SWAP_MARGIN = 3
 
 
 def _verify_team_hmac(report: TeamMatchReport) -> bool:
@@ -6292,6 +6298,107 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
             text("""UPDATE team_series SET t1_series_wins = :t1, t2_series_wins = :t2 WHERE id = :sid"""),
             {"t1": new_t1w, "t2": new_t2w, "sid": report.series_id},
         )
+
+        # ── Auto-balance between matches in an auto-balanced series ──
+        # When the previous match was lopsided (point margin >= AUTO_BALANCE_SWAP_MARGIN)
+        # AND the series was originally auto-balanced (not a manual pick lobby),
+        # swap the weakest winner with the strongest loser so the next match
+        # plays with reshuffled teams. The rebalance only applies to the NEXT
+        # match — the client gets a `rebalance_assignments` payload on the
+        # response and updates each player's TeamID before round 1 starts.
+        try:
+            was_auto = bool(series["was_auto_balanced"]) if "was_auto_balanced" in series else True
+            margin = abs(int(report.t1_points_total or 0) - int(report.t2_points_total or 0))
+            if was_auto and margin >= AUTO_BALANCE_SWAP_MARGIN:
+                # Pull each player's current effective rating (2v2 if trusted, else 1v1 fallback).
+                pids = [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id]
+                rate_q = await db.execute(
+                    text("""
+                        SELECT p.id AS pid,
+                               COALESCE(g2.rating, 1500.0) AS r2,
+                               COALESCE(g2.rating_deviation, 350.0) AS rd2,
+                               COALESCE(g2.completed_series, 0) AS cs,
+                               COALESCE(g1.rating, 1500.0) AS r1
+                          FROM players p
+                          LEFT JOIN glicko_ratings_2v2 g2 ON g2.player_id = p.id
+                          LEFT JOIN glicko_ratings    g1 ON g1.player_id = p.id
+                         WHERE p.id = ANY(:ids)
+                    """),
+                    {"ids": pids},
+                )
+                rate_by_pid = {r["pid"]: _team_balance_rating(
+                    float(r["r2"]), int(r["cs"]), float(r["r1"]), float(r["rd2"])
+                ) for r in rate_q.mappings().all()}
+
+                winner_team_match = report.winner_team
+                if winner_team_match == 1:
+                    winners = [(p_t1a.id, rate_by_pid.get(p_t1a.id, 1500.0)),
+                               (p_t1b.id, rate_by_pid.get(p_t1b.id, 1500.0))]
+                    losers  = [(p_t2a.id, rate_by_pid.get(p_t2a.id, 1500.0)),
+                               (p_t2b.id, rate_by_pid.get(p_t2b.id, 1500.0))]
+                else:
+                    winners = [(p_t2a.id, rate_by_pid.get(p_t2a.id, 1500.0)),
+                               (p_t2b.id, rate_by_pid.get(p_t2b.id, 1500.0))]
+                    losers  = [(p_t1a.id, rate_by_pid.get(p_t1a.id, 1500.0)),
+                               (p_t1b.id, rate_by_pid.get(p_t1b.id, 1500.0))]
+                # Weakest winner + strongest loser swap.
+                weakest_winner = min(winners, key=lambda t: t[1])[0]
+                strongest_loser = max(losers, key=lambda t: t[1])[0]
+
+                # Build the new (post-swap) team rosters.
+                t1_ids = [p_t1a.id, p_t1b.id]
+                t2_ids = [p_t2a.id, p_t2b.id]
+                new_t1 = [pid for pid in t1_ids if pid != weakest_winner and pid != strongest_loser]
+                new_t2 = [pid for pid in t2_ids if pid != weakest_winner and pid != strongest_loser]
+                if winner_team_match == 1:
+                    # weakest_winner was on t1, strongest_loser was on t2 → swap them.
+                    new_t1.append(strongest_loser); new_t2.append(weakest_winner)
+                else:
+                    new_t2.append(strongest_loser); new_t1.append(weakest_winner)
+
+                # Canonicalize within-team order by steam_id (matches lock-time sort).
+                pid_to_steam = {
+                    p_t1a.id: p_t1a.steam_id, p_t1b.id: p_t1b.steam_id,
+                    p_t2a.id: p_t2a.steam_id, p_t2b.id: p_t2b.steam_id,
+                }
+                new_t1.sort(key=lambda pid: pid_to_steam[pid])
+                new_t2.sort(key=lambda pid: pid_to_steam[pid])
+
+                # Persist new slot order on team_series.
+                await db.execute(
+                    text("""UPDATE team_series
+                              SET t1a_id = :t1a, t1b_id = :t1b,
+                                  t2a_id = :t2a, t2b_id = :t2b,
+                                  rebalance_count = COALESCE(rebalance_count, 0) + 1
+                            WHERE id = :sid"""),
+                    {"t1a": new_t1[0], "t1b": new_t1[1],
+                     "t2a": new_t2[0], "t2b": new_t2[1],
+                     "sid": series_uuid},
+                )
+                # Update queue rows so /poll reflects the new team_assigned.
+                await db.execute(
+                    text("""UPDATE team_queue
+                              SET team_assigned = CASE
+                                                    WHEN player_id = ANY(:t1) THEN 1
+                                                    ELSE 2
+                                                  END
+                            WHERE series_id = :sid"""),
+                    {"t1": new_t1, "sid": series_uuid},
+                )
+
+                # Build rebalance_assignments keyed by Steam ID (the client
+                # uses the Steam ID it knows for each peer to look up the new
+                # team and update its local Player.TeamID + spawn / body color).
+                steam_to_pid = {v: k for k, v in pid_to_steam.items()}
+                rebalance_assignments = {}
+                for pid in new_t1:
+                    rebalance_assignments[pid_to_steam[pid]] = 1
+                for pid in new_t2:
+                    rebalance_assignments[pid_to_steam[pid]] = 2
+                print(f"[TEAM-REBALANCE] series={series_uuid} margin={margin} swapped: "
+                      f"weakest_winner={pid_to_steam[weakest_winner]} ↔ strongest_loser={pid_to_steam[strongest_loser]}")
+        except Exception as rex:
+            print(f"[TEAM-REBALANCE] error: {rex}")
 
     await db.commit()
 
