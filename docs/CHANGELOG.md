@@ -1,5 +1,13 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.23 — Recent 2v2 Series cards: 2-per-line + tighter team columns
+
+Hotfix on top of v1.25.22's stacked cards layout.
+
+- Cards now stack 2 per line (`Card1, Card2`) instead of 1 per line — same total info but ~half the vertical space per game row.
+- Team columns sit closer together: left/right column width 265 → 220, inter-column gap 12 → 4. The orange (opponents) column was unnecessarily spaced from the blue (allies) column.
+- `CountCardLines` updated to `ceil(cards/2)` so per-game row height matches the new pair-per-line format.
+
 ## v1.25.22 — 2v2 UI/UX polish: scrollable tab, aligned leaderboard, mid-series auto-balance leg work
 
 **Scrollable 2v2 tab:** the whole tab is now wrapped in a vertical ScrollView so the queue panels can grow to fit 8+ queuers each without crushing the leaderboard / history below. Bottom row sized to 720px so its internal scrollviews still work for tall data.

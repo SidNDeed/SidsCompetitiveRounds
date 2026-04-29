@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds
 
-A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built for the Competitive Rounds Discord community (~1,100 members).
+A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built for the Competitive Rounds Discord community (~2,500 members).
 
 > **⚠️ IMPORTANT: This mod is designed exclusively for vanilla ROUNDS v1.1.2 (the "Default Public Version" on Steam). It is NOT compatible with older versions, beta branches, or other mods. The mod will automatically disable itself if it detects an incompatible game version or other BepInEx plugins installed.**
 

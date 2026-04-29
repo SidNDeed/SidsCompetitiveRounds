@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds
 
-A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built for the Competitive Rounds Discord community (~1,100 members).
+A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built for the Competitive Rounds Discord community (~2,500 members).
 
 > **⚠️ IMPORTANT: Designed exclusively for vanilla ROUNDS v1.1.2 (the "Default Public Version" on Steam). NOT compatible with older versions, beta branches, or any other mods. The mod will automatically disable itself if it detects an incompatible game version or another BepInEx plugin.**
 
@@ -22,7 +22,7 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 ## Compatibility
 
 - **Required**: ROUNDS v1.1.2 (Steam "Default Public Version")
-- **Required**: BepInEx 5.4.22 (declared as a Thunderstore dependency — auto-installed)
+- **Required**: BepInExPack ROUNDS 5.4.1901 (declared as a Thunderstore dependency — auto-installed; this is the only BepInEx pack distributed for ROUNDS)
 - **NOT compatible** with any other BepInEx mods. The mod must be the only plugin installed.
 - **NOT compatible** with older ROUNDS versions or Steam beta branches.
 

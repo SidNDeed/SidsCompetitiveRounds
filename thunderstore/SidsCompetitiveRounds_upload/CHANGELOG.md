@@ -1,5 +1,188 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.23 — Recent 2v2 Series cards: 2-per-line + tighter team columns
+
+Hotfix on top of v1.25.22's stacked cards layout.
+
+- Cards now stack 2 per line (`Card1, Card2`) instead of 1 per line — same total info but ~half the vertical space per game row.
+- Team columns sit closer together: column width 265 → 220, inter-column gap 12 → 4. The orange (opponents) column was unnecessarily spaced from the blue (allies) column.
+
+## v1.25.22 — 2v2 polish: scrollable tab, aligned leaderboard, mid-series rebalance leg work
+
+- Whole 2v2 tab wrapped in a vertical ScrollView so the queue panels can grow to fit 8+ queuers each without crushing the leaderboard / history below.
+- 2v2 Leaderboard rework: floating sort buttons replaced with clickable column headers aligned to data columns. Title moved to suffix `Name [Title]`. "Mate Elo" → "Avg Mate Elo". Capacity bumped to 100 visible rows. Active sort highlighted with a brighter button + `v` indicator. Columns: `# | Player | Rating | W-L | WR | Avg Mate Elo | Gold | XP`.
+- Recent 2v2 Series: pagination row inline with the header label (`< 1/3 >`); buttons hide at first/last page. Per-game card display rebuilt: instead of one snake line, each game shows two stacked card columns side-by-side (left team / right team). Each column lists every card pick grouped under the player's bolded name, no truncation. Row height auto-grows to fit the taller column.
+- Mid-series auto-balance (backend leg work): after each non-completing match in an auto-balanced series whose point margin ≥ 3, the server swaps the weakest winner with the strongest loser for the NEXT match. `team_series` slot order + `team_queue.team_assigned` updated; `rebalance_count` incremented. `TeamMatchResponse.rebalance_assignments` populated. Client parses, logs `[2v2-REBALANCE]`, shows a notification. Full client-side mid-match team mutation (TeamID + spawn + body color update propagation) is the next round's work.
+
+## v1.25.21 — 2v2 mega follow-up: economy, leaderboard expansion, paginated history, queue/face/UI fixes
+
+- **2v2 economy**: per-match XP base 600 with x1.5 win multiplier (~600 lost / ~900 won), `+50g` series winner / `+25g` series loser. Tracked separately on `players.team_{gold,xp}_earned` so the leaderboard can surface "Total 2v2 Gold" / "Total 2v2 XP" without summing transactions.
+- **Matchmaker fix**: trusts 2v2 elo when RD has converged below 110 even with low series count. Fixes the case where two high-elo veterans (one with 20 series, one with 4) couldn't get matched as opponents because the balancer fell back to the new account's 1v1 elo.
+- **Live 2v2 series**: the Live Ranked Games panel now renders 2v2 entries even when there are no 1v1 games in flight (early-return bug).
+- **Recent 2v2 Series rewritten** off a new `/team/all-series-paged` endpoint — now shows the global series feed (every player can see every series), paginated 3 per page, with per-slot ratings + title + rating delta + gold + XP earned plus per-game card breakdowns.
+- **2v2 Leaderboard expanded** with title prefix, average teammate elo, total 2v2 gold + XP. Sortable by `Rating / Wins / WR / Avg Mate Elo / Gold / XP`.
+- **Decoupled queues** — Random matchmaking vs Custom-Lobby pick-teams flow are now two independent queues that never cross-match. F5 tab gets `Search Random` and `Find Custom Lobby` buttons. `In Queue` panel splits into `Random Queue (N)` and `Custom Lobbies (N)` sections.
+- **Card-pick face/character bug**: `FacePublisher.PublishLocal()` now logs the specific early-return path; republishes when this client is the picker AND when a peer joins the room (defends against the property-replication race that was leaving 2 of 4 players faceless).
+- **Card-pick body color** in 2v2 was rendering with the wrong team's hue at card-pick despite the in-match body rendering correctly. New `CardPickBodyTinter` coroutine walks the visualizer hierarchy and recolors anything that matches the wrong-team baseline to the picker's actual team color.
+- **Body-color toggle off** now also re-bakes every player's `PlayerSkin` via vanilla's `PlayerSkinHandler.Init` so live `SpriteRenderer.color` writes get redrawn.
+- **Misc**: Casual History `txtOpp` column widened so long names don't bleed into the FPS column. Session Info now records all three opponents in 2v2 (was a single-opponent latch from 1v1).
+
+## v1.25.20 — Card-pick body color fix
+
+A team-1 picker's body rendered as the wrong team color (orange) in the card-pick visualizer despite the in-match body rendering correctly. Vanilla `CardChoiceVisuals` spawns a skin clone whose body sprites/particles get baked at instantiation time from a path our `PlayerSkinBank.GetPlayerSkinColors` patch couldn't reach. New `CardPickBodyTinter` coroutine fires from the `CardChoiceVisuals.Show` Postfix, waits 4 frames for the visualizer's children to populate, walks every `SpriteRenderer`, `ParticleSystem`, and `PlayerSkin/Handler` Color field, and recolors anything that matches the wrong-team baseline.
+
+## v1.25.19 — Queue auto-refresh, per-game card history actually populates, no phantom 1v1 series
+
+- `RefreshTeamTab` only ran on dirty events so the Random Queue / Custom Lobbies panels stayed frozen. Added a per-frame ticker that polls every 2s while you're on the 2v2 tab.
+- Per-game cards in 2v2 history were silently failing to render because `FindMatchingBracket` only handles `[]` and the `cards_by_player` object needs `{}` matching. Added `FindMatchingBrace`. Server data was always there.
+- `GameStateWatcher` series-preflight branch was creating phantom 1v1 `ranked_series` rows inside `cr_ff` rooms (up to 3 per match — one per opponent the poll latched onto). Gated to non-2v2 rooms. Phantoms cleaned up server-side.
+- `FacePublisher.TryReadAndApply` previously returned false silently on every fail path. Now logs `[POPUP-DIAG]` with the specific gate that tripped.
+
+## v1.25.18 — Decoupled Random vs Pick-Teams 2v2 queues + per-game card history + queue UX
+
+- Two independent queues. `Search Random` joins matchmaking; `Find Custom Lobby` joins the pick-teams flow. They never cross-match.
+- Manual queue always honors each player's `preferred_team` — joining IS the consent, no quorum gate.
+- F5 `In Queue` panel split into `Random Queue (N)` and `Custom Lobbies (N)` sections.
+- Per-series header restored as the parent row (outcome + final score + elo delta + teams) with per-game rows beneath, each showing `Game N: 5-2` and the cards each team picked.
+- `(N searching)` count in the 2v2 header turns green when anyone is searching.
+- Team 1 / Team 2 buttons highlight the claimed side with `✓ Team N` and a brighter color.
+- Queue-list polling tightened from 5s → 2s.
+
+## v1.25.14 — Critical Harmony loader fix + 1v1 quality-of-life
+
+A single mis-named parameter in v1.25.10 silently broke a chunk of the mod's Harmony patches for the past 4 releases. Fixed in this drop, and the Harmony loader is now resilient (one bad patch can't disable everything else).
+
+**What re-lands now that the loader is fixed:**
+- Custom map colors (the post-process color grading + wall tint patches) reliably apply on map load and on Shift cycle.
+- 2v2 spawn-point sort by X (so team 0 lands left, team 1 lands right).
+- Card-pick face Postfix (Photon-custom-prop face fallback for the RPC timing race).
+- A bunch of `[2v2-DIAG]` patches that surface failures.
+
+**1v1 + sync-tournament quality-of-life:**
+- **Auto-continue popup** — the post-game "Continue?" prompt auto-confirms in any mod-issued ranked room (1v1 ranked, 2v2, sync tournaments). Vanilla casual / private rooms still get the manual popup. Players who want to leave can simply leave during the next card pick.
+- **Cosmetic late-prop reapply** — opponents' custom body colors and trails now show reliably even when the Photon properties were cached at room-join time (no `OnPlayerPropertiesUpdate` event fires for that case).
+- **Card-pick face fix** — the right face now shows next to the picker on every client (no more RPC timing races).
+
+## v1.25.13 — 2v2 mode lands
+
+The big drop since the last Thunderstore release: 2-vs-2 ranked matchmaking, with a separate Glicko-2 ladder, queue, balancer, ready-up flow, and Discord channel. Plus all the cosmetic and stability work in between.
+
+**2v2 ranked mode** — search the 2v2 tab in F5. Server matches you and a teammate against another pair, all 4 ready-up, you spawn into a `cr_ff`-flagged Photon room with proper team-based spawn positions, color-grouped skins, all 4 players' card-pick bars visible, and faces synced via Photon custom props (no RPC timing races). Continue prompts auto-confirm so all 4 advance together. Match-assembly timeout at 15s if fewer than 4 players spawn. Vanilla disconnect cascade fires gracefully if any player leaves mid-match. Full 2v2 leaderboard, stats tab, match history, and Discord live-game beacon.
+
+**Body colors + neon nametags** — new Body Color shop subtab with 21 tints across 4 tiers (3000g-8000g, including animated Prismatic + Chrome). 7 new Neon nametag styles at 500g each with matching SDF glow halos.
+
+**FPS in match history** — both players' average FPS now captured and rendered per match.
+
+**Block debug overlay** — toggle in Settings to visualize block timing classifications during play.
+
+**Bug fixes since 1.25.3** — DC-at-4-rounds exploit, `vunknown` / `v2.1.0` installer bugs, phantom-ranked private-room matches, leaderboard pagination cap, MapTransition NRE on map-cycle particle tinting, and dozens of 2v2-specific fixes (auto-spawn, late-joiner GM_ArmsRace activation, character-select OOB, Searching overlay cleanup, prismatic anim loop kicking, late trail prop reapply, cosmetic skin re-bake after AssignPlayerID, match reporting routing).
+
+## v1.25.3 — DC exploit fix, ranked-detection race fix, private-room series visibility
+
+Non-mandatory but recommended.
+
+- **DC-at-4-rounds exploit closed.** Disconnecting at 4 rounds while ahead no longer gives the DC'er the win. Cancels unless both players are at ≥4 (4-4 tiebreak goes to the non-DC'er). Leave-% penalty still applies.
+- **First-match-vs-new-opponent ranked-detection fix.** When two mod users met for the first time, a startup-sync race could leave the match flagged casual permanently. Opponent ranked-check now retries every 5s while in room, picks up status when sync lands.
+- **Private-room ranked games appear in Live Ranked Games immediately** via a new preflight beacon. Previously the series row was only created at first-match-completion.
+- **Internal**: 2v2 lock-path fixes, block-activation counter only credits when block was actually ready (no inflation from cooldown right-clicks).
+
+## v1.25.2 — Hotfix follow-up
+
+- **Ranked detection corrected.** Random vanilla matchmaking between two real mod users counts as ranked again — that's the intended path. v1.25.1's room-name gate broke that. New check: opponent must have the mod actively running (Photon `cr_*` custom property presence). Vanilla players → casual; two real mod users → ranked.
+- **Auto-installer "v2.1.0" bug fixed.** v1.25.1's regex was reading `netstandard, Version=2.1.0.0` instead of the real ModVersion. Now anchors directly on the BepInPlugin attribute layout.
+
+## v1.25.1 — Hotfixes
+
+- **Casual private-room matches no longer get reported as ranked** (note: corrected in 1.25.2 — the original 1.25.1 fix over-reached). Server-side data correction was applied.
+- **Block activation counter** no longer increments while your block is on cooldown. Idle right-clicks were inflating your activation denominator.
+- **Auto-installer "vunknown"** detection fixed for v1.20.0+ (further refined in 1.25.2).
+
+## v1.25.0 — Body colors, neon nametags, FPS tracking, polish
+
+Non-mandatory update.
+
+### Body Color shop tab
+- New **Body Color** category in the F5 Shop. Override the default orange/blue team color with a tint of your choice. Visible to everyone with the mod.
+- 21 colors across 4 tiers — 10 × 3000g solid, 5 × 4000g jewel/metallic, 4 × 5000g neons, 2 × 8000g animated specials (**Prismatic** cycles the rainbow during combat, **Chrome** does a soft shifting cool-grey).
+- Cosmetic-aware tinting filters out the face / gun / block-orb / cosmetic trails — only what was originally team-colored gets repainted.
+- Colors apply from the moment you spawn (pick phase #1 included).
+- New Settings toggle **`Custom player body colors: ON / OFF`** for anyone who finds the cross-player tints distracting.
+
+### Neon nametag tier (500g each)
+- 7 new **Neon** name styles (Pink, Cyan, Lime, Orange, Violet, Toxic, Glow Yellow) — brighter than the regular color set, each with a matching SDF-glow halo for modded clients. Non-modded players still see the bright color via Photon NickName rich-text.
+- Single-active within the color slot. Sort order clusters Neons together as a premium block.
+
+### FPS in match history
+- Average FPS for both players is captured per match and shown next to the opponent name in History rows. Player side blue, opponent red. Opponent FPS only fills in if your opponent also has v1.25+.
+
+### Block debug overlay (opt-in)
+- New Settings toggle. Corner panel shows live block-activation vs success counts plus per-hit timing classification (`TOO SLOW`, `TOO EARLY`, `unblockable?`). Default off.
+
+### Misc
+- Leaderboard now shows top 100 on page 1.
+- Discord auto-leaderboard expanded to top 100 with prev/next buttons.
+- **Immovable Object** achievement no longer false-flags when you press Enter and type in chat.
+
+## v1.24.0 — Automated tournaments (Phase 1 + Phase 2)
+
+Non-mandatory update. Older clients still work against the live API — they just don't see the Tournaments tab or the auto-connect flow.
+
+### Tournaments tab — sync + async modes
+
+- **New F5 menu tab: "Tournaments"** with a SYNC / ASYNC sub-tab toggle.
+- **Sync tournaments**: auto-created weekly, default slot = Saturday 12:00 PT. 7-day signup window; voting on 8 alternate start slots within ±24h of default (tallies hidden until you vote). Force-start unlocks at 8 signups with unanimous vote in a 30-min window.
+- **Async tournaments**: auto-created every 6 weeks. Bracket visible from start; no scheduled start — matches activate on signup lock and each carries a 7-day deadline. Players self-coordinate via Discord (`/dm-opponent`, `/opp-online`). When both have Ranked enabled and play any private lobby, the mod auto-detects and records the result.
+- **Format (both modes)**: **double-elim BO3**. Parallel play keeps 16p sync wall-clock ~90–120 min. LB absorbs WB losers round-by-round; Grand Final has bracket reset if LB champ wins first BO3.
+- **Top seeds get byes** when <16 sign up. All matches count toward ranked Elo.
+- **Bracket**: click-to-expand rounds. Default state shows compact round headers with `[+]`/`[-]` toggles and progress summaries.
+- **Timezone picker** — tap to cycle through Local / UTC / PT / MT / CT / ET / UK / CET / EET / MSK / JST / AEST.
+- **TOURNAMENT GAME indicator** under the top RANKED status when you're in a ROUNDS room with a tournament opponent.
+- **Auto-enable Ranked** per-match: the mod flips Ranked on the moment your tournament match goes active.
+
+### Auto-connect (sync)
+
+- **Deterministic room code** derived from match_id (`sct-<prefix>`). Both clients land in the same Photon room.
+- **Region-pinned**: each tournament's canonical Photon region is the mode across all signups. Auto-connect calls `ConnectToRegion` before `JoinOrCreateRoom` so cross-region pairings don't miss.
+- **Reconnect button** + visible room code for manual join if auto-connect fails.
+- **Plugin-level heartbeat** fires every 20s whenever you have an active tournament match — regardless of which F5 tab is open. Keeps `ready_at` fresh during gameplay.
+
+### Discord bot
+
+- Lifecycle announcements in `TOURNAMENT_CHANNEL` (signups open, locked roster, tournament started, podium).
+- DMs to participants: signup confirm with seed, match-ready (sync + async variants), 24h deadline warning for async, daily "still pending" nag after 3 days.
+- `/dm-opponent <message>` — rate-limited 8/min relay.
+- `/opp-online` — check if your async opponent is online in Discord.
+- Trophy roles on completion: `SCR Tournament Winner` / `Runner Up` / `3rd Place` with `(x2)` promotion on repeat placements. `SCR Tournament Participant` → `Participant 2` promotion.
+
+### Prizes
+
+- **Full tier (16+ players)**: 1st = 500g + 2500 XP, 2nd = 300g + 1500 XP, 3rd = 60g + 75 XP, plus trophy roles.
+- Scaled 60% at 12–15 players, 30% at 8–11. Under 8 signups → tournament cancelled.
+
+### Penalty system
+
+- Rolling 90-day show rate with linear decay. Displayed on Tournaments tab; tiebreaker for >16 signups.
+- `~` prefix marks speculative overflow slots; penalty-free late signups can bump higher-penalty speculatives before lock.
+- **Leave semantics**: free during voting / locked (speculative promoted into your slot); during running, no-show forfeits + penalty.
+- **Deadline tiebreak**: mutual no-show awards to lower-penalty player.
+
+### Cross-tournament safeguards
+
+- Player blocks auto-cleared between confirmed tournament participants at lock.
+- Series lookup uses `ORDER BY created_at DESC LIMIT 1` so a player in multiple active tournaments against the same opponent doesn't crash the match handler.
+- `with_for_update()` on advance-match SELECT serializes tick/hook races.
+
+### Other UI polish
+
+- Per-signup **bracket progress labels**: "WB R2", "LB R3", "eliminated LB R2", "CHAMPION".
+- **Tournament history** on leaderboard click-a-player detail (trophy counts + last 4 placements).
+- **Recent Tournaments** panel on the Tournaments tab.
+- **All F5 text bold** via rich-text `<b>` fallback — readable on any SDF atlas that silently no-ops `fontStyle=Bold`.
+
+### Signup requirements
+
+- **Discord must be linked** (get code from My Stats tab → Discord Link → `!link CODE` in Discord).
+
 ## v1.23.1 — Hotfix: map cycle no longer tints the moving boxes
 
 Post-v1.23.0 ship reported a regression: pressing Left Shift to cycle map colors tinted **every** SpriteRenderer under `Map/*` (the 49 moving physics boxes) and every non-UI/non-player scene sprite, making the whole map read as a monotone color block. The fix removes those two passes so the tint now applies only where intended: the `OutOfBounds/*` wall particle systems (the primary + secondary wall colors) and the ArtInstance atmosphere particles. Moving boxes keep their vanilla art colors.

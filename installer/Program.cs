@@ -298,7 +298,7 @@ namespace CompetitiveRoundsInstaller
                 // <len>"1.X.Y". Anchor on the ModName since it's unique to our DLL and
                 // the ModVersion is GUARANTEED to be the next short string after it
                 // (separated only by a 1-byte length prefix). Skips the dependent-
-                // assembly version refs (netstandard 2.1.0, BepInEx 5.4.22, etc.) that
+                // assembly version refs (netstandard 2.1.0, BepInEx 5.4.1901, etc.) that
                 // the previous broad-window regex was picking up.
                 var match = Regex.Match(content, @"Competitive ROUNDS.{0,2}(\d+\.\d{1,2}\.\d{1,2})");
                 if (match.Success) return match.Groups[1].Value;

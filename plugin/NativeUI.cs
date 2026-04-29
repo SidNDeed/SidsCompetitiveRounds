@@ -3632,14 +3632,17 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             row.cardsRow = new GameObject("cardsRow");
             row.cardsRow.transform.SetParent(row.root.transform, false);
             row.cardsRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(row.cardsRow, spacing: 12, padL: 12);
+            // Tight inter-column spacing so the two team columns sit close
+            // (tester report: "move the enemy/orange team a bit closer to
+            // the blue/ally side, they're unnecessarily spaced").
+            UIFactory.AddHLG(row.cardsRow, spacing: 4, padL: 12);
             UIFactory.AddLE(row.cardsRow, minH: 24, flexH: 0);
             row.txtCardsLeft  = UIFactory.CreateText("cl", row.cardsRow.transform, "", 13f,
                 new Color(0.55f, 0.80f, 1.00f), UIFactory.AlignTopLeft,
-                sizeDelta: new Vector2(265, 200));
+                sizeDelta: new Vector2(220, 200));
             row.txtCardsRight = UIFactory.CreateText("cr", row.cardsRow.transform, "", 13f,
                 new Color(1.00f, 0.69f, 0.53f), UIFactory.AlignTopLeft,
-                sizeDelta: new Vector2(265, 200));
+                sizeDelta: new Vector2(220, 200));
             // Word-wrap on so any single-card name longer than the column
             // width breaks rather than clips. Vertical stacking via newlines
             // in the text content.
@@ -4054,9 +4057,12 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                     sb.Append("\n  <color=#666>—</color>");
                     return;
                 }
-                foreach (var c in cards)
+                // Two cards per line, comma-separated. Each pair starts a new
+                // line so the column stays narrow and reads top-to-bottom.
+                for (int i = 0; i < cards.Count; i += 2)
                 {
-                    sb.Append("\n  ").Append(c);
+                    sb.Append("\n  ").Append(cards[i]);
+                    if (i + 1 < cards.Count) sb.Append(", ").Append(cards[i + 1]);
                 }
             }
             appendFor(a);
@@ -4064,9 +4070,8 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             return sb.ToString();
         }
 
-        // Compute a vertical pixel budget for one cards-column based on how
-        // many lines we'll emit. Header (player name) + one line per card,
-        // ~16px per line. Used to size the row so it grows to fit content.
+        // Compute a vertical pixel budget for one cards-column. Header (player
+        // name) + ceil(cards/2) lines because each line holds two cards.
         private static int CountCardLines(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b)
         {
             int lines = 0;
@@ -4075,9 +4080,9 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 if (s == null || string.IsNullOrEmpty(s.steam_id)) return;
                 lines += 1; // player name header
                 if (m != null && m.cards_by_player != null
-                    && m.cards_by_player.TryGetValue(s.steam_id, out var cards) && cards != null)
+                    && m.cards_by_player.TryGetValue(s.steam_id, out var cards) && cards != null && cards.Count > 0)
                 {
-                    lines += Math.Max(1, cards.Count); // each card or one "—" line
+                    lines += (cards.Count + 1) / 2; // 2 cards per line, ceil
                 }
                 else
                 {
