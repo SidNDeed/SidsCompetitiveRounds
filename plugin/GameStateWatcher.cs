@@ -1122,20 +1122,47 @@ namespace CompetitiveRounds
                 : $"[POLL] You lost to {opponentDisplayName}");
             Plugin.Log.LogInfo($"[POLL] Final: P1 {p1Rounds}r - P2 {p2Rounds}r");
 
-            // \u2500\u2500 Update session W/L tracking \u2500\u2500
-            string oppKey = opponentDisplayName ?? "Unknown";
-            if (!sessionWLByOpponent.ContainsKey(oppKey))
-                sessionWLByOpponent[oppKey] = new int[] { 0, 0, 0, 0 }; // [rW, rL, cW, cL]
-
-            if (matchIsRanked)
+            // ── Update session W/L tracking ──
+            // Build the opponent set: in 1v1 it's just opponentDisplayName; in
+            // 2v2 it's every other player in the room (sans teammate). Tracks
+            // all three opponents in 2v2 so Session Info shows them all rather
+            // than whichever one we latched onto first.
+            var oppKeys = new List<string>();
+            bool sessionRoomIsCrFf = false;
+            try
             {
-                if (localWon) sessionWLByOpponent[oppKey][0]++;
-                else sessionWLByOpponent[oppKey][1]++;
+                var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
+                sessionRoomIsCrFf = rp != null && rp.ContainsKey("cr_ff");
+            } catch { }
+            if (sessionRoomIsCrFf && PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length >= 4)
+            {
+                foreach (var pp in PhotonNetwork.PlayerList)
+                {
+                    if (pp == null) continue;
+                    if (PhotonNetwork.LocalPlayer != null && pp.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber) continue;
+                    string nm = pp.NickName;
+                    if (string.IsNullOrEmpty(nm)) continue;
+                    oppKeys.Add(nm);
+                }
             }
-            else
+            if (oppKeys.Count == 0)
+                oppKeys.Add(opponentDisplayName ?? "Unknown");
+
+            foreach (var oppKey in oppKeys)
             {
-                if (localWon) sessionWLByOpponent[oppKey][2]++;
-                else sessionWLByOpponent[oppKey][3]++;
+                if (!sessionWLByOpponent.ContainsKey(oppKey))
+                    sessionWLByOpponent[oppKey] = new int[] { 0, 0, 0, 0 }; // [rW, rL, cW, cL]
+
+                if (matchIsRanked)
+                {
+                    if (localWon) sessionWLByOpponent[oppKey][0]++;
+                    else sessionWLByOpponent[oppKey][1]++;
+                }
+                else
+                {
+                    if (localWon) sessionWLByOpponent[oppKey][2]++;
+                    else sessionWLByOpponent[oppKey][3]++;
+                }
             }
 
             if (matchIsRanked)

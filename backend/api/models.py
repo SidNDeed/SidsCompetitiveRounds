@@ -31,6 +31,8 @@ class Player(Base):
     discord_username = Column(String(64), nullable=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     gold_earned = Column(Integer, nullable=False, default=0)
+    team_gold_earned = Column(Integer, nullable=False, default=0)
+    team_xp_earned = Column(Integer, nullable=False, default=0)
     gold_spent = Column(Integer, nullable=False, default=0)
     # Lifetime gun accuracy + block success counters (migration 038).
     # Accumulated from each submitted non-invalidated match's local_* fields on the reporter.

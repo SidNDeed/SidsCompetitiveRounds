@@ -3327,11 +3327,196 @@ namespace CompetitiveRounds
             public int series_losses;
             public float win_rate;
             public int level;
+            public string title, title_color;
+            public int avg_teammate_elo;
+            public int team_gold_earned;
+            public int team_xp_earned;
         }
         public static List<TeamLeaderboardEntry> CachedTeamLeaderboard { get; private set; } = new List<TeamLeaderboardEntry>();
         public static int CachedTeamLeaderboardTotal { get; private set; } = 0;
+        public static string CachedTeamLeaderboardSort { get; private set; } = "rating";
+
+        // ── Paged 2v2 series feed ──────────────────────────────
+        // Drives Recent 2v2 Series. Replaces the per-player team-matches feed
+        // with a global paginated view that includes per-player gold/xp + titles.
+        [Serializable]
+        public class TeamSeriesSlot
+        {
+            public string steam_id, name, title, title_color;
+            public int rating;
+            public float rating_change;
+            public int gold_earned, xp_earned;
+        }
 
         [Serializable]
+        public class TeamSeriesMatch
+        {
+            public string match_id, ended_at;
+            public int t1_rounds_won, t2_rounds_won, t1_points_total, t2_points_total;
+            // steam_id -> [card_name, card_name, ...]
+            public Dictionary<string, List<string>> cards_by_player = new Dictionary<string, List<string>>();
+        }
+
+        [Serializable]
+        public class TeamSeriesPagedEntry
+        {
+            public string series_id, completed_at;
+            public int winner_team, t1_series_wins, t2_series_wins;
+            public TeamSeriesSlot t1a, t1b, t2a, t2b;
+            public List<TeamSeriesMatch> matches = new List<TeamSeriesMatch>();
+        }
+
+        public static List<TeamSeriesPagedEntry> CachedTeamSeriesPaged { get; private set; } = new List<TeamSeriesPagedEntry>();
+        public static int CachedTeamSeriesTotal { get; private set; } = 0;
+        public static int CachedTeamSeriesPage { get; private set; } = 0;
+        public static int CachedTeamSeriesPageSize { get; private set; } = 3;
+        public static int CachedTeamSeriesTotalPages { get; private set; } = 0;
+
+        public static void FetchAllSeriesPaged(int page = 0, int pageSize = 3)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/team/all-series-paged?page={page}&page_size={pageSize}",
+                (success, response) =>
+                {
+                    if (!success || string.IsNullOrEmpty(response)) return;
+                    try { ParseAllSeriesPaged(response, page, pageSize); NativeUI.MarkDirty(); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[TEAM-SERIES-PAGED] parse: {ex.Message}"); }
+                }
+            ));
+        }
+
+        private static void ParseAllSeriesPaged(string response, int reqPage, int reqPageSize)
+        {
+            var list = new List<TeamSeriesPagedEntry>();
+            int sStart = response.IndexOf("\"series\"");
+            if (sStart < 0) { CachedTeamSeriesPaged = list; return; }
+            int arrStart = response.IndexOf('[', sStart);
+            int arrEnd = FindMatchingBracket(response, arrStart);
+            if (arrStart < 0 || arrEnd < 0) { CachedTeamSeriesPaged = list; return; }
+            string slice = response.Substring(arrStart + 1, arrEnd - arrStart - 1);
+            int oIdx = 0;
+            while (oIdx < slice.Length)
+            {
+                int objStart = slice.IndexOf('{', oIdx);
+                if (objStart < 0) break;
+                int oEnd = FindMatchingBrace(slice, objStart);
+                if (oEnd < 0) break;
+                string obj = slice.Substring(objStart, oEnd - objStart + 1);
+                var e = new TeamSeriesPagedEntry
+                {
+                    series_id = ExtractJsonString(obj, "series_id"),
+                    completed_at = ExtractJsonString(obj, "completed_at"),
+                    winner_team = ExtractJsonInt(obj, "winner_team"),
+                    t1_series_wins = ExtractJsonInt(obj, "t1_series_wins"),
+                    t2_series_wins = ExtractJsonInt(obj, "t2_series_wins"),
+                    t1a = ParseSeriesSlot(obj, "t1a"),
+                    t1b = ParseSeriesSlot(obj, "t1b"),
+                    t2a = ParseSeriesSlot(obj, "t2a"),
+                    t2b = ParseSeriesSlot(obj, "t2b"),
+                    matches = ParseSeriesMatches(obj),
+                };
+                list.Add(e);
+                oIdx = oEnd + 1;
+            }
+            CachedTeamSeriesPaged = list;
+            CachedTeamSeriesTotal = ExtractJsonInt(response, "total");
+            CachedTeamSeriesPage = reqPage;
+            CachedTeamSeriesPageSize = reqPageSize;
+            CachedTeamSeriesTotalPages = ExtractJsonInt(response, "total_pages");
+        }
+
+        private static TeamSeriesSlot ParseSeriesSlot(string seriesObj, string slotKey)
+        {
+            // Find "<slotKey>": { ... }  inside the series object.
+            int kIdx = seriesObj.IndexOf($"\"{slotKey}\":");
+            if (kIdx < 0) return new TeamSeriesSlot();
+            int oStart = seriesObj.IndexOf('{', kIdx);
+            int oEnd = FindMatchingBrace(seriesObj, oStart);
+            if (oStart < 0 || oEnd < 0) return new TeamSeriesSlot();
+            string s = seriesObj.Substring(oStart, oEnd - oStart + 1);
+            return new TeamSeriesSlot
+            {
+                steam_id = ExtractJsonString(s, "steam_id"),
+                name = ExtractJsonString(s, "name"),
+                title = ExtractJsonString(s, "title"),
+                title_color = ExtractJsonString(s, "title_color"),
+                rating = (int)ExtractJsonFloat(s, "rating"),
+                rating_change = ExtractJsonFloat(s, "rating_change"),
+                gold_earned = ExtractJsonInt(s, "gold_earned"),
+                xp_earned = ExtractJsonInt(s, "xp_earned"),
+            };
+        }
+
+        private static List<TeamSeriesMatch> ParseSeriesMatches(string seriesObj)
+        {
+            var list = new List<TeamSeriesMatch>();
+            int mIdx = seriesObj.IndexOf("\"matches\":");
+            if (mIdx < 0) return list;
+            int aStart = seriesObj.IndexOf('[', mIdx);
+            int aEnd = FindMatchingBracket(seriesObj, aStart);
+            if (aStart < 0 || aEnd < 0) return list;
+            string slice = seriesObj.Substring(aStart + 1, aEnd - aStart - 1);
+            int cur = 0;
+            while (cur < slice.Length)
+            {
+                int objStart = slice.IndexOf('{', cur);
+                if (objStart < 0) break;
+                int oEnd = FindMatchingBrace(slice, objStart);
+                if (oEnd < 0) break;
+                string m = slice.Substring(objStart, oEnd - objStart + 1);
+                var entry = new TeamSeriesMatch
+                {
+                    match_id = ExtractJsonString(m, "match_id"),
+                    ended_at = ExtractJsonString(m, "ended_at"),
+                    t1_rounds_won = ExtractJsonInt(m, "t1_rounds_won"),
+                    t2_rounds_won = ExtractJsonInt(m, "t2_rounds_won"),
+                    t1_points_total = ExtractJsonInt(m, "t1_points_total"),
+                    t2_points_total = ExtractJsonInt(m, "t2_points_total"),
+                };
+                // cards_by_player parser (same shape as TeamMatchHistoryEntry).
+                int cIdx = m.IndexOf("\"cards_by_player\":");
+                if (cIdx >= 0)
+                {
+                    int cbStart = m.IndexOf('{', cIdx);
+                    int cbEnd = FindMatchingBrace(m, cbStart);
+                    if (cbStart >= 0 && cbEnd > cbStart)
+                    {
+                        string cbSlice = m.Substring(cbStart + 1, cbEnd - cbStart - 1);
+                        int cursor = 0;
+                        while (cursor < cbSlice.Length)
+                        {
+                            int kS = cbSlice.IndexOf('"', cursor);
+                            if (kS < 0) break;
+                            int kE = cbSlice.IndexOf('"', kS + 1);
+                            if (kE < 0) break;
+                            string sid = cbSlice.Substring(kS + 1, kE - kS - 1);
+                            int aS2 = cbSlice.IndexOf('[', kE);
+                            int aE2 = FindMatchingBracket(cbSlice, aS2);
+                            if (aS2 < 0 || aE2 < 0) break;
+                            string aSlice = cbSlice.Substring(aS2 + 1, aE2 - aS2 - 1);
+                            // Cards are bare strings here (the new endpoint flattens them).
+                            var cards = new List<string>();
+                            int sCur = 0;
+                            while (sCur < aSlice.Length)
+                            {
+                                int qs = aSlice.IndexOf('"', sCur);
+                                if (qs < 0) break;
+                                int qe = aSlice.IndexOf('"', qs + 1);
+                                if (qe < 0) break;
+                                cards.Add(aSlice.Substring(qs + 1, qe - qs - 1));
+                                sCur = qe + 1;
+                            }
+                            entry.cards_by_player[sid] = cards;
+                            cursor = aE2 + 1;
+                        }
+                    }
+                }
+                list.Add(entry);
+                cur = oEnd + 1;
+            }
+            return list;
+        }
+
         public class TeamMatchHistoryEntry
         {
             public string match_id, series_id, ended_at;
@@ -3502,10 +3687,11 @@ namespace CompetitiveRounds
             ));
         }
 
-        public static void FetchTeamLeaderboard(int limit = 100)
+        public static void FetchTeamLeaderboard(int limit = 200, string sortBy = "rating")
         {
+            CachedTeamLeaderboardSort = sortBy;
             Plugin.Instance.StartCoroutine(GetRequest(
-                $"{baseUrl}/api/v1/team/leaderboard?limit={limit}",
+                $"{baseUrl}/api/v1/team/leaderboard?limit={limit}&sort_by={sortBy}",
                 (success, response) =>
                 {
                     if (!success) return;
@@ -3529,6 +3715,11 @@ namespace CompetitiveRounds
                                 series_losses = ExtractJsonInt(chunk, "series_losses"),
                                 win_rate = ExtractJsonFloat(chunk, "win_rate"),
                                 level = ExtractJsonInt(chunk, "level"),
+                                title = ExtractJsonString(chunk, "title"),
+                                title_color = ExtractJsonString(chunk, "title_color"),
+                                avg_teammate_elo = ExtractJsonInt(chunk, "avg_teammate_elo"),
+                                team_gold_earned = ExtractJsonInt(chunk, "team_gold_earned"),
+                                team_xp_earned = ExtractJsonInt(chunk, "team_xp_earned"),
                             });
                         }
                         CachedTeamLeaderboard = entries;

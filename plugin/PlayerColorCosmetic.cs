@@ -129,6 +129,28 @@ namespace CompetitiveRounds
                     try { Plugin.Instance.StopCoroutine(animLoop); } catch { }
                     animLoop = null;
                 }
+                // Also force a re-bake of every player's PlayerSkin via vanilla
+                // so any tints we applied that didn't get caught by RevertOnState
+                // (e.g., live SpriteRenderer.color we don't have an originals
+                // backref for) get redrawn from the prefab. Mirrors the path
+                // used at match start by PlayerSkinHandler.Init.
+                try
+                {
+                    var pm = PlayerManager.instance;
+                    if (pm != null && pm.players != null)
+                    {
+                        foreach (var p in pm.players)
+                        {
+                            if (p == null) continue;
+                            var psh = p.GetComponentInChildren(typeof(PlayerSkinHandler), true);
+                            if (psh == null) continue;
+                            var initMethod = typeof(PlayerSkinHandler).GetMethod("Init",
+                                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            initMethod?.Invoke(psh, null);
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] re-bake on toggle-off failed: {ex.Message}"); }
             }
             else if (GameStateWatcher.IsInMatch)
             {

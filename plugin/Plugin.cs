@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.20";
+        public const string ModVersion = "1.25.21";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1132,6 +1132,17 @@ namespace CompetitiveRounds
 
         public void OnPlayerEnteredRoom(Photon.Realtime.Player p)
         {
+            // Republish our cr_face every time a new player joins the room.
+            // This fixes the "two characters missing in card-pick" bug where
+            // a peer joined after our OnJoinedRoom-time publish so they never
+            // received the cr_face property update.
+            try
+            {
+                if (CompetitiveRoomDetect.IsCompetitiveRoom())
+                    FacePublisher.PublishLocal();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] PlayerEntered face republish: {ex.Message}"); }
+
             if (!Diag2v2.IsActive()) return;
             try
             {
@@ -1676,10 +1687,27 @@ namespace CompetitiveRounds
             try
             {
                 var cch = CharacterCreatorHandler.instance;
-                if (cch == null || cch.selectedPlayerFaces == null || cch.selectedPlayerFaces.Length == 0) return;
+                if (cch == null)
+                {
+                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: CharacterCreatorHandler.instance is null (game state not ready)");
+                    return;
+                }
+                if (cch.selectedPlayerFaces == null || cch.selectedPlayerFaces.Length == 0)
+                {
+                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: selectedPlayerFaces empty");
+                    return;
+                }
                 var face = cch.selectedPlayerFaces[0];
-                if (face == null) return;
-                if (PhotonNetwork.LocalPlayer == null) return;
+                if (face == null)
+                {
+                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: face[0] is null");
+                    return;
+                }
+                if (PhotonNetwork.LocalPlayer == null)
+                {
+                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: LocalPlayer is null");
+                    return;
+                }
                 // If the local face is fully default (all four item IDs zero), skip
                 // publishing. Accounts that never opened the character creator
                 // have an uninitialized face — publishing all-zeros causes
@@ -1942,6 +1970,16 @@ namespace CompetitiveRounds
                 if (picker == null) return;
                 var pv = picker.GetComponent<PhotonView>();
                 if (pv == null || pv.Owner == null) return;
+
+                // If THIS client is the picker, republish our cr_face right
+                // before the visualizer renders. Tester report (Sid2's logs)
+                // showed multiple players' face publish never reached remote
+                // clients despite OnJoinedRoom firing — likely a replication
+                // race between OnJoinedRoom and the first card-pick on a peer.
+                // A republish here gives the remote a fresh property right
+                // before they need it.
+                if (picker.IsLocal) FacePublisher.PublishLocal();
+
                 bool ok = FacePublisher.TryReadAndApply(pv.Owner.ActorNumber, __instance.gameObject);
                 if (ok)
                     Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face from Photon (pickerID={pickerID}, actor={pv.Owner.ActorNumber})");

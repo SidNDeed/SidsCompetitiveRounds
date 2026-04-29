@@ -15,6 +15,12 @@ QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
 CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL", "1495392567687250061"))  # #scr-admin — anti-cheat flags
 TOURNAMENT_CHANNEL_ID = int(os.getenv("TOURNAMENT_CHANNEL", "0"))  # set to enable #tournaments announcements
+# Channel for new mod-release announcements. Bot polls the public GitHub
+# releases API every 5 min; any new tag is posted here AND mirrored into
+# the chat/discussions channel so people who don't watch #releases still
+# see it. See poll_github_releases() below.
+RELEASES_CHANNEL_ID = int(os.getenv("RELEASES_CHANNEL", "1498731888813277294"))
+GITHUB_RELEASES_REPO = os.getenv("GITHUB_RELEASES_REPO", "SidNDeed/SidsCompetitiveRounds")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 
 # Tournament trophy role names (set via env if they exist in the guild).
@@ -132,6 +138,7 @@ async def on_ready():
     if not poll_team_queue_beacon.is_running(): poll_team_queue_beacon.start()
     if not poll_team_recent_series.is_running(): poll_team_recent_series.start()
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
+    if not poll_github_releases.is_running(): poll_github_releases.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
     if not nag_pending_async_matches.is_running(): nag_pending_async_matches.start()
@@ -953,6 +960,146 @@ async def poll_anticheat_flags():
             _last_flag_id_posted = f["id"]
         except Exception as ex:
             print(f"[ANTICHEAT] post error for flag {f.get('id')}: {ex}")
+
+
+# ── GitHub release announcements ───────────────────────────────────────────
+
+# In-memory tag of the most recent release we've already announced. Bot
+# rebuilds reset this to None — the cold-start branch in the loop anchors
+# to whatever the latest tag is on first tick (no post) so a rebuild
+# doesn't re-spam the channel. The downside: a release that lands DURING
+# a rebuild window won't be auto-announced and needs /announce-release.
+_last_release_tag = None
+_release_poller_initialized = False
+
+
+def _format_release_message(release_json):
+    """Build the Discord-flavored release message. Trim body to fit Discord's
+    2000-char message limit, with a 'see full notes' link footer that always
+    fits regardless of how long the body is."""
+    tag = release_json.get("tag_name") or "v?"
+    name = release_json.get("name") or tag
+    url = release_json.get("html_url") or f"https://github.com/{GITHUB_RELEASES_REPO}/releases/tag/{tag}"
+    body = release_json.get("body") or ""
+    # Strip GitHub-specific markdown that Discord renders weirdly. Keep the
+    # rest mostly intact since both platforms support similar markdown.
+    body = body.replace("\r\n", "\n").strip()
+    header = f"**🚀 New release: {name}**\n{url}\n\n"
+    footer = f"\n\n— Full notes: {url}"
+    # Discord per-message limit is 2000 chars. Reserve room for header + footer.
+    budget = 2000 - len(header) - len(footer) - 20  # 20 for safety/ellipsis
+    if len(body) > budget:
+        body = body[:budget].rstrip() + "…"
+    return header + body + footer
+
+
+@tasks.loop(minutes=5)
+async def poll_github_releases():
+    """Watch the public GitHub releases endpoint for the mod repo. When a new
+    tag appears (different from `_last_release_tag`), post the formatted
+    release notes to #releases and mirror to the discussions/chat channel."""
+    global _last_release_tag, _release_poller_initialized
+    if not http_session:
+        return
+    if not RELEASES_CHANNEL_ID and not CHAT_CHANNEL_ID:
+        return
+    try:
+        # Public endpoint, no auth needed for unauthenticated requests (60/hr/IP).
+        # Don't send our X-Internal-Key header — it's invalid for github.com.
+        async with aiohttp.ClientSession() as s:  # fresh session, no shared headers
+            async with s.get(
+                f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/latest",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "comp-rounds-bot"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    print(f"[RELEASES] GitHub status={resp.status}")
+                    return
+                payload = await resp.json()
+    except Exception as e:
+        print(f"[RELEASES] fetch error: {e}")
+        return
+
+    tag = payload.get("tag_name")
+    if not tag:
+        return
+
+    # Cold-start: don't repost on bot restart. Anchor to the current latest
+    # tag and skip posting on the first tick.
+    if not _release_poller_initialized:
+        _release_poller_initialized = True
+        _last_release_tag = tag
+        print(f"[RELEASES] cold start, anchored at {tag}")
+        return
+
+    if tag == _last_release_tag:
+        return
+
+    # New release — post to #releases only (chat mirror dropped per user
+    # request: "only post new releases in the Releases channel instead of both").
+    msg = _format_release_message(payload)
+    posted = 0
+    if RELEASES_CHANNEL_ID:
+        try:
+            ch = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
+            if ch is None:
+                print(f"[RELEASES] channel {RELEASES_CHANNEL_ID} not resolvable")
+            else:
+                await ch.send(msg)
+                posted = 1
+        except Exception as e:
+            print(f"[RELEASES] post error: {e}")
+    _last_release_tag = tag
+    print(f"[RELEASES] announced {tag} to {posted} channel(s)")
+
+
+@bot.hybrid_command(
+    name="announce-release",
+    description="Post the latest GitHub release notes to #releases + discussions (admins only)",
+)
+async def announce_release(ctx):
+    """One-shot manual announcement. Used to bootstrap the system (e.g. announce
+    v1.25.14 right after deploying this code, since cold-start anchor would
+    otherwise skip the very first detected release). Requires Manage Messages
+    in the channel where the command is invoked."""
+    global _last_release_tag, _release_poller_initialized
+    perms = getattr(ctx.author, "guild_permissions", None)
+    if not perms or not perms.manage_messages:
+        await ctx.reply("This command requires Manage Messages.", ephemeral=True)
+        return
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/latest",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "comp-rounds-bot"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    await ctx.reply(f"GitHub returned {resp.status}.", ephemeral=True)
+                    return
+                payload = await resp.json()
+    except Exception as e:
+        await ctx.reply(f"Fetch failed: {e}", ephemeral=True)
+        return
+
+    tag = payload.get("tag_name") or "?"
+    msg = _format_release_message(payload)
+    posted = []
+    if RELEASES_CHANNEL_ID:
+        try:
+            ch = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
+            if ch is not None:
+                await ch.send(msg)
+                posted.append("#releases")
+        except Exception as e:
+            print(f"[RELEASES] manual post error: {e}")
+    # Update the anchor so the polling loop doesn't re-announce this tag.
+    _last_release_tag = tag
+    _release_poller_initialized = True
+    if posted:
+        await ctx.reply(f"Posted {tag} to {', '.join(posted)}.", ephemeral=True)
+    else:
+        await ctx.reply("No channels resolvable.", ephemeral=True)
 
 
 # ── Tournaments ────────────────────────────────────────────────────────────

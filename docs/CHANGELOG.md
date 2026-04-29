@@ -1,5 +1,54 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.21 — 2v2 mega follow-up: economy, leaderboard expansion, paginated history, queue/face/UI fixes
+
+Heavy batch addressing tester feedback after v1.25.20.
+
+**Discord bot:**
+- `/team/queue/recent-joins` filters to `queue_type='auto'` so #ranked-looking-for-people no longer beacons Custom Lobby joins
+- GitHub-release poller posts to `#releases` only (chat mirror dropped)
+
+**2v2 economy (#new):**
+- Migration `066_team_economy.sql` adds `players.team_gold_earned` + `players.team_xp_earned` and `team_series.t{1a,1b,2a,2b}_{gold,xp}_earned` columns
+- Per-match XP base 600 with `x1.5` win multiplier (lands ~600 lost / ~900 won)
+- `+50g` series winner / `+25g` series loser awarded on series completion
+- 100xp=1g auto-conversion still applies, so a clean BO3 sweep stacks meaningful gold
+
+**Matchmaker:**
+- `_team_balance_rating` now also trusts the 2v2 rating when RD has converged below `TEAM_TRUST_2V2_RD_BELOW=110` even if `completed_series` is below the threshold. Fixes "Sid + Sid3 (both high 2v2 elo) got matched as teammates because the balancer fell back to 1v1 elo for the lower-series account."
+
+**Live 2v2 series:**
+- `RefreshLiveSeries` no longer early-returns when 1v1 list is empty — 2v2 series now render in the Live Ranked Games panel even when there are no 1v1 games in flight
+
+**Recent 2v2 Series (rewritten):**
+- New endpoint `/api/v1/team/all-series-paged?page=N&page_size=3` returns the global series feed with per-slot ratings, title, rating delta, gold + XP earned in that series, plus matches with `cards_by_player`
+- F5 panel now paginates 3 series per page with `<` / `>` buttons
+- Header line shows the caller's perspective (W/L from caller's team) plus their `+Ng / +Nxp` for the series; non-participants see neutral framing
+- Per-game rows render team-aggregated cards with player names
+
+**2v2 Leaderboard:**
+- New columns: title prefix on names, average teammate elo, total 2v2 gold, total 2v2 XP
+- Sortable: `Rating` / `Wins` / `WR` / `Mate Elo` / `Gold` / `XP` buttons cycle the sort
+- Bumped capacity from 50 to 100 visible rows per page
+
+**Queue UX:**
+- Random Queue + Custom Lobbies panels heightened to fit ~8 queuers each (per tester report: previously cut into the leaderboard below)
+
+**Card-pick face/character bug (#3 from tester):**
+- Logs from `LogOutput(14).log` showed `cr_face property not set on remote player` for two of four players
+- `FacePublisher.PublishLocal` now logs the specific early-return path (was silent before)
+- `CardChoiceVisuals.Show` Postfix republishes our cr_face when this client is the picker (defends against the property-replication race)
+- `OnPlayerEnteredRoom` republishes when a peer joins a competitive room (fixes the case where our `OnJoinedRoom` publish lands before the peer is connected)
+
+**Misc client fixes:**
+- Body-color toggle off now also re-bakes every player's `PlayerSkin` via vanilla's `Init` so live `SpriteRenderer.color` writes we couldn't track get redrawn
+- Session Info now records all three opponents in 2v2 (vs the single-opponent latch from 1v1)
+- My Stats Casual History `txtOpp` column widened 180→240px so long names no longer overflow into the FPS column
+
+**Deferred (will tackle next round):**
+- Auto-balance teams between matches in the same BO3 series — needs new server logic to recompute partition mid-series and propagate via team_assigned updates
+- Regicide achievement gating: already 1v1-only by virtue of running only inside `submit_match` (the 2v2 path is `submit_team_match`). No change needed.
+
 ## v1.25.20 — 2v2 follow-up #2: card-pick body re-tinted to correct team color
 
 **Card-pick body color fix (#3 from tester feedback):**

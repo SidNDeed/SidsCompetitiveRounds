@@ -305,6 +305,8 @@ namespace CompetitiveRounds
         // user navigates away and back. Throttled to 2s to match the existing
         // /team/queue/list cadence in ApiClient.
         private static float teamTabRefreshAt;
+        private static float teamSeriesRefreshAt;
+        public static int teamSeriesPageReq = 0;
         public static void MaybeRefreshTeamTab()
         {
             if (currentTab != 8) return;
@@ -313,6 +315,13 @@ namespace CompetitiveRounds
             ApiClient.UpdateTeamQueueList(force: true);
             // Header count auto-refreshes via its own internal 10s timer.
             ApiClient.UpdateTeamQueueCount();
+            // Recent 2v2 Series (paged) — refresh every 10s. Page state lives
+            // in teamSeriesPageReq so prev/next buttons can change it.
+            if (Time.unscaledTime >= teamSeriesRefreshAt)
+            {
+                teamSeriesRefreshAt = Time.unscaledTime + 10f;
+                ApiClient.FetchAllSeriesPaged(teamSeriesPageReq, 3);
+            }
         }
 
         private static void FindMainMenuGroup(){var all=UnityEngine.Object.FindObjectsOfType<ListMenuButton>();Type tt=null;PropertyInfo tp=null;foreach(var a in AppDomain.CurrentDomain.GetAssemblies()){tt=a.GetType("TMPro.TMP_Text");if(tt!=null)break;}if(tt!=null)tp=tt.GetProperty("text",BindingFlags.Public|BindingFlags.Instance);foreach(var b in all){if(tp==null)break;try{var tc=b.GetComponentInChildren(tt,true);if(tc==null)continue;if((tp.GetValue(tc)as string??"").Trim().ToUpper()=="QUIT"){mainMenuGroup=b.transform.parent.gameObject;Plugin.Log.LogInfo($"[NATIVE] Found main menu group: {mainMenuGroup.name}");return;}}catch{}}Plugin.Log.LogWarning("[NATIVE] Could not find QUIT button");}
@@ -412,7 +421,7 @@ txtLinkCode=UIFactory.CreateText("LkC",lkRow.transform,"Type !link CODE in Disco
         var right=new GameObject("Right");right.transform.SetParent(panel.transform,false);right.AddComponent<RectTransform>();UIFactory.AddVLG(right,spacing:4);UIFactory.AddLE(right,flexW:1,flexH:1);var rkBox=UIFactory.CreatePanel("RkB",right.transform,C_PANEL);UIFactory.AddVLG(rkBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(rkBox,flexH:1);UIFactory.CreateText("RkH",rkBox.transform,"Ranked History",21f,C_GOLD,sizeDelta:new Vector2(250,30));txtOppSummary=UIFactory.CreateText("OS",rkBox.transform,"",15f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(500,22));var rkSV=UIFactory.CreateScrollView("RkSV",rkBox.transform,spacing:1);UIFactory.AddLE(rkSV.scrollGO,flexH:1);rankedContainer=rkSV.content;for(int i=0;i<15;i++)rankedRows.Add(CreateHistoryRow(rankedContainer.transform,$"rr{i}"));var rPg=new GameObject("RPg");rPg.transform.SetParent(rkBox.transform,false);rPg.AddComponent<RectTransform>();UIFactory.AddHLG(rPg,spacing:6,forceExpandH:true);UIFactory.AddLE(rPg,prefH:20,flexH:0);var rS1=new GameObject("S");rS1.transform.SetParent(rPg.transform,false);rS1.AddComponent<RectTransform>();UIFactory.AddLE(rS1,flexW:1);rPrev=UIFactory.CreateButton("rP",rPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(rankedPage>0){rankedPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtRankedPage=UIFactory.CreateText("rPI",rPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));rNext=UIFactory.CreateButton("rN",rPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{rankedPage++;dirty=true;},sizeDelta:new Vector2(50,18));var rS2=new GameObject("S");rS2.transform.SetParent(rPg.transform,false);rS2.AddComponent<RectTransform>();UIFactory.AddLE(rS2,flexW:1);
         var csBox=UIFactory.CreatePanel("CsB",right.transform,C_PANEL);UIFactory.AddVLG(csBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(csBox,flexH:1);UIFactory.CreateText("CsH",csBox.transform,"Casual History",21f,C_SUB,sizeDelta:new Vector2(250,30));var csSV=UIFactory.CreateScrollView("CsSV",csBox.transform,spacing:1);UIFactory.AddLE(csSV.scrollGO,flexH:1);casualContainer=csSV.content;for(int i=0;i<12;i++)casualRows.Add(CreateHistoryRow(casualContainer.transform,$"cr{i}"));var cPg=new GameObject("CPg");cPg.transform.SetParent(csBox.transform,false);cPg.AddComponent<RectTransform>();UIFactory.AddHLG(cPg,spacing:6,forceExpandH:true);UIFactory.AddLE(cPg,prefH:20,flexH:0);var cS1=new GameObject("S");cS1.transform.SetParent(cPg.transform,false);cS1.AddComponent<RectTransform>();UIFactory.AddLE(cS1,flexW:1);cPrev=UIFactory.CreateButton("cP",cPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(casualPage>0){casualPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtCasualPage=UIFactory.CreateText("cPI",cPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));cNext=UIFactory.CreateButton("cN",cPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{casualPage++;dirty=true;},sizeDelta:new Vector2(50,18));var cS2=new GameObject("S");cS2.transform.SetParent(cPg.transform,false);cS2.AddComponent<RectTransform>();UIFactory.AddLE(cS2,flexW:1);return panel;}
 
-        private static HistoryRow CreateHistoryRow(Transform parent,string name){var row=new HistoryRow();row.seriesGO=new GameObject(name+"s");row.seriesGO.transform.SetParent(parent,false);row.seriesGO.AddComponent<RectTransform>();UIFactory.AddHLG(row.seriesGO,spacing:4,padL:4);UIFactory.AddLE(row.seriesGO,prefH:25);row.txtSeriesHead=UIFactory.CreateText("sh",row.seriesGO.transform,"",19f,C_GREEN,sizeDelta:new Vector2(500,25));row.txtSeriesElo=UIFactory.CreateText("se",row.seriesGO.transform,"",19f,C_GREEN,UIFactory.AlignMidRight,sizeDelta:new Vector2(160,25));row.seriesGO.SetActive(false);row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddVLG(row.root,spacing:0,padL:4);var main=new GameObject("m");main.transform.SetParent(row.root.transform,false);main.AddComponent<RectTransform>();UIFactory.AddHLG(main,spacing:4);UIFactory.AddLE(main,prefH:25);row.txtResult=UIFactory.CreateText("r",main.transform,"",19f,C_GREEN,UIFactory.AlignMidLeft,sizeDelta:new Vector2(200,25));row.txtOpp=UIFactory.CreateText("o",main.transform,"",18f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(180,25));row.txtFps=UIFactory.CreateText("fp",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(140,25));var sp=new GameObject("S");sp.transform.SetParent(main.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);row.txtXP=UIFactory.CreateText("x",main.transform,"",16f,C_BLUE,UIFactory.AlignMidRight,sizeDelta:new Vector2(65,25));row.txtDate=UIFactory.CreateText("d",main.transform,"",15f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(45,25));row.txtCards=UIFactory.CreateText("c",row.root.transform,"",19f,new Color(0.6f,0.7f,0.9f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtCards,1.5f);row.txtOppCards=UIFactory.CreateText("oc",row.root.transform,"",19f,new Color(0.9f,0.6f,0.5f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtOppCards,1.5f);row.root.SetActive(false);return row;}
+        private static HistoryRow CreateHistoryRow(Transform parent,string name){var row=new HistoryRow();row.seriesGO=new GameObject(name+"s");row.seriesGO.transform.SetParent(parent,false);row.seriesGO.AddComponent<RectTransform>();UIFactory.AddHLG(row.seriesGO,spacing:4,padL:4);UIFactory.AddLE(row.seriesGO,prefH:25);row.txtSeriesHead=UIFactory.CreateText("sh",row.seriesGO.transform,"",19f,C_GREEN,sizeDelta:new Vector2(500,25));row.txtSeriesElo=UIFactory.CreateText("se",row.seriesGO.transform,"",19f,C_GREEN,UIFactory.AlignMidRight,sizeDelta:new Vector2(160,25));row.seriesGO.SetActive(false);row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddVLG(row.root,spacing:0,padL:4);var main=new GameObject("m");main.transform.SetParent(row.root.transform,false);main.AddComponent<RectTransform>();UIFactory.AddHLG(main,spacing:4);UIFactory.AddLE(main,prefH:25);row.txtResult=UIFactory.CreateText("r",main.transform,"",19f,C_GREEN,UIFactory.AlignMidLeft,sizeDelta:new Vector2(200,25));row.txtOpp=UIFactory.CreateText("o",main.transform,"",18f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,25));row.txtFps=UIFactory.CreateText("fp",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(140,25));var sp=new GameObject("S");sp.transform.SetParent(main.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);row.txtXP=UIFactory.CreateText("x",main.transform,"",16f,C_BLUE,UIFactory.AlignMidRight,sizeDelta:new Vector2(65,25));row.txtDate=UIFactory.CreateText("d",main.transform,"",15f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(45,25));row.txtCards=UIFactory.CreateText("c",row.root.transform,"",19f,new Color(0.6f,0.7f,0.9f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtCards,1.5f);row.txtOppCards=UIFactory.CreateText("oc",row.root.transform,"",19f,new Color(0.9f,0.6f,0.5f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtOppCards,1.5f);row.root.SetActive(false);return row;}
 
         private static object txtLBPlayerName;
         private static GameObject BuildLeaderboardTab(Transform parent){var panel=new GameObject("Leaderboard");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:6);UIFactory.AddLE(panel,flexH:1);/* === LEFT: Recent Ranked Series === */var seriesCol=UIFactory.CreatePanel("LBSeries",panel.transform,C_PANEL);UIFactory.AddVLG(seriesCol,spacing:2,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(seriesCol,prefW:400,minW:340,flexH:1);txtLiveHeader=UIFactory.CreateText("RSL",seriesCol.transform,"<color=#FF6688>* Live Ranked Games</color>",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));txtLiveSeries=UIFactory.CreateText("LIVE",seriesCol.transform,"<color=#666><i>No live games right now.</i></color>",13f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(280,24));UIFactory.SetWordWrap(txtLiveSeries,true);liveBetsContainer=new GameObject("LiveBets");liveBetsContainer.transform.SetParent(seriesCol.transform,false);liveBetsContainer.AddComponent<RectTransform>();UIFactory.AddVLG(liveBetsContainer,spacing:2);/* No LayoutElement: VLG on this container already sums child preferred heights with priority 0 and reports that as its preferred height, so the parent VLG sizes us correctly. Previously an LE with prefH:0 priority:1 was overriding that sum to 0, collapsing the live series into the recent series list below. */
@@ -540,9 +549,12 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 UIFactory.SetText(txtLiveHeader, $"<color={dotColor}>*</color> <color=#FF6688>Live Ranked Games</color>");
             }
             var list = ApiClient.CachedActiveSeries;
+            var teamList = ApiClient.CachedActiveTeamSeries;
+            int oneVOneCount = list != null ? list.Count : 0;
+            int teamCount = teamList != null ? teamList.Count : 0;
             // Clear pool first, then rebuild.
             foreach (var g in liveBetRowPool) g.SetActive(false);
-            if (list == null || list.Count == 0)
+            if (oneVOneCount == 0 && teamCount == 0)
             {
                 UIFactory.SetText(txtLiveSeries, "<color=#666><i>No live games right now.</i></color>");
                 if (liveBetsPager != null) liveBetsPager.SetActive(false);
@@ -550,10 +562,10 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             }
             UIFactory.SetText(txtLiveSeries, "");
 
-            int totalPages = Math.Max(1, (list.Count + LIVE_SERIES_PER_PAGE - 1) / LIVE_SERIES_PER_PAGE);
+            int totalPages = Math.Max(1, (oneVOneCount + LIVE_SERIES_PER_PAGE - 1) / LIVE_SERIES_PER_PAGE);
             liveSeriesPage = Math.Max(0, Math.Min(liveSeriesPage, totalPages - 1));
             int start = liveSeriesPage * LIVE_SERIES_PER_PAGE;
-            int end = Math.Min(start + LIVE_SERIES_PER_PAGE, list.Count);
+            int end = Math.Min(start + LIVE_SERIES_PER_PAGE, oneVOneCount);
 
             int poolIdx = 0;
             for (int i = start; i < end; i++)
@@ -569,9 +581,8 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             }
 
             // 2v2 active series — same 3-row layout (header + bet-on-team1 + bet-on-team2)
-            // appended below the 1v1 list. Pagination is shared but 2v2 series rarely
-            // outnumber 1v1, so we render all of them rather than slice.
-            var teamList = ApiClient.CachedActiveTeamSeries;
+            // appended below the 1v1 list. Always render the full team list (no
+            // pagination) — 2v2 volume is small.
             if (teamList != null)
             {
                 foreach (var ts in teamList)
@@ -592,7 +603,7 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 liveBetsPager.SetActive(show);
                 if (show)
                 {
-                    UIFactory.SetText(txtLiveBetsPage, $"{list.Count} live - {liveSeriesPage + 1}/{totalPages}");
+                    UIFactory.SetText(txtLiveBetsPage, $"{oneVOneCount} live - {liveSeriesPage + 1}/{totalPages}");
                     liveBetsPrev.SetActive(liveSeriesPage > 0);
                     liveBetsNext.SetActive(liveSeriesPage < totalPages - 1);
                 }
@@ -3428,8 +3439,11 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 "<color=#888>Custom lobby — claim Team 1 or Team 2.</color>",
                 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 26));
 
-            // "In Queue" panel — split into Random and Custom sections so the
-            // user can see who's in either queue independently. Polled every 2s.
+            // "In Queue" panel — split into Random and Custom sections. Each
+            // body sized for ~8 rows (each row is one queuer, ~18px tall) so
+            // the panel doesn't clip into the leaderboard / history below.
+            // Bumped pref height per body 60 → 160 (8 * 18 + padding) per
+            // tester report: queue panels were cutting into the text below.
             var queueListPanel = UIFactory.CreatePanel("TQL", panel.transform, C_PANEL);
             UIFactory.AddVLG(queueListPanel, spacing: 2, padL: 12, padR: 12, padT: 6, padB: 6);
             UIFactory.AddLE(queueListPanel, flexH: 0);
@@ -3437,13 +3451,17 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 "<b>Random Queue</b>", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
             txtTeamQueueListBody = UIFactory.CreateText("TQLB", queueListPanel.transform,
                 "<color=#888>Loading…</color>", 15f, C_LABEL, UIFactory.AlignTopLeft,
-                sizeDelta: new Vector2(900, 60));
+                sizeDelta: new Vector2(900, 160));
+            var qlbComp = txtTeamQueueListBody as Component;
+            if (qlbComp != null) UIFactory.AddLE(qlbComp.gameObject, prefH: 160, minH: 80, flexH: 0);
             UIFactory.SetWordWrap(txtTeamQueueListBody, true);
             txtTeamQueueManualHeader = UIFactory.CreateText("TQMH", queueListPanel.transform,
                 "<b>Custom Lobbies</b>", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
             txtTeamQueueManualBody = UIFactory.CreateText("TQMB", queueListPanel.transform,
                 "<color=#888>Loading…</color>", 15f, C_LABEL, UIFactory.AlignTopLeft,
-                sizeDelta: new Vector2(900, 60));
+                sizeDelta: new Vector2(900, 160));
+            var qmbComp = txtTeamQueueManualBody as Component;
+            if (qmbComp != null) UIFactory.AddLE(qmbComp.gameObject, prefH: 160, minH: 80, flexH: 0);
             UIFactory.SetWordWrap(txtTeamQueueManualBody, true);
 
             // Bottom row: leaderboard (left) + recent history (right).
@@ -3462,27 +3480,63 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             txtTeamLBHeader = UIFactory.CreateText("TLBH", lbCol.transform,
                 "<b>2v2 Leaderboard</b>", 18f, C_SUB,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 24));
+            // Sort row — buttons that cycle the leaderboard sort.
+            var lbSortRow = new GameObject("TLBSR");
+            lbSortRow.transform.SetParent(lbCol.transform, false);
+            lbSortRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(lbSortRow, spacing: 4);
+            UIFactory.AddLE(lbSortRow, prefH: 22, minH: 22, flexH: 0);
+            string[] sortKeys = new[] { "rating", "wins", "win_rate", "avg_teammate_elo", "team_gold_earned", "team_xp_earned" };
+            string[] sortLabels = new[] { "Rating", "Wins", "WR", "Mate Elo", "Gold", "XP" };
+            teamLBSortBtns = new List<GameObject>();
+            for (int si = 0; si < sortKeys.Length; si++)
+            {
+                int idx = si;
+                var b = UIFactory.CreateButton($"TLBS_{sortKeys[si]}", lbSortRow.transform, sortLabels[si],
+                    13f, C_LABEL, new Color(0.20f, 0.22f, 0.26f, 0.85f),
+                    () => { ApiClient.FetchTeamLeaderboard(200, sortKeys[idx]); },
+                    sizeDelta: new Vector2(78, 22));
+                teamLBSortBtns.Add(b);
+            }
             var lbScroll = UIFactory.CreateScrollView("TLBSV", lbCol.transform, spacing: 1);
             UIFactory.AddLE(lbScroll.scrollGO, flexH: 1);
             teamLBContainer = lbScroll.content;
-            for (int i = 0; i < 50; i++) teamLBRows.Add(CreateTeamLBRow(teamLBContainer.transform, $"tlb{i}"));
+            for (int i = 0; i < 100; i++) teamLBRows.Add(CreateTeamLBRow(teamLBContainer.transform, $"tlb{i}"));
 
-            // Right: recent 2v2 matches
+            // Right: recent 2v2 series — paginated 3/page.
             var hCol = new GameObject("TH2Col");
             hCol.transform.SetParent(bottom.transform, false);
             hCol.AddComponent<RectTransform>();
             UIFactory.AddVLG(hCol, spacing: 4);
             UIFactory.AddLE(hCol, flexW: 1, flexH: 1);
             txtTeamHistHeader = UIFactory.CreateText("THH", hCol.transform,
-                "<b>Recent 2v2 Matches</b>", 18f, C_SUB,
+                "<b>Recent 2v2 Series</b>", 18f, C_SUB,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 24));
+            // Pagination row.
+            var pageRow = new GameObject("THPR");
+            pageRow.transform.SetParent(hCol.transform, false);
+            pageRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(pageRow, spacing: 6);
+            UIFactory.AddLE(pageRow, prefH: 22, minH: 22, flexH: 0);
+            teamHistPrevBtn = UIFactory.CreateButton("THPP", pageRow.transform, "<", 14f, C_WHITE,
+                new Color(0.22f, 0.25f, 0.30f, 0.95f),
+                () => { teamSeriesPageReq = Math.Max(0, teamSeriesPageReq - 1); ApiClient.FetchAllSeriesPaged(teamSeriesPageReq, 3); },
+                sizeDelta: new Vector2(40, 22));
+            teamHistNextBtn = UIFactory.CreateButton("THPN", pageRow.transform, ">", 14f, C_WHITE,
+                new Color(0.22f, 0.25f, 0.30f, 0.95f),
+                () => { teamSeriesPageReq += 1; ApiClient.FetchAllSeriesPaged(teamSeriesPageReq, 3); },
+                sizeDelta: new Vector2(40, 22));
             var histScroll = UIFactory.CreateScrollView("THSV", hCol.transform, spacing: 2);
             UIFactory.AddLE(histScroll.scrollGO, flexH: 1);
             teamHistContainer = histScroll.content;
+            // 3 series × ~5 rows per series (header + 4 games max) = 15 rows.
             for (int i = 0; i < 30; i++) teamHistRows.Add(CreateTeamHistRow(teamHistContainer.transform, $"th{i}"));
 
             return panel;
         }
+
+        private static List<GameObject> teamLBSortBtns;
+        private static GameObject teamHistPrevBtn, teamHistNextBtn;
 
         private static object txtTeamHistHeader;
         private static GameObject teamHistContainer;
@@ -3656,6 +3710,7 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
 
             // Leaderboard
             var lb = ApiClient.CachedTeamLeaderboard ?? new List<ApiClient.TeamLeaderboardEntry>();
+            string sortKey = ApiClient.CachedTeamLeaderboardSort ?? "rating";
             for (int i = 0; i < teamLBRows.Count; i++)
             {
                 var row = teamLBRows[i];
@@ -3663,10 +3718,30 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 var e = lb[i];
                 bool me = e.steam_id == MatchTracker.LocalSteamId;
                 UIFactory.SetText(row.txtRank, $"#{e.rank}");
-                UIFactory.SetText(row.txtName, Trunc(e.display_name, 22));
+                // Title prefix on name when present.
+                string nameDisplay;
+                if (!string.IsNullOrEmpty(e.title))
+                {
+                    string col = string.IsNullOrEmpty(e.title_color) ? "#FFD94D" : e.title_color;
+                    nameDisplay = $"<color={col}>{Trunc(e.title, 8)}</color> {Trunc(e.display_name, 14)}";
+                }
+                else nameDisplay = Trunc(e.display_name, 22);
+                UIFactory.SetText(row.txtName, nameDisplay);
                 UIFactory.SetColor(row.txtName, me ? C_GREEN : C_WHITE);
                 UIFactory.SetText(row.txtRating, $"{e.rating}");
-                UIFactory.SetText(row.txtSeries, $"{e.series_wins}W-{e.series_losses}L");
+                // Adapt series column to current sort: show the sorted-by stat
+                // for visual confirmation that the sort is working.
+                string colA;
+                switch (sortKey)
+                {
+                    case "wins": colA = $"{e.series_wins}W-{e.series_losses}L"; break;
+                    case "win_rate": colA = $"{e.win_rate * 100f:F0}%"; break;
+                    case "avg_teammate_elo": colA = $"~{e.avg_teammate_elo}"; break;
+                    case "team_gold_earned": colA = $"{e.team_gold_earned}g"; break;
+                    case "team_xp_earned": colA = $"{e.team_xp_earned}xp"; break;
+                    default: colA = $"{e.series_wins}W-{e.series_losses}L"; break;
+                }
+                UIFactory.SetText(row.txtSeries, colA);
                 UIFactory.SetText(row.txtWR, $"{e.win_rate * 100f:F0}%");
                 row.root.SetActive(true);
             }
@@ -3676,108 +3751,110 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             }
             else
             {
-                UIFactory.SetText(txtTeamLBHeader, $"<b>2v2 Leaderboard</b>  <color=#888>(top {lb.Count})</color>");
-            }
-
-            // Recent 2v2 history. Group matches by series_id, render a HEADER
-            // row per series (outcome + final score + elo + teams), then the
-            // individual game rows beneath it (Game 1: 5-2  cards: ...).
-            // Server returns hist in time-DESC order; within a series we want
-            // Game 1 → Game N ascending.
-            var hist = ApiClient.CachedTeamMatchHistory ?? new List<ApiClient.TeamMatchHistoryEntry>();
-            var seriesOrder = new List<string>();
-            var bySeries = new Dictionary<string, List<ApiClient.TeamMatchHistoryEntry>>();
-            foreach (var m in hist)
-            {
-                if (string.IsNullOrEmpty(m.series_id)) continue;
-                if (!bySeries.ContainsKey(m.series_id))
+                string sortLabel;
+                switch (sortKey)
                 {
-                    seriesOrder.Add(m.series_id);
-                    bySeries[m.series_id] = new List<ApiClient.TeamMatchHistoryEntry>();
+                    case "wins": sortLabel = "by wins"; break;
+                    case "win_rate": sortLabel = "by win rate"; break;
+                    case "avg_teammate_elo": sortLabel = "by avg teammate elo"; break;
+                    case "team_gold_earned": sortLabel = "by 2v2 gold"; break;
+                    case "team_xp_earned": sortLabel = "by 2v2 XP"; break;
+                    default: sortLabel = "by rating"; break;
                 }
-                bySeries[m.series_id].Add(m);
+                UIFactory.SetText(txtTeamLBHeader, $"<b>2v2 Leaderboard</b>  <color=#888>({lb.Count} · {sortLabel})</color>");
             }
-            // Within each series flip to ASC by ended_at so Game 1 renders first.
-            foreach (var sid in seriesOrder)
-                bySeries[sid].Sort((a, b) => string.Compare(a.ended_at, b.ended_at, StringComparison.Ordinal));
 
+            // Recent 2v2 Series — paginated global feed. Drives off the new
+            // /team/all-series-paged endpoint so non-participants can see the
+            // full series history. Each visible series renders: header row
+            // (outcome from caller perspective + score + date + caller's elo
+            // delta + caller's gold/xp earned), team line with titles, then
+            // one row per game with team-aggregated cards.
+            var pagedSeries = ApiClient.CachedTeamSeriesPaged ?? new List<ApiClient.TeamSeriesPagedEntry>();
+            string mySid = MatchTracker.LocalSteamId;
             int rowIdx = 0;
-            int seriesCount = 0;
-            foreach (var sid in seriesOrder)
+            foreach (var s in pagedSeries)
             {
-                var matches = bySeries[sid];
-                if (matches.Count == 0) continue;
                 if (rowIdx >= teamHistRows.Count) break;
-                var first = matches[0];
-                seriesCount++;
 
-                // ── HEADER row ───────────────────────────────────────
-                int mySW = 0, oppSW = 0;
-                if (!string.IsNullOrEmpty(first.series_score))
-                {
-                    var parts = first.series_score.Split('-');
-                    if (parts.Length == 2) { int.TryParse(parts[0], out mySW); int.TryParse(parts[1], out oppSW); }
-                }
-                // If series_score missing, derive from match wins.
-                if (mySW == 0 && oppSW == 0)
-                {
-                    foreach (var mm in matches)
-                    {
-                        if (mm.won) mySW++; else oppSW++;
-                    }
-                }
-                bool seriesWon = mySW > oppSW;
-                string outcome = seriesWon ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>";
-                string mate = first.my_team == 1
-                    ? (first.t1a_steam_id == MatchTracker.LocalSteamId ? first.t1b_name : first.t1a_name)
-                    : (first.t2a_steam_id == MatchTracker.LocalSteamId ? first.t2b_name : first.t2a_name);
-                string opp1 = first.my_team == 1 ? first.t2a_name : first.t1a_name;
-                string opp2 = first.my_team == 1 ? first.t2b_name : first.t1b_name;
+                // Caller-perspective outcome. If caller isn't in this series,
+                // render neutral (gray) and show t1-t2 score raw.
+                ApiClient.TeamSeriesSlot mySlot = null;
+                int callerTeam = 0;
+                if (s.t1a?.steam_id == mySid) { mySlot = s.t1a; callerTeam = 1; }
+                else if (s.t1b?.steam_id == mySid) { mySlot = s.t1b; callerTeam = 1; }
+                else if (s.t2a?.steam_id == mySid) { mySlot = s.t2a; callerTeam = 2; }
+                else if (s.t2b?.steam_id == mySid) { mySlot = s.t2b; callerTeam = 2; }
+
+                bool callerInSeries = mySlot != null;
+                int leftScore = callerInSeries && callerTeam == 2 ? s.t2_series_wins : s.t1_series_wins;
+                int rightScore = callerInSeries && callerTeam == 2 ? s.t1_series_wins : s.t2_series_wins;
+                bool seriesWon = callerInSeries && (s.winner_team == callerTeam);
+                string outcome;
+                if (callerInSeries) outcome = seriesWon ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>";
+                else                outcome = "<color=#888>·</color>";
+
                 string ratingDelta = "";
-                if (Mathf.Abs(first.series_rating_change) > 0.01f)
+                if (mySlot != null && Mathf.Abs(mySlot.rating_change) > 0.01f)
                 {
-                    string rcCol = first.series_rating_change > 0 ? "#00FF00" : "#FF6666";
-                    ratingDelta = $"  <color={rcCol}>{(first.series_rating_change > 0 ? "+" : "")}{first.series_rating_change:F0} elo</color>";
+                    string rcCol = mySlot.rating_change > 0 ? "#00FF00" : "#FF6666";
+                    ratingDelta = $"  <color={rcCol}>{(mySlot.rating_change > 0 ? "+" : "")}{mySlot.rating_change:F0} elo</color>";
+                }
+                string econ = "";
+                if (mySlot != null && (mySlot.gold_earned > 0 || mySlot.xp_earned > 0))
+                {
+                    econ = $"  <color=#FFD94D>+{mySlot.gold_earned}g</color>  <color=#88CCFF>+{mySlot.xp_earned}xp</color>";
                 }
                 string dt = "";
                 try
                 {
-                    var latest = matches[matches.Count - 1].ended_at;
-                    if (!string.IsNullOrEmpty(latest) && latest.Length >= 10)
-                        dt = DateTime.Parse(latest).ToString("M/d");
+                    if (!string.IsNullOrEmpty(s.completed_at) && s.completed_at.Length >= 10)
+                        dt = DateTime.Parse(s.completed_at).ToString("M/d");
                 }
                 catch { }
 
                 var hdr = teamHistRows[rowIdx++];
                 UIFactory.SetText(hdr.txtLine1,
-                    $"{outcome} <b>Series {mySW}-{oppSW}</b>  <color=#999>{dt}</color>{ratingDelta}");
-                UIFactory.SetText(hdr.txtLine2,
-                    $"  <color=#88CCFF>YOU + {Trunc(mate, 12)}</color>  vs  <color=#FFB088>{Trunc(opp1, 12)}, {Trunc(opp2, 12)}</color>");
+                    $"{outcome} <b>Series {leftScore}-{rightScore}</b>  <color=#999>{dt}</color>{ratingDelta}{econ}");
+                // Team line: render titles + names. T1 left, T2 right (caller's
+                // team rendered LEFT when participant; otherwise raw t1 first).
+                ApiClient.TeamSeriesSlot leftA, leftB, rightA, rightB;
+                if (callerInSeries && callerTeam == 2)
+                { leftA = s.t2a; leftB = s.t2b; rightA = s.t1a; rightB = s.t1b; }
+                else
+                { leftA = s.t1a; leftB = s.t1b; rightA = s.t2a; rightB = s.t2b; }
+                string leftTeamColor = callerInSeries ? "#88CCFF" : "#FFB088";
+                string rightTeamColor = callerInSeries ? "#FFB088" : "#FFB088";
+                string ll = $"<color={leftTeamColor}>{FormatTitleName(leftA)} + {FormatTitleName(leftB)}</color>"
+                          + $"  <color=#666>vs</color>  "
+                          + $"<color={rightTeamColor}>{FormatTitleName(rightA)} + {FormatTitleName(rightB)}</color>";
+                UIFactory.SetText(hdr.txtLine2, ll);
                 hdr.root.SetActive(true);
 
-                // ── Per-match rows ───────────────────────────────────
+                // Per-match rows.
                 int gameNum = 0;
-                foreach (var m in matches)
+                foreach (var m in s.matches)
                 {
                     if (rowIdx >= teamHistRows.Count) break;
                     gameNum++;
-                    int myR = m.my_team == 1 ? m.t1_rounds_won : m.t2_rounds_won;
-                    int oppR = m.my_team == 1 ? m.t2_rounds_won : m.t1_rounds_won;
-                    bool gameWon = myR > oppR;
-                    string gOut = gameWon ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>";
+                    int leftR = (callerInSeries && callerTeam == 2) ? m.t2_rounds_won : m.t1_rounds_won;
+                    int rightR = (callerInSeries && callerTeam == 2) ? m.t1_rounds_won : m.t2_rounds_won;
+                    string gOut;
+                    if (callerInSeries)
+                        gOut = leftR > rightR ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>";
+                    else
+                        gOut = "<color=#888>·</color>";
 
-                    // Team-aggregate cards. Show as "YOU+mate took: ..." vs
-                    // "opp1+opp2 took: ..." — combine each team's cards into one list.
-                    string myTeamCards = JoinTeamCards(m, m.my_team);
-                    string oppTeamCards = JoinTeamCards(m, m.my_team == 1 ? 2 : 1);
+                    string leftCards = JoinPagedTeamCards(m, leftA, leftB);
+                    string rightCards = JoinPagedTeamCards(m, rightA, rightB);
 
                     var row = teamHistRows[rowIdx++];
                     UIFactory.SetText(row.txtLine1,
-                        $"  <color=#666>—</color>  Game {gameNum}: {gOut} {myR}-{oppR}");
+                        $"  <color=#666>—</color>  Game {gameNum}: {gOut} {leftR}-{rightR}");
                     string cardsLine = "";
-                    if (!string.IsNullOrEmpty(myTeamCards) || !string.IsNullOrEmpty(oppTeamCards))
+                    if (!string.IsNullOrEmpty(leftCards) || !string.IsNullOrEmpty(rightCards))
                     {
-                        cardsLine = $"     <color=#88CCFF>{(string.IsNullOrEmpty(myTeamCards) ? "—" : myTeamCards)}</color>  <color=#666>·</color>  <color=#FFB088>{(string.IsNullOrEmpty(oppTeamCards) ? "—" : oppTeamCards)}</color>";
+                        cardsLine = $"     <color={leftTeamColor}>{(string.IsNullOrEmpty(leftCards) ? "—" : leftCards)}</color>  <color=#666>·</color>  <color={rightTeamColor}>{(string.IsNullOrEmpty(rightCards) ? "—" : rightCards)}</color>";
                     }
                     UIFactory.SetText(row.txtLine2, cardsLine);
                     row.root.SetActive(true);
@@ -3786,10 +3863,47 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             // Hide unused rows.
             for (int i = rowIdx; i < teamHistRows.Count; i++) teamHistRows[i].root.SetActive(false);
 
-            if (seriesCount == 0)
+            int total = ApiClient.CachedTeamSeriesTotal;
+            int totalPages = ApiClient.CachedTeamSeriesTotalPages;
+            int curPage = ApiClient.CachedTeamSeriesPage;
+            if (total == 0)
                 UIFactory.SetText(txtTeamHistHeader, "<b>Recent 2v2 Series</b>  <color=#888>— none yet</color>");
             else
-                UIFactory.SetText(txtTeamHistHeader, $"<b>Recent 2v2 Series</b>  <color=#888>({seriesCount})</color>");
+                UIFactory.SetText(txtTeamHistHeader,
+                    $"<b>Recent 2v2 Series</b>  <color=#888>(page {curPage + 1}/{Math.Max(1, totalPages)} of {total})</color>");
+        }
+
+        private static string FormatTitleName(ApiClient.TeamSeriesSlot s)
+        {
+            if (s == null) return "?";
+            string nm = Trunc(s.name ?? "?", 12);
+            if (string.IsNullOrEmpty(s.title)) return nm;
+            string col = string.IsNullOrEmpty(s.title_color) ? "#FFD94D" : s.title_color;
+            return $"<color={col}>{Trunc(s.title, 10)}</color> {nm}";
+        }
+
+        private static string JoinPagedTeamCards(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b)
+        {
+            if (m == null || m.cards_by_player == null) return "";
+            var sb = new StringBuilder();
+            void appendFor(ApiClient.TeamSeriesSlot s)
+            {
+                if (s == null || string.IsNullOrEmpty(s.steam_id)) return;
+                if (m.cards_by_player.TryGetValue(s.steam_id, out var cards) && cards.Count > 0)
+                {
+                    if (sb.Length > 0) sb.Append("  |  ");
+                    sb.Append(Trunc(s.name, 8)).Append(": ");
+                    int n = Math.Min(cards.Count, 6);
+                    for (int i = 0; i < n; i++)
+                    {
+                        if (i > 0) sb.Append(", ");
+                        sb.Append(cards[i]);
+                    }
+                }
+            }
+            appendFor(a);
+            appendFor(b);
+            return sb.ToString();
         }
 
         // Render one half of the split In Queue panel (Random or Custom).

@@ -493,6 +493,11 @@ class Team2v2LeaderboardEntry(BaseModel):
     series_losses: int
     win_rate: float
     level: int = 0
+    title: str | None = None
+    title_color: str | None = None
+    avg_teammate_elo: int = 0
+    team_gold_earned: int = 0
+    team_xp_earned: int = 0
 
 
 class Team2v2LeaderboardResponse(BaseModel):

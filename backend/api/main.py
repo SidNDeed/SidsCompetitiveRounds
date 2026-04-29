@@ -469,7 +469,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.25.20"
+LATEST_MOD_VERSION = "1.25.21"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -4755,6 +4755,20 @@ TEAM_READY_TIMEOUT_SECONDS = 120  # +30s vs 1v1 — 4 players coordinating is sl
 # falls back to 1v1 rating for that player (lesson: new accounts shouldn't drag a
 # matchmaking decision around with a 1500-default 2v2 rating that means nothing).
 TEAM_TRUST_2V2_RATING_AFTER = 10
+# 2v2 elo is also trusted earlier than the series count if the player's RD has
+# already converged below this threshold — Glicko-2 RD shrinks fast for active
+# players, so once it hits ~100 the rating estimate is meaningful even if the
+# player only has a few completed series. Without this, two high-elo veterans
+# (one with 20 series, one with 4) couldn't get matched as opponents because
+# the matchmaker would fall back to the new account's 1v1 elo for balancing.
+TEAM_TRUST_2V2_RD_BELOW = 110.0
+
+# 2v2 economy. Per-match XP base + win multiplier targets ~600 XP loss /
+# ~900 XP win at base; per-series gold bonus on top.
+TEAM_MATCH_XP_BASE       = 600
+TEAM_MATCH_WIN_MULT      = 1.5  # 600 → 900 on win
+TEAM_SERIES_WIN_GOLD     = 50
+TEAM_SERIES_LOSS_GOLD    = 25
 
 
 def _verify_team_hmac(report: TeamMatchReport) -> bool:
@@ -4798,10 +4812,15 @@ def _balance_teams(players: list[dict]) -> tuple[list[str], list[str]]:
     return ([x["player_id"] for x in best[0]], [x["player_id"] for x in best[1]])
 
 
-def _team_balance_rating(rating: float, completed_series: int, fallback_rating: float) -> float:
-    """Use 2v2 rating once a player has enough 2v2 series; otherwise pull their 1v1 rating
-    forward. Floor at the fallback when the 2v2 rating is provisional."""
+def _team_balance_rating(rating: float, completed_series: int, fallback_rating: float, rd: float = 350.0) -> float:
+    """Use 2v2 rating once a player has either:
+       - enough completed series (TEAM_TRUST_2V2_RATING_AFTER), OR
+       - converged RD (rd <= TEAM_TRUST_2V2_RD_BELOW)
+    Otherwise fall back to their 1v1 rating. RD path catches active players
+    whose 2v2 rating is meaningful even before they hit the series threshold."""
     if completed_series >= TEAM_TRUST_2V2_RATING_AFTER:
+        return rating
+    if rd is not None and rd <= TEAM_TRUST_2V2_RD_BELOW:
         return rating
     return fallback_rating
 
@@ -4938,7 +4957,7 @@ async def team_queue_list(db: AsyncSession = Depends(get_db)):
     client can render two side-by-side panels without re-filtering."""
     result = await db.execute(
         text("""
-            SELECT tq.steam_id, tq.display_name, tq.rating, tq.completed_series,
+            SELECT tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation, tq.completed_series,
                    tq.fallback_rating, tq.region, tq.joined_at, tq.status,
                    tq.team_assigned, tq.series_id,
                    tq.manual_pick_enabled, tq.preferred_team, tq.queue_type
@@ -4953,7 +4972,9 @@ async def team_queue_list(db: AsyncSession = Depends(get_db)):
     manual_bucket: list[dict] = []
     for r in rows:
         cs = int(r["completed_series"] or 0)
-        using_fb = cs < TEAM_TRUST_2V2_RATING_AFTER
+        rd = float(r["rating_deviation"] or 350.0)
+        # Same trust rule the matchmaker uses — series count OR converged RD.
+        using_fb = (cs < TEAM_TRUST_2V2_RATING_AFTER) and (rd > TEAM_TRUST_2V2_RD_BELOW)
         fb = float(r["fallback_rating"] or 0)
         balance = int(round(fb)) if using_fb else int(round(r["rating"]))
         qt = (r["queue_type"] or "auto").lower()
@@ -4989,18 +5010,21 @@ async def team_queue_list(db: AsyncSession = Depends(get_db)):
 @app.get("/api/v1/team/queue/recent-joins", tags=["Team Queue"])
 async def team_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
     """Players who joined the 2v2 queue in the last N seconds. Drives the Discord
-    beacon `🎯 NAME searching for 2v2!` post."""
+    beacon `🎯 NAME searching for 2v2!` post — auto queue only. Custom-lobby
+    (manual) queuers are intentionally excluded so #ranked-looking-for-people
+    only beacons random-matchmaking joins."""
     result = await db.execute(
         text("""
             SELECT tq.display_name, tq.steam_id, tq.rating, tq.joined_at
             FROM team_queue tq
             WHERE tq.status = 'searching'
+              AND tq.queue_type = 'auto'
               AND tq.joined_at > NOW() - INTERVAL '1 second' * :secs
             ORDER BY tq.joined_at DESC
         """), {"secs": seconds},
     )
     rows = result.mappings().all()
-    cnt_q = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status='searching'"))
+    cnt_q = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status='searching' AND queue_type='auto'"))
     cnt = cnt_q.scalar() or 0
     return {
         "joins": [
@@ -5109,7 +5133,8 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         # Build response payload
         def to_member(row):
             cs = int(row.get("completed_series") or 0)
-            using_fb = cs < TEAM_TRUST_2V2_RATING_AFTER
+            rd = float(row.get("rating_deviation") or 350.0)
+            using_fb = (cs < TEAM_TRUST_2V2_RATING_AFTER) and (rd > TEAM_TRUST_2V2_RD_BELOW)
             fb = float(row.get("fallback_rating") or 0)
             balance = int(round(fb)) if using_fb else int(round(row["rating"]))
             return TeamQueueMember(
@@ -5182,7 +5207,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
     # ── SEARCHING ── try to lock 4 mutually-acceptable players
     elo_range = compute_elo_range(wait_seconds)
-    my_balance = _team_balance_rating(me["rating"], me["completed_series"], me["fallback_rating"])
+    my_balance = _team_balance_rating(me["rating"], me["completed_series"], me["fallback_rating"], me["rating_deviation"])
 
     # Find 3 other compatible players. Bilateral Elo overlap, no mutual blocks.
     # Use the SAME elo_range as the caller's tier — wider tier callers find each
@@ -5318,7 +5343,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     for o in others:
         pool.append({
             "player_id": o["player_id"],
-            "balance_rating": _team_balance_rating(o["rating"], o["completed_series"], o["fallback_rating"]),
+            "balance_rating": _team_balance_rating(o["rating"], o["completed_series"], o["fallback_rating"], o["rating_deviation"]),
             "rating": o["rating"],
             "rd": o["rating_deviation"],
             "steam_id": o["steam_id"],
@@ -5991,6 +6016,77 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
                 round_number=card.round_number,
             ))
 
+    # Per-match XP awards. Higher base than 1v1 so wins land in user's
+    # ~800-900 band and losses near ~600. 100xp=1g auto-conversion still
+    # applies (mirrors the 1v1 path) so a clean win also drops a few gold.
+    # Per-series accumulator (tax slot positions in team_series so the F5 UI
+    # can render +Ng/+Nxp beside each player's name in their own series).
+    series_xp_by_pid: dict = {}
+    series_gold_by_pid: dict = {}
+    try:
+        team_match_winner = report.winner_team
+        for p in (p_t1a, p_t1b, p_t2a, p_t2b):
+            p_team = 1 if p.id in (p_t1a.id, p_t1b.id) else 2
+            won_match = (p_team == team_match_winner)
+            xp = TEAM_MATCH_XP_BASE
+            if won_match:
+                xp = int(xp * TEAM_MATCH_WIN_MULT)
+            old_xp_q = await db.execute(text("SELECT total_xp FROM players WHERE id = :pid"), {"pid": p.id})
+            old_xp = old_xp_q.scalar() or 0
+            new_xp = old_xp + xp
+            await db.execute(
+                text("UPDATE players SET total_xp = :new, "
+                     "team_xp_earned = COALESCE(team_xp_earned,0) + :delta WHERE id = :pid"),
+                {"new": new_xp, "delta": xp, "pid": p.id},
+            )
+            series_xp_by_pid[p.id] = series_xp_by_pid.get(p.id, 0) + xp
+            # 100 XP = 1 gold conversion (mirrors submit_match logic).
+            gold_delta = (new_xp // 100) - (old_xp // 100)
+            if gold_delta > 0:
+                await db.execute(
+                    text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, "
+                         "team_gold_earned = COALESCE(team_gold_earned,0) + :g WHERE id = :pid"),
+                    {"g": gold_delta, "pid": p.id},
+                )
+                db.add(GoldTransaction(
+                    player_id=p.id, amount=gold_delta,
+                    reason="team_xp", reference_id=str(new_match.id),
+                ))
+                series_gold_by_pid[p.id] = series_gold_by_pid.get(p.id, 0) + gold_delta
+    except Exception as xpex:
+        print(f"[TEAM-ECON] per-match XP failed for match {new_match.id}: {xpex}")
+
+    # Roll the per-match awards into the team_series row's per-slot accumulators.
+    try:
+        slot_pid = {
+            "t1a": series["t1a_id"], "t1b": series["t1b_id"],
+            "t2a": series["t2a_id"], "t2b": series["t2b_id"],
+        }
+        await db.execute(text(
+            "UPDATE team_series SET "
+            "t1a_xp_earned = COALESCE(t1a_xp_earned,0) + :t1a_xp, "
+            "t1b_xp_earned = COALESCE(t1b_xp_earned,0) + :t1b_xp, "
+            "t2a_xp_earned = COALESCE(t2a_xp_earned,0) + :t2a_xp, "
+            "t2b_xp_earned = COALESCE(t2b_xp_earned,0) + :t2b_xp, "
+            "t1a_gold_earned = COALESCE(t1a_gold_earned,0) + :t1a_g, "
+            "t1b_gold_earned = COALESCE(t1b_gold_earned,0) + :t1b_g, "
+            "t2a_gold_earned = COALESCE(t2a_gold_earned,0) + :t2a_g, "
+            "t2b_gold_earned = COALESCE(t2b_gold_earned,0) + :t2b_g "
+            "WHERE id = :sid"
+        ), {
+            "sid": series_uuid,
+            "t1a_xp": series_xp_by_pid.get(slot_pid["t1a"], 0),
+            "t1b_xp": series_xp_by_pid.get(slot_pid["t1b"], 0),
+            "t2a_xp": series_xp_by_pid.get(slot_pid["t2a"], 0),
+            "t2b_xp": series_xp_by_pid.get(slot_pid["t2b"], 0),
+            "t1a_g":  series_gold_by_pid.get(slot_pid["t1a"], 0),
+            "t1b_g":  series_gold_by_pid.get(slot_pid["t1b"], 0),
+            "t2a_g":  series_gold_by_pid.get(slot_pid["t2a"], 0),
+            "t2b_g":  series_gold_by_pid.get(slot_pid["t2b"], 0),
+        })
+    except Exception as agex:
+        print(f"[TEAM-ECON] per-series accumulator update failed: {agex}")
+
     # Advance series counters.
     if report.winner_team == 1:
         new_t1w = (series["t1_series_wins"] or 0) + 1
@@ -6143,6 +6239,48 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
                 "t2b_d": delta_by_pid[slot_to_pid["t2b"]],
             },
         )
+
+        # Series-completion gold: +50g winner, +25g loser. Also folded into
+        # the team_series per-slot gold accumulator so the F5 panel can
+        # render "+Ng / +Nxp" beside each player.
+        bonus_by_pid = {}
+        try:
+            for p in (p_t1a, p_t1b, p_t2a, p_t2b):
+                player_team = 1 if p.id in (p_t1a.id, p_t1b.id) else 2
+                won_series = (player_team == winner_team)
+                bonus = TEAM_SERIES_WIN_GOLD if won_series else TEAM_SERIES_LOSS_GOLD
+                await db.execute(
+                    text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, "
+                         "team_gold_earned = COALESCE(team_gold_earned,0) + :g WHERE id = :pid"),
+                    {"g": bonus, "pid": p.id},
+                )
+                db.add(GoldTransaction(
+                    player_id=p.id, amount=bonus,
+                    reason=("team_series_win" if won_series else "team_series_loss"),
+                    reference_id=str(series_uuid),
+                ))
+                bonus_by_pid[p.id] = bonus
+            slot_pid = {
+                "t1a": series["t1a_id"], "t1b": series["t1b_id"],
+                "t2a": series["t2a_id"], "t2b": series["t2b_id"],
+            }
+            await db.execute(text(
+                "UPDATE team_series SET "
+                "t1a_gold_earned = COALESCE(t1a_gold_earned,0) + :t1a_g, "
+                "t1b_gold_earned = COALESCE(t1b_gold_earned,0) + :t1b_g, "
+                "t2a_gold_earned = COALESCE(t2a_gold_earned,0) + :t2a_g, "
+                "t2b_gold_earned = COALESCE(t2b_gold_earned,0) + :t2b_g "
+                "WHERE id = :sid"
+            ), {
+                "sid": series_uuid,
+                "t1a_g": bonus_by_pid.get(slot_pid["t1a"], 0),
+                "t1b_g": bonus_by_pid.get(slot_pid["t1b"], 0),
+                "t2a_g": bonus_by_pid.get(slot_pid["t2a"], 0),
+                "t2b_g": bonus_by_pid.get(slot_pid["t2b"], 0),
+            })
+        except Exception as gex:
+            print(f"[TEAM-ECON] series-bonus gold failed for {series_uuid}: {gex}")
+
         # Free the queue rows so all 4 can re-queue.
         await db.execute(
             text("DELETE FROM team_queue WHERE series_id = :sid"),
@@ -6453,16 +6591,143 @@ async def team_series_recent(minutes: int = Query(5, ge=1, le=60), db: AsyncSess
     ]}
 
 
-@app.get("/api/v1/team/leaderboard", response_model=Team2v2LeaderboardResponse, tags=["Team Matches"])
-async def team_leaderboard(
-    limit: int = Query(100, ge=1, le=200),
-    min_series: int = Query(1, ge=0),
+@app.get("/api/v1/team/all-series-paged", tags=["Team Matches"])
+async def team_all_series_paged(
+    page: int = Query(0, ge=0),
+    page_size: int = Query(3, ge=1, le=20),
     db: AsyncSession = Depends(get_db),
 ):
-    """Top players by 2v2 Glicko rating. min_series gates rookies out of the top
-    of the board the same way 1v1 leaderboard does with min_matches.
-    Default lowered to 1 during 2v2 beta — bump back once volume picks up."""
-    q = text("""
+    """Paginated feed of every completed 2v2 series. Drives the F5 'Recent 2v2
+    Series' panel. Each series includes per-slot ratings + rating deltas +
+    titles + per-slot gold/XP earned in this series, plus the matches array
+    with per-player card picks. Replaces the per-player /team-matches feed
+    so non-participants can also browse the global series history."""
+    total_q = await db.execute(text("SELECT COUNT(*) FROM team_series WHERE status='completed'"))
+    total = total_q.scalar() or 0
+
+    series_q = text("""
+        SELECT s.id AS series_id, s.completed_at, s.created_at,
+               s.t1_series_wins, s.t2_series_wins, s.winner_team,
+               s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id,
+               s.t1a_rating_change, s.t1b_rating_change, s.t2a_rating_change, s.t2b_rating_change,
+               s.t1a_gold_earned, s.t1b_gold_earned, s.t2a_gold_earned, s.t2b_gold_earned,
+               s.t1a_xp_earned,   s.t1b_xp_earned,   s.t2a_xp_earned,   s.t2b_xp_earned,
+               p1a.steam_id AS t1a_sid, p1a.display_name AS t1a_name, ti1a.name AS t1a_title, ti1a.preview_color AS t1a_title_color,
+               p1b.steam_id AS t1b_sid, p1b.display_name AS t1b_name, ti1b.name AS t1b_title, ti1b.preview_color AS t1b_title_color,
+               p2a.steam_id AS t2a_sid, p2a.display_name AS t2a_name, ti2a.name AS t2a_title, ti2a.preview_color AS t2a_title_color,
+               p2b.steam_id AS t2b_sid, p2b.display_name AS t2b_name, ti2b.name AS t2b_title, ti2b.preview_color AS t2b_title_color,
+               g1a.rating AS t1a_rating, g1b.rating AS t1b_rating,
+               g2a.rating AS t2a_rating, g2b.rating AS t2b_rating
+          FROM team_series s
+          JOIN players p1a ON p1a.id = s.t1a_id
+          JOIN players p1b ON p1b.id = s.t1b_id
+          JOIN players p2a ON p2a.id = s.t2a_id
+          JOIN players p2b ON p2b.id = s.t2b_id
+          LEFT JOIN shop_items ti1a ON ti1a.id = p1a.active_title_id
+          LEFT JOIN shop_items ti1b ON ti1b.id = p1b.active_title_id
+          LEFT JOIN shop_items ti2a ON ti2a.id = p2a.active_title_id
+          LEFT JOIN shop_items ti2b ON ti2b.id = p2b.active_title_id
+          LEFT JOIN glicko_ratings_2v2 g1a ON g1a.player_id = s.t1a_id
+          LEFT JOIN glicko_ratings_2v2 g1b ON g1b.player_id = s.t1b_id
+          LEFT JOIN glicko_ratings_2v2 g2a ON g2a.player_id = s.t2a_id
+          LEFT JOIN glicko_ratings_2v2 g2b ON g2b.player_id = s.t2b_id
+         WHERE s.status = 'completed'
+         ORDER BY s.completed_at DESC
+         LIMIT :lim OFFSET :off
+    """)
+    rows = (await db.execute(series_q, {"lim": page_size, "off": page * page_size})).mappings().all()
+
+    out_series = []
+    for r in rows:
+        # Per-series matches.
+        m_q = text("""
+            SELECT id AS match_id, ended_at, t1_rounds_won, t2_rounds_won,
+                   t1_points_total, t2_points_total
+              FROM team_matches
+             WHERE series_id = :sid AND invalidated_at IS NULL
+             ORDER BY ended_at ASC
+        """)
+        m_rows = (await db.execute(m_q, {"sid": r["series_id"]})).mappings().all()
+        matches = []
+        # Per-(match, player) cards lookup.
+        match_ids = [m["match_id"] for m in m_rows]
+        cards_by_match: dict = {}
+        if match_ids:
+            c_q = text("""
+                SELECT match_id, player_id, card_name, pick_order, round_number
+                  FROM team_match_cards
+                 WHERE match_id = ANY(:mids)
+                 ORDER BY match_id, player_id, round_number, pick_order
+            """)
+            c_rows = (await db.execute(c_q, {"mids": match_ids})).mappings().all()
+            pid_to_sid = {
+                str(r["t1a_id"]): r["t1a_sid"], str(r["t1b_id"]): r["t1b_sid"],
+                str(r["t2a_id"]): r["t2a_sid"], str(r["t2b_id"]): r["t2b_sid"],
+            }
+            for c in c_rows:
+                mid_key = str(c["match_id"])
+                sid_for = pid_to_sid.get(str(c["player_id"]))
+                if not sid_for: continue
+                cards_by_match.setdefault(mid_key, {}).setdefault(sid_for, []).append(c["card_name"])
+        for m in m_rows:
+            matches.append({
+                "match_id": str(m["match_id"]),
+                "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
+                "t1_rounds_won": m["t1_rounds_won"], "t2_rounds_won": m["t2_rounds_won"],
+                "t1_points_total": m["t1_points_total"] or 0, "t2_points_total": m["t2_points_total"] or 0,
+                "cards_by_player": cards_by_match.get(str(m["match_id"]), {}),
+            })
+
+        def slot(prefix):
+            return {
+                "steam_id": r[f"{prefix}_sid"], "name": r[f"{prefix}_name"],
+                "title": r[f"{prefix}_title"], "title_color": r[f"{prefix}_title_color"],
+                "rating": float(r[f"{prefix}_rating"]) if r[f"{prefix}_rating"] is not None else 1500.0,
+                "rating_change": float(r[f"{prefix}_rating_change"] or 0),
+                "gold_earned": int(r[f"{prefix}_gold_earned"] or 0),
+                "xp_earned":   int(r[f"{prefix}_xp_earned"] or 0),
+            }
+        out_series.append({
+            "series_id": str(r["series_id"]),
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            "winner_team": r["winner_team"],
+            "t1_series_wins": r["t1_series_wins"], "t2_series_wins": r["t2_series_wins"],
+            "t1a": slot("t1a"), "t1b": slot("t1b"),
+            "t2a": slot("t2a"), "t2b": slot("t2b"),
+            "matches": matches,
+        })
+
+    return {
+        "series": out_series,
+        "page": page, "page_size": page_size, "total": total,
+        "total_pages": (total + page_size - 1) // page_size if total else 0,
+    }
+
+
+@app.get("/api/v1/team/leaderboard", response_model=Team2v2LeaderboardResponse, tags=["Team Matches"])
+async def team_leaderboard(
+    limit: int = Query(200, ge=1, le=500),
+    min_series: int = Query(1, ge=0),
+    sort_by: str = Query("rating"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Top players by 2v2 Glicko rating. Includes title, avg teammate elo,
+    total 2v2 gold + XP earned. sort_by accepts: rating, wins, win_rate,
+    avg_teammate_elo, team_gold_earned, team_xp_earned."""
+    sort_map = {
+        "rating": "g2.rating DESC",
+        "wins": "wins DESC",
+        "win_rate": "win_rate DESC",
+        "avg_teammate_elo": "avg_teammate_elo DESC",
+        "team_gold_earned": "team_gold_earned DESC",
+        "team_xp_earned": "team_xp_earned DESC",
+    }
+    order_clause = sort_map.get(sort_by, "g2.rating DESC")
+
+    # avg_teammate_elo: pull the OTHER member's 2v2 rating across all completed
+    # series this player was in (or 1v1 fallback if their teammate is provisional),
+    # then average. Self-reference filtered so own rating doesn't pollute.
+    q = text(f"""
         WITH series_stats AS (
             SELECT player_id, SUM(won) AS wins, SUM(lost) AS losses, COUNT(*) AS total
             FROM (
@@ -6484,9 +6749,25 @@ async def team_leaderboard(
                 FROM team_series WHERE status='completed'
             ) sub
             GROUP BY player_id
+        ),
+        teammate_pairs AS (
+            SELECT t1a_id AS player_id, t1b_id AS teammate_id
+              FROM team_series WHERE status='completed'
+            UNION ALL
+            SELECT t1b_id, t1a_id FROM team_series WHERE status='completed'
+            UNION ALL
+            SELECT t2a_id, t2b_id FROM team_series WHERE status='completed'
+            UNION ALL
+            SELECT t2b_id, t2a_id FROM team_series WHERE status='completed'
+        ),
+        teammate_elo AS (
+            SELECT tp.player_id, ROUND(AVG(COALESCE(g2t.rating, gt1.rating, 1500))::numeric, 0) AS avg_teammate_elo
+              FROM teammate_pairs tp
+              LEFT JOIN glicko_ratings_2v2 g2t ON g2t.player_id = tp.teammate_id AND g2t.completed_series >= 5
+              LEFT JOIN glicko_ratings    gt1 ON gt1.player_id = tp.teammate_id
+             GROUP BY tp.player_id
         )
         SELECT
-            ROW_NUMBER() OVER (ORDER BY g2.rating DESC) AS rank,
             p.steam_id,
             p.display_name,
             ROUND(g2.rating::numeric, 0) AS rating,
@@ -6497,19 +6778,27 @@ async def team_leaderboard(
             CASE WHEN COALESCE(ss.total, 0) > 0
                  THEN ROUND(COALESCE(ss.wins, 0)::numeric / ss.total, 4)
                  ELSE 0 END AS win_rate,
-            COALESCE(p.total_xp, 0) AS total_xp
+            COALESCE(p.total_xp, 0) AS total_xp,
+            COALESCE(p.team_gold_earned, 0) AS team_gold_earned,
+            COALESCE(p.team_xp_earned,   0) AS team_xp_earned,
+            COALESCE(te.avg_teammate_elo, 0) AS avg_teammate_elo,
+            si.name AS title,
+            si.preview_color AS title_color
         FROM glicko_ratings_2v2 g2
         JOIN players p ON p.id = g2.player_id
         LEFT JOIN series_stats ss ON ss.player_id = p.id
+        LEFT JOIN teammate_elo te  ON te.player_id = p.id
+        LEFT JOIN shop_items si    ON si.id = p.active_title_id
         WHERE g2.completed_series >= :min_series
           AND p.deleted_at IS NULL
-        ORDER BY g2.rating DESC
+        ORDER BY {order_clause}
         LIMIT :limit
     """)
     rows = (await db.execute(q, {"min_series": min_series, "limit": limit})).mappings().all()
-    entries = [
-        Team2v2LeaderboardEntry(
-            rank=r["rank"],
+    entries = []
+    for idx, r in enumerate(rows, start=1):
+        entries.append(Team2v2LeaderboardEntry(
+            rank=idx,
             steam_id=r["steam_id"],
             display_name=r["display_name"],
             rating=int(r["rating"]),
@@ -6519,9 +6808,12 @@ async def team_leaderboard(
             series_losses=r["losses"],
             win_rate=float(r["win_rate"]),
             level=level_from_xp(r["total_xp"])[0],
-        )
-        for r in rows
-    ]
+            title=r["title"],
+            title_color=r["title_color"],
+            avg_teammate_elo=int(r["avg_teammate_elo"] or 0),
+            team_gold_earned=int(r["team_gold_earned"] or 0),
+            team_xp_earned=int(r["team_xp_earned"] or 0),
+        ))
     cnt = (await db.execute(
         text("SELECT COUNT(*) FROM glicko_ratings_2v2 WHERE completed_series >= :m"),
         {"m": min_series},
