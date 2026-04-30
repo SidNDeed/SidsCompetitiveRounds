@@ -1,5 +1,14 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.4 — 2v2 assembly cascade fix
+
+Two consecutive 2v2 tests with 4 players (Sid + 3 testers) hit the same disconnect pattern: ~30 seconds after Both-Ready, the server canceled the series with reason `assembly_timeout, 3/4 confirmed` and kicked all 4 players back to the menu. Root cause was the server's 15-second deadline for all 4 clients to post `/spawn-confirm` after the room is created — Photon region pinging routinely blows past that on slow connects (Sid's logs had ~390 lines of `Trying to connect to photon` before the join even started). Once any one client busted the deadline, the cancellation cascaded: each player's `OnPlayerLeftRoom` callback fired `/report-dc` on the room exits triggered by the cancellation, which only made things noisier server-side.
+
+- **Server**: bumped `_ASSEMBLY_DEADLINE_SECONDS` 15 → 60. Realistic window for slow Photon connects + region pinging.
+- **Client**: `OnPlayerLeftRoom` now early-returns when `GameStateWatcher.IsInMatch` is false. The 2v2 DC-reporting path is gated to actual gameplay (Round 1 has started); during the assembly phase, peer leaves are silently ignored and the server's own `assembly_timeout` handler resolves anything genuinely stuck. Once the match has started, real DCs still report normally.
+
+Both fixes complement each other — the bumped deadline catches most slow-connect cases on its own, and the client gate prevents the false-DC cascade if anything still slips through.
+
 ## v1.26.3 — Tester feedback batch: unequip cosmetics, tournament push-back, block NRE safety, queue-state cleanup, mid-room ConnectToRegion diagnostic
 
 **Cosmetics — clicking the equipped title or trail now unequips it.** Backend already supported `item_id=null` to clear the active title/trail, but the client never sent it; clicking an "Equipped" item just re-set the same value. Now the click handler detects re-click of an active single-equip cosmetic and sends `0` (translates to omitted query param → null). Button label flipped from `Equipped` → `Unequip` so the action is obvious.

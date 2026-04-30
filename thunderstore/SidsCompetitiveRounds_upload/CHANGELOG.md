@@ -1,5 +1,9 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.4 — 2v2 assembly cascade fix
+
+Two consecutive 2v2 tests with 4 players hit the same `assembly_timeout, 3/4 confirmed` cancellation. Root cause: the server's 15-second deadline for all 4 clients to spawn-confirm was too tight for slow Photon connects. Bumped it to 60 seconds, and gated client-side `OnPlayerLeftRoom` DC reports on `IsInMatch=true` so transient peer drops during assembly no longer cascade into a kick-everyone-to-menu storm.
+
 ## v1.26.3 — Tester feedback batch: unequip cosmetics, tournament push-back, block NRE safety, queue cleanup
 
 - **Cosmetics**: clicking an equipped title or trail now unequips it (was previously a no-op). Button label flipped from `Equipped` → `Unequip`.

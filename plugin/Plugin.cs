@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.26.3";
+        public const string ModVersion = "1.26.4";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1184,6 +1184,26 @@ namespace CompetitiveRounds
                 if (p == null) return;
                 string seriesId = ApiClient.ActiveTeamSeriesId;
                 if (string.IsNullOrEmpty(seriesId)) return;
+
+                // Suppress DC reports during the assembly phase (between Photon
+                // room join and "Round 1 active"). Two real testers (4-player
+                // 2v2 sessions, v1.26.3 logs) hit this: when the slowest client
+                // takes 25+ seconds to spawn-confirm, ANY transient leave by
+                // another peer fires our OnPlayerLeftRoom which posts report-dc,
+                // which races against the server's assembly_timeout cancel and
+                // turns into a cascading DC storm — every remaining player's
+                // OnPlayerLeftRoom fires when the others leave the now-cancelled
+                // room, and the cascade kicks all 4 back to the menu. The
+                // server's own assembly_timeout handler resolves stuck assemblies
+                // without our help; we only want to report DCs once gameplay
+                // has actually started.
+                if (!GameStateWatcher.IsInMatch)
+                {
+                    Plugin.Log.LogInfo($"[2v2-DC] suppressed during assembly phase " +
+                        $"(IsInMatch=false), leaver='{p?.NickName}' actor={p?.ActorNumber}");
+                    return;
+                }
+
                 // Resolve the DC'd player's Steam ID from their custom props.
                 string dcSteamId = null;
                 if (p.CustomProperties != null)

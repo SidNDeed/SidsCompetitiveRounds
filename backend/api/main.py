@@ -500,7 +500,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.26.3"
+LATEST_MOD_VERSION = "1.26.4"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -5757,7 +5757,7 @@ async def team_queue_ready(steam_id: str = Query(...), db: AsyncSession = Depend
 # can bail to menu instead of sitting on the ready screen for 30s.
 # ─────────────────────────────────────────────────────────────────────────
 
-_ASSEMBLY_DEADLINE_SECONDS = 15
+_ASSEMBLY_DEADLINE_SECONDS = 60
 
 
 def _verify_spawn_confirm_hmac(steam_id: str, series_id: str, signature: str) -> bool:
