@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
+using UnityEngine;
+#if !THUNDERSTORE
 using System.IO.Compression;
 using System.Net;
-using System.Reflection;
 using System.Threading;
-using UnityEngine;
+#endif
 
 namespace CompetitiveRounds
 {
@@ -24,14 +26,21 @@ namespace CompetitiveRounds
     public static class CardImageLoader
     {
         // Bumped whenever Landfall ships a new card. The auto-bootstrap
-        // also re-fires if the on-disk count is lower than this.
+        // (non-Thunderstore builds only) also re-fires if the on-disk
+        // count is lower than this.
         private const int EXPECTED_CARD_COUNT = 67;
 
+#if !THUNDERSTORE
         // Stable URL — cards.zip is attached to the v1.26.0 release and
         // never moves. Future patch releases reuse the same asset since
         // the cards themselves don't change with our code patches.
+        // Thunderstore builds NEVER reference this URL — Thunderstore
+        // packages must be self-contained, so the bundle ships the
+        // cards directly under plugins/cards/ and the download path is
+        // compiled out entirely.
         private const string CARDS_ZIP_URL =
             "https://github.com/SidNDeed/SidsCompetitiveRounds/releases/download/v1.26.0/cards.zip";
+#endif
 
         // Canonical key (lowercase, no spaces) → on-disk file path.
         // Replaced atomically by the rescan after auto-download so
@@ -41,7 +50,9 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, Sprite> _spriteCache =
             new Dictionary<string, Sprite>(StringComparer.OrdinalIgnoreCase);
         private static bool _scanAttempted;
+#if !THUNDERSTORE
         private static int _downloadStarted; // 0 = not started, 1 = in flight or done
+#endif
         private static string _cardsDir;
 
         /// <summary>
@@ -77,8 +88,16 @@ namespace CompetitiveRounds
                     Plugin.Log?.LogInfo($"[CARD-ART] indexed {found} card images from {_cardsDir}");
                     return;
                 }
+#if THUNDERSTORE
+                // Thunderstore packages ship the cards directly in the
+                // bundle. If the count is below expected here, the user
+                // either has a corrupt install or extracted the bundle
+                // wrong — re-install via the mod manager.
+                Plugin.Log?.LogWarning($"[CARD-ART] only {found}/{EXPECTED_CARD_COUNT} card images present at {_cardsDir}. Reinstall via the mod manager if popups / tier list export look broken.");
+#else
                 Plugin.Log?.LogInfo($"[CARD-ART] {found}/{EXPECTED_CARD_COUNT} card images present at {_cardsDir} — fetching the rest from GitHub release in background.");
                 MaybeStartAutoDownload();
+#endif
             }
             catch (Exception ex)
             {
@@ -106,10 +125,14 @@ namespace CompetitiveRounds
             return map;
         }
 
+#if !THUNDERSTORE
         /// <summary>One-shot guarded auto-download. Spawns a background
         /// thread that fetches cards.zip from the GitHub release,
         /// extracts the PNGs into _cardsDir, and rescans. Subsequent
-        /// calls are no-ops thanks to the Interlocked compare-exchange.</summary>
+        /// calls are no-ops thanks to the Interlocked compare-exchange.
+        /// Compiled out of Thunderstore builds — those bundles ship the
+        /// cards directly so runtime download is unnecessary AND would
+        /// violate Thunderstore's "no runtime asset fetching" policy.</summary>
         private static void MaybeStartAutoDownload()
         {
             if (Interlocked.Exchange(ref _downloadStarted, 1) != 0) return;
@@ -183,6 +206,7 @@ namespace CompetitiveRounds
                 }
             }
         }
+#endif
 
         /// <summary>
         /// Returns the cached Sprite for cardName, or loads it from
