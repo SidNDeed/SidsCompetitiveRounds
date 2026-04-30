@@ -340,6 +340,25 @@ async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: st
 
     if purged:
         print(f"[PRIVACY] Re-registration blocked: steam_id={steam_id} was previously purged — tombstoned")
+    else:
+        # Auto-grant the "Beta" title to fresh joiners while the mod is in
+        # beta. Free, dark blue, equipped immediately if they have no other
+        # active title. Removed from auto-grant when beta ends (drop the
+        # title row or change this branch).
+        try:
+            beta_id = (await db.execute(
+                text("SELECT id FROM shop_items WHERE sku = 'title_beta' LIMIT 1")
+            )).scalar()
+            if beta_id is not None:
+                await db.execute(text(
+                    "INSERT INTO player_items (player_id, item_id, purchase_price) "
+                    "VALUES (:pid, :iid, 0) "
+                    "ON CONFLICT (player_id, item_id) DO NOTHING"
+                ), {"pid": player.id, "iid": beta_id})
+                if player.active_title_id is None:
+                    player.active_title_id = beta_id
+        except Exception as ex:
+            print(f"[BETA] auto-grant failed for {steam_id}: {ex}")
     return player
 
 
@@ -469,7 +488,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.25.23"
+LATEST_MOD_VERSION = "1.25.24"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1753,6 +1772,84 @@ async def get_player_matches(
 
 
 # ── Routes: Card Stats ─────────────────────────────────────────
+
+@app.get("/api/v1/players/{steam_id}/card-tiers", tags=["Cards"])
+async def get_player_card_tiers(
+    steam_id: str,
+    filter: str = Query("ranked"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-player tier-list assignments for the Card Stats panel. Returns a
+    map {card_name: tier} for the requested filter ('casual'|'ranked'|'all').
+    Empty dict if the player has no rankings yet for this filter."""
+    f = filter.lower()
+    if f not in ("casual", "ranked", "all"):
+        raise HTTPException(400, "filter must be casual|ranked|all")
+    rows = (await db.execute(
+        text("""
+            SELECT pct.card_name, pct.tier
+              FROM player_card_tiers pct
+              JOIN players p ON p.id = pct.player_id
+             WHERE p.steam_id = :sid AND pct.filter = :f
+        """), {"sid": steam_id, "f": f}
+    )).mappings().all()
+    return {"filter": f, "tiers": {r["card_name"]: r["tier"] for r in rows}}
+
+
+@app.post("/api/v1/players/{steam_id}/card-tiers", tags=["Cards"])
+async def set_player_card_tier(
+    steam_id: str,
+    card_name: str = Query(..., max_length=64),
+    filter: str = Query(...),
+    tier: str = Query(""),  # empty = clear
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set or clear a single (card, filter) tier for the caller. HMAC over
+    'card-tier:{steam}:{card}:{filter}:{tier}' so a malicious client can't
+    overwrite someone else's tier list."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(503, "HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"card-tier:{steam_id}:{card_name}:{filter}:{tier}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(403, "Invalid signature")
+
+    f = filter.lower()
+    if f not in ("casual", "ranked", "all"):
+        raise HTTPException(400, "filter must be casual|ranked|all")
+    t = tier.upper().strip()
+    if t and t not in ("S", "A", "B", "C", "D", "E", "F"):
+        raise HTTPException(400, "tier must be S/A/B/C/D/E/F or empty")
+
+    pid = (await db.execute(
+        select(Player.id).where(Player.steam_id == steam_id)
+    )).scalar_one_or_none()
+    if pid is None:
+        raise HTTPException(404, "Player not found")
+
+    if not t:
+        # Empty tier = clear the assignment.
+        await db.execute(
+            text("DELETE FROM player_card_tiers WHERE player_id=:pid AND card_name=:c AND filter=:f"),
+            {"pid": pid, "c": card_name, "f": f},
+        )
+    else:
+        await db.execute(
+            text("""
+                INSERT INTO player_card_tiers (player_id, card_name, filter, tier)
+                VALUES (:pid, :c, :f, :t)
+                ON CONFLICT (player_id, card_name, filter)
+                DO UPDATE SET tier = EXCLUDED.tier, assigned_at = NOW()
+            """),
+            {"pid": pid, "c": card_name, "f": f, "t": t},
+        )
+    await db.commit()
+    return {"status": "ok", "card_name": card_name, "filter": f, "tier": t or None}
+
 
 @app.get("/api/v1/cards", response_model=list[CardStatEntry], tags=["Cards"])
 async def get_card_stats(
@@ -3620,7 +3717,8 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
             gr2.rating_deviation       AS p2_rd,
             rs.p1_series_wins, rs.p2_series_wins,
             rs.live_p1_points, rs.live_p2_points,
-            rs.created_at
+            rs.created_at,
+            rs.is_private
         FROM ranked_series rs
         JOIN players p1        ON p1.id = rs.player1_id
         JOIN players p2        ON p2.id = rs.player2_id
@@ -3649,8 +3747,14 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         p2_odds = round(_odds_multiplier(p2_rating, p1_rating, p2_rd, p1_rd), 2)
         no_profit = max(p1_odds, p2_odds) < 1.10
         score_locked = (live_p1 + live_p2) >= 2 or r["p1_series_wins"] > 0 or r["p2_series_wins"] > 0
-        bets_locked = no_profit or score_locked
-        if score_locked:
+        is_private = bool(r["is_private"])
+        # Private rooms surface in /series/active right at game start with no
+        # usable pre-game betting window, so we lock bets immediately and the
+        # client renders a PRIVATE tag instead of bettable odds.
+        bets_locked = no_profit or score_locked or is_private
+        if is_private:
+            lock_reason = "private_room"
+        elif score_locked:
             lock_reason = "game_in_progress"
         elif no_profit:
             lock_reason = "no_meaningful_odds"
@@ -3674,6 +3778,7 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
             "live_p2_points": live_p2,
             "bets_locked": bets_locked,
             "lock_reason": lock_reason,
+            "is_private": is_private,
             "started_at": r["created_at"].isoformat() if r["created_at"] else None,
         })
     return {"series": series}
@@ -3755,6 +3860,8 @@ async def series_preflight(
     p1_steam_id: str = Query(...),
     p2_steam_id: str = Query(...),
     sig: str = Query(...),
+    p1_name: str | None = Query(None, max_length=64),
+    p2_name: str | None = Query(None, max_length=64),
     db: AsyncSession = Depends(get_db),
 ):
     """Pre-create a ranked_series for two players who are about to play a
@@ -3781,8 +3888,12 @@ async def series_preflight(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
-    p1 = await get_or_create_player(db, p1_steam_id, p1_steam_id)
-    p2 = await get_or_create_player(db, p2_steam_id, p2_steam_id)
+    # Use the caller-provided NickNames so first-time-seen players don't
+    # render as their bare Steam ID in /series/active until their next
+    # /stats refresh. Falls back to the steam_id if the client didn't pass
+    # a name (older mod build).
+    p1 = await get_or_create_player(db, p1_steam_id, p1_name or p1_steam_id)
+    p2 = await get_or_create_player(db, p2_steam_id, p2_name or p2_steam_id)
     if not p1.ranked_enabled or not p2.ranked_enabled:
         # Don't create series for casual matches. Client should re-call after
         # both have toggled ranked on.
@@ -3811,6 +3922,13 @@ async def series_preflight(
     )
     db.add(series)
     await db.flush()
+    # Mark as private-room so Live Ranked Games can render it with the
+    # "PRIVATE — no bets" tag (preflight surfaces these right at game
+    # start with no usable betting window).
+    await db.execute(
+        text("UPDATE ranked_series SET is_private = TRUE WHERE id = :sid"),
+        {"sid": series.id},
+    )
     await db.commit()
     print(f"[SERIES-PREFLIGHT] created series {series.id} for {p1_steam_id} vs {p2_steam_id} (private room)")
     return {"status": "created", "series_id": str(series.id)}
@@ -3868,6 +3986,40 @@ async def update_live_points(
         "live_p2_points": series.live_p2_points,
         "bets_locked": (series.live_p1_points + series.live_p2_points) >= 2,
     }
+
+
+@app.post("/api/v1/discord-bets", tags=["Betting"])
+async def place_discord_bet(
+    discord_user_id: str = Query(..., max_length=32),
+    series_id: str = Query(...),
+    bet_on_steam_id: str = Query(..., description="Which player's Steam ID to bet on"),
+    amount: int = Query(..., ge=1, le=100000),
+    db: AsyncSession = Depends(get_db),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+):
+    """Bot-side bet placement. Authenticated via X-Internal-Key. Resolves the
+    Discord user to a linked player and places a bet on their behalf using
+    the same validation pipeline as the in-game /bets endpoint (banned check,
+    odds floor, lock checks, gold balance, idempotent one-bet-per-series)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(403, "Internal endpoint")
+    bettor = (await db.execute(
+        select(Player).where(Player.discord_id == discord_user_id)
+    )).scalar_one_or_none()
+    if bettor is None:
+        raise HTTPException(404, "Discord account not linked to any player. Use !link from in-game first.")
+    # Reuse the in-game /bets validation by re-signing internally — keeps
+    # the bet-placement code path single-sourced.
+    sig = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"bet:{bettor.steam_id}:{series_id}:{bet_on_steam_id}:{amount}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return await place_bet(
+        steam_id=bettor.steam_id, series_id=series_id,
+        bet_on_steam_id=bet_on_steam_id, amount=amount, sig=sig, db=db,
+    )
 
 
 @app.post("/api/v1/bets", tags=["Betting"])

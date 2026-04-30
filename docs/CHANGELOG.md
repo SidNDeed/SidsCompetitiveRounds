@@ -1,5 +1,19 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.24 — Names + private-room tag, Beta title, card tier-list, card preview, Discord betting
+
+**Display names lag fix:** new players now appear with their actual nickname in Live Ranked Games / Recent Series instead of their bare Steam ID. `/series/preflight` accepts optional `p1_name` / `p2_name` and the client passes both Photon NickNames in.
+
+**Private-room ranked games tagged + bet-locked:** migration 068 adds `ranked_series.is_private` (set true on preflight). `/series/active` returns the flag and forces `bets_locked=true` with `lock_reason="private_room"`. UI / Discord can now render a 🔒 PRIVATE tag and disable bet buttons.
+
+**Beta title (#2A66B5 dark blue) + 19 new shop titles:** migration 069 adds the Beta title (free, auto-granted on every existing + future joiner via the `get_or_create_player` hook) plus card-themed titles — Poisoner, Windup, Reloader, Huge, Hasty, Bouncy, Healer, Bouncer, Tracker — and general flair — Sniper, Tank, Pacifist, Berserker, Phoenix, Specter, Blitz, Apex, Echo, Voidshot. All ≤ 11 chars (Grandmaster benchmark). Backfilled 731 existing players with the Beta grant + auto-equip if they had no active title.
+
+**Card Stats tier-list (S/A/B/C/D/E/F):** migration 070 adds `player_card_tiers` (player + card + filter + tier). Per-player, three independent tier lists (Casual / Ranked / All). New endpoints `GET/POST /api/v1/players/{steam_id}/card-tiers`. Card Stats panel gets a new Tier column with click-to-cycle behavior; tier badges color-coded by letter (S=red → F=grey).
+
+**Card preview popup:** clicking a card name in Card Stats spawns the actual ROUNDS card prefab as an inert visual under our overlay canvas. Photon components stripped on the clone so nothing in-game can be affected. Click outside to dismiss.
+
+**Discord Live Ranked Games + betting (channel `1456460424831701074`):** new bot poller `poll_live_bets` posts/edits an embed per active series with bet buttons (`100g / 500g / 2000g` per player). Bets fire via the new `/api/v1/discord-bets` endpoint (X-Internal-Key auth) which resolves Discord user → linked player and reuses the in-game bet pipeline (banned check, odds floor, lock checks, gold balance, idempotency). Users must `!link` their Discord account first.
+
 ## v1.25.23 — Recent 2v2 Series cards: 2-per-line + tighter team columns
 
 Hotfix on top of v1.25.22's stacked cards layout.

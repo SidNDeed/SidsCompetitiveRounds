@@ -2,7 +2,7 @@
 Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
-import os, asyncio, aiohttp, discord
+import os, asyncio, aiohttp, discord, json
 from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, timezone
@@ -22,6 +22,10 @@ TOURNAMENT_CHANNEL_ID = int(os.getenv("TOURNAMENT_CHANNEL", "0"))  # set to enab
 RELEASES_CHANNEL_ID = int(os.getenv("RELEASES_CHANNEL", "1498731888813277294"))
 GITHUB_RELEASES_REPO = os.getenv("GITHUB_RELEASES_REPO", "SidNDeed/SidsCompetitiveRounds")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
+# Live ranked-games channel — bot posts/updates an embed per active series with
+# bet buttons (100/500/2000g per player). Bets fire via /api/v1/discord-bets
+# which requires the user to have linked their Discord account in-game first.
+LIVE_BETS_CHANNEL_ID = int(os.getenv("LIVE_BETS_CHANNEL", "1456460424831701074"))
 
 # Tournament trophy role names (set via env if they exist in the guild).
 # Multi-win tracking uses an "(x2)" suffix variant of each role: a player with 1 win
@@ -139,6 +143,7 @@ async def on_ready():
     if not poll_team_recent_series.is_running(): poll_team_recent_series.start()
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
     if not poll_github_releases.is_running(): poll_github_releases.start()
+    if not poll_live_bets.is_running(): poll_live_bets.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
     if not nag_pending_async_matches.is_running(): nag_pending_async_matches.start()
@@ -1481,6 +1486,157 @@ async def nag_pending_async_matches():
             await asyncio.sleep(0.2)
     if nagged:
         print(f"[TOURNAMENT-NAG] Sent {nagged} pending-match reminders")
+
+
+# ── Live Ranked Games + Discord betting ─────────────────────────────
+# Posts/updates a message per active 1v1 ranked series in LIVE_BETS_CHANNEL.
+# Bet buttons fire /api/v1/discord-bets which requires the user's Discord
+# account to be linked via !link first. Mirrors the in-game live-bets panel
+# but visible to anyone in the Discord (no mod required to bet).
+live_bet_messages = {}  # series_id -> message_id (in LIVE_BETS_CHANNEL)
+LIVE_BET_AMOUNTS = (100, 500, 2000)
+
+class LiveBetView(discord.ui.View):
+    def __init__(self, series_id: str, p1_steam: str, p1_name: str,
+                 p2_steam: str, p2_name: str):
+        super().__init__(timeout=None)
+        self.series_id = series_id
+        self.p1_steam = p1_steam
+        self.p1_name = p1_name
+        self.p2_steam = p2_steam
+        self.p2_name = p2_name
+        # 6 buttons: 3 amounts × 2 players. Layout in two rows.
+        for amt in LIVE_BET_AMOUNTS:
+            self.add_item(LiveBetButton(self, amt, on_p1=True))
+        for amt in LIVE_BET_AMOUNTS:
+            self.add_item(LiveBetButton(self, amt, on_p1=False))
+
+class LiveBetButton(discord.ui.Button):
+    def __init__(self, parent: LiveBetView, amount: int, on_p1: bool):
+        side_label = parent.p1_name if on_p1 else parent.p2_name
+        # Truncate aggressive — Discord buttons cap at 80 chars but rendering
+        # gets cramped above ~24.
+        label = f"{amount:,}g {side_label[:14]}"
+        style = discord.ButtonStyle.primary if on_p1 else discord.ButtonStyle.success
+        row = 0 if on_p1 else 1
+        super().__init__(label=label, style=style, row=row,
+                         custom_id=f"livebet:{parent.series_id}:{amount}:{'p1' if on_p1 else 'p2'}")
+        self.parent_view = parent
+        self.amount = amount
+        self.on_p1 = on_p1
+
+    async def callback(self, interaction: discord.Interaction):
+        bet_on_steam = self.parent_view.p1_steam if self.on_p1 else self.parent_view.p2_steam
+        side_name = self.parent_view.p1_name if self.on_p1 else self.parent_view.p2_name
+        try:
+            result = await api_post(
+                "/discord-bets",
+                params={
+                    "discord_user_id": str(interaction.user.id),
+                    "series_id": self.parent_view.series_id,
+                    "bet_on_steam_id": bet_on_steam,
+                    "amount": self.amount,
+                },
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"Bet failed: {e}", ephemeral=True)
+            return
+        if not result:
+            await interaction.response.send_message("Bet failed: backend unreachable.", ephemeral=True)
+            return
+        if isinstance(result, dict) and "error" in result:
+            err = result.get("error", "")
+            # Surface the server's reason verbatim (e.g. "not linked", "insufficient gold",
+            # "bets locked", "already bet on this series").
+            try:
+                err_obj = json.loads(err)
+                msg = err_obj.get("detail") or err
+            except Exception:
+                msg = err
+            await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"✅ Bet placed: **{self.amount:,}g** on **{side_name}**.",
+            ephemeral=True,
+        )
+
+def _format_live_bet_embed(s: dict) -> discord.Embed:
+    p1n = s.get("p1_name", "?"); p2n = s.get("p2_name", "?")
+    p1r = s.get("p1_rating", 1500); p2r = s.get("p2_rating", 1500)
+    p1o = s.get("p1_odds", 1.01);   p2o = s.get("p2_odds", 1.01)
+    p1w = s.get("p1_wins", 0);      p2w = s.get("p2_wins", 0)
+    locked = s.get("bets_locked", False)
+    reason = s.get("lock_reason")
+    title = f"🎮 {p1n} ({p1r}) vs {p2n} ({p2r})"
+    desc_lines = [
+        f"Series: **{p1w} - {p2w}**",
+        f"Odds: **{p1o}x** {p1n} / **{p2o}x** {p2n}",
+    ]
+    if locked:
+        if reason == "private_room":
+            desc_lines.append("🔒 PRIVATE ROOM — bets disabled")
+        elif reason == "game_in_progress":
+            desc_lines.append("🔒 Game in progress — bets locked")
+        elif reason == "no_meaningful_odds":
+            desc_lines.append("🔒 No meaningful odds — bets disabled")
+        else:
+            desc_lines.append("🔒 Bets locked")
+    em = discord.Embed(title=title, description="\n".join(desc_lines),
+                       color=0xFF6688 if not locked else 0x666666)
+    em.set_footer(text=f"series {s['series_id'][:8]}")
+    return em
+
+@tasks.loop(seconds=10)
+async def poll_live_bets():
+    if not LIVE_BETS_CHANNEL_ID:
+        return
+    data = await api_get("/series/active")
+    if not data:
+        return
+    series_list = data.get("series") or []
+    channel = bot.get_channel(LIVE_BETS_CHANNEL_ID)
+    if channel is None:
+        try: channel = await bot.fetch_channel(LIVE_BETS_CHANNEL_ID)
+        except Exception: return
+    seen_now = set()
+    for s in series_list:
+        sid = s.get("series_id")
+        if not sid: continue
+        seen_now.add(sid)
+        embed = _format_live_bet_embed(s)
+        view = None
+        if not s.get("bets_locked", False):
+            view = LiveBetView(
+                series_id=sid,
+                p1_steam=s.get("p1_steam_id", ""),
+                p1_name=s.get("p1_name", "?"),
+                p2_steam=s.get("p2_steam_id", ""),
+                p2_name=s.get("p2_name", "?"),
+            )
+        msg_id = live_bet_messages.get(sid)
+        try:
+            if msg_id is None:
+                msg = await channel.send(embed=embed, view=view)
+                live_bet_messages[sid] = msg.id
+            else:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(embed=embed, view=view)
+        except discord.NotFound:
+            # Message was deleted by hand — repost.
+            try:
+                msg = await channel.send(embed=embed, view=view)
+                live_bet_messages[sid] = msg.id
+            except Exception as e:
+                print(f"[LIVE-BETS] re-post failed for {sid}: {e}")
+        except Exception as e:
+            print(f"[LIVE-BETS] update failed for {sid}: {e}")
+    # Series no longer active — leave the message in the channel as history,
+    # but drop our tracking so we don't keep editing it. (A separate cleanup
+    # could mark it as "Final: X-Y" but that needs a /series/{id} fetch we
+    # don't have yet; cheap enough to leave as-is.)
+    stale = [sid for sid in list(live_bet_messages.keys()) if sid not in seen_now]
+    for sid in stale:
+        del live_bet_messages[sid]
 
 
 if __name__ == "__main__":

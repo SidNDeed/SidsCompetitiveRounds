@@ -1954,6 +1954,55 @@ namespace CompetitiveRounds
             return -1;
         }
 
+        // Per-player card-tier-list state. (filter, card_name) -> tier letter.
+        // Loaded by FetchCardTiers when the user changes the Card Stats filter.
+        public static void FetchCardTiers(string steamId, string filter, Action<Dictionary<string, string>> onLoaded)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { onLoaded?.Invoke(new Dictionary<string, string>()); return; }
+            string url = $"{baseUrl}/api/v1/players/{Escape(steamId)}/card-tiers?filter={Escape(filter)}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (success, response) =>
+            {
+                var map = new Dictionary<string, string>();
+                if (!success || string.IsNullOrEmpty(response)) { onLoaded?.Invoke(map); return; }
+                try
+                {
+                    int o = response.IndexOf("\"tiers\"");
+                    if (o < 0) { onLoaded?.Invoke(map); return; }
+                    int oS = response.IndexOf('{', o);
+                    int oE = FindMatchingBrace(response, oS);
+                    if (oS < 0 || oE < 0) { onLoaded?.Invoke(map); return; }
+                    string slice = response.Substring(oS + 1, oE - oS - 1);
+                    int cur = 0;
+                    while (cur < slice.Length)
+                    {
+                        int kS = slice.IndexOf('"', cur); if (kS < 0) break;
+                        int kE = slice.IndexOf('"', kS + 1); if (kE < 0) break;
+                        string card = slice.Substring(kS + 1, kE - kS - 1);
+                        int colon = slice.IndexOf(':', kE); if (colon < 0) break;
+                        int vS = slice.IndexOf('"', colon); if (vS < 0) break;
+                        int vE = slice.IndexOf('"', vS + 1); if (vE < 0) break;
+                        string val = slice.Substring(vS + 1, vE - vS - 1);
+                        map[card.ToLower()] = val;
+                        cur = vE + 1;
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[CARD-TIER] parse: {ex.Message}"); }
+                onLoaded?.Invoke(map);
+            }));
+        }
+
+        public static void SetCardTier(string steamId, string cardName, string filter, string tier)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            string sig = ComputeHmacHex($"card-tier:{steamId}:{cardName}:{filter}:{tier}");
+            string url = $"{baseUrl}/api/v1/players/{Escape(steamId)}/card-tiers"
+                       + $"?card_name={Escape(cardName)}&filter={Escape(filter)}&tier={Escape(tier)}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                if (!ok) Plugin.Log.LogWarning($"[CARD-TIER] set failed: {resp}");
+            }));
+        }
+
         public static void FetchCardStats(int limit = 30, string steamId = null, string sortBy = "times_picked", string isRanked = null)
         {
             IsLoading = true;
@@ -2242,7 +2291,13 @@ namespace CompetitiveRounds
             string a = string.Compare(mySteamId, oppSteamId, StringComparison.Ordinal) <= 0 ? mySteamId : oppSteamId;
             string b = a == mySteamId ? oppSteamId : mySteamId;
             string sig = ComputeHmacHex($"preflight:{a}:{b}");
-            string url = $"{baseUrl}/api/v1/series/preflight?p1_steam_id={Escape(mySteamId)}&p2_steam_id={Escape(oppSteamId)}&sig={sig}";
+            // Pass display names so first-time-seen players show as their
+            // actual nickname in Live Ranked Games / Recent Series, not as
+            // the bare Steam ID until their next /stats call.
+            string myName = MatchTracker.LocalDisplayName ?? mySteamId;
+            string oppName = GameStateWatcher.OpponentDisplayName ?? oppSteamId;
+            string url = $"{baseUrl}/api/v1/series/preflight?p1_steam_id={Escape(mySteamId)}&p2_steam_id={Escape(oppSteamId)}"
+                       + $"&p1_name={Escape(myName)}&p2_name={Escape(oppName)}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 if (ok)
