@@ -1,5 +1,9 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.2 — Thunderstore-only repack of v1.26.1
+
+The in-game mod version stays at 1.26.1 (no functional changes for Thunderstore users). This bump is solely to clear the previous Thunderstore submission rejection: the original v1.26.1 zip embedded a runtime asset-download URL in the DLL, which Thunderstore policy disallows. The v1.26.1 source has since been gated so the THUNDERSTORE build excludes that path entirely; the bundled cards still ship inside the zip as before.
+
 ## v1.26.1 — Hotfix: card art auto-bootstraps for non-Thunderstore installs
 
 Discord-installer and direct-DLL users on v1.26.0 ended up without the 67 card PNGs in `cards/`, so their tier-list export rendered every cell as text instead of art. v1.26.1 makes the loader fetch missing card art automatically.
