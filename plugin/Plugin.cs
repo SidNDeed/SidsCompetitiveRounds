@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.26.0";
+        public const string ModVersion = "1.26.1";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;

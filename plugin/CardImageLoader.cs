@@ -1,26 +1,47 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
+using System.Net;
 using System.Reflection;
+using System.Threading;
 using UnityEngine;
 
 namespace CompetitiveRounds
 {
     /// <summary>
-    /// Loads card art (jpg) shipped alongside the DLL in the
+    /// Loads card art shipped alongside the DLL in the
     /// `cards/` subfolder of BepInEx/plugins/CompetitiveRounds/.
     /// Keyed by canonical lowercase no-space card name. Sprites are
     /// created lazily on first request and cached for the session.
+    ///
+    /// Self-bootstrapping: if the cards/ folder is missing or sparse on
+    /// first launch (e.g. mod was installed via Discord installer or a
+    /// manual DLL drop without the asset zip), this loader downloads
+    /// cards.zip from the v1.26.0 GitHub release on a background
+    /// thread, extracts it, and rescans. No user action needed.
     /// </summary>
     public static class CardImageLoader
     {
+        // Bumped whenever Landfall ships a new card. The auto-bootstrap
+        // also re-fires if the on-disk count is lower than this.
+        private const int EXPECTED_CARD_COUNT = 67;
+
+        // Stable URL — cards.zip is attached to the v1.26.0 release and
+        // never moves. Future patch releases reuse the same asset since
+        // the cards themselves don't change with our code patches.
+        private const string CARDS_ZIP_URL =
+            "https://github.com/SidNDeed/SidsCompetitiveRounds/releases/download/v1.26.0/cards.zip";
+
         // Canonical key (lowercase, no spaces) → on-disk file path.
-        // Built once at initialize from the cards/ directory listing.
-        private static Dictionary<string, string> _filesByKey;
+        // Replaced atomically by the rescan after auto-download so
+        // concurrent reads always see a consistent dictionary.
+        private static volatile Dictionary<string, string> _filesByKey;
         // Canonical key → cached Sprite. Loaded on demand.
         private static readonly Dictionary<string, Sprite> _spriteCache =
             new Dictionary<string, Sprite>(StringComparer.OrdinalIgnoreCase);
         private static bool _scanAttempted;
+        private static int _downloadStarted; // 0 = not started, 1 = in flight or done
         private static string _cardsDir;
 
         /// <summary>
@@ -34,9 +55,11 @@ namespace CompetitiveRounds
         public static int Count => _filesByKey?.Count ?? 0;
 
         /// <summary>
-        /// Scans the cards/ folder for jpg/png files and indexes
-        /// them by canonical name (lowercase, no spaces). Safe to
-        /// call repeatedly — only the first call does work.
+        /// Scans the cards/ folder for jpg/png files and indexes them
+        /// by canonical name. If the folder is missing or has fewer
+        /// than EXPECTED_CARD_COUNT images, kicks off a background
+        /// download of cards.zip from the GitHub release. Safe to
+        /// call repeatedly — only the first call does the sync scan.
         /// </summary>
         public static void Initialize()
         {
@@ -47,29 +70,117 @@ namespace CompetitiveRounds
                 string dllPath = Assembly.GetExecutingAssembly().Location;
                 string dllDir = Path.GetDirectoryName(dllPath);
                 _cardsDir = Path.Combine(dllDir, "cards");
-                if (!Directory.Exists(_cardsDir))
+                _filesByKey = ScanCardsDir();
+                int found = _filesByKey.Count;
+                if (found >= EXPECTED_CARD_COUNT)
                 {
-                    Plugin.Log?.LogWarning($"[CARD-ART] cards/ folder not found at {_cardsDir} — image popups disabled.");
-                    _filesByKey = new Dictionary<string, string>();
+                    Plugin.Log?.LogInfo($"[CARD-ART] indexed {found} card images from {_cardsDir}");
                     return;
                 }
-                _filesByKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var ext in new[] { "*.jpg", "*.jpeg", "*.png" })
-                {
-                    foreach (var file in Directory.GetFiles(_cardsDir, ext))
-                    {
-                        string stem = Path.GetFileNameWithoutExtension(file);
-                        string key = NormalizeKey(stem);
-                        if (!_filesByKey.ContainsKey(key))
-                            _filesByKey[key] = file;
-                    }
-                }
-                Plugin.Log?.LogInfo($"[CARD-ART] indexed {_filesByKey.Count} card images from {_cardsDir}");
+                Plugin.Log?.LogInfo($"[CARD-ART] {found}/{EXPECTED_CARD_COUNT} card images present at {_cardsDir} — fetching the rest from GitHub release in background.");
+                MaybeStartAutoDownload();
             }
             catch (Exception ex)
             {
                 Plugin.Log?.LogWarning($"[CARD-ART] init failed: {ex.Message}");
                 _filesByKey = _filesByKey ?? new Dictionary<string, string>();
+            }
+        }
+
+        /// <summary>Reads the cards directory once and returns a fresh
+        /// canonical-name → path map. Returns an empty map if the
+        /// directory is missing.</summary>
+        private static Dictionary<string, string> ScanCardsDir()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(_cardsDir) || !Directory.Exists(_cardsDir)) return map;
+            foreach (var ext in new[] { "*.jpg", "*.jpeg", "*.png" })
+            {
+                foreach (var file in Directory.GetFiles(_cardsDir, ext))
+                {
+                    string stem = Path.GetFileNameWithoutExtension(file);
+                    string key = NormalizeKey(stem);
+                    if (!map.ContainsKey(key)) map[key] = file;
+                }
+            }
+            return map;
+        }
+
+        /// <summary>One-shot guarded auto-download. Spawns a background
+        /// thread that fetches cards.zip from the GitHub release,
+        /// extracts the PNGs into _cardsDir, and rescans. Subsequent
+        /// calls are no-ops thanks to the Interlocked compare-exchange.</summary>
+        private static void MaybeStartAutoDownload()
+        {
+            if (Interlocked.Exchange(ref _downloadStarted, 1) != 0) return;
+            var t = new Thread(AutoDownloadWorker) { IsBackground = true, Name = "CR_CardArtDownload" };
+            t.Start();
+        }
+
+        private static void AutoDownloadWorker()
+        {
+            string tmpZip = null;
+            try
+            {
+                Directory.CreateDirectory(_cardsDir);
+                tmpZip = Path.Combine(Path.GetDirectoryName(_cardsDir), "cards-download.zip");
+                Plugin.Log?.LogInfo($"[CARD-ART] downloading {CARDS_ZIP_URL} → {tmpZip}");
+
+                // GitHub redirects to S3 / objects.githubusercontent.com.
+                // WebClient follows redirects by default. TLS 1.2 needed
+                // on older .NET runtimes; force it explicitly.
+                try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
+
+                using (var wc = new WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "CompetitiveRounds-Mod/" + Plugin.ModVersion);
+                    wc.DownloadFile(CARDS_ZIP_URL, tmpZip);
+                }
+
+                long bytes = new FileInfo(tmpZip).Length;
+                Plugin.Log?.LogInfo($"[CARD-ART] downloaded {bytes / 1024} KB, extracting to {_cardsDir}");
+
+                int extracted = 0;
+                using (var fs = File.OpenRead(tmpZip))
+                using (var zip = new ZipArchive(fs, ZipArchiveMode.Read))
+                {
+                    foreach (var entry in zip.Entries)
+                    {
+                        if (string.IsNullOrEmpty(entry.Name)) continue; // directory marker
+                        string lower = entry.Name.ToLowerInvariant();
+                        if (!lower.EndsWith(".png") && !lower.EndsWith(".jpg") && !lower.EndsWith(".jpeg")) continue;
+                        string outPath = Path.Combine(_cardsDir, entry.Name);
+                        try
+                        {
+                            using (var es = entry.Open())
+                            using (var os = File.Create(outPath))
+                            {
+                                es.CopyTo(os);
+                            }
+                            extracted++;
+                        }
+                        catch (Exception exEntry)
+                        {
+                            Plugin.Log?.LogWarning($"[CARD-ART] extract failed for {entry.Name}: {exEntry.Message}");
+                        }
+                    }
+                }
+
+                // Atomic swap — readers either see the old (partial) map
+                // or the new (full) one, never an in-progress mutation.
+                _filesByKey = ScanCardsDir();
+                Plugin.Log?.LogInfo($"[CARD-ART] auto-bootstrap complete: extracted {extracted} files, indexed {_filesByKey.Count}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogWarning($"[CARD-ART] auto-download failed: {ex.Message} — image popups will fall back to text until the next launch.");
+            }
+            finally
+            {
+                if (tmpZip != null && File.Exists(tmpZip))
+                {
+                    try { File.Delete(tmpZip); } catch { }
+                }
             }
         }
 
@@ -82,7 +193,8 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(cardName)) return null;
             if (!_scanAttempted) Initialize();
-            if (_filesByKey == null) return null;
+            var map = _filesByKey;
+            if (map == null) return null;
 
             // Try the canonical (server-normalized) name first, then
             // the raw name. Some callers pass display names (with
@@ -97,8 +209,8 @@ namespace CompetitiveRounds
 
             string path = null;
             string keyUsed = null;
-            if (_filesByKey.TryGetValue(keyA, out path)) keyUsed = keyA;
-            else if (_filesByKey.TryGetValue(keyB, out path)) keyUsed = keyB;
+            if (map.TryGetValue(keyA, out path)) keyUsed = keyA;
+            else if (map.TryGetValue(keyB, out path)) keyUsed = keyB;
             if (path == null) return null;
 
             try
@@ -128,7 +240,7 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Lowercase + strip spaces, hyphens, apostrophes, periods. Matches
-        /// our filename convention "abyssal countdown.jpg" → "abyssalcountdown".</summary>
+        /// our filename convention "abyssal countdown.png" → "abyssalcountdown".</summary>
         private static string NormalizeKey(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";

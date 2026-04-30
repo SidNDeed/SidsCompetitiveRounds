@@ -1,5 +1,12 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.1 — Hotfix: card art auto-bootstraps for non-Thunderstore installs
+
+Discord-installer and direct-DLL users on v1.26.0 ended up without the 67 card PNGs in `cards/`, so their tier-list export rendered every cell as text instead of art. v1.26.1 makes the loader fetch missing card art automatically.
+
+- `CardImageLoader` counts cards on startup. If fewer than 67 are present, a background thread downloads `cards.zip` from the v1.26.0 release asset and extracts it into `cards/`. Future exports and the in-game popup pick up the new sprites without restart in most cases (a relaunch guarantees it).
+- Thunderstore users were never affected — the bundle ships the cards directly — but the auto-bootstrap is harmless: scan finds 67, download is skipped.
+
 ## v1.26.0 — Card art everywhere + Tier List Maker export overhaul
 
 The Card Stats tab is now a fully fledged **Tier List Maker** with image-based card previews and a polished export pipeline — matching the popular ROUNDS tier-list-maker community sites but with your real ranked / casual / all-mode pick + win stats baked in.
