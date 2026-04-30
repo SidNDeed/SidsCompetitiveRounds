@@ -10,6 +10,7 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 - **Matchmaking queue** — Elo-tiered search with mutual ready-up and optional ranked-only toggle.
 - **In-game leaderboard** — sortable, with player detail panel, rating history line graph, series-based recent form, head-to-head, and achievements.
 - **Match history + card stats** — BO3 series grouping, opponent cards, pass rates, filterable by Ranked / Casual / All.
+- **Tier List Maker** — assign every card an S/A/B/C/D/E/F tier with click-to-cycle. Three independent lists (Casual / Ranked / All) persisted server-side. Click any card to preview the full-color art. Export the whole list as a near-square PNG with real ROUNDS card art + your live `## played` / `##% won` underneath each card. PNG lands in `<ROUNDS>/CompetitiveRoundsTierLists/`.
 - **Gold economy + shop** — earn gold from matches and achievements, spend on titles, Photon-synced cosmetic trails, map color presets, and stackable name styling (bold/italic/color/size/font-style/glow).
 - **Betting** — wager gold on live ranked series with Glicko-expectancy odds; locks at 2 points scored in game 1.
 - **In-game ↔ Discord chat bridge** — press **T** anywhere in-game to chat, messages round-trip through the Competitive Rounds Discord with ratings and titles attached.

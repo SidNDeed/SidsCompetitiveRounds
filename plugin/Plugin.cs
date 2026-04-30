@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.25.25";
+        public const string ModVersion = "1.26.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -700,6 +700,7 @@ namespace CompetitiveRounds
 
             ApiClient.Initialize(Plugin.ApiBaseUrl.Value);
             GameStateWatcher.Initialize();
+            CardImageLoader.Initialize();
             CompetitiveUI.CacheRaycasters(); // No-op but kept for compat
             initialized = true;
 

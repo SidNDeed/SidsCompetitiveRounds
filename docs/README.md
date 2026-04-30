@@ -13,6 +13,7 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 - **In-game leaderboard** with player detail panel, rating history line graph, series-based recent form, head-to-head records, and achievements
 - **Match history** grouped by BO3 series, with card picks, opponent cards, XP, and gold earned
 - **Card stats** with pick counts, win rates, and pass rates, filterable by Ranked / Casual / All
+- **Tier List Maker** — assign every card an S/A/B/C/D/E/F tier with click-to-cycle, three independent lists (Casual / Ranked / All) persisted server-side. Click any card to pop a full-color art preview. Export the whole tier list as a near-square PNG: the real ROUNDS card art for every card + your live `## played` / `##% won` underneath, color-coded by win band (≥55% green / ≤45% red). Output lands in `<ROUNDS>/CompetitiveRoundsTierLists/tierlist-<filter>-<timestamp>.png`.
 
 ### Economy & cosmetics
 - **Gold currency** — earn from matches, ranked wins, sweeps, and achievements (100g each)

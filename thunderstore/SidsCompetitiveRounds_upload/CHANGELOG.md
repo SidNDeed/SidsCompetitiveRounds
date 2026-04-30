@@ -1,5 +1,15 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.0 — Card art everywhere + Tier List Maker export overhaul
+
+The Card Stats tab is now a fully fledged **Tier List Maker** with image-based card previews and a polished export pipeline — matching the popular ROUNDS tier-list-maker community sites but with your real ranked / casual / all-mode pick + win stats baked in.
+
+- **67 ROUNDS card icons** ship with the mod. Card preview popup (clicked from Card Stats / My Stats / 2v2 tabs) now shows the full-color card art at 360×545 with click-anywhere-to-close.
+- **Tier list export image** rebuilt — each cell now shows the card art (220×330) + `## played` + `##% won`. 12 cells per row at 3000-wide canvas, near-square aspect (was tall portrait in earlier passes).
+- Win-rate color band: ≥55% green / ≤45% red / otherwise white. Steam-name watermark bottom-left, mod info bottom-right (italic dark grey).
+- Output: `<ROUNDS>/CompetitiveRoundsTierLists/tierlist-<filter>-<timestamp>.png`. RenderTexture pipeline so the image isn't capped to monitor aspect.
+- **Tier UI in the Card Stats tab**: tier column moved to the LEFT, bold black letter for max contrast. Click-to-cycle is in-place (no re-render / re-sort) so editing one card no longer flips a different card's tier. Whole row gets a translucent tier-color highlight bounded to the data columns. Sortable column headers including the Tier column.
+
 ## v1.25.23 — Recent 2v2 Series cards: 2-per-line + tighter team columns
 
 Hotfix on top of v1.25.22's stacked cards layout.

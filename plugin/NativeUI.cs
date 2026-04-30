@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -251,7 +252,7 @@ namespace CompetitiveRounds
         private class LBRow{public GameObject root,hlWrap;public object txtRank,txtLv,txtName,txtRating,txtW,txtL,txtWL,txtGold;public string steamId;}
         private static List<CardRow> cardRows=new List<CardRow>();private static int cardFilter;private static string cardSort="times_picked";private static bool cardSortDesc=true;
         private static object[] cardSortTexts;private static GameObject[] cardSortBtns,cardFilterBtns;private static object[] cardFilterTexts;
-        private class CardRow{public GameObject root;public object txtName,txtRarity,txtPicks,txtWins,txtWR,txtPass,txtTier;public GameObject tierBtn;public string cardName;}
+        private class CardRow{public GameObject root;public GameObject hl;public object txtName,txtRarity,txtPicks,txtWins,txtWR,txtPass,txtTier;public GameObject tierBtn;public string cardName;}
         private static List<AchRow> achRows=new List<AchRow>();
         private class AchRow{public GameObject root;public object txtIcon,txtName,txtDesc,txtDate;}
         private static object txtRankedStatus,txtQueueInfo,txtMatchFound,txtConnectLabel;
@@ -267,8 +268,9 @@ namespace CompetitiveRounds
         private static readonly float[] LB_COL_W={40,40,250,88,56,56,69,76};
         // Leading column = Tier (S/A/B/C/D/E/F) for the per-player tier list.
         // Cycle on click; saves to /api/v1/players/{sid}/card-tiers. Order:
-        // Tier, Card, Rarity, Picks, Wins, WR%, Pass%.
-        private static readonly float[] CS_COL_W={52,310,110,64,64,64,64};
+        // Tier, Card, Rarity, Picks, Wins, WR%, Pass%. Widened ~20% to match
+        // the bumped font size + bold per tester ask.
+        private static readonly float[] CS_COL_W={60,360,130,76,76,76,76};
         private static readonly string[] TIER_CYCLE = new[] { "", "S", "A", "B", "C", "D", "E", "F" };
         // (filter, card_name) -> tier letter (or "" = unset). Loaded from server
         // when filter changes; written through on click.
@@ -447,27 +449,61 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
 
         private static LBRow CreateLBRow(Transform parent,string name,int rowIndex){var row=new LBRow();row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:0,forceExpandH:true);UIFactory.AddLE(row.root,prefH:28);var lsp=new GameObject("S");lsp.transform.SetParent(row.root.transform,false);lsp.AddComponent<RectTransform>();UIFactory.AddLE(lsp,flexW:1);row.hlWrap=new GameObject("W");row.hlWrap.transform.SetParent(row.root.transform,false);row.hlWrap.AddComponent<RectTransform>();UIFactory.AddHLG(row.hlWrap,spacing:2,forceExpandH:true);if(UIFactory.tImage!=null){var img=row.hlWrap.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,new Color(0.15f,0.15f,0.2f,0.01f));UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,true);}row.txtRank=UIFactory.CreateText("r",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[0],25));row.txtLv=UIFactory.CreateText("l",row.hlWrap.transform,"",15f,C_BLUE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[1],25));row.txtName=UIFactory.CreateText("n",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(LB_COL_W[2],25));row.txtRating=UIFactory.CreateText("rt",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[3],25));UIFactory.SetBold(row.txtRating,true);row.txtW=UIFactory.CreateText("w",row.hlWrap.transform,"",15f,C_GREEN,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[4],25));row.txtL=UIFactory.CreateText("ls",row.hlWrap.transform,"",15f,C_RED,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[5],25));row.txtWL=UIFactory.CreateText("wl",row.hlWrap.transform,"",15f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[6],25));row.txtGold=UIFactory.CreateText("gd",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[7],25));UIFactory.SetBold(row.txtGold,true);var rsp=new GameObject("S");rsp.transform.SetParent(row.root.transform,false);rsp.AddComponent<RectTransform>();UIFactory.AddLE(rsp,flexW:1);int idx=rowIndex;var ch=row.root.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()&&idx>=0&&idx<lbRows.Count&&!string.IsNullOrEmpty(lbRows[idx].steamId)){string sid=lbRows[idx].steamId;if(selectedSteamId==sid){selectedSteamId="";selectedStats=null;}else{selectedSteamId=sid;selectedStats=null;ApiClient.FetchPlayerStatsForView(sid,(d)=>{selectedStats=d;dirty=true;});ApiClient.FetchAchievementsForView(sid);ApiClient.FetchPlayerTournaments(sid);}dirty=true;}};row.root.SetActive(false);return row;}
 
-        private static GameObject BuildCardStatsTab(Transform parent){var panel=new GameObject("CardStats");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddVLG(panel,spacing:4);UIFactory.AddLE(panel,flexH:1);var fBar=new GameObject("Filt");fBar.transform.SetParent(panel.transform,false);fBar.AddComponent<RectTransform>();UIFactory.AddHLG(fBar,spacing:4,forceExpandH:true);UIFactory.AddLE(fBar,prefH:32,minH:32,flexH:0);var fSp1=new GameObject("S");fSp1.transform.SetParent(fBar.transform,false);fSp1.AddComponent<RectTransform>();UIFactory.AddLE(fSp1,flexW:2);string[]fN={"All","Ranked","Casual"};cardFilterBtns=new GameObject[3];cardFilterTexts=new object[3];for(int i=0;i<3;i++){int idx=i;var btn=UIFactory.CreateButton($"F{i}",fBar.transform,fN[i],16f,C_LABEL,i==0?C_TABACT:C_TAB,()=>{cardFilter=idx;string r=idx==1?"true":idx==2?"false":null;ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId,"times_picked",r);LoadCardTiersForCurrentFilter();for(int fi=0;fi<3;fi++){UIFactory.SetImageColor(cardFilterBtns[fi],fi==idx?C_TABACT:C_TAB);if(cardFilterTexts[fi]!=null){UIFactory.SetColor(cardFilterTexts[fi],fi==idx?C_WHITE:C_LABEL);UIFactory.SetBold(cardFilterTexts[fi],fi==idx);}}dirty=true;},sizeDelta:new Vector2(95,28));if(UIFactory.tLE!=null){var el=btn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(btn,flexW:1,prefH:28,minH:28,flexH:0);cardFilterBtns[i]=btn;cardFilterTexts[i]=UIFactory.GetButtonText(btn);}var fSp2=new GameObject("S");fSp2.transform.SetParent(fBar.transform,false);fSp2.AddComponent<RectTransform>();UIFactory.AddLE(fSp2,flexW:2);// Header — Tier first (matches the data row's column order). All 7 are
-        // sortable by clicking the column header.
-        string[]hL={"Tier","Card","Rarity","Picks","Wins","WR%","Pass%"};string[]hK={"tier","card_name","card_rarity","times_picked","wins_with_card","win_rate","pass_rate"};var hRow=new GameObject("CHR");hRow.transform.SetParent(panel.transform,false);hRow.AddComponent<RectTransform>();UIFactory.AddHLG(hRow,spacing:2,forceExpandH:true);UIFactory.AddLE(hRow,prefH:28,minH:28,flexH:0);cardSortTexts=new object[7];cardSortBtns=new GameObject[7];var csHSp1=new GameObject("S");csHSp1.transform.SetParent(hRow.transform,false);csHSp1.AddComponent<RectTransform>();UIFactory.AddLE(csHSp1,flexW:1);for(int hi=0;hi<7;hi++){int idx=hi;string arrow=cardSort==hK[hi]?(cardSortDesc?" v":" ^"):"";var hBtn=UIFactory.CreateButton($"CS{hi}",hRow.transform,hL[hi]+arrow,15f,cardSort==hK[hi]?C_WHITE:C_LABEL,cardSort==hK[hi]?C_TABACT:C_TAB,()=>{if(cardSort==hK[idx])cardSortDesc=!cardSortDesc;else{cardSort=hK[idx];cardSortDesc=true;}dirty=true;},sizeDelta:new Vector2(CS_COL_W[hi],22));if(UIFactory.tLE!=null){var el=hBtn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(hBtn,prefW:CS_COL_W[hi],prefH:22,flexH:0);cardSortBtns[hi]=hBtn;cardSortTexts[hi]=UIFactory.GetButtonText(hBtn);}
+        private static GameObject BuildCardStatsTab(Transform parent){var panel=new GameObject("CardStats");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddVLG(panel,spacing:4);UIFactory.AddLE(panel,flexH:1);var fBar=new GameObject("Filt");fBar.transform.SetParent(panel.transform,false);fBar.AddComponent<RectTransform>();UIFactory.AddHLG(fBar,spacing:4,padL:12,forceExpandH:true);UIFactory.AddLE(fBar,prefH:34,minH:34,flexH:0);
+        // Export Tier List button on the LEFT of the filter row (was its own
+        // row — tester asked to move card list up). Filter buttons still
+        // center under the data columns via flex spacers.
+        var expBtnInline=UIFactory.CreateButton("ExpBtn",fBar.transform,"Export Tier List",16f,C_WHITE,new Color(0.20f,0.55f,0.30f,0.95f),
+            ()=>{ ExportCardTierList(); }, sizeDelta:new Vector2(180,30));
+        UIFactory.SetBold(UIFactory.GetButtonText(expBtnInline),true);
+        if(UIFactory.tLE!=null){var el=expBtnInline.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}
+        UIFactory.AddLE(expBtnInline,prefW:180,minW:180,prefH:30,minH:30,flexH:0,flexW:0);
+        var fSp1=new GameObject("S");fSp1.transform.SetParent(fBar.transform,false);fSp1.AddComponent<RectTransform>();UIFactory.AddLE(fSp1,flexW:1);string[]fN={"All","Ranked","Casual"};cardFilterBtns=new GameObject[3];cardFilterTexts=new object[3];
+        // Filter buttons sized to share the same total span as the data
+        // columns below them (Tier→Pass% sum from CS_COL_W). 3 buttons, no
+        // flex, fixed prefW each. Mirrors the data row's flex-spacer pattern
+        // so they line up visually.
+        float CS_TOTAL_W=0f; for(int ci=0;ci<CS_COL_W.Length;ci++) CS_TOTAL_W+=CS_COL_W[ci];
+        float perFilterW=Mathf.Floor((CS_TOTAL_W-2f*2f)/3f); // 2 = HLG spacing
+        for(int i=0;i<3;i++){int idx=i;var btn=UIFactory.CreateButton($"F{i}",fBar.transform,fN[i],18f,C_LABEL,i==0?C_TABACT:C_TAB,()=>{cardFilter=idx;string r=idx==1?"true":idx==2?"false":null;ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId,"times_picked",r);LoadCardTiersForCurrentFilter();for(int fi=0;fi<3;fi++){UIFactory.SetImageColor(cardFilterBtns[fi],fi==idx?C_TABACT:C_TAB);if(cardFilterTexts[fi]!=null){UIFactory.SetColor(cardFilterTexts[fi],fi==idx?C_WHITE:C_LABEL);UIFactory.SetBold(cardFilterTexts[fi],fi==idx);}}dirty=true;},sizeDelta:new Vector2(perFilterW,30));if(UIFactory.tLE!=null){var el=btn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(btn,prefW:perFilterW,minW:perFilterW,prefH:30,minH:30,flexH:0,flexW:0);UIFactory.SetBold(UIFactory.GetButtonText(btn),true);cardFilterBtns[i]=btn;cardFilterTexts[i]=UIFactory.GetButtonText(btn);}var fSp2=new GameObject("S");fSp2.transform.SetParent(fBar.transform,false);fSp2.AddComponent<RectTransform>();UIFactory.AddLE(fSp2,flexW:1);
+        // Right-side balance spacer matches the Export button's width (180px)
+        // so the 3 filter buttons stay centered above the data columns even
+        // with the Export button squatting on the left of this row.
+        var fBalance=new GameObject("FBal");fBalance.transform.SetParent(fBar.transform,false);fBalance.AddComponent<RectTransform>();UIFactory.AddLE(fBalance,prefW:180,minW:180,flexW:0);
+        // Header — Tier first (matches the data row's column order). All 7 are
+        // sortable by clicking the column header. Sizes bumped 20% with bold
+        // labels (matches the bumped data rows).
+        string[]hL={"Tier","Card","Rarity","Picks","Wins","WR%","Pass%"};string[]hK={"tier","card_name","card_rarity","times_picked","wins_with_card","win_rate","pass_rate"};var hRow=new GameObject("CHR");hRow.transform.SetParent(panel.transform,false);hRow.AddComponent<RectTransform>();UIFactory.AddHLG(hRow,spacing:2,forceExpandH:true);UIFactory.AddLE(hRow,prefH:32,minH:32,flexH:0);cardSortTexts=new object[7];cardSortBtns=new GameObject[7];var csHSp1=new GameObject("S");csHSp1.transform.SetParent(hRow.transform,false);csHSp1.AddComponent<RectTransform>();UIFactory.AddLE(csHSp1,flexW:1);for(int hi=0;hi<7;hi++){int idx=hi;string arrow=cardSort==hK[hi]?(cardSortDesc?" v":" ^"):"";var hBtn=UIFactory.CreateButton($"CS{hi}",hRow.transform,hL[hi]+arrow,18f,cardSort==hK[hi]?C_WHITE:C_LABEL,cardSort==hK[hi]?C_TABACT:C_TAB,()=>{if(cardSort==hK[idx])cardSortDesc=!cardSortDesc;else{cardSort=hK[idx];cardSortDesc=true;}dirty=true;},sizeDelta:new Vector2(CS_COL_W[hi],26));if(UIFactory.tLE!=null){var el=hBtn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(hBtn,prefW:CS_COL_W[hi],prefH:26,flexH:0);UIFactory.SetBold(UIFactory.GetButtonText(hBtn),true);cardSortBtns[hi]=hBtn;cardSortTexts[hi]=UIFactory.GetButtonText(hBtn);}
         var hSp=new GameObject("S");hSp.transform.SetParent(hRow.transform,false);hSp.AddComponent<RectTransform>();UIFactory.AddLE(hSp,flexW:1);var sv=UIFactory.CreateScrollView("CSV",panel.transform);UIFactory.AddLE(sv.scrollGO,flexH:1);for(int i=0;i<100;i++)cardRows.Add(CreateCardRow(sv.content.transform,$"cd{i}"));return panel;}
 
         private static CardRow CreateCardRow(Transform parent,string name){var row=new CardRow();row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();
-            // Background image on the row root — repainted with a translucent
-            // tier color in RefreshCardStats so each row glows by tier.
-            var bgImg=row.root.AddComponent(UIFactory.tImage);
+            UIFactory.AddHLG(row.root,spacing:0,forceExpandH:true);UIFactory.AddLE(row.root,prefH:30);
+            // Leading flex spacer — leaves the data columns centered horizontally.
+            var cls=new GameObject("S");cls.transform.SetParent(row.root.transform,false);cls.AddComponent<RectTransform>();UIFactory.AddLE(cls,flexW:1);
+            // Highlight wrapper — Image on this GO is repainted in RefreshCardStats
+            // with a translucent tier tint. Sized to span ONLY Tier→Pass% so
+            // the highlight stops at the data-column boundaries (tester report:
+            // "change its width to the boundaries of the columns").
+            row.hl=new GameObject("hl");row.hl.transform.SetParent(row.root.transform,false);row.hl.AddComponent<RectTransform>();
+            var bgImg=row.hl.AddComponent(UIFactory.tImage);
             UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(bgImg,new Color(0,0,0,0));
             UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(bgImg,false);
-            UIFactory.AddHLG(row.root,spacing:2,forceExpandH:true);UIFactory.AddLE(row.root,prefH:25);var cls=new GameObject("S");cls.transform.SetParent(row.root.transform,false);cls.AddComponent<RectTransform>();UIFactory.AddLE(cls,flexW:1);
+            UIFactory.AddHLG(row.hl,spacing:2,forceExpandH:true);UIFactory.AddLE(row.hl,prefH:30,minH:30,flexH:0);
             // Tier (LEFT-side leading column). Clickable button cycles
-            // S/A/B/C/D/E/F/clear. Text rendered black for max contrast on
-            // the saturated tier-color backgrounds.
-            row.tierBtn=UIFactory.CreateButton("tb",row.root.transform,"-",15f,Color.black,new Color(0.18f,0.20f,0.24f,0.85f),
-                ()=>{ if(string.IsNullOrEmpty(row.cardName))return; CycleCardTier(row.cardName); },
-                sizeDelta:new Vector2(CS_COL_W[0],25));
+            // S/A/B/C/D/E/F/clear. Text rendered black + bold for max contrast
+            // on the saturated tier-color backgrounds.
+            row.tierBtn=UIFactory.CreateButton("tb",row.hl.transform,"-",18f,Color.black,new Color(0.18f,0.20f,0.24f,0.85f),
+                ()=>{ if(string.IsNullOrEmpty(row.cardName))return; CycleCardTierInPlace(row,row.cardName); },
+                sizeDelta:new Vector2(CS_COL_W[0],30));
             row.txtTier=UIFactory.GetButtonText(row.tierBtn);
             UIFactory.SetBold(row.txtTier,true);
-            row.txtName=UIFactory.CreateText("t",row.root.transform,"",16f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(CS_COL_W[1],25),raycastTarget:true);row.txtRarity=UIFactory.CreateText("tr",row.root.transform,"",15f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[2],25));row.txtPicks=UIFactory.CreateText("tp",row.root.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[3],25));row.txtWins=UIFactory.CreateText("tw",row.root.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[4],25));row.txtWR=UIFactory.CreateText("wr",row.root.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[5],25));row.txtPass=UIFactory.CreateText("pr",row.root.transform,"",16f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[6],25));
+            // Card Stats text bumped 20% larger + bold (tester ask).
+            row.txtName=UIFactory.CreateText("t",row.hl.transform,"",19f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(CS_COL_W[1],30),raycastTarget:true);UIFactory.SetBold(row.txtName,true);
+            row.txtRarity=UIFactory.CreateText("tr",row.hl.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[2],30));UIFactory.SetBold(row.txtRarity,true);
+            row.txtPicks=UIFactory.CreateText("tp",row.hl.transform,"",19f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[3],30));UIFactory.SetBold(row.txtPicks,true);
+            row.txtWins=UIFactory.CreateText("tw",row.hl.transform,"",19f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[4],30));UIFactory.SetBold(row.txtWins,true);
+            row.txtWR=UIFactory.CreateText("wr",row.hl.transform,"",19f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[5],30));UIFactory.SetBold(row.txtWR,true);
+            row.txtPass=UIFactory.CreateText("pr",row.hl.transform,"",19f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(CS_COL_W[6],30));UIFactory.SetBold(row.txtPass,true);
             // Click on the card name = popup with the card visual + description.
             try
             {
@@ -475,6 +511,205 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 if(nm!=null){var ch=nm.gameObject.AddComponent<ClickHandler>();ch.onClick=()=>{ if(ClickGuard.Claim() && !string.IsNullOrEmpty(row.cardName)) ShowCardPreview(row.cardName); };}
             }catch{}
             var sp=new GameObject("S");sp.transform.SetParent(row.root.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);row.root.SetActive(false);return row;}
+
+        // Static description fallback for cards whose CardInfo.cardDestription
+        // is empty (some cards bake the description into the prefab UI text
+        // only, others rely entirely on the stat block). Sourced from the
+        // user-provided full card list (mirrors the ROUNDS wiki). Keyed by
+        // both spaced + unspaced lowercase variants so "Wind Up" / "Windup"
+        // / "windup" all resolve. Skipped: cards whose Description column
+        // was N/A — their stat block speaks for itself.
+        private static readonly Dictionary<string, string> CARD_DESC_FALLBACK = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "abyssalcountdown",   "Stand still to summon dark powers." },
+            { "barrage",            "Fire many bullets at the same time." },
+            { "bigbullet",          "Bigger bullets." },
+            { "bigbullets",         "Bigger bullets." },
+            { "bombsaway",          "Spawn a bunch of small bombs around you when you block." },
+            { "brawler",            "+200% HP for 3s after dealing damage." },
+            { "buckshot",           "Adds a shotgun vibe to your attack." },
+            { "burst",              "Multiple bullets are fired in a sequence." },
+            { "chase",              "+60% movement when moving towards the opponent." },
+            { "chillingpresence",   "Slightly slow nearby enemies." },
+            { "dazzle",             "Bullets stun the opponent multiple times." },
+            { "decay",              "Damage done to you is dealt over 4 seconds." },
+            { "demonicpact",        "Shooting costs 10HP. Removes shooting cooldown." },
+            { "drillammo",          "Bullets drill through walls." },
+            { "echo",               "Blocking triggers another, delayed block." },
+            { "emp",                "Blocking spawns a ring of slowing projectiles." },
+            { "empower",            "Blocking increases the damage and speed of your next shot. The shot triggers any on-block abilities where it lands." },
+            { "explosivebullet",    "Bullet explodes on impact." },
+            { "fastforward",        "Bullets keep the default trajectory." },
+            { "frostslam",          "Slows enemies around you when you block." },
+            { "grow",               "Bullets get more damage over time when travelling." },
+            { "healingfield",       "Blocking creates a healing field." },
+            { "homing",             "Bullets home towards visible targets." },
+            { "implode",            "Blocking pulls enemies towards you." },
+            { "lifestealer",        "Steal HP from your opponent when near." },
+            { "overpower",          "Deal 15% of your max HP to enemies around you when you block." },
+            { "parasite",           "Bullets deal damage over 5 seconds." },
+            { "phoenix",            "Respawn once on death." },
+            { "poison",             "Bullets deal damage over 3 seconds." },
+            { "pristineperseverance", "+400% HP when above 90% HP." },
+            { "pristineperseverence", "+400% HP when above 90% HP." },
+            { "radarshot",          "Blocking scans the area for enemies. You automatically shoot any enemy found." },
+            { "radiance",           "Spawn damaging sun waves when reloading. The rate increases during the reload sequence." },
+            { "refresh",            "You get block back when dealing damage." },
+            { "remote",             "Steer bullet with right stick / mouse." },
+            { "ricochet",           "Bullets lose half of their speed when they bounce." },
+            { "saw",                "Blocking spawns a saw around you for a short while." },
+            { "scavenger",          "Dealing damage reloads your weapon." },
+            { "shieldcharge",       "Blocking launches you forward and gives you a second automatic block upon ending the charge." },
+            { "shieldsup",          "Firing your last bullet triggers a block. Disables continuous reloading." },
+            { "shockwave",          "Blocking pushes enemies away." },
+            { "silence",            "Blocking silences enemies nearby." },
+            { "sneaky",             "Bullets avoid the ground." },
+            { "staticfield",        "Blocking creates a field that slows and deals damage." },
+            { "supernova",          "Spawns a field that pulls enemies in and stuns after a while." },
+            { "tacticalreload",     "Blocking reloads your weapon." },
+            { "targetbounce",       "Bullets aim for visible targets when bouncing." },
+            { "tasteofblood",       "+50% movement speed for 3s after dealing damage." },
+            { "teleport",           "Blocking teleports you forward." },
+            { "thruster",           "Bullets have thrusters that push targets." },
+            { "timeddetonation",    "Bullets spawn bombs that explode after half a second." },
+            { "toxiccloud",         "Bullets spawn a poison cloud on impact. Clouds deal damage and slow." },
+            { "trickster",          "Bullets deal 80% more DMG per bounce (capped to your bounce count)." },
+            // Cards whose Description column was N/A on the wiki — keep these
+            // out of the fallback so the stat block alone shows. Listed for
+            // reference: bouncy, careful planning, cold bullets, combine,
+            // defender, fastball, glass cannon, huge, leech, mayhem,
+            // quick reload, quick shot, spray, steady shot, tank, wind up.
+        };
+
+        // Static stat-block fallback for cards where reflection couldn't pull
+        // the CardInfoStat[] (some cards bake their stats into the prefab in
+        // a way our Resources scan misses). Sourced from the user-provided
+        // 67-card list. Keys are space-stripped lowercase. Each entry:
+        // (positive: bool, amount: string, stat: string).
+        private struct CardStatTuple { public bool positive; public string amount; public string stat; }
+        private static readonly Dictionary<string, CardStatTuple[]> CARD_STATS_FALLBACK = new Dictionary<string, CardStatTuple[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "barrage",         new[] { CST(true,"+4","BULLETS"), CST(true,"+5","AMMO"), CST(false,"-70%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
+            { "bigbullet",       new[] { CST(false,"+0.25s","RELOAD") } },
+            { "bigbullets",      new[] { CST(false,"+0.25s","RELOAD") } },
+            { "bombsaway",       new[] { CST(true,"+30%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "bouncy",          new[] { CST(true,"+2","BULLET BOUNCES"), CST(true,"+25%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
+            { "buckshot",        new[] { CST(true,"+4","BULLETS"), CST(true,"+5","AMMO"), CST(false,"-60%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
+            { "burst",           new[] { CST(true,"+2","BULLETS"), CST(true,"+3","AMMO"), CST(false,"-60%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
+            { "carefulplanning", new[] { CST(true,"+100%","DAMAGE"), CST(false,"-150%","ATKSPD"), CST(false,"+0.5s","RELOAD") } },
+            { "chase",           new[] { CST(true,"+30%","HEALTH") } },
+            { "chillingpresence",new[] { CST(true,"+25%","HP") } },
+            { "coldbullets",     new[] { CST(true,"+70%","BULLET SLOW"), CST(false,"+0.25s","RELOAD") } },
+            { "combine",         new[] { CST(true,"+100%","DAMAGE"), CST(false,"-2","AMMO"), CST(false,"+0.5s","RELOAD") } },
+            { "dazzle",          new[] { CST(false,"+0.25s","RELOAD") } },
+            { "decay",           new[] { CST(true,"+50%","HP") } },
+            { "defender",        new[] { CST(true,"-30%","BLOCK CD"), CST(true,"+30%","HP") } },
+            { "demonicpact",     new[] { CST(true,"+9","BULLETS"), CST(true,"+2","SPLASH DMG"), CST(false,"+0.25s","RELOAD") } },
+            { "drillammo",       new[] { CST(true,"+7m","DRILL"), CST(false,"+0.25s","RELOAD") } },
+            { "echo",            new[] { CST(true,"+30%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "emp",             new[] { CST(true,"+30%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "empower",         new[] { CST(false,"+0.25s","BLOCK CD") } },
+            { "explosivebullet", new[] { CST(false,"-100%","ATKSPD"), CST(false,"+0.25s","RELOAD") } },
+            { "fastball",        new[] { CST(true,"+250%","BULLET SPEED"), CST(false,"-50%","ATKSPD"), CST(false,"+0.25s","RELOAD") } },
+            { "fastforward",     new[] { CST(true,"+100%","PROJ SPEED"), CST(true,"+30%","RELOAD SPD") } },
+            { "frostslam",       new[] { CST(true,"+30%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "glasscannon",     new[] { CST(true,"+100%","DAMAGE"), CST(false,"-100%","HP"), CST(false,"+0.25s","RELOAD") } },
+            { "grow",            new[] { CST(false,"+0.25s","RELOAD") } },
+            { "healingfield",    new[] { CST(true,"+30%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "homing",          new[] { CST(false,"-25%","DAMAGE"), CST(false,"-50%","ATKSPD"), CST(false,"+0.25s","RELOAD") } },
+            { "huge",            new[] { CST(true,"+80%","HP") } },
+            { "implode",         new[] { CST(true,"+50%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "leech",           new[] { CST(true,"+75%","LIFE STEAL"), CST(true,"+30%","HP") } },
+            { "lifestealer",     new[] { CST(true,"+25%","HP") } },
+            { "mayhem",          new[] { CST(true,"+5","BULLET BOUNCES"), CST(false,"-15%","DAMAGE"), CST(false,"+0.5s","RELOAD") } },
+            { "overpower",       new[] { CST(true,"+30%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "parasite",        new[] { CST(true,"+50%","LIFE STEAL"), CST(true,"+25%","HP"), CST(true,"+25%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
+            { "phoenix",         new[] { CST(false,"-35%","HP") } },
+            { "poison",          new[] { CST(true,"+70%","DAMAGE"), CST(true,"+30%","RELOAD SPD"), CST(false,"-1","BULLET") } },
+            { "quickreload",     new[] { CST(true,"-70%","RELOAD") } },
+            { "quickshot",       new[] { CST(true,"+150%","BULLET SPEED"), CST(false,"+0.25s","RELOAD") } },
+            { "radarshot",       new[] { CST(true,"+30%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "radiance",        new[] { CST(true,"+30%","HP") } },
+            { "remote",          new[] { CST(false,"-40%","BULLET SPEED"), CST(false,"+0.25s","RELOAD") } },
+            { "ricochet",        new[] { CST(true,"+2","BULLET BOUNCES"), CST(true,"+25%","ATKSPD"), CST(false,"+0.25s","RELOAD") } },
+            { "riccochet",       new[] { CST(true,"+2","BULLET BOUNCES"), CST(true,"+25%","ATKSPD"), CST(false,"+0.25s","RELOAD") } },
+            { "saw",             new[] { CST(true,"+30%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "scavenger",       new[] { CST(false,"+0.5s","RELOAD") } },
+            { "shieldcharge",    new[] { CST(false,"+0.25s","BLOCK CD") } },
+            { "shieldsup",       new[] { CST(false,"+0.5s","RELOAD"), CST(false,"+0.5s","BLOCK CD") } },
+            { "shockwave",       new[] { CST(true,"+50%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "silence",         new[] { CST(true,"+25%","HP"), CST(false,"+0.25s","BLOCK CD") } },
+            { "sneaky",          new[] { CST(false,"+0.25s","RELOAD") } },
+            { "spray",           new[] { CST(true,"+1000%","ATKSPD"), CST(true,"+12","AMMO"), CST(false,"-75%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
+            { "staticfield",     new[] { CST(false,"+0.25s","BLOCK CD") } },
+            { "steadyshot",      new[] { CST(true,"+40%","HP"), CST(true,"+100%","BULLET SPEED"), CST(false,"+0.25s","RELOAD") } },
+            { "supernova",       new[] { CST(true,"+50%","HP"), CST(false,"+0.5s","BLOCK CD") } },
+            { "tacticalreload",  new[] { CST(false,"+0.25s","BLOCK CD") } },
+            { "tank",            new[] { CST(true,"+100%","HP"), CST(false,"-25%","ATKSPD"), CST(false,"+0.5s","RELOAD") } },
+            { "targetbounce",    new[] { CST(true,"+1","BULLET BOUNCE"), CST(false,"-20%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
+            { "tasteofblood",    new[] { CST(true,"+30%","LIFE STEAL") } },
+            { "teleport",        new[] { CST(true,"-30%","BLOCK CD") } },
+            { "thruster",        new[] { CST(false,"+0.25s","RELOAD") } },
+            { "timeddetonation", new[] { CST(false,"-15%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
+            { "toxiccloud",      new[] { CST(false,"-20%","ATKSPD"), CST(false,"+0.5s","RELOAD") } },
+            { "trickster",       new[] { CST(true,"+2","BULLET BOUNCES"), CST(false,"-20%","DAMAGE"), CST(false,"+0.5s","RELOAD") } },
+            { "windup",          new[] { CST(true,"+100%","BULLET SPEED"), CST(true,"+60%","DAMAGE"), CST(false,"-100%","ATKSPD"), CST(false,"+0.5s","RELOAD") } },
+        };
+        private static CardStatTuple CST(bool p, string a, string s) => new CardStatTuple { positive = p, amount = a, stat = s };
+
+        // Normalize stat labels so the image / popup don't mix "DMG" + "DAMAGE",
+        // "ATKSPD" + "ATTACK SPEED", etc. Picks the SHORTER variant since cell
+        // space is limited.
+        private static string NormalizeStatLabel(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return raw;
+            string s = raw.Trim().ToUpperInvariant();
+            // Strip a trailing colon some prefab labels include.
+            if (s.EndsWith(":")) s = s.Substring(0, s.Length - 1).TrimEnd();
+            switch (s)
+            {
+                case "DAMAGE": case "DMG": case "DAMAGE:": return "DMG";
+                case "ATTACK SPEED": case "ATKSPD": case "ATK SPEED": case "ATK SPD": return "ATK SPD";
+                case "BULLET SPEED": case "BULLET SPD": case "PROJ SPEED": case "PROJECTILE SPEED": return "BULLET SPD";
+                case "RELOAD": case "RELOAD TIME": case "RELOAD SPEED": case "RELOAD SPD": return "RELOAD";
+                case "BLOCK CD": case "BLOCK COOLDOWN": case "BLOCK COOLDOWN TIME": return "BLOCK CD";
+                case "HP": case "HEALTH": return "HP";
+                case "AMMO": case "MAGAZINE": case "MAG": return "AMMO";
+                case "BULLETS": case "BULLET COUNT": return "BULLETS";
+                case "BULLET": case "BULLET LOSS": return "BULLET";
+                case "LIFESTEAL": case "LIFE STEAL": return "LIFESTEAL";
+                case "BULLET BOUNCES": case "BOUNCES": return "BULLET BOUNCES";
+                case "BULLET BOUNCE": case "BOUNCE": return "BULLET BOUNCE";
+                case "BULLET SLOW": return "BULLET SLOW";
+                case "DRILL": case "WALL DRILL": case "DRILL THROUGH WALLS": return "DRILL";
+                case "SPLASH DMG": case "SPLASH DAMAGE": return "SPLASH DMG";
+            }
+            return s;
+        }
+
+        // Build a stat block string from the fallback tuples for a given card.
+        // Returns "" if the canonical name isn't in the dict.
+        private static string BuildStatBlockFromFallback(string cardName, int max)
+        {
+            if (string.IsNullOrEmpty(cardName)) return "";
+            string canonical = CardRarityLookup.GetCanonicalName(cardName) ?? cardName;
+            string[] keys = new[] { (canonical ?? "").ToLowerInvariant().Replace(" ", ""),
+                                    (cardName  ?? "").ToLowerInvariant().Replace(" ", "") };
+            CardStatTuple[] arr = null;
+            foreach (var k in keys) { if (!string.IsNullOrEmpty(k) && CARD_STATS_FALLBACK.TryGetValue(k, out arr)) break; }
+            if (arr == null || arr.Length == 0) return "";
+            var sb = new StringBuilder();
+            int shown = 0;
+            for (int i = 0; i < arr.Length && shown < max; i++)
+            {
+                var t = arr[i];
+                string col = t.positive ? "#88FF88" : "#FF8888";
+                if (sb.Length > 0) sb.Append("\n");
+                sb.Append("<color=").Append(col).Append("><b>").Append(t.amount).Append("</b></color> ").Append(t.stat);
+                shown++;
+            }
+            return sb.ToString();
+        }
 
         // ── Card preview popup ─────────────────────────────────
         // Text-based modal showing the card's name + rarity + description +
@@ -489,45 +724,144 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             HideCardPreview();
             try
             {
-                // Resolve the CardInfo via CardChoice.instance.cards (reflected
-                // so we don't pull in ROUNDS as a hard reference at compile time).
-                var ccType = AppDomain.CurrentDomain.GetAssemblies()
-                    .Select(a => a.GetType("CardChoice")).FirstOrDefault(t => t != null);
                 Component ci = null;
                 string realName = cardName, rarity = "Unknown", description = "";
-                Component[] statsList = null;
-                if (ccType != null)
+                Array statsList = null;
+                // Resolve CardInfo by name. Try CardChoice.instance.cards FIRST
+                // (always-loaded global registry; covers most cards including
+                // ones renamed since release). Fall back to
+                // Resources.FindObjectsOfTypeAll<CardInfo> if the global list
+                // doesn't have it (some mod cards may not be registered there).
+                // Match against (a) the canonical name from CardRarityLookup,
+                // (b) GO name (clone-suffix stripped), (c) cardName field —
+                // all case-insensitive + space-stripped.
+                string lcTarget = (cardName ?? "").ToLowerInvariant().Replace(" ", "");
+                string canonical = CardRarityLookup.GetCanonicalName(cardName) ?? cardName;
+                string lcCanonical = canonical.ToLowerInvariant().Replace(" ", "");
+                bool Matches(string s)
                 {
-                    object cc = ccType.GetField("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
-                    var cardsArr = ccType.GetField("cards", BindingFlags.Public | BindingFlags.Instance)?.GetValue(cc) as Array;
-                    if (cardsArr != null)
-                    {
-                        string lcTarget = cardName.ToLowerInvariant().Replace(" ", "");
-                        foreach (var c in cardsArr)
-                        {
-                            var comp = c as Component;
-                            if (comp == null) continue;
-                            string goName = comp.gameObject.name ?? "";
-                            string display = comp.GetType().GetField("cardName", BindingFlags.Public | BindingFlags.Instance)?.GetValue(comp) as string ?? "";
-                            if (goName.ToLowerInvariant().Replace(" ", "") == lcTarget
-                                || display.ToLowerInvariant().Replace(" ", "") == lcTarget)
-                            { ci = comp; break; }
-                        }
-                    }
+                    if (string.IsNullOrEmpty(s)) return false;
+                    string lc = s.ToLowerInvariant().Replace(" ", "");
+                    return lc == lcTarget || lc == lcCanonical;
                 }
+                Component MatchInArray(IEnumerable arr)
+                {
+                    if (arr == null) return null;
+                    foreach (var c in arr)
+                    {
+                        var comp = c as Component;
+                        if (comp == null) continue;
+                        string goName = comp.gameObject.name?.Replace("(Clone)", "").Trim() ?? "";
+                        string display = comp.GetType().GetField("cardName", BindingFlags.Public | BindingFlags.Instance)?.GetValue(comp) as string ?? "";
+                        if (Matches(goName) || Matches(display)) return comp;
+                    }
+                    return null;
+                }
+                try
+                {
+                    // Path 1: CardChoice.instance.cards
+                    var ccType = AppDomain.CurrentDomain.GetAssemblies()
+                        .Select(a => a.GetType("CardChoice")).FirstOrDefault(t => t != null);
+                    if (ccType != null)
+                    {
+                        object cc = ccType.GetField("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                        var cardsArr = ccType.GetField("cards", BindingFlags.Public | BindingFlags.Instance)?.GetValue(cc) as Array;
+                        ci = MatchInArray(cardsArr);
+                    }
+                    // Path 2: Resources fallback
+                    if (ci == null)
+                    {
+                        var allCards = Resources.FindObjectsOfTypeAll<CardInfo>();
+                        ci = MatchInArray(allCards);
+                    }
+                    if (ci == null)
+                        Plugin.Log.LogInfo($"[CARD-PREVIEW] CardInfo not found for '{cardName}' (canonical='{canonical}') — falling back to dict");
+                }
+                catch (Exception sx) { Plugin.Log.LogWarning($"[CARD-PREVIEW] lookup: {sx.Message}"); }
                 if (ci != null)
                 {
                     var ciT = ci.GetType();
                     var nField = ciT.GetField("cardName", BindingFlags.Public | BindingFlags.Instance);
                     var rField = ciT.GetField("rarity", BindingFlags.Public | BindingFlags.Instance);
+                    // Vanilla typoed `cardDestription` for years; current builds
+                    // also have `cardDescription` and a few more fields. Try
+                    // each in priority order.
                     var dField = ciT.GetField("cardDestription", BindingFlags.Public | BindingFlags.Instance)
-                              ?? ciT.GetField("cardDescription", BindingFlags.Public | BindingFlags.Instance);
+                              ?? ciT.GetField("cardDescription", BindingFlags.Public | BindingFlags.Instance)
+                              ?? ciT.GetField("description", BindingFlags.Public | BindingFlags.Instance);
+                    // CardInfoStat is [Serializable] but NOT a Component, so the
+                    // earlier Component[] cast returned null and the popup never
+                    // rendered the stat block. Read as Array (object[]) and
+                    // reflect each element's fields.
                     var sField = ciT.GetField("cardStats", BindingFlags.Public | BindingFlags.Instance)
                               ?? ciT.GetField("stats", BindingFlags.Public | BindingFlags.Instance);
                     realName = (nField?.GetValue(ci) as string) ?? cardName;
                     var rv = rField?.GetValue(ci); rarity = rv != null ? rv.ToString() : "Unknown";
                     description = (dField?.GetValue(ci) as string) ?? "";
-                    statsList = sField?.GetValue(ci) as Component[];
+                    statsList = sField?.GetValue(ci) as Array;
+
+                    // Hardcoded fallback dictionary — covers cards whose
+                    // description lives outside CardInfo (poison/leech/quick
+                    // reload/remote, etc). Source: ROUNDS wiki + community
+                    // knowledge. Keyed by canonical name lowercased + spaces
+                    // stripped so "Quick Reload" and "QuickReload" both hit.
+                    if (string.IsNullOrEmpty(description))
+                    {
+                        string fbKey = (canonical ?? cardName ?? "").ToLowerInvariant().Replace(" ", "");
+                        if (!string.IsNullOrEmpty(fbKey) && CARD_DESC_FALLBACK.TryGetValue(fbKey, out var fbDesc))
+                            description = fbDesc;
+                    }
+                    // Fallback: if the card's mechanic text lives only in the
+                    // prefab's UI hierarchy (some cards have an empty
+                    // cardDestription field but show description text via a
+                    // baked-in TMP component), scan children for any
+                    // non-trivial text and use that as a secondary description.
+                    if (string.IsNullOrEmpty(description))
+                    {
+                        try
+                        {
+                            string lcReal = (realName ?? "").ToLowerInvariant().Replace(" ", "");
+                            string lcRare = (rarity ?? "").ToLowerInvariant();
+                            var sb = new StringBuilder();
+                            // TMPro types are loaded by ROUNDS — find by name.
+                            Type tmpType = null;
+                            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                            {
+                                tmpType = asm.GetType("TMPro.TMP_Text") ?? asm.GetType("TMPro.TextMeshProUGUI");
+                                if (tmpType != null) break;
+                            }
+                            if (tmpType != null)
+                            {
+                                var textProp = tmpType.GetProperty("text", BindingFlags.Public | BindingFlags.Instance);
+                                var components = ci.gameObject.GetComponentsInChildren(tmpType, true);
+                                foreach (var t in components)
+                                {
+                                    if (t == null || textProp == null) continue;
+                                    string s = textProp.GetValue(t) as string ?? "";
+                                    s = s.Trim();
+                                    if (string.IsNullOrEmpty(s)) continue;
+                                    string lc = s.ToLowerInvariant().Replace(" ", "");
+                                    if (lc == lcReal || lc == lcRare) continue;
+                                    if (s.Length < 4 || s.Length > 200) continue;
+                                    if (sb.Length > 0) sb.Append("\n");
+                                    sb.Append(s);
+                                    if (sb.Length > 240) break;
+                                }
+                            }
+                            if (sb.Length > 0) description = sb.ToString();
+                        }
+                        catch { }
+                    }
+                }
+
+                // Final fallback if BOTH the CardInfo lookup failed AND the
+                // hardcoded dict didn't fire inside the ci-null branch above:
+                // try the dict here too so the popup always tries every source.
+                if (string.IsNullOrEmpty(description))
+                {
+                    string fbKey = (canonical ?? cardName ?? "").ToLowerInvariant().Replace(" ", "");
+                    if (!string.IsNullOrEmpty(fbKey) && CARD_DESC_FALLBACK.TryGetValue(fbKey, out var fbDesc))
+                        description = fbDesc;
                 }
 
                 EnsureOverlayCanvas();
@@ -549,63 +883,114 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 var bdClick = bd.AddComponent<ClickHandler>();
                 bdClick.onClick = () => { if (ClickGuard.Claim()) HideCardPreview(); };
 
+                // Image-first popup: if we have card art on disk, show
+                // the image as the popup body. The art already contains
+                // the card's name + description + stats baked in, so we
+                // skip the text rendering paths entirely.
+                Sprite cardSprite = CardImageLoader.GetSprite(cardName);
+
                 // Centered card panel.
                 var card = UIFactory.CreatePanel("Card", cardPreviewGO.transform, new Color(0.10f, 0.12f, 0.16f, 0.97f));
                 var cardRT = card.GetComponent<RectTransform>();
                 cardRT.anchorMin = new Vector2(0.5f, 0.5f);
                 cardRT.anchorMax = new Vector2(0.5f, 0.5f);
                 cardRT.pivot = new Vector2(0.5f, 0.5f);
-                cardRT.sizeDelta = new Vector2(440, 360);
-                UIFactory.AddVLG(card, spacing: 6, padL: 18, padR: 18, padT: 14, padB: 14);
 
-                // Header: name (bold, large) + rarity tag.
-                UIFactory.CreateText("CPName", card.transform, $"<b>{realName}</b>",
-                    24f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(400, 32));
-                Color rColor = GetRarityColor(rarity);
-                UIFactory.CreateText("CPRar", card.transform, rarity ?? "Unknown",
-                    16f, rColor, UIFactory.AlignMidCenter, sizeDelta: new Vector2(400, 22));
-
-                // Description.
-                if (!string.IsNullOrEmpty(description))
+                if (cardSprite != null)
                 {
-                    var dt = UIFactory.CreateText("CPDesc", card.transform, $"<i>{description}</i>",
-                        15f, new Color(0.85f, 0.88f, 0.95f), UIFactory.AlignMidCenter,
-                        sizeDelta: new Vector2(400, 60));
-                    UIFactory.SetWordWrap(dt, true);
+                    // 360 wide × 540 tall image at native ~2:3 ratio,
+                    // plus a 24px hint row underneath.
+                    cardRT.sizeDelta = new Vector2(380, 600);
+                    UIFactory.AddVLG(card, spacing: 6, padL: 10, padR: 10, padT: 10, padB: 10);
+
+                    var imgGO = new GameObject("CardImg");
+                    imgGO.transform.SetParent(card.transform, false);
+                    imgGO.AddComponent<RectTransform>();
+                    var imgComp = imgGO.AddComponent(UIFactory.tImage);
+                    var pSprite = UIFactory.tImage.GetProperty("sprite", BindingFlags.Public | BindingFlags.Instance);
+                    var pPreserve = UIFactory.tImage.GetProperty("preserveAspect", BindingFlags.Public | BindingFlags.Instance);
+                    var pColor = UIFactory.tImage.GetProperty("color", BindingFlags.Public | BindingFlags.Instance);
+                    pSprite?.SetValue(imgComp, cardSprite);
+                    pPreserve?.SetValue(imgComp, true);
+                    pColor?.SetValue(imgComp, Color.white);
+                    UIFactory.AddLE(imgGO, prefW: 360, minW: 360, prefH: 545, minH: 545, flexH: 0, flexW: 0);
+
+                    UIFactory.CreateText("CPHint", card.transform, "<color=#888>click anywhere to close</color>",
+                        13f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(360, 20));
+
+                    Plugin.Log.LogInfo($"[CARD-PREVIEW] showing image for '{realName}'");
                 }
-
-                // Stat block — render each CardInfoStat's amount + stat name +
-                // positive/negative tint. CardInfoStat has fields like
-                // `stat`, `amount`, `simepleAmount`, `positive`.
-                if (statsList != null && statsList.Length > 0)
+                else
                 {
-                    var sb = new StringBuilder();
-                    foreach (var s in statsList)
+                    // Fallback text-only layout for cards with no art on
+                    // disk. Existing code path preserved.
+                    cardRT.sizeDelta = new Vector2(440, 360);
+                    UIFactory.AddVLG(card, spacing: 6, padL: 18, padR: 18, padT: 14, padB: 14);
+
+                    UIFactory.CreateText("CPName", card.transform, $"<b>{realName}</b>",
+                        24f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(400, 32));
+                    Color rColor = GetRarityColor(rarity);
+                    UIFactory.CreateText("CPRar", card.transform, rarity ?? "Unknown",
+                        16f, rColor, UIFactory.AlignMidCenter, sizeDelta: new Vector2(400, 22));
+
+                    if (!string.IsNullOrEmpty(description))
                     {
-                        if (s == null) continue;
-                        var st = s.GetType();
-                        string statName = st.GetField("stat", BindingFlags.Public | BindingFlags.Instance)?.GetValue(s) as string ?? "";
-                        string amount = st.GetField("amount", BindingFlags.Public | BindingFlags.Instance)?.GetValue(s) as string ?? "";
-                        var posObj = st.GetField("positive", BindingFlags.Public | BindingFlags.Instance)?.GetValue(s);
-                        bool positive = posObj is bool pb ? pb : true;
-                        if (string.IsNullOrEmpty(statName) && string.IsNullOrEmpty(amount)) continue;
-                        string color = positive ? "#88FF88" : "#FF6666";
-                        sb.Append("  <color=").Append(color).Append(">").Append(amount).Append("</color>  ").Append(statName).Append("\n");
+                        var dt = UIFactory.CreateText("CPDesc", card.transform, $"<i>{description}</i>",
+                            15f, new Color(0.85f, 0.88f, 0.95f), UIFactory.AlignMidCenter,
+                            sizeDelta: new Vector2(400, 60));
+                        UIFactory.SetWordWrap(dt, true);
                     }
-                    string statBlock = sb.ToString().TrimEnd('\n');
-                    if (!string.IsNullOrEmpty(statBlock))
+
+                    string fallbackStatText = null;
+                    if (statsList == null || statsList.Length == 0)
+                        fallbackStatText = BuildStatBlockFromFallback(cardName, 8);
+                    if (!string.IsNullOrEmpty(fallbackStatText))
                     {
-                        var stTxt = UIFactory.CreateText("CPStats", card.transform, statBlock,
-                            15f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(400, 140));
+                        var stTxt = UIFactory.CreateText("CPStats", card.transform, fallbackStatText,
+                            15f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(400, 160));
                         UIFactory.SetWordWrap(stTxt, true);
                     }
+                    else if (statsList != null && statsList.Length > 0)
+                    {
+                        var sb = new StringBuilder();
+                        for (int i = 0; i < statsList.Length; i++)
+                        {
+                            var s = statsList.GetValue(i);
+                            if (s == null) continue;
+                            var st = s.GetType();
+                            string statName = st.GetField("stat", BindingFlags.Public | BindingFlags.Instance)?.GetValue(s) as string ?? "";
+                            string amount = st.GetField("amount", BindingFlags.Public | BindingFlags.Instance)?.GetValue(s) as string ?? "";
+                            var posObj = st.GetField("positive", BindingFlags.Public | BindingFlags.Instance)?.GetValue(s);
+                            bool positive = posObj is bool pb ? pb : true;
+                            if (string.IsNullOrEmpty(statName) && string.IsNullOrEmpty(amount)) continue;
+                            string color = positive ? "#88FF88" : "#FF6666";
+                            sb.Append("  <color=").Append(color).Append("><b>").Append(amount).Append("</b></color>  ").Append(NormalizeStatLabel(statName)).Append("\n");
+                        }
+                        string statBlock = sb.ToString().TrimEnd('\n');
+                        if (!string.IsNullOrEmpty(statBlock))
+                        {
+                            var stTxt = UIFactory.CreateText("CPStats", card.transform, statBlock,
+                                15f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(400, 160));
+                            UIFactory.SetWordWrap(stTxt, true);
+                        }
+                        else
+                        {
+                            UIFactory.CreateText("CPStatsEmpty", card.transform,
+                                "<color=#888><i>(Mechanic isn't expressed as numerical stats — check the card description above or pick it in-game.)</i></color>",
+                                13f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(400, 60));
+                        }
+                    }
+                    else
+                    {
+                        UIFactory.CreateText("CPNoStats", card.transform,
+                            "<color=#888><i>No stat data available for this card.</i></color>",
+                            13f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(400, 28));
+                    }
+
+                    UIFactory.CreateText("CPHint", card.transform, "<color=#888>click anywhere to close</color>",
+                        13f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(400, 18));
+                    Plugin.Log.LogInfo($"[CARD-PREVIEW] showing text fallback for '{realName}' (rarity={rarity})");
                 }
-
-                // Footer hint.
-                UIFactory.CreateText("CPHint", card.transform, "<color=#888>click anywhere to close</color>",
-                    13f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(400, 18));
-
-                Plugin.Log.LogInfo($"[CARD-PREVIEW] showing '{realName}' (rarity={rarity})");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[CARD-PREVIEW] failed: {ex.Message}"); }
         }
@@ -648,19 +1033,6 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
 
         // Cycle one card's tier and write through to the server. Filter is
         // tied to the current cardFilter index (0=All,1=Ranked,2=Casual).
-        private static void CycleCardTier(string cardName)
-        {
-            string filterStr = cardFilter == 1 ? "ranked" : cardFilter == 2 ? "casual" : "all";
-            string key = CardTierKey(cardFilter, cardName);
-            string current = cardTierMap.TryGetValue(key, out var c) ? c : "";
-            int idx = Array.IndexOf(TIER_CYCLE, current);
-            if (idx < 0) idx = 0;
-            string next = TIER_CYCLE[(idx + 1) % TIER_CYCLE.Length];
-            cardTierMap[key] = next;
-            ApiClient.SetCardTier(MatchTracker.LocalSteamId, cardName, filterStr, next);
-            dirty = true;
-        }
-
         // -- Achievements Tab ------------------------------------
         private static GameObject BuildAchievementsTab(Transform parent){var panel=new GameObject("Achievements");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddVLG(panel,spacing:6,padL:20,padR:20,padT:10);UIFactory.AddLE(panel,flexH:1);UIFactory.CreateText("AchH",panel.transform,"Achievements",22f,C_GOLD,UIFactory.AlignTopCenter,sizeDelta:new Vector2(600,30));var countRow=new GameObject("AchCnt");countRow.transform.SetParent(panel.transform,false);countRow.AddComponent<RectTransform>();UIFactory.AddLE(countRow,prefH:22);txtAchCount=UIFactory.CreateText("AC",countRow.transform,"",15f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(400,22));var sv=UIFactory.CreateScrollView("AchSV",panel.transform,spacing:4);UIFactory.AddLE(sv.scrollGO,flexH:1);achRows.Clear();foreach(var kvp in ApiClient.AchievementDefs){var row=new AchRow();string key=kvp.Key;string[]def=kvp.Value;row.root=new GameObject($"ach_{key}");row.root.transform.SetParent(sv.content.transform,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:10,padL:8,padR:8,padT:6,padB:6,forceExpandH:true);UIFactory.AddLE(row.root,prefH:50);if(UIFactory.tImage!=null){var img=row.root.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,C_PANEL);}row.txtIcon=UIFactory.CreateText("ic",row.root.transform,"",24f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(36,40));var infoCol=new GameObject("Info");infoCol.transform.SetParent(row.root.transform,false);infoCol.AddComponent<RectTransform>();UIFactory.AddVLG(infoCol,spacing:1);UIFactory.AddLE(infoCol,flexW:1);row.txtName=UIFactory.CreateText("nm",infoCol.transform,def[0],17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,22));row.txtDesc=UIFactory.CreateText("ds",infoCol.transform,def[1],14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,20));row.txtDate=UIFactory.CreateText("dt",row.root.transform,"",13f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(180,40));row.root.SetActive(true);achRows.Add(row);}return panel;}
 
@@ -2196,13 +2568,463 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 // for this (card, current filter).
                 string key=CardTierKey(cardFilter,c.card_name);
                 string tierLetter=cardTierMap.TryGetValue(key,out var tv)?tv:"";
-                if(string.IsNullOrEmpty(tierLetter)){UIFactory.SetText(row.txtTier,"-");UIFactory.SetImageColor(row.tierBtn,new Color(0.18f,0.20f,0.24f,0.85f));UIFactory.SetImageColor(row.root,new Color(0,0,0,0));}
-                else{UIFactory.SetText(row.txtTier,tierLetter);Color tc=GetTierColor(tierLetter);UIFactory.SetImageColor(row.tierBtn,tc);
-                // Translucent row tint — same hue, ~25% alpha so text stays readable.
-                UIFactory.SetImageColor(row.root,new Color(tc.r,tc.g,tc.b,0.25f));}
+                ApplyRowTierVisuals(row, tierLetter);
                 row.root.SetActive(true);}}
+
+        // Update one row's tier display in place (no full re-render). Used both
+        // by RefreshCardStats's per-row loop and by the click handler so a
+        // tier-cycle doesn't trigger a re-sort that shifts cards under the
+        // user's mouse cursor.
+        private static void ApplyRowTierVisuals(CardRow row, string tierLetter)
+        {
+            if (string.IsNullOrEmpty(tierLetter))
+            {
+                UIFactory.SetText(row.txtTier, "<b>-</b>");
+                UIFactory.SetImageColor(row.tierBtn, new Color(0.18f, 0.20f, 0.24f, 0.85f));
+                UIFactory.SetImageColor(row.hl, new Color(0, 0, 0, 0));
+            }
+            else
+            {
+                // Rich-text bold so the letter renders bold on SDF atlases that
+                // silently no-op the fontStyle=Bold flag (lesson 14).
+                UIFactory.SetText(row.txtTier, $"<b>{tierLetter}</b>");
+                Color tc = GetTierColor(tierLetter);
+                UIFactory.SetImageColor(row.tierBtn, tc);
+                // Translucent tier tint — same hue, ~25% alpha so text stays
+                // readable. Bounded to row.hl (Tier→Pass% column wrapper).
+                UIFactory.SetImageColor(row.hl, new Color(tc.r, tc.g, tc.b, 0.25f));
+            }
+        }
+
+        // Click-time tier cycle. Updates state + writes to server + repaints
+        // ONLY this single row's visuals — no full re-render and no re-sort,
+        // so the row stays put under the user's cursor for follow-up clicks.
+        private static void CycleCardTierInPlace(CardRow row, string cardName)
+        {
+            if (string.IsNullOrEmpty(cardName)) return;
+            string filterStr = cardFilter == 1 ? "ranked" : cardFilter == 2 ? "casual" : "all";
+            string key = CardTierKey(cardFilter, cardName);
+            string current = cardTierMap.TryGetValue(key, out var c) ? c : "";
+            int idx = Array.IndexOf(TIER_CYCLE, current);
+            if (idx < 0) idx = 0;
+            string next = TIER_CYCLE[(idx + 1) % TIER_CYCLE.Length];
+            cardTierMap[key] = next;
+            ApiClient.SetCardTier(MatchTracker.LocalSteamId, cardName, filterStr, next);
+            ApplyRowTierVisuals(row, next);
+            // No `dirty = true` — re-sort would shift cards mid-click and the
+            // user would end up cycling a different card on their next tap.
+        }
         // Tier badge background colors. S = pop red, A = orange, ... F = grey.
         private static Color GetTierColor(string t){switch(t){case "S":return new Color(0.95f,0.30f,0.30f,0.90f);case "A":return new Color(1.00f,0.55f,0.22f,0.90f);case "B":return new Color(0.95f,0.85f,0.30f,0.90f);case "C":return new Color(0.45f,0.85f,0.45f,0.90f);case "D":return new Color(0.45f,0.70f,0.95f,0.90f);case "E":return new Color(0.65f,0.55f,0.95f,0.90f);case "F":return new Color(0.55f,0.55f,0.55f,0.90f);default:return new Color(0.18f,0.20f,0.24f,0.85f);}}
+
+        // Compact stat line for one cell on the tier-list image. Pulls the
+        // first 2 CardInfoStats off the matching CardInfo. Layered lookup
+        // mirrors the popup: try CardChoice.instance.cards first (always-loaded
+        // global registry), then Resources.FindObjectsOfTypeAll. Match against
+        // canonical name + GO name + cardName field.
+        private static string BuildCellStatLine(string cardName)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(cardName)) return "";
+                string canonical = CardRarityLookup.GetCanonicalName(cardName) ?? cardName;
+                string lcA = (cardName ?? "").ToLowerInvariant().Replace(" ", "");
+                string lcB = canonical.ToLowerInvariant().Replace(" ", "");
+                Component found = null;
+                Component MatchOne(IEnumerable arr)
+                {
+                    if (arr == null) return null;
+                    foreach (var c in arr)
+                    {
+                        var comp = c as Component;
+                        if (comp == null) continue;
+                        string goName = comp.gameObject.name?.Replace("(Clone)", "").Trim() ?? "";
+                        string display = comp.GetType().GetField("cardName", BindingFlags.Public | BindingFlags.Instance)?.GetValue(comp) as string ?? "";
+                        if (goName.ToLowerInvariant().Replace(" ", "") == lcA
+                            || goName.ToLowerInvariant().Replace(" ", "") == lcB
+                            || display.ToLowerInvariant().Replace(" ", "") == lcA
+                            || display.ToLowerInvariant().Replace(" ", "") == lcB)
+                            return comp;
+                    }
+                    return null;
+                }
+                // Path 1: CardChoice.instance.cards (always loaded)
+                var ccType = AppDomain.CurrentDomain.GetAssemblies()
+                    .Select(a => a.GetType("CardChoice")).FirstOrDefault(t => t != null);
+                if (ccType != null)
+                {
+                    object cc = ccType.GetField("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                    var cardsArr = ccType.GetField("cards", BindingFlags.Public | BindingFlags.Instance)?.GetValue(cc) as Array;
+                    found = MatchOne(cardsArr);
+                }
+                // Path 2: Resources fallback
+                if (found == null) found = MatchOne(Resources.FindObjectsOfTypeAll<CardInfo>());
+                // Path 3: hardcoded stats dict fallback (cards where Resources
+                // didn't have the prefab loaded — Rico/Leech/etc).
+                if (found == null) return BuildStatBlockFromFallback(cardName, 8);
+                var sField = found.GetType().GetField("cardStats", BindingFlags.Public | BindingFlags.Instance)
+                          ?? found.GetType().GetField("stats", BindingFlags.Public | BindingFlags.Instance);
+                var arr = sField?.GetValue(found) as Array;
+                // CardInfo found but its stats array is null/empty — fall back
+                // to the hardcoded dict (some cards' stats are populated at
+                // runtime by their effect components, not on CardInfo itself).
+                if (arr == null || arr.Length == 0) return BuildStatBlockFromFallback(cardName, 8);
+                // Snip — apply normalization to the live-stat path below.
+                var sb = new StringBuilder();
+                int shown = 0;
+                // Show every non-empty stat — taller cell has room. Earlier
+                // 2-stat cap left out the most informative parts of cards
+                // like Spray (4 stats) and Demonic Pact (3 stats).
+                for (int i = 0; i < arr.Length && shown < 8; i++)
+                {
+                    var s = arr.GetValue(i);
+                    if (s == null) continue;
+                    var st = s.GetType();
+                    string stat = (st.GetField("stat", BindingFlags.Public | BindingFlags.Instance)?.GetValue(s) as string ?? "").Trim();
+                    string amount = (st.GetField("amount", BindingFlags.Public | BindingFlags.Instance)?.GetValue(s) as string ?? "").Trim();
+                    var posObj = st.GetField("positive", BindingFlags.Public | BindingFlags.Instance)?.GetValue(s);
+                    bool positive = posObj is bool pb ? pb : true;
+                    if (string.IsNullOrEmpty(stat) && string.IsNullOrEmpty(amount)) continue;
+                    string col = positive ? "#88FF88" : "#FF8888";
+                    if (sb.Length > 0) sb.Append("\n");
+                    // Normalize the stat label so DMG/DAMAGE/etc all render
+                    // consistently across cards.
+                    string statNorm = NormalizeStatLabel(stat);
+                    string statShort = statNorm.Length > 16 ? statNorm.Substring(0, 14) + "…" : statNorm;
+                    sb.Append("<color=").Append(col).Append(">").Append(amount).Append("</color> ").Append(statShort);
+                    shown++;
+                }
+                return sb.ToString();
+            }
+            catch { return ""; }
+        }
+
+        // ── Export tier list as fullscreen PNG ────────────────────
+        // Builds a temporary fullscreen overlay with every card grouped by
+        // tier, captures via ScreenCapture.CaptureScreenshot, surfaces the
+        // saved path. Mirrors the "tierlist maker" community tool but with
+        // our own per-card stats baked in.
+        private static GameObject tierExportPanel;
+        public static void ExportCardTierList()
+        {
+            if (Plugin.Instance == null) return;
+            try { Plugin.Instance.StartCoroutine(ExportTierListCoroutine()); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[TIER-EXPORT] failed: {ex.Message}"); }
+        }
+
+        private static System.Collections.IEnumerator ExportTierListCoroutine()
+        {
+            // Portrait export via offscreen World-Space canvas + Camera +
+            // RenderTexture. Earlier versions used ScreenCapture which is
+            // locked to the player's monitor aspect (always landscape on a
+            // 1920x1080 screen). RenderTexture lets us pick any output size,
+            // so we render a tall portrait PNG (1280×N) regardless of the
+            // host screen.
+            if (tierExportPanel != null) UnityEngine.Object.Destroy(tierExportPanel);
+            tierExportPanel = new GameObject("CR_TierExport");
+            tierExportPanel.hideFlags = HideFlags.HideAndDontSave;
+            // Park the offscreen canvas FAR from any in-game camera's frustum
+            // so it can't accidentally render in the live view.
+            tierExportPanel.transform.position = new Vector3(50000f, 50000f, 0f);
+
+            // Reusable bg holder — a World-Space canvas, root of the export.
+            var canvasComp = tierExportPanel.AddComponent(UIFactory.tCanvas);
+            try
+            {
+                var rmProp = UIFactory.tCanvas.GetProperty("renderMode", BindingFlags.Public | BindingFlags.Instance);
+                if (rmProp != null) rmProp.SetValue(canvasComp, Enum.ToObject(rmProp.PropertyType, 2)); // 2 = WorldSpace
+                var sortProp = UIFactory.tCanvas.GetProperty("sortingOrder", BindingFlags.Public | BindingFlags.Instance);
+                if (sortProp != null) sortProp.SetValue(canvasComp, 30000);
+            }
+            catch { }
+            // GraphicRaycaster optional for rendering-only canvas — skip.
+
+            var rootRT = tierExportPanel.GetComponent<RectTransform>();
+            if (rootRT == null) rootRT = tierExportPanel.AddComponent<RectTransform>();
+            // 3000 wide × 12 cells per row. Smaller cells (220×330
+            // card art + 2 text rows) compress the vertical height so
+            // the final image lands close to square aspect rather than
+            // tall portrait.
+            rootRT.sizeDelta = new Vector2(3000, 6000);  // height shrinks after layout
+            rootRT.localScale = Vector3.one;
+
+            var bg = UIFactory.CreatePanel("BG", tierExportPanel.transform, new Color(0.07f, 0.08f, 0.10f, 1f));
+            var bgRT = bg.GetComponent<RectTransform>();
+            bgRT.anchorMin = Vector2.zero; bgRT.anchorMax = Vector2.one;
+            bgRT.offsetMin = Vector2.zero; bgRT.offsetMax = Vector2.zero;
+            UIFactory.AddVLG(bg, spacing: 14, padL: 24, padR: 24, padT: 18, padB: 18);
+            // ContentSizeFitter on the bg so the bg's preferredHeight tracks
+            // the children's stacked heights — used to size the RenderTexture.
+            try
+            {
+                Type csfType = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    csfType = asm.GetType("UnityEngine.UI.ContentSizeFitter");
+                    if (csfType != null) break;
+                }
+                if (csfType != null)
+                {
+                    var csf = bg.AddComponent(csfType);
+                    var ft = csfType.GetProperty("verticalFit", BindingFlags.Public | BindingFlags.Instance);
+                    if (ft != null) ft.SetValue(csf, Enum.ToObject(ft.PropertyType, 2)); // PreferredSize
+                }
+            }
+            catch { }
+
+            // Title — sized for the 1600px-wide canvas, big enough to
+            // read on phone display after ~0.67x scaling.
+            string filterStr = cardFilter == 1 ? "Ranked" : cardFilter == 2 ? "Casual" : "All";
+            UIFactory.CreateText("TXTitle", bg.transform,
+                $"<b>Sid's Competitive Rounds  ·  Card Tier List</b>  <color=#888>({filterStr})</color>",
+                36f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(2900, 52));
+
+            // Group cards by tier.
+            var cards = ApiClient.CachedCardStats ?? new List<ApiClient.CardStatData>();
+            // Merge duplicates same as RefreshCardStats.
+            var merged = new List<ApiClient.CardStatData>();
+            var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var c in cards)
+            {
+                string key = (c.card_name ?? "?").ToLower().Replace(" ", "");
+                if (seen.ContainsKey(key))
+                {
+                    var e = merged[seen[key]];
+                    e.times_picked += c.times_picked; e.wins_with_card += c.wins_with_card;
+                    e.win_rate = e.times_picked > 0 ? (float)e.wins_with_card / e.times_picked : 0;
+                    if ((e.card_rarity == null || e.card_rarity == "Unknown") && !string.IsNullOrEmpty(c.card_rarity) && c.card_rarity != "Unknown") e.card_rarity = c.card_rarity;
+                }
+                else { seen[key] = merged.Count; merged.Add(new ApiClient.CardStatData { card_name = c.card_name, card_rarity = c.card_rarity, times_picked = c.times_picked, wins_with_card = c.wins_with_card, win_rate = c.win_rate, times_offered = c.times_offered, pass_rate = c.pass_rate }); }
+            }
+            string[] tierOrder = new[] { "S", "A", "B", "C", "D", "E", "F", "" };
+            var byTier = new Dictionary<string, List<ApiClient.CardStatData>>();
+            foreach (var t in tierOrder) byTier[t] = new List<ApiClient.CardStatData>();
+            foreach (var c in merged)
+            {
+                string t = cardTierMap.TryGetValue(CardTierKey(cardFilter, c.card_name), out var tv) ? tv : "";
+                if (!byTier.ContainsKey(t)) t = "";
+                byTier[t].Add(c);
+            }
+
+            // Layout — 3000 wide × 12 cells per row. Smaller cells
+            // shrink the row count so the final image lands close to
+            // square instead of tall portrait. Each cell is 220×330
+            // card art + ## played + ##% won.
+            const int CANVAS_W = 3000;
+            const int BADGE_W = 130;
+            const int CELL_W = 226;
+            const int CELL_H = 410;       // 330 image + 30 + 30 + 8 spacing + 12 pad
+            const int IMG_W = 220, IMG_H = 330;
+            const int CELL_GAP = 8;
+            int cardsAreaW = CANVAS_W - 48 - BADGE_W - 14;
+            int cellsPerRow = Math.Max(3, cardsAreaW / (CELL_W + CELL_GAP)); // = 6
+
+            // Reflected setters for UnityEngine.UI.Image — used to bind
+            // the loaded card Sprite to a fresh Image component on each
+            // cell.
+            var pImgSprite = UIFactory.tImage.GetProperty("sprite", BindingFlags.Public | BindingFlags.Instance);
+            var pImgPreserve = UIFactory.tImage.GetProperty("preserveAspect", BindingFlags.Public | BindingFlags.Instance);
+            var pImgColor = UIFactory.tImage.GetProperty("color", BindingFlags.Public | BindingFlags.Instance);
+
+            foreach (var tier in tierOrder)
+            {
+                var list = byTier[tier];
+                if (list.Count == 0) continue;
+                Color tc = string.IsNullOrEmpty(tier) ? new Color(0.30f, 0.32f, 0.36f, 0.95f) : GetTierColor(tier);
+                int rowsNeeded = (list.Count + cellsPerRow - 1) / cellsPerRow;
+                int tierBlockH = rowsNeeded * (CELL_H + 6) + 12;
+
+                // Tier row container — badge on the left, wrapping cards on the right.
+                var tierGO = new GameObject($"T_{tier}");
+                tierGO.transform.SetParent(bg.transform, false);
+                tierGO.AddComponent<RectTransform>();
+                UIFactory.AddHLG(tierGO, spacing: 8, padL: 8, padR: 8, padT: 6, padB: 6);
+                UIFactory.AddLE(tierGO, prefH: tierBlockH, minH: tierBlockH, flexH: 0);
+
+                // Tier badge.
+                var badge = UIFactory.CreatePanel($"B_{tier}", tierGO.transform, tc);
+                UIFactory.AddLE(badge, prefW: BADGE_W, minW: BADGE_W, prefH: tierBlockH - 12, minH: tierBlockH - 12, flexW: 0);
+                UIFactory.CreateText("BL", badge.transform, $"<b>{(string.IsNullOrEmpty(tier) ? "Unranked" : tier)}</b>",
+                    string.IsNullOrEmpty(tier) ? 36f : 84f, Color.black,
+                    UIFactory.AlignMidCenter, sizeDelta: new Vector2(BADGE_W, tierBlockH - 12));
+
+                // Cards container.
+                var cardsCol = new GameObject($"R_{tier}");
+                cardsCol.transform.SetParent(tierGO.transform, false);
+                cardsCol.AddComponent<RectTransform>();
+                UIFactory.AddVLG(cardsCol, spacing: 6, padL: 4, padR: 4, padT: 0, padB: 0);
+                UIFactory.AddLE(cardsCol, flexW: 1, prefH: tierBlockH - 12, minH: tierBlockH - 12, flexH: 0);
+
+                GameObject curRow = null;
+                int curIdx = 0;
+                foreach (var c in list)
+                {
+                    if (curRow == null || curIdx >= cellsPerRow)
+                    {
+                        curRow = new GameObject($"row{list.IndexOf(c)}");
+                        curRow.transform.SetParent(cardsCol.transform, false);
+                        curRow.AddComponent<RectTransform>();
+                        UIFactory.AddHLG(curRow, spacing: CELL_GAP);
+                        UIFactory.AddLE(curRow, prefH: CELL_H, minH: CELL_H, flexH: 0);
+                        curIdx = 0;
+                    }
+                    var cell = UIFactory.CreatePanel($"C_{c.card_name}", curRow.transform,
+                        new Color(tc.r, tc.g, tc.b, 0.22f));
+                    UIFactory.AddVLG(cell, spacing: 4, padL: 4, padR: 4, padT: 6, padB: 6);
+                    UIFactory.AddLE(cell, prefW: CELL_W, minW: CELL_W, prefH: CELL_H, minH: CELL_H, flexW: 0);
+
+                    // Card art — fills most of the cell. preserveAspect=true
+                    // so non-2:3 art letterboxes rather than distorts.
+                    Sprite sp = CardImageLoader.GetSprite(c.card_name);
+                    var imgGO = new GameObject("Img");
+                    imgGO.transform.SetParent(cell.transform, false);
+                    imgGO.AddComponent<RectTransform>();
+                    var imgComp = imgGO.AddComponent(UIFactory.tImage);
+                    if (sp != null)
+                    {
+                        pImgSprite?.SetValue(imgComp, sp);
+                        pImgPreserve?.SetValue(imgComp, true);
+                        pImgColor?.SetValue(imgComp, Color.white);
+                    }
+                    else
+                    {
+                        // Missing-art fallback — solid colored placeholder
+                        // with the card name written across it.
+                        pImgColor?.SetValue(imgComp, new Color(0.20f, 0.22f, 0.26f, 1f));
+                        UIFactory.CreateText("Miss", imgGO.transform,
+                            $"<b>{Trunc(c.card_name ?? "?", 14)}</b>",
+                            22f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(IMG_W - 8, 60));
+                    }
+                    UIFactory.AddLE(imgGO, prefW: IMG_W, minW: IMG_W, prefH: IMG_H, minH: IMG_H, flexW: 0, flexH: 0);
+
+                    // Picks count.
+                    var playedTxt = UIFactory.CreateText("P", cell.transform,
+                        $"<b>{c.times_picked} played</b>",
+                        26f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(CELL_W - 8, 30));
+                    UIFactory.SetBold(playedTxt, true);
+                    // Win % colored by performance band.
+                    float wr = c.win_rate * 100f;
+                    string wrCol = wr >= 55 ? "#88FF88" : wr <= 45 ? "#FF8888" : "#FFFFFF";
+                    var wrTxt = UIFactory.CreateText("W", cell.transform,
+                        $"<b><color={wrCol}>{wr:F0}% won</color></b>",
+                        26f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(CELL_W - 8, 30));
+                    UIFactory.SetBold(wrTxt, true);
+
+                    curIdx++;
+                }
+                // Pad the last row so cells aren't stretched if HLG forceExpandW is on.
+                while (curRow != null && curIdx < cellsPerRow)
+                {
+                    var pad = new GameObject("pad");
+                    pad.transform.SetParent(curRow.transform, false);
+                    pad.AddComponent<RectTransform>();
+                    UIFactory.AddLE(pad, prefW: CELL_W, minW: CELL_W, flexW: 0);
+                    curIdx++;
+                }
+            }
+
+            // (Legend dropped — inline labels "## played" / "##% won" make the
+            // tier-color guide redundant. Tier-letter badges on the left of
+            // each row already convey the ranking.)
+
+            // Bottom watermark — Steam name on the left (claims the tier
+            // list as theirs), mod info on the right. Both dark grey italic
+            // matching the user's ask.
+            string steamName = MatchTracker.LocalDisplayName;
+            if (string.IsNullOrEmpty(steamName) || steamName == "unknown") steamName = "Anonymous";
+            var wm = new GameObject("WM"); wm.transform.SetParent(bg.transform, false); wm.AddComponent<RectTransform>();
+            UIFactory.AddHLG(wm, spacing: 0); UIFactory.AddLE(wm, prefH: 50, flexH: 0);
+            UIFactory.CreateText("WMSteam", wm.transform,
+                $"<color=#888><i>{steamName}'s tier list</i></color>",
+                26f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(1400, 50));
+            var wmSp = new GameObject("S"); wmSp.transform.SetParent(wm.transform, false); wmSp.AddComponent<RectTransform>();
+            UIFactory.AddLE(wmSp, flexW: 1);
+            UIFactory.CreateText("WMTxt", wm.transform,
+                $"<color=#888><i>Sid's Competitive Rounds mod  ·  v{Plugin.ModVersion}  ·  {DateTime.Now:yyyy-MM-dd}</i></color>",
+                22f, C_DIM, UIFactory.AlignMidRight, sizeDelta: new Vector2(1500, 50));
+
+            // Wait two frames for the LayoutGroups + ContentSizeFitter to
+            // push the bg's preferred height into its RectTransform.
+            yield return null;
+            yield return null;
+            try
+            {
+                Type canvasT = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                { canvasT = asm.GetType("UnityEngine.Canvas"); if (canvasT != null) break; }
+                canvasT?.GetMethod("ForceUpdateCanvases", BindingFlags.Public | BindingFlags.Static)?.Invoke(null, null);
+            }
+            catch { }
+            yield return null;
+
+            // Resolve final canvas height from the bg's measured preferred size.
+            int finalH = Mathf.CeilToInt(bgRT.rect.height);
+            if (finalH < 600) finalH = 600;
+            // Resize the canvas root so the world rect matches the content.
+            rootRT.sizeDelta = new Vector2(CANVAS_W, finalH);
+            yield return null;
+
+            string outDir;
+            try
+            {
+                outDir = System.IO.Path.GetFullPath(System.IO.Path.Combine(Application.dataPath, "..", "CompetitiveRoundsTierLists"));
+                System.IO.Directory.CreateDirectory(outDir);
+            }
+            catch { outDir = Application.persistentDataPath; }
+            string fn = $"tierlist-{filterStr}-{DateTime.Now:yyyyMMdd-HHmmss}.png";
+            string fullPath = System.IO.Path.Combine(outDir, fn);
+
+            // RenderTexture path: spawn a temp orthographic camera looking at
+            // the offscreen canvas, render into a texture sized to the
+            // canvas dimensions, ReadPixels → EncodeToPNG → file. Bypasses
+            // ScreenCapture entirely (which is locked to monitor aspect).
+            GameObject camGO = null;
+            RenderTexture renderT = null;
+            Texture2D tex = null;
+            try
+            {
+                camGO = new GameObject("CR_TierCam");
+                camGO.hideFlags = HideFlags.HideAndDontSave;
+                camGO.transform.position = new Vector3(50000f, 50000f, -10f);
+                var cam = camGO.AddComponent<Camera>();
+                cam.orthographic = true;
+                cam.orthographicSize = finalH / 2f;
+                cam.aspect = (float)CANVAS_W / Math.Max(1, finalH);
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = new Color(0.07f, 0.08f, 0.10f, 1f);
+                cam.cullingMask = ~0;
+                cam.nearClipPlane = 0.1f;
+                cam.farClipPlane = 100f;
+
+                renderT = new RenderTexture(CANVAS_W, finalH, 24);
+                cam.targetTexture = renderT;
+                cam.Render();
+
+                var prevActive = RenderTexture.active;
+                RenderTexture.active = renderT;
+                tex = new Texture2D(CANVAS_W, finalH, TextureFormat.RGB24, false);
+                tex.ReadPixels(new Rect(0, 0, CANVAS_W, finalH), 0, 0);
+                tex.Apply();
+                RenderTexture.active = prevActive;
+
+                byte[] png = tex.EncodeToPNG();
+                System.IO.File.WriteAllBytes(fullPath, png);
+                Plugin.Log.LogInfo($"[TIER-EXPORT] saved {CANVAS_W}×{finalH} → {fullPath}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[TIER-EXPORT] capture failed: {ex.Message}"); }
+            finally
+            {
+                try { if (camGO != null) UnityEngine.Object.Destroy(camGO); } catch { }
+                try { if (renderT != null) UnityEngine.Object.Destroy(renderT); } catch { }
+                try { if (tex != null) UnityEngine.Object.Destroy(tex); } catch { }
+            }
+
+            try { if (tierExportPanel != null) UnityEngine.Object.Destroy(tierExportPanel); } catch { }
+            tierExportPanel = null;
+
+            CompetitiveUI.ShowNotification($"Tier list saved to {fullPath}", new Color(0.4f, 0.9f, 0.4f), 12f);
+            Plugin.Log.LogInfo($"[TIER-EXPORT] done — {fullPath}");
+        }
         private static Color GetRarityColor(string r){if(string.IsNullOrEmpty(r))return C_LABEL;switch(r.ToLower()){case "common":return C_COMMON;case "uncommon":return C_UNCOMMON;case "rare":return C_RARE;default:return C_LABEL;}}
 
         // -- Chat --------------------------------------------------

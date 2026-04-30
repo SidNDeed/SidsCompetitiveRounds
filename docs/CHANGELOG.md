@@ -1,5 +1,35 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.0 — Card art everywhere + Tier List Maker export overhaul
+
+The Card Stats tab is now a fully fledged **Tier List Maker** with image-based card previews and a polished export pipeline — matching the popular ROUNDS tier-list-maker community sites but with your real ranked / casual / all-mode pick + win stats baked in.
+
+**67 ROUNDS card icons ship with the mod.**
+- New asset directory `BepInEx/plugins/CompetitiveRounds/cards/` populated by the build target. PNGs land beside the DLL on every Release / Thunderstore build.
+- New `CardImageLoader.cs` lazy-loads each PNG into a cached `Sprite` on first request. Keys are normalized (lowercase, no spaces/punct), with a fall-through via `CardRarityLookup.GetCanonicalName` so server-form and display-form names both resolve.
+
+**Card preview popup — image-first.**
+- Click any card name in the Card Stats tab (My Stats, 2v2 page, leaderboard player detail) and you now see the full-color card art at 360×545 with click-anywhere-to-close. The art carries name + description + numerical stats baked in, so we no longer render those as text.
+- Cards without art (none currently) fall back to the prior text-block popup automatically.
+
+**Tier list export image — image-based, near-square aspect.**
+- Each cell now shows the card art (220×330) + `## played` + `##% won`. Card name, rarity tag, and stat lines are gone — the art covers them.
+- 12 cells per row at 3000-wide canvas. Aspect lands near 1:1 (was tall portrait at 1080-wide / 2400-wide / 1840-wide in earlier iterations) — looks balanced on both phone and PC viewers.
+- Win-rate color band: `≥55% green / ≤45% red / otherwise white`.
+- Steam-name watermark bottom-left, mod info bottom-right (italic dark grey).
+- Output path unchanged: `<ROUNDS>/CompetitiveRoundsTierLists/tierlist-<filter>-<timestamp>.png`. RenderTexture pipeline so the image isn't capped to monitor aspect.
+
+**Tier UI iteration in the Card Stats tab (preceded the image overhaul).**
+- Tier column moved to the **left** of the row; tier letter is **bold black** for max contrast against the saturated tier color background.
+- Click-to-cycle is now in-place (no re-render / re-sort) so editing one card no longer flips a different card's tier.
+- Whole row gets a translucent tier-color highlight bounded to the data columns.
+- Export Tier List button moved into the filter row (no longer its own row above the data).
+- Sortable column headers including the new Tier column (Unranked sorts to bottom).
+
+**Backend changes shipped in this version.**
+- `docker-compose.yml`: added `RELEASES_CHANNEL` env var passthrough for the Discord bot's release-poll target.
+- Migration `067_grant_lopidav_gold.sql`: one-shot 20,000g admin grant to lopidav (manual `/migrate` if not already applied).
+
 ## v1.25.25 — Card Stats UX iteration + Beta title scoped to mod users
 
 **Card Stats tier column UX:**

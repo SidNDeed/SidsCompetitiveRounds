@@ -141,16 +141,29 @@
        copy it alongside the DLL so NametagFontRenderer can load it via AssetBundle.LoadFromFile
        next to itself. If absent (user hasn't run the Font Bundler), the mod still loads;
        typefaces just silently fall back to the default font. -->
+  <!-- Card art (jpg/png) — shipped alongside the DLL. CardImageLoader.cs
+       reads these from <plugin-dir>/cards/ at runtime. The CardArtToCopy
+       item group rebuilds on each build to pick up new files. -->
+  <ItemGroup>
+    <CardArtToCopy Include="cards\*.jpg" />
+    <CardArtToCopy Include="cards\*.png" />
+  </ItemGroup>
+
   <Target Name="CopyToPlugins" AfterTargets="Build">
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds" />
+    <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cards" />
     <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(OutputPath)comp-rounds-fonts"
           DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds"
           SkipUnchangedFiles="true"
           Condition="Exists('$(OutputPath)comp-rounds-fonts')" />
+    <Copy SourceFiles="@(CardArtToCopy)"
+          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\cards"
+          SkipUnchangedFiles="true" />
     <Message Text="Copied $(AssemblyName).dll to BepInEx plugins" Importance="high" />
     <Message Text="Copied comp-rounds-fonts bundle to BepInEx plugins" Importance="high"
              Condition="Exists('$(OutputPath)comp-rounds-fonts')" />
+    <Message Text="Copied @(CardArtToCopy->Count()) card art files to BepInEx plugins" Importance="high" />
   </Target>
 
 </Project>
