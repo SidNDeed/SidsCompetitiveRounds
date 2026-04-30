@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.26.1";
+        public const string ModVersion = "1.26.3";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -308,14 +308,25 @@ namespace CompetitiveRounds
 
             stateTimer += Time.deltaTime;
 
-            // Safety timeout — 30s to account for disconnect + NCH connection sequence
+            // Safety timeout — 30s to account for disconnect + NCH connection sequence.
+            // Lexia hit this on a slow Photon connect (v1.26.1 logs): pending room set
+            // mid-queue from a prior session, timeout fired, but the reset only cleared
+            // the room — leaving GameStateWatcher.LeavingForRanked=true (set when we
+            // initiated the leave on line where state became LeavingRoom) and stale
+            // targetRoom / targetRegion behind. Subsequent matches in the same session
+            // could then suppress legitimate DC-win counting. Clear everything.
             if (state != JoinState.Idle && stateTimer > 30f)
             {
-                Plugin.Log.LogWarning("[QUEUE-JOINER] Timed out waiting for room join, resetting");
+                Plugin.Log.LogWarning($"[QUEUE-JOINER] Timed out waiting for room join (state={state}, target='{targetRoom}'), resetting all queue state");
                 Plugin.ClearPendingRoom();
                 joinInitiated = false;
                 state = JoinState.Idle;
                 stateTimer = 0f;
+                targetRoom = null;
+                targetRegion = null;
+                // We may have set this when state went to LeavingRoom — clear so a
+                // future legitimate leave doesn't mistakenly cancel match-result counting.
+                try { GameStateWatcher.LeavingForRanked = false; } catch { }
                 CompetitiveUI.ShowNotification("Failed to join ranked room", new Color(1f, 0.4f, 0.4f));
                 return;
             }
@@ -3325,6 +3336,80 @@ namespace CompetitiveRounds
                 GameStateWatcher.OnLocalBlockSuccessful();
             }
             catch { }
+        }
+    }
+
+    // ── Diagnostic: ConnectToRegion call-site tracer (v1.26.3) ─────────────
+    // Lopi reported (v1.26.1 logs): joined ranked room successfully, sat
+    // there ~15 seconds with the F5 menu open, then suddenly the vanilla
+    // Photon flow fired `connectToRegion us` → Left room → joined a vanilla
+    // EU casual room. Match was abandoned; Lexia stuck in the empty ranked
+    // room. We don't yet know what triggered NCH.ConnectToRegion mid-room
+    // — our QueueJoiner shouldn't fire it once already in the target room,
+    // and MainMenuHandler was disabled so vanilla quickmatch shouldn't be
+    // reachable. This Prefix logs every call to ConnectToRegion along with
+    // a partial managed stack-trace (top 12 frames) when we're in a
+    // competitive room, so the next reproduction tells us exactly which
+    // code path is calling it.
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "ConnectToRegion")]
+    class NCHConnectToRegionDiagPatch
+    {
+        static void Prefix(string region)
+        {
+            try
+            {
+                bool inComp = CompetitiveRoomDetect.IsCompetitiveRoom();
+                string roomName = "(none)";
+                try { roomName = PhotonNetwork.CurrentRoom?.Name ?? "(none)"; } catch { }
+                // Trim the stack-trace to a manageable size — the top frames
+                // are what matter.
+                var st = new System.Diagnostics.StackTrace(1, false);
+                var sb = new System.Text.StringBuilder();
+                int n = Math.Min(st.FrameCount, 12);
+                for (int i = 0; i < n; i++)
+                {
+                    var m = st.GetFrame(i)?.GetMethod();
+                    if (m == null) continue;
+                    sb.Append("  at ").Append(m.DeclaringType?.FullName ?? "?")
+                      .Append('.').Append(m.Name).Append('\n');
+                }
+                Plugin.Log.LogWarning($"[NCH-DIAG] ConnectToRegion('{region}') called " +
+                    $"while inComp={inComp} room='{roomName}'. Stack:\n{sb}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[NCH-DIAG] log error: {ex.Message}"); }
+        }
+    }
+
+    // ── Block trigger null-safety (v1.26.3) ────────────────────────────────
+    // Vanilla Block.IDoBlock iterates Block.triggers and calls DoBlock on each.
+    // The iteration does NOT null-check before invoking, but card teardowns
+    // between rounds can leave references to destroyed BlockTrigger instances
+    // in the list. Vanilla's BlockTrigger.DoBlock reads `this.gameObject`
+    // early, which throws NRE on a destroyed Component. The exception
+    // propagates out of the IDoBlock coroutine, abandoning the remaining
+    // triggers — so a single dangling reference silently breaks ALL of the
+    // player's blocks for the rest of the round.
+    //
+    // Reproduced in Lexia's v1.26.1 logs: 9 BLOCK-DBG ACTIVATED events in a
+    // single round, each followed by the same NRE (BlockTrigger.DoBlock
+    // [0x0002a]). Block effect never registered for any of them. Adding a
+    // Prefix that bails on a destroyed __instance restores the rest of
+    // the iteration. Vanilla bug; we're patching the missing null-check.
+    [HarmonyPatch(typeof(BlockTrigger), "DoBlock")]
+    class BlockTriggerDoBlockNullSafetyPatch
+    {
+        static bool Prefix(BlockTrigger __instance)
+        {
+            // Unity Component "fake null": `__instance == null` is true when
+            // the underlying GameObject was destroyed even if the managed
+            // reference is non-null. Returning false skips the original
+            // method entirely and the iterator continues.
+            if (__instance == null)
+            {
+                Plugin.Log.LogWarning("[BLOCK-SAFETY] skipping destroyed BlockTrigger in Block.triggers (vanilla NRE workaround)");
+                return false;
+            }
+            return true;
         }
     }
 

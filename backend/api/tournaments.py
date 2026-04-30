@@ -382,7 +382,9 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
 async def lock_tournament(db: AsyncSession, t: Tournament) -> None:
     """Transition voting -> locked. Picks scheduled_start_ts from top-voted slot
     (random among ties), snapshots Elo for seeding, generates bracket. If
-    signup count < min_players, mark cancelled instead."""
+    signup count < min_players, push lock_at + start back by a week instead
+    of cancelling — gives the community another full signup window to
+    rally rather than skipping the cadence outright."""
     now = datetime.now(timezone.utc)
 
     # Confirmed signups only (is_speculative=False).
@@ -393,9 +395,29 @@ async def lock_tournament(db: AsyncSession, t: Tournament) -> None:
     signups = (await db.execute(q)).scalars().all()
 
     if len(signups) < t.min_players:
-        t.status = "cancelled"
-        t.locked_at = now
-        t.prize_tier = "none"
+        # Pushback path. Status stays "voting" so the cron re-enters this
+        # function next week. lock_at, voting_closes_at, default_start_ts
+        # all advance by 7 days. For async tournaments default_start_ts
+        # equals lock_at (they begin the moment signups close); for sync,
+        # default_start_ts is a separate scheduled time we also push.
+        push = timedelta(days=7)
+        t.lock_at = now + push
+        t.voting_closes_at = t.lock_at
+        if t.kind == "async":
+            t.default_start_ts = t.lock_at
+        else:
+            # Sync: keep the same time-of-day, slide the date by 7 days.
+            t.default_start_ts = t.default_start_ts + push
+        # Wipe any tallied votes whose slot_ts is now in the past so the
+        # next lock attempt isn't biased toward a stale slot.
+        await db.execute(
+            text("DELETE FROM tournament_time_votes "
+                 "WHERE tournament_id = :tid AND slot_ts <= :now"),
+            {"tid": t.id, "now": now},
+        )
+        print(f"[TOURNAMENT] {t.id} only {len(signups)}/{t.min_players} "
+              f"confirmed signups — pushing lock_at to {t.lock_at.isoformat()} "
+              f"(kind={t.kind}). Status stays voting.")
         return
 
     # Prize tier

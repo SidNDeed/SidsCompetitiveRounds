@@ -1,6 +1,6 @@
 {
     "name": "SidsCompetitiveRounds",
-    "version_number": "1.26.2",
+    "version_number": "1.26.3",
     "website_url": "https://github.com/SidNDeed/SidsCompetitiveRounds",
     "description": "Ranked mod for vanilla ROUNDS v1.1.2. Glicko-2 BO3 matchmaking (1v1 + 2v2), tier list maker with card art, tournaments, leaderboards, shop, betting, Discord bridge, anti-cheat.",
     "dependencies": ["BepInEx-BepInExPack_ROUNDS-5.4.1901"]

@@ -1,8 +1,12 @@
 # Sid's Competitive Rounds — Changelog
 
-## v1.26.2 — Thunderstore-only repack of v1.26.1
+## v1.26.3 — Tester feedback batch: unequip cosmetics, tournament push-back, block NRE safety, queue cleanup
 
-The in-game mod version stays at 1.26.1 (no functional changes for Thunderstore users). This bump is solely to clear the previous Thunderstore submission rejection: the original v1.26.1 zip embedded a runtime asset-download URL in the DLL, which Thunderstore policy disallows. The v1.26.1 source has since been gated so the THUNDERSTORE build excludes that path entirely; the bundled cards still ship inside the zip as before.
+- **Cosmetics**: clicking an equipped title or trail now unequips it (was previously a no-op). Button label flipped from `Equipped` → `Unequip`.
+- **Tournaments**: when fewer than 8 confirmed signups land by lock time, the tournament now pushes its start back by 7 days instead of cancelling — keeps the cadence going while the community rallies. Stale time-slot votes (slot ≤ now) get cleared on each push.
+- **Block NRE safety**: vanilla `BlockTrigger.DoBlock` was throwing NRE when one of `Block.triggers[]` was a destroyed reference, abandoning the rest of the trigger list and silently neutering the player's blocks for the round. Added a Prefix that skips destroyed instances cleanly.
+- **Queue state cleanup**: the 30s `[QUEUE-JOINER]` timeout now clears `targetRoom`, `targetRegion`, and `GameStateWatcher.LeavingForRanked` (previously only cleared the pending room name). Slow Photon connects that timed out could otherwise suppress legitimate DC-win counting in the next match.
+- **Diagnostic**: `[NCH-DIAG]` Prefix on `NetworkConnectionHandler.ConnectToRegion` logs every call with a trimmed stack-trace when we're in a competitive room, to chase down a v1.26.1 report of mid-room casual-fallthrough.
 
 ## v1.26.1 — Hotfix: card art auto-bootstraps for non-Thunderstore installs
 

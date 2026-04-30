@@ -1,5 +1,17 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.3 — Tester feedback batch: unequip cosmetics, tournament push-back, block NRE safety, queue-state cleanup, mid-room ConnectToRegion diagnostic
+
+**Cosmetics — clicking the equipped title or trail now unequips it.** Backend already supported `item_id=null` to clear the active title/trail, but the client never sent it; clicking an "Equipped" item just re-set the same value. Now the click handler detects re-click of an active single-equip cosmetic and sends `0` (translates to omitted query param → null). Button label flipped from `Equipped` → `Unequip` so the action is obvious.
+
+**Tournaments — under-min-signup pushes the start back a week instead of cancelling.** Previously `lock_tournament` marked the tournament `cancelled` when fewer than `min_players` (8) confirmed signups had landed by `lock_at`, and the cadence skipped that whole week. Now the same condition slides `lock_at`, `voting_closes_at`, and `default_start_ts` (or `lock_at` for async) forward by 7 days, status stays `voting`, stale slot-votes whose `slot_ts` ≤ now are dropped, and the cron re-enters lock_tournament next week. Repeats until 8+ confirmed signups land or the community gives up. Async kind tracks `lock_at`; sync kind keeps the same time-of-day on the new date.
+
+**Block NRE safety — `BlockTrigger.DoBlock` `Prefix` now skips destroyed instances.** Lexia's logs showed 9 NREs in a single round inside vanilla `BlockTrigger.DoBlock [0x0002a]` (reading `this.gameObject` on a destroyed Component). Vanilla's `Block.IDoBlock` iterator doesn't null-check before invoking each trigger; one dangling reference (likely a card teardown leak between rounds) blew up the rest of the trigger list, silently neutering all the player's blocks for the rest of the round. Patch returns `false` from the Prefix when `__instance == null` (Unity fake-null check) so the iterator continues with the remaining triggers.
+
+**Queue state cleanup on `[QUEUE-JOINER]` 30s timeout.** The previous reset only cleared `pendingRankedRoom`. Now it also nulls `targetRoom` / `targetRegion` and explicitly clears `GameStateWatcher.LeavingForRanked = false`. Without this, a slow Photon connect that timed out left `LeavingForRanked = true` and could subsequently suppress legitimate DC-win counting in the next match.
+
+**Diagnostic — `[NCH-DIAG]` traces every `NetworkConnectionHandler.ConnectToRegion` call.** Lopi's v1.26.1 logs showed an unexplained `connectToRegion us` mid-ranked-room that pulled him into a vanilla EU casual lobby and stranded Lexia. Our `MainMenuHandler` was disabled and our `QueueJoiner` doesn't fire `ConnectToRegion` once already in the target room, so something else is calling it — but we can't tell what without a stack. The new Prefix logs the call with a trimmed managed stack-trace whenever it fires while we're in a competitive room. Next reproduction will tell us the exact call site.
+
 ## v1.26.1 — Hotfix: card art auto-bootstraps for non-Thunderstore installs
 
 The v1.26.0 Thunderstore bundle ships the 67 card PNGs alongside the DLL, so Thunderstore installs got the tier list export image working out of the box. The Discord installer and direct GitHub-DLL drops only deliver the DLL though, which left those users with text-only cells in the export and a missing image popup. v1.26.1 fixes that without requiring a re-install or installer update.

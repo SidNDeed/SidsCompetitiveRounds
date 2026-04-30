@@ -1645,20 +1645,45 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                                 if (it.id == r.itemId) { kind = it.kind; itemName = it.name; itemColor = it.preview_color; break; }
                         Plugin.Log.LogInfo($"[SHOP] Set Active clicked sku={r.sku} kind={kind}");
 
+                        // Detect re-click of an already-equipped single-active item
+                        // → unequip path. Backend's _set_active_cosmetic clears
+                        // the active_*_id when item_id is None, so we send 0
+                        // (translated to omitted query param in ApiClient).
+                        var cached = ApiClient.CachedPlayerStats;
+                        bool clickedActiveTitle = kind == "title" && cached != null && cached.active_title == itemName;
+                        bool clickedActiveTrail = kind == "trail" && cached != null && cached.active_trail_sku == itemSku;
+                        bool unequipping = clickedActiveTitle || clickedActiveTrail;
+                        long apiItemId = unequipping ? 0L : r.itemId;
+
                         // Optimistic UI update - flip the cached stats IMMEDIATELY so Refresh
                         // reflects the equip without waiting for the server round-trip + FetchPlayerStats.
-                        var cached = ApiClient.CachedPlayerStats;
                         if (cached != null)
                         {
                             if (kind == "title")
                             {
-                                cached.active_title = itemName;
-                                cached.active_title_color = itemColor;
+                                if (clickedActiveTitle)
+                                {
+                                    cached.active_title = null;
+                                    cached.active_title_color = null;
+                                }
+                                else
+                                {
+                                    cached.active_title = itemName;
+                                    cached.active_title_color = itemColor;
+                                }
                             }
                             else if (kind == "trail")
                             {
-                                cached.active_trail_sku = itemSku;
-                                cached.active_trail_color = itemColor;
+                                if (clickedActiveTrail)
+                                {
+                                    cached.active_trail_sku = null;
+                                    cached.active_trail_color = null;
+                                }
+                                else
+                                {
+                                    cached.active_trail_sku = itemSku;
+                                    cached.active_trail_color = itemColor;
+                                }
                             }
                             else if (kind == "color")
                             {
@@ -1726,11 +1751,11 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                                 }
                             }
                         };
-                        if (kind == "trail") ApiClient.SetActiveTrail(id, r.itemId, cb);
+                        if (kind == "trail") ApiClient.SetActiveTrail(id, apiItemId, cb);
                         else if (kind == "color") ApiClient.ToggleMapColor(id, r.itemId, cb);
                         else if (kind == "nametag") ApiClient.ToggleNametagStyle(id, r.itemId, cb);
                         else if (kind == "player_color") ApiClient.SetActivePlayerColor(id, r.itemId, cb);
-                        else ApiClient.SetActiveTitle(id, r.itemId, cb);
+                        else ApiClient.SetActiveTitle(id, apiItemId, cb);
                     }
                     catch (Exception ex) { Plugin.Log.LogError($"[SHOP] setActive threw: {ex}"); }
                 },
@@ -1992,14 +2017,14 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                     ? new Color(0.2f, 0.55f, 0.2f, 0.95f)   // active = green
                     : new Color(0.3f, 0.3f, 0.5f, 0.9f));   // inactive = default
                 var txtComp = UIFactory.GetButtonText(r.setActiveBtn);
-                // Colors are multi-equip (cycle via Shift) and nametags are stackable, so
+                // Colors are multi-equip (cycle via Shift) and nametags are stackable so
                 // their "active" label is "Remove" - clicking removes from the equipped set.
-                // Titles/trails are single-active so their label stays "Equipped" (visual
-                // indicator only; clicking switches to this one from a different equipped).
+                // Titles/trails/player-colors are single-active; clicking the equipped one
+                // unequips it so the player can run with no title / no trail / default body.
                 bool isMultiEquip = it.kind == "nametag" || it.kind == "color";
                 if (txtComp != null) UIFactory.SetText(txtComp,
                     isActive
-                        ? (isMultiEquip ? "Remove" : "Equipped")
+                        ? (isMultiEquip ? "Remove" : "Unequip")
                         : (isMultiEquip ? "Equip" : "Set Active"));
             }
 
