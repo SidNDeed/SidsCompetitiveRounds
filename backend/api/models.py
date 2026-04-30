@@ -54,6 +54,10 @@ class Player(Base):
     nametag_style_ids = Column(ARRAY(BigInteger), nullable=False, default=list)
     first_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     last_seen = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    # Set by _mark_mod_seen on the first call from a mod-only endpoint.
+    # NULL = passive opponent record (auto-created via get_or_create_player
+    # when their match was reported by someone else).
+    mod_seen_at = Column(DateTime(timezone=True), nullable=True)
 
     glicko = relationship("GlickoRating", back_populates="player", uselist=False)
     rating_history = relationship("RatingHistory", back_populates="player")

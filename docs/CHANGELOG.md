@@ -1,5 +1,22 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.25.25 — Card Stats UX iteration + Beta title scoped to mod users
+
+**Card Stats tier column UX:**
+- Tier moved to the LEFT side of the row (was rightmost). Header `Tier | Card | Rarity | Picks | Wins | WR% | Pass%`.
+- Tier text is now **black** for max contrast on the saturated tier-color backgrounds.
+- Tier column is **sortable** — clicking the header cycles asc/desc, with un-tiered cards always at the bottom.
+- Each card row gets a translucent background tinted in its tier color (~25% alpha, so text stays readable). None state = transparent.
+
+**Card preview popup fix:**
+- The previous version cloned vanilla CardInfo prefabs under our screen-space overlay canvas; vanilla cards render in world space, so the preview just looked like a grey backdrop with a one-frame card flash.
+- Replaced with a text-based modal: card name (bold), rarity tag (colored), italic description, stat block (each `CardInfoStat` rendered with its `amount` + name, green for positive, red for negative). Click anywhere outside to dismiss.
+
+**Beta title scoped to actual mod users:**
+- Migration 071 adds `players.mod_seen_at` and revokes the Beta grant from players whose record was auto-created from a casual-opponent match report (no signal of mod install). Result: 47 confirmed mod users keep Beta; 685 passive opponents lost it.
+- New helper `_mark_mod_seen()` runs in mod-only endpoints (`/queue/join`, `/team/queue/join`, `/toggle-ranked`, `/achievements/unlock`, the reporter side of `/matches` and `/team/matches`, both sides of `/series/preflight`). Stamps `mod_seen_at` and grants Beta on first call.
+- `get_or_create_player` no longer auto-grants Beta — passive opponent rows no longer inherit it.
+
 ## v1.25.24 — Names + private-room tag, Beta title, card tier-list, card preview, Discord betting
 
 **Display names lag fix:** new players now appear with their actual nickname in Live Ranked Games / Recent Series instead of their bare Steam ID. `/series/preflight` accepts optional `p1_name` / `p2_name` and the client passes both Photon NickNames in.

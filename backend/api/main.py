@@ -340,26 +340,38 @@ async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: st
 
     if purged:
         print(f"[PRIVACY] Re-registration blocked: steam_id={steam_id} was previously purged — tombstoned")
-    else:
-        # Auto-grant the "Beta" title to fresh joiners while the mod is in
-        # beta. Free, dark blue, equipped immediately if they have no other
-        # active title. Removed from auto-grant when beta ends (drop the
-        # title row or change this branch).
-        try:
-            beta_id = (await db.execute(
-                text("SELECT id FROM shop_items WHERE sku = 'title_beta' LIMIT 1")
-            )).scalar()
-            if beta_id is not None:
-                await db.execute(text(
-                    "INSERT INTO player_items (player_id, item_id, purchase_price) "
-                    "VALUES (:pid, :iid, 0) "
-                    "ON CONFLICT (player_id, item_id) DO NOTHING"
-                ), {"pid": player.id, "iid": beta_id})
-                if player.active_title_id is None:
-                    player.active_title_id = beta_id
-        except Exception as ex:
-            print(f"[BETA] auto-grant failed for {steam_id}: {ex}")
+    # Beta title is NOT auto-granted here anymore — every player row in the
+    # DB triggers this path including casual opponents auto-created from
+    # match reports. _mark_mod_seen() in mod-only endpoints handles the
+    # Beta grant for actual mod users.
     return player
+
+
+async def _mark_mod_seen(db: AsyncSession, player: Player) -> None:
+    """Stamp `mod_seen_at` and auto-grant the Beta title. Called from mod-only
+    endpoints (queue join, toggle-ranked, achievements unlock, match-report
+    reporter) so the Beta title only lands on confirmed mod users — not on
+    casual opponents auto-created by get_or_create_player."""
+    if player is None or player.deleted_at is not None:
+        return
+    try:
+        if player.mod_seen_at is None:
+            player.mod_seen_at = datetime.now(timezone.utc)
+        beta_id = (await db.execute(
+            text("SELECT id FROM shop_items WHERE sku = 'title_beta' LIMIT 1")
+        )).scalar()
+        if beta_id is None:
+            return
+        await db.execute(
+            text("INSERT INTO player_items (player_id, item_id, purchase_price) "
+                 "VALUES (:pid, :iid, 0) "
+                 "ON CONFLICT (player_id, item_id) DO NOTHING"),
+            {"pid": player.id, "iid": beta_id},
+        )
+        if player.active_title_id is None:
+            player.active_title_id = beta_id
+    except Exception as ex:
+        print(f"[BETA] mark_mod_seen failed for {player.steam_id}: {ex}")
 
 
 def verify_hmac(report: MatchReport) -> bool:
@@ -488,7 +500,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.25.24"
+LATEST_MOD_VERSION = "1.25.25"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -780,6 +792,8 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
 
     # Find the reporting player
     reporter = p1 if report.reported_by_steam_id == report.player1.steam_id else p2
+    # Reporter clearly has the mod installed — stamp them and grant Beta.
+    await _mark_mod_seen(db, reporter)
 
     # Create match record. duration_seconds mirrors match_duration so anti-cheat
     # queries can use the canonical column going forward; both populated for safety.
@@ -2072,6 +2086,7 @@ async def toggle_ranked(steam_id: str, enabled: bool = Query(...), db: AsyncSess
         player = await get_or_create_player(db, steam_id, steam_id)
 
     player.ranked_enabled = enabled
+    await _mark_mod_seen(db, player)
     await db.commit()
 
     return {"steam_id": steam_id, "ranked_enabled": enabled}
@@ -2113,6 +2128,7 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
     # Get or create the player (auto-register on first queue join)
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
+    await _mark_mod_seen(db, player)
 
     # Get their current rating
     rating_result = await db.execute(
@@ -3894,6 +3910,10 @@ async def series_preflight(
     # a name (older mod build).
     p1 = await get_or_create_player(db, p1_steam_id, p1_name or p1_steam_id)
     p2 = await get_or_create_player(db, p2_steam_id, p2_name or p2_steam_id)
+    # Both players reached preflight via their own mod's GameStateWatcher,
+    # so both are confirmed mod users.
+    await _mark_mod_seen(db, p1)
+    await _mark_mod_seen(db, p2)
     if not p1.ranked_enabled or not p2.ranked_enabled:
         # Don't create series for casual matches. Client should re-call after
         # both have toggled ranked on.
@@ -4465,6 +4485,7 @@ async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = D
     player = player.scalar_one_or_none()
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
+    await _mark_mod_seen(db, player)
 
     # Check if already unlocked
     existing = await db.execute(
@@ -4990,6 +5011,7 @@ async def team_queue_join(req: TeamQueueJoinRequest, db: AsyncSession = Depends(
     await _check_ban_or_raise(db, req.steam_id)
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
+    await _mark_mod_seen(db, player)
 
     # Snapshot 2v2 rating (default if no row yet)
     g2_r = await db.execute(select(GlickoRating2v2).where(GlickoRating2v2.player_id == player.id))
@@ -6099,6 +6121,8 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
     reporter = by_steam.get(report.reported_by_steam_id)
     if not reporter:
         raise HTTPException(400, "Reporter must be one of the four participants")
+    # 2v2 reporter clearly has the mod installed.
+    await _mark_mod_seen(db, reporter)
 
     # First-match-of-series team_series slot alignment. The server's balancer
     # assigned team1/team2 at lock time, but the client's t1a/t1b/t2a/t2b
