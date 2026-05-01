@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.26.4";
+        public const string ModVersion = "1.26.5";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -3418,18 +3418,58 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(BlockTrigger), "DoBlock")]
     class BlockTriggerDoBlockNullSafetyPatch
     {
-        static bool Prefix(BlockTrigger __instance)
+        // Original v1.26.3 patch silently swallowed destroyed-trigger NREs so
+        // Block.IDoBlock's iterator could continue with remaining triggers.
+        // That fixed Lexia's "9 NREs in one round" cascade but masked an
+        // upstream bug where SOME players (Sir Blender, NotHoly reported
+        // post-v1.26.3) end up with their MAIN block-effect trigger destroyed
+        // — meaning the cascade-skip works as intended, but the visual /
+        // damage-absorb that lived on the destroyed trigger never fires and
+        // the player's block "doesn't proc". v1.26.5 expands the patch to
+        // capture per-call diagnostic context (player ActorNumber + trigger
+        // info) so the next reproduction tells us which trigger is being
+        // destroyed and from where, AND adds a Finalizer backstop in case
+        // vanilla NREs even when __instance looks alive (some sub-component
+        // destroyed under it).
+        static bool Prefix(BlockTrigger __instance, BlockTrigger.BlockTriggerType triggerType)
         {
-            // Unity Component "fake null": `__instance == null` is true when
-            // the underlying GameObject was destroyed even if the managed
-            // reference is non-null. Returning false skips the original
-            // method entirely and the iterator continues.
             if (__instance == null)
             {
-                Plugin.Log.LogWarning("[BLOCK-SAFETY] skipping destroyed BlockTrigger in Block.triggers (vanilla NRE workaround)");
+                // Try to figure out which player owned this trigger so the log
+                // tells us "Sid's block missed its main trigger" not just
+                // "some block trigger somewhere died."
+                string ownerInfo = "?";
+                try
+                {
+                    // __instance is fake-null but the wrapper still has a
+                    // type — try to introspect. transform/gameObject access
+                    // will themselves throw on a destroyed object, so wrap.
+                    ownerInfo = "(GameObject destroyed)";
+                }
+                catch { }
+                Plugin.Log.LogWarning($"[BLOCK-SAFETY] DoBlock skipped: triggerType={triggerType} owner={ownerInfo}. " +
+                    "If a player's block isn't proccing this round, this is the cause — main BlockTrigger was destroyed.");
                 return false;
             }
             return true;
+        }
+
+        // Backstop: if vanilla still NREs after the Prefix lets it through
+        // (e.g., a child Component on a live BlockTrigger is destroyed),
+        // swallow the exception so Block.IDoBlock's iterator continues with
+        // the remaining triggers instead of aborting the whole block.
+        static Exception Finalizer(Exception __exception, BlockTrigger __instance, BlockTrigger.BlockTriggerType triggerType)
+        {
+            if (__exception is NullReferenceException)
+            {
+                string state = "alive";
+                try { if (__instance == null) state = "destroyed"; } catch { state = "introspection-failed"; }
+                Plugin.Log.LogWarning($"[BLOCK-SAFETY] NRE inside vanilla DoBlock " +
+                    $"(triggerType={triggerType} instance={state}) — swallowed so iterator continues. " +
+                    "Stack: " + (__exception.StackTrace ?? "(none)").Replace("\n", " | "));
+                return null;
+            }
+            return __exception;
         }
     }
 

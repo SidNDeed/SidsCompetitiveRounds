@@ -1,5 +1,38 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.5 — Tournament resurrection + leaver/bet/block fixes
+
+The async tournament had been silently broken since the feature shipped — `start_tournament` errored on every cron tick because the `RankedSeries` SQLAlchemy model was missing the `tournament_id` / `is_tournament` / `is_private` columns it tries to populate. Tournaments stayed stuck at `status='locked'` forever and players' ranked games against their bracket opponents weren't attributed. Fixed model + a pile of correctness and UX issues that surfaced once tournaments started running.
+
+**Tournament fixes (server)**
+- `RankedSeries` model gained `tournament_id`, `is_tournament`, `is_private` columns to match the existing DB schema. Confirmed live: the active async tournament flipped from `locked` → `running` immediately on deploy, and Sid+Lopi's WB R1 series row now has `tournament_id` populated.
+- New `tournament_matches.photon_room_name` column (migration 072) — server allocates the room name at activation time rather than each client deriving `"sct-" + match_id[:12]` independently. Eliminates the dual-derivation race.
+- `_prune_stale_series` now skips `is_tournament=TRUE` rows. The 30-minute "no match reported = abandoned" cutoff was correct for queue/private series but kept sweeping async tournament series rows whose 7-day match window hadn't elapsed. Migration 074 restored the two rows that got swept before the fix.
+- Migration 073 marked 19 zombie pre-fix `status='active'` ranked_series rows as `abandoned` so historical queries that don't time-bound aren't lying about the live count.
+- `/api/v1/tournaments/my-active-matches` now returns `photon_room_name`, `photon_region`, `my_ready`, `opp_ready`. Used by the new client-side dispatch loop (below).
+- `/api/v1/series/active` returns `phase: "pre_match" | "live"` so clients can split tournament series between Tournament-tab and Live-Ranked-Games panel.
+- Dropped a dead `grant()` stub in `_pay_prizes` that sat next to the active `do_grant()` — unused since some prior refactor, copy-paste trap.
+
+**Tournament UX (client)**
+- New **"Upcoming Match Bets"** section in the Tournament tab showing every active tournament series in `pre_match` phase with the same 3-row bet UI used in Live Ranked Games. Hides automatically when there's nothing to bet on.
+- Live Ranked Games panel now **filters out** tournament series that haven't gone live (`is_tournament && phase == "pre_match"`). They reappear once any in-game activity registers.
+- Tournament dispatch (auto-connect to the Photon room when both players ready) is now **tab-independent**: the existing `TournamentHeartbeatLoop` plugin-level coroutine — which already runs forever for ready-up signals — also fires `SetPendingRoom` when it sees a sync `ready` match with both players ready and a server-issued room name. Previously the dispatch only fired while the user was actively on the Tournament tab in F5, which routinely meant they missed the 5-min ready window from in-game.
+- Visual bracket: replaced the collapsing-list bracket render with a positional canvas — each match is a 170×48 cell anchored at a computed (x, y) within `tBracketVisual`, with L-shaped connector lines drawn between prereq matches. WB columns top-left, LB columns bottom-left, GF column far right. Status colors (cyan completed, yellow ready, green active, gray pending). Falls back to a structure-only blank bracket of the right size during voting/locked phases so players can see the shape ahead of time.
+- Auto-connect prefers server-issued `photon_room_name` over the legacy client-side derivation; three call sites updated (Reconnect button, my-room-code display, sync auto-dispatch).
+
+**Tournament + private bets are bettable on the same terms as queue series**
+- Earlier in the session I had auto-locked bets on tournament + private series with `lock_reason="tournament"` / `"private_room"`. Reverted — same lock rules as queue games (≥2 firefights into game 1, OR a game has been won, OR no meaningful odds). Display tags `[TOURNAMENT Async]` and `[PRIVATE]` stay so users still know what kind of match they're betting on. Discord embed mirrors with 🏆 prefix + `[Async]/[Sync]` suffix and a `PRE-MATCH` callout when phase=="pre_match".
+
+**Leaver penalty fixes**
+- `matchIsRanked` now persists across games of a series. `OnMatchStarted` re-derives it from the room's CustomProperties (mod-issued ranked rooms force-true, vanilla rooms with both players opted-in fall through). Previously `OnGameOver` cleared `matchIsRanked` at the end of every game, but the room-join branch that re-set it only fired once per Photon room — so games 2 and 3 of a ranked series were silently treated as casual: leaver reports skipped, session W/L tallied as casual, the `[POLL]` log line read "CASUAL Match Over" mid-ranked-series. Reproduced 2026-04-30 when Galaxy Ice DC'd mid-game-2 with ~6 firefights on the board and got no leaver penalty.
+- Leaver threshold widened from `totalPts >= 2` to `totalPts >= 2 OR seriesGames >= 1`. Either path counts as meaningful play: 2+ firefights in the current game, or any prior game completed in the series. The earlier threshold treated only the current game's firefight count and missed leavers who walked early in game 2 of a 1-0 series.
+
+**Eager preflight for private rooms**
+- `series/preflight` now fires the moment we see the opponent's `cr_*` Photon properties — no longer waits for the HTTP `/mod/check` round trip. Discord `#live-bets` and the in-game Live Ranked Games panel now surface private 1v1 matches within ~10s of room entry instead of "a whole game late." Server's preflight handler is idempotent and returns `skipped` if either player isn't ranked, so eager calls are harmless.
+
+**Block-trigger safety: verbose diagnostics**
+- v1.26.3's silent skip on destroyed `BlockTrigger` instances was masking an upstream bug — players (Sir Blender, NotHoly reported post-v1.26.3) ending up with their MAIN block-effect trigger destroyed, so the cascade-skip kept the iterator alive but the player's block "didn't proc" because the visual+absorb effect lived on the destroyed trigger. The patch now logs the trigger type and instance state on every skip, AND adds a `Finalizer` backstop that catches any vanilla `NullReferenceException` inside `DoBlock` (with stack trace) so we get diagnostic data on the next reproduction.
+
 ## v1.26.4 — 2v2 assembly cascade fix
 
 Two consecutive 2v2 tests with 4 players (Sid + 3 testers) hit the same disconnect pattern: ~30 seconds after Both-Ready, the server canceled the series with reason `assembly_timeout, 3/4 confirmed` and kicked all 4 players back to the menu. Root cause was the server's 15-second deadline for all 4 clients to post `/spawn-confirm` after the room is created — Photon region pinging routinely blows past that on slow connects (Sid's logs had ~390 lines of `Trying to connect to photon` before the join even started). Once any one client busted the deadline, the cancellation cascaded: each player's `OnPlayerLeftRoom` callback fired `/report-dc` on the room exits triggered by the cancellation, which only made things noisier server-side.

@@ -500,7 +500,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.26.4"
+LATEST_MOD_VERSION = "1.26.5"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -3667,11 +3667,20 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
 async def _prune_stale_series(db: AsyncSession) -> int:
     """Mark series abandoned when no match has been reported within 30 min of creation,
     and refund any pending bets on those series. Returns the number of series pruned.
-    Called lazily at the start of /series/active so we don't need a separate scheduler."""
+    Called lazily at the start of /series/active so we don't need a separate scheduler.
+
+    Tournament series are exempt — async tournament matches have a 7-day match
+    deadline and the series row is created at lock time (potentially days
+    before the players actually meet up). The 30-minute cutoff that's right
+    for queue/private series would otherwise sweep them every poll once they
+    age past the threshold, which is exactly what happened on 2026-05-01
+    when the active async tournament's WB R1 series got marked abandoned
+    despite the bracket being live."""
     cutoff_min = 30
     stale_rows = (await db.execute(text(
         "SELECT rs.id FROM ranked_series rs "
         "WHERE rs.status = 'active' "
+        "  AND rs.is_tournament = FALSE "
         "  AND rs.created_at < NOW() - (:cutoff_min || ' minutes')::interval "
         "  AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
         "LIMIT 50"
@@ -3734,12 +3743,16 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
             rs.p1_series_wins, rs.p2_series_wins,
             rs.live_p1_points, rs.live_p2_points,
             rs.created_at,
-            rs.is_private
+            rs.is_private,
+            rs.is_tournament,
+            rs.tournament_id::text     AS tournament_id,
+            t.kind                     AS tournament_kind
         FROM ranked_series rs
         JOIN players p1        ON p1.id = rs.player1_id
         JOIN players p2        ON p2.id = rs.player2_id
         LEFT JOIN glicko_ratings gr1 ON gr1.player_id = rs.player1_id
         LEFT JOIN glicko_ratings gr2 ON gr2.player_id = rs.player2_id
+        LEFT JOIN tournaments t      ON t.id = rs.tournament_id
         WHERE rs.status = 'active'
           AND rs.created_at > NOW() - INTERVAL '2 hours'
         ORDER BY rs.created_at DESC
@@ -3764,18 +3777,28 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         no_profit = max(p1_odds, p2_odds) < 1.10
         score_locked = (live_p1 + live_p2) >= 2 or r["p1_series_wins"] > 0 or r["p2_series_wins"] > 0
         is_private = bool(r["is_private"])
-        # Private rooms surface in /series/active right at game start with no
-        # usable pre-game betting window, so we lock bets immediately and the
-        # client renders a PRIVATE tag instead of bettable odds.
-        bets_locked = no_profit or score_locked or is_private
-        if is_private:
-            lock_reason = "private_room"
-        elif score_locked:
+        is_tournament = bool(r["is_tournament"])
+        tournament_kind = r["tournament_kind"]   # "sync" | "async" | None
+        # Tournament + private series stay bettable on the same terms as
+        # queue series — lock at 2 firefights into game 1 or once any game
+        # has been won. Tag stays for display so users still see what kind
+        # of match they're betting on.
+        bets_locked = no_profit or score_locked
+        if score_locked:
             lock_reason = "game_in_progress"
         elif no_profit:
             lock_reason = "no_meaningful_odds"
         else:
             lock_reason = None
+        # Match phase. "pre_match" = series row exists but no in-game
+        # activity yet (no points scored, no game won). "live" = game 1
+        # has actually started or a game is decided. Used by clients to
+        # split tournament series between the Tournament tab (pre-match
+        # bet UI) and the Live Ranked Games panel (live state only) so
+        # tournament pairings don't clutter the live panel before they
+        # actually start playing.
+        any_activity = (live_p1 + live_p2) > 0 or r["p1_series_wins"] > 0 or r["p2_series_wins"] > 0
+        phase = "live" if any_activity else "pre_match"
         series.append({
             "series_id": r["series_id"],
             "p1_steam_id": r["p1_steam_id"],
@@ -3795,6 +3818,9 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
             "bets_locked": bets_locked,
             "lock_reason": lock_reason,
             "is_private": is_private,
+            "is_tournament": is_tournament,
+            "tournament_kind": tournament_kind,
+            "phase": phase,
             "started_at": r["created_at"].isoformat() if r["created_at"] else None,
         })
     return {"series": series}

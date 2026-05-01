@@ -521,6 +521,49 @@ namespace CompetitiveRounds
                 TryResolveOpponent();
             }
 
+            // Eager preflight for private rooms. The matchIsRanked-gated
+            // preflight inside the CheckOpponentRanked callback (further
+            // down) is async — it waits for an HTTP /mod/check round
+            // trip before firing. For private rooms that delay routinely
+            // landed the /series/active row a whole game late, which
+            // meant Discord #live-bets and the in-game Live Ranked Games
+            // panel only surfaced the match when game 1 was already over.
+            // Fire as soon as we have the opponent's Steam ID and see
+            // their mod props (cr_*) on Photon — server's preflight
+            // endpoint is idempotent and already returns "skipped" if
+            // either player isn't ranked, so calling it eagerly is safe.
+            // Mod-issued rooms (ranked_*, sct-*) skip this branch — the
+            // queue / tournament flow pre-creates the series row anyway,
+            // and inCrFf rooms are 2v2 (separate team_series pipeline).
+            if (inRoom && !seriesPreflightSent
+                && opponentSteamIdResolved
+                && !string.IsNullOrEmpty(opponentSteamId)
+                && !opponentSteamId.StartsWith("photon_")
+                && OpponentHasMod()
+                && (Plugin.RankedEnabled?.Value ?? false)
+                && string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
+                && !string.IsNullOrEmpty(localSteamId))
+            {
+                bool inCrFfEager = false;
+                try
+                {
+                    var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
+                    inCrFfEager = rp != null && rp.ContainsKey("cr_ff");
+                }
+                catch { }
+                string rNameEager = "";
+                try { rNameEager = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+                bool isModIssuedEager = rNameEager.StartsWith("ranked_")
+                                     || rNameEager.StartsWith("team_")
+                                     || rNameEager.StartsWith("sct-");
+                if (!inCrFfEager && !isModIssuedEager)
+                {
+                    seriesPreflightSent = true;
+                    Plugin.Log.LogInfo($"[POLL] Eager preflight: opponent {opponentSteamId} has mod props — firing /series/preflight before /mod/check completes");
+                    ApiClient.SendSeriesPreflight(localSteamId, opponentSteamId);
+                }
+            }
+
             // Opponent ranked-check + retry. Initial check fires as soon as their
             // Steam ID is resolved; subsequent retries fire every 5s while in room
             // IF the previous check returned false but we can see they have the mod
@@ -603,17 +646,26 @@ namespace CompetitiveRounds
                         int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
                         int oppR = localTeamId == 0 ? p2Rounds : p1Rounds;
                         int totalPts = p1Points + p2Points;
+                        int seriesGames = p1Rounds + p2Rounds; // games already won this series
 
-                        // Report for leave % if: ranked, >=2 total points, neither has >=4 rounds
-                        if (matchIsRanked && totalPts >= 2 && localR < 4 && oppR < 4
+                        // Report for leave % if:
+                        //  - match is ranked
+                        //  - meaningful play happened (>=2 firefights in current game,
+                        //    OR at least one prior game completed in this series so the
+                        //    series has progressed past round 1)
+                        //  - neither player at match point in current game (>=4 firefights);
+                        //    DC'er already in a losing position when they leave at 4-X
+                        //    is recorded as a regular DC win, not a leave-% incident.
+                        bool meaningfulPlay = totalPts >= 2 || seriesGames >= 1;
+                        if (matchIsRanked && meaningfulPlay && localR < 4 && oppR < 4
                             && opponentSteamIdResolved && !opponentSteamId.StartsWith("photon_"))
                         {
-                            Plugin.Log.LogInfo($"[DC] Opponent {opponentDisplayName} disconnected at {localR}-{oppR} ({totalPts}pts) — reporting leave");
+                            Plugin.Log.LogInfo($"[DC] Opponent {opponentDisplayName} disconnected at game-rounds={localR}-{oppR}, pts={totalPts}, series-games={seriesGames} — reporting leave");
                             ApiClient.ReportDisconnect(localSteamId, opponentSteamId);
                         }
                         else
                         {
-                            Plugin.Log.LogInfo($"[DC] Opponent left (ranked={matchIsRanked}, pts={totalPts}, rounds={localR}-{oppR}) — not eligible for leave tracking");
+                            Plugin.Log.LogInfo($"[DC] Opponent left (ranked={matchIsRanked}, pts={totalPts}, series-games={seriesGames}, rounds={localR}-{oppR}) — not eligible for leave tracking");
                         }
                     }
                 }
@@ -928,6 +980,40 @@ namespace CompetitiveRounds
             isTracking = true;
             gameOverReported = false;
             matchStartTime = DateTime.UtcNow;
+
+            // Restore matchIsRanked for game 2+ in a series. OnGameOver clears
+            // matchIsRanked at the end of every game (line ~1370) so the in-game
+            // "RANKED" indicator goes away during the inter-match break, but
+            // games 2 and 3 of a ranked series are obviously still ranked. The
+            // room-join branch at the top of Update() (~line 425) only fires
+            // once per Photon room transition and the room stays open across
+            // the whole series, so without re-deriving matchIsRanked here the
+            // remainder of the series is silently treated as casual: leaver
+            // reports skipped, session W/L tallied as casual, the OnGameOver
+            // log line says "CASUAL Match Over" mid-ranked-series. Caught
+            // 2026-04-30 when Galaxy Ice DC'd mid-game-2 of a ranked series
+            // with ~6 firefights on the board and got no leaver penalty.
+            try
+            {
+                var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
+                string rname = PhotonNetwork.CurrentRoom?.Name ?? "";
+                bool isModIssued = (rp != null && rp.ContainsKey("cr_ff"))
+                                || rname.StartsWith("ranked_")
+                                || rname.StartsWith("team_")
+                                || rname.StartsWith("sct-");
+                if (isModIssued)
+                {
+                    matchIsRanked = true;
+                }
+                else if (opponentRankChecked && opponentIsRanked && OpponentHasMod()
+                         && Plugin.RankedEnabled != null && Plugin.RankedEnabled.Value)
+                {
+                    // Vanilla casual room with both players opted-in for cross-room ranked.
+                    matchIsRanked = true;
+                }
+            }
+            catch { }
+
             // Spawn the cosmetic trail for this match (if the player owns one).
             TrailCosmetic.OnMatchStart();
             PlayerColorCosmetic.OnMatchStart();

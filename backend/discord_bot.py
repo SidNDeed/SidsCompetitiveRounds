@@ -1567,22 +1567,43 @@ def _format_live_bet_embed(s: dict) -> discord.Embed:
     p1w = s.get("p1_wins", 0);      p2w = s.get("p2_wins", 0)
     locked = s.get("bets_locked", False)
     reason = s.get("lock_reason")
-    title = f"🎮 {p1n} ({p1r}) vs {p2n} ({p2r})"
+    is_tournament = s.get("is_tournament", False)
+    tournament_kind = s.get("tournament_kind") or ""
+    phase = s.get("phase") or ""
+    # Tournament series get a 🏆 prefix and a kind suffix ("[Async]" /
+    # "[Sync]") so the channel makes it obvious which bracket the match
+    # belongs to without having to dig into the F5 menu. Pre-match
+    # tournament series get an additional "PRE-MATCH" callout — bets are
+    # still open but the game hasn't started in-game yet, so people
+    # know they're betting on an upcoming bracket fixture rather than
+    # a live ranked queue match.
+    if is_tournament:
+        kind_label = f" [{tournament_kind.title()}]" if tournament_kind else ""
+        if phase == "pre_match":
+            title = f"🏆 Tournament{kind_label} PRE-MATCH: {p1n} ({p1r}) vs {p2n} ({p2r})"
+        else:
+            title = f"🏆 Tournament{kind_label}: {p1n} ({p1r}) vs {p2n} ({p2r})"
+    else:
+        title = f"🎮 {p1n} ({p1r}) vs {p2n} ({p2r})"
     desc_lines = [
         f"Series: **{p1w} - {p2w}**",
         f"Odds: **{p1o}x** {p1n} / **{p2o}x** {p2n}",
     ]
     if locked:
-        if reason == "private_room":
-            desc_lines.append("🔒 PRIVATE ROOM — bets disabled")
-        elif reason == "game_in_progress":
+        if reason == "game_in_progress":
             desc_lines.append("🔒 Game in progress — bets locked")
         elif reason == "no_meaningful_odds":
             desc_lines.append("🔒 No meaningful odds — bets disabled")
         else:
             desc_lines.append("🔒 Bets locked")
-    em = discord.Embed(title=title, description="\n".join(desc_lines),
-                       color=0xFF6688 if not locked else 0x666666)
+    # Tournament gets a distinct gold tint so it's instantly visually different.
+    if is_tournament:
+        embed_color = 0xFFD94D
+    elif locked:
+        embed_color = 0x666666
+    else:
+        embed_color = 0xFF6688
+    em = discord.Embed(title=title, description="\n".join(desc_lines), color=embed_color)
     em.set_footer(text=f"series {s['series_id'][:8]}")
     return em
 

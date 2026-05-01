@@ -252,6 +252,12 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(TournamentHeartbeatLoop());
         }
 
+        // Per-match dispatch memo. Mirrors the per-tab one in NativeUI but
+        // lives at plugin scope so the loop doesn't re-fire SetPendingRoom
+        // every 20 seconds for the same match. Reset implicitly when the
+        // match transitions out of "ready" (server stops returning it).
+        private static readonly HashSet<string> _heartbeatDispatchedMatches = new HashSet<string>();
+
         private static IEnumerator TournamentHeartbeatLoop()
         {
             // Small initial delay so the mod finishes initializing before the
@@ -275,6 +281,43 @@ namespace CompetitiveRounds
                     seen.Add(m.tournament_id);
                     TournamentReady(m.tournament_id, sid);
                     yield return new WaitForSeconds(0.2f); // space the requests
+
+                    // Tab-independent auto-connect dispatch. The Tournament
+                    // tab's RefreshTournaments has the same logic, but it
+                    // ONLY runs when the user is on tab 7 with the F5 menu
+                    // open — meanwhile sync tournament matches need to
+                    // start from in-game (F5 closed). Without this branch
+                    // the auto-connect silently fails and the player
+                    // forfeits the 5-min window.
+                    bool isSyncReady = m.kind == "sync"
+                        && m.status == "ready"
+                        && m.my_ready
+                        && m.opp_ready
+                        && !string.IsNullOrEmpty(m.photon_room_name)
+                        && !string.IsNullOrEmpty(m.match_id);
+                    if (isSyncReady && !_heartbeatDispatchedMatches.Contains(m.match_id))
+                    {
+                        if (Plugin.PendingRankedRoom != m.photon_room_name)
+                        {
+                            _heartbeatDispatchedMatches.Add(m.match_id);
+                            Plugin.SetPendingRoom(m.photon_room_name, m.photon_region);
+                            Plugin.Log.LogInfo($"[TOURNAMENT-HB] Dispatch from heartbeat loop: room={m.photon_room_name} region={m.photon_region ?? "default"} match={m.match_id}");
+                        }
+                    }
+                }
+                // Drop any memo entries whose matches no longer appear —
+                // lets a re-ready (e.g., player relaunched the game) fire
+                // SetPendingRoom again.
+                if (CachedMyActiveTournamentMatches.Count == 0)
+                {
+                    _heartbeatDispatchedMatches.Clear();
+                }
+                else
+                {
+                    var stillActive = new HashSet<string>();
+                    foreach (var m in CachedMyActiveTournamentMatches)
+                        if (!string.IsNullOrEmpty(m.match_id)) stillActive.Add(m.match_id);
+                    _heartbeatDispatchedMatches.RemoveWhere(id => !stillActive.Contains(id));
                 }
             }
         }
@@ -613,7 +656,11 @@ namespace CompetitiveRounds
             public float p2_odds;
             public int live_p1_points, live_p2_points;
             public bool bets_locked;
-            public string lock_reason;  // "game_in_progress" | "no_meaningful_odds" | null
+            public string lock_reason;  // "tournament" | "private_room" | "game_in_progress" | "no_meaningful_odds" | null
+            public bool is_private;
+            public bool is_tournament;
+            public string tournament_kind; // "sync" | "async" | null
+            public string phase; // "pre_match" | "live"
         }
 
         public class MyBetEntry
@@ -656,6 +703,10 @@ namespace CompetitiveRounds
                             e.live_p2_points = ExtractJsonInt(chunk, "live_p2_points");
                             e.bets_locked   = chunk.Contains("\"bets_locked\":true") || chunk.Contains("\"bets_locked\": true");
                             e.lock_reason   = ExtractJsonString(chunk, "lock_reason");
+                            e.is_private    = chunk.Contains("\"is_private\":true") || chunk.Contains("\"is_private\": true");
+                            e.is_tournament = chunk.Contains("\"is_tournament\":true") || chunk.Contains("\"is_tournament\": true");
+                            e.tournament_kind = ExtractJsonString(chunk, "tournament_kind");
+                            e.phase           = ExtractJsonString(chunk, "phase");
                             if (!string.IsNullOrEmpty(e.series_id)) list.Add(e);
                         }
                     }
@@ -4297,6 +4348,17 @@ namespace CompetitiveRounds
             public int p1_series_wins;
             public int p2_series_wins;
             public string deadline_at;    // async 7-day match deadline (null for sync)
+            // UUIDs of the matches whose winners (or losers, per
+            // prereq_roles) feed into this match's p1/p2 slots. Empty for
+            // round-1 WB matches. Used by the visual bracket renderer to
+            // draw connector lines between cells.
+            public string[] prereq_match_ids;
+            // Server-issued Photon room name. Set when the match
+            // transitions to 'ready'. Replaces client-side derivation
+            // ("sct-" + match_id[:12]) so both clients always converge
+            // on the same room. Falls back to null for older matches
+            // that pre-date the column.
+            public string photon_room_name;
         }
 
         // Tracks which kind (sync | async) the client is currently viewing. Set
@@ -4388,6 +4450,8 @@ namespace CompetitiveRounds
                 p1_series_wins = ExtractInt(raw, "p1_series_wins", 0),
                 p2_series_wins = ExtractInt(raw, "p2_series_wins", 0),
                 deadline_at = ExtractString(raw, "deadline_at"),
+                prereq_match_ids = ExtractStringArray(raw, "prereq_match_ids"),
+                photon_room_name = ExtractString(raw, "photon_room_name"),
             });
             return t;
         }
@@ -4676,6 +4740,15 @@ namespace CompetitiveRounds
             public int round;
             public string opponent_steam_id;
             public string opponent_display_name;
+            // Server-issued Photon room + region. Used by the
+            // tournament dispatch loop to fire SetPendingRoom from a
+            // plugin-level coroutine, independent of which UI tab is
+            // open — without it, auto-connect only ran when the user
+            // happened to be on the Tournament tab.
+            public string photon_room_name;
+            public string photon_region;
+            public bool my_ready;
+            public bool opp_ready;
         }
         public static List<ActiveTournamentMatch> CachedMyActiveTournamentMatches = new List<ActiveTournamentMatch>();
         private static float _myActiveMatchesRefreshAt;
@@ -4704,6 +4777,10 @@ namespace CompetitiveRounds
                                 round = ExtractInt(raw, "round", 0),
                                 opponent_steam_id = ExtractString(raw, "opponent_steam_id"),
                                 opponent_display_name = ExtractString(raw, "opponent_display_name"),
+                                photon_room_name = ExtractString(raw, "photon_room_name"),
+                                photon_region = ExtractString(raw, "photon_region"),
+                                my_ready = ExtractBool(raw, "my_ready"),
+                                opp_ready = ExtractBool(raw, "opp_ready"),
                             });
                         }
                         CachedMyActiveTournamentMatches = list;

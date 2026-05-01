@@ -167,6 +167,17 @@ class RankedSeries(Base):
     # since this only matters for the bet-cutoff window). Bets reject when sum >= 2.
     live_p1_points = Column(Integer, nullable=False, default=0)
     live_p2_points = Column(Integer, nullable=False, default=0)
+    # Tournament linkage. Set when start_tournament creates the series row
+    # for a bracket match. The DB schema has had these columns since the
+    # tournament feature shipped, but the model was never updated to
+    # declare them — every start_tournament call errored with "'tournament_id'
+    # is an invalid keyword argument for RankedSeries", silently stranding
+    # tournaments in status='locked' (caught by Sid's testing 2026-04-30).
+    tournament_id = Column(UUID(as_uuid=True), ForeignKey("tournaments.id", ondelete="SET NULL"), nullable=True)
+    is_tournament = Column(Boolean, nullable=False, default=False)
+    # Private rooms (set by /series/preflight when room name doesn't start
+    # with "ranked_") — bets are locked, not surfaced on Live Ranked Games.
+    is_private = Column(Boolean, nullable=False, default=False)
 
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
@@ -433,6 +444,13 @@ class TournamentMatch(Base):
     ready_deadline_at = Column(DateTime(timezone=True), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
+    # Server-issued Photon room name (e.g., "sct-a1b2c3d4e5f6"). Set when
+    # the match transitions to 'ready' so both clients receive the same
+    # canonical name from the API rather than deriving it locally.
+    # Migration 072 added the column; older rows pre-existing the
+    # migration may have NULL (server falls back to deriving from id
+    # at activation time for those, kept for compat).
+    photon_room_name = Column(String(64), nullable=True)
 
     __table_args__ = (UniqueConstraint("tournament_id", "round", "bracket_side", "slot_idx"),)
 

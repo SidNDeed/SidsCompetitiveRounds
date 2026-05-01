@@ -417,7 +417,7 @@ namespace CompetitiveRounds
 
         private static void BuildTabBar(Transform parent){var bar=new GameObject("TabBar");bar.transform.SetParent(parent,false);bar.AddComponent<RectTransform>();UIFactory.AddHLG(bar,spacing:4);UIFactory.AddLE(bar,prefH:28,minH:28,flexH:0);tabButtons=new GameObject[9];tabTexts=new object[9];for(int i=0;i<9;i++){int idx=i;var btn=UIFactory.CreateButton($"Tab{i}",bar.transform,TAB_NAMES[i],13f,C_LABEL,C_TAB,()=>SwitchTab(idx),sizeDelta:new Vector2(0,26));if(UIFactory.tLE!=null){var el=btn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(btn,prefH:26,minH:26,flexW:1,flexH:0);tabButtons[i]=btn;tabTexts[i]=UIFactory.GetButtonText(btn);}/* Admin tab visibility flips on as soon as IsAdmin resolves true (poll-driven update from RefreshCurrentTab). */tabButtons[6].SetActive(ApiClient.IsAdmin);}
         private static readonly string[] TAB_NAMES={"My Stats","Leaderboard","Card Stats","Achievements","Shop","Settings","Admin","Tournaments","2v2"};
-        private static void SwitchTab(int idx){currentTab=idx;for(int i=0;i<9;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);UIFactory.SetImageColor(tabButtons[i],i==idx?C_TABACT:C_TAB);if(tabTexts[i]!=null){UIFactory.SetColor(tabTexts[i],i==idx?C_WHITE:C_LABEL);UIFactory.SetBold(tabTexts[i],i==idx);}}if(idx==1){if(ApiClient.CachedLeaderboard==null){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchPlayerTournaments(_msid);}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;for(int i=0;i<9;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);UIFactory.SetImageColor(tabButtons[i],i==idx?C_TABACT:C_TAB);if(tabTexts[i]!=null){UIFactory.SetColor(tabTexts[i],i==idx?C_WHITE:C_LABEL);UIFactory.SetBold(tabTexts[i],i==idx);}}if(idx==1){if(ApiClient.CachedLeaderboard==null){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}dirty=true;}
 
         private static GameObject BuildMyStatsTab(Transform parent){var panel=new GameObject("MyStats");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:8);UIFactory.AddLE(panel,flexH:1);var left=new GameObject("Left");left.transform.SetParent(panel.transform,false);left.AddComponent<RectTransform>();UIFactory.AddVLG(left,spacing:4);UIFactory.AddLE(left,prefW:380);var rBox=UIFactory.CreatePanel("RB",left.transform,C_PANEL);UIFactory.AddVLG(rBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(rBox,flexH:0);var glHdr=UIFactory.CreateText("RL",rBox.transform,"Glicko-2 Rating",19f,C_SUB,sizeDelta:new Vector2(250,28));UIFactory.SetCharSpacing(glHdr,1f);var rRow=new GameObject("RR");rRow.transform.SetParent(rBox.transform,false);rRow.AddComponent<RectTransform>();UIFactory.AddHLG(rRow,spacing:12);UIFactory.AddLE(rRow,prefH:38);txtRating=UIFactory.CreateText("Rat",rRow.transform,"1500",30f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,38));UIFactory.SetBold(txtRating,true);txtRD=UIFactory.CreateText("RD",rRow.transform,"RD: 350",18f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,38));var xBox=UIFactory.CreatePanel("XB",left.transform,C_PANEL);UIFactory.AddVLG(xBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(xBox,flexH:0);var lvRow=new GameObject("LR");lvRow.transform.SetParent(xBox.transform,false);lvRow.AddComponent<RectTransform>();UIFactory.AddHLG(lvRow,spacing:8);UIFactory.AddLE(lvRow,prefH:28);txtLevel=UIFactory.CreateText("Lv",lvRow.transform,"Level 1",19f,C_BLUE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(100,28));UIFactory.SetBold(txtLevel,true);txtXPProg=UIFactory.CreateText("XPP",lvRow.transform,"",16f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(130,28));var xSp=new GameObject("S");xSp.transform.SetParent(lvRow.transform,false);xSp.AddComponent<RectTransform>();UIFactory.AddLE(xSp,flexW:1);txtTotalXP=UIFactory.CreateText("TXP",lvRow.transform,"0 XP",16f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(110,28));xpFill=UIFactory.CreateFillBar("XP",xBox.transform,new Color(0.2f,0.2f,0.25f,0.8f),new Color(0.3f,0.7f,1f,0.9f),10f);var recBox=UIFactory.CreatePanel("RecB",left.transform,C_PANEL);UIFactory.AddVLG(recBox,spacing:1,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(recBox,flexH:0);UIFactory.CreateText("RecL",recBox.transform,"Record",19f,C_SUB,sizeDelta:new Vector2(340,28));txtRankedRec=UIFactory.CreateText("RR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtRankedStrk=UIFactory.CreateText("RS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtTeam2v2Rec=UIFactory.CreateText("T2",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTeam2v2Strk=UIFactory.CreateText("T2S",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtCasualRec=UIFactory.CreateText("CR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtCasualStrk=UIFactory.CreateText("CS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtSweeps=UIFactory.CreateText("SW",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTotalRec=UIFactory.CreateText("TR",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtAccuracy=UIFactory.CreateText("AC",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));var sesBox=UIFactory.CreatePanel("SB",left.transform,C_PANEL);UIFactory.AddVLG(sesBox,spacing:3,padL:10,padR:10,padT:8,padB:8);UIFactory.AddLE(sesBox,flexH:0);UIFactory.CreateText("SL",sesBox.transform,"Session Info",19f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(340,28));txtSessionSum=UIFactory.CreateText("SS",sesBox.transform,"No games this session",17f,C_DIM,sizeDelta:new Vector2(340,26));txtSessionSplit=UIFactory.CreateText("SSp",sesBox.transform,"",16f,C_LABEL,sizeDelta:new Vector2(340,24));txtSessionSweeps=UIFactory.CreateText("SSw",sesBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtSessionOppLifetime=UIFactory.CreateText("SOL",sesBox.transform,"",15f,new Color(0.6f,0.75f,1f),sizeDelta:new Vector2(340,22));sessionOppContainer=new GameObject("SOC");sessionOppContainer.transform.SetParent(sesBox.transform,false);sessionOppContainer.AddComponent<RectTransform>();UIFactory.AddVLG(sessionOppContainer,spacing:1);
         var linkBox=UIFactory.CreatePanel("LkB",left.transform,C_PANEL);UIFactory.AddVLG(linkBox,spacing:4,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(linkBox,flexH:0);UIFactory.CreateText("LkL",linkBox.transform,"Discord Link",19f,new Color(0.55f,0.55f,0.95f),sizeDelta:new Vector2(340,28));var lkRow=new GameObject("LkR");lkRow.transform.SetParent(linkBox.transform,false);lkRow.AddComponent<RectTransform>();UIFactory.AddHLG(lkRow,spacing:8);UIFactory.AddLE(lkRow,prefH:28);linkCodeBtn=UIFactory.CreateButton("LkBtn",lkRow.transform,"Get Link Code",15f,C_WHITE,C_BTN,()=>{var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.GenerateLinkCode(id);},sizeDelta:new Vector2(130,26));/* Click-to-reveal on the link text - Discord ID/username defaults hidden for streamers.
@@ -1140,9 +1140,24 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 string dotColor = liveHeaderPulseFilled ? "#FF6688" : "#552233";
                 UIFactory.SetText(txtLiveHeader, $"<color={dotColor}>*</color> <color=#FF6688>Live Ranked Games</color>");
             }
-            var list = ApiClient.CachedActiveSeries;
+            var rawList = ApiClient.CachedActiveSeries;
+            // Filter out tournament series that haven't actually gone live
+            // yet (no points scored, no game wins). Pre-match tournament
+            // matches show up in the Tournament tab's bet section instead.
+            // Once any in-game activity registers (server flips
+            // phase=='live'), they appear in the Live Ranked Games panel
+            // alongside queue + private matches.
+            var list = new List<ApiClient.ActiveSeriesEntry>();
+            if (rawList != null)
+            {
+                foreach (var s in rawList)
+                {
+                    if (s.is_tournament && s.phase == "pre_match") continue;
+                    list.Add(s);
+                }
+            }
             var teamList = ApiClient.CachedActiveTeamSeries;
-            int oneVOneCount = list != null ? list.Count : 0;
+            int oneVOneCount = list.Count;
             int teamCount = teamList != null ? teamList.Count : 0;
             // Clear pool first, then rebuild.
             foreach (var g in liveBetRowPool) g.SetActive(false);
@@ -1227,7 +1242,24 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             // disabled so a long name doesn't push elo onto a second visual line - the column is
             // 400 wide and fonts are bold 16f, but TMP word-wrapping would still split the line on
             // narrow screens.
-            string line = $"<color=#AAF>{Trunc(s.p1_name, 12)}</color> ({s.p1_rating})  " +
+            // Lead the line with a tournament tag for tournament series so
+            // the user instantly sees these aren't open-queue games. Tag
+            // styled gold like the rest of the tournament UI; kind suffix
+            // ([Async]/[Sync]) only when the kind is known.
+            string tag = "";
+            if (s.is_tournament)
+            {
+                string kindSuffix = string.IsNullOrEmpty(s.tournament_kind)
+                    ? ""
+                    : $" {char.ToUpper(s.tournament_kind[0]) + s.tournament_kind.Substring(1)}";
+                tag = $"<color=#FFD94D><b>[TOURNAMENT{kindSuffix}]</b></color>  ";
+            }
+            else if (s.is_private)
+            {
+                tag = "<color=#888><b>[PRIVATE]</b></color>  ";
+            }
+            string line = tag +
+                          $"<color=#AAF>{Trunc(s.p1_name, 12)}</color> ({s.p1_rating})  " +
                           $"<b>{s.p1_wins}-{s.p2_wins}</b>  " +
                           $"<color=#FAA>{Trunc(s.p2_name, 12)}</color> ({s.p2_rating})";
             var t = UIFactory.CreateText("h", row.transform, line, 15f, C_WHITE,
@@ -3504,6 +3536,20 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
         private static List<object[]> tSignupRowTexts = new List<object[]>();  // [seedTxt, nameTxt, statusTxt]
         private static List<GameObject> tBracketRowPool = new List<GameObject>();
         private static List<object> tBracketRowTexts = new List<object>();
+        // Visual bracket host — sibling of the row-pool, positioned-content
+        // canvas for rendering matches as a true bracket diagram. When the
+        // visual bracket is shown, all row-pool rows are hidden and we
+        // populate this host with absolutely-positioned match cells +
+        // connector lines. When the bracket should be blanked (locked
+        // sync, voting), the row-pool's first row holds the placeholder
+        // text and the visual host is hidden.
+        private static GameObject tBracketVisual;
+        // "Upcoming Match Bets" section in the Tournament tab — surfaces
+        // tournament series that exist server-side but haven't gone live
+        // in-game yet. Rebuilds on each refresh from CachedActiveSeries.
+        private static GameObject tTournBetsBox, tTournBetsContainer;
+        private static object tTournBetsHeader;
+        private static List<GameObject> tTournBetRowPool = new List<GameObject>();
         // Per-row "purpose" - what the row represents on the current refresh.
         // Populated in RefreshTournaments' bracket render so the row's click
         // handler can look up its group key and toggle _tBracketExpanded.
@@ -3707,7 +3753,14 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                         (m.p1_signup_id == t.my_signup_id || m.p2_signup_id == t.my_signup_id) &&
                         !string.IsNullOrEmpty(m.match_id))
                     {
-                        string roomName = "sct-" + m.match_id.Replace("-", "").Substring(0, 12);
+                        // Prefer server-issued room name; fall back to the
+                        // legacy client-derived format only when the server
+                        // hasn't populated it yet (older matches pre-072
+                        // migration). Both formats are identical for matches
+                        // activated post-migration.
+                        string roomName = !string.IsNullOrEmpty(m.photon_room_name)
+                            ? m.photon_room_name
+                            : "sct-" + m.match_id.Replace("-", "").Substring(0, 12);
                         _tournamentDispatchedMatches.Remove(m.match_id);
                         Plugin.SetPendingRoom(roomName, t.photon_region);
                         CompetitiveUI.ShowNotification($"Reconnecting to {roomName} (region {t.photon_region ?? "default"})", new Color(0.5f, 0.8f, 1f));
@@ -3741,6 +3794,22 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 tSignupRowTexts.Add(new object[] { seedT, nameT, statT });
                 row.SetActive(false);
             }
+
+            // Pre-match tournament bets — bracket pairings that have a
+            // ranked_series row but no in-game activity yet. RefreshLiveSeries
+            // hides these from the Live Ranked Games panel until they go live;
+            // betting still happens here so people can wager pre-game.
+            tTournBetsBox = UIFactory.CreatePanel("TBetsBox", right.transform, C_PANEL);
+            UIFactory.AddVLG(tTournBetsBox, spacing: 2, padL: 8, padR: 8, padT: 6, padB: 6);
+            UIFactory.AddLE(tTournBetsBox, flexH: 0);
+            tTournBetsHeader = UIFactory.CreateText("TBH_Bets", tTournBetsBox.transform,
+                "<color=#FFD94D>Upcoming Match Bets</color>",
+                17f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(360, 24));
+            tTournBetsContainer = new GameObject("TBetsRows");
+            tTournBetsContainer.transform.SetParent(tTournBetsBox.transform, false);
+            tTournBetsContainer.AddComponent<RectTransform>();
+            UIFactory.AddVLG(tTournBetsContainer, spacing: 2);
+            tTournBetsBox.SetActive(false); // hidden until there's a pre-match tournament series
 
             var brkBox = UIFactory.CreatePanel("TBrkBox", right.transform, C_PANEL);
             UIFactory.AddVLG(brkBox, spacing: 2, padL: 8, padR: 8, padT: 6, padB: 6);
@@ -3787,6 +3856,22 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 tBracketRowTexts.Add(t);
                 row.SetActive(false);
             }
+
+            // Visual bracket canvas — sibling of the row-pool inside the
+            // bracket ScrollView's content. Manual positional layout (no
+            // VLG); each match is anchored at a computed (x, y) within
+            // this host so connector lines line up cleanly. Initial size
+            // is a placeholder — RenderVisualBracket recomputes per render
+            // based on tournament size.
+            tBracketVisual = new GameObject("TBV");
+            tBracketVisual.transform.SetParent(tBracketList.transform, false);
+            var tbvRT = tBracketVisual.AddComponent<RectTransform>();
+            tbvRT.anchorMin = new Vector2(0f, 1f);
+            tbvRT.anchorMax = new Vector2(0f, 1f);
+            tbvRT.pivot = new Vector2(0f, 1f);
+            tbvRT.sizeDelta = new Vector2(900, 600);
+            UIFactory.AddLE(tBracketVisual, prefH: 600, minH: 600, prefW: 900, minW: 900, flexH: 0, flexW: 0);
+            tBracketVisual.SetActive(false);
 
             // "My Tournaments" inline summary for the local player (own trophy line).
             txtTMyHistory = UIFactory.CreateText("TMH", right.transform, "", 14f, new Color(1f, 0.87f, 0.52f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 22));
@@ -3909,8 +3994,401 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             catch { return iso; }
         }
 
+        // ── Visual bracket renderer ─────────────────────────────────────
+        // Positional layout: each match is a 170×48 cell anchored at a
+        // computed (x, y) inside tBracketVisual. Connector lines join
+        // each match to its prereq matches (an L-shape: short horizontal
+        // out of the prereq → vertical to align with target → short
+        // horizontal into target). WB rounds in the top half, LB in the
+        // bottom, GF/GF_RESET on the right. Cell colors mirror the
+        // legacy text view (cyan=completed, yellow=ready, green=active,
+        // gray=bye/pending). Replaces the collapsing list when bracket
+        // data is available.
+        private static void RenderVisualBracket(ApiClient.TournamentSnapshot t, bool blankNames, int blankSize, bool isAsync)
+        {
+            if (tBracketVisual == null) return;
+            // Tear down previous render. We rebuild fully each refresh —
+            // simpler than diffing individual cells, and the bracket data
+            // changes seldom enough that the rebuild cost is negligible.
+            for (int i = tBracketVisual.transform.childCount - 1; i >= 0; i--)
+                UnityEngine.Object.Destroy(tBracketVisual.transform.GetChild(i).gameObject);
+
+            const int CELL_W = 170, CELL_H = 48;
+            const int COL_GAP = 24;
+            const int ROW_GAP = 56;
+            const int PAD = 12;
+            const int WB_LB_GAP = 30; // vertical gap between WB section and LB section
+
+            // Resolve matches list (real or synthesized for blank shape).
+            ApiClient.TournamentMatchRow[] matches = t.matches;
+            if (matches == null || matches.Length == 0)
+            {
+                if (blankSize >= 4) matches = SynthesizeBlankBracket(blankSize);
+                else { return; }
+            }
+
+            // Group by (side, round) and find max round per side.
+            var bySide = new Dictionary<string, Dictionary<int, List<ApiClient.TournamentMatchRow>>>();
+            int wbMaxRound = 0, lbMaxRound = 0;
+            foreach (var m in matches)
+            {
+                if (!bySide.TryGetValue(m.bracket_side, out var rounds))
+                { rounds = new Dictionary<int, List<ApiClient.TournamentMatchRow>>(); bySide[m.bracket_side] = rounds; }
+                if (!rounds.TryGetValue(m.round, out var lst)) { lst = new List<ApiClient.TournamentMatchRow>(); rounds[m.round] = lst; }
+                lst.Add(m);
+                if (m.bracket_side == "W" && m.round > wbMaxRound) wbMaxRound = m.round;
+                if (m.bracket_side == "L" && m.round > lbMaxRound) lbMaxRound = m.round;
+            }
+
+            // Compute height of WB section: WB R1's slot count drives it.
+            int wbR1Count = (bySide.TryGetValue("W", out var wbRounds) && wbRounds.TryGetValue(1, out var wbR1)) ? wbR1.Count : 0;
+            int lbR1Count = (bySide.TryGetValue("L", out var lbRounds) && lbRounds.TryGetValue(1, out var lbR1)) ? lbR1.Count : 0;
+            int wbHeight = Math.Max(wbR1Count * ROW_GAP, ROW_GAP);
+            int lbHeight = Math.Max(lbR1Count * ROW_GAP, ROW_GAP);
+
+            // Compute (x, y) for each match. Positions are anchored from
+            // top-left of tBracketVisual (anchorMin/Max already set in
+            // BuildTournamentTab) → +x is right, +y is down.
+            var pos = new Dictionary<string, Vector2>();
+            int maxX = 0, maxY = 0;
+
+            // WB cells: classic centering (each subsequent round's match
+            // sits between its two prereqs from the previous round).
+            if (wbRounds != null)
+            {
+                foreach (var kv in wbRounds)
+                {
+                    int r = kv.Key;
+                    foreach (var m in kv.Value)
+                    {
+                        int s = m.slot_idx;
+                        int x = PAD + (r - 1) * (CELL_W + COL_GAP);
+                        // Spread doubles per round so descendants land between their prereqs.
+                        float pitch = ROW_GAP * (1 << (r - 1));
+                        float y = PAD + s * pitch + (pitch - ROW_GAP) / 2f;
+                        pos[m.match_id] = new Vector2(x, y);
+                        if (x + CELL_W > maxX) maxX = x + CELL_W;
+                        if (y + CELL_H > maxY) maxY = (int)(y + CELL_H);
+                    }
+                }
+            }
+
+            // LB cells: positioned in the bottom half. LB rounds zig-zag
+            // (minor / major) but the slot_idx ordering is monotonic, so
+            // we lay them out as a simple stack within each round, scaled
+            // similarly to WB.
+            int lbStartY = PAD + wbHeight + WB_LB_GAP;
+            if (lbRounds != null)
+            {
+                foreach (var kv in lbRounds)
+                {
+                    int r = kv.Key;
+                    foreach (var m in kv.Value)
+                    {
+                        int s = m.slot_idx;
+                        int x = PAD + (r - 1) * (CELL_W + COL_GAP);
+                        // LB R1 + R2 share LB R1's row count, then halves
+                        // every two rounds. Approximate via ceiling of
+                        // (lbR1Count / 2^((r-1)/2)) to match standard
+                        // double-elim shape.
+                        int divPower = (r - 1) / 2;
+                        float pitch = ROW_GAP * (1 << divPower);
+                        // Major (even) rounds offset by half a pitch from the minor.
+                        float yOff = (r % 2 == 0) ? pitch / 2f : 0f;
+                        float y = lbStartY + s * pitch + yOff;
+                        pos[m.match_id] = new Vector2(x, y);
+                        if (x + CELL_W > maxX) maxX = x + CELL_W;
+                        if (y + CELL_H > maxY) maxY = (int)(y + CELL_H);
+                    }
+                }
+            }
+
+            // GF + GF_RESET column — far right, vertically centered between WB and LB sections.
+            int gfX = PAD + Math.Max(wbMaxRound, lbMaxRound) * (CELL_W + COL_GAP);
+            float gfY = PAD + (wbHeight + WB_LB_GAP) / 2f - CELL_H / 2f;
+            int gfStack = 0;
+            foreach (var sideKey in new[] { "GF", "GF_RESET", "TP" })
+            {
+                if (!bySide.TryGetValue(sideKey, out var sideRounds)) continue;
+                foreach (var kv in sideRounds)
+                {
+                    foreach (var m in kv.Value)
+                    {
+                        int x = gfX;
+                        float y = gfY + gfStack * (CELL_H + 14);
+                        pos[m.match_id] = new Vector2(x, y);
+                        if (x + CELL_W > maxX) maxX = x + CELL_W;
+                        if (y + CELL_H > maxY) maxY = (int)(y + CELL_H);
+                        gfStack++;
+                    }
+                }
+            }
+
+            // Resize the host canvas to fit content + padding.
+            int hostW = maxX + PAD;
+            int hostH = maxY + PAD;
+            var rt = tBracketVisual.GetComponent<RectTransform>();
+            rt.sizeDelta = new Vector2(hostW, hostH);
+            UIFactory.AddLE(tBracketVisual, prefH: hostH, minH: hostH, prefW: hostW, minW: hostW, flexH: 0, flexW: 0);
+
+            // Connector lines first (so cells render on top). For each
+            // non-bye match with prereq_match_ids populated, draw an
+            // L-shape from each prereq's right-center to the match's
+            // left-center.
+            foreach (var m in matches)
+            {
+                if (m.prereq_match_ids == null) continue;
+                if (!pos.TryGetValue(m.match_id, out var to)) continue;
+                Vector2 toAnchor = new Vector2(to.x, to.y + CELL_H / 2f); // left-center of target cell
+                foreach (var pid in m.prereq_match_ids)
+                {
+                    if (string.IsNullOrEmpty(pid)) continue;
+                    if (!pos.TryGetValue(pid, out var from)) continue;
+                    Vector2 fromAnchor = new Vector2(from.x + CELL_W, from.y + CELL_H / 2f); // right-center of source
+                    DrawBracketConnector(tBracketVisual, fromAnchor, toAnchor);
+                }
+            }
+
+            // Cells.
+            foreach (var m in matches)
+            {
+                if (!pos.TryGetValue(m.match_id, out var p)) continue;
+                CreateBracketCell(tBracketVisual, m, p, blankNames, isAsync);
+            }
+        }
+
+        /// <summary>L-shaped connector: short horizontal segment out of
+        /// the source, vertical to align with target Y, short horizontal
+        /// into the target. Drawn as 2px-thick Image rectangles.</summary>
+        private static void DrawBracketConnector(GameObject host, Vector2 fromTopLeftPx, Vector2 toTopLeftPx)
+        {
+            // Coords are top-left-anchored; +y is DOWN. Convert into
+            // anchoredPosition (which uses top-left pivot so y becomes
+            // negative-of-top).
+            float midX = (fromTopLeftPx.x + toTopLeftPx.x) / 2f;
+            float thickness = 2f;
+            Color lineColor = new Color(1f, 0.85f, 0.3f, 0.55f);
+            // Horizontal seg 1: from source.x to midX at source.y
+            DrawLineSegment(host, fromTopLeftPx.x, fromTopLeftPx.y, midX - fromTopLeftPx.x, thickness, lineColor);
+            // Vertical seg: from min(source.y, target.y) to max at midX
+            float vY = Math.Min(fromTopLeftPx.y, toTopLeftPx.y);
+            float vH = Math.Abs(toTopLeftPx.y - fromTopLeftPx.y) + thickness;
+            DrawLineSegment(host, midX - thickness / 2f, vY, thickness, vH, lineColor);
+            // Horizontal seg 2: from midX to target.x at target.y
+            DrawLineSegment(host, midX, toTopLeftPx.y, toTopLeftPx.x - midX, thickness, lineColor);
+        }
+
+        private static void DrawLineSegment(GameObject host, float x, float y, float w, float h, Color c)
+        {
+            var seg = new GameObject("Conn");
+            seg.transform.SetParent(host.transform, false);
+            var srt = seg.AddComponent<RectTransform>();
+            srt.anchorMin = new Vector2(0f, 1f);
+            srt.anchorMax = new Vector2(0f, 1f);
+            srt.pivot = new Vector2(0f, 1f);
+            srt.anchoredPosition = new Vector2(x, -y);
+            srt.sizeDelta = new Vector2(Math.Max(1f, w), Math.Max(1f, h));
+            var img = seg.AddComponent(UIFactory.tImage);
+            UIFactory.tImage.GetProperty("color", BindingFlags.Public | BindingFlags.Instance)?.SetValue(img, c);
+            UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(img, false);
+        }
+
+        private static void CreateBracketCell(GameObject host, ApiClient.TournamentMatchRow m, Vector2 topLeftPx, bool blankNames, bool isAsync)
+        {
+            const int CELL_W = 170, CELL_H = 48;
+
+            // Pick background tint by match status.
+            Color bg = m.is_bye ? new Color(0.18f, 0.20f, 0.24f, 0.80f)
+                : m.status == "completed" ? new Color(0.18f, 0.32f, 0.45f, 0.85f)
+                : m.status == "active" ? new Color(0.20f, 0.42f, 0.20f, 0.90f)
+                : m.status == "ready" ? new Color(0.45f, 0.38f, 0.15f, 0.90f)
+                : new Color(0.16f, 0.17f, 0.21f, 0.85f); // pending
+
+            var cell = UIFactory.CreatePanel($"M_{m.match_id}", host.transform, bg);
+            var crt = cell.GetComponent<RectTransform>();
+            crt.anchorMin = new Vector2(0f, 1f);
+            crt.anchorMax = new Vector2(0f, 1f);
+            crt.pivot = new Vector2(0f, 1f);
+            crt.anchoredPosition = new Vector2(topLeftPx.x, -topLeftPx.y);
+            crt.sizeDelta = new Vector2(CELL_W, CELL_H);
+
+            // Two text rows: p1 + p2 with the score on the right.
+            string p1Name = blankNames ? "?" : (m.p1_display_name ?? (m.is_bye ? "BYE" : "TBD"));
+            string p2Name = blankNames ? "?" : (m.p2_display_name ?? (m.is_bye ? "BYE" : "TBD"));
+            string p1Score = "", p2Score = "";
+            if (m.status == "completed")
+            {
+                p1Score = m.p1_series_wins.ToString();
+                p2Score = m.p2_series_wins.ToString();
+            }
+            else if (m.status == "forfeit" || m.status == "double_forfeit")
+            {
+                p1Score = m.status == "forfeit" ? "FF" : "FF";
+                p2Score = m.status == "forfeit" ? "FF" : "FF";
+            }
+
+            // Highlight winner row in completed matches.
+            int winner = 0;
+            if (m.status == "completed") winner = m.p1_series_wins > m.p2_series_wins ? 1 : 2;
+
+            float rowH = (CELL_H - 2) / 2f;
+            CreateBracketCellRow(cell, p1Name, p1Score, 1, winner, 0, rowH, CELL_W);
+            CreateBracketCellRow(cell, p2Name, p2Score, 2, winner, rowH + 1, rowH, CELL_W);
+
+            // Tap-target: clicks on the cell currently no-op (could route
+            // to a series detail view in a future pass).
+        }
+
+        private static void CreateBracketCellRow(GameObject cell, string playerName, string score, int rowSlot, int winnerSlot, float yTop, float h, float cellW)
+        {
+            var row = new GameObject($"R{rowSlot}");
+            row.transform.SetParent(cell.transform, false);
+            var rrt = row.AddComponent<RectTransform>();
+            rrt.anchorMin = new Vector2(0f, 1f);
+            rrt.anchorMax = new Vector2(0f, 1f);
+            rrt.pivot = new Vector2(0f, 1f);
+            rrt.anchoredPosition = new Vector2(0f, -yTop);
+            rrt.sizeDelta = new Vector2(cellW, h);
+
+            bool isWinner = winnerSlot == rowSlot;
+            bool isLoser = winnerSlot != 0 && winnerSlot != rowSlot;
+            Color nameColor = isWinner ? new Color(0.95f, 1f, 0.7f) : isLoser ? new Color(0.55f, 0.55f, 0.55f) : new Color(0.92f, 0.95f, 1f);
+
+            string nameText = isWinner ? $"<b>{playerName}</b>" : playerName;
+            UIFactory.CreateText("N", row.transform, nameText, 13f, nameColor, UIFactory.AlignMidLeft, sizeDelta: new Vector2(cellW - 36, h));
+            // Position name with left padding.
+            var nGo = row.transform.Find("N");
+            if (nGo != null)
+            {
+                var nrt = nGo.GetComponent<RectTransform>();
+                nrt.anchorMin = new Vector2(0f, 1f); nrt.anchorMax = new Vector2(0f, 1f); nrt.pivot = new Vector2(0f, 1f);
+                nrt.anchoredPosition = new Vector2(8f, 0f);
+            }
+
+            if (!string.IsNullOrEmpty(score))
+            {
+                Color scoreColor = isWinner ? new Color(1f, 0.95f, 0.4f) : new Color(0.7f, 0.7f, 0.7f);
+                UIFactory.CreateText("S", row.transform, score, 14f, scoreColor, UIFactory.AlignMidRight, sizeDelta: new Vector2(28, h));
+                var sGo = row.transform.Find("S");
+                if (sGo != null)
+                {
+                    var srt = sGo.GetComponent<RectTransform>();
+                    srt.anchorMin = new Vector2(0f, 1f); srt.anchorMax = new Vector2(0f, 1f); srt.pivot = new Vector2(0f, 1f);
+                    srt.anchoredPosition = new Vector2(cellW - 32, 0f);
+                }
+            }
+        }
+
+        /// <summary>Build a placeholder bracket of the given size (4/8/16)
+        /// for the voting / pre-lock state. All matches have null player
+        /// names, prereq_match_ids set so connector lines still draw.
+        /// Tournament format = double_elim_bo3.</summary>
+        private static ApiClient.TournamentMatchRow[] SynthesizeBlankBracket(int n)
+        {
+            var list = new List<ApiClient.TournamentMatchRow>();
+            int wbRounds = 0; int x = n; while (x > 1) { x >>= 1; wbRounds++; }
+            // WB
+            var wbIds = new Dictionary<(int r, int s), string>();
+            for (int r = 1; r <= wbRounds; r++)
+            {
+                int matchCount = n / (1 << r);
+                for (int s = 0; s < matchCount; s++)
+                {
+                    string id = $"BLANK_W_{r}_{s}";
+                    wbIds[(r, s)] = id;
+                    var prereq = new List<string>();
+                    if (r > 1)
+                    {
+                        if (wbIds.TryGetValue((r - 1, s * 2), out var p1)) prereq.Add(p1);
+                        if (wbIds.TryGetValue((r - 1, s * 2 + 1), out var p2)) prereq.Add(p2);
+                    }
+                    list.Add(new ApiClient.TournamentMatchRow {
+                        match_id = id, bracket_side = "W", round = r, slot_idx = s, status = "pending",
+                        prereq_match_ids = prereq.ToArray(),
+                    });
+                }
+            }
+            // LB — skip for blank to keep the placeholder simple. A real
+            // LB layout requires careful prereq plumbing that mirrors the
+            // server's build_double_elim_bracket output. The blank shape
+            // shows the WB tree only, which is enough for "what does an
+            // 8-player tournament look like?".
+            // GF placeholder.
+            list.Add(new ApiClient.TournamentMatchRow {
+                match_id = "BLANK_GF", bracket_side = "GF", round = 1, slot_idx = 0, status = "pending",
+                prereq_match_ids = new string[0],
+            });
+            return list.ToArray();
+        }
+
+        /// <summary>Render the Tournament tab's "Upcoming Match Bets" section.
+        /// Pulls every active tournament series in pre_match phase from
+        /// CachedActiveSeries (which polls server-side every few seconds via
+        /// /series/active), builds the same 3-row bet UI used in the Live
+        /// Ranked Games panel for each one. Hides the whole box when there's
+        /// nothing to bet on.</summary>
+        private static void RefreshTournamentBets()
+        {
+            if (tTournBetsBox == null || tTournBetsContainer == null) return;
+            // Reset pool.
+            foreach (var r in tTournBetRowPool) r.SetActive(false);
+
+            var raw = ApiClient.CachedActiveSeries;
+            var preMatch = new List<ApiClient.ActiveSeriesEntry>();
+            if (raw != null)
+            {
+                foreach (var s in raw)
+                    if (s.is_tournament && s.phase == "pre_match")
+                        preMatch.Add(s);
+            }
+            if (preMatch.Count == 0)
+            {
+                tTournBetsBox.SetActive(false);
+                return;
+            }
+            tTournBetsBox.SetActive(true);
+            UIFactory.SetText(tTournBetsHeader,
+                $"<color=#FFD94D>Upcoming Match Bets</color>  <color=#888>({preMatch.Count})</color>");
+
+            int idx = 0;
+            foreach (var s in preMatch)
+            {
+                // Header row, bet-on-p1 row, bet-on-p2 row — 3 per series.
+                var hdr = GetOrCreateTournBetRow(idx++);
+                ApplyHeaderRow(hdr, s);
+                var bp1 = GetOrCreateTournBetRow(idx++);
+                ApplyBetRow(bp1, s, true);
+                var bp2 = GetOrCreateTournBetRow(idx++);
+                ApplyBetRow(bp2, s, false);
+            }
+        }
+
+        private static GameObject GetOrCreateTournBetRow(int idx)
+        {
+            while (tTournBetRowPool.Count <= idx)
+            {
+                var go = new GameObject($"tbet{tTournBetRowPool.Count}");
+                go.transform.SetParent(tTournBetsContainer.transform, false);
+                go.AddComponent<RectTransform>();
+                UIFactory.AddHLG(go, spacing: 4, forceExpandH: true);
+                UIFactory.AddLE(go, prefH: 26, flexH: 0);
+                tTournBetRowPool.Add(go);
+            }
+            var row = tTournBetRowPool[idx];
+            for (int i = row.transform.childCount - 1; i >= 0; i--)
+                UnityEngine.Object.Destroy(row.transform.GetChild(i).gameObject);
+            row.SetActive(true);
+            return row;
+        }
+
         private static void RefreshTournaments()
         {
+            // Tournament-tab pre-match bet section runs on every tab refresh
+            // — pulls from the same CachedActiveSeries that the Leaderboard
+            // tab's Live Ranked Games panel uses, so the data is always
+            // fresh as long as ApiClient.FetchActiveSeries is being polled.
+            RefreshTournamentBets();
+
             var t = ApiClient.CachedTournament;
             if (t == null)
             {
@@ -4048,7 +4526,9 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                     if (m.status != "ready" && m.status != "active") continue;
                     if (m.p1_signup_id != t.my_signup_id && m.p2_signup_id != t.my_signup_id) continue;
                     if (!string.IsNullOrEmpty(m.match_id))
-                        myRoomCode = "sct-" + m.match_id.Replace("-", "").Substring(0, 12);
+                        myRoomCode = !string.IsNullOrEmpty(m.photon_room_name)
+                            ? m.photon_room_name
+                            : "sct-" + m.match_id.Replace("-", "").Substring(0, 12);
                     string opp = (m.p1_signup_id == t.my_signup_id) ? m.p2_display_name : m.p1_display_name;
                     string oppSignupId = (m.p1_signup_id == t.my_signup_id) ? m.p2_signup_id : m.p1_signup_id;
                     bool oppReady = false;
@@ -4072,7 +4552,9 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                     // both players have ranked enabled and play in any private room.
                     if (!isAsync && t.my_ready && oppReady && !string.IsNullOrEmpty(m.match_id))
                     {
-                        string roomName = "sct-" + m.match_id.Replace("-", "").Substring(0, 12);
+                        string roomName = !string.IsNullOrEmpty(m.photon_room_name)
+                            ? m.photon_room_name
+                            : "sct-" + m.match_id.Replace("-", "").Substring(0, 12);
                         if (!_tournamentDispatchedMatches.Contains(m.match_id)
                             && Plugin.PendingRankedRoom != roomName)
                         {
@@ -4141,34 +4623,71 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             }
             for (int i = signupIdx; i < tSignupRowPool.Count; i++) tSignupRowPool[i].SetActive(false);
 
-            // Bracket list - flat chronological list grouped by round with separators.
-            // Before the tournament starts running, we hide the matchups so signups can't
-            // scout their round-1 opponent. During `locked` the bracket exists server-side
-            // but the client shows a placeholder. Once `running`, full bracket is revealed.
+            // Bracket render — visual diagram (positional cells + connector lines)
+            // when we have data; row-pool placeholder for true empty states only.
+            // Sync `locked` shows a BLANK bracket of the right shape (no names)
+            // so signups can see the structure without scouting matchups, then
+            // reveals names when status flips to `running`.
             int brkIdx = 0;
-            // Sync hides the bracket until start-time so nobody scouts their R1
-            // opponent. Async brackets are always visible - players need to know
-            // their opponent during the 7-day match window to coordinate.
             bool bracketHidden = !isAsync && t.status != "running" && t.status != "completed";
-            if (bracketHidden)
+            bool haveMatches = t.matches != null && t.matches.Length > 0;
+            bool wantBlankBracket = bracketHidden && haveMatches; // sync locked: show shape, no names
+            int blankBracketSize = 0;
+            if (!haveMatches && (t.status == "voting" || t.status == "locked"))
             {
-                if (t.status == "locked" && brkIdx < tBracketRowPool.Count)
+                // No bracket built yet — derive a shape from current signup
+                // count (rounded to next power of 2), capped to the
+                // tournament's max_players so the diagram doesn't balloon.
+                int active = 0;
+                if (t.signups != null)
+                    foreach (var s in t.signups) if (!s.is_speculative) active++;
+                int targetSize = Math.Max(active, 4);
+                blankBracketSize = 1;
+                while (blankBracketSize < targetSize) blankBracketSize *= 2;
+                if (blankBracketSize > 16) blankBracketSize = 16;
+            }
+
+            if (haveMatches || blankBracketSize > 0)
+            {
+                // Hide all row-pool placeholder rows, render the visual bracket.
+                for (int i = 0; i < tBracketRowPool.Count; i++) tBracketRowPool[i].SetActive(false);
+                if (tBracketVisual != null)
                 {
-                    UIFactory.SetColor(tBracketRowTexts[brkIdx], C_LABEL);
+                    tBracketVisual.SetActive(true);
+                    RenderVisualBracket(t, wantBlankBracket, blankBracketSize, isAsync);
+                }
+                _tBracketRowPurposes.Clear();
+                brkIdx = tBracketRowPool.Count; // skip the trailing row-hide loop
+            }
+            else if (bracketHidden && !haveMatches)
+            {
+                if (tBracketVisual != null) tBracketVisual.SetActive(false);
+                if (brkIdx < tBracketRowPool.Count)
+                {
+                    UIFactory.SetColor(tBracketRowTexts[brkIdx], C_DIM);
                     UIFactory.SetText(tBracketRowTexts[brkIdx],
                         $"<i>Bracket revealed when the tournament starts ({_FmtSlot(t.scheduled_start_ts)}).</i>");
                     tBracketRowPool[brkIdx].SetActive(true);
                     brkIdx++;
                 }
-                else if (brkIdx < tBracketRowPool.Count)
+            }
+            else
+            {
+                // Voting / no-data state with no signups yet — minimal placeholder.
+                if (tBracketVisual != null) tBracketVisual.SetActive(false);
+                if (brkIdx < tBracketRowPool.Count)
                 {
                     UIFactory.SetColor(tBracketRowTexts[brkIdx], C_DIM);
-                    UIFactory.SetText(tBracketRowTexts[brkIdx], "<i>Bracket is generated once signups lock.</i>");
+                    UIFactory.SetText(tBracketRowTexts[brkIdx], "<i>Bracket appears once signups have rolled in.</i>");
                     tBracketRowPool[brkIdx].SetActive(true);
                     brkIdx++;
                 }
             }
-            else if (t.matches != null && t.matches.Length > 0)
+
+            // ── End of new bracket render. The block below is the legacy
+            // text-list render (kept as an unreached fallback in case the
+            // visual path bails out). Skipping via the trailing for-loop.
+            if (false)
             {
                 // Clear the per-row purpose list so each refresh rebuilds it fresh.
                 _tBracketRowPurposes.Clear();

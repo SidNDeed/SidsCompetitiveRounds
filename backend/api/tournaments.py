@@ -278,6 +278,7 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
                m.p1_signup_id, m.p2_signup_id, m.prereq_match_ids,
                m.is_bye, m.status, m.series_id, m.winner_signup_id,
                m.ready_deadline_at, m.deadline_at, m.started_at, m.ended_at,
+               m.photon_room_name,
                p1.display_name AS p1_name, p2.display_name AS p2_name,
                rs.p1_series_wins, rs.p2_series_wins,
                rs.player1_id AS rs_p1_player_id, s1.player_id AS s1_player_id
@@ -311,6 +312,7 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
             ready_deadline_at=r.ready_deadline_at,
             deadline_at=r.deadline_at,
             started_at=r.started_at, ended_at=r.ended_at,
+            photon_room_name=r.photon_room_name,
         ))
 
     # Caller-specific fields
@@ -667,6 +669,14 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         db.add(series)
         m.series_id = series.id
         m.status = "ready"
+        # Server-issued Photon room name. Both clients pull this from
+        # /api/v1/tournaments/current rather than deriving it from match.id
+        # locally — kills the dual-derivation race that could land them
+        # in different rooms if the string-split logic ever drifted.
+        # Format kept compatible with the legacy "sct-<12hex>" convention
+        # so older clients that still derive client-side won't see a
+        # mismatch (they'll arrive at the same room name).
+        m.photon_room_name = "sct-" + str(m.id).replace("-", "")[:12]
         # Sync: 5-min ready-up window. Async: 7-day match deadline. The tick
         # enforces both via _apply_no_show_forfeits + the async deadline path.
         if t.kind == "async":
@@ -892,16 +902,6 @@ async def _pay_prizes(db: AsyncSession, t: Tournament) -> None:
     tier = t.prize_tier or "none"
     golds = PRIZE_GOLD.get(tier, (0, 0, 0))
     xps = PRIZE_XP.get(tier, (0, 0, 0))
-
-    def grant(signup_id: Optional[uuid.UUID], rank_idx: int) -> None:
-        if not signup_id:
-            return
-        g = golds[rank_idx]
-        x = xps[rank_idx]
-        if g == 0 and x == 0:
-            return
-        # Pull player_id from signup, then credit.
-        db.execute  # just to keep type-checker happy; we execute below
 
     async def do_grant(signup_id: Optional[uuid.UUID], rank_idx: int) -> None:
         if not signup_id:
@@ -1517,9 +1517,11 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
         return {"matches": []}
     q = text("""
         SELECT m.id AS match_id, m.status, m.bracket_side, m.round,
-               t.id AS tournament_id, t.kind,
+               m.photon_room_name,
+               t.id AS tournament_id, t.kind, t.photon_region,
                p1.steam_id AS p1_steam_id, p1.display_name AS p1_name,
-               p2.steam_id AS p2_steam_id, p2.display_name AS p2_name
+               p2.steam_id AS p2_steam_id, p2.display_name AS p2_name,
+               s1.ready_at AS p1_ready_at, s2.ready_at AS p2_ready_at
         FROM tournament_matches m
         JOIN tournaments t ON t.id = m.tournament_id
         LEFT JOIN tournament_signups s1 ON s1.id = m.p1_signup_id
@@ -1532,9 +1534,14 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
         ORDER BY m.round
     """)
     rows = (await db.execute(q, {"pid": player.id})).all()
+    # Ready iff the heartbeat is recent (within 60s) — mirrors the
+    # forfeit-deadline logic in _apply_no_show_forfeits.
+    ready_cutoff = datetime.now(timezone.utc) - timedelta(seconds=READY_STALE_SECONDS)
     result = []
     for r in rows:
         is_p1 = r.p1_steam_id == steam_id
+        my_ready = (r.p1_ready_at if is_p1 else r.p2_ready_at)
+        opp_ready = (r.p2_ready_at if is_p1 else r.p1_ready_at)
         result.append({
             "tournament_id": str(r.tournament_id),
             "kind": r.kind,
@@ -1544,6 +1551,10 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
             "round": r.round,
             "opponent_steam_id": (r.p2_steam_id if is_p1 else r.p1_steam_id),
             "opponent_display_name": (r.p2_name if is_p1 else r.p1_name),
+            "photon_room_name": r.photon_room_name,
+            "photon_region": r.photon_region,
+            "my_ready": my_ready is not None and my_ready >= ready_cutoff,
+            "opp_ready": opp_ready is not None and opp_ready >= ready_cutoff,
         })
     return {"matches": result}
 

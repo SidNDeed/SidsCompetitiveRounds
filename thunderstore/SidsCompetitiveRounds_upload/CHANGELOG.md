@@ -1,5 +1,15 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.5 — Tournament resurrection + leaver/bet/block fixes
+
+The async tournament feature was silently broken since launch — `start_tournament` errored on every cron tick because the `RankedSeries` model was missing the columns it tried to populate. Tournaments stayed stuck at `status='locked'` forever and players' ranked games against bracket opponents weren't attributed. Fixed model + the pile of correctness/UX issues that surfaced once tournaments actually started running.
+
+- **Tournaments unstuck.** Model fix unblocks `start_tournament`. Server-issued Photon room names (no more client-side derivation race). Async tournament series no longer get swept by the 30-min stale-series prune. Pre-match tournament bets live in the new "Upcoming Match Bets" section in the Tournament tab, visible to bettors before the match goes live but hidden from the Live Ranked Games panel. Tournament auto-connect dispatch is now tab-independent — fires from the plugin-level heartbeat loop instead of only when the user has the Tournament tab open. Visual bracket: positional canvas with L-shaped connector lines between matches.
+- **Tournament + private bets back to queue rules.** Bettable until 2 firefights into game 1 (or game 1 result is in). `[TOURNAMENT Async]` / `[PRIVATE]` tags stay for display.
+- **Leaver penalty fixes.** `matchIsRanked` now persists across games of a ranked series so DCs in game 2/3 actually register. Threshold widened to count "any prior game completed" alongside "2+ firefights in current game" — catches early-game-2 leavers.
+- **Eager preflight for private rooms.** `/series/preflight` fires the moment the opponent's mod props arrive on Photon instead of waiting for an HTTP round-trip. Private 1v1 games now surface in `#live-bets` and Live Ranked Games within ~10s of room entry instead of a game late.
+- **Block-trigger diagnostics.** v1.26.3's silent skip on destroyed BlockTriggers now logs trigger type + instance state, plus a Finalizer backstop that catches residual NREs with stack traces, so the next "block didn't proc" reproduction gives us the data to chase the upstream cause.
+
 ## v1.26.4 — 2v2 assembly cascade fix
 
 Two consecutive 2v2 tests with 4 players hit the same `assembly_timeout, 3/4 confirmed` cancellation. Root cause: the server's 15-second deadline for all 4 clients to spawn-confirm was too tight for slow Photon connects. Bumped it to 60 seconds, and gated client-side `OnPlayerLeftRoom` DC reports on `IsInMatch=true` so transient peer drops during assembly no longer cascade into a kick-everyone-to-menu storm.

@@ -338,6 +338,7 @@ class TournamentMatchEntry(BaseModel):
     deadline_at: datetime | None = None
     started_at: datetime | None
     ended_at: datetime | None
+    photon_room_name: str | None = None
 
 
 class TournamentTimeSlotTally(BaseModel):
