@@ -143,6 +143,18 @@ namespace CompetitiveRounds
             public List<float> top_card_win_rates;
             public List<string> recent_form; // "W","L","W"... last 20
             public List<float> rating_history; // oldest→newest
+            // Per-player mod version (server-tracked from X-Mod-Version header).
+            public string mod_version;
+            // Server-computed head-to-head against the local viewer
+            // (passed via FetchPlayerStatsForView's viewer_steam_id query
+            // param). Replaces the prior client-side H2H computation that
+            // iterated the local match cache and missed older opponents.
+            public int h2h_ranked_wins;
+            public int h2h_ranked_losses;
+            public int h2h_casual_wins;
+            public int h2h_casual_losses;
+            public int h2h_series_wins;
+            public int h2h_series_losses;
         }
 
         [Serializable]
@@ -1477,6 +1489,18 @@ namespace CompetitiveRounds
                             else if (seriesStatus == "completed")
                             {
                                 CompetitiveUI.QueueNotification($"SERIES COMPLETE {seriesScore}!", new Color(0.3f, 1f, 0.3f), 4f);
+                                // Increment the session series tally. The series winner is
+                                // whoever won this final reported game (a BO_n first-to-N
+                                // ends on the deciding game), so map reporter-perspective
+                                // win to local-perspective win and bump the right counter.
+                                try
+                                {
+                                    string mySid = MatchTracker.LocalSteamId;
+                                    bool meIsP1 = !string.IsNullOrEmpty(mySid) && mySid == p1SteamId;
+                                    bool meWon = meIsP1 ? (p1RoundsWon > p2RoundsWon) : (p2RoundsWon > p1RoundsWon);
+                                    GameStateWatcher.IncrementSessionRankedSeries(meWon);
+                                }
+                                catch (Exception ex) { Plugin.Log.LogWarning($"[SESSION] series tally update failed: {ex.Message}"); }
                                 // Regicide is now handled server-side after series completion
                                 GameStateWatcher.pendingRegicideCheck = false;
                             }
@@ -1739,8 +1763,15 @@ namespace CompetitiveRounds
                 return;
             }
 
+            // Pass the local Steam ID as the viewer so the server can
+            // compute head-to-head counts against us. Falls back to no
+            // viewer (no H2H) when the local ID isn't resolved yet.
+            string viewer = MatchTracker.LocalSteamId;
+            string viewerQ = (!string.IsNullOrEmpty(viewer) && viewer != "unknown" && viewer != steamId)
+                ? $"?viewer_steam_id={Escape(viewer)}"
+                : "";
             Plugin.Instance.StartCoroutine(GetRequest(
-                $"{baseUrl}/api/v1/players/{steamId}",
+                $"{baseUrl}/api/v1/players/{steamId}{viewerQ}",
                 (success, response) =>
                 {
                     if (success)

@@ -761,7 +761,8 @@ namespace CompetitiveRounds
 
         private static void DrawMatchStatus()
         {
-            if (!MatchTracker.IsInMatch || !GameStateWatcher.MatchIsRanked) return;
+            if (!MatchTracker.IsInMatch) return;
+            bool isRanked = GameStateWatcher.MatchIsRanked;
             if (statusStyle == null)
             {
                 statusStyle = new GUIStyle(GUI.skin.label);
@@ -769,10 +770,80 @@ namespace CompetitiveRounds
                 statusStyle.fontStyle = FontStyle.Bold;
                 statusStyle.alignment = TextAnchor.MiddleCenter;
             }
+            if (scoreStyle == null)
+            {
+                scoreStyle = new GUIStyle(GUI.skin.label);
+                scoreStyle.fontSize = 14;
+                scoreStyle.fontStyle = FontStyle.Bold;
+                scoreStyle.alignment = TextAnchor.MiddleCenter;
+            }
             var oc = GUI.contentColor;
-            GUI.contentColor = Color.green;
-            GUI.Label(new Rect((Screen.width - 140) / 2f, 8, 140, 18), "RANKED - Recording", statusStyle);
+
+            // Top banner: "RANKED - Recording" only on ranked. Casual gets no banner —
+            // the score line below floats up so it sits where the banner would have.
+            float scoreY;
+            if (isRanked)
+            {
+                GUI.contentColor = Color.green;
+                GUI.Label(new Rect((Screen.width - 140) / 2f, 8, 140, 18), "RANKED - Recording", statusStyle);
+                scoreY = 28;
+            }
+            else
+            {
+                scoreY = 8;
+            }
+
+            // Score line. The ROUNDS UI itself already shows the in-game
+            // firefight count, so this banner is dedicated to context the
+            // game doesn't surface: the BO3 SERIES score on top, and the
+            // SESSION series tally (cumulative across every ranked series
+            // played since the mod loaded) below. Casual matches fall back
+            // to firefight count since there's no series context.
+            int localTeam = GameStateWatcher.LocalTeamId;
+            int p1r = GameStateWatcher.P1Rounds;
+            int p2r = GameStateWatcher.P2Rounds;
+            int local = localTeam == 0 ? p1r : p2r;
+            int opp   = localTeam == 0 ? p2r : p1r;
+
+            if (isRanked)
+            {
+                // Series score (current BO3) — pulled from CachedActiveSeries.
+                string seriesText = null;
+                var act = ApiClient.CachedActiveSeries;
+                string mySid = MatchTracker.LocalSteamId;
+                if (act != null && !string.IsNullOrEmpty(mySid))
+                {
+                    foreach (var s in act)
+                    {
+                        if (s.p1_steam_id == mySid) { seriesText = $"{s.p1_wins} - {s.p2_wins}"; break; }
+                        if (s.p2_steam_id == mySid) { seriesText = $"{s.p2_wins} - {s.p1_wins}"; break; }
+                    }
+                }
+                if (seriesText == null) seriesText = "0 - 0";
+
+                // Session series tally — cumulative ranked SERIES wins/losses
+                // across this app session. Tracked in GameStateWatcher,
+                // incremented from the report-match callback when the
+                // server replies with series_status='completed'.
+                int sw = GameStateWatcher.SessionRankedSeriesWins;
+                int sl = GameStateWatcher.SessionRankedSeriesLosses;
+
+                GUI.contentColor = new Color(1f, 0.85f, 0.3f);
+                GUI.Label(new Rect((Screen.width - 220) / 2f, scoreY, 220, 22),
+                    $"Series: {seriesText}", scoreStyle);
+                GUI.contentColor = new Color(0.75f, 0.85f, 1f);
+                GUI.Label(new Rect((Screen.width - 220) / 2f, scoreY + 18, 220, 20),
+                    $"Session: {sw} - {sl}", scoreStyle);
+            }
+            else
+            {
+                GUI.contentColor = new Color(0.85f, 0.85f, 0.85f);
+                GUI.Label(new Rect((Screen.width - 200) / 2f, scoreY, 200, 22),
+                    $"Score: {local} - {opp}", scoreStyle);
+            }
             GUI.contentColor = oc;
         }
+
+        private static GUIStyle scoreStyle;
     }
 }

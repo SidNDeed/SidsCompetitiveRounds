@@ -86,6 +86,20 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] OnMatchStart error: {ex.Message}"); }
         }
 
+        /// <summary>Called from GameStateWatcher when p1Rounds + p2Rounds advances —
+        /// catches sprites that spawn AFTER our initial DelayedApplyAll walk
+        /// (Phoenix respawn, card effects creating new SpriteRenderers, etc.)
+        /// and re-tints them. Without this, players reported seeing the native
+        /// team color "leak through" their cosmetic mid-match — that's exactly
+        /// these post-match-start spawned sprites we never reached on the
+        /// first walk.</summary>
+        public static void OnRoundStart()
+        {
+            if (Plugin.ShowPlayerColors != null && !Plugin.ShowPlayerColors.Value) return;
+            try { Plugin.Instance.StartCoroutine(DelayedApplyAll()); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] OnRoundStart error: {ex.Message}"); }
+        }
+
         public static void OnMatchEnd()
         {
             // Restore each tinted player's originals before clearing state. Match-end

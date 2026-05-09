@@ -1,5 +1,75 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.6 — first-launch ranked fix, anti-cheat false-positive sweep, 2v2 menu rework, in-match session score, Sid+feauxen series recovery
+
+**Headlines for testers**
+- New installs no longer get logged as casual on their first match. Steamworks resolution is racy on first launch; we used to skip the `/toggle-ranked` server sync entirely if Steam wasn't ready by the time the plugin initialized, so the player's `ranked_enabled` stayed false on the server and every opponent saw them as casual until they restarted ROUNDS. Plugin now polls every 0.5 s for up to 30 s and fires the init the moment Steam resolves.
+- The "too_many_cards" anti-cheat was wrong. ROUNDS arms-race rules give the loser of a 5-X game **6 cards** legitimately (1 pre-match auto-pick + 1 per round lost). Threshold was 5 with auto-invalidate on; every existing flag was a false positive. Bumped to 7, demoted to advisory-only, dismissed the unreviewed flags, restored the 3 wrongly-invalidated matches, re-credited gold/XP. (Migration 081.)
+- In-match score banner now shows **Series** + **Session** instead of repeating the round count the game already displays. Series = current BO3 score (e.g. `1 - 0`), Session = cumulative ranked series wins/losses since the mod loaded.
+- 2v2 menu rework — Random Queue + Custom Lobbies are now side-by-side, queue bodies collapse when empty, "Live 2v2 Now" strip in the 2v2 tab, scroll-affordance hint between sections, and panel images set to non-raycast so wheel/drag-scroll bubbles cleanly to the outer ScrollRect.
+
+**Sid+feauxen 2v2 recovery (server-side, retroactive)**
+- Migration **077** rebuilt 4 unreported 2v2 wins from 2026-05-09 that the queue cleanup loop swept mid-game (the underlying loop was fixed in the same deploy: `team_queue_cleanup_loop` now gates on `spawn_confirmations < 4` so post-assembly series aren't cancelled when players stop polling `/team/queue/poll` after entering Photon).
+- Migration **078** split the recovery into the two BO3 series Sid+feauxen actually played that day (matches 1+2 stay on `4ea30d95...`, matches 3+4 move to a new series row).
+- Migration **079** backfilled per-slot gold/XP earned (T1 +1200xp/+37g per series, T2 +1800xp/+68g per series) and credited each player's totals via real `gold_transactions` rows.
+- Migration **080** approximated per-slot Glicko deltas using the live `glicko2.calculate_new_rating` against best-known pre-series inputs, so the F5 history elo chip actually renders. The recovered-series elo numbers are large because three of the four players had default 350 RD on 5/9 — accurate Glicko output, not a display bug.
+- 2v2 history now reads "(card data not recorded)" once per match instead of stacking four "—" placeholders when none of the four players' card lists were captured, which kept the recovered matches from looking confused.
+
+**Backend hardening**
+- Background tasks (`queue_cleanup_loop`, `team_queue_cleanup_loop`, `tournament_tick`) are wrapped in a `_supervised(name, coro_factory)` helper that catches any non-`CancelledError` exception, logs the traceback, and restarts the loop after 5 s. Previously a single asyncpg blip killed the loop until next API restart.
+- DB connection pool bumped from `pool_size=10, max_overflow=5` to `20 + 10`, with `pool_timeout=30 s`, `pool_pre_ping=True`, `pool_recycle=1800 s`. Saturday playtest peaks were brushing the prior 15-conn ceiling; the timeout means we 503 cleanly under contention instead of hanging the worker.
+
+**Earlier in this release window — tournament + leaver/bet/block fixes (rolled in)**
+
+The async tournament had been silently broken since the feature shipped — `start_tournament` errored on every cron tick because the `RankedSeries` SQLAlchemy model was missing the `tournament_id` / `is_tournament` / `is_private` columns. Fixed model + a pile of correctness and UX issues that surfaced once tournaments started running. Highlights:
+
+- `RankedSeries` model gained `tournament_id`, `is_tournament`, `is_private`. Confirmed live: the active async tournament flipped from `locked` → `running` immediately on deploy, and Sid+Lopi's WB R1 series row now has `tournament_id` populated.
+- `tournament_matches.photon_room_name` (migration 072) — server allocates the room name at activation time. Eliminates the dual-derivation race.
+- `_prune_stale_series` skips `is_tournament=TRUE` rows. Migration 074 restored the two rows that got swept before the fix; migration 073 marked 19 zombie pre-fix `status='active'` rows as `abandoned`.
+- New "Upcoming Match Bets" section in the Tournament tab. Live Ranked Games hides tournament series in `pre_match` phase. Tournament + private bets follow the same lock rules as queue series; Discord embed mirrors with `🏆 [Async]/[Sync]` and a `PRE-MATCH` callout.
+- Tournament dispatch is now tab-independent: `TournamentHeartbeatLoop` plugin-level coroutine fires `SetPendingRoom` for sync-ready matches whether or not the F5 menu is open.
+- Visual bracket replaced the collapsing list — positional canvas, status colors, blank skeleton during voting/locked.
+- Auto-connect prefers server-issued `photon_room_name` over the legacy client-side derivation.
+
+**Leaver penalty + eager preflight + block safety**
+- `matchIsRanked` now persists across games of a series; `OnMatchStarted` re-derives it from room CustomProperties. Previously games 2+ of a series silently logged casual. Reproduced 2026-04-30 when Galaxy Ice DC'd mid-game-2 with ~6 firefights and got no leaver penalty.
+- Leaver threshold: `totalPts >= 2 OR seriesGames >= 1` (was firefight-count only).
+- `series/preflight` fires the moment we see opponent `cr_*` Photon properties — Discord `#live-bets` and the in-game Live Ranked Games panel surface private 1v1 matches within ~10 s of room entry.
+- Verbose `[BLOCK-SAFETY]` diagnostics + Finalizer backstop on `BlockTrigger.DoBlock` after testers reported the cascade-skip wasn't catching the upstream destroyed-trigger bug.
+
+**Stan refund + stalled-series prune**
+- Refunded Stan's 2000g bet on series 4e320959 (1 match played 5-2, then players never finished — `_prune_stale_series` only handled "0 matches in 30 min", not "1+ matches then stalled"). Migration 076 also swept 5 other stuck series found in the same audit. The /series/active prune path was extended in the same deploy so future stalled series auto-prune + auto-refund.
+
+**First-launch "casual instead of ranked" bug**
+- Fresh installs whose Steamworks resolution was racy on first launch silently skipped `ApiClient.ToggleRanked` — `Plugin.cs:723` had a single bare `if (steamId != "unknown")` guard with no retry. Their server-side `ranked_enabled` stayed at the SQL default of `false`, so every opponent's `OnMatchStarted` ranked-derivation saw them as casual until the next ROUNDS restart (when Steamworks was already loaded by the time `DoInitialize` ran). Replaced the inline guard with an `InitWhenSteamReady` coroutine that polls every 0.5 s for up to 30 s, then fires the same one-shot init (`ToggleRanked` + `FetchPlayerStats` + `FetchMatchHistory` + `FetchBlockedPlayers` + `CheckAdminStatus`) once the Steam ID resolves.
+
+**Anti-cheat: "too_many_cards" was a false-positive factory**
+- The threshold was `5 cards per player per game`, but ROUNDS arms-race rules let the LOSER pick `rounds_lost + 1` cards (1 pre-match + 1 per round lost), so a clean 5-X loss legitimately produces 6. An audit of every existing `too_many_cards` flag confirmed all 5 hits matched `rounds_lost + 1` exactly — every one was a false positive.
+- Bumped `ANTICHEAT_MAX_CARDS_PER_PLAYER` 5 → 7 so only true outliers (7+) flag at all.
+- Demoted the flag from `auto_invalidate=True` to advisory-only.
+- Migration **081** dismisses the 3 unreviewed flags as `false_positive`, restores the 3 matches that were auto-invalidated solely on `too_many_cards`, and re-credits the players' gold/XP via `reversal_undo` rows.
+
+**Backend hardening**
+- Background tasks (`queue_cleanup_loop`, `team_queue_cleanup_loop`, `tournament_tick`) are now wrapped in a `_supervised(name, coro_factory)` helper that catches every non-`CancelledError` exception, prints a stack trace, and restarts the loop after a 5 s backoff. Previously a single asyncpg blip killed the loop until the next API restart and queue/series rows accumulated forever.
+- Connection pool bumped from 10 + 5 (max 15 concurrent) to 20 + 10 (max 30), with `pool_timeout=30 s`, `pool_pre_ping=True`, `pool_recycle=1800 s`. Saturday playtests with ~60 testers were pushing the prior ceiling, especially with queue polls overlapping match-submit + leaderboard reads.
+
+## Unreleased (rolled into above) — 2v2 menu rework + Sid+feauxen series recovery
+
+**2v2 history split + economy backfill (server)**
+- Migration **078** splits the four matches recovered by 077 into the two BO3 series Sid+feauxen actually played that day. The original recovery dumped all four under one series_id; client-side history merged them into a single 0-2-extended view. Now matches 1+2 stay on `4ea30d95-…` (completed 0-2 at 11:25) and matches 3+4 move onto a new series row (completed 0-2 at 11:40), so each renders as its own line in the F5 history.
+- Migration **079** backfills the per-slot `t1a/b/2a/b_xp_earned` + `_gold_earned` accumulators on both recovered series and credits the four players the gold/XP they earned at match time. Per series: T1 +1200 xp / +37g, T2 +1800 xp / +68g (matches the live submit-path math: 600/900 xp per match, 100 xp = 1g auto-conversion, +25g/+50g series-end bonus). `gold_transactions` rows inserted for the audit trail. Glicko `rating_change` is intentionally left NULL — historical 2v2 rating snapshots aren't recoverable, and the F5 row already omits the elo chip when the field is null.
+
+**2v2 tab UX rework (client)**
+- **Queue panels are now side-by-side**, two columns instead of stacked: Random Queue on the left, Custom Lobbies on the right. Was previously two 900-wide blocks stacked vertically, which wasted half the screen horizontally when ~0-2 people were queueing in either bucket.
+- **Queue bodies collapse when empty** and grow to fit row count when populated (was a fixed 160 px each).
+- **Live 2v2 Now strip** added directly to the 2v2 tab. One line per active team series, hidden entirely when no 2v2 is live. Mirrors the leaderboard tab's Live Ranked Games panel so users don't have to switch tabs to see what's currently in progress.
+- **Scroll-affordance hint** ("↓ Scroll down for leaderboard + recent series ↓") now sits between the queue band and the leaderboard/history block. Tester feedback was that users didn't realize the tab scrolled; an always-visible hint solves the discoverability gap without pulling in a full reflection-built Unity Scrollbar.
+- **Defensive raycastTarget=false** on the inner 2v2-tab panel `Image`s so mouse-wheel + drag-scroll bubble cleanly to the outer ScrollRect even when the cursor sits on a dark panel background.
+
+**Recovered-series elo + cards (server + client)**
+- Migration **080** populates approximate per-slot `rating_change` on both recovered series so the F5 history elo chip actually renders. Computed via the live `glicko2.calculate_new_rating` against best-known pre-series inputs (Sid's actual 2v2 row + defaults for the three first-time-2v2 players). T2A (Sid) +65 / +22, T2B (feauxen) +247 / +57 (huge series-A swing because she was at default 350 RD), T1A/T1B -183 / -46 each. Live `glicko_ratings_2v2` rows are intentionally NOT touched — players' current ratings already reflect everything they played AFTER these recovered series.
+- 2v2 history view now renders "(card data not recorded)" instead of four "—" dashes when none of the four players have card entries for that match — clearer state for the recovered matches whose per-pick data wasn't in the source log.
+
 ## v1.26.5 — Tournament resurrection + leaver/bet/block fixes
 
 The async tournament had been silently broken since the feature shipped — `start_tournament` errored on every cron tick because the `RankedSeries` SQLAlchemy model was missing the `tournament_id` / `is_tournament` / `is_private` columns it tries to populate. Tournaments stayed stuck at `status='locked'` forever and players' ranked games against their bracket opponents weren't attributed. Fixed model + a pile of correctness and UX issues that surfaced once tournaments started running.

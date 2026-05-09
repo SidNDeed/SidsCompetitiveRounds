@@ -147,6 +147,17 @@ class PlayerStatsResponse(BaseModel):
     sweeps_taken: int = 0
     ranked_dc_count: int = 0
     recent_form: list[dict] = Field(default_factory=list)
+    # Most recently observed mod version for this player (X-Mod-Version
+    # header on their last mod-only request). null for non-mod players.
+    mod_version: str | None = None
+    # Server-computed head-to-head against the optional ?viewer_steam_id
+    # query param. All zero when viewer is unset or matches steam_id.
+    h2h_ranked_wins: int = 0
+    h2h_ranked_losses: int = 0
+    h2h_casual_wins: int = 0
+    h2h_casual_losses: int = 0
+    h2h_series_wins: int = 0
+    h2h_series_losses: int = 0
 
     model_config = {"from_attributes": True}
 

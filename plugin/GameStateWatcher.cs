@@ -135,6 +135,12 @@ namespace CompetitiveRounds
         private static Dictionary<string, int[]> sessionWLByOpponent = new Dictionary<string, int[]>(); // [rW, rL, cW, cL]
         private static int sessionRankedWins = 0;
         private static int sessionRankedLosses = 0;
+        // Session SERIES tally — distinct from match wins/losses above. A
+        // BO3 series can include 2-3 matches; only the deciding match flips
+        // these counters. Incremented from ApiClient.ReportMatch's success
+        // callback when the server response carries series_status='completed'.
+        private static int sessionRankedSeriesWins = 0;
+        private static int sessionRankedSeriesLosses = 0;
         private static int sessionCasualWins = 0;
         private static int sessionCasualLosses = 0;
         // 2v2 series tally for the in-mod Session Info panel. Incremented from
@@ -319,6 +325,13 @@ namespace CompetitiveRounds
         public static int SessionMatchCount => sessionMatchCount;
         public static int SessionRankedWins => sessionRankedWins;
         public static int SessionRankedLosses => sessionRankedLosses;
+        public static int SessionRankedSeriesWins => sessionRankedSeriesWins;
+        public static int SessionRankedSeriesLosses => sessionRankedSeriesLosses;
+        public static void IncrementSessionRankedSeries(bool won)
+        {
+            if (won) sessionRankedSeriesWins++; else sessionRankedSeriesLosses++;
+            Plugin.Log.LogInfo($"[SESSION] Ranked series tally: {sessionRankedSeriesWins}-{sessionRankedSeriesLosses}");
+        }
         public static int SessionCasualWins => sessionCasualWins;
         public static int SessionCasualLosses => sessionCasualLosses;
         public static int SessionTeamSeriesWins => sessionTeamSeriesWins;
@@ -946,6 +959,15 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo($"[POLL] Round: P1! Rounds: {p1Rounds}-{p2Rounds}");
                     if (curP2Rounds > lastP2Rounds)
                         Plugin.Log.LogInfo($"[POLL] Round: P2! Rounds: {p1Rounds}-{p2Rounds}");
+
+                    // Re-tint player_color cosmetic after every round
+                    // transition — vanilla spawns new sprites mid-match
+                    // (Phoenix respawn, card effects spawning visual
+                    // children) that our match-start DelayedApplyAll
+                    // never reaches. Players reported seeing native
+                    // team color "leak through" their cosmetic; that's
+                    // these later-spawned sprites.
+                    try { PlayerColorCosmetic.OnRoundStart(); } catch { }
 
                     // Achievement: track comeback (0-4 deficit)
                     int localR = localTeamId == 0 ? p1Rounds : p2Rounds;

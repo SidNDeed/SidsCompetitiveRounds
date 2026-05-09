@@ -58,6 +58,11 @@ class Player(Base):
     # NULL = passive opponent record (auto-created via get_or_create_player
     # when their match was reported by someone else).
     mod_seen_at = Column(DateTime(timezone=True), nullable=True)
+    # Most recently observed mod version (X-Mod-Version request header,
+    # stamped by _mark_mod_seen on mod-only endpoints). Used by the
+    # leaderboard player-detail view so testers can tell at a glance
+    # whether a player is running a build that has a given fix.
+    mod_version = Column(String(16), nullable=True)
 
     glicko = relationship("GlickoRating", back_populates="player", uselist=False)
     rating_history = relationship("RatingHistory", back_populates="player")

@@ -4,6 +4,7 @@ FastAPI backend for match tracking, Glicko-2 ratings, and leaderboards.
 """
 
 import asyncio
+import contextvars
 import hashlib
 import hmac
 import math
@@ -65,14 +66,32 @@ GLICKO2_PERIOD_HOURS = int(os.getenv("GLICKO2_PERIOD_HOURS", "168"))
 
 # ── Application setup ──────────────────────────────────────────
 
+async def _supervised(name: str, coro_factory):
+    """Wraps a long-running background task so an unhandled exception logs
+    loudly + auto-restarts after a 5s backoff instead of dying silently.
+    Without this, a single asyncpg connection blip in queue_cleanup_loop
+    or tournament_tick would kill the loop until the next API restart and
+    queue rows would accumulate forever."""
+    while True:
+        try:
+            await coro_factory()
+        except asyncio.CancelledError:
+            print(f"[BGTASK] {name} cancelled")
+            raise
+        except Exception:
+            import traceback
+            print(f"[BGTASK] {name} crashed — restarting in 5s\n{traceback.format_exc()}")
+            await asyncio.sleep(5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     print("Competitive ROUNDS API starting up")
-    task = asyncio.create_task(queue_cleanup_loop())
-    task_t2 = asyncio.create_task(team_queue_cleanup_loop())
     from tournaments import tournament_tick
-    task_t = asyncio.create_task(tournament_tick())
+    task   = asyncio.create_task(_supervised("queue_cleanup",      queue_cleanup_loop))
+    task_t2 = asyncio.create_task(_supervised("team_queue_cleanup", team_queue_cleanup_loop))
+    task_t  = asyncio.create_task(_supervised("tournament_tick",   tournament_tick))
     yield
     task.cancel()
     task_t.cancel()
@@ -84,20 +103,39 @@ async def team_queue_cleanup_loop():
     """Delete stale 2v2 queue rows. Mirrors queue_cleanup_loop with one extra
     safety net: when a 'matched' or 'ready' row goes stale we also cancel the
     series and boot the other 3 back to searching, since the queue cascade in
-    /team/queue/leave only fires on explicit user action."""
+    /team/queue/leave only fires on explicit user action.
+
+    Originally the cancel-when-stale path fired on ANY series whose queue
+    rows had gone stale. That broke every 2v2 match: once players spawn-
+    confirm and start playing, they STOP polling /team/queue/poll (the F5
+    queue panel is closed and only the in-match poll runs), so all 4
+    queue rows go stale within a minute and the series gets cancelled
+    mid-game. Subsequent /team/matches POSTs then bounce with HTTP 400
+    because the series is already cancelled. Reproduced 2026-05-09 with
+    Sid's 4 unreported matches in series 4ea30d95.
+
+    Fixed by gating the cancel on `spawn_confirmations < 4`. Once all
+    four players have spawn-confirmed, the series is in live-game state
+    and queue staleness is meaningless. The original "client crashed
+    mid-lock" intent — assembly hasn't completed and players aren't
+    coming back — still gets handled because in that case
+    spawn_confirmations is below 4 by definition.
+    """
     import asyncio as _aio
     from database import async_session
     while True:
         try:
             await _aio.sleep(60)
             async with async_session() as db:
-                # Cancel any series whose queue rows have all gone stale (no poll in 30s).
-                # This handles the case where a client crashed mid-lock without /leave.
                 stale_series = await db.execute(
                     text("""
-                        SELECT DISTINCT series_id FROM team_queue
-                        WHERE series_id IS NOT NULL
-                          AND last_polled < NOW() - INTERVAL '60 seconds'
+                        SELECT DISTINCT tq.series_id
+                          FROM team_queue tq
+                          JOIN team_series ts ON ts.id = tq.series_id
+                         WHERE tq.series_id IS NOT NULL
+                           AND tq.last_polled < NOW() - INTERVAL '60 seconds'
+                           AND ts.status = 'active'
+                           AND ts.spawn_confirmations < 4
                     """)
                 )
                 for srow in stale_series.fetchall():
@@ -106,7 +144,9 @@ async def team_queue_cleanup_loop():
                         text("""UPDATE team_series
                                SET status='cancelled', invalidated_at=NOW(),
                                    invalidation_reason='stale_queue_rows'
-                               WHERE id=:sid AND status='active'"""),
+                               WHERE id=:sid
+                                 AND status='active'
+                                 AND spawn_confirmations < 4"""),
                         {"sid": sid},
                     )
                 # Stale-poll cleanup
@@ -203,6 +243,14 @@ app.include_router(tournaments_router)
 MIN_MOD_VERSION = "1.22.0"
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
+# Per-request mod version captured from the X-Mod-Version header by the
+# version-gate middleware. Read by _mark_mod_seen so we can stamp
+# players.mod_version without threading the request object through every
+# endpoint that calls the helper.
+_current_mod_version: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_mod_version", default=None
+)
+
 # Endpoints that bypass the gate (mod uses these to discover the required version).
 # Use a frozenset of exact paths — startswith on a tuple containing "/" would match everything.
 _VERSION_GATE_BYPASS = frozenset({
@@ -276,7 +324,17 @@ async def version_gate(request: Request, call_next):
             status_code=426,
             content={"error": "outdated", "required": MIN_MOD_VERSION, "current": sent},
         )
-    return await call_next(request)
+    # Stash on request.state + a ContextVar so _mark_mod_seen can stamp
+    # the player row with the version that just made the call. ContextVar
+    # propagates through asyncio's per-task context — caller endpoints
+    # don't need to pass anything down. Used by the leaderboard
+    # player-detail view to show "running v1.26.5" per player.
+    request.state.mod_version = sent
+    token = _current_mod_version.set(sent)
+    try:
+        return await call_next(request)
+    finally:
+        _current_mod_version.reset(token)
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -351,12 +409,19 @@ async def _mark_mod_seen(db: AsyncSession, player: Player) -> None:
     """Stamp `mod_seen_at` and auto-grant the Beta title. Called from mod-only
     endpoints (queue join, toggle-ranked, achievements unlock, match-report
     reporter) so the Beta title only lands on confirmed mod users — not on
-    casual opponents auto-created by get_or_create_player."""
+    casual opponents auto-created by get_or_create_player.
+
+    Also stamps `mod_version` from the per-request contextvar populated by the
+    version-gate middleware. ContextVar propagates through asyncio's task-local
+    context so callers don't need to thread the request through every endpoint."""
     if player is None or player.deleted_at is not None:
         return
     try:
         if player.mod_seen_at is None:
             player.mod_seen_at = datetime.now(timezone.utc)
+        observed_version = _current_mod_version.get()
+        if observed_version and player.mod_version != observed_version:
+            player.mod_version = observed_version
         beta_id = (await db.execute(
             text("SELECT id FROM shop_items WHERE sku = 'title_beta' LIMIT 1")
         )).scalar()
@@ -500,7 +565,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.26.5"
+LATEST_MOD_VERSION = "1.26.6"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -598,7 +663,14 @@ async def get_recent_flags(
 
 ANTICHEAT_SHORT_DURATION_SEC = 60
 ANTICHEAT_PATTERN_WINDOW_HOURS = 2
-ANTICHEAT_MAX_CARDS_PER_PLAYER = 5
+# ROUNDS arms-race rule: BOTH players auto-pick a card pre-match, then only
+# the loser picks after each round. So in a first-to-5 game, the LOSER of
+# a 5-X game picks 1 (pre-match) + 5 (rounds lost) = 6 cards legitimately.
+# An audit (2026-05-09) of every "too_many_cards" flag showed all 5 hits
+# were exactly `rounds_lost + 1` — perfect false-positives. Threshold was
+# 5; bumped to 7 so anything > 6 still surfaces but normal 5-X losses
+# don't fire. Auto-invalidate dropped to advisory-only at the same time.
+ANTICHEAT_MAX_CARDS_PER_PLAYER = 7
 # Duration floor for the AFK check. Combined with cards_picked=0 AND shots=0
 # AND blocks=0, this catches real AFK (never-at-keyboard) without firing on
 # legitimate-but-inputless play like Pacifist, Melee, Echo+Decay, or
@@ -639,7 +711,10 @@ async def _check_anti_cheat(
     flags = []
     invalidate = False
 
-    # 1. Too many cards (vanilla cap is 5 picks per player per BO5 game).
+    # 1. Too many cards. Advisory-only (auto_invalidate=False). Vanilla
+    # ROUNDS rules let the loser pick `rounds_lost + 1` cards (1 pre-match
+    # + 1 per round lost), so a clean 5-X loss legitimately produces 6.
+    # The threshold is set above 6 so only true outliers (7+) flag at all.
     p1_cards = len(report.player1.cards or [])
     p2_cards = len(report.player2.cards or [])
     if p1_cards > ANTICHEAT_MAX_CARDS_PER_PLAYER or p2_cards > ANTICHEAT_MAX_CARDS_PER_PLAYER:
@@ -650,9 +725,8 @@ async def _check_anti_cheat(
                 "p1_steam": p1.steam_id, "p2_steam": p2.steam_id,
                 "max_allowed": ANTICHEAT_MAX_CARDS_PER_PLAYER,
             },
-            True,
+            False,
         ))
-        invalidate = True
 
     # 2. Sub-60s pattern. Must use COALESCE since older matches only have match_duration set.
     duration = report.match_duration if report.match_duration is not None else 999999
@@ -1329,8 +1403,17 @@ async def get_leaderboard(
 # ── Routes: Player Stats ──────────────────────────────────────
 
 @app.get("/api/v1/players/{steam_id}", response_model=PlayerStatsResponse, tags=["Players"])
-async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
-    """Get full stats for a player by Steam ID."""
+async def get_player_stats(
+    steam_id: str,
+    viewer_steam_id: str | None = Query(None, description="Compute head-to-head stats vs this viewer."),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get full stats for a player by Steam ID. Optionally returns server-
+    computed head-to-head record between the viewed player and the viewer
+    (replaces the prior client-side H2H computation, which iterated the
+    viewer's local match-history cache and silently dropped opponents
+    outside the most-recent 500 matches — invisible H2H rows for older
+    rivals)."""
 
     result = await db.execute(
         select(Player).where(Player.steam_id == steam_id)
@@ -1600,6 +1683,53 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         for r in form_rows
     ]
 
+    # Server-computed head-to-head record between the viewed player and the
+    # viewer. Iterates the FULL matches table (not the viewer's most-recent
+    # 500 like the old client-side path) so old opponents always show
+    # accurate counts. Series wins/losses dedupe by series_id and require
+    # 2-game majority so non-completed series don't double-count.
+    h2h_ranked_w = h2h_ranked_l = 0
+    h2h_casual_w = h2h_casual_l = 0
+    h2h_series_w = h2h_series_l = 0
+    if viewer_steam_id and viewer_steam_id != steam_id:
+        viewer_row = (await db.execute(
+            select(Player.id).where(Player.steam_id == viewer_steam_id)
+        )).scalar_one_or_none()
+        if viewer_row is not None:
+            h2h_q = text("""
+                SELECT
+                    COUNT(*) FILTER (WHERE m.is_ranked AND m.winner_id = :vid) AS ranked_w,
+                    COUNT(*) FILTER (WHERE m.is_ranked AND m.winner_id = :pid) AS ranked_l,
+                    COUNT(*) FILTER (WHERE NOT m.is_ranked AND m.winner_id = :vid) AS casual_w,
+                    COUNT(*) FILTER (WHERE NOT m.is_ranked AND m.winner_id = :pid) AS casual_l
+                  FROM matches m
+                 WHERE ((m.player1_id = :vid AND m.player2_id = :pid)
+                     OR (m.player1_id = :pid AND m.player2_id = :vid))
+            """)
+            r = (await db.execute(h2h_q, {"vid": viewer_row, "pid": player.id})).mappings().first()
+            if r:
+                h2h_ranked_w = int(r["ranked_w"] or 0)
+                h2h_ranked_l = int(r["ranked_l"] or 0)
+                h2h_casual_w = int(r["casual_w"] or 0)
+                h2h_casual_l = int(r["casual_l"] or 0)
+            # Completed BO3 ranked series between the pair. p1_series_wins/p2
+            # are stored in player1/player2 order; map to the viewer side.
+            sq = text("""
+                SELECT rs.player1_id AS p1, rs.p1_series_wins AS p1w, rs.p2_series_wins AS p2w
+                  FROM ranked_series rs
+                 WHERE rs.status = 'completed'
+                   AND ((rs.player1_id = :vid AND rs.player2_id = :pid)
+                     OR (rs.player1_id = :pid AND rs.player2_id = :vid))
+                   AND (rs.p1_series_wins >= 2 OR rs.p2_series_wins >= 2)
+            """)
+            for s in (await db.execute(sq, {"vid": viewer_row, "pid": player.id})).mappings().all():
+                if s["p1"] == viewer_row:
+                    if s["p1w"] > s["p2w"]: h2h_series_w += 1
+                    else: h2h_series_l += 1
+                else:
+                    if s["p1w"] > s["p2w"]: h2h_series_l += 1
+                    else: h2h_series_w += 1
+
     return PlayerStatsResponse(
         steam_id=player.steam_id,
         display_name=player.display_name,
@@ -1648,6 +1778,13 @@ async def get_player_stats(steam_id: str, db: AsyncSession = Depends(get_db)):
         sweeps_taken=sweeps_taken,
         ranked_dc_count=player.ranked_dc_count or 0,
         recent_form=recent_form,
+        mod_version=player.mod_version,
+        h2h_ranked_wins=h2h_ranked_w,
+        h2h_ranked_losses=h2h_ranked_l,
+        h2h_casual_wins=h2h_casual_w,
+        h2h_casual_losses=h2h_casual_l,
+        h2h_series_wins=h2h_series_w,
+        h2h_series_losses=h2h_series_l,
     )
 
 
@@ -3665,19 +3802,26 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
 # ── Routes: Betting + Live series ────────────────────────────
 
 async def _prune_stale_series(db: AsyncSession) -> int:
-    """Mark series abandoned when no match has been reported within 30 min of creation,
-    and refund any pending bets on those series. Returns the number of series pruned.
-    Called lazily at the start of /series/active so we don't need a separate scheduler.
+    """Mark series abandoned + refund any pending bets. Catches two failure
+    modes:
+      1. **No match reported within 30 min of creation** — players never
+         actually played anything (preflight created the series row but
+         the room died before round 1).
+      2. **Series stalled mid-BO3** — at least one match was reported but
+         no further match in the last 60 minutes AND the series isn't
+         decided (no team has 2 wins). Reproduced 2026-05-07 when Stan
+         had 2000g stuck on a series that played match 1 then never
+         finished — the original prune path only matched mode (1) so the
+         series sat in `status='active'` indefinitely.
 
-    Tournament series are exempt — async tournament matches have a 7-day match
-    deadline and the series row is created at lock time (potentially days
-    before the players actually meet up). The 30-minute cutoff that's right
-    for queue/private series would otherwise sweep them every poll once they
-    age past the threshold, which is exactly what happened on 2026-05-01
-    when the active async tournament's WB R1 series got marked abandoned
-    despite the bracket being live."""
+    Tournament series are exempt from BOTH paths — async tournament
+    matches have a 7-day match deadline and the series row is created at
+    lock time (potentially days before the players actually meet up).
+    Returns the number of series pruned across both modes."""
     cutoff_min = 30
-    stale_rows = (await db.execute(text(
+    stalled_min = 60
+    # Mode 1: no match reported. Same query as before.
+    stale_rows_a = (await db.execute(text(
         "SELECT rs.id FROM ranked_series rs "
         "WHERE rs.status = 'active' "
         "  AND rs.is_tournament = FALSE "
@@ -3685,6 +3829,23 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         "  AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
         "LIMIT 50"
     ), {"cutoff_min": str(cutoff_min)})).all()
+    # Mode 2: stalled after match 1 (or 2). Last match >1h ago AND nobody
+    # has 2 wins yet (so the series isn't actually decided — a 2-0 or 2-1
+    # final state still gets caught by the regular series-completion path
+    # in the match-report handler).
+    stale_rows_b = (await db.execute(text(
+        "SELECT rs.id FROM ranked_series rs "
+        "WHERE rs.status = 'active' "
+        "  AND rs.is_tournament = FALSE "
+        "  AND rs.p1_series_wins < 2 "
+        "  AND rs.p2_series_wins < 2 "
+        "  AND EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
+        "  AND COALESCE(("
+        "        SELECT MAX(m.ended_at) FROM matches m WHERE m.series_id = rs.id"
+        "      ), rs.created_at) < NOW() - (:stalled_min || ' minutes')::interval "
+        "LIMIT 50"
+    ), {"stalled_min": str(stalled_min)})).all()
+    stale_rows = list(stale_rows_a) + list(stale_rows_b)
     if not stale_rows:
         return 0
     pruned = 0

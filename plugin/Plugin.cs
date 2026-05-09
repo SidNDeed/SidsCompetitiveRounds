@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.26.5";
+        public const string ModVersion = "1.26.6";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -719,20 +719,15 @@ namespace CompetitiveRounds
             try { UIFactory.InitTypes(); UIFactory.InitFont(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[UI] Type init deferred: {ex.Message}"); }
 
-            // Fetch initial data so overlay has content before first F5
-            string steamId = GameStateWatcher.LocalSteamId;
-            if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
-            {
-                // Sync ranked status to server on every startup
-                // This ensures DB stays in sync even after resets/wipes
-                ApiClient.ToggleRanked(steamId, Plugin.RankedEnabled.Value);
-
-                ApiClient.FetchPlayerStats(steamId);
-                ApiClient.FetchMatchHistory(steamId);
-                ApiClient.FetchBlockedPlayers(steamId);
-                // Determine admin status once at startup. The admin tab is hidden when this is false.
-                ApiClient.CheckAdminStatus(steamId);
-            }
+            // Fetch initial data so overlay has content before first F5.
+            // Steamworks resolution is racy — on first launch, GetSteamID()
+            // routinely returns 0 ("unknown") for the first second or so.
+            // Without a retry path, ToggleRanked + FetchPlayerStats etc.
+            // never fire and the player's server-side ranked_enabled stays
+            // at its default false. Fix the new-install "casual instead of
+            // ranked" bug by spawning a coroutine that polls until Steam
+            // resolves, then runs the same one-shot init.
+            Plugin.Instance.StartCoroutine(InitWhenSteamReady());
 
             // Wire the chat pipe so incoming messages reach the UI log.
             ChatClient.OnMessage = NativeUI.OnChatMessage;
@@ -749,6 +744,40 @@ namespace CompetitiveRounds
             try { NametagFontRenderer.LogAvailableTmpFonts(); } catch { }
 
             Plugin.Log.LogInfo("[PERSIST] All systems active! Press F5 for overlay.");
+        }
+
+        // Polls until LocalSteamId resolves (Steamworks isn't always ready by
+        // the time DoInitialize runs on first launch), then fires the same
+        // one-shot init the inline guard used to do — ToggleRanked,
+        // FetchPlayerStats, FetchMatchHistory, FetchBlockedPlayers,
+        // CheckAdminStatus. Without this, a brand-new install whose
+        // Steamworks resolve loses the race never calls ToggleRanked, leaves
+        // their server-side ranked_enabled at false, and is matched as
+        // casual by every opponent until they restart the game.
+        private static bool _initSteamRanFired = false;
+        private System.Collections.IEnumerator InitWhenSteamReady()
+        {
+            float deadline = Time.unscaledTime + 30f;  // give up after 30s; logs warn
+            int tries = 0;
+            while (!_initSteamRanFired && Time.unscaledTime < deadline)
+            {
+                tries++;
+                string sid = GameStateWatcher.LocalSteamId;
+                if (!string.IsNullOrEmpty(sid) && sid != "unknown")
+                {
+                    _initSteamRanFired = true;
+                    Plugin.Log.LogInfo($"[INIT] Steam resolved on try {tries} (sid={sid}); firing one-shot init");
+                    try { ApiClient.ToggleRanked(sid, Plugin.RankedEnabled.Value); } catch (Exception ex) { Plugin.Log.LogWarning($"[INIT] ToggleRanked failed: {ex.Message}"); }
+                    try { ApiClient.FetchPlayerStats(sid); } catch { }
+                    try { ApiClient.FetchMatchHistory(sid); } catch { }
+                    try { ApiClient.FetchBlockedPlayers(sid); } catch { }
+                    try { ApiClient.CheckAdminStatus(sid); } catch { }
+                    yield break;
+                }
+                yield return new WaitForSeconds(0.5f);
+            }
+            if (!_initSteamRanFired)
+                Plugin.Log.LogWarning($"[INIT] Steam ID never resolved after {tries} tries / 30s. Server-side ranked_enabled may be stale until next launch.");
         }
 
         private void OnGUI()
@@ -2039,6 +2068,23 @@ namespace CompetitiveRounds
                         // the spawned hierarchy.
                         if (Plugin.Instance != null && skin != null)
                             Plugin.Instance.StartCoroutine(CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID));
+
+                        // 2v2 stack-fix: vanilla CardChoiceVisuals was designed
+                        // for 1v1 (one picker at a time) so every picker's
+                        // visualizer spawns at localPos (0,0,0) under the same
+                        // anchor. In 2v2 round 1 all 4 pick simultaneously and
+                        // they collide at the origin — only whichever rendered
+                        // last is fully visible, the other 3 hide behind it.
+                        // Reported as "2 of 4 invisible" by testers. Spread
+                        // them along X by pickerID so each is its own visible
+                        // slot. Safe in 1v1: pickerID is 0 or 1, both visible.
+                        try
+                        {
+                            float xOffset = (pickerID - 1.5f) * 4.0f; // pickerID 0,1,2,3 → -6, -2, +2, +6
+                            var rt = skin.transform;
+                            rt.localPosition = new Vector3(xOffset, rt.localPosition.y, rt.localPosition.z);
+                        }
+                        catch (Exception offEx) { Plugin.Log.LogWarning($"[POPUP] visualizer offset failed: {offEx.Message}"); }
                     }
                     Plugin.Log.LogInfo($"[CARDPICK-DIAG] pickerID={pickerID} actor={pv.Owner.ActorNumber} pid={picker.PlayerID} team={picker.TeamID} isLocal={picker.IsLocal} currentSkin: {skinDesc}");
                 }

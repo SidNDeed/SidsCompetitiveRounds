@@ -327,6 +327,10 @@ namespace CompetitiveRounds
             ApiClient.UpdateTeamQueueList(force: true);
             // Header count auto-refreshes via its own internal 10s timer.
             ApiClient.UpdateTeamQueueCount();
+            // Live 2v2 strip — pull the active team series feed every 5s so
+            // the inline panel inside the 2v2 tab stays current without
+            // requiring the user to switch to the leaderboard tab.
+            ApiClient.FetchActiveTeamSeries();
             // Recent 2v2 Series (paged) — refresh every 10s. Page state lives
             // in teamSeriesPageReq so prev/next buttons can change it.
             if (Time.unscaledTime >= teamSeriesRefreshAt)
@@ -2476,7 +2480,12 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
 
         private static void RefreshSession(){int games=GameStateWatcher.SessionMatchCount;bool inRoom=GameStateWatcher.IsInRoom;string oppSteamId=GameStateWatcher.OpponentSteamId;string oppName=GameStateWatcher.OpponentDisplayName;var history=ApiClient.CachedMatchHistory;/* Show opponent lifetime record when in room */if(inRoom&&!string.IsNullOrEmpty(oppSteamId)&&!oppSteamId.StartsWith("photon_")&&history!=null){int ltW=0,ltL=0;string lastPlayed="";foreach(var m in history){if(m.opponent_steam_id==oppSteamId){if(m.won)ltW++;else ltL++;if(string.IsNullOrEmpty(lastPlayed)){try{lastPlayed=DateTime.Parse(m.ended_at).ToString("M/d/yyyy");}catch{}}}}if(ltW+ltL>0){string col=ltW>ltL?"#00FF00":ltW<ltL?"#FF6666":"#AAAAAA";UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  <color={col}>{ltW}W-{ltL}L lifetime</color>  (last: {lastPlayed})");}else{UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  First time playing!");}UIFactory.SetColor(txtSessionOppLifetime,new Color(0.6f,0.75f,1f));}else if(inRoom&&!string.IsNullOrEmpty(oppName)&&oppName!="Opponent"){UIFactory.SetText(txtSessionOppLifetime,$"  In room with {oppName}");UIFactory.SetColor(txtSessionOppLifetime,C_DIM);}else{UIFactory.SetText(txtSessionOppLifetime,"");}if(games<=0){UIFactory.SetText(txtSessionSum,inRoom?"In game - no results yet":"No games this session");UIFactory.SetColor(txtSessionSum,C_DIM);UIFactory.SetText(txtSessionSplit,"");UIFactory.SetText(txtSessionSweeps,"");return;}int mins=(int)(DateTime.UtcNow-GameStateWatcher.SessionStartTime).TotalMinutes;string time=mins>=60?$"{mins/60}h {mins%60}m":$"{mins}m";int rw=GameStateWatcher.SessionRankedWins,rl=GameStateWatcher.SessionRankedLosses,cw=GameStateWatcher.SessionCasualWins,cl=GameStateWatcher.SessionCasualLosses;int t2w=GameStateWatcher.SessionTeamSeriesWins,t2l=GameStateWatcher.SessionTeamSeriesLosses;int sesSweepG=0,sesSweepT=0;if(history!=null){var sesStart=GameStateWatcher.SessionStartTime;foreach(var m in history){DateTime mTime=DateTime.UtcNow;try{if(!string.IsNullOrEmpty(m.ended_at))mTime=DateTime.Parse(m.ended_at).ToUniversalTime();}catch{}if(mTime<sesStart)continue;if(m.won&&m.opponent_rounds_won==0)sesSweepG++;if(!m.won&&m.player_rounds_won==0)sesSweepT++;}}UIFactory.SetText(txtSessionSum,$"{games} games    {rw+cw}W - {rl+cl}L    {time}");UIFactory.SetColor(txtSessionSum,C_WHITE);string splitLine="";var splitParts=new List<string>();if(rw+rl>0)splitParts.Add($"<color=#FFD94D>Ranked:</color> {rw}W/{rl}L");if(t2w+t2l>0)splitParts.Add($"<color=#FFB347>2v2:</color> {t2w}W/{t2l}L");if(cw+cl>0)splitParts.Add($"Casual: {cw}W/{cl}L");if(splitParts.Count>0)splitLine="  "+string.Join("    ",splitParts.ToArray());UIFactory.SetText(txtSessionSplit,splitLine);if(sesSweepG+sesSweepT>0)UIFactory.SetText(txtSessionSweeps,$"  Sweeps: <color=#00FF00>5-0 x{sesSweepG}</color>  <color=#FF6666>0-5 x{sesSweepT}</color>");else UIFactory.SetText(txtSessionSweeps,"");var wl=GameStateWatcher.SessionWLByOpponent;var st=GameStateWatcher.SessionTimeByOpponent;int idx=0;if(wl!=null)foreach(var kvp in wl){int[]a=kvp.Value;if(a==null||a.Length<4)continue;int ow=a[0]+a[2],ol=a[1]+a[3];string line=$"  vs {kvp.Key}:  {ow}W-{ol}L";if(a[0]+a[1]>0&&a[2]+a[3]>0)line+=$"  (R:{a[0]}-{a[1]} C:{a[2]}-{a[3]})";if(st!=null&&st.ContainsKey(kvp.Key)){int m=(int)st[kvp.Key];line+=m>=60?$"   {m/60}h {m%60}m":$"   {m}m";}while(sessionOppTexts.Count<=idx)sessionOppTexts.Add(UIFactory.CreateText($"so{sessionOppTexts.Count}",sessionOppContainer.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22)));UIFactory.SetText(sessionOppTexts[idx],line);UIFactory.SetColor(sessionOppTexts[idx],ow>ol?C_GREEN:ow<ol?C_RED:C_DIM);var go=(sessionOppTexts[idx]as Component)?.gameObject;if(go)go.SetActive(true);idx++;}for(int i=idx;i<sessionOppTexts.Count;i++){var go=(sessionOppTexts[i]as Component)?.gameObject;if(go)go.SetActive(false);}}
 
-        private static void RefreshLeaderboard(){string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,14);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);UIFactory.SetText(row.txtRating,$"{e.rating}");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");bool sel=e.steam_id==selectedSteamId;UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):new Color(0.15f,0.15f,0.2f,0.01f));row.root.SetActive(true);}UIFactory.SetText(txtLBCount,$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string detail=$"\nRating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked: {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head */var history=ApiClient.CachedMatchHistory;if(history!=null&&selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=0,h2hL=0,h2hCW=0,h2hCL=0,h2hSW=0,h2hSL=0;var seenSeries=new HashSet<string>();foreach(var m in history){if(m.opponent_steam_id==selectedSteamId){if(m.is_ranked){/* Count individual ranked for overall */if(m.won)h2hW++;else h2hL++;/* Count series wins/losses (deduplicate by series_id) */if(!string.IsNullOrEmpty(m.series_id)&&m.series_id!="null"&&!seenSeries.Contains(m.series_id)){string ss=m.series_score;if(!string.IsNullOrEmpty(ss)&&ss.Contains("-")){try{var sp=ss.Split('-');int sw=int.Parse(sp[0]),sl=int.Parse(sp[1]);if(sw>=2||sl>=2){seenSeries.Add(m.series_id);if(sw>sl)h2hSW++;else h2hSL++;}}catch{}}}}else{if(m.won)h2hCW++;else h2hCL++;}}}int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+=$"\n<b>vs You:</b> <color={h2hColor}>{h2hAll}W - {h2hAllL}L ({h2hAll+h2hAllL} games)</color>\n";if(h2hSW+h2hSL>0)detail+=$"  Ranked Series: {h2hSW}W / {h2hSL}L\n";if(h2hCW+h2hCL>0)detail+=$"  Casual: {h2hCW}W / {h2hCL}L\n";}}/* Top cards with win rates */if(ps.top_card_names!=null&&ps.top_card_names.Count>0){detail+="\n<color=#99AAEE>Top Cards:</color>\n";for(int ci=0;ci<ps.top_card_names.Count&&ci<8;ci++){string picks=ps.top_card_picks.Count>ci?$" ({ps.top_card_picks[ci]}x)":"";float wr=ps.top_card_win_rates!=null&&ps.top_card_win_rates.Count>ci?ps.top_card_win_rates[ci]*100f:0f;string wrCol=wr>=55?"#00FF00":wr<=45?"#FF6666":"#AAAAAA";detail+=$"  {ps.top_card_names[ci]}{picks}  <color={wrCol}>{wr:F0}%</color>\n";}}/* Tournament placements + recent results for the viewed player. Trophy counts stay inline (compact), recent list is capped to 4 rows so the detail doesn't grow off-screen. */if(ApiClient.CachedPlayerTournaments.TryGetValue(selectedSteamId,out var _tHist)&&_tHist!=null&&(_tHist.participant_count>0)){detail+="\n<color=#FFD94D>Tournaments:</color> ";detail+=$"<color=#FFE580>1stx{_tHist.winner_count}</color>  <color=#C8C8C8>2ndx{_tHist.runner_up_count}</color>  <color=#D4894A>3rdx{_tHist.third_place_count}</color>  <color=#888>(played {_tHist.participant_count})</color>\n";if(_tHist.recent!=null&&_tHist.recent.Length>0){int shown=0;foreach(var te in _tHist.recent){if(shown>=4)break;string dt=te.ended_at;try{if(!string.IsNullOrEmpty(dt))dt=TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at,null,System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),_ResolveTz()).ToString("M/d/yy");}catch{}string placeTxt=te.placed_rank==1?"<color=#FFE580>1st</color>":te.placed_rank==2?"<color=#C8C8C8>2nd</color>":te.placed_rank==3?"<color=#D4894A>3rd</color>":$"<color=#888>-</color>";detail+=$"  {dt}  {placeTxt}  <color=#888>({te.signup_count}p)</color>\n";shown++;}}}UIFactory.SetText(txtLBDetail,detail+GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Unblock from Ranked":"Block from Ranked");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}}else{UIFactory.SetText(txtLBPlayerName,"Click a player");UIFactory.SetText(txtLBDetail,"");BuildFormGraph(null,null);if(lbBlockRow!=null)lbBlockRow.SetActive(false);}}
+        private static void RefreshLeaderboard(){string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,14);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);UIFactory.SetText(row.txtRating,$"{e.rating}");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");bool sel=e.steam_id==selectedSteamId;UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):new Color(0.15f,0.15f,0.2f,0.01f));row.root.SetActive(true);}UIFactory.SetText(txtLBCount,$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string detail=$"\nRating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked: {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
+ * earlier client-side iteration over CachedMatchHistory which was
+ * limited to the viewer's most-recent 500 matches and silently dropped
+ * H2H rows for older opponents. */if(selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=ps.h2h_ranked_wins,h2hL=ps.h2h_ranked_losses,h2hCW=ps.h2h_casual_wins,h2hCL=ps.h2h_casual_losses,h2hSW=ps.h2h_series_wins,h2hSL=ps.h2h_series_losses;int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+=$"\n<b>vs You:</b> <color={h2hColor}>{h2hAll}W - {h2hAllL}L ({h2hAll+h2hAllL} games)</color>\n";if(h2hSW+h2hSL>0)detail+=$"  Ranked Series: {h2hSW}W / {h2hSL}L\n";if(h2hCW+h2hCL>0)detail+=$"  Casual: {h2hCW}W / {h2hCL}L\n";}}/* Mod version this player was last seen running (X-Mod-Version
+ * header on their last mod-only API call). Helps testers tell at a
+ * glance who's on a build that has a given fix. */if(!string.IsNullOrEmpty(ps.mod_version)){string mvCol=ps.mod_version==Plugin.ModVersion?"#88FF88":"#FFD94D";detail+=$"\n<color=#888>Mod:</color> <color={mvCol}>v{ps.mod_version}</color>\n";}else{detail+=$"\n<color=#888>Mod: <i>not detected</i></color>\n";}/* Top cards with win rates */if(ps.top_card_names!=null&&ps.top_card_names.Count>0){detail+="\n<color=#99AAEE>Top Cards:</color>\n";for(int ci=0;ci<ps.top_card_names.Count&&ci<8;ci++){string picks=ps.top_card_picks.Count>ci?$" ({ps.top_card_picks[ci]}x)":"";float wr=ps.top_card_win_rates!=null&&ps.top_card_win_rates.Count>ci?ps.top_card_win_rates[ci]*100f:0f;string wrCol=wr>=55?"#00FF00":wr<=45?"#FF6666":"#AAAAAA";detail+=$"  {ps.top_card_names[ci]}{picks}  <color={wrCol}>{wr:F0}%</color>\n";}}/* Tournament placements + recent results for the viewed player. Trophy counts stay inline (compact), recent list is capped to 4 rows so the detail doesn't grow off-screen. */if(ApiClient.CachedPlayerTournaments.TryGetValue(selectedSteamId,out var _tHist)&&_tHist!=null&&(_tHist.participant_count>0)){detail+="\n<color=#FFD94D>Tournaments:</color> ";detail+=$"<color=#FFE580>1stx{_tHist.winner_count}</color>  <color=#C8C8C8>2ndx{_tHist.runner_up_count}</color>  <color=#D4894A>3rdx{_tHist.third_place_count}</color>  <color=#888>(played {_tHist.participant_count})</color>\n";if(_tHist.recent!=null&&_tHist.recent.Length>0){int shown=0;foreach(var te in _tHist.recent){if(shown>=4)break;string dt=te.ended_at;try{if(!string.IsNullOrEmpty(dt))dt=TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at,null,System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),_ResolveTz()).ToString("M/d/yy");}catch{}string placeTxt=te.placed_rank==1?"<color=#FFE580>1st</color>":te.placed_rank==2?"<color=#C8C8C8>2nd</color>":te.placed_rank==3?"<color=#D4894A>3rd</color>":$"<color=#888>-</color>";detail+=$"  {dt}  {placeTxt}  <color=#888>({te.signup_count}p)</color>\n";shown++;}}}UIFactory.SetText(txtLBDetail,detail+GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Unblock from Ranked":"Block from Ranked");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}}else{UIFactory.SetText(txtLBPlayerName,"Click a player");UIFactory.SetText(txtLBDetail,"");BuildFormGraph(null,null);if(lbBlockRow!=null)lbBlockRow.SetActive(false);}}
 
         private static void BuildFormGraph(List<float> ratingHistory, List<string> form)
         {
@@ -5061,30 +5070,85 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 "<color=#888>Custom lobby — claim Team 1 or Team 2.</color>",
                 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 26));
 
-            // "In Queue" panel — split into Random and Custom sections. Each
-            // body sized for ~8 rows (each row is one queuer, ~18px tall) so
-            // the panel doesn't clip into the leaderboard / history below.
-            // Bumped pref height per body 60 → 160 (8 * 18 + padding) per
-            // tester report: queue panels were cutting into the text below.
-            var queueListPanel = UIFactory.CreatePanel("TQL", panel.transform, C_PANEL);
-            UIFactory.AddVLG(queueListPanel, spacing: 2, padL: 12, padR: 12, padT: 6, padB: 6);
-            UIFactory.AddLE(queueListPanel, flexH: 0);
+            // Live 2v2 Now — compact strip showing active 2v2 series. Mirrors
+            // the leaderboard-tab Live Ranked Games panel but lives directly
+            // in the 2v2 tab so users don't have to switch tabs to see who's
+            // currently mid-series. Hidden when no 2v2 is live.
+            var liveTeamPanel = UIFactory.CreatePanel("TLT", panel.transform, C_PANEL);
+            UIFactory.AddVLG(liveTeamPanel, spacing: 2, padL: 12, padR: 12, padT: 6, padB: 6);
+            UIFactory.AddLE(liveTeamPanel, flexH: 0);
+            txtTeamLiveHeader = UIFactory.CreateText("TLTH", liveTeamPanel.transform,
+                "<b><color=#FF6688>* Live 2v2 Now</color></b>", 16f, C_SUB,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
+            txtTeamLiveBody = UIFactory.CreateText("TLTB", liveTeamPanel.transform,
+                "<color=#666><i>No live 2v2 right now.</i></color>", 14f, C_LABEL,
+                UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 22));
+            var ltbComp = txtTeamLiveBody as Component;
+            if (ltbComp != null) UIFactory.AddLE(ltbComp.gameObject, prefH: 22, minH: 22, flexH: 0);
+            UIFactory.SetWordWrap(txtTeamLiveBody, false);
+            teamLivePanel = liveTeamPanel;
+
+            // Queue row — Random Queue + Custom Lobbies side-by-side as two
+            // columns. Was previously stacked vertically with both bodies at
+            // a fixed 900-wide × 160-tall block; that wasted half the screen
+            // horizontally when 0-2 people were queueing in either bucket.
+            // Side-by-side packs both buckets in a single vertical band.
+            var queueRow = new GameObject("TQR");
+            queueRow.transform.SetParent(panel.transform, false);
+            queueRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(queueRow, spacing: 8);
+            UIFactory.AddLE(queueRow, flexH: 0);
+
+            // Random Queue (left column)
+            var queueListPanel = UIFactory.CreatePanel("TQL", queueRow.transform, C_PANEL);
+            UIFactory.AddVLG(queueListPanel, spacing: 2, padL: 10, padR: 10, padT: 6, padB: 6);
+            UIFactory.AddLE(queueListPanel, flexW: 1, flexH: 0);
             txtTeamQueueListHeader = UIFactory.CreateText("TQLH", queueListPanel.transform,
-                "<b>Random Queue</b>", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
+                "<b>Random Queue</b>", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
             txtTeamQueueListBody = UIFactory.CreateText("TQLB", queueListPanel.transform,
-                "<color=#888>Loading…</color>", 15f, C_LABEL, UIFactory.AlignTopLeft,
-                sizeDelta: new Vector2(900, 160));
+                "<color=#888>Loading…</color>", 14f, C_LABEL, UIFactory.AlignTopLeft,
+                sizeDelta: new Vector2(440, 22));
             var qlbComp = txtTeamQueueListBody as Component;
-            if (qlbComp != null) UIFactory.AddLE(qlbComp.gameObject, prefH: 160, minH: 80, flexH: 0);
+            if (qlbComp != null) UIFactory.AddLE(qlbComp.gameObject, prefH: 22, minH: 22, flexH: 0);
             UIFactory.SetWordWrap(txtTeamQueueListBody, true);
-            txtTeamQueueManualHeader = UIFactory.CreateText("TQMH", queueListPanel.transform,
-                "<b>Custom Lobbies</b>", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
-            txtTeamQueueManualBody = UIFactory.CreateText("TQMB", queueListPanel.transform,
-                "<color=#888>Loading…</color>", 15f, C_LABEL, UIFactory.AlignTopLeft,
-                sizeDelta: new Vector2(900, 160));
+
+            // Custom Lobbies (right column)
+            var manualPanel = UIFactory.CreatePanel("TQM", queueRow.transform, C_PANEL);
+            UIFactory.AddVLG(manualPanel, spacing: 2, padL: 10, padR: 10, padT: 6, padB: 6);
+            UIFactory.AddLE(manualPanel, flexW: 1, flexH: 0);
+            txtTeamQueueManualHeader = UIFactory.CreateText("TQMH", manualPanel.transform,
+                "<b>Custom Lobbies</b>", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+            txtTeamQueueManualBody = UIFactory.CreateText("TQMB", manualPanel.transform,
+                "<color=#888>Loading…</color>", 14f, C_LABEL, UIFactory.AlignTopLeft,
+                sizeDelta: new Vector2(440, 22));
             var qmbComp = txtTeamQueueManualBody as Component;
-            if (qmbComp != null) UIFactory.AddLE(qmbComp.gameObject, prefH: 160, minH: 80, flexH: 0);
+            if (qmbComp != null) UIFactory.AddLE(qmbComp.gameObject, prefH: 22, minH: 22, flexH: 0);
             UIFactory.SetWordWrap(txtTeamQueueManualBody, true);
+
+            // Defensive: turn off raycastTarget on these panel backgrounds so
+            // mouse-wheel scroll + drag-scroll bubble cleanly to the outer
+            // ScrollRect even when the cursor is on a dark panel background.
+            void disablePanelRaycast(GameObject p)
+            {
+                var pImg = p.GetComponent(UIFactory.tImage);
+                if (pImg != null) UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(pImg, false);
+            }
+            disablePanelRaycast(liveTeamPanel);
+            disablePanelRaycast(queueListPanel);
+            disablePanelRaycast(manualPanel);
+
+            // Scroll-discoverability hint. Tester feedback: "the scroll
+            // only works on the grey background, people don't know they can
+            // scroll down". Always-visible label between the queue band and
+            // the leaderboard/history row that explicitly tells the user
+            // there's more below — solves the affordance problem without
+            // pulling in a full Unity Scrollbar component (which would need
+            // reflection-built handle/track infra and is a lot of risk for
+            // a static visual hint).
+            var scrollHint = UIFactory.CreateText("TSH", panel.transform,
+                "<color=#888><i>v  Scroll down for leaderboard + recent series  v</i></color>",
+                13f, C_LABEL, UIFactory.AlignMidCenter, sizeDelta: new Vector2(900, 18));
+            UIFactory.SetBold(scrollHint, false);
 
             // Bottom row: leaderboard (left) + recent history (right).
             // Fixed prefH inside the outer scroll so the bottom row gets a
@@ -5212,6 +5276,11 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
         private static object txtTeamDcGrace;
         private static GameObject teamPickT1Btn, teamPickT2Btn;
         private static object txtPickStatus;
+        // Live 2v2 strip in the 2v2 tab — mirrors the leaderboard tab's Live
+        // Ranked Games panel but lives directly inside the 2v2 view.
+        private static GameObject teamLivePanel;
+        private static object txtTeamLiveHeader;
+        private static object txtTeamLiveBody;
 
         private static TeamHistRow CreateTeamHistRow(Transform parent, string name)
         {
@@ -5402,6 +5471,35 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
 
             RenderTeamQueueSection(autoList, txtTeamQueueListHeader, txtTeamQueueListBody, "Random Queue");
             RenderTeamQueueSection(manualList, txtTeamQueueManualHeader, txtTeamQueueManualBody, "Custom Lobbies");
+
+            // Live 2v2 Now strip. One line per active team series. Hidden
+            // entirely when no 2v2 is live.
+            var liveTeam = ApiClient.CachedActiveTeamSeries;
+            int liveCount = liveTeam != null ? liveTeam.Count : 0;
+            if (teamLivePanel != null) teamLivePanel.SetActive(liveCount > 0);
+            if (liveCount > 0)
+            {
+                UIFactory.SetText(txtTeamLiveHeader, $"<b><color=#FF6688>* Live 2v2 Now</color></b>  <color=#888>({liveCount})</color>");
+                var sbLive = new StringBuilder();
+                foreach (var ts in liveTeam)
+                {
+                    sbLive.Append($"<color=#AAF>{Trunc(ts.t1a_name, 8)}+{Trunc(ts.t1b_name, 8)}</color> ({ts.t1_rating})");
+                    sbLive.Append($"  <b>{ts.t1_wins}-{ts.t2_wins}</b>  ");
+                    sbLive.Append($"<color=#FAA>{Trunc(ts.t2a_name, 8)}+{Trunc(ts.t2b_name, 8)}</color> ({ts.t2_rating})\n");
+                }
+                UIFactory.SetText(txtTeamLiveBody, sbLive.ToString().TrimEnd('\n'));
+                int newH = Math.Max(22, liveCount * 18 + 4);
+                var liveBodyComp = txtTeamLiveBody as Component;
+                if (liveBodyComp != null)
+                {
+                    var le = liveBodyComp.gameObject.GetComponent(UIFactory.tLE);
+                    if (le != null)
+                    {
+                        UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, (float)newH);
+                        UIFactory.tLE.GetProperty("minHeight",       BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, (float)newH);
+                    }
+                }
+            }
 
             // Leaderboard
             var lb = ApiClient.CachedTeamLeaderboard ?? new List<ApiClient.TeamLeaderboardEntry>();
@@ -5645,6 +5743,22 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
         private static string BuildTeamCardsColumn(ApiClient.TeamSeriesMatch m, ApiClient.TeamSeriesSlot a, ApiClient.TeamSeriesSlot b)
         {
             if (m == null || m.cards_by_player == null) return "";
+            // If neither player on this team has any card entries, render
+            // a single-line "(card data not recorded)" placeholder instead
+            // of repeating "—" under every name. Hits historical matches
+            // recovered without per-pick data, where the row otherwise
+            // looked like 4 confused dashes.
+            bool anyCards = false;
+            foreach (var slot in new[] { a, b })
+            {
+                if (slot == null || string.IsNullOrEmpty(slot.steam_id)) continue;
+                if (m.cards_by_player.TryGetValue(slot.steam_id, out var cs) && cs != null && cs.Count > 0)
+                {
+                    anyCards = true;
+                    break;
+                }
+            }
+            if (!anyCards) return "<color=#666><i>(card data not recorded)</i></color>";
             var sb = new StringBuilder();
             void appendFor(ApiClient.TeamSeriesSlot s)
             {
@@ -5701,33 +5815,57 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             List<ApiClient.TeamQueueListEntry> list, object header, object body, string label)
         {
             int n = list != null ? list.Count : 0;
+            // Dynamic body height: collapse to one line when empty, grow to fit
+            // the active row count otherwise. Was a fixed 160px / 8-row block
+            // that left a wall of whitespace when 0-2 people were queueing.
+            float perRow = 18f;
+            int newH;
             if (n == 0)
             {
                 UIFactory.SetText(header, $"<b>{label}</b>  <color=#888>(empty)</color>");
                 UIFactory.SetText(body, $"<color=#888>No one in {label.ToLower()} right now.</color>");
-                return;
+                newH = 22;
             }
-            UIFactory.SetText(header, $"<b>{label}</b>  <color=#888>({n})</color>");
-            var sb = new StringBuilder();
-            foreach (var q in list)
+            else
             {
-                bool isMe = q.steam_id == MatchTracker.LocalSteamId;
-                string nameC = isMe ? "<color=#88FF88>" : "<color=#FFFFFF>";
-                string ratingDisplay = q.using_fallback_rating
-                    ? $"<color=#FFB347>{q.balance_rating}</color> <color=#888>1v1</color>"
-                    : $"<color=#FFFFFF>{q.rating}</color>";
-                string statusTag = q.status == "searching"
-                    ? $"<color=#66CCFF>searching</color>"
-                    : q.status == "matched" ? $"<color=#FFD94D>matched</color>" : $"<color=#88FF88>{q.status}</color>";
-                int waitMin = q.wait_seconds / 60;
-                int waitSec = q.wait_seconds % 60;
-                string waitStr = waitMin > 0 ? $"{waitMin}m{waitSec:D2}s" : $"{waitSec}s";
-                string teamTag = "";
-                if (q.preferred_team == 1) teamTag = "  <color=#FFB347>T1</color>";
-                else if (q.preferred_team == 2) teamTag = "  <color=#88AAFF>T2</color>";
-                sb.Append($"  {nameC}{Trunc(q.display_name, 18)}</color>  {ratingDisplay}  {statusTag}  <color=#888>{waitStr}</color>{teamTag}\n");
+                UIFactory.SetText(header, $"<b>{label}</b>  <color=#888>({n})</color>");
+                var sb = new StringBuilder();
+                foreach (var q in list)
+                {
+                    bool isMe = q.steam_id == MatchTracker.LocalSteamId;
+                    string nameC = isMe ? "<color=#88FF88>" : "<color=#FFFFFF>";
+                    string ratingDisplay = q.using_fallback_rating
+                        ? $"<color=#FFB347>{q.balance_rating}</color> <color=#888>1v1</color>"
+                        : $"<color=#FFFFFF>{q.rating}</color>";
+                    string statusTag = q.status == "searching"
+                        ? $"<color=#66CCFF>searching</color>"
+                        : q.status == "matched" ? $"<color=#FFD94D>matched</color>" : $"<color=#88FF88>{q.status}</color>";
+                    int waitMin = q.wait_seconds / 60;
+                    int waitSec = q.wait_seconds % 60;
+                    string waitStr = waitMin > 0 ? $"{waitMin}m{waitSec:D2}s" : $"{waitSec}s";
+                    string teamTag = "";
+                    if (q.preferred_team == 1) teamTag = "  <color=#FFB347>T1</color>";
+                    else if (q.preferred_team == 2) teamTag = "  <color=#88AAFF>T2</color>";
+                    sb.Append($"  {nameC}{Trunc(q.display_name, 18)}</color>  {ratingDisplay}  {statusTag}  <color=#888>{waitStr}</color>{teamTag}\n");
+                }
+                UIFactory.SetText(body, sb.ToString());
+                newH = (int)(n * perRow + 6);
             }
-            UIFactory.SetText(body, sb.ToString());
+            // Push the new prefH onto the body's LayoutElement so the parent
+            // VLG resizes the panel to match. Keeps the wasted space out of
+            // the queue panel area when ~0-3 people are queueing.
+            var bodyComp = body as Component;
+            if (bodyComp != null)
+            {
+                var le = bodyComp.gameObject.GetComponent(UIFactory.tLE);
+                if (le != null)
+                {
+                    UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, (float)newH);
+                    UIFactory.tLE.GetProperty("minHeight",       BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, (float)newH);
+                }
+                var rt = bodyComp.GetComponent<RectTransform>();
+                if (rt != null) rt.sizeDelta = new Vector2(rt.sizeDelta.x, newH);
+            }
         }
 
         // Helpers for the per-match cards line.
