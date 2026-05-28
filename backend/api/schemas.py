@@ -294,6 +294,72 @@ class AchievementListResponse(BaseModel):
     achievements: list[AchievementEntry]
 
 
+# ── Bug reports (v1.26.7) ─────────────────────────────────────
+
+class BugReportRequest(BaseModel):
+    """In-game bug report submission. log_text is optional plain-text — server
+    gzips it before persisting to disk."""
+    steam_id: str = Field(..., max_length=32)
+    display_name: str | None = Field(None, max_length=64)
+    mod_version: str | None = Field(None, max_length=32)
+    game_version: str | None = Field(None, max_length=32)
+    severity: str = Field("medium", max_length=16)   # low | medium | high | crash
+    category: str = Field("other", max_length=16)    # ui | gameplay | network | other
+    description: str = Field(..., min_length=4, max_length=4000)
+    repro_steps: str | None = Field(None, max_length=4000)
+    log_text: str | None = Field(None, max_length=4_000_000)   # ~4MB cap pre-gzip
+
+
+class BugReportSummary(BaseModel):
+    """Listed in /api/v1/bug-reports for admin triage."""
+    id: str
+    bug_number: int
+    created_at: datetime
+    steam_id: str | None
+    display_name: str | None
+    mod_version: str | None
+    severity: str
+    category: str
+    status: str
+    description: str
+    has_log: bool
+    log_bytes: int | None
+
+
+class BugReportEventEntry(BaseModel):
+    """One row in a bug report's activity timeline."""
+    id: str
+    actor_steam_id: str | None = None
+    actor_name: str
+    event_type: str
+    old_status: str | None = None
+    new_status: str | None = None
+    comment: str | None = None
+    created_at: datetime
+
+
+class BugReportStatusRequest(BaseModel):
+    """Admin POST body for /api/v1/bug-reports/{id}/status."""
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    new_status: str  # open | triaged | resolved | wontfix | dupe
+    comment: str | None = None
+
+
+class BugReportCommentRequest(BaseModel):
+    """Admin POST body for /api/v1/bug-reports/{id}/comment."""
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    comment: str
+
+
+class BugReportInternalCommentRequest(BaseModel):
+    """Internal-only POST body (no HMAC, gated to localhost) used by the
+    assistant to leave notes on triage. actor_name is free-form."""
+    actor_name: str
+    comment: str
+
+
 # ── Tournaments (Phase 1: sync single-elim BO3) ────────────────
 
 class TournamentSignupRequest(BaseModel):
@@ -425,6 +491,7 @@ class TeamQueueMember(BaseModel):
     using_fallback_rating: bool = False
     balance_rating: int = 0           # the rating the balancer actually used
     completed_series: int = 0         # 2v2 series count at queue join time
+    ready: bool = False               # per-slot ready flag for the lock-in prompt
 
 
 class TeamQueuePollResponse(BaseModel):
@@ -447,6 +514,7 @@ class TeamQueuePollResponse(BaseModel):
     room_name: str | None = None
     room_region: str | None = None
     match_age_seconds: int = 0
+    my_ready: bool = False  # the polling player's own ready flag
 
 
 class TeamMatchReport(BaseModel):

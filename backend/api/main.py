@@ -27,11 +27,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import AdminUser, AdminAction, Bet, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard
+from models import AdminUser, AdminAction, Bet, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
     AchievementEntry,
+    BugReportRequest,
+    BugReportSummary,
+    BugReportEventEntry,
+    BugReportStatusRequest,
+    BugReportCommentRequest,
+    BugReportInternalCommentRequest,
     CardStatEntry,
     HealthResponse,
     LeaderboardEntry,
@@ -306,6 +312,12 @@ async def version_gate(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api/v1/") or path in _VERSION_GATE_BYPASS:
         return await call_next(request)
+    # /api/v1/internal/* endpoints are already firewalled by request.client.host
+    # (localhost + Docker bridge only) inside each handler, so re-gating them on
+    # mod version is redundant and breaks the wrapper-driven Claude commenting
+    # path (curl from the LXC host has no X-Mod-Version header by design).
+    if path.startswith("/api/v1/internal/"):
+        return await call_next(request)
     # Internal callers (Discord bot) authenticate via X-Internal-Key and bypass the version gate.
     # Bot doesn't have a "mod version" — locking it out broke leaderboard posting + flag relay.
     internal_key = request.headers.get("X-Internal-Key")
@@ -565,7 +577,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.26.6"
+LATEST_MOD_VERSION = "1.26.7"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -857,9 +869,28 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     if report.photon_room_id and "offline" in report.photon_room_id.lower():
         raise HTTPException(status_code=400, detail="Offline matches are not recorded")
 
+    # 2v2 rooms (mod-issued, prefix "team_") must use /api/v1/team/matches. If a buggy
+    # client routes them through the 1v1 endpoint, the match would create phantom
+    # ranked_series rows and contaminate both /series/active and 1v1 history with
+    # arbitrary opponent pairings. Defense in depth — client gates this too.
+    if report.photon_room_id and report.photon_room_id.startswith("team_"):
+        print(f"[MATCH] rejected misrouted 2v2 match: room={report.photon_room_id} reporter={report.reported_by_steam_id}")
+        raise HTTPException(status_code=400, detail="2v2 matches must use /team/matches endpoint")
+
     # Get or create both players
     p1 = await get_or_create_player(db, report.player1.steam_id, report.player1.display_name)
     p2 = await get_or_create_player(db, report.player2.steam_id, report.player2.display_name)
+    # First-launch race fallback: a fresh-install player's async /toggle-ranked
+    # may not have landed before their first ranked match completes. If the
+    # client reports a ranked match (room name starts with ranked_ / cr_ff /
+    # sct- — the mod gates is_ranked=true on that), both participants consented
+    # to ranked by being in the room. Flip ranked_enabled so subsequent series
+    # creation, preflight, and stats render correctly.
+    if report.is_ranked:
+        if not p1.ranked_enabled:
+            p1.ranked_enabled = True
+        if not p2.ranked_enabled:
+            p2.ranked_enabled = True
 
     # Determine winner
     winner = p1 if report.p1_rounds_won > report.p2_rounds_won else p2
@@ -1176,6 +1207,13 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                         volatility=vol,
                         period_end=now,
                     ))
+
+                # Auto-grant Master rank achievement when either player crosses
+                # the threshold on this series' Glicko update.
+                if new_r1 >= MASTER_RANK_THRESHOLD:
+                    await _grant_achievement_inline(db, p1.id, "master_rank")
+                if new_r2 >= MASTER_RANK_THRESHOLD:
+                    await _grant_achievement_inline(db, p2.id, "master_rank")
 
             await db.commit()
         except Exception as ex:
@@ -1847,7 +1885,8 @@ async def get_player_matches(
         LEFT JOIN shop_items si1 ON si1.id = p1.active_title_id
         LEFT JOIN shop_items si2 ON si2.id = p2.active_title_id
         LEFT JOIN ranked_series rs ON rs.id = m.series_id
-        WHERE m.player1_id = :pid OR m.player2_id = :pid
+        WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+          AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
         ORDER BY m.ended_at DESC
         LIMIT :limit OFFSET :offset
     """)
@@ -2266,6 +2305,12 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
     await _mark_mod_seen(db, player)
+    # Clicking the ranked queue button IS the opt-in. Without this, first-launch
+    # players whose async /toggle-ranked POST hasn't landed yet get their first
+    # ranked match recorded as casual — required a game restart before /toggle
+    # landed and subsequent matches counted. Idempotent: already-on stays on.
+    if not player.ranked_enabled:
+        player.ranked_enabled = True
 
     # Get their current rating
     rating_result = await db.execute(
@@ -3916,6 +3961,12 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         LEFT JOIN tournaments t      ON t.id = rs.tournament_id
         WHERE rs.status = 'active'
           AND rs.created_at > NOW() - INTERVAL '2 hours'
+          -- Reject phantom 1v1 series whose only matches were 2v2 misroutes.
+          AND NOT EXISTS (
+              SELECT 1 FROM matches m
+              WHERE m.series_id = rs.id
+                AND LEFT(m.photon_room_id, 5) = 'team_'
+          )
         ORDER BY rs.created_at DESC
         LIMIT 20
     """))).mappings().all()
@@ -4101,11 +4152,14 @@ async def series_preflight(
     # so both are confirmed mod users.
     await _mark_mod_seen(db, p1)
     await _mark_mod_seen(db, p2)
-    if not p1.ranked_enabled or not p2.ranked_enabled:
-        # Don't create series for casual matches. Client should re-call after
-        # both have toggled ranked on.
-        await db.commit()
-        return {"status": "skipped", "reason": "one_or_both_not_ranked"}
+    # Preflight is only called when the local mod has decided the match is
+    # ranked (opponent has the mod + ranked_enabled per /mod/check). Both
+    # participants are mod users in a ranked context; flip ranked_enabled so
+    # first-launch race conditions don't kill the series visibility.
+    if not p1.ranked_enabled:
+        p1.ranked_enabled = True
+    if not p2.ranked_enabled:
+        p2.ranked_enabled = True
 
     # Idempotent: reuse existing active series between this pair.
     existing = (await db.execute(
@@ -4625,7 +4679,40 @@ ACHIEVEMENT_DEFS = {
     "regicide":             {"name": "Regicide",            "desc": "Win against Sid in a ranked series"},
     "pacifist":             {"name": "Pacifist",            "desc": "Win a game without firing a single shot"},
     "immovable_object":     {"name": "Immovable Object",    "desc": "Win a game without moving or jumping"},
+    # v1.26.7
+    "master_rank":          {"name": "Master",              "desc": "Reach 2030 rating in ranked (1v1 or 2v2)"},
+    "team_sweep":           {"name": "Tag Team Sweep",      "desc": "Win a 2v2 series 2-0"},
 }
+
+# Master rank threshold — applies to both 1v1 and 2v2 Glicko rating.
+MASTER_RANK_THRESHOLD = 2030.0
+
+
+async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key: str) -> bool:
+    """Idempotent inline grant — insert PlayerAchievement row + gold, no commit.
+    Caller is responsible for the surrounding transaction's commit/rollback.
+    Returns True if newly granted, False if already unlocked or unknown key."""
+    if achievement_key not in ACHIEVEMENT_DEFS:
+        return False
+    existing = await db.execute(
+        select(PlayerAchievement).where(
+            PlayerAchievement.player_id == player_id,
+            PlayerAchievement.achievement_key == achievement_key,
+        )
+    )
+    if existing.scalar_one_or_none():
+        return False
+    db.add(PlayerAchievement(player_id=player_id, achievement_key=achievement_key))
+    await db.execute(
+        text("UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id = :pid"),
+        {"g": ACHIEVEMENT_GOLD, "pid": player_id},
+    )
+    db.add(GoldTransaction(
+        player_id=player_id, amount=ACHIEVEMENT_GOLD,
+        reason="achievement", reference_id=achievement_key,
+    ))
+    print(f"[ACHIEVEMENT] auto-granted {achievement_key} to {player_id}")
+    return True
 
 
 @app.get("/api/v1/achievements/definitions", tags=["Achievements"])
@@ -4719,6 +4806,389 @@ async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = D
 
     name = ACHIEVEMENT_DEFS[req.achievement_key]["name"]
     return {"status": "unlocked", "achievement_key": req.achievement_key, "name": name, "gold_awarded": ACHIEVEMENT_GOLD}
+
+
+# ── Routes: Bug reports (v1.26.7) ────────────────────────────
+#
+# In-game bug reports submitted via the F5 menu. Reports persist to the
+# bug_reports table; optional log blobs are gzipped and written to disk at
+# BUG_REPORT_LOG_DIR (defaults to /opt/competitive-rounds/bug-reports). The
+# admin listing endpoint mirrors /admin/* auth (admin_steam_id + HMAC), so
+# only mod admins can browse/triage. Self-rate-limit by Steam ID to keep
+# malicious flooding from blowing out disk.
+
+import gzip as _gzip
+import pathlib as _pathlib
+
+BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-rounds/bug-reports")
+BUG_REPORT_PER_STEAM_PER_DAY = 3
+BUG_REPORT_VALID_SEVERITIES = ("low", "medium", "high", "crash")
+BUG_REPORT_VALID_CATEGORIES = ("ui", "gameplay", "network", "other")
+
+
+def _bug_report_log_path(report_id: str) -> _pathlib.Path:
+    base = _pathlib.Path(BUG_REPORT_LOG_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{report_id}.log.gz"
+
+
+@app.post("/api/v1/bug-reports", tags=["Bug Reports"])
+async def submit_bug_report(req: BugReportRequest, db: AsyncSession = Depends(get_db)):
+    """Player-submitted bug report. Idempotent only on (steam_id, description)
+    dupes — sliding window rate-limits flooding."""
+    severity = req.severity.lower() if req.severity else "medium"
+    category = req.category.lower() if req.category else "other"
+    if severity not in BUG_REPORT_VALID_SEVERITIES:
+        severity = "medium"
+    if category not in BUG_REPORT_VALID_CATEGORIES:
+        category = "other"
+
+    # Resolve player if known — bug reports tolerate unknown senders so
+    # first-launch players can still report.
+    player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
+    player = player.scalar_one_or_none()
+    if player:
+        await _mark_mod_seen(db, player)
+
+    # Rate limit: 3 reports per 24h per Steam ID. Returns 429 so the client
+    # can show a "slow down" toast.
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    recent = await db.execute(
+        text("SELECT COUNT(*) FROM bug_reports WHERE steam_id = :sid AND created_at >= :cutoff"),
+        {"sid": req.steam_id, "cutoff": cutoff},
+    )
+    if (recent.scalar() or 0) >= BUG_REPORT_PER_STEAM_PER_DAY:
+        raise HTTPException(status_code=429, detail=f"Limit is {BUG_REPORT_PER_STEAM_PER_DAY} reports per 24h — try again later")
+
+    log_filename: str | None = None
+    log_bytes_stored: int | None = None
+    log_blob = (req.log_text or "").strip()
+
+    report = BugReport(
+        player_id=player.id if player else None,
+        steam_id=req.steam_id,
+        display_name=req.display_name or (player.display_name if player else None),
+        mod_version=req.mod_version,
+        game_version=req.game_version,
+        severity=severity,
+        category=category,
+        description=req.description.strip(),
+        repro_steps=(req.repro_steps or "").strip() or None,
+    )
+    db.add(report)
+    await db.flush()  # need report.id for the filename
+
+    if log_blob:
+        try:
+            path = _bug_report_log_path(str(report.id))
+            data = _gzip.compress(log_blob.encode("utf-8", errors="replace"))
+            with open(path, "wb") as f:
+                f.write(data)
+            log_filename = path.name
+            log_bytes_stored = len(data)
+            report.log_filename = log_filename
+            report.log_bytes = log_bytes_stored
+        except Exception as ex:
+            print(f"[BUG-REPORT] log persistence failed for {report.id}: {ex}")
+
+    # Seed the activity log with a "created" event so the timeline is complete.
+    db.add(BugReportEvent(
+        bug_report_id=report.id,
+        actor_steam_id=req.steam_id,
+        actor_name=req.display_name or req.steam_id or "Unknown",
+        event_type="created",
+        new_status="open",
+        comment=None,
+    ))
+
+    await db.commit()
+    # Re-read so we have the DB-assigned bug_number.
+    await db.refresh(report)
+    print(f"[BUG-REPORT] #{report.bug_number} ({report.id}) {severity}/{category} from {req.steam_id} ({req.display_name}) " +
+          f"log_bytes={log_bytes_stored or 0}")
+    return {
+        "status": "received",
+        "id": str(report.id),
+        "bug_number": report.bug_number,
+        "log_persisted": log_filename is not None,
+    }
+
+
+@app.get("/api/v1/bug-reports", tags=["Bug Reports"])
+async def list_bug_reports(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    status: str | None = Query(None, max_length=16),
+    severity: str | None = Query(None, max_length=16),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: list recent bug reports. HMAC over `admin:{steam}:bug_reports:list`."""
+    if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, "bug_reports", "list", hmac_signature):
+        raise HTTPException(403, "Invalid admin signature")
+
+    filters = []
+    params: dict = {"limit": limit, "offset": offset}
+    if status:
+        filters.append("status = :status")
+        params["status"] = status.lower()
+    if severity:
+        filters.append("severity = :severity")
+        params["severity"] = severity.lower()
+    where = " WHERE " + " AND ".join(filters) if filters else ""
+    rows = await db.execute(
+        text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
+                        severity, category, status, description,
+                        log_filename, log_bytes
+                   FROM bug_reports{where}
+                  ORDER BY created_at DESC
+                  LIMIT :limit OFFSET :offset"""),
+        params,
+    )
+    return {
+        "reports": [
+            BugReportSummary(
+                id=str(r["id"]),
+                bug_number=r["bug_number"] or 0,
+                created_at=r["created_at"],
+                steam_id=r["steam_id"],
+                display_name=r["display_name"],
+                mod_version=r["mod_version"],
+                severity=r["severity"],
+                category=r["category"],
+                status=r["status"],
+                description=r["description"],
+                has_log=r["log_filename"] is not None,
+                log_bytes=r["log_bytes"],
+            ).model_dump()
+            for r in rows.mappings().all()
+        ],
+    }
+
+
+@app.get("/api/v1/bug-reports/recent", tags=["Bug Reports"])
+async def recent_bug_reports(seconds: int = Query(60, ge=10, le=600), db: AsyncSession = Depends(get_db)):
+    """Bot-poll endpoint. Returns reports filed in the last N seconds, minus
+    logs/comments — only the metadata + description that's safe to post in
+    a public-ish Discord channel."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    rows = (await db.execute(
+        text("""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
+                       severity, category, status, description
+                  FROM bug_reports
+                 WHERE created_at >= :cutoff
+                 ORDER BY created_at ASC"""),
+        {"cutoff": cutoff},
+    )).mappings().all()
+    return {
+        "reports": [
+            {
+                "id": str(r["id"]),
+                "bug_number": r["bug_number"] or 0,
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "steam_id": r["steam_id"],
+                "display_name": r["display_name"],
+                "mod_version": r["mod_version"],
+                "severity": r["severity"],
+                "category": r["category"],
+                "status": r["status"],
+                "description": r["description"],
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.get("/api/v1/bug-reports/{report_id}", tags=["Bug Reports"])
+async def get_bug_report(
+    report_id: str,
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    include_log: bool = Query(True),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: fetch a single bug report. Optionally inlines the gunzipped log."""
+    if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, "bug_reports", report_id, hmac_signature):
+        raise HTTPException(403, "Invalid admin signature")
+    try:
+        rid = UUID(report_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid report_id")
+    row = (await db.execute(
+        text("""SELECT id, bug_number, player_id, steam_id, display_name, mod_version, game_version,
+                       severity, category, description, repro_steps, log_filename, log_bytes,
+                       status, triage_notes, created_at, updated_at
+                  FROM bug_reports WHERE id = :rid"""),
+        {"rid": rid},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Bug report not found")
+
+    log_text: str | None = None
+    if include_log and row["log_filename"]:
+        try:
+            path = _pathlib.Path(BUG_REPORT_LOG_DIR) / row["log_filename"]
+            if path.exists():
+                with _gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+                    log_text = f.read()
+        except Exception as ex:
+            log_text = f"[log read error: {ex}]"
+
+    # Activity timeline — chronological so the UI can render top-down.
+    ev_rows = (await db.execute(
+        text("""SELECT id, actor_steam_id, actor_name, event_type,
+                       old_status, new_status, comment, created_at
+                  FROM bug_report_events
+                 WHERE bug_report_id = :rid
+                 ORDER BY created_at ASC"""),
+        {"rid": rid},
+    )).mappings().all()
+    events = [
+        {
+            "id": str(e["id"]),
+            "actor_steam_id": e["actor_steam_id"],
+            "actor_name": e["actor_name"],
+            "event_type": e["event_type"],
+            "old_status": e["old_status"],
+            "new_status": e["new_status"],
+            "comment": e["comment"],
+            "created_at": e["created_at"].isoformat() if e["created_at"] else None,
+        }
+        for e in ev_rows
+    ]
+
+    out = dict(row)
+    out["id"] = str(out["id"])
+    if out.get("player_id"):
+        out["player_id"] = str(out["player_id"])
+    out["created_at"] = out["created_at"].isoformat() if out["created_at"] else None
+    out["updated_at"] = out["updated_at"].isoformat() if out["updated_at"] else None
+    out["log_text"] = log_text
+    out["events"] = events
+    return out
+
+
+_BUG_REPORT_VALID_STATUSES = ("open", "triaged", "resolved", "wontfix", "dupe")
+
+
+async def _record_bug_event(db, report_id, actor_steam_id, actor_name, event_type,
+                            old_status=None, new_status=None, comment=None):
+    db.add(BugReportEvent(
+        bug_report_id=report_id,
+        actor_steam_id=actor_steam_id,
+        actor_name=actor_name,
+        event_type=event_type,
+        old_status=old_status,
+        new_status=new_status,
+        comment=comment,
+    ))
+    # Touch the parent row's updated_at so the list view sorts recently-activity-first if needed.
+    await db.execute(
+        text("UPDATE bug_reports SET updated_at = NOW() WHERE id = :rid"),
+        {"rid": report_id},
+    )
+
+
+@app.post("/api/v1/bug-reports/{report_id}/comment", tags=["Bug Reports"])
+async def admin_comment_on_bug_report(
+    report_id: str,
+    req: BugReportCommentRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: append a comment to a bug report's activity log."""
+    if not await _is_admin(db, req.admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(req.admin_steam_id, "bug_reports_comment", report_id, req.hmac_signature):
+        raise HTTPException(403, "Invalid admin signature")
+    try:
+        rid = UUID(report_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid report_id")
+    comment = (req.comment or "").strip()
+    if not comment:
+        raise HTTPException(400, "Comment cannot be empty")
+    exists = (await db.execute(select(BugReport.id).where(BugReport.id == rid))).scalar_one_or_none()
+    if not exists:
+        raise HTTPException(404, "Bug report not found")
+    admin = (await db.execute(select(Player).where(Player.steam_id == req.admin_steam_id))).scalar_one_or_none()
+    actor_name = admin.display_name if (admin and admin.display_name) else req.admin_steam_id
+    await _record_bug_event(db, rid, req.admin_steam_id, actor_name, "comment", comment=comment)
+    await db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/bug-reports/{report_id}/status", tags=["Bug Reports"])
+async def admin_change_bug_report_status(
+    report_id: str,
+    req: BugReportStatusRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: change status (open/triaged/resolved/wontfix/dupe). Optional comment."""
+    if not await _is_admin(db, req.admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(req.admin_steam_id, "bug_reports_status", report_id, req.hmac_signature):
+        raise HTTPException(403, "Invalid admin signature")
+    try:
+        rid = UUID(report_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid report_id")
+    new_status = (req.new_status or "").strip().lower()
+    if new_status not in _BUG_REPORT_VALID_STATUSES:
+        raise HTTPException(400, f"Invalid status; must be one of {_BUG_REPORT_VALID_STATUSES}")
+    report = (await db.execute(select(BugReport).where(BugReport.id == rid))).scalar_one_or_none()
+    if not report:
+        raise HTTPException(404, "Bug report not found")
+    old_status = report.status
+    if old_status == new_status and not (req.comment and req.comment.strip()):
+        return {"status": "noop"}
+    admin = (await db.execute(select(Player).where(Player.steam_id == req.admin_steam_id))).scalar_one_or_none()
+    actor_name = admin.display_name if (admin and admin.display_name) else req.admin_steam_id
+    if old_status != new_status:
+        report.status = new_status
+        await _record_bug_event(db, rid, req.admin_steam_id, actor_name, "status_change",
+                                old_status=old_status, new_status=new_status,
+                                comment=(req.comment.strip() if req.comment else None))
+    elif req.comment and req.comment.strip():
+        await _record_bug_event(db, rid, req.admin_steam_id, actor_name, "comment",
+                                comment=req.comment.strip())
+    await db.commit()
+    return {"status": "ok", "old_status": old_status, "new_status": new_status}
+
+
+@app.post("/api/v1/internal/bug-reports/{report_id}/comment", tags=["Bug Reports"])
+async def internal_comment_on_bug_report(
+    report_id: str,
+    req: BugReportInternalCommentRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Internal-only commenting endpoint for the assistant. No HMAC; gated to
+    localhost so only processes inside the LXC (or via ssh tunnel) can post.
+    actor_name is free-form ('Claude', 'System', 'cron')."""
+    client_host = (request.client.host if request.client else "") or ""
+    # Accept loopback + the Docker bridge gateway range (172.16.0.0/12).
+    if not (client_host in ("127.0.0.1", "::1", "localhost")
+            or client_host.startswith("172.")):
+        raise HTTPException(403, f"Internal endpoint — local-only (saw {client_host})")
+    try:
+        rid = UUID(report_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid report_id")
+    comment = (req.comment or "").strip()
+    actor = (req.actor_name or "").strip() or "System"
+    if not comment:
+        raise HTTPException(400, "Comment cannot be empty")
+    exists = (await db.execute(select(BugReport.id).where(BugReport.id == rid))).scalar_one_or_none()
+    if not exists:
+        raise HTTPException(404, "Bug report not found")
+    await _record_bug_event(db, rid, None, actor, "comment", comment=comment)
+    await db.commit()
+    return {"status": "ok"}
 
 
 # ── Routes: Admin ────────────────────────────────────────────
@@ -5199,6 +5669,9 @@ async def team_queue_join(req: TeamQueueJoinRequest, db: AsyncSession = Depends(
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
     await _mark_mod_seen(db, player)
+    # Joining 2v2 queue = ranked opt-in. Same race fix as /api/v1/queue/join.
+    if not player.ranked_enabled:
+        player.ranked_enabled = True
 
     # Snapshot 2v2 rating (default if no row yet)
     g2_r = await db.execute(select(GlickoRating2v2).where(GlickoRating2v2.player_id == player.id))
@@ -5513,6 +5986,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 using_fallback_rating=using_fb,
                 balance_rating=balance,
                 completed_series=cs,
+                ready=bool(row.get("ready") or False),
             )
         teammates_pl = [to_member(r) for r in teammates]
         opponents_pl = [to_member(r) for r in opponents]
@@ -5559,6 +6033,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 room_name=room_out,
                 room_region=region_out,
                 match_age_seconds=int((now - me["matched_at"]).total_seconds()) if me["matched_at"] else 0,
+                my_ready=bool(me["ready"]),
             )
 
         # Matched but not all-ready
@@ -5570,6 +6045,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             teammates=teammates_pl,
             opponents=opponents_pl,
             match_age_seconds=int((now - me["matched_at"]).total_seconds()) if me["matched_at"] else 0,
+            my_ready=bool(me["ready"]),
         )
 
     # ── SEARCHING ── try to lock 4 mutually-acceptable players
@@ -6582,6 +7058,16 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
                     {"r": new_r, "rd": new_rd, "v": new_vol, "pid": pid},
                 )
             new_ratings[str(pid)] = round(new_r, 1)
+            # Master rank: crossed 2000 in 2v2.
+            if new_r >= MASTER_RANK_THRESHOLD:
+                await _grant_achievement_inline(db, pid, "master_rank")
+
+        # Tag Team Sweep: 2-0 series win goes to both winning players.
+        sweep = (new_t1w == 2 and new_t2w == 0) or (new_t2w == 2 and new_t1w == 0)
+        if sweep:
+            winners = (p_t1a, p_t1b) if winner_team == 1 else (p_t2a, p_t2b)
+            for wp in winners:
+                await _grant_achievement_inline(db, wp.id, "team_sweep")
         # Persist the per-player series Elo deltas in the team_series slot that
         # holds each player's player_id — NOT in the slot whose label happens to
         # match the report's t1a/t1b/t2a/t2b naming. The two can disagree

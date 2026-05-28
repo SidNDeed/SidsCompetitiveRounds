@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using Photon.Pun;
 using UnityEngine;
@@ -109,9 +110,396 @@ namespace CompetitiveRounds
             DrawInGameChat();
             DrawChatInput();
             DrawAdminPrompt();
+            DrawBugReportModal();
+            DrawBugReportAdminViewer();
+            DrawLogViewerModal();
             DrawBlockDebug();  // debug-only; toggle via BlockDebugEnabled below
+            DrawInputOverlay();
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
+        }
+
+        // ── Admin: bug-report viewer (v1.26.7) ─────────────────────────
+        private static readonly string[] BUG_STATUSES = new[] { "open", "triaged", "resolved", "wontfix", "dupe" };
+        private static bool bugAdminOpen = false;
+        private static string bugAdminSelectedId = null;
+        private static Vector2 bugAdminListScroll, bugAdminDetailScroll;
+        private static bool bugAdminLoading = false;
+        private static GUIStyle bugAdminRowStyle, bugAdminDetailStyle, bugAdminTabStyle, bugAdminTabActiveStyle;
+        private static string bugAdminCommentDraft = "";
+        private static int bugAdminStatusIdx = 0;
+        private static string bugAdminActionStatus = "";
+        private static string bugAdminLookup = "";
+
+        public static void OpenBugReportAdminViewer()
+        {
+            bugAdminOpen = true;
+            bugAdminSelectedId = null;
+            ApiClient.CachedBugReportDetail = null;
+            bugAdminLoading = true;
+            bugAdminCommentDraft = "";
+            bugAdminActionStatus = "";
+            string sid = MatchTracker.LocalSteamId;
+            ApiClient.FetchBugReports(sid, ok => { bugAdminLoading = false; });
+        }
+
+        private static void DrawBugReportAdminViewer()
+        {
+            if (!bugAdminOpen) return;
+            if (!NativeUI.IsOpen) { bugAdminOpen = false; return; }
+
+            var ev = Event.current;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
+            { bugAdminOpen = false; ev.Use(); return; }
+
+            if (bugAdminRowStyle == null)
+            {
+                bugAdminRowStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, richText = true, wordWrap = false };
+                bugAdminDetailStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, richText = true, wordWrap = true, alignment = TextAnchor.UpperLeft };
+                bugAdminTabStyle = new GUIStyle(GUI.skin.button) { fontSize = 12 };
+                bugAdminTabActiveStyle = new GUIStyle(GUI.skin.button)
+                {
+                    fontSize = 12, fontStyle = FontStyle.Bold,
+                    normal = { background = Texture2D.whiteTexture, textColor = Color.black },
+                    hover  = { background = Texture2D.whiteTexture, textColor = Color.black },
+                };
+            }
+
+            float w = Mathf.Min(Screen.width - 40, 1280);
+            float h = Mathf.Min(Screen.height - 60, 760);
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.55f), 0, 0);
+            GUI.DrawTexture(new Rect(x - 10, y - 10, w + 20, h + 20), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(0.05f, 0.06f, 0.08f, 0.98f), 0, 0);
+
+            GUI.Label(new Rect(x, y, w, 24), "<b>Bug Reports</b>", bugTitleStyle ?? GUI.skin.label);
+            if (GUI.Button(new Rect(x + w - 100, y, 100, 26), "Close")) { bugAdminOpen = false; return; }
+            if (GUI.Button(new Rect(x + w - 210, y, 100, 26), "Refresh"))
+            {
+                bugAdminLoading = true;
+                string sid = MatchTracker.LocalSteamId;
+                ApiClient.FetchBugReports(sid, ok => { bugAdminLoading = false; });
+                if (!string.IsNullOrEmpty(bugAdminSelectedId))
+                    ApiClient.FetchBugReportDetail(sid, bugAdminSelectedId);
+            }
+            if (bugAdminLoading)
+                GUI.Label(new Rect(x + 200, y, 200, 24), "<color=#888>loading...</color>", bugAdminRowStyle);
+
+            // Layout: left list (40%) + right detail (60%).
+            float listW = w * 0.40f;
+            float bodyY = y + 36;
+            float bodyH = h - 46;
+
+            // ── Left pane: report list ───────────────────────────────
+            GUI.DrawTexture(new Rect(x, bodyY, listW - 6, bodyH), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(0.08f, 0.10f, 0.13f, 0.95f), 0, 0);
+
+            // Lookup box at top of list — filters cached reports by bug #
+            // (exact match) or by case-insensitive substring of description/name.
+            float lookupY = bodyY + 4;
+            GUI.Label(new Rect(x + 6, lookupY + 2, 48, 22), "<b>Find:</b>", bugAdminRowStyle);
+            bugAdminLookup = GUI.TextField(new Rect(x + 56, lookupY, listW - 70, 22), bugAdminLookup ?? "");
+
+            var allReports = ApiClient.CachedBugReports ?? new List<ApiClient.BugReportSummary>();
+            var reports = allReports;
+            string q = (bugAdminLookup ?? "").Trim();
+            if (!string.IsNullOrEmpty(q))
+            {
+                reports = new List<ApiClient.BugReportSummary>();
+                bool numQ = int.TryParse(q, out int qNum);
+                string qLower = q.ToLowerInvariant();
+                foreach (var r in allReports)
+                {
+                    if (numQ && r.bug_number == qNum) { reports.Add(r); continue; }
+                    if ((r.description ?? "").ToLowerInvariant().Contains(qLower)) { reports.Add(r); continue; }
+                    if ((r.display_name ?? "").ToLowerInvariant().Contains(qLower)) { reports.Add(r); continue; }
+                    if ((r.steam_id ?? "").Contains(q)) { reports.Add(r); }
+                }
+            }
+            // Bigger rows so the 3-line content (badge / who-when / description)
+            // never clips — each line is 20px, header pad 6px, footer pad 8px,
+            // bottom margin 4px = 84px total. Previously 72px which cut the
+            // user-name line off because per-line height + padding exceeded it.
+            const float rowH = 84f;
+            const float rowGap = 4f;
+            const float linePadTop = 6f;
+            const float lineH = 20f;
+            float listBodyY = lookupY + 28;
+            float listBodyH = bodyH - 28 - 4;
+            float viewportW = listW - 18;            // scroll viewport
+            float contentW  = viewportW - 16;        // minus scrollbar
+            float contentH  = Mathf.Max(listBodyH - 8, reports.Count * (rowH + rowGap) + 8);
+            bugAdminListScroll = GUI.BeginScrollView(new Rect(x + 4, listBodyY, viewportW, listBodyH),
+                                                     bugAdminListScroll,
+                                                     new Rect(0, 0, contentW, contentH));
+            for (int i = 0; i < reports.Count; i++)
+            {
+                var r = reports[i];
+                var rect = new Rect(2, i * (rowH + rowGap) + 2, contentW - 6, rowH);
+                bool selected = r.id == bugAdminSelectedId;
+                Color bg = selected ? new Color(0.20f, 0.30f, 0.45f, 0.95f) : new Color(0.13f, 0.15f, 0.19f, 0.95f);
+                GUI.DrawTexture(rect, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, bg, 0, 0);
+                string sevColor = r.severity == "crash" ? "#FF5555" : r.severity == "high" ? "#FF9966" : r.severity == "medium" ? "#FFCC66" : "#88AABB";
+                string statusColor = r.status == "resolved" ? "#88FF88" : r.status == "wontfix" ? "#888888" : r.status == "dupe" ? "#888888" : r.status == "triaged" ? "#FFCC66" : "#FF6688";
+                string idTag = r.bug_number > 0 ? $"<b><color=#FFFFFF>#{r.bug_number}</color></b>  " : "";
+                string title = $"{idTag}<b><color={sevColor}>[{(r.severity ?? "?").ToUpper()}/{(r.category ?? "?").ToUpper()}]</color></b>  <color={statusColor}>{(r.status ?? "?").ToUpper()}</color>";
+                string who = $"{r.display_name ?? r.steam_id ?? "?"} <color=#888>({r.mod_version ?? "?"})</color>";
+                string when = ShortDate(r.created_at);
+                string desc = (r.description ?? "").Replace("\n", " ");
+                if (desc.Length > 70) desc = desc.Substring(0, 70) + "...";
+                // 3 line slots, each 20px tall + 6px top pad. Total = 6+20+20+20 = 66, leaves 18px bottom breathing room.
+                GUI.Label(new Rect(rect.x + 8, rect.y + linePadTop,                rect.width - 16, lineH), title, bugAdminRowStyle);
+                GUI.Label(new Rect(rect.x + 8, rect.y + linePadTop + lineH,        rect.width - 16, lineH),
+                          $"<color=#CCCCCC>{who}</color>  <color=#888>{when}</color>{(r.has_log ? "  <color=#88FF88>[log]</color>" : "")}", bugAdminRowStyle);
+                GUI.Label(new Rect(rect.x + 8, rect.y + linePadTop + lineH * 2,    rect.width - 16, lineH),
+                          $"<color=#EEEEEE>{desc}</color>", bugAdminRowStyle);
+                if (GUI.Button(rect, GUIContent.none, GUIStyle.none))
+                {
+                    bugAdminSelectedId = r.id;
+                    ApiClient.CachedBugReportDetail = null;
+                    bugAdminCommentDraft = "";
+                    bugAdminActionStatus = "";
+                    string sid = MatchTracker.LocalSteamId;
+                    ApiClient.FetchBugReportDetail(sid, r.id);
+                }
+            }
+            if (reports.Count == 0)
+            {
+                string msg = string.IsNullOrEmpty(q)
+                    ? "<color=#888>(no reports yet)</color>"
+                    : $"<color=#888>(no reports match '{q}')</color>";
+                GUI.Label(new Rect(8, 8, listW - 40, 30), msg, bugAdminRowStyle);
+            }
+            GUI.EndScrollView();
+
+            // ── Right pane: detail + actions + activity ──────────────
+            float detailX = x + listW;
+            float detailW = w - listW;
+            GUI.DrawTexture(new Rect(detailX, bodyY, detailW, bodyH), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(0.05f, 0.07f, 0.10f, 0.95f), 0, 0);
+            var d = ApiClient.CachedBugReportDetail;
+            if (d == null || string.IsNullOrEmpty(bugAdminSelectedId))
+            {
+                GUI.Label(new Rect(detailX + 12, bodyY + 12, detailW - 24, 30),
+                          "<color=#888>Click a report on the left to view full detail + log.</color>", bugAdminRowStyle);
+                return;
+            }
+
+            // Status action row at top of detail.
+            // Sync the dropdown index to the loaded status so the picker
+            // doesn't display the previously-selected report's status.
+            int curIdx = Array.IndexOf(BUG_STATUSES, (d.status ?? "open").ToLower());
+            if (curIdx < 0) curIdx = 0;
+            if (bugAdminStatusIdx < 0 || bugAdminStatusIdx >= BUG_STATUSES.Length)
+                bugAdminStatusIdx = curIdx;
+
+            float actY = bodyY + 8;
+            GUI.Label(new Rect(detailX + 8, actY, 80, 22), "<b>Status:</b>", bugAdminRowStyle);
+            for (int si = 0; si < BUG_STATUSES.Length; si++)
+            {
+                bool picked = si == bugAdminStatusIdx;
+                if (GUI.Button(new Rect(detailX + 80 + si * 76, actY - 2, 72, 24),
+                               BUG_STATUSES[si].ToUpper(),
+                               picked ? bugAdminTabActiveStyle : bugAdminTabStyle))
+                    bugAdminStatusIdx = si;
+            }
+            if (GUI.Button(new Rect(detailX + 80 + BUG_STATUSES.Length * 76 + 8, actY - 2, 96, 24), "Apply Status"))
+            {
+                string sid = MatchTracker.LocalSteamId;
+                string ns = BUG_STATUSES[bugAdminStatusIdx];
+                bugAdminActionStatus = "<color=#88CCFF>updating...</color>";
+                ApiClient.AdminBugReportStatus(sid, d.id, ns, null, (ok, resp) =>
+                {
+                    bugAdminActionStatus = ok ? "<color=#88FF88>status updated</color>"
+                                              : $"<color=#FF6666>fail: {(resp ?? "").Replace("\n", " ")}</color>";
+                    if (ok)
+                    {
+                        ApiClient.FetchBugReportDetail(sid, d.id);
+                        ApiClient.FetchBugReports(sid);
+                    }
+                });
+            }
+            if (!string.IsNullOrEmpty(bugAdminActionStatus))
+                GUI.Label(new Rect(detailX + 8, actY + 24, detailW - 16, 18), bugAdminActionStatus, bugAdminRowStyle);
+
+            // Detail body (description + repro + log + events).
+            var sbDet = new System.Text.StringBuilder();
+            string headerId = d.bug_number > 0 ? $"<color=#FFE580>#{d.bug_number}</color>  " : "";
+            sbDet.AppendLine($"{headerId}<b>{(d.display_name ?? d.steam_id)}</b>  <color=#888>{d.steam_id}</color>");
+            sbDet.AppendLine($"<color=#888>{ShortDate(d.created_at)} | mod={d.mod_version} | game={d.game_version}</color>");
+            sbDet.AppendLine($"<b>severity:</b> {d.severity}   <b>category:</b> {d.category}   <b>status:</b> {d.status}");
+            sbDet.AppendLine();
+            sbDet.AppendLine($"<b><color=#FFD94D>Description:</color></b>");
+            sbDet.AppendLine(d.description ?? "(empty)");
+            if (!string.IsNullOrEmpty(d.repro_steps))
+            {
+                sbDet.AppendLine();
+                sbDet.AppendLine($"<b><color=#FFD94D>Repro:</color></b>");
+                sbDet.AppendLine(d.repro_steps);
+            }
+            if (d.events != null && d.events.Count > 0)
+            {
+                sbDet.AppendLine();
+                sbDet.AppendLine($"<b><color=#99CCFF>Activity ({d.events.Count}):</color></b>");
+                foreach (var e in d.events)
+                {
+                    string ts = ShortDate(e.created_at);
+                    string who = e.actor_name ?? "?";
+                    if (e.event_type == "status_change")
+                        sbDet.AppendLine($"  <color=#888>{ts}</color> <b>{who}</b> <color=#FFCC66>{e.old_status ?? "?"} -> {e.new_status ?? "?"}</color>{(string.IsNullOrEmpty(e.comment) ? "" : "  -- " + e.comment)}");
+                    else if (e.event_type == "created")
+                        sbDet.AppendLine($"  <color=#888>{ts}</color> <b>{who}</b> <color=#88FF88>filed report</color>");
+                    else
+                        sbDet.AppendLine($"  <color=#888>{ts}</color> <b>{who}:</b> {e.comment ?? ""}");
+                }
+            }
+            if (!string.IsNullOrEmpty(d.log_text))
+            {
+                sbDet.AppendLine();
+                int fullLen = d.log_text.Length;
+                const int DISPLAY_CAP = 400_000;
+                string log = d.log_text;
+                string truncNote = "";
+                if (log.Length > DISPLAY_CAP)
+                {
+                    log = "[... earlier content trimmed for display - see ssh bug-log:" + d.bug_number + " for full ...]\n"
+                          + log.Substring(log.Length - DISPLAY_CAP);
+                    truncNote = $" — <color=#FFCC66>showing last {DISPLAY_CAP:N0} of {fullLen:N0} chars</color>";
+                }
+                sbDet.AppendLine($"<b><color=#88CCFF>Attached log ({d.log_bytes:N0} bytes gzipped on disk, {fullLen:N0} chars decoded){truncNote}:</color></b>");
+                sbDet.AppendLine(log);
+            }
+
+            string body = sbDet.ToString();
+            float scrollTop = actY + 48;
+            float commentRowH = 96;      // reserved at bottom for comment input
+            float scrollH = bodyH - (scrollTop - bodyY) - commentRowH - 8;
+            float bw = detailW - 24;
+            float bh = Mathf.Max(scrollH, body.Length / 90f * 14f + 80f);
+            bugAdminDetailScroll = GUI.BeginScrollView(new Rect(detailX + 8, scrollTop, detailW - 12, scrollH),
+                                                        bugAdminDetailScroll,
+                                                        new Rect(0, 0, bw - 12, bh));
+            GUI.Label(new Rect(4, 4, bw - 12, bh - 8), body, bugAdminDetailStyle);
+            GUI.EndScrollView();
+
+            // Comment input + submit at the bottom.
+            float cY = bodyY + bodyH - commentRowH;
+            GUI.Label(new Rect(detailX + 8, cY, 200, 18), "<b>Add comment:</b>", bugAdminRowStyle);
+            bugAdminCommentDraft = GUI.TextArea(new Rect(detailX + 8, cY + 20, detailW - 130, commentRowH - 26),
+                                                bugAdminCommentDraft ?? "", 2000);
+            bool canSubmit = !string.IsNullOrEmpty((bugAdminCommentDraft ?? "").Trim());
+            GUI.enabled = canSubmit;
+            if (GUI.Button(new Rect(detailX + detailW - 116, cY + 20, 108, commentRowH - 26), "Post Comment"))
+            {
+                string sid = MatchTracker.LocalSteamId;
+                string c = (bugAdminCommentDraft ?? "").Trim();
+                bugAdminActionStatus = "<color=#88CCFF>posting...</color>";
+                ApiClient.AdminBugReportComment(sid, d.id, c, (ok, resp) =>
+                {
+                    bugAdminActionStatus = ok ? "<color=#88FF88>comment posted</color>"
+                                              : $"<color=#FF6666>fail: {(resp ?? "").Replace("\n", " ")}</color>";
+                    if (ok)
+                    {
+                        bugAdminCommentDraft = "";
+                        ApiClient.FetchBugReportDetail(sid, d.id);
+                    }
+                });
+            }
+            GUI.enabled = true;
+        }
+
+        private static string ShortDate(string isoStr)
+        {
+            if (string.IsNullOrEmpty(isoStr)) return "?";
+            try
+            {
+                var dt = DateTime.Parse(isoStr, null, System.Globalization.DateTimeStyles.RoundtripKind).ToLocalTime();
+                return dt.ToString("M/d HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+            }
+            catch { return isoStr; }
+        }
+
+        // ── Input overlay (UI.ShowInputOverlay) ──────────────────
+        // Bottom-left WASD + Space + LMB/RMB indicator. Pressed keys turn red.
+        // Only drawn while in a match — useful for stream overlays and for
+        // confirming inputs register (helps debug "block didn't fire" reports).
+        private static GUIStyle inputKeyStyle;
+        private static GUIStyle inputKeySmallStyle;
+        private static void DrawInputOverlay()
+        {
+            if (Plugin.ShowInputOverlay == null || !Plugin.ShowInputOverlay.Value) return;
+            if (!GameStateWatcher.IsInMatch) return;
+            if (inputKeyStyle == null)
+            {
+                inputKeyStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 18, richText = true,
+                    alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold,
+                };
+                inputKeySmallStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 12, richText = true,
+                    alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold,
+                };
+            }
+
+            bool w = Input.GetKey(KeyCode.W);
+            bool a = Input.GetKey(KeyCode.A);
+            bool s = Input.GetKey(KeyCode.S);
+            bool d = Input.GetKey(KeyCode.D);
+            bool space = Input.GetKey(KeyCode.Space);
+            bool lmb = Input.GetMouseButton(0);
+            bool rmb = Input.GetMouseButton(1);
+
+            // Geometry: bottom-left, two stacked rows for keyboard, mouse row below.
+            float keyW = 38, keyH = 38, gap = 4;
+            float originX = 14;
+            // Layout from the bottom up: mouse row, spacer, WASD rows.
+            float bottomY = Screen.height - 14;
+            // Mouse row (LMB + RMB, wider keys labeled).
+            float mouseRowY = bottomY - keyH;
+            float mKeyW = keyW * 1.6f;
+            DrawKeyBox(new Rect(originX, mouseRowY, mKeyW, keyH), "LMB", lmb, true);
+            DrawKeyBox(new Rect(originX + mKeyW + gap, mouseRowY, mKeyW, keyH), "RMB", rmb, true);
+            float mouseRowW = (mKeyW * 2) + gap;
+            // Spacer
+            float wasdBottomY = mouseRowY - 10 - keyH;
+            // Bottom WASD row: A S D
+            float asdX = originX + keyW + gap;  // align under W
+            DrawKeyBox(new Rect(originX,                 wasdBottomY, keyW, keyH), "A", a, false);
+            DrawKeyBox(new Rect(originX + keyW + gap,    wasdBottomY, keyW, keyH), "S", s, false);
+            DrawKeyBox(new Rect(originX + (keyW+gap)*2,  wasdBottomY, keyW, keyH), "D", d, false);
+            // W row on top
+            float wRowY = wasdBottomY - keyH - gap;
+            DrawKeyBox(new Rect(originX + keyW + gap,    wRowY, keyW, keyH), "W", w, false);
+            // Space bar (wide) under the WASD cluster, between WASD and mouse.
+            float spaceY = mouseRowY - 6 - keyH;
+            float spaceW = (keyW + gap) * 3 - gap;
+            // But this collides with WASD layout — instead place SPACE to the
+            // right of WASD on the same row as the bottom WASD line.
+            DrawKeyBox(new Rect(originX + (keyW+gap)*3 + 8, wasdBottomY, spaceW, keyH), "SPACE", space, true);
+        }
+
+        private static void DrawKeyBox(Rect r, string label, bool pressed, bool small)
+        {
+            // Pressed = red fill + bright label; idle = dim gray fill, white label.
+            Color fill = pressed
+                ? new Color(0.85f, 0.18f, 0.18f, 0.92f)
+                : new Color(0.10f, 0.10f, 0.13f, 0.78f);
+            Color edge = pressed
+                ? new Color(1f, 0.5f, 0.5f, 0.9f)
+                : new Color(1f, 1f, 1f, 0.35f);
+            GUI.DrawTexture(r, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, fill, 0, 0);
+            // 1px edge — drawn as 4 thin rects.
+            GUI.DrawTexture(new Rect(r.x, r.y, r.width, 1), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, edge, 0, 0);
+            GUI.DrawTexture(new Rect(r.x, r.y + r.height - 1, r.width, 1), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, edge, 0, 0);
+            GUI.DrawTexture(new Rect(r.x, r.y, 1, r.height), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, edge, 0, 0);
+            GUI.DrawTexture(new Rect(r.x + r.width - 1, r.y, 1, r.height), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, edge, 0, 0);
+            var prev = GUI.contentColor;
+            GUI.contentColor = Color.white;
+            GUI.Label(r, label, small ? inputKeySmallStyle : inputKeyStyle);
+            GUI.contentColor = prev;
         }
 
         // ── Block debug overlay (opt-in, UI.ShowBlockDebug config) ────────
@@ -293,6 +681,7 @@ namespace CompetitiveRounds
             "untouchable", "silent_assassin", "total_mayhem", "fragile_perfection",
             "no_escape", "rise_from_the_ashes", "the_comeback_kid", "stacked_deck",
             "regicide", "pacifist", "immovable_object",
+            "master_rank", "team_sweep",
         };
 
         public static void OpenAdminPrompt(string mode)
@@ -396,6 +785,418 @@ namespace CompetitiveRounds
             }
         }
 
+        // ── Bug report modal (v1.26.7) ─────────────────────────────────────
+        // F5 → Help/About → "Report a Bug" opens this. Submits to the server's
+        // /api/v1/bug-reports endpoint. Includes the active BepInEx/Unity log
+        // tail when the "send logs" box stays checked. The log viewer button
+        // pops the secondary modal below so users can preview what they're
+        // sending.
+        private static readonly string[] BUG_SEVERITIES = new[] { "low", "medium", "high", "crash" };
+        private static readonly string[] BUG_CATEGORIES = new[] { "ui", "gameplay", "network", "other" };
+        private static bool bugModalOpen = false;
+        private static string bugDescription = "";
+        private static string bugRepro = "";
+        private static int bugSeverityIdx = 1;   // default = medium
+        private static int bugCategoryIdx = 3;   // default = other
+        private static bool bugSendLogs = true;  // pre-checked per requirement
+        private static string bugSubmitStatus = "";
+        private static bool bugSubmitting = false;
+        private static Vector2 bugDescScroll, bugReproScroll;
+        private static GUIStyle bugTitleStyle, bugLabelStyle, bugFieldStyle, bugAreaStyle, bugButtonStyle, bugBtnPickedStyle;
+
+        public static void OpenBugReportModal()
+        {
+            bugModalOpen = true;
+            bugSubmitStatus = "";
+            bugSubmitting = false;
+        }
+
+        private static void EnsureBugStyles()
+        {
+            if (bugTitleStyle != null) return;
+            bugTitleStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 19, fontStyle = FontStyle.Bold, richText = true,
+                alignment = TextAnchor.MiddleLeft,
+            };
+            bugLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 13, richText = true };
+            bugFieldStyle = new GUIStyle(GUI.skin.textField) { fontSize = 14 };
+            bugAreaStyle = new GUIStyle(GUI.skin.textArea) { fontSize = 13, wordWrap = true };
+            bugButtonStyle = new GUIStyle(GUI.skin.button) { fontSize = 13 };
+            bugBtnPickedStyle = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = 13, fontStyle = FontStyle.Bold,
+                normal = { background = Texture2D.whiteTexture, textColor = Color.black },
+                hover  = { background = Texture2D.whiteTexture, textColor = Color.black },
+                active = { background = Texture2D.whiteTexture, textColor = Color.black },
+            };
+        }
+
+        private static void DrawBugReportModal()
+        {
+            if (!bugModalOpen) return;
+            if (!NativeUI.IsOpen) { bugModalOpen = false; return; }
+            EnsureBugStyles();
+
+            var ev = Event.current;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
+            { bugModalOpen = false; ev.Use(); return; }
+
+            float w = 680, h = 580;
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            // Backdrop blocks click-through.
+            GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.45f), 0, 0);
+            GUI.DrawTexture(new Rect(x - 10, y - 10, w + 20, h + 20), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(0.07f, 0.08f, 0.11f, 0.97f), 0, 0);
+            GUI.DrawTexture(new Rect(x - 10, y - 10, w + 20, 1), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(1f, 1f, 1f, 0.4f), 0, 0);
+
+            GUI.Label(new Rect(x, y, w, 28), "<color=#FFE580>Report a Bug</color>", bugTitleStyle);
+            GUI.Label(new Rect(x, y + 30, w, 18),
+                "<color=#AAAAAA>Reports go to the mod team. Be specific — what happened, when, what you were doing.</color>",
+                bugLabelStyle);
+
+            // Severity row
+            GUI.Label(new Rect(x, y + 56, 120, 22), "<b>Severity:</b>", bugLabelStyle);
+            for (int i = 0; i < BUG_SEVERITIES.Length; i++)
+            {
+                bool picked = i == bugSeverityIdx;
+                if (GUI.Button(new Rect(x + 100 + i * 88, y + 54, 84, 26),
+                               BUG_SEVERITIES[i].ToUpper(),
+                               picked ? bugBtnPickedStyle : bugButtonStyle))
+                    bugSeverityIdx = i;
+            }
+
+            // Category row
+            GUI.Label(new Rect(x, y + 92, 120, 22), "<b>Category:</b>", bugLabelStyle);
+            for (int i = 0; i < BUG_CATEGORIES.Length; i++)
+            {
+                bool picked = i == bugCategoryIdx;
+                if (GUI.Button(new Rect(x + 100 + i * 88, y + 90, 84, 26),
+                               BUG_CATEGORIES[i].ToUpper(),
+                               picked ? bugBtnPickedStyle : bugButtonStyle))
+                    bugCategoryIdx = i;
+            }
+
+            // Description (required)
+            GUI.Label(new Rect(x, y + 126, w, 18), "<b>What happened?</b> <color=#FF9966>(required)</color>", bugLabelStyle);
+            bugDescScroll = GUI.BeginScrollView(new Rect(x, y + 146, w, 140),
+                                                bugDescScroll,
+                                                new Rect(0, 0, w - 20, Mathf.Max(140, (bugDescription?.Length ?? 0) / 4)));
+            bugDescription = GUI.TextArea(new Rect(0, 0, w - 20, Mathf.Max(140, (bugDescription?.Length ?? 0) / 4)),
+                                          bugDescription ?? "", 4000, bugAreaStyle);
+            GUI.EndScrollView();
+
+            // Repro
+            GUI.Label(new Rect(x, y + 296, w, 18), "<b>How to reproduce?</b> <color=#888>(optional)</color>", bugLabelStyle);
+            bugReproScroll = GUI.BeginScrollView(new Rect(x, y + 316, w, 100),
+                                                 bugReproScroll,
+                                                 new Rect(0, 0, w - 20, Mathf.Max(100, (bugRepro?.Length ?? 0) / 4)));
+            bugRepro = GUI.TextArea(new Rect(0, 0, w - 20, Mathf.Max(100, (bugRepro?.Length ?? 0) / 4)),
+                                    bugRepro ?? "", 4000, bugAreaStyle);
+            GUI.EndScrollView();
+
+            // Send logs row: checkbox + label on the LEFT, "Preview logs" button
+            // on the RIGHT. Clickable areas are split so clicking Preview doesn't
+            // also toggle the checkbox.
+            float togX = x;
+            float togW = 280;            // hit area for the checkbox+label (NOT the whole row)
+            var toggleRect = new Rect(togX, y + 428, togW, 26);
+            if (GUI.Button(toggleRect, GUIContent.none, GUIStyle.none))
+                bugSendLogs = !bugSendLogs;
+            var boxRect = new Rect(togX + 2, y + 430, 20, 20);
+            Color boxFill = bugSendLogs ? new Color(0.25f, 0.7f, 0.3f, 0.95f) : new Color(0.18f, 0.18f, 0.22f, 0.95f);
+            GUI.DrawTexture(boxRect, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, boxFill, 0, 0);
+            GUI.DrawTexture(new Rect(boxRect.x, boxRect.y, boxRect.width, 1), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, Color.white, 0, 0);
+            GUI.DrawTexture(new Rect(boxRect.x, boxRect.y + boxRect.height - 1, boxRect.width, 1), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, Color.white, 0, 0);
+            GUI.DrawTexture(new Rect(boxRect.x, boxRect.y, 1, boxRect.height), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, Color.white, 0, 0);
+            GUI.DrawTexture(new Rect(boxRect.x + boxRect.width - 1, boxRect.y, 1, boxRect.height), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, Color.white, 0, 0);
+            if (bugSendLogs)
+            {
+                var checkStyle = new GUIStyle(bugLabelStyle) { fontSize = 16, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+                GUI.Label(boxRect, "<color=#FFFFFF>X</color>", checkStyle);
+            }
+            // Label sits inside the toggle hit area.
+            GUI.Label(new Rect(togX + 28, y + 428, togW - 32, 26),
+                      "Attach game logs (recommended)",
+                      bugLabelStyle);
+            // Preview button far to the right of the toggle hit area + a gap.
+            float prevX = togX + togW + 16;
+            if (GUI.Button(new Rect(prevX, y + 428, 140, 24), "Preview logs", bugButtonStyle))
+            {
+                OpenLogViewer();
+            }
+
+            // Status line
+            if (!string.IsNullOrEmpty(bugSubmitStatus))
+                GUI.Label(new Rect(x, y + 460, w, 20), bugSubmitStatus, bugLabelStyle);
+
+            // Buttons
+            bool disabled = bugSubmitting || string.IsNullOrEmpty(bugDescription) || bugDescription.Trim().Length < 4;
+            GUI.enabled = !bugSubmitting;
+            if (GUI.Button(new Rect(x, y + h - 44, 120, 30), "Cancel", bugButtonStyle))
+            {
+                bugModalOpen = false; GUI.enabled = true; return;
+            }
+            GUI.enabled = !disabled;
+            if (GUI.Button(new Rect(x + w - 160, y + h - 44, 160, 30),
+                           bugSubmitting ? "Submitting..." : "Submit Report",
+                           bugButtonStyle))
+            {
+                SubmitBugReportNow();
+            }
+            GUI.enabled = true;
+        }
+
+        private static void SubmitBugReportNow()
+        {
+            bugSubmitting = true;
+            bugSubmitStatus = "<color=#88CCFF>Submitting...</color>";
+            string sid = MatchTracker.LocalSteamId;
+            string name = MatchTracker.LocalDisplayName ?? "";
+            string desc = (bugDescription ?? "").Trim();
+            string repro = (bugRepro ?? "").Trim();
+            string sev = BUG_SEVERITIES[Mathf.Clamp(bugSeverityIdx, 0, BUG_SEVERITIES.Length - 1)];
+            string cat = BUG_CATEGORIES[Mathf.Clamp(bugCategoryIdx, 0, BUG_CATEGORIES.Length - 1)];
+            string logBundle = bugSendLogs ? BuildLogBundle() : null;
+
+            ApiClient.SubmitBugReport(sid, name, desc, repro, sev, cat, logBundle,
+                (ok, resp) =>
+                {
+                    bugSubmitting = false;
+                    if (ok)
+                    {
+                        // Pull bug_number out of the response so the user sees a
+                        // human-friendly ID they can quote in chat.
+                        int bn = ApiClient.ExtractJsonIntPublic(resp ?? "", "bug_number");
+                        string idTag = bn > 0 ? $" Filed as <b>#{bn}</b>." : "";
+                        bugSubmitStatus = $"<color=#88FF88>Sent! Thank you.{idTag}</color>";
+                        bugDescription = "";
+                        bugRepro = "";
+                        string notif = bn > 0 ? $"Bug report sent. Thanks! (#{bn})" : "Bug report sent. Thanks!";
+                        ShowNotification(notif, new Color(0.5f, 1f, 0.5f), 5f);
+                        bugModalOpen = false;
+                    }
+                    else
+                    {
+                        bugSubmitStatus = $"<color=#FF6666>Failed: {(resp ?? "").Replace("\n", " ")}</color>";
+                    }
+                });
+        }
+
+        // Builds the bug-report log bundle: previous-session BepInEx snapshot
+        // + current BepInEx + Unity, each capped INDIVIDUALLY so all three
+        // fit in the submit cap with all three represented. Without per-section
+        // budgets the post-concat ApiClient cap would tail-trim — losing the
+        // BepInEx logs (which are usually the triage signal) when Unity's log
+        // happened to be large.
+        //
+        // Budget split (~3.4M total, under ApiClient.BUG_REPORT_LOG_CAP_CHARS=3.5M):
+        //   BepInEx current     1.5M  — most important for live diagnosis
+        //   BepInEx prev        1.0M  — crash-on-prior-launch context
+        //   Unity Player.log    1.0M  — engine-side hint when needed
+        // Tail-most slice of each (most recent N chars) is taken. Each section
+        // emits a clearly delimited header so a triage reader can split the
+        // concatenation back into pieces.
+        private const int BUNDLE_CAP_BEP_CURRENT = 1_500_000;
+        private const int BUNDLE_CAP_BEP_PREV    = 1_000_000;
+        private const int BUNDLE_CAP_UNITY       = 1_000_000;
+
+        private static string BuildLogBundle()
+        {
+            string bep     = ApiClient.ReadLogTail(BepInExLogPath(),         maxChars: BUNDLE_CAP_BEP_CURRENT);
+            string bepPrev = ApiClient.ReadLogTail(BepInExLogPreviousPath(), maxChars: BUNDLE_CAP_BEP_PREV);
+            string uni     = ApiClient.ReadLogTail(UnityLogPath(),           maxChars: BUNDLE_CAP_UNITY);
+            var sb = new System.Text.StringBuilder();
+            if (!string.IsNullOrEmpty(bepPrev))
+            {
+                sb.AppendLine($"===== BepInEx LogOutput-prev.log [{BepInExLogPreviousPath()}]  ({bepPrev.Length:N0} chars, cap {BUNDLE_CAP_BEP_PREV:N0}) =====");
+                sb.AppendLine(bepPrev);
+                sb.AppendLine();
+            }
+            sb.AppendLine($"===== BepInEx LogOutput.log [{BepInExLogPath() ?? "(path unknown)"}]  ({(bep?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_BEP_CURRENT:N0}) =====");
+            sb.AppendLine(string.IsNullOrEmpty(bep) ? "(not found)" : bep);
+            sb.AppendLine();
+            sb.AppendLine($"===== Unity Player.log [{UnityLogPath() ?? "(path unknown)"}]  ({(uni?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_UNITY:N0}) =====");
+            sb.AppendLine(string.IsNullOrEmpty(uni) ? "(not found)" : uni);
+            return sb.ToString();
+        }
+
+        // Walks from the plugin assembly's location back to <ROUNDS>/BepInEx/.
+        // Assembly is at <ROUNDS>/BepInEx/plugins/CompetitiveRounds/CompetitiveRounds.dll
+        // so two GetDirectoryName calls land at <ROUNDS>/BepInEx/plugins, and one more
+        // step up gets us to <ROUNDS>/BepInEx (where LogOutput.log lives by default).
+        private static string BepInExDir()
+        {
+            try
+            {
+                string asm = typeof(Plugin).Assembly.Location;
+                if (string.IsNullOrEmpty(asm)) return null;
+                string pluginsDir = Path.GetDirectoryName(Path.GetDirectoryName(asm));
+                if (string.IsNullOrEmpty(pluginsDir)) return null;
+                return Path.GetDirectoryName(pluginsDir);
+            }
+            catch { return null; }
+        }
+
+        private static string GameRoot()
+        {
+            try
+            {
+                string bep = BepInExDir();
+                return string.IsNullOrEmpty(bep) ? null : Path.GetDirectoryName(bep);
+            }
+            catch { return null; }
+        }
+
+        private static string BepInExLogPath()
+        {
+            string bep = BepInExDir();
+            if (string.IsNullOrEmpty(bep)) return null;
+            return Path.Combine(bep, "LogOutput.log");
+        }
+
+        // Public accessor for Plugin.Awake — needs to snapshot the current log
+        // to LogOutput-prev.log at Application.quitting so the previous-session
+        // crash data is recoverable after a relaunch (BepInEx 5 truncates the
+        // active log on every startup by default, so without this snapshot the
+        // crash trace is lost the moment the player reopens to file a report).
+        public static string BepInExLogPathPublic() => BepInExLogPath();
+
+        // Path to the previous-session snapshot. Always returned (caller checks
+        // existence) so Plugin.Awake can write there at quit time.
+        public static string BepInExLogPreviousPath()
+        {
+            string bep = BepInExDir();
+            return string.IsNullOrEmpty(bep) ? null : Path.Combine(bep, "LogOutput-prev.log");
+        }
+
+        private static string UnityLogPath()
+        {
+            // Unity writes Player.log to LocalLow\Landfall Games\ROUNDS\Player.log
+            // on a fresh ROUNDS install. Also try the legacy <ROUNDS>/output_log.txt
+            // for backwards compatibility.
+            try
+            {
+                string root = GameRoot();
+                if (!string.IsNullOrEmpty(root))
+                {
+                    string legacy = Path.Combine(root, "output_log.txt");
+                    if (System.IO.File.Exists(legacy)) return legacy;
+                }
+                string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrEmpty(localApp))
+                {
+                    foreach (var publisher in new[] { "Landfall Games", "Landfall" })
+                    {
+                        string p = Path.GetFullPath(Path.Combine(localApp, "..", "LocalLow", publisher, "ROUNDS", "Player.log"));
+                        if (System.IO.File.Exists(p)) return p;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // ── Log viewer modal ────────────────────────────────────────────
+        private static bool logViewerOpen = false;
+        private static int logViewerTab = 0;     // 0=BepInEx, 1=BepInEx-prev, 2=Unity
+        private static Vector2 logViewerScroll;
+        private static string logViewerBepCache, logViewerBepPrevCache, logViewerUniCache;
+        private static GUIStyle logViewerStyle, logViewerTabStyle, logViewerTabActiveStyle;
+
+        private static void OpenLogViewer()
+        {
+            logViewerOpen = true;
+            logViewerBepCache     = ApiClient.ReadLogTail(BepInExLogPath(), maxChars: 400_000);
+            logViewerBepPrevCache = ApiClient.ReadLogTail(BepInExLogPreviousPath(), maxChars: 400_000);
+            logViewerUniCache     = ApiClient.ReadLogTail(UnityLogPath(), maxChars: 400_000);
+            Plugin.Log.LogInfo($"[BUG-REPORT-VIEWER] bep_path={BepInExLogPath()} bep_chars={logViewerBepCache?.Length ?? 0}; " +
+                               $"prev_path={BepInExLogPreviousPath()} prev_chars={logViewerBepPrevCache?.Length ?? 0}; " +
+                               $"uni_path={UnityLogPath()} uni_chars={logViewerUniCache?.Length ?? 0}");
+        }
+
+        private static void DrawLogViewerModal()
+        {
+            if (!logViewerOpen) return;
+            if (!NativeUI.IsOpen) { logViewerOpen = false; return; }
+            if (logViewerStyle == null)
+            {
+                logViewerStyle = new GUIStyle(GUI.skin.label)
+                { fontSize = 12, richText = false, alignment = TextAnchor.UpperLeft, wordWrap = false };
+                logViewerTabStyle = new GUIStyle(GUI.skin.button) { fontSize = 13 };
+                logViewerTabActiveStyle = new GUIStyle(GUI.skin.button)
+                {
+                    fontSize = 13, fontStyle = FontStyle.Bold,
+                    normal = { background = Texture2D.whiteTexture, textColor = Color.black },
+                    hover  = { background = Texture2D.whiteTexture, textColor = Color.black },
+                };
+            }
+
+            var ev = Event.current;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
+            { logViewerOpen = false; ev.Use(); return; }
+
+            float w = Mathf.Min(Screen.width - 60, 1100);
+            float h = Mathf.Min(Screen.height - 80, 720);
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.55f), 0, 0);
+            GUI.DrawTexture(new Rect(x - 10, y - 10, w + 20, h + 20), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0, new Color(0.05f, 0.06f, 0.08f, 0.98f), 0, 0);
+
+            GUI.Label(new Rect(x, y, w, 24), "<b>Game logs (tail)</b> — included with your report when the box is checked.",
+                      bugLabelStyle ?? GUI.skin.label);
+
+            // Tab labels kept short so they fit inside the buttons without clipping
+            // — earlier "BepInEx (previous session)" cut off the trailing "n)".
+            if (GUI.Button(new Rect(x, y + 28, 160, 26), "BepInEx (current)",
+                           logViewerTab == 0 ? logViewerTabActiveStyle : logViewerTabStyle))
+                logViewerTab = 0;
+            if (GUI.Button(new Rect(x + 168, y + 28, 180, 26), "BepInEx (prev session)",
+                           logViewerTab == 1 ? logViewerTabActiveStyle : logViewerTabStyle))
+                logViewerTab = 1;
+            if (GUI.Button(new Rect(x + 356, y + 28, 140, 26), "Unity / Game",
+                           logViewerTab == 2 ? logViewerTabActiveStyle : logViewerTabStyle))
+                logViewerTab = 2;
+            if (GUI.Button(new Rect(x + w - 200, y + 28, 90, 26), "Refresh", logViewerTabStyle))
+            {
+                logViewerBepCache     = ApiClient.ReadLogTail(BepInExLogPath(), maxChars: 400_000);
+                logViewerBepPrevCache = ApiClient.ReadLogTail(BepInExLogPreviousPath(), maxChars: 400_000);
+                logViewerUniCache     = ApiClient.ReadLogTail(UnityLogPath(), maxChars: 400_000);
+            }
+            if (GUI.Button(new Rect(x + w - 100, y + 28, 100, 26), "Close", logViewerTabStyle))
+            { logViewerOpen = false; return; }
+
+            string body, path;
+            switch (logViewerTab)
+            {
+                case 0: body = logViewerBepCache;     path = BepInExLogPath();         break;
+                case 1: body = logViewerBepPrevCache; path = BepInExLogPreviousPath(); break;
+                default: body = logViewerUniCache;    path = UnityLogPath();           break;
+            }
+            if (string.IsNullOrEmpty(body))
+            {
+                if (logViewerTab == 1)
+                    body = $"(no previous-session log yet — gets written by the mod when ROUNDS is closed cleanly, so on first ever launch this is empty)\n\nExpected path: {path ?? "unknown"}";
+                else
+                    body = $"(no log content read from: {path ?? "unknown path"})";
+            }
+
+            float bodyY = y + 64;
+            float bodyH = h - 70;
+            // Wide content rect so horizontal scrolling works for very long lines.
+            float contentW = w - 30;
+            float estLines = body.Length / 110f + 4;
+            float contentH = Mathf.Max(bodyH - 12, estLines * 14f);
+            logViewerScroll = GUI.BeginScrollView(new Rect(x, bodyY, w, bodyH),
+                                                  logViewerScroll,
+                                                  new Rect(0, 0, contentW, contentH));
+            GUI.Label(new Rect(4, 4, contentW - 8, contentH - 4), body, logViewerStyle);
+            GUI.EndScrollView();
+        }
+
         // True when some OTHER uGUI/TMP text input field has focus — used to avoid stealing
         // T while the user is already typing into a different chat (Photon / another mod /
         // ROUNDS' own future chat). Detected via the EventSystem singleton's selected object;
@@ -470,6 +1271,10 @@ namespace CompetitiveRounds
             if (!Plugin.DataConsentGranted) return;
             bool combatActive = GameStateWatcher.IsInMatch && !NativeUI.IsOpen
                 && GameStateWatcher.LocalAliveInCombatNow;
+            // Don't hijack T while a modal IMGUI input is taking keystrokes —
+            // bug report form, log viewer, and admin bug viewer all have their
+            // own text areas that need T to type "the", "tree", etc.
+            if (bugModalOpen || logViewerOpen || bugAdminOpen) return;
 
             var ev = Event.current;
             if (!chatInputOpen)
@@ -793,54 +1598,88 @@ namespace CompetitiveRounds
                 scoreY = 8;
             }
 
-            // Score line. The ROUNDS UI itself already shows the in-game
-            // firefight count, so this banner is dedicated to context the
-            // game doesn't surface: the BO3 SERIES score on top, and the
-            // SESSION series tally (cumulative across every ranked series
-            // played since the mod loaded) below. Casual matches fall back
-            // to firefight count since there's no series context.
-            int localTeam = GameStateWatcher.LocalTeamId;
-            int p1r = GameStateWatcher.P1Rounds;
-            int p2r = GameStateWatcher.P2Rounds;
-            int local = localTeam == 0 ? p1r : p2r;
-            int opp   = localTeam == 0 ? p2r : p1r;
-
+            // Two HUD lines under the RANKED banner — both pulled from
+            // local counters in GameStateWatcher rather than the
+            // /series/active cache, because that cache only refreshes
+            // when the F5 leaderboard tab is open and is therefore stale
+            // mid-match. Casual matches still get the per-opponent H2H
+            // line (the only useful stat for a casual queue).
+            float nextLineY = scoreY;
             if (isRanked)
             {
-                // Series score (current BO3) — pulled from CachedActiveSeries.
-                string seriesText = null;
-                var act = ApiClient.CachedActiveSeries;
-                string mySid = MatchTracker.LocalSteamId;
-                if (act != null && !string.IsNullOrEmpty(mySid))
-                {
-                    foreach (var s in act)
-                    {
-                        if (s.p1_steam_id == mySid) { seriesText = $"{s.p1_wins} - {s.p2_wins}"; break; }
-                        if (s.p2_steam_id == mySid) { seriesText = $"{s.p2_wins} - {s.p1_wins}"; break; }
-                    }
-                }
-                if (seriesText == null) seriesText = "0 - 0";
-
-                // Session series tally — cumulative ranked SERIES wins/losses
-                // across this app session. Tracked in GameStateWatcher,
-                // incremented from the report-match callback when the
-                // server replies with series_status='completed'.
-                int sw = GameStateWatcher.SessionRankedSeriesWins;
-                int sl = GameStateWatcher.SessionRankedSeriesLosses;
+                int sgw = GameStateWatcher.CurrentSeriesGamesWon;
+                int sgl = GameStateWatcher.CurrentSeriesGamesLost;
+                int rgw = GameStateWatcher.SessionRankedWins;
+                int rgl = GameStateWatcher.SessionRankedLosses;
+                int rsw = GameStateWatcher.SessionRankedSeriesWins;
+                int rsl = GameStateWatcher.SessionRankedSeriesLosses;
 
                 GUI.contentColor = new Color(1f, 0.85f, 0.3f);
-                GUI.Label(new Rect((Screen.width - 220) / 2f, scoreY, 220, 22),
-                    $"Series: {seriesText}", scoreStyle);
+                GUI.Label(new Rect((Screen.width - 260) / 2f, scoreY, 260, 22),
+                    $"Series: {sgw} - {sgl}", scoreStyle);
                 GUI.contentColor = new Color(0.75f, 0.85f, 1f);
-                GUI.Label(new Rect((Screen.width - 220) / 2f, scoreY + 18, 220, 20),
-                    $"Session: {sw} - {sl}", scoreStyle);
+                GUI.Label(new Rect((Screen.width - 320) / 2f, scoreY + 18, 320, 20),
+                    $"Session: {rgw}-{rgl} games  ({rsw}-{rsl} series)", scoreStyle);
+                nextLineY = scoreY + 36;
             }
-            else
+
+            // Per-opponent session H2H — fires on both ranked AND casual so a
+            // regular game shows "vs Opponent: 2-1 this session" right under
+            // the score line. Skip 2v2 (cr_ff) rooms: opponentSteamId latches
+            // on one of the two opposing players which makes the H2H number
+            // misleading.
+            try
             {
-                GUI.contentColor = new Color(0.85f, 0.85f, 0.85f);
-                GUI.Label(new Rect((Screen.width - 200) / 2f, scoreY, 200, 22),
-                    $"Score: {local} - {opp}", scoreStyle);
+                string oppSid = GameStateWatcher.OpponentSteamId;
+                string oppName = GameStateWatcher.OpponentDisplayName;
+                bool isCrFf = false;
+                try
+                {
+                    var rp = Photon.Pun.PhotonNetwork.CurrentRoom?.CustomProperties;
+                    isCrFf = rp != null && rp.ContainsKey("cr_ff");
+                }
+                catch { }
+                if (!isCrFf
+                    && !string.IsNullOrEmpty(oppName)
+                    && oppName != "Opponent"
+                    && !(oppSid != null && oppSid.StartsWith("photon_")))
+                {
+                    var dict = GameStateWatcher.SessionWLByOpponent;
+                    int[] counts;
+                    // sessionWLByOpponent is keyed by DISPLAY NAME, not steam_id
+                    // (see GameStateWatcher.OnGameOver — uses opponentDisplayName).
+                    if (dict != null && dict.TryGetValue(oppName, out counts) && counts != null && counts.Length >= 4)
+                    {
+                        int w = counts[0] + counts[2];   // ranked W + casual W
+                        int l = counts[1] + counts[3];   // ranked L + casual L
+                        if (w + l > 0)
+                        {
+                            Color tint = w > l ? new Color(0.6f, 1f, 0.6f)
+                                       : w < l ? new Color(1f, 0.6f, 0.6f)
+                                              : new Color(0.85f, 0.85f, 0.85f);
+                            GUI.contentColor = tint;
+                            string shortName = oppName.Length > 18 ? oppName.Substring(0, 18) : oppName;
+                            GUI.Label(new Rect((Screen.width - 360) / 2f, nextLineY, 360, 20),
+                                      $"vs {shortName}: {w}-{l} this session", scoreStyle);
+                        }
+                        else
+                        {
+                            GUI.contentColor = new Color(0.7f, 0.7f, 0.7f);
+                            string shortName = oppName.Length > 18 ? oppName.Substring(0, 18) : oppName;
+                            GUI.Label(new Rect((Screen.width - 360) / 2f, nextLineY, 360, 20),
+                                      $"vs {shortName}: first game this session", scoreStyle);
+                        }
+                    }
+                    else
+                    {
+                        GUI.contentColor = new Color(0.7f, 0.7f, 0.7f);
+                        string shortName = oppName.Length > 18 ? oppName.Substring(0, 18) : oppName;
+                        GUI.Label(new Rect((Screen.width - 360) / 2f, nextLineY, 360, 20),
+                                  $"vs {shortName}: first game this session", scoreStyle);
+                    }
+                }
             }
+            catch { }
             GUI.contentColor = oc;
         }
 

@@ -1,5 +1,35 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.7 — in-game bug reporter, 2 new achievements, input overlay, session persistence, 2v2/1v1 bet dedupe, 2v2 ready indicators, tournament auto-cleanup
+
+**Headlines for testers**
+- **Report bugs from in-game.** F5 → Settings → "Open Report Form" — fill in description + severity + category, optionally attach your game logs (BepInEx current + previous session + Unity), submit. Reports get a quotable `#N` ID and auto-post to the new Discord bug-reports channel (no logs/comments leaked there — just the metadata + description). Rate limited to 3 reports per 24h per player so accidents don't flood. Admins (currently Sid) can triage everything from F5 → Admin → Bug Reports: status changes (`open` → `triaged` → `resolved` / `wontfix` / `dupe`), comments, full activity log, attached log preview.
+- **Two new achievements.**
+  - **Master** — reach 2030 rating in ranked (1v1 OR 2v2).
+  - **Tag Team Sweep** — win a 2v2 series 2-0.
+  Both auto-grant when you cross the threshold; +100g each like the rest.
+- **WASD / Space / L+R click input overlay.** Bottom-left corner toggle in F5 → Settings. Keys glow red when pressed. Useful for stream overlays and for diagnosing "my block didn't fire" reports without having to record video.
+- **Session persistence.** Quit + reopen ROUNDS within 3 hours and your session counters resume — match count, ranked/casual W-L, series wins, per-opponent H2H, time-with-opponent — all of it. Past 3 h of inactivity, fresh session as before.
+- **Session H2H opponent line under the in-match score banner.** Renders in BOTH ranked and casual matches now (was ranked-only). Shows `vs OpponentName: W-L this session` or `first game this session`, color-coded. 2v2 rooms skip it (opponent-latch makes the number misleading).
+
+**Bug fixes**
+- **2v2 ↔ 1v1 dedupe.** Live-bets panel + 1v1 match history were getting polluted by 2v2 matches that the client occasionally fell back to reporting through the 1v1 endpoint. Server now hard-rejects any match report with a `team_*` room ID at the 1v1 endpoint; client hard-blocks the 1v1 fallback whenever a `cr_ff` room or team series is present; query filters added so historical phantoms can't show up either. Migration 082 invalidated the 5 phantom rows that had already leaked through.
+- **First-launch ranked race (round 2).** Server-side reinforcement of the v1.26.6 client fix: `/queue/join`, `/team/queue/join`, `/series-preflight`, and `/api/v1/matches` all now flip `ranked_enabled=true` on first contact. Clicking the queue button IS the opt-in. Belt and suspenders so a slow async `/toggle-ranked` can't degrade your first match.
+- **Tournament list auto-cleanup.** The async tournament that finished 2026-05-13 was still showing as the "current" tournament weeks later because the `/tournaments/current` fallback query had no recency filter. Narrowed to "completed within last 3 days" so finished brackets clear automatically.
+- **2v2 ready indicators.** Per-slot `[R]` / `[ ]` tags in front of every name in the lock-in prompt, including your own — no more guessing who you're waiting on.
+- **2v2 right-click block (mod-rooms only).** Added a state-reset on every game start in competitive rooms — scrubs null entries from `Block.triggers` and forces all Block components ready. Targets the "right-click goes straight to cooldown" pattern that hit 2v2 series after game 1. Gated on competitive room detection so vanilla pickup games are unaffected.
+
+**Backend / infra**
+- **`bug_reports` + `bug_report_events` tables** with sequential `bug_number` IDs (migrations 083, 085, 086, 087).
+- **Bug log persistence**: `docker-compose.yml` now bind-mounts `/opt/competitive-rounds/bug-reports/` on the host so log files survive API container rebuilds. Pre-existing orphaned `log_filename` pointers (from logs that died with their container) cleared in 087.
+- **Discord bot**: new `poll_bug_reports` task posts a colored embed per new report to channel `BUG_REPORTS_CHANNEL` (default `1501643180049960970`).
+- **Internal-only commenting endpoint** at `/api/v1/internal/bug-reports/{id}/comment` — gated to localhost + Docker bridge only. Lets Claude post triage comments via `bug-comment:N|text` through the SSH wrapper. Bypasses the version gate (it's loopback-only).
+- **SSH wrapper additions** (`cc-deploy-wrapper.sh`): `bug-list`, `bug-read:N`, `bug-comment:N|text`, `bug-log:N`. Lets the mod owner + Claude triage without HMAC dancing.
+- **JSON parser fix** (client-side): `ExtractJsonString` now correctly skips `\"` and other JSON escapes — previously the admin viewer's log section silently truncated at the first `"` inside log content.
+
+**Process / docs**
+- `docs/learnings.md` worth updating: BepInEx 5 ships with `AppendLog = false` by default, meaning `LogOutput.log` is truncated per launch. Application.quitting hook in Plugin.Awake now copies the current session's log to `LogOutput-prev.log` BEFORE the next launch's BepInEx truncates, so previous-session crash data survives a relaunch-to-file-report cycle.
+
 ## v1.26.6 — first-launch ranked fix, anti-cheat false-positive sweep, 2v2 menu rework, in-match session score, Sid+feauxen series recovery
 
 **Headlines for testers**

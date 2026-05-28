@@ -141,6 +141,12 @@ namespace CompetitiveRounds
         // callback when the server response carries series_status='completed'.
         private static int sessionRankedSeriesWins = 0;
         private static int sessionRankedSeriesLosses = 0;
+        // Current BO3 series score, tracked locally off OnGameOver events so
+        // the in-match HUD doesn't depend on a stale /series/active cache.
+        // Reset on room change (new series), and at series-completion when
+        // the report-match callback bumps the session series tally.
+        private static int currentSeriesGamesWon = 0;
+        private static int currentSeriesGamesLost = 0;
         private static int sessionCasualWins = 0;
         private static int sessionCasualLosses = 0;
         // 2v2 series tally for the in-mod Session Info panel. Incremented from
@@ -327,10 +333,22 @@ namespace CompetitiveRounds
         public static int SessionRankedLosses => sessionRankedLosses;
         public static int SessionRankedSeriesWins => sessionRankedSeriesWins;
         public static int SessionRankedSeriesLosses => sessionRankedSeriesLosses;
+        public static int CurrentSeriesGamesWon => currentSeriesGamesWon;
+        public static int CurrentSeriesGamesLost => currentSeriesGamesLost;
         public static void IncrementSessionRankedSeries(bool won)
         {
             if (won) sessionRankedSeriesWins++; else sessionRankedSeriesLosses++;
-            Plugin.Log.LogInfo($"[SESSION] Ranked series tally: {sessionRankedSeriesWins}-{sessionRankedSeriesLosses}");
+            // Series ended -> reset the per-series game counter so the next
+            // BO3 starts at 0-0 in the HUD.
+            currentSeriesGamesWon = 0;
+            currentSeriesGamesLost = 0;
+            Plugin.Log.LogInfo($"[SESSION] Ranked series tally: {sessionRankedSeriesWins}-{sessionRankedSeriesLosses}; current series counters reset");
+            SaveSessionState();
+        }
+        public static void ResetCurrentSeriesScore()
+        {
+            currentSeriesGamesWon = 0;
+            currentSeriesGamesLost = 0;
         }
         public static int SessionCasualWins => sessionCasualWins;
         public static int SessionCasualLosses => sessionCasualLosses;
@@ -340,14 +358,163 @@ namespace CompetitiveRounds
         {
             if (won) sessionTeamSeriesWins++;
             else sessionTeamSeriesLosses++;
+            SaveSessionState();
         }
         public static DateTime SessionStartTime => sessionStartTime;
 
-        // \u2500\u2500 Initialization \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        // Session persistence (v1.26.7). Counters survive game restarts; reset
+        // only when the gap between SaveSession() calls exceeds SESSION_INACTIVITY_HOURS,
+        // so a player who quits, restarts, and comes back within the window keeps
+        // their session intact. Stored via PlayerPrefs (per-user, per-machine).
+        private const double SESSION_INACTIVITY_HOURS = 3.0;
+        private const string PP_SESSION_LAST_ACTIVITY = "cr_session_last_activity_unix";
+        private const string PP_SESSION_START         = "cr_session_start_unix";
+        private const string PP_SESSION_MATCHES       = "cr_session_match_count";
+        private const string PP_SESSION_RW            = "cr_session_ranked_wins";
+        private const string PP_SESSION_RL            = "cr_session_ranked_losses";
+        private const string PP_SESSION_CW            = "cr_session_casual_wins";
+        private const string PP_SESSION_CL            = "cr_session_casual_losses";
+        private const string PP_SESSION_RSW           = "cr_session_rseries_wins";
+        private const string PP_SESSION_RSL           = "cr_session_rseries_losses";
+        private const string PP_SESSION_T2W           = "cr_session_tseries_wins";
+        private const string PP_SESSION_T2L           = "cr_session_tseries_losses";
+        private const string PP_SESSION_WL_BY_OPP     = "cr_session_wl_by_opp";
+        private const string PP_SESSION_TIME_BY_OPP   = "cr_session_time_by_opp";
+
+        private static long _DtToUnix(DateTime utc)
+        {
+            var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            return (long)(utc.ToUniversalTime() - epoch).TotalSeconds;
+        }
+        private static DateTime _UnixToDt(long secs)
+        {
+            return new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(secs);
+        }
+
+        public static void SaveSessionState()
+        {
+            try
+            {
+                PlayerPrefs.SetString(PP_SESSION_LAST_ACTIVITY, _DtToUnix(DateTime.UtcNow).ToString());
+                PlayerPrefs.SetString(PP_SESSION_START, _DtToUnix(sessionStartTime).ToString());
+                PlayerPrefs.SetInt(PP_SESSION_MATCHES, sessionMatchCount);
+                PlayerPrefs.SetInt(PP_SESSION_RW, sessionRankedWins);
+                PlayerPrefs.SetInt(PP_SESSION_RL, sessionRankedLosses);
+                PlayerPrefs.SetInt(PP_SESSION_CW, sessionCasualWins);
+                PlayerPrefs.SetInt(PP_SESSION_CL, sessionCasualLosses);
+                PlayerPrefs.SetInt(PP_SESSION_RSW, sessionRankedSeriesWins);
+                PlayerPrefs.SetInt(PP_SESSION_RSL, sessionRankedSeriesLosses);
+                PlayerPrefs.SetInt(PP_SESSION_T2W, sessionTeamSeriesWins);
+                PlayerPrefs.SetInt(PP_SESSION_T2L, sessionTeamSeriesLosses);
+                // Encode WL dict: "name1=rW,rL,cW,cL|name2=rW,rL,cW,cL|..."
+                // Replace | = , in display names with safe placeholders before joining.
+                var sbWl = new System.Text.StringBuilder();
+                bool firstWl = true;
+                foreach (var kv in sessionWLByOpponent)
+                {
+                    if (kv.Value == null || kv.Value.Length < 4) continue;
+                    string name = (kv.Key ?? "").Replace("|", "/").Replace("=", "-").Replace(",", ".");
+                    if (!firstWl) sbWl.Append('|');
+                    sbWl.Append(name).Append('=')
+                        .Append(kv.Value[0]).Append(',')
+                        .Append(kv.Value[1]).Append(',')
+                        .Append(kv.Value[2]).Append(',')
+                        .Append(kv.Value[3]);
+                    firstWl = false;
+                }
+                PlayerPrefs.SetString(PP_SESSION_WL_BY_OPP, sbWl.ToString());
+                var sbT = new System.Text.StringBuilder();
+                bool firstT = true;
+                foreach (var kv in sessionTimeByOpponent)
+                {
+                    string name = (kv.Key ?? "").Replace("|", "/").Replace("=", "-");
+                    if (!firstT) sbT.Append('|');
+                    sbT.Append(name).Append('=').Append(kv.Value.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
+                    firstT = false;
+                }
+                PlayerPrefs.SetString(PP_SESSION_TIME_BY_OPP, sbT.ToString());
+                PlayerPrefs.Save();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SESSION] save failed: {ex.Message}"); }
+        }
+
+        private static void LoadSessionStateOrReset()
+        {
+            try
+            {
+                string lastStr = PlayerPrefs.GetString(PP_SESSION_LAST_ACTIVITY, "");
+                if (string.IsNullOrEmpty(lastStr))
+                {
+                    sessionStartTime = DateTime.UtcNow;
+                    Plugin.Log.LogInfo("[SESSION] no prior session - starting fresh");
+                    return;
+                }
+                if (!long.TryParse(lastStr, out long lastUnix))
+                {
+                    sessionStartTime = DateTime.UtcNow;
+                    return;
+                }
+                DateTime lastActivity = _UnixToDt(lastUnix);
+                double idleHours = (DateTime.UtcNow - lastActivity).TotalHours;
+                if (idleHours > SESSION_INACTIVITY_HOURS || idleHours < 0)
+                {
+                    sessionStartTime = DateTime.UtcNow;
+                    Plugin.Log.LogInfo($"[SESSION] last activity {idleHours:F1}h ago (>{SESSION_INACTIVITY_HOURS}h) - starting fresh");
+                    return;
+                }
+                long startUnix = long.Parse(PlayerPrefs.GetString(PP_SESSION_START, lastUnix.ToString()));
+                sessionStartTime = _UnixToDt(startUnix);
+                sessionMatchCount        = PlayerPrefs.GetInt(PP_SESSION_MATCHES, 0);
+                sessionRankedWins        = PlayerPrefs.GetInt(PP_SESSION_RW, 0);
+                sessionRankedLosses      = PlayerPrefs.GetInt(PP_SESSION_RL, 0);
+                sessionCasualWins        = PlayerPrefs.GetInt(PP_SESSION_CW, 0);
+                sessionCasualLosses      = PlayerPrefs.GetInt(PP_SESSION_CL, 0);
+                sessionRankedSeriesWins  = PlayerPrefs.GetInt(PP_SESSION_RSW, 0);
+                sessionRankedSeriesLosses= PlayerPrefs.GetInt(PP_SESSION_RSL, 0);
+                sessionTeamSeriesWins    = PlayerPrefs.GetInt(PP_SESSION_T2W, 0);
+                sessionTeamSeriesLosses  = PlayerPrefs.GetInt(PP_SESSION_T2L, 0);
+                sessionWLByOpponent.Clear();
+                foreach (var entry in (PlayerPrefs.GetString(PP_SESSION_WL_BY_OPP, "") ?? "").Split('|'))
+                {
+                    if (string.IsNullOrEmpty(entry)) continue;
+                    int eq = entry.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string name = entry.Substring(0, eq);
+                    var parts = entry.Substring(eq + 1).Split(',');
+                    if (parts.Length != 4) continue;
+                    if (int.TryParse(parts[0], out int rw) && int.TryParse(parts[1], out int rl)
+                        && int.TryParse(parts[2], out int cw) && int.TryParse(parts[3], out int cl))
+                    {
+                        sessionWLByOpponent[name] = new int[] { rw, rl, cw, cl };
+                    }
+                }
+                sessionTimeByOpponent.Clear();
+                foreach (var entry in (PlayerPrefs.GetString(PP_SESSION_TIME_BY_OPP, "") ?? "").Split('|'))
+                {
+                    if (string.IsNullOrEmpty(entry)) continue;
+                    int eq = entry.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string name = entry.Substring(0, eq);
+                    if (float.TryParse(entry.Substring(eq + 1), System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out float mins))
+                        sessionTimeByOpponent[name] = mins;
+                }
+                Plugin.Log.LogInfo($"[SESSION] restored prior session ({idleHours:F1}h since last activity): " +
+                                   $"{sessionMatchCount} games, {sessionRankedWins}-{sessionRankedLosses}R / {sessionCasualWins}-{sessionCasualLosses}C, " +
+                                   $"{sessionWLByOpponent.Count} opponents");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[SESSION] load failed: {ex.Message} - starting fresh");
+                sessionStartTime = DateTime.UtcNow;
+            }
+        }
+
+        // Initialization
 
         public static void Initialize()
         {
-            sessionStartTime = DateTime.UtcNow;
+            LoadSessionStateOrReset();
             IdentifyLocalPlayer();
             RegisterLogListener(); // Register early to catch all picks
             Plugin.Log.LogInfo("GameStateWatcher initialized");
@@ -459,6 +626,11 @@ namespace CompetitiveRounds
                 catch { }
                 seriesPreflightSent = false;
                 lastOpponentRankCheck = -999f;
+                // Fresh room = new series. Reset the in-match HUD's BO3 score
+                // counter so it doesn't carry over from the prior room. The
+                // session game / series tallies stay (they're cumulative).
+                currentSeriesGamesWon = 0;
+                currentSeriesGamesLost = 0;
                 Plugin.Log.LogInfo($"[POLL] Joined room: {photonRoomId} (region: {photonRegion})");
                 // Republish all local cosmetic props on every room join. Photon
                 // resets state at room creation; without re-publish, remote clients
@@ -1276,6 +1448,13 @@ namespace CompetitiveRounds
             if (matchIsRanked)
             {
                 if (localWon) sessionRankedWins++; else sessionRankedLosses++;
+                // BO3 in-progress: bump the per-series game counter so the HUD
+                // can show "Series: 1-0" the moment game 1 ends, without
+                // waiting for the next /series/active fetch. The counter is
+                // reset to 0-0 in IncrementSessionRankedSeries when the
+                // server confirms series_status='completed', and on room
+                // change (OnRoomJoin path) when a fresh series begins.
+                if (localWon) currentSeriesGamesWon++; else currentSeriesGamesLost++;
             }
             else
             {
@@ -1284,6 +1463,11 @@ namespace CompetitiveRounds
 
             // Update session time immediately (not just on room leave)
             AccumulateSessionTime();
+
+            // Checkpoint session state to PlayerPrefs so a restart-within-3h
+            // restores all of this. AccumulateSessionTime already bumped the
+            // time-by-opponent dict; the WL dict + counters were bumped above.
+            SaveSessionState();
 
             LastResult = new MatchTracker.MatchResult
             {
@@ -1407,10 +1591,17 @@ namespace CompetitiveRounds
                         return;
                     }
                 }
-                else if (roomIsCrFf || hasSeries)
+
+                // Any 2v2 signal (cr_ff room or team series) bans the 1v1 fallback —
+                // otherwise we leak phantom 1v1 matches + ranked_series rows for arbitrary
+                // 2v2 opponent pairs, polluting bets and 1v1 history.
+                if (roomIsCrFf || hasSeries)
                 {
-                    // Caught a partial-state mismatch — log loudly so we can diagnose.
-                    Plugin.Log.LogWarning($"[2v2-REPORT-ROUTE] FELL THROUGH to 1v1 path despite 2v2 signals: shouldReport={shouldReport} hasSeries={hasSeries} playerListLen={playerListLen} cr_ff={roomIsCrFf}");
+                    Plugin.Log.LogWarning($"[2v2-REPORT-ROUTE] BLOCKING 1v1 fallback in 2v2 context: shouldReport={shouldReport} hasSeries={hasSeries} playerListLen={playerListLen} cr_ff={roomIsCrFf} — match will not be reported");
+                    EvaluateAchievements(localWon);
+                    isTracking = false;
+                    matchIsRanked = false;
+                    return;
                 }
             }
             catch (Exception ex)

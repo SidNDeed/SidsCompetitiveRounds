@@ -1,5 +1,37 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.26.7 — in-game bug reporter, 2 new achievements, input overlay, session persistence, 2v2/1v1 bet dedupe, 2v2 ready indicators, tournament auto-cleanup
+
+**Headlines for testers**
+- **Report bugs from in-game.** F5 → Settings → "Open Report Form" — fill in description + severity + category, optionally attach your game logs (BepInEx current + previous session + Unity), submit. Reports get a quotable `#N` ID and auto-post to the bug-reports Discord channel. Rate limited to 3 per 24h.
+- **Two new achievements** — **Master** (reach 2030 rating in ranked 1v1 OR 2v2) and **Tag Team Sweep** (win a 2v2 series 2-0). +100g each.
+- **WASD / Space / L+R click input overlay** — toggleable in F5 → Settings. Bottom-left corner. Keys glow red when pressed.
+- **Session persistence** — quit + reopen ROUNDS within 3 hours and your session counters resume (match count, W-L, per-opponent H2H, time-with-opponent). Past 3h of inactivity, fresh session.
+- **In-match opponent H2H** now shows in both ranked AND casual (was ranked-only) under the score banner — "vs OpponentName: W-L this session".
+
+**Bug fixes**
+- 2v2 matches no longer leak into 1v1 bets or 1v1 match history.
+- First-launch ranked race fully closed — clicking the queue button now flips your ranked opt-in on the server immediately.
+- Completed tournaments older than 3 days drop off the "current tournament" list automatically.
+- 2v2 lock-in prompt shows per-slot `[R]` / `[ ]` ready indicators.
+- Defensive patch for the "right-click block goes straight to cooldown" symptom in 2v2 series after game 1 — resets `Block.triggers` and forces blocks ready on every game start (in mod-issued rooms only, vanilla pickup games unaffected).
+- Log files attached to bug reports now persist across API redeploys (host bind-mount). Previous-session BepInEx log is also archived at quit time so a crash-then-reopen-to-report cycle keeps the crash trace.
+
+## v1.26.6 — first-launch ranked fix, anti-cheat false-positive sweep, 2v2 menu rework, in-match session score, Sid+feauxen series recovery
+
+**Headlines for testers**
+- New installs no longer get logged as casual on their first match. Steamworks resolution is racy on first launch; we used to skip the `/toggle-ranked` server sync entirely if Steam wasn't ready by the time the plugin initialized, so the player's `ranked_enabled` stayed false on the server and every opponent saw them as casual until they restarted ROUNDS. Plugin now polls every 0.5 s for up to 30 s and fires the init the moment Steam resolves.
+- The "too_many_cards" anti-cheat was wrong. ROUNDS arms-race rules give the loser of a 5-X game **6 cards** legitimately (1 pre-match auto-pick + 1 per round lost). Threshold was 5 with auto-invalidate on; every existing flag was a false positive. Bumped to 7, demoted to advisory-only, dismissed the unreviewed flags, restored the wrongly-invalidated matches, re-credited gold/XP.
+- In-match score banner now shows **Series** + **Session** instead of repeating the round count the game already displays. Series = current BO3 score (e.g. `1 - 0`), Session = cumulative ranked series wins/losses since the mod loaded.
+- 2v2 menu rework — Random Queue + Custom Lobbies are now side-by-side, queue bodies collapse when empty, "Live 2v2 Now" strip in the 2v2 tab, scroll-affordance hint between sections, and panel images set to non-raycast so wheel/drag-scroll bubbles cleanly to the outer ScrollRect.
+
+**Sid+feauxen 2v2 recovery (server-side, retroactive)**
+- Migrations 077–080 rebuilt 4 unreported wins from 2026-05-09 that the queue cleanup loop swept mid-game, split into the two BO3 series actually played, backfilled per-slot gold/XP earned, and approximated Glicko deltas via the live `glicko2.calculate_new_rating`. The underlying loop bug was fixed in the same deploy: `team_queue_cleanup_loop` now gates on `spawn_confirmations < 4` so post-assembly series aren't cancelled when players stop polling `/team/queue/poll` after entering Photon.
+
+**Backend hardening**
+- Background tasks (`queue_cleanup_loop`, `team_queue_cleanup_loop`, `tournament_tick`) wrapped in a `_supervised` helper — catches any non-`CancelledError` exception, logs traceback, restarts after 5 s. Previously a single asyncpg blip killed the loop until the next API restart.
+- DB connection pool bumped from `pool_size=10, max_overflow=5` to `20 + 10`, with `pool_timeout=30 s`, `pool_pre_ping=True`, `pool_recycle=1800 s`. Saturday playtest peaks were brushing the prior 15-conn ceiling.
+
 ## v1.26.5 — Tournament resurrection + leaver/bet/block fixes
 
 The async tournament feature was silently broken since launch — `start_tournament` errored on every cron tick because the `RankedSeries` model was missing the columns it tried to populate. Tournaments stayed stuck at `status='locked'` forever and players' ranked games against bracket opponents weren't attributed. Fixed model + the pile of correctness/UX issues that surfaced once tournaments actually started running.

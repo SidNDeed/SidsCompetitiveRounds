@@ -26,6 +26,9 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 # bet buttons (100/500/2000g per player). Bets fire via /api/v1/discord-bets
 # which requires the user to have linked their Discord account in-game first.
 LIVE_BETS_CHANNEL_ID = int(os.getenv("LIVE_BETS_CHANNEL", "1456460424831701074"))
+# Bug reports auto-post here when players file via the F5 menu. ID gets a
+# safe default so an unset env var doesn't crash the bot — 0 disables.
+BUG_REPORTS_CHANNEL_ID = int(os.getenv("BUG_REPORTS_CHANNEL", "1501643180049960970"))
 
 # Tournament trophy role names (set via env if they exist in the guild).
 # Multi-win tracking uses an "(x2)" suffix variant of each role: a player with 1 win
@@ -147,6 +150,7 @@ async def on_ready():
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
     if not nag_pending_async_matches.is_running(): nag_pending_async_matches.start()
+    if not poll_bug_reports.is_running(): poll_bug_reports.start()
     # Chat bridge: subscribe to the WS firehose so we can forward in-game
     # messages to the Discord channel. Discord -> in-game goes the other way
     # via on_message below. The poll_chat_catchup task above is a belt-and-
@@ -613,6 +617,65 @@ async def poll_team_queue_beacon():
             )
     except Exception as e:
         print(f"Team queue beacon error: {e}")
+
+
+# ── Bug Report Posting ────────────────────────────────────────────
+# Polls /bug-reports/recent every 30s, posts new ones to BUG_REPORTS_CHANNEL.
+# Only metadata + description — no log content and no triage comments (per
+# Sid: keep the public-ish channel free of attached game logs).
+seen_bug_reports = set()
+
+@tasks.loop(seconds=30)
+async def poll_bug_reports():
+    if not BUG_REPORTS_CHANNEL_ID:
+        return
+    try:
+        # Look back 90s so a missed tick doesn't drop a report. Dedup is via
+        # the set so repeated fetches of the same row are harmless.
+        data = await api_get("/bug-reports/recent?seconds=90")
+        if not data or not data.get("reports"):
+            return
+        channel = bot.get_channel(BUG_REPORTS_CHANNEL_ID)
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(BUG_REPORTS_CHANNEL_ID)
+            except Exception as ex:
+                print(f"[BUG-REPORT-POST] channel fetch failed: {ex}")
+                return
+        for r in data["reports"]:
+            rid = r.get("id")
+            if not rid or rid in seen_bug_reports:
+                continue
+            seen_bug_reports.add(rid)
+            if len(seen_bug_reports) > 1000:
+                seen_bug_reports.clear()
+            sev = (r.get("severity") or "medium").lower()
+            cat = (r.get("category") or "other").lower()
+            sev_color = {
+                "crash":  0xCC2222,
+                "high":   0xCC7733,
+                "medium": 0xCCAA33,
+                "low":    0x6688AA,
+            }.get(sev, 0xCCAA33)
+            bug_num = r.get("bug_number") or 0
+            who = r.get("display_name") or r.get("steam_id") or "Unknown"
+            mod = r.get("mod_version") or "?"
+            desc = (r.get("description") or "").strip()
+            if len(desc) > 1500:
+                desc = desc[:1500] + "... (truncated — full text in F5 admin viewer)"
+            embed = discord.Embed(
+                title=f"#{bug_num} — [{sev.upper()} / {cat.upper()}]",
+                description=desc or "(no description)",
+                color=sev_color,
+            )
+            embed.add_field(name="Reporter", value=f"`{who}` (mod v{mod})", inline=False)
+            embed.set_footer(text=f"Triage in-game (F5 -> Admin -> Bug Reports) or quote as #{bug_num}.")
+            try:
+                await channel.send(embed=embed)
+            except Exception as ex:
+                print(f"[BUG-REPORT-POST] send failed for #{bug_num}: {ex}")
+    except Exception as e:
+        print(f"Bug-report post error: {e}")
 
 
 # ── 2v2 Series Result Posting ─────────────────────────────────────

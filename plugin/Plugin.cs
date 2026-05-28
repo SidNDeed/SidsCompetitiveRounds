@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.26.6";
+        public const string ModVersion = "1.26.7";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -38,6 +38,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowTrails;
         internal static ConfigEntry<bool> ShowBlockDebug;
         internal static ConfigEntry<bool> ShowPlayerColors;
+        internal static ConfigEntry<bool> ShowInputOverlay;
         // Preferred timezone for tournament time display. Values: "Local" (use OS),
         // "UTC", or an IANA / Windows tz ID that TimeZoneInfo.FindSystemTimeZoneById
         // resolves. Persisted so it survives restarts; applies only to tournament UI.
@@ -108,6 +109,31 @@ namespace CompetitiveRounds
         {
             Log = Logger;
 
+            // BepInEx 5 defaults AppendLog=false, which truncates LogOutput.log
+            // on every launch — meaning if a player crashes and reopens to file
+            // a bug report, the crash log is gone. Hook Application.quitting
+            // to snapshot the current session's log to LogOutput-prev.log
+            // BEFORE BepInEx truncates the next run. Best-effort; failures are
+            // swallowed (file lock / disk-full) so plugin load can't be blocked.
+            try
+            {
+                UnityEngine.Application.quitting += () =>
+                {
+                    try
+                    {
+                        string src = CompetitiveUI.BepInExLogPathPublic();
+                        string dst = CompetitiveUI.BepInExLogPreviousPath();
+                        if (!string.IsNullOrEmpty(src) && !string.IsNullOrEmpty(dst) && System.IO.File.Exists(src))
+                        {
+                            System.IO.File.Copy(src, dst, overwrite: true);
+                            Log.LogInfo($"[BUG-REPORT] log snapshot saved: {dst}");
+                        }
+                    }
+                    catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit-time log copy failed: {ex.Message}"); }
+                };
+            }
+            catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
+
             ApiBaseUrl = Config.Bind(
                 "API", "BaseUrl",
                 "http://competitive-rounds.duckdns.org:8443",
@@ -160,6 +186,12 @@ namespace CompetitiveRounds
                 "UI", "ShowPlayerColors",
                 true,
                 "Render custom player body colors (purchased from the Body Color shop tab) — your own and other modded players'. Off = everyone falls back to the default orange/blue team colors."
+            );
+
+            ShowInputOverlay = Config.Bind(
+                "UI", "ShowInputOverlay",
+                false,
+                "Show a bottom-left WASD + Space + L/R-click input visualizer during matches. Keys glow red when pressed."
             );
 
             TournamentTimezone = Config.Bind(
@@ -3516,6 +3548,118 @@ namespace CompetitiveRounds
                 return null;
             }
             return __exception;
+        }
+    }
+
+    // ── Block state recovery for 2v2 series (v1.26.7) ──────────────────────
+    // Symptom: in 2v2 series, after game 1 some players right-click but the
+    // block goes straight to cooldown instead of activating. Never happens
+    // game 1; intermittent across game 2+. Diagnosis: ROUNDS' card teardowns
+    // between games can leave null entries in Block.triggers AND can leave
+    // BlockTrigger sub-components destroyed. Vanilla iterates the list without
+    // scrubbing, hits the NRE, and abandons the iteration mid-block —
+    // cooldown still starts because Block.TryBlock already committed. The
+    // BlockTriggerDoBlockNullSafetyPatch above is reactive (per-call). This
+    // proactive pass scrubs the triggers list at each Block.TryBlock entry
+    // AND on game start (every game in a series, the moment the bug window
+    // opens). Gated on competitive (mod-issued) rooms so vanilla pickup
+    // games are unaffected.
+    internal static class BlockReflect
+    {
+        private static System.Reflection.FieldInfo _fTriggers;
+        private static System.Reflection.FieldInfo _fCounter;
+        private static System.Reflection.FieldInfo _fCooldown;
+        private static bool _resolved;
+        private static void Resolve()
+        {
+            if (_resolved) return;
+            try
+            {
+                var t = typeof(Block);
+                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                _fTriggers = t.GetField("triggers", bf);
+                _fCounter  = t.GetField("counter", bf);
+                _fCooldown = t.GetField("cooldown", bf);
+            }
+            catch { }
+            _resolved = true;
+        }
+        public static int ScrubNullTriggers(Block b)
+        {
+            if (b == null) return 0;
+            Resolve();
+            if (_fTriggers == null) return 0;
+            try
+            {
+                var raw = _fTriggers.GetValue(b);
+                var list = raw as System.Collections.IList;
+                if (list == null) return 0;
+                int removed = 0;
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    var item = list[i] as UnityEngine.Object;
+                    if (item == null) { list.RemoveAt(i); removed++; }
+                }
+                return removed;
+            }
+            catch { return 0; }
+        }
+        public static void ForceReady(Block b)
+        {
+            if (b == null) return;
+            Resolve();
+            try
+            {
+                if (_fCounter != null && _fCooldown != null)
+                {
+                    float cd = (float)_fCooldown.GetValue(b);
+                    _fCounter.SetValue(b, cd);
+                }
+            }
+            catch { }
+        }
+    }
+
+    [HarmonyPatch(typeof(Block), "TryBlock")]
+    class BlockTryBlockScrubPatch
+    {
+        // Runs BEFORE BlockTryBlockCounterPatch's Prefix (same target, multiple
+        // patches both fire). Scrubs null triggers so vanilla's iteration in
+        // IDoBlock has a clean list to work with — eliminates the cascade
+        // where a single dead trigger silently aborts the rest of the block.
+        static void Prefix(Block __instance)
+        {
+            if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
+            int removed = BlockReflect.ScrubNullTriggers(__instance);
+            if (removed > 0)
+                Plugin.Log.LogInfo($"[BLOCK-SCRUB] removed {removed} null trigger(s) from Block before TryBlock");
+        }
+    }
+
+    [HarmonyPatch(typeof(GM_ArmsRace), "StartGame")]
+    class GMArmsRaceStartGameBlockResetPatch
+    {
+        // Each game in a series fires StartGame fresh. Scrub null triggers on
+        // every Block in the scene and force them ready. Without this, players
+        // whose triggers got nulled between games are stuck — right-click
+        // appears to start cooldown but does nothing.
+        static void Postfix()
+        {
+            try
+            {
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
+                var blocks = UnityEngine.Object.FindObjectsOfType<Block>();
+                if (blocks == null) return;
+                int total = 0;
+                foreach (var b in blocks)
+                {
+                    int r = BlockReflect.ScrubNullTriggers(b);
+                    total += r;
+                    BlockReflect.ForceReady(b);
+                }
+                Plugin.Log.LogInfo($"[BLOCK-RESET] StartGame: reset {blocks.Length} Block(s), scrubbed {total} null triggers");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[BLOCK-RESET] error: {ex.Message}"); }
         }
     }
 

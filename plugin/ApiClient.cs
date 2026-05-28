@@ -241,6 +241,8 @@ namespace CompetitiveRounds
             {"regicide",            new[]{"Regicide",            "Win against Sid in a ranked series"}},
             {"pacifist",            new[]{"Pacifist",            "Win a game without firing a single shot"}},
             {"immovable_object",    new[]{"Immovable Object",    "Win a game without moving or jumping"}},
+            {"master_rank",         new[]{"Master",              "Reach 2030 rating in ranked (1v1 or 2v2)"}},
+            {"team_sweep",          new[]{"Tag Team Sweep",      "Win a 2v2 series 2-0"}},
         };
 
         // Cached data
@@ -1243,6 +1245,243 @@ namespace CompetitiveRounds
             string sig = ComputeHmacHex($"admin:{adminSteamId}:review_flag:{flagId}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"flag_id\":\"{Escape(flagId)}\",\"review_action\":\"{Escape(action)}\",\"hmac_signature\":\"{sig}\"}}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/review-flag", body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        // ── Bug report admin viewers ─────────────────────────────────────
+        [Serializable]
+        public class BugReportSummary
+        {
+            public string id;
+            public int bug_number;       // human-friendly auto-incrementing ID; quotable as "#47"
+            public string created_at;
+            public string steam_id;
+            public string display_name;
+            public string mod_version;
+            public string severity;
+            public string category;
+            public string status;
+            public string description;
+            public bool has_log;
+            public int log_bytes;
+        }
+        [Serializable]
+        public class BugReportEventEntry
+        {
+            public string id;
+            public string actor_steam_id;
+            public string actor_name;
+            public string event_type;   // comment | status_change | created
+            public string old_status;
+            public string new_status;
+            public string comment;
+            public string created_at;
+        }
+        [Serializable]
+        public class BugReportDetail
+        {
+            public string id;
+            public int bug_number;
+            public string steam_id;
+            public string display_name;
+            public string mod_version;
+            public string game_version;
+            public string severity;
+            public string category;
+            public string description;
+            public string repro_steps;
+            public string status;
+            public string triage_notes;
+            public string created_at;
+            public string log_text;
+            public int log_bytes;
+            public List<BugReportEventEntry> events = new List<BugReportEventEntry>();
+        }
+        public static List<BugReportSummary> CachedBugReports { get; private set; } = new List<BugReportSummary>();
+        public static BugReportDetail CachedBugReportDetail { get; set; }
+
+        public static void FetchBugReports(string adminSteamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:bug_reports:list");
+            string url = $"{baseUrl}/api/v1/bug-reports?admin_steam_id={adminSteamId}&hmac_signature={sig}&limit=100";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                if (!ok) { Plugin.Log.LogWarning($"[BUG-REPORTS] fetch failed: {body}"); callback?.Invoke(false); return; }
+                try
+                {
+                    CachedBugReports = ParseBugReportList(body);
+                    callback?.Invoke(true);
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[BUG-REPORTS] parse: {ex.Message}"); callback?.Invoke(false); }
+            }));
+        }
+
+        public static void FetchBugReportDetail(string adminSteamId, string reportId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId) || string.IsNullOrEmpty(reportId)) { callback?.Invoke(false); return; }
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:bug_reports:{reportId}");
+            string url = $"{baseUrl}/api/v1/bug-reports/{reportId}?admin_steam_id={adminSteamId}&hmac_signature={sig}&include_log=true";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                if (!ok) { Plugin.Log.LogWarning($"[BUG-REPORTS] detail fetch failed: {body}"); callback?.Invoke(false); return; }
+                try
+                {
+                    CachedBugReportDetail = ParseBugReportDetail(body);
+                    callback?.Invoke(true);
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[BUG-REPORTS] detail parse: {ex.Message}"); callback?.Invoke(false); }
+            }));
+        }
+
+        private static List<BugReportSummary> ParseBugReportList(string json)
+        {
+            var list = new List<BugReportSummary>();
+            if (string.IsNullOrEmpty(json)) return list;
+            int kIdx = json.IndexOf("\"reports\":[");
+            if (kIdx < 0) return list;
+            int start = kIdx + "\"reports\":[".Length;
+            int depth = 1, i = start;
+            while (i < json.Length && depth > 0)
+            {
+                if (json[i] == '[') depth++;
+                else if (json[i] == ']') depth--;
+                i++;
+            }
+            if (depth != 0) return list;
+            string slice = json.Substring(start, i - start - 1);
+            int oIdx = 0;
+            while (oIdx < slice.Length)
+            {
+                int objStart = slice.IndexOf('{', oIdx);
+                if (objStart < 0) break;
+                int oDepth = 1, j = objStart + 1;
+                while (j < slice.Length && oDepth > 0)
+                {
+                    if (slice[j] == '{') oDepth++;
+                    else if (slice[j] == '}') oDepth--;
+                    j++;
+                }
+                if (oDepth != 0) break;
+                string obj = slice.Substring(objStart, j - objStart);
+                list.Add(new BugReportSummary
+                {
+                    id           = ExtractJsonString(obj, "id"),
+                    bug_number   = ExtractJsonInt(obj, "bug_number"),
+                    created_at   = ExtractJsonString(obj, "created_at"),
+                    steam_id     = ExtractJsonString(obj, "steam_id"),
+                    display_name = ExtractJsonString(obj, "display_name"),
+                    mod_version  = ExtractJsonString(obj, "mod_version"),
+                    severity     = ExtractJsonString(obj, "severity"),
+                    category     = ExtractJsonString(obj, "category"),
+                    status       = ExtractJsonString(obj, "status"),
+                    description  = ExtractJsonString(obj, "description"),
+                    has_log      = ExtractJsonBool(obj, "has_log"),
+                    log_bytes    = ExtractJsonInt(obj, "log_bytes"),
+                });
+                oIdx = j;
+            }
+            return list;
+        }
+
+        private static BugReportDetail ParseBugReportDetail(string json)
+        {
+            var detail = new BugReportDetail
+            {
+                id            = ExtractJsonString(json, "id"),
+                bug_number    = ExtractJsonInt(json, "bug_number"),
+                steam_id      = ExtractJsonString(json, "steam_id"),
+                display_name  = ExtractJsonString(json, "display_name"),
+                mod_version   = ExtractJsonString(json, "mod_version"),
+                game_version  = ExtractJsonString(json, "game_version"),
+                severity      = ExtractJsonString(json, "severity"),
+                category      = ExtractJsonString(json, "category"),
+                description   = ExtractJsonString(json, "description"),
+                repro_steps   = ExtractJsonString(json, "repro_steps"),
+                status        = ExtractJsonString(json, "status"),
+                triage_notes  = ExtractJsonString(json, "triage_notes"),
+                created_at    = ExtractJsonString(json, "created_at"),
+                log_text      = ExtractJsonString(json, "log_text"),
+                log_bytes     = ExtractJsonInt(json, "log_bytes"),
+            };
+            // Parse events array — schema mirrors BugReportEventEntry. Manual
+            // slicing because JsonUtility chokes on nested arrays (learning #25).
+            try
+            {
+                int kIdx = json.IndexOf("\"events\":[");
+                if (kIdx >= 0)
+                {
+                    int start = kIdx + "\"events\":[".Length;
+                    int depth = 1, i = start;
+                    while (i < json.Length && depth > 0)
+                    {
+                        if (json[i] == '[') depth++;
+                        else if (json[i] == ']') depth--;
+                        i++;
+                    }
+                    if (depth == 0)
+                    {
+                        string slice = json.Substring(start, i - start - 1);
+                        int oIdx = 0;
+                        while (oIdx < slice.Length)
+                        {
+                            int objStart = slice.IndexOf('{', oIdx);
+                            if (objStart < 0) break;
+                            int oDepth = 1, j = objStart + 1;
+                            while (j < slice.Length && oDepth > 0)
+                            {
+                                if (slice[j] == '{') oDepth++;
+                                else if (slice[j] == '}') oDepth--;
+                                j++;
+                            }
+                            if (oDepth != 0) break;
+                            string obj = slice.Substring(objStart, j - objStart);
+                            detail.events.Add(new BugReportEventEntry
+                            {
+                                id              = ExtractJsonString(obj, "id"),
+                                actor_steam_id  = ExtractJsonString(obj, "actor_steam_id"),
+                                actor_name      = ExtractJsonString(obj, "actor_name"),
+                                event_type      = ExtractJsonString(obj, "event_type"),
+                                old_status      = ExtractJsonString(obj, "old_status"),
+                                new_status      = ExtractJsonString(obj, "new_status"),
+                                comment         = ExtractJsonString(obj, "comment"),
+                                created_at      = ExtractJsonString(obj, "created_at"),
+                            });
+                            oIdx = j;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[BUG-REPORTS] events parse: {ex.Message}"); }
+            return detail;
+        }
+
+        public static void AdminBugReportComment(string adminSteamId, string reportId, string comment, Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId) || string.IsNullOrEmpty(reportId))
+            { callback?.Invoke(false, "missing args"); return; }
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:bug_reports_comment:{reportId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"hmac_signature\":\"{sig}\",\"comment\":\"{Escape(comment ?? "")}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/bug-reports/{reportId}/comment", body,
+                (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        public static void AdminBugReportStatus(string adminSteamId, string reportId, string newStatus, string comment, Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId) || string.IsNullOrEmpty(reportId) || string.IsNullOrEmpty(newStatus))
+            { callback?.Invoke(false, "missing args"); return; }
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:bug_reports_status:{reportId}");
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{");
+            sb.Append($"\"admin_steam_id\":\"{Escape(adminSteamId)}\"");
+            sb.Append($",\"hmac_signature\":\"{sig}\"");
+            sb.Append($",\"new_status\":\"{Escape(newStatus)}\"");
+            if (!string.IsNullOrEmpty(comment))
+                sb.Append($",\"comment\":\"{Escape(comment)}\"");
+            sb.Append("}");
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/bug-reports/{reportId}/status", sb.ToString(),
+                (ok, resp) => callback?.Invoke(ok, resp)));
         }
 
         // Manual JSON parsers (the existing pattern in this file: JsonUtility silently fails on nested arrays).
@@ -2251,12 +2490,56 @@ namespace CompetitiveRounds
                 int start = json.IndexOf(search);
                 if (start < 0) return "";
                 start += search.Length;
-                int end = json.IndexOf("\"", start);
-                if (end < 0) return "";
-                return json.Substring(start, end - start);
+                // Scan forward, skipping escaped chars. Without this, any value
+                // containing a literal " (encoded as \" in JSON) truncates the
+                // parse — bug reports with quoted log text were losing the rest
+                // of the field + bleeding into adjacent fields.
+                int i = start;
+                var sb = new System.Text.StringBuilder();
+                while (i < json.Length)
+                {
+                    char c = json[i];
+                    if (c == '\\' && i + 1 < json.Length)
+                    {
+                        char nx = json[i + 1];
+                        switch (nx)
+                        {
+                            case '"':  sb.Append('"');  i += 2; continue;
+                            case '\\': sb.Append('\\'); i += 2; continue;
+                            case '/':  sb.Append('/');  i += 2; continue;
+                            case 'n':  sb.Append('\n'); i += 2; continue;
+                            case 'r':  sb.Append('\r'); i += 2; continue;
+                            case 't':  sb.Append('\t'); i += 2; continue;
+                            case 'b':  sb.Append('\b'); i += 2; continue;
+                            case 'f':  sb.Append('\f'); i += 2; continue;
+                            case 'u':
+                                if (i + 5 < json.Length)
+                                {
+                                    string hex = json.Substring(i + 2, 4);
+                                    if (int.TryParse(hex, System.Globalization.NumberStyles.HexNumber,
+                                                     System.Globalization.CultureInfo.InvariantCulture, out int code))
+                                    {
+                                        sb.Append((char)code);
+                                        i += 6;
+                                        continue;
+                                    }
+                                }
+                                sb.Append(nx); i += 2; continue;
+                            default: sb.Append(nx); i += 2; continue;
+                        }
+                    }
+                    if (c == '"') break;
+                    sb.Append(c);
+                    i++;
+                }
+                return sb.ToString();
             }
             catch { return ""; }
         }
+
+        // Public alias so CompetitiveUI can reuse the helper without exposing
+        // every parser internal. Same semantics as ExtractJsonInt.
+        public static int ExtractJsonIntPublic(string json, string key) => ExtractJsonInt(json, key);
 
         private static int ExtractJsonInt(string json, string key)
         {
@@ -2781,6 +3064,7 @@ namespace CompetitiveRounds
             public bool using_fallback_rating;
             public int balance_rating;     // the rating the balancer actually uses (2v2 or 1v1 fallback)
             public int completed_series;   // 2v2 series count at queue join time
+            public bool ready;             // per-slot ready flag for the lock-in prompt
         }
 
         [Serializable]
@@ -2796,6 +3080,7 @@ namespace CompetitiveRounds
             public string room_name;
             public string room_region;
             public int match_age_seconds;
+            public bool my_ready;          // the polling player's own ready flag
         }
 
         [Serializable]
@@ -3042,6 +3327,7 @@ namespace CompetitiveRounds
                 room_name = ExtractJsonString(response, "room_name"),
                 room_region = ExtractJsonString(response, "room_region"),
                 match_age_seconds = ExtractJsonInt(response, "match_age_seconds"),
+                my_ready = ExtractJsonBool(response, "my_ready"),
             };
             data.teammates = ExtractTeamMemberList(response, "teammates");
             data.opponents = ExtractTeamMemberList(response, "opponents");
@@ -3219,6 +3505,7 @@ namespace CompetitiveRounds
                         using_fallback_rating = ExtractJsonBool(obj, "using_fallback_rating"),
                         balance_rating = ExtractJsonInt(obj, "balance_rating"),
                         completed_series = ExtractJsonInt(obj, "completed_series"),
+                        ready = ExtractJsonBool(obj, "ready"),
                     });
                     oIdx = j;
                 }
@@ -4298,6 +4585,71 @@ namespace CompetitiveRounds
                     .Replace("\"", "\\\"")
                     .Replace("\n", "\\n")
                     .Replace("\r", "\\r");
+        }
+
+        // ── Bug reports ──────────────────────────────────────────────────────
+        // POST /api/v1/bug-reports. Server gzips + persists the log blob to
+        // disk; we just pass plain text up. Caps log payload at ~3.5MB to
+        // stay under the server's 4MB validator and FastAPI's body limit.
+        public const int BUG_REPORT_LOG_CAP_CHARS = 3_500_000;
+        public static void SubmitBugReport(string steamId, string displayName, string description,
+                                           string reproSteps, string severity, string category,
+                                           string logText, Action<bool, string> done)
+        {
+            if (string.IsNullOrEmpty(steamId))
+            {
+                done?.Invoke(false, "steam_id missing");
+                return;
+            }
+            if (logText != null && logText.Length > BUG_REPORT_LOG_CAP_CHARS)
+                logText = logText.Substring(logText.Length - BUG_REPORT_LOG_CAP_CHARS); // tail-most window
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{");
+            sb.Append($"\"steam_id\":\"{Escape(steamId)}\"");
+            sb.Append($",\"display_name\":\"{Escape(displayName ?? "")}\"");
+            sb.Append($",\"mod_version\":\"{Escape(Plugin.ModVersion)}\"");
+            sb.Append($",\"game_version\":\"{Escape(UnityEngine.Application.version ?? "")}\"");
+            sb.Append($",\"severity\":\"{Escape(severity ?? "medium")}\"");
+            sb.Append($",\"category\":\"{Escape(category ?? "other")}\"");
+            sb.Append($",\"description\":\"{Escape(description ?? "")}\"");
+            if (!string.IsNullOrEmpty(reproSteps))
+                sb.Append($",\"repro_steps\":\"{Escape(reproSteps)}\"");
+            if (!string.IsNullOrEmpty(logText))
+                sb.Append($",\"log_text\":\"{Escape(logText)}\"");
+            sb.Append("}");
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/bug-reports", sb.ToString(),
+                (ok, response) =>
+                {
+                    if (ok) Plugin.Log.LogInfo($"[BUG-REPORT] submitted ok: {response}");
+                    else Plugin.Log.LogWarning($"[BUG-REPORT] submit failed: {response}");
+                    done?.Invoke(ok, response);
+                }
+            ));
+        }
+
+        // Reads the tail of a log file (BepInEx LogOutput.log or Unity output_log.txt)
+        // with sane caps so we don't blow out memory on a multi-MB log.
+        public static string ReadLogTail(string path, int maxChars = BUG_REPORT_LOG_CAP_CHARS)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return "";
+                // FileShare.ReadWrite — BepInEx + Unity keep these handles open.
+                using (var fs = new System.IO.FileStream(path, System.IO.FileMode.Open,
+                                                        System.IO.FileAccess.Read,
+                                                        System.IO.FileShare.ReadWrite))
+                using (var sr = new System.IO.StreamReader(fs))
+                {
+                    string all = sr.ReadToEnd();
+                    if (all.Length <= maxChars) return all;
+                    return all.Substring(all.Length - maxChars);
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"[log read error: {ex.Message}]";
+            }
         }
 
 

@@ -2089,8 +2089,8 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
         // -- Settings Tab ----------------------------------------
         private static object txtConsentStatus, txtDeleteStatus;
         private static GameObject consentToggleBtn, deleteBtn, confirmDeleteBtn, cancelDelBtn, notifToggleBtn;
-        private static GameObject fpsToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn;
-        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt;
+        private static GameObject fpsToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn;
+        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt;
         private static bool deleteArmed = false;
 
         // Helper: makes a left-aligned fixed-width button. Wraps in an HLG with a flex
@@ -2233,6 +2233,20 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 });
             playerColorToggleTxt = UIFactory.GetButtonText(playerColorToggleBtn);
 
+            // -- Input overlay (WASD + Space + mouse buttons) --
+            UIFactory.CreateText("SInpOvL", dispBox.transform,
+                "Input overlay (bottom-left): shows W/A/S/D/Space and L/R click. Keys glow red when pressed. Useful for streams or diagnosing missed inputs.",
+                13f, C_DIM, sizeDelta: new Vector2(700, 34));
+            inputOverlayToggleBtn = SettingsButton(dispBox.transform, "SInpOv", "",
+                C_WHITE, C_BTN, new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Input overlay toggled");
+                    Plugin.ShowInputOverlay.Value = !Plugin.ShowInputOverlay.Value;
+                    dirty = true;
+                });
+            inputOverlayToggleTxt = UIFactory.GetButtonText(inputOverlayToggleBtn);
+
             // -- Chat pop-up notifications --
             var notifBox = UIFactory.CreatePanel("SNB", panel.transform, C_PANEL);
             UIFactory.AddVLG(notifBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);
@@ -2252,6 +2266,20 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                     dirty = true;
                 });
             notifToggleTxt = UIFactory.GetButtonText(notifToggleBtn);
+
+            // -- Bug report --
+            var bugBox = UIFactory.CreatePanel("SBugB", panel.transform, C_PANEL);
+            UIFactory.AddVLG(bugBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);
+            UIFactory.AddLE(bugBox, flexH: 0);
+            UIFactory.CreateText("SBugL", bugBox.transform,
+                "Report a bug", 17f, new Color(1f, 0.9f, 0.6f),
+                sizeDelta: new Vector2(700, 24));
+            UIFactory.CreateText("SBugD", bugBox.transform,
+                "Send a bug report straight to the mod team — description, severity, and optionally your game logs. Use the Preview button to see what gets attached.",
+                13f, C_DIM, sizeDelta: new Vector2(700, 38));
+            var bugBtn = SettingsButton(bugBox.transform, "SBugBtn", "Open Report Form",
+                C_WHITE, new Color(0.20f, 0.30f, 0.45f, 0.9f), new Vector2(260, 28),
+                () => { CompetitiveUI.OpenBugReportModal(); });
 
             // -- Filler spacer so Delete sits at the bottom --
             var mid = new GameObject("SMid");
@@ -2392,6 +2420,11 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                     Plugin.ShowPlayerColors.Value
                         ? "Custom player body colors: <color=#88FF88>ON</color>"
                         : "Custom player body colors: <color=#FF9966>OFF</color>");
+            if (inputOverlayToggleTxt != null && Plugin.ShowInputOverlay != null)
+                UIFactory.SetText(inputOverlayToggleTxt,
+                    Plugin.ShowInputOverlay.Value
+                        ? "Input overlay: <color=#88FF88>ON</color>"
+                        : "Input overlay: <color=#FF9966>OFF</color>");
         }
 
         private static void RefreshRecentSeries()
@@ -3356,6 +3389,8 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 CompetitiveUI.OpenAdminPrompt("grant"), sizeDelta: new Vector2(170, 26));
             UIFactory.CreateButton("ARev", actionRow.transform, "Reverse Series...", 13f, C_WHITE, new Color(0.45f, 0.3f, 0.55f, 0.9f), () =>
                 CompetitiveUI.OpenAdminPrompt("reverse"), sizeDelta: new Vector2(150, 26));
+            UIFactory.CreateButton("ABugRpt", actionRow.transform, "Bug Reports...", 13f, C_WHITE, new Color(0.2f, 0.3f, 0.5f, 0.9f), () =>
+                CompetitiveUI.OpenBugReportAdminViewer(), sizeDelta: new Vector2(150, 26));
 
             var split = new GameObject("ASplit"); split.transform.SetParent(panel.transform, false); split.AddComponent<RectTransform>();
             UIFactory.AddHLG(split, spacing: 8); UIFactory.AddLE(split, flexH: 1);
@@ -5894,9 +5929,10 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
             if (poll == null) return "";
             var sb = new StringBuilder();
             sb.Append("<color=#66CCFF>Your Team:</color> ");
-            sb.Append("<b>YOU</b>");
+            sb.Append($"{ReadyTag(poll.my_ready)}<b>YOU</b>");
             if (poll.teammates != null)
-                foreach (var t in poll.teammates) sb.Append($", {Trunc(t.display_name, 16)} {FmtMemberRating(t)}");
+                foreach (var t in poll.teammates)
+                    sb.Append($", {ReadyTag(t.ready)}{Trunc(t.display_name, 16)} {FmtMemberRating(t)}");
             sb.Append("\n<color=#FF6688>Opponents:</color> ");
             if (poll.opponents != null)
             {
@@ -5904,11 +5940,18 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
                 foreach (var o in poll.opponents)
                 {
                     if (!first) sb.Append(", ");
-                    sb.Append($"{Trunc(o.display_name, 16)} {FmtMemberRating(o)}");
+                    sb.Append($"{ReadyTag(o.ready)}{Trunc(o.display_name, 16)} {FmtMemberRating(o)}");
                     first = false;
                 }
             }
             return sb.ToString();
+        }
+
+        // Per-slot ready/pending tag shown in front of each player name in the
+        // 2v2 lock-in prompt so all 4 can see who they're waiting on.
+        private static string ReadyTag(bool isReady)
+        {
+            return isReady ? "<color=#44FF66>[R]</color> " : "<color=#888>[ ]</color> ";
         }
 
         // Format the queuer's rating with a hint if the balancer is using their

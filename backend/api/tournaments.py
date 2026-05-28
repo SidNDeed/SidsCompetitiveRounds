@@ -1186,8 +1186,26 @@ async def get_current(
     )).order_by(Tournament.default_start_ts.asc())
     t = (await db.execute(q)).scalars().first()
     if not t:
-        # Fall through to most recent completed.
-        q2 = select(Tournament).where(Tournament.kind == kind).order_by(Tournament.created_at.desc())
+        # Fall through to most recent completed — but only if it actually
+        # finished recently. The previous logic returned the most recent
+        # tournament regardless of age, so a tournament that ended weeks
+        # ago kept showing as "current" in the F5 panel forever (user
+        # report: async tournament from 2026-05-13 still listed end of May).
+        # Short window (3 days) keeps the "bracket recap" moment but
+        # clears stale entries automatically.
+        recent_cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+        q2 = (
+            select(Tournament)
+            .where(and_(
+                Tournament.kind == kind,
+                Tournament.status == "completed",
+                or_(
+                    Tournament.ended_at >= recent_cutoff,
+                    and_(Tournament.ended_at.is_(None), Tournament.created_at >= recent_cutoff),
+                ),
+            ))
+            .order_by(Tournament.created_at.desc())
+        )
         t = (await db.execute(q2)).scalars().first()
     if not t:
         return TournamentCurrentResponse(

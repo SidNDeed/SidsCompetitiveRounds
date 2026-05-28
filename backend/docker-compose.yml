@@ -42,6 +42,11 @@ services:
       GLICKO2_DEFAULT_RATING: ${GLICKO2_DEFAULT_RATING}
       GLICKO2_DEFAULT_RD: ${GLICKO2_DEFAULT_RD}
       GLICKO2_DEFAULT_VOLATILITY: ${GLICKO2_DEFAULT_VOLATILITY}
+    volumes:
+      # Bind-mount bug-report logs to the host so they survive container
+      # rebuilds. Without this, every `docker compose up -d --build api`
+      # nukes the writable layer and submitted log_filename rows orphan.
+      - ./bug-reports:/opt/competitive-rounds/bug-reports
     ports:
       - "${API_PORT:-8443}:8000"
     security_opt:

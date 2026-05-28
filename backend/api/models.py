@@ -7,8 +7,8 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, Double, ForeignKey, Index, Integer,
-    SmallInteger, String, UniqueConstraint,
+    BigInteger, Boolean, Column, DateTime, Double, FetchedValue, ForeignKey, Index, Integer,
+    SmallInteger, String, Text, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -325,6 +325,48 @@ class PlayerAchievement(Base):
         Index("idx_pa_player", "player_id"),
         Index("idx_pa_key", "achievement_key"),
     )
+
+
+class BugReport(Base):
+    """In-game bug reports submitted from the F5 menu (v1.26.7)."""
+    __tablename__ = "bug_reports"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Auto-assigned by DB sequence (migration 086); FetchedValue tells the
+    # ORM not to send the column in the INSERT (so the DEFAULT fires) and to
+    # re-read it after the insert so report.bug_number is populated.
+    bug_number = Column(BigInteger, nullable=False, unique=True,
+                        server_default=FetchedValue(), server_onupdate=FetchedValue())
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="SET NULL"), nullable=True)
+    steam_id = Column(String(32), nullable=True)
+    display_name = Column(String(64), nullable=True)
+    mod_version = Column(String(32), nullable=True)
+    game_version = Column(String(32), nullable=True)
+    severity = Column(String(16), nullable=False, default="medium")
+    category = Column(String(16), nullable=False, default="other")
+    description = Column(Text, nullable=False)
+    repro_steps = Column(Text, nullable=True)
+    log_filename = Column(String(96), nullable=True)
+    log_bytes = Column(Integer, nullable=True)
+    status = Column(String(16), nullable=False, default="open")
+    triage_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class BugReportEvent(Base):
+    """Activity log entry for a bug report — status change or comment."""
+    __tablename__ = "bug_report_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    bug_report_id = Column(UUID(as_uuid=True), ForeignKey("bug_reports.id", ondelete="CASCADE"), nullable=False)
+    actor_steam_id = Column(String(32), nullable=True)
+    actor_name = Column(String(96), nullable=False)
+    event_type = Column(String(24), nullable=False)  # comment | status_change | created
+    old_status = Column(String(16), nullable=True)
+    new_status = Column(String(16), nullable=True)
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 # ── Anti-cheat & admin (v1.21.0) ──────────────────────────────
