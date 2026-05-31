@@ -35,18 +35,16 @@ UPDATE players p
    AND pa.unlocked_at >= NOW() - INTERVAL '1 minute';
 
 -- ── team_sweep ──────────────────────────────────────────────
--- Every winning slot of a 2-0 team_series qualifies (both winners on the
--- winning team). DISTINCT to dedupe players who swept multiple times.
+-- Corrected criterion (v1.26.8): a player gets team_sweep if they've ever
+-- WON a 2v2 GAME 5-0 in rounds (round shutout), not for a 2-0 series.
+-- DISTINCT to dedupe players who swept multiple times.
 WITH eligible AS (
     SELECT DISTINCT p.id AS player_id
-      FROM team_series ts
-      JOIN players p ON p.id IN (
-            CASE WHEN ts.winner_team = 1 THEN ts.t1a_id ELSE ts.t2a_id END,
-            CASE WHEN ts.winner_team = 1 THEN ts.t1b_id ELSE ts.t2b_id END
+      FROM team_matches tm
+      JOIN players p ON (
+            (tm.t1_rounds_won = 5 AND tm.t2_rounds_won = 0 AND p.id IN (tm.t1a_id, tm.t1b_id))
+         OR (tm.t2_rounds_won = 5 AND tm.t1_rounds_won = 0 AND p.id IN (tm.t2a_id, tm.t2b_id))
       )
-     WHERE ts.status = 'completed'
-       AND ((ts.t1_series_wins = 2 AND ts.t2_series_wins = 0)
-         OR (ts.t2_series_wins = 2 AND ts.t1_series_wins = 0))
 ),
 inserted AS (
     INSERT INTO player_achievements (player_id, achievement_key)

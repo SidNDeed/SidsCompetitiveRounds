@@ -305,9 +305,9 @@ class BugReportRequest(BaseModel):
     game_version: str | None = Field(None, max_length=32)
     severity: str = Field("medium", max_length=16)   # low | medium | high | crash
     category: str = Field("other", max_length=16)    # ui | gameplay | network | other
-    description: str = Field(..., min_length=4, max_length=4000)
-    repro_steps: str | None = Field(None, max_length=4000)
-    log_text: str | None = Field(None, max_length=4_000_000)   # ~4MB cap pre-gzip
+    description: str = Field(..., min_length=4, max_length=8000)
+    repro_steps: str | None = Field(None, max_length=8000)
+    log_text: str | None = Field(None, max_length=12_000_000)  # ~12MB cap pre-gzip — covers active sessions with verbose tournament/match log spam
 
 
 class BugReportSummary(BaseModel):

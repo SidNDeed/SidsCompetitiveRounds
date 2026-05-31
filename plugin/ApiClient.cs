@@ -242,7 +242,7 @@ namespace CompetitiveRounds
             {"pacifist",            new[]{"Pacifist",            "Win a game without firing a single shot"}},
             {"immovable_object",    new[]{"Immovable Object",    "Win a game without moving or jumping"}},
             {"master_rank",         new[]{"Master",              "Reach 2030 rating in ranked (1v1 or 2v2)"}},
-            {"team_sweep",          new[]{"Tag Team Sweep",      "Win a 2v2 series 2-0"}},
+            {"team_sweep",          new[]{"Tag Team Sweep",      "Win a 2v2 game 5-0"}},
         };
 
         // Cached data
@@ -2205,10 +2205,19 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
-            // Reverse so oldest is first (API returns newest first)
-            if (data.rating_history.Count > 1)
-                data.rating_history.Reverse();
-            Plugin.Log.LogInfo($"[STATS] Parsed {data.rating_history.Count} rating history points for {data.display_name}");
+            // Server returns ASC (oldest → newest) since v1.26.8. Do NOT reverse —
+            // the old reverse call was a v1.26.7-era hack that made the graph plot
+            // right-to-left after the server switched ordering, AND made the "current
+            // Elo" label read the OLDEST rating instead of the newest.
+            //
+            // Prepend 1500 as a synthetic first point so the graph starts at every
+            // player's initial rating instead of wherever their first recorded series
+            // happened to land. This matches user expectation ("shouldn't it start at
+            // 1500 for everyone?") and turns the first slope into a meaningful "your
+            // first series gain/loss from baseline" visualization.
+            if (data.rating_history.Count > 0 && data.rating_history[0] != 1500f)
+                data.rating_history.Insert(0, 1500f);
+            Plugin.Log.LogInfo($"[STATS] Parsed {data.rating_history.Count} rating history points for {data.display_name} (oldest→newest, 1500 baseline prepended)");
         }
 
         // ── Selected player achievements (for LB detail) ─────────
@@ -2404,7 +2413,11 @@ namespace CompetitiveRounds
             ));
         }
 
-        public static void FetchMatchHistory(string steamId, int limit = 500)
+        // limit=2000 is the server cap (see /players/{steam_id}/matches). Bumped
+        // 500 → 2000 in v1.26.8 after Stan reported old matches "disappearing"
+        // off the F5 history. 2000 covers ~6 months of heavy play for any user
+        // and matches the server's enforcement ceiling.
+        public static void FetchMatchHistory(string steamId, int limit = 2000)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
 

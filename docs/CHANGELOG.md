@@ -1,5 +1,35 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.27.0 — custom map colors, shop expansion, level rewards, 2v2 series rework, performance pass
+
+> Big release rolling up everything since v1.26.7. The backend (API + DB migrations 088–097) was deployed incrementally; this is the matching client ship plus the Discord Gambler bot.
+
+**Headlines for testers**
+- **Custom map colors.** A full shop tab of map-skin recolors (Soft Slate, Moss, Cream, Lavender, Dusk, Sand, Mono, Forest, Amethyst, Charcoal, Crimson, Slate, Rose, Mint, Sunset, Obsidian, Abyss, Pine, Iron, Burgundy, Magma, Velvet, Blackwood). Equip several and **cycle them in-match with Left Shift**. Each skin is a designed two-color wall pair on a light-grey-to-dark background; the brown physics boxes stay brown. Backgrounds stay readable (no more pitch-black).
+- **Body colors + name styles.** New body colors (4000g) and a big nametag shop: solid colors (100g), font styles (caps / small-caps / spaced / bold / italic), size/float effects, **neon glow** variants, and premium **animated gradient** nametags (Aurora, Ember, Galaxy, Ocean, Sunset) plus Rainbow.
+- **Level rewards.** Earn **100g every 5 levels** up to level 50, then **500g every 5 levels** after. Backfilled for everyone already past a milestone.
+- **Card tooltips in history.** F5 history shows cards as 2-letter chips; **hover any card group to see the full names**. Now in both My Stats and the 2v2 series view.
+- **2v2 "Recent Series" rework.** Series are **compact one-liners you click to expand** (clear WON/LOST + score + your Δelo + gold/xp + date). Teams are color-coded **blue vs orange** (fixes the old "everyone shows red" bug), with a `(you)` marker. Expanded games show per-player cards as chips with hover-for-full-names. The list now **fills the whole panel** (10 series/page) and **keeps your scroll position** instead of snapping to the top on refresh. 2v2 ELO now shows **±RD** on the leaderboard and beside each player in series detail.
+- **Leaderboard rating graph** now shows the full series-rating history (server cap 20→500, chronological), bucketed when long so it stays readable instead of dropping points.
+
+**Bug fixes**
+- **Map-skin flicker fixed.** Custom map walls no longer strobe between textures. Root cause was overlapping transparent wall particle systems fighting for draw order frame-to-frame; each now gets a stable, distinct sort order. The harmless vanilla per-particle shimmer is preserved. Shift-cycling between skins is now an instant snap, not a slow fade.
+- **"Match Found" escape hatch false-positives.** The stuck-on-match-found recovery overlay no longer appears when you enter Sandbox or flashes periodically while searching — it's now suppressed in Photon offline mode, where no real match-found stall can happen.
+- **Series-win gold misrouting** (migration 090) and **Tag Team Sweep criteria** (migration 088) corrected; **duplicate/stale tournaments** cleaned up (089).
+- **rating_history backfilled** (migration 097) so the leaderboard graph has full history for everyone.
+
+**Performance**
+- Ported performance patches from the community Performance Improvements mod (StunPlayer null-guard, off-screen bullet despawn, NRE finalizers for hit-sound / edge-bounce, color-ghost auto-cleanup, bullet-hit particle cap, object-pool init clamp, card-pick particle pause, menu-controller update bail, spawned-object cleanup tagging). All behind F5 → Settings toggles.
+- **`[PERF]` telemetry**: each ported patch logs a one-time first-fire line and a per-match hit-count summary (on room leave) so we can verify what's actually firing in-game.
+
+**Discord**
+- **Gambler role.** Members opt in via the `/gambler` slash command or by reacting 🎲 to a pinned signup message; the bot pings the role whenever a new ranked match opens for betting. (Requires the role to be Mentionable and the bot's role to sit above it.)
+
+**Backend / infra**
+- Migrations 088–097: team-sweep fix, tournament cleanup, series-win gold fix, level-reward backfill, body colors, nametag styles, rainbow/gradient nametag effects, dark map colors + recolor, more gradient nametags, rating_history backfill.
+- 2v2 team leaderboard now returns `rd` (rating deviation); level-reward grants wired into `submit_match` + `submit_team_match`.
+
+
 ## v1.26.7 — in-game bug reporter, 2 new achievements, input overlay, session persistence, 2v2/1v1 bet dedupe, 2v2 ready indicators, tournament auto-cleanup
 
 **Headlines for testers**

@@ -115,8 +115,217 @@ namespace CompetitiveRounds
             DrawLogViewerModal();
             DrawBlockDebug();  // debug-only; toggle via BlockDebugEnabled below
             DrawInputOverlay();
+            DrawMatchFoundStuckOverlay();
+            DrawCardHoverTooltip();
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
+        }
+
+        // ── Card hover tooltip (v1.26.8) ───────────────────────────────
+        // NativeUI.FillRow registers a screen-space rect + the full card list
+        // for each history row's chips line. On every OnGUI tick we check
+        // Input.mousePosition against those rects and render a floating IMGUI
+        // panel near the cursor showing the long card names — Sid's "vanilla
+        // 2-letter chip with hover tooltip" request.
+        public struct CardHoverRegion
+        {
+            public Rect screenRect;       // screen coordinates (origin bottom-left for Input.mousePosition)
+            public string fullCardLine;    // pre-formatted "Mayhem, Empower, Echo, ..." string from server
+            public bool isOpponent;        // tint the tooltip accent accordingly
+            // Overrides (used by the 2v2 tab). titleOverride: null = default
+            // "Your/Opponent's picks" header; "" = render NO header. bodyOverride:
+            // null = derive bulleted lines from fullCardLine; else render this
+            // pre-formatted (possibly multi-line, rich-text) string verbatim.
+            public string titleOverride;
+            public string bodyOverride;
+        }
+        private static readonly List<CardHoverRegion> _cardHoverRegions = new List<CardHoverRegion>(40);
+        public static void ClearCardHoverRegions()
+        {
+            _cardHoverRegions.Clear();
+        }
+        public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent)
+            => RegisterCardHoverRegion(screenRect, fullCardLine, isOpponent, null, null);
+        public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent,
+                                                   string titleOverride, string bodyOverride)
+        {
+            // Need SOMETHING to show — either a legacy comma line or an explicit body.
+            if (string.IsNullOrEmpty(fullCardLine) && string.IsNullOrEmpty(bodyOverride)) return;
+            _cardHoverRegions.Add(new CardHoverRegion {
+                screenRect = screenRect, fullCardLine = fullCardLine, isOpponent = isOpponent,
+                titleOverride = titleOverride, bodyOverride = bodyOverride,
+            });
+        }
+
+        private static GUIStyle _cardTipTitleStyle, _cardTipBodyStyle;
+        private static void DrawCardHoverTooltip()
+        {
+            if (!NativeUI.IsOpen) return;
+            // My Stats (tab 0) and the 2v2 tab (tab 8) both register card hover
+            // regions. On any OTHER tab the regions from the last render would
+            // falsely fire when the cursor crosses those screen positions over
+            // the Shop / Admin / Settings panels. SwitchTab also clears the
+            // regions on tab change; this is the cheap belt-and-suspenders.
+            if (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8) return;
+            if (_cardHoverRegions.Count == 0) return;
+
+            Vector2 mp = Input.mousePosition;  // bottom-left origin
+            CardHoverRegion? hit = null;
+            // Last-registered first so newer rows on top of stacked layouts win.
+            for (int i = _cardHoverRegions.Count - 1; i >= 0; i--)
+            {
+                if (_cardHoverRegions[i].screenRect.Contains(mp))
+                {
+                    hit = _cardHoverRegions[i];
+                    break;
+                }
+            }
+            if (hit == null) return;
+
+            if (_cardTipTitleStyle == null)
+            {
+                _cardTipTitleStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 13, richText = true, fontStyle = FontStyle.Bold,
+                    alignment = TextAnchor.MiddleLeft,
+                };
+                _cardTipBodyStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 12, richText = true, wordWrap = true,
+                    alignment = TextAnchor.UpperLeft,
+                };
+            }
+
+            // Body: either a pre-formatted override (2v2 — grouped by player,
+            // one card per line) or the legacy comma-split bullet list (My Stats).
+            string body;
+            int lineCount;
+            if (hit.Value.bodyOverride != null)
+            {
+                body = hit.Value.bodyOverride;
+                lineCount = 1;
+                for (int ci = 0; ci < body.Length; ci++) if (body[ci] == '\n') lineCount++;
+            }
+            else
+            {
+                string raw = hit.Value.fullCardLine;
+                string[] cards;
+                try { cards = raw.Split(','); }
+                catch { cards = new[] { raw }; }
+                lineCount = 0;
+                var sb = new System.Text.StringBuilder();
+                foreach (var c in cards)
+                {
+                    string name = c.Trim();
+                    if (string.IsNullOrEmpty(name)) continue;
+                    lineCount++;
+                    sb.Append("• ").Append(name).Append('\n');
+                }
+                body = sb.ToString().TrimEnd();
+            }
+
+            // Title: default "Your/Opponent's picks", or an override ("" = no header).
+            string title = hit.Value.titleOverride != null
+                         ? hit.Value.titleOverride
+                         : (hit.Value.isOpponent ? "Opponent's picks" : "Your picks");
+            bool showTitle = !string.IsNullOrEmpty(title);
+
+            float w = 260f;
+            float lineH = 16f;
+            float headH = showTitle ? 22f : 6f;   // title band height (or just top pad)
+            float h = headH + lineCount * lineH + 8f;
+            float x = Input.mousePosition.x + 14f;
+            float y = (Screen.height - Input.mousePosition.y) + 14f;  // IMGUI y is top-down
+            // Clamp inside screen
+            if (x + w > Screen.width) x = Screen.width - w - 4f;
+            if (y + h > Screen.height) y = Screen.height - h - 4f;
+            if (y < 4f) y = 4f;
+
+            // Backdrop + accent border that matches existing modals
+            GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0,
+                            new Color(0.06f, 0.07f, 0.10f, 0.97f), 0, 0);
+            var accent = hit.Value.isOpponent
+                       ? new Color(0.95f, 0.55f, 0.45f, 0.9f)
+                       : new Color(0.40f, 0.70f, 1.00f, 0.9f);
+            GUI.DrawTexture(new Rect(x, y, w, 1), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, accent, 0, 0);
+            GUI.DrawTexture(new Rect(x, y + h - 1, w, 1), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, accent, 0, 0);
+            GUI.DrawTexture(new Rect(x, y, 1, h), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, accent, 0, 0);
+            GUI.DrawTexture(new Rect(x + w - 1, y, 1, h), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, accent, 0, 0);
+
+            if (showTitle)
+                GUI.Label(new Rect(x + 8, y + 6, w - 16, 18),
+                          $"<color=#{(hit.Value.isOpponent ? "FF9988" : "8BB6FF")}>{title}</color>",
+                          _cardTipTitleStyle);
+            GUI.Label(new Rect(x + 8, y + headH, w - 16, h - headH - 4f),
+                      $"<color=#DDDDDD>{body}</color>",
+                      _cardTipBodyStyle);
+        }
+
+        // ── Stuck match-found overlay (v1.26.8) ─────────────────────────
+        // Renders when GameStateWatcher's watchdog says we've been sitting in
+        // a non-mod-issued Photon room for ≥20s without a match starting —
+        // matches the symptom of the vanilla "press space to ready" freeze.
+        // Player gets a single-click escape hatch (`PhotonNetwork.LeaveRoom`)
+        // so they never need alt+F4. Also a "Dismiss (1 min)" so legitimate
+        // custom-lobby waits aren't nagged.
+        private static GUIStyle stuckTitleStyle;
+        private static GUIStyle stuckTextStyle;
+        private static GUIStyle stuckButtonStyle;
+        private static void DrawMatchFoundStuckOverlay()
+        {
+            if (!GameStateWatcher.ShouldShowMatchFoundStuckOverlay) return;
+            if (NativeUI.IsOpen) return;  // F5 menu already covers the screen
+
+            if (stuckTitleStyle == null)
+            {
+                stuckTitleStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 17, richText = true, fontStyle = FontStyle.Bold,
+                    alignment = TextAnchor.MiddleLeft,
+                };
+                stuckTextStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 13, richText = true, wordWrap = true,
+                    alignment = TextAnchor.UpperLeft,
+                };
+                stuckButtonStyle = new GUIStyle(GUI.skin.button) { fontSize = 14 };
+            }
+
+            float w = 560f, h = 132f;
+            float x = (Screen.width - w) / 2f;
+            float y = 60f;
+
+            GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
+                            ScaleMode.StretchToFill, true, 0,
+                            new Color(0.10f, 0.06f, 0.06f, 0.94f), 0, 0);
+            // Thin amber border so it reads as a warning.
+            var amber = new Color(0.95f, 0.65f, 0.20f, 0.9f);
+            GUI.DrawTexture(new Rect(x, y, w, 1), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, amber, 0, 0);
+            GUI.DrawTexture(new Rect(x, y + h - 1, w, 1), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, amber, 0, 0);
+            GUI.DrawTexture(new Rect(x, y, 1, h), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, amber, 0, 0);
+            GUI.DrawTexture(new Rect(x + w - 1, y, 1, h), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, amber, 0, 0);
+
+            int secs = GameStateWatcher.SecondsInUnstartedRoom;
+            GUI.Label(new Rect(x + 14, y + 8, w - 28, 22),
+                      "<color=#FFD080>Match-found screen might be stuck</color>",
+                      stuckTitleStyle);
+            GUI.Label(new Rect(x + 14, y + 32, w - 28, 50),
+                      $"<color=#CCCCCC>In this Photon room for <b>{secs}s</b> with no match started. " +
+                      "Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. " +
+                      "Click into the ROUNDS window first and try space again, or use the escape hatch below.</color>",
+                      stuckTextStyle);
+
+            if (GUI.Button(new Rect(x + 14, y + h - 38, 220, 28), "Force exit room", stuckButtonStyle))
+            {
+                try { Photon.Pun.PhotonNetwork.LeaveRoom(); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[STUCK] LeaveRoom failed: {ex.Message}"); }
+                GameStateWatcher.DismissMatchFoundStuckOverlay();
+            }
+            if (GUI.Button(new Rect(x + w - 174, y + h - 38, 160, 28), "Dismiss (1 min)", stuckButtonStyle))
+            {
+                GameStateWatcher.DismissMatchFoundStuckOverlay();
+            }
         }
 
         // ── Admin: bug-report viewer (v1.26.7) ─────────────────────────

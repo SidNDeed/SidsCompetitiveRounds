@@ -20,12 +20,25 @@ namespace CompetitiveRounds
 
         // SKU → preset. Each preset has:
         //   BaseArt       — vanilla ROUNDS art applied first for particle backdrop + base profile
-        //   MapBlockColor — color tint applied to the physical map block renderers (Map.Start patch)
-        //   Configure     — ColorGrading params layered on top via the cloned profile
-        // Designed so map blocks visually pop against their backdrop and both player colors
-        // (orange + blue) stay readable. Backgrounds are darkened (post-exposure -0.2 to -0.45)
-        // on most presets so the player avatars stand out — Soft Slate + Cream stay lighter
-        // for users who prefer the brighter look from the previous batch.
+        //   MapBlockColor — PRIMARY wall color. Tints half the OutOfBounds wall particle systems
+        //                   (the other half get SecondaryColor — see the two-tone wall pass in
+        //                   MapPhysicalColorPatch). Multiplied onto the vanilla particle color.
+        //   SecondaryColor— SECOND wall color + the atmosphere/background glow tint.
+        //   Configure     — ColorGrading layered on top via the cloned profile. Controls the
+        //                   BACKGROUND brightness/mood (postExposure + colorFilter) for the whole
+        //                   scene.
+        //
+        // v1.26.11 full rework — design rules:
+        //   * Backgrounds stay LIGHT GREY → DARK GREY (never pitch black). postExposure lives in
+        //     the -0.30 (light grey) to -0.80 (dark) band; the old -1.45..-1.65 "dark batch"
+        //     crushed the walls into the background, so those values are gone.
+        //   * colorFilters are near-NEUTRAL grey (brightness ~0.34-0.56) with only a subtle tint,
+        //     so the COLORED walls pop against a calm grey backdrop instead of fighting a tinted bg.
+        //   * Walls are a designed TWO-COLOR pair (primary + secondary) chosen to read clearly and
+        //     be unique per skin. Both colors are kept bright/saturated enough to survive the bg
+        //     darkening.
+        //   * The brown physics boxes are NEVER tinted (the Map.Start patch only touches OutOfBounds
+        //     particles + ArtInstance atmosphere particles), so they stay brown as required.
         private struct Preset
         {
             public string BaseArt;
@@ -41,208 +54,288 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, Preset> _presets =
             new Dictionary<string, Preset>(StringComparer.OrdinalIgnoreCase)
             {
-                // ── Existing presets, retuned with darker bg + matched block color ──
+                // ── Light / mid backgrounds ──
 
-                // Soft Slate — slate-grey blocks + warm peach accent. Background shifts to a
-                // neutral warm grey (away from the blue-grey block family) for clearer separation.
+                // Soft Slate — slate blue-grey walls + warm peach accent on a light grey bg.
                 { "mapcolor_soft", new Preset {
                     BaseArt = "Sky",
-                    MapBlockColor = new Color(0.42f, 0.48f, 0.56f),
-                    SecondaryColor = new Color(0.56f, 0.48f, 0.42f),
+                    MapBlockColor = new Color(0.50f, 0.58f, 0.68f),
+                    SecondaryColor = new Color(0.85f, 0.62f, 0.48f),
                     Configure = cg => {
-                        cg.saturation.Override(-45f);
-                        cg.temperature.Override(10f);
-                        cg.postExposure.Override(-0.95f);
-                        cg.colorFilter.Override(new Color(0.38f, 0.36f, 0.34f));
+                        cg.saturation.Override(-30f);
+                        cg.temperature.Override(5f);
+                        cg.postExposure.Override(-0.35f);
+                        cg.colorFilter.Override(new Color(0.52f, 0.52f, 0.54f));
                     }
                 }},
-                // Moss — green blocks + earthy brown accent. Background pushed to warm dark brown
-                // so the green blocks don't blend into a green backdrop.
+                // Moss — moss green walls + earthy tan accent on a grey-green bg.
                 { "mapcolor_moss", new Preset {
                     BaseArt = "Poison",
-                    MapBlockColor = new Color(0.30f, 0.50f, 0.32f),
-                    SecondaryColor = new Color(0.50f, 0.42f, 0.28f),
+                    MapBlockColor = new Color(0.42f, 0.62f, 0.40f),
+                    SecondaryColor = new Color(0.74f, 0.60f, 0.38f),
                     Configure = cg => {
-                        cg.saturation.Override(-40f);
-                        cg.postExposure.Override(-1.15f);
-                        cg.temperature.Override(20f);
-                        cg.colorFilter.Override(new Color(0.40f, 0.32f, 0.22f));
+                        cg.saturation.Override(-22f);
+                        cg.temperature.Override(10f);
+                        cg.postExposure.Override(-0.55f);
+                        cg.colorFilter.Override(new Color(0.42f, 0.46f, 0.42f));
                     }
                 }},
-                // Cream — tan blocks + cool blue accent. Background is cool-blue now (was tan,
-                // which blended with the tan blocks). True warm-cool split now.
+                // Cream — warm cream-tan walls + soft sky-blue accent on a light bg.
                 { "mapcolor_cream", new Preset {
                     BaseArt = "Gold",
-                    MapBlockColor = new Color(0.85f, 0.78f, 0.62f),
-                    SecondaryColor = new Color(0.62f, 0.72f, 0.85f),
-                    Configure = cg => {
-                        cg.saturation.Override(-30f);
-                        cg.temperature.Override(-30f);
-                        cg.postExposure.Override(-0.95f);
-                        cg.colorFilter.Override(new Color(0.42f, 0.48f, 0.58f));
-                    }
-                }},
-                // Lavender — pastel lavender blocks + gold accent. Background shifts to warm
-                // gold-brown so the cool lavender blocks read against a complementary warm bg.
-                { "mapcolor_lavender", new Preset {
-                    BaseArt = "Sky",
-                    MapBlockColor = new Color(0.62f, 0.55f, 0.78f),
-                    SecondaryColor = new Color(0.78f, 0.72f, 0.55f),
-                    Configure = cg => {
-                        cg.saturation.Override(-40f);
-                        cg.postExposure.Override(-1.20f);
-                        cg.temperature.Override(25f);
-                        cg.colorFilter.Override(new Color(0.45f, 0.38f, 0.28f));
-                    }
-                }},
-                // Dusk — deep navy blocks + amber accent. Background swings to warm reddish-brown
-                // (embers) so it complements the navy blocks instead of echoing them.
-                { "mapcolor_dusk", new Preset {
-                    BaseArt = "Sky",
-                    MapBlockColor = new Color(0.20f, 0.26f, 0.40f),
-                    SecondaryColor = new Color(0.50f, 0.32f, 0.18f),
-                    Configure = cg => {
-                        cg.saturation.Override(-30f);
-                        cg.temperature.Override(25f);
-                        cg.postExposure.Override(-1.20f);
-                        cg.colorFilter.Override(new Color(0.42f, 0.28f, 0.20f));
-                    }
-                }},
-                // Sand — sandy blocks + cool-blue accent. Background flips to cool dusty blue
-                // (oasis sky) so the warm sand blocks contrast hard against it.
-                { "mapcolor_sand", new Preset {
-                    BaseArt = "Gold",
-                    MapBlockColor = new Color(0.78f, 0.65f, 0.42f),
-                    SecondaryColor = new Color(0.42f, 0.55f, 0.78f),
-                    Configure = cg => {
-                        cg.saturation.Override(-25f);
-                        cg.temperature.Override(-35f);
-                        cg.tint.Override(-5f);
-                        cg.postExposure.Override(-1.10f);
-                        cg.colorFilter.Override(new Color(0.32f, 0.40f, 0.55f));
-                    }
-                }},
-                // Monochrome — pure grey blocks + slightly cooler grey walls. Background already
-                // tiered (dark) so kept as-is — this preset reads fine already.
-                { "mapcolor_mono", new Preset {
-                    BaseArt = "Sky",
-                    MapBlockColor = new Color(0.55f, 0.55f, 0.55f),
-                    SecondaryColor = new Color(0.32f, 0.32f, 0.38f),
-                    Configure = cg => {
-                        cg.saturation.Override(-100f);
-                        cg.postExposure.Override(-1.25f);
-                        cg.colorFilter.Override(new Color(0.20f, 0.20f, 0.22f));
-                    }
-                }},
-
-                // ── NEW presets — straying from the default-ROUNDS palette ──
-
-                // Forest — deep evergreen + amber accent (sunlight through canopy feel).
-                { "mapcolor_forest", new Preset {
-                    BaseArt = "Poison",
-                    MapBlockColor = new Color(0.18f, 0.36f, 0.24f),
-                    SecondaryColor = new Color(0.55f, 0.42f, 0.18f),
-                    Configure = cg => {
-                        cg.saturation.Override(-30f);
-                        cg.postExposure.Override(-1.10f);
-                        cg.temperature.Override(-10f);
-                        cg.colorFilter.Override(new Color(0.30f, 0.55f, 0.35f));
-                    }
-                }},
-                // Amethyst — purple walls + warm gold background (swap from previous build).
-                // Blocks are lighter lavender so they pop against the deeper-purple walls.
-                { "mapcolor_amethyst", new Preset {
-                    BaseArt = "Sky",
-                    MapBlockColor = new Color(0.72f, 0.58f, 0.88f),
-                    SecondaryColor = new Color(0.38f, 0.20f, 0.55f),
-                    Configure = cg => {
-                        cg.saturation.Override(-15f);
-                        cg.postExposure.Override(-0.95f);
-                        cg.temperature.Override(25f);
-                        cg.colorFilter.Override(new Color(0.62f, 0.50f, 0.22f));
-                    }
-                }},
-                // Charcoal — tiered greys, but all DARK. Previous version used medium-grey blocks
-                // which made the wall particles (half-primary / half-secondary) read as glowy grey
-                // against near-black bg — user feedback was "walls very bright". Now everything is
-                // in the 0.14–0.32 range: blocks still visible (lightest tier), walls mid-dark,
-                // background nearly black. Saturation -100 so subtle warm/cool differences don't
-                // sneak in and add brightness.
-                { "mapcolor_charcoal", new Preset {
-                    BaseArt = "Sky",
-                    MapBlockColor = new Color(0.32f, 0.32f, 0.35f),
-                    SecondaryColor = new Color(0.18f, 0.16f, 0.14f),
-                    Configure = cg => {
-                        cg.saturation.Override(-100f);
-                        cg.postExposure.Override(-1.50f);
-                        cg.colorFilter.Override(new Color(0.10f, 0.10f, 0.12f));
-                    }
-                }},
-                // Crimson — red blocks + teal accent. Background flips to dark teal (matching the
-                // accent) so the red blocks contrast hard against their complement instead of
-                // sitting on a pink-red backdrop.
-                { "mapcolor_crimson_map", new Preset {
-                    BaseArt = "Soviet",
-                    MapBlockColor = new Color(0.45f, 0.15f, 0.18f),
-                    SecondaryColor = new Color(0.15f, 0.45f, 0.42f),
-                    Configure = cg => {
-                        cg.saturation.Override(-25f);
-                        cg.postExposure.Override(-1.10f);
-                        cg.temperature.Override(-30f);
-                        cg.colorFilter.Override(new Color(0.22f, 0.38f, 0.40f));
-                    }
-                }},
-                // Slate — cool slate-blue blocks + copper accent. Background shifts to warm copper
-                // (was also slate → too similar to blocks).
-                { "mapcolor_slate", new Preset {
-                    BaseArt = "Sky",
-                    MapBlockColor = new Color(0.32f, 0.40f, 0.50f),
-                    SecondaryColor = new Color(0.50f, 0.40f, 0.32f),
-                    Configure = cg => {
-                        cg.saturation.Override(-45f);
-                        cg.postExposure.Override(-1.10f);
-                        cg.temperature.Override(30f);
-                        cg.colorFilter.Override(new Color(0.42f, 0.32f, 0.22f));
-                    }
-                }},
-                // Rose — dusty rose + muted sage teal accent.
-                { "mapcolor_rose", new Preset {
-                    BaseArt = "Gold",
-                    MapBlockColor = new Color(0.62f, 0.36f, 0.42f),
-                    SecondaryColor = new Color(0.36f, 0.62f, 0.55f),
-                    Configure = cg => {
-                        cg.saturation.Override(-35f);
-                        cg.postExposure.Override(-1.00f);
-                        cg.temperature.Override(20f);
-                        cg.colorFilter.Override(new Color(0.65f, 0.45f, 0.50f));
-                    }
-                }},
-                // Mint — pale mint blocks + coral accent. Background flips to dusty coral (was
-                // also mint → blocks blended). Now a true split-complement palette.
-                { "mapcolor_mint", new Preset {
-                    BaseArt = "Sky",
-                    MapBlockColor = new Color(0.55f, 0.78f, 0.65f),
-                    SecondaryColor = new Color(0.78f, 0.55f, 0.62f),
-                    Configure = cg => {
-                        cg.saturation.Override(-30f);
-                        cg.postExposure.Override(-1.10f);
-                        cg.temperature.Override(25f);
-                        cg.colorFilter.Override(new Color(0.50f, 0.32f, 0.35f));
-                    }
-                }},
-                // Sunset — orange blocks + violet accent. Background shifts to dark violet so the
-                // warm orange blocks pop against their cool complement (was peachy → same warm
-                // family as the blocks).
-                { "mapcolor_sunset", new Preset {
-                    BaseArt = "Gold",
-                    MapBlockColor = new Color(0.85f, 0.45f, 0.30f),
-                    SecondaryColor = new Color(0.45f, 0.30f, 0.65f),
+                    MapBlockColor = new Color(0.88f, 0.80f, 0.62f),
+                    SecondaryColor = new Color(0.58f, 0.74f, 0.90f),
                     Configure = cg => {
                         cg.saturation.Override(-20f);
-                        cg.postExposure.Override(-1.05f);
-                        cg.temperature.Override(-35f);
-                        cg.tint.Override(8f);
-                        cg.colorFilter.Override(new Color(0.32f, 0.25f, 0.45f));
+                        cg.temperature.Override(-10f);
+                        cg.postExposure.Override(-0.30f);
+                        cg.colorFilter.Override(new Color(0.54f, 0.54f, 0.56f));
+                    }
+                }},
+                // Lavender — pastel lavender walls + soft gold accent on a light grey bg.
+                { "mapcolor_lavender", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.70f, 0.62f, 0.88f),
+                    SecondaryColor = new Color(0.88f, 0.78f, 0.52f),
+                    Configure = cg => {
+                        cg.saturation.Override(-22f);
+                        cg.temperature.Override(5f);
+                        cg.postExposure.Override(-0.40f);
+                        cg.colorFilter.Override(new Color(0.50f, 0.49f, 0.54f));
+                    }
+                }},
+                // Dusk — navy-blue walls + warm amber accent on a darker blue-grey bg.
+                { "mapcolor_dusk", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.36f, 0.46f, 0.72f),
+                    SecondaryColor = new Color(0.86f, 0.60f, 0.30f),
+                    Configure = cg => {
+                        cg.saturation.Override(-18f);
+                        cg.temperature.Override(10f);
+                        cg.postExposure.Override(-0.62f);
+                        cg.colorFilter.Override(new Color(0.40f, 0.40f, 0.46f));
+                    }
+                }},
+                // Sand — sandy gold walls + cool teal accent on a warm light-grey bg.
+                { "mapcolor_sand", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.86f, 0.70f, 0.44f),
+                    SecondaryColor = new Color(0.40f, 0.70f, 0.72f),
+                    Configure = cg => {
+                        cg.saturation.Override(-18f);
+                        cg.temperature.Override(-10f);
+                        cg.postExposure.Override(-0.40f);
+                        cg.colorFilter.Override(new Color(0.52f, 0.50f, 0.46f));
+                    }
+                }},
+                // Monochrome — light grey + dark grey walls on a neutral grey bg.
+                { "mapcolor_mono", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.80f, 0.80f, 0.82f),
+                    SecondaryColor = new Color(0.40f, 0.40f, 0.44f),
+                    Configure = cg => {
+                        cg.saturation.Override(-100f);
+                        cg.postExposure.Override(-0.45f);
+                        cg.colorFilter.Override(new Color(0.48f, 0.48f, 0.50f));
+                    }
+                }},
+
+                // ── Jewel / nature tones ──
+
+                // Forest — deep evergreen walls + amber accent on a darker green-grey bg.
+                { "mapcolor_forest", new Preset {
+                    BaseArt = "Poison",
+                    MapBlockColor = new Color(0.28f, 0.56f, 0.34f),
+                    SecondaryColor = new Color(0.82f, 0.58f, 0.26f),
+                    Configure = cg => {
+                        cg.saturation.Override(-18f);
+                        cg.temperature.Override(-5f);
+                        cg.postExposure.Override(-0.60f);
+                        cg.colorFilter.Override(new Color(0.40f, 0.44f, 0.40f));
+                    }
+                }},
+                // Amethyst — amethyst purple walls + warm gold accent on a mid grey bg.
+                { "mapcolor_amethyst", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.64f, 0.42f, 0.84f),
+                    SecondaryColor = new Color(0.86f, 0.70f, 0.38f),
+                    Configure = cg => {
+                        cg.saturation.Override(-12f);
+                        cg.temperature.Override(10f);
+                        cg.postExposure.Override(-0.50f);
+                        cg.colorFilter.Override(new Color(0.45f, 0.43f, 0.49f));
+                    }
+                }},
+                // Charcoal — light cool grey + mid slate walls on a dark grey bg.
+                { "mapcolor_charcoal", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.72f, 0.74f, 0.80f),
+                    SecondaryColor = new Color(0.44f, 0.46f, 0.52f),
+                    Configure = cg => {
+                        cg.saturation.Override(-70f);
+                        cg.postExposure.Override(-0.65f);
+                        cg.colorFilter.Override(new Color(0.38f, 0.38f, 0.42f));
+                    }
+                }},
+                // Crimson — crimson red walls + teal accent on a dark neutral bg.
+                { "mapcolor_crimson_map", new Preset {
+                    BaseArt = "Soviet",
+                    MapBlockColor = new Color(0.80f, 0.28f, 0.30f),
+                    SecondaryColor = new Color(0.30f, 0.64f, 0.62f),
+                    Configure = cg => {
+                        cg.saturation.Override(-12f);
+                        cg.temperature.Override(-10f);
+                        cg.postExposure.Override(-0.58f);
+                        cg.colorFilter.Override(new Color(0.42f, 0.38f, 0.40f));
+                    }
+                }},
+                // Slate — slate-blue walls + copper accent on a neutral grey bg.
+                { "mapcolor_slate", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.44f, 0.56f, 0.70f),
+                    SecondaryColor = new Color(0.80f, 0.54f, 0.34f),
+                    Configure = cg => {
+                        cg.saturation.Override(-25f);
+                        cg.temperature.Override(8f);
+                        cg.postExposure.Override(-0.45f);
+                        cg.colorFilter.Override(new Color(0.47f, 0.48f, 0.50f));
+                    }
+                }},
+                // Rose — dusty rose walls + sage-teal accent on a light bg.
+                { "mapcolor_rose", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.84f, 0.50f, 0.58f),
+                    SecondaryColor = new Color(0.46f, 0.72f, 0.62f),
+                    Configure = cg => {
+                        cg.saturation.Override(-18f);
+                        cg.temperature.Override(5f);
+                        cg.postExposure.Override(-0.40f);
+                        cg.colorFilter.Override(new Color(0.52f, 0.49f, 0.51f));
+                    }
+                }},
+                // Mint — pale mint walls + warm coral accent on a light bg.
+                { "mapcolor_mint", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.58f, 0.86f, 0.70f),
+                    SecondaryColor = new Color(0.94f, 0.56f, 0.50f),
+                    Configure = cg => {
+                        cg.saturation.Override(-12f);
+                        cg.temperature.Override(0f);
+                        cg.postExposure.Override(-0.40f);
+                        cg.colorFilter.Override(new Color(0.50f, 0.52f, 0.50f));
+                    }
+                }},
+                // Sunset — sunset orange walls + violet accent on a mid grey bg.
+                { "mapcolor_sunset", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.94f, 0.54f, 0.30f),
+                    SecondaryColor = new Color(0.54f, 0.40f, 0.74f),
+                    Configure = cg => {
+                        cg.saturation.Override(-8f);
+                        cg.temperature.Override(-8f);
+                        cg.postExposure.Override(-0.50f);
+                        cg.colorFilter.Override(new Color(0.47f, 0.43f, 0.47f));
+                    }
+                }},
+
+                // ── Deep / moody (still grey bg, never black) ──
+
+                // Obsidian — dark blue-grey walls + bright silver-blue accent on a dark bg.
+                { "mapcolor_obsidian", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.40f, 0.46f, 0.58f),
+                    SecondaryColor = new Color(0.64f, 0.72f, 0.84f),
+                    Configure = cg => {
+                        cg.saturation.Override(-35f);
+                        cg.temperature.Override(-10f);
+                        cg.postExposure.Override(-0.72f);
+                        cg.colorFilter.Override(new Color(0.36f, 0.37f, 0.42f));
+                    }
+                }},
+                // Abyss — deep teal-blue walls + bright cyan accent on a dark cool bg.
+                { "mapcolor_abyss", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.26f, 0.52f, 0.62f),
+                    SecondaryColor = new Color(0.42f, 0.82f, 0.84f),
+                    Configure = cg => {
+                        cg.saturation.Override(-12f);
+                        cg.temperature.Override(-25f);
+                        cg.tint.Override(-8f);
+                        cg.postExposure.Override(-0.72f);
+                        cg.colorFilter.Override(new Color(0.34f, 0.40f, 0.44f));
+                    }
+                }},
+                // Pine — pine green walls + autumn-rust accent on a darker green-grey bg.
+                { "mapcolor_pine", new Preset {
+                    BaseArt = "Poison",
+                    MapBlockColor = new Color(0.32f, 0.54f, 0.40f),
+                    SecondaryColor = new Color(0.80f, 0.48f, 0.26f),
+                    Configure = cg => {
+                        cg.saturation.Override(-18f);
+                        cg.temperature.Override(-5f);
+                        cg.postExposure.Override(-0.66f);
+                        cg.colorFilter.Override(new Color(0.38f, 0.42f, 0.40f));
+                    }
+                }},
+                // Iron — steel grey walls + oxidized-rust accent on a neutral grey bg.
+                { "mapcolor_iron", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.54f, 0.58f, 0.64f),
+                    SecondaryColor = new Color(0.78f, 0.48f, 0.28f),
+                    Configure = cg => {
+                        cg.saturation.Override(-35f);
+                        cg.temperature.Override(5f);
+                        cg.postExposure.Override(-0.55f);
+                        cg.colorFilter.Override(new Color(0.42f, 0.43f, 0.46f));
+                    }
+                }},
+                // Burgundy — wine-red walls + slate-blue accent on a dark bg. (The blue Sid liked.)
+                { "mapcolor_burgundy", new Preset {
+                    BaseArt = "Soviet",
+                    MapBlockColor = new Color(0.64f, 0.24f, 0.34f),
+                    SecondaryColor = new Color(0.36f, 0.52f, 0.78f),
+                    Configure = cg => {
+                        cg.saturation.Override(-12f);
+                        cg.temperature.Override(8f);
+                        cg.postExposure.Override(-0.66f);
+                        cg.colorFilter.Override(new Color(0.40f, 0.36f, 0.42f));
+                    }
+                }},
+                // Magma — molten oxblood-red walls + glowing amber-yellow accent on a dark warm bg.
+                { "mapcolor_magma", new Preset {
+                    BaseArt = "Soviet",
+                    MapBlockColor = new Color(0.74f, 0.28f, 0.18f),
+                    SecondaryColor = new Color(0.94f, 0.70f, 0.30f),
+                    Configure = cg => {
+                        cg.saturation.Override(-6f);
+                        cg.temperature.Override(25f);
+                        cg.postExposure.Override(-0.58f);
+                        cg.colorFilter.Override(new Color(0.44f, 0.38f, 0.34f));
+                    }
+                }},
+                // Velvet — royal purple walls + gilded gold accent on a dark bg.
+                { "mapcolor_velvet", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.48f, 0.28f, 0.66f),
+                    SecondaryColor = new Color(0.86f, 0.68f, 0.34f),
+                    Configure = cg => {
+                        cg.saturation.Override(-12f);
+                        cg.temperature.Override(10f);
+                        cg.postExposure.Override(-0.66f);
+                        cg.colorFilter.Override(new Color(0.40f, 0.36f, 0.44f));
+                    }
+                }},
+                // Blackwood — charred slate timber walls + smoldering ember accent on a dark warm bg.
+                // (Walls deliberately slate, not brown, so they don't blend with the brown boxes.)
+                { "mapcolor_blackwood", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(0.48f, 0.48f, 0.52f),
+                    SecondaryColor = new Color(0.86f, 0.52f, 0.24f),
+                    Configure = cg => {
+                        cg.saturation.Override(-30f);
+                        cg.temperature.Override(15f);
+                        cg.postExposure.Override(-0.70f);
+                        cg.colorFilter.Override(new Color(0.38f, 0.37f, 0.38f));
                     }
                 }},
             };

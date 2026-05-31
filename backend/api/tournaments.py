@@ -78,7 +78,11 @@ ASYNC_MATCH_DEADLINE_DAYS = 7    # each match has a 7-day deadline
 # don't wait the full 7 days. Set cadence to 42 days (6 weeks) so back-to-back
 # tournaments typically don't overlap. If the prior one still has stragglers,
 # the new signup window starts and people can join both.
-ASYNC_CADENCE_DAYS = 42
+ASYNC_CADENCE_DAYS = 42  # legacy — kept for any external reference; superseded by post-completion logic
+# Wait this many days after a completed async tournament's ended_at before
+# the cron spawns the next one. 2 days = bracket recap window so players
+# can review results before the new signup wave starts.
+ASYNC_POST_COMPLETION_DAYS = 2
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -981,8 +985,13 @@ async def _ensure_next_tournament(db: AsyncSession) -> None:
             db.add(t)
             print(f"[TOURNAMENT-CRON] Created sync tournament, default_start={default_start.isoformat()}, lock_at={lock_at.isoformat()}")
 
-    # Async cadence: separate from sync. Create a new async tournament if none
-    # is active and the most recent async was created ≥ ASYNC_CADENCE_DAYS ago.
+    # Async cadence (v1.26.8): create a new async tournament once the most
+    # recent one has been finished for ASYNC_POST_COMPLETION_DAYS days.
+    # Cancelled tournaments fall through immediately (subject to the 24h
+    # safety net) so we don't get stuck if signups failed to meet quorum.
+    # Previously the gate was 42 days from CREATION which left long droughts
+    # between brackets — players reported "none of us can sign up for the
+    # async tournament" because none existed.
     aaq = select(Tournament).where(and_(
         Tournament.kind == "async",
         Tournament.status.in_(["voting", "locked", "running"]),
@@ -991,8 +1000,16 @@ async def _ensure_next_tournament(db: AsyncSession) -> None:
         return
     last_async_q = select(Tournament).where(Tournament.kind == "async").order_by(Tournament.created_at.desc())
     last_async = (await db.execute(last_async_q)).scalars().first()
-    if last_async and (now - last_async.created_at) < timedelta(days=ASYNC_CADENCE_DAYS):
-        return
+    if last_async:
+        # Safety net: never spawn within 24h of the prior creation, no matter
+        # what state it ended in. Stops thrash if signups churn.
+        if (now - last_async.created_at) < timedelta(hours=24):
+            return
+        # For completed tournaments, wait ASYNC_POST_COMPLETION_DAYS after
+        # ended_at so the previous bracket has a brief recap window.
+        if last_async.status == "completed" and last_async.ended_at:
+            if (now - last_async.ended_at) < timedelta(days=ASYNC_POST_COMPLETION_DAYS):
+                return
     # Async: 7-day signup window, lock and start immediately at the end. No
     # scheduled_start_ts delay — async tournaments begin as soon as signups close.
     async_lock_at = now + timedelta(days=ASYNC_SIGNUP_DAYS)
@@ -1208,6 +1225,15 @@ async def get_current(
         )
         t = (await db.execute(q2)).scalars().first()
     if not t:
+        # Empty response (no tournament in voting/locked/running + nothing
+        # completed in the last 3 days). Still resolve the caller's discord
+        # state — otherwise the client's "Link Discord first" prompt fires
+        # against linked players whenever there's no tournament to sign up
+        # for. The misleading prompt is what users reported as the bug.
+        empty_my_discord = False
+        if steam_id:
+            caller0 = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+            empty_my_discord = bool(caller0 and caller0.discord_id)
         return TournamentCurrentResponse(
             tournament_id=None, status=None, kind=None,
             default_start_ts=None, scheduled_start_ts=None, lock_at=None,
@@ -1215,7 +1241,7 @@ async def get_current(
             min_players=8, max_players=16,
             signups=[], matches=[],
             my_signup_id=None, my_votes=[], my_force_vote_at=None,
-            my_ready=False, my_penalty_pct=0.0, my_discord_linked=False,
+            my_ready=False, my_penalty_pct=0.0, my_discord_linked=empty_my_discord,
             time_slot_options=[], time_slot_tallies=[], force_vote_count=0,
         )
     caller = None
@@ -1230,6 +1256,13 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: Asy
     if t.status != "voting":
         raise HTTPException(status_code=400, detail=f"Tournament not accepting signups (status={t.status})")
     player = await _get_player_by_steam(db, req.steam_id)
+    # Discord linkage is required so the bot can DM match-ready notifications
+    # + role-ping for tournament matches. The earlier hotfix that dropped this
+    # gate was reverted in v1.26.8 — the real reported bug was that the
+    # client-side "Link Discord first" message fired even when the user HAD
+    # linked Discord, caused by an empty TournamentCurrentResponse fallback
+    # defaulting my_discord_linked=False. That fallback now reads the caller's
+    # discord state, so the client gate clears on its own when linkage is set.
     if not player.discord_id:
         raise HTTPException(status_code=400, detail="Discord account must be linked before signup")
     existing = await _get_signup_for(db, tournament_id, player.id)

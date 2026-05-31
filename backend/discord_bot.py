@@ -26,6 +26,19 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 # bet buttons (100/500/2000g per player). Bets fire via /api/v1/discord-bets
 # which requires the user to have linked their Discord account in-game first.
 LIVE_BETS_CHANNEL_ID = int(os.getenv("LIVE_BETS_CHANNEL", "1456460424831701074"))
+# ── Gambler role: ping on every new open bet + self-serve opt-in/out ──────
+# Sid created a "Gambler" role in the guild. Members opt in to get pinged
+# whenever a new ranked match opens for betting. Opt-in/out is available BOTH
+# via the /gambler slash command (toggle) AND by reacting (🎲) to a pinned
+# signup message the bot maintains in the signup channel.
+GAMBLER_ROLE_NAME = os.getenv("GAMBLER_ROLE", "Gambler")
+# Where the 🎲 reaction-role signup message lives. Defaults to the live-bets
+# channel so opt-in sits right next to the bets; override via env.
+GAMBLER_SIGNUP_CHANNEL_ID = int(os.getenv("GAMBLER_SIGNUP_CHANNEL", str(LIVE_BETS_CHANNEL_ID)))
+GAMBLER_EMOJI = "🎲"
+# Marker stashed in the signup embed footer so the bot re-finds its own message
+# after a restart instead of posting duplicates.
+GAMBLER_SIGNUP_MARKER = "scr-gambler-signup-v1"
 # Bug reports auto-post here when players file via the F5 menu. ID gets a
 # safe default so an unset env var doesn't crash the bot — 0 disables.
 BUG_REPORTS_CHANNEL_ID = int(os.getenv("BUG_REPORTS_CHANNEL", "1501643180049960970"))
@@ -147,10 +160,12 @@ async def on_ready():
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
     if not poll_github_releases.is_running(): poll_github_releases.start()
     if not poll_live_bets.is_running(): poll_live_bets.start()
+    if not poll_gambler_pings.is_running(): poll_gambler_pings.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
     if not nag_pending_async_matches.is_running(): nag_pending_async_matches.start()
     if not poll_bug_reports.is_running(): poll_bug_reports.start()
+    if not poll_bug_report_events.is_running(): poll_bug_report_events.start()
     # Chat bridge: subscribe to the WS firehose so we can forward in-game
     # messages to the Discord channel. Discord -> in-game goes the other way
     # via on_message below. The poll_chat_catchup task above is a belt-and-
@@ -676,6 +691,109 @@ async def poll_bug_reports():
                 print(f"[BUG-REPORT-POST] send failed for #{bug_num}: {ex}")
     except Exception as e:
         print(f"Bug-report post error: {e}")
+
+
+# ── Bug Report Event DMs ──────────────────────────────────────────
+# DMs the bug-report's REPORTER when a status change or comment lands on
+# their report, provided their Discord is linked. Skips:
+#   - 'created' events (they just submitted; no useful DM)
+#   - events where actor_steam_id == reporter_steam_id (don't DM yourself)
+#   - reporters with no discord_id linked (can't DM)
+seen_bug_events = set()
+
+@tasks.loop(seconds=30)
+async def poll_bug_report_events():
+    try:
+        # Look back 90s so a missed tick doesn't drop an event. Dedup via the
+        # set so repeated fetches of the same row are harmless.
+        data = await api_get("/bug-reports/events/recent?seconds=90")
+        if not data or not data.get("events"):
+            return
+        for e in data["events"]:
+            eid = e.get("event_id")
+            if not eid or eid in seen_bug_events:
+                continue
+            seen_bug_events.add(eid)
+            if len(seen_bug_events) > 2000:
+                seen_bug_events.clear()
+
+            # Skip events not worth DMing about.
+            if e.get("event_type") == "created":
+                continue
+            reporter_discord = e.get("reporter_discord_id")
+            if not reporter_discord:
+                continue
+            reporter_steam = e.get("reporter_steam_id")
+            if e.get("actor_steam_id") and reporter_steam and \
+               e["actor_steam_id"] == reporter_steam:
+                continue  # self-attributed; no point pinging yourself
+
+            # Resolve the Discord user. fetch_user falls back to a REST call
+            # if the user isn't in any shared guild cache.
+            try:
+                user = bot.get_user(int(reporter_discord))
+                if not user:
+                    user = await bot.fetch_user(int(reporter_discord))
+            except Exception as ex:
+                print(f"[BUG-DM] fetch_user({reporter_discord}) failed: {ex}")
+                continue
+            if not user:
+                continue
+
+            bug_num = e.get("bug_number") or 0
+            actor = e.get("actor_name") or "Someone"
+            snippet = (e.get("description_snippet") or "").strip()
+            if len(snippet) > 100:
+                snippet = snippet[:100] + "..."
+            etype = e.get("event_type")
+
+            if etype == "status_change":
+                old_s = (e.get("old_status") or "?").upper()
+                new_s = (e.get("new_status") or "?").upper()
+                # Color-code by destination status.
+                status_color = {
+                    "RESOLVED": 0x44CC44,
+                    "TRIAGED":  0xCCAA33,
+                    "WONTFIX":  0x888888,
+                    "DUPE":     0x888888,
+                    "OPEN":     0xCC6688,
+                }.get(new_s, 0x6688AA)
+                embed = discord.Embed(
+                    title=f"Bug report #{bug_num} — status change",
+                    description=(f"**{actor}** moved your report from "
+                                 f"**{old_s}** → **{new_s}**."),
+                    color=status_color,
+                )
+                if snippet:
+                    embed.add_field(name="Your report", value=snippet, inline=False)
+                if e.get("comment"):
+                    embed.add_field(name="Note from " + actor, value=e["comment"][:1024], inline=False)
+            elif etype == "comment":
+                comment_text = (e.get("comment") or "").strip()
+                if not comment_text:
+                    continue  # nothing to relay
+                embed = discord.Embed(
+                    title=f"Bug report #{bug_num} — new comment",
+                    description=f"**{actor}** commented on your report.",
+                    color=0x6688CC,
+                )
+                if snippet:
+                    embed.add_field(name="Your report", value=snippet, inline=False)
+                embed.add_field(name=f"{actor} says", value=comment_text[:1024], inline=False)
+            else:
+                # Unknown event type — skip silently.
+                continue
+
+            embed.set_footer(text=f"Open the F5 menu in-game and look up #{bug_num} for the full thread.")
+            try:
+                await user.send(embed=embed)
+                print(f"[BUG-DM] #{bug_num} → {user} ({reporter_discord}): {etype}")
+            except discord.Forbidden:
+                print(f"[BUG-DM] #{bug_num} → {reporter_discord} forbidden (DMs closed)")
+            except Exception as ex:
+                print(f"[BUG-DM] #{bug_num} → {reporter_discord} failed: {ex}")
+    except Exception as ex:
+        print(f"poll_bug_report_events error: {ex}")
 
 
 # ── 2v2 Series Result Posting ─────────────────────────────────────
@@ -1721,6 +1839,196 @@ async def poll_live_bets():
     stale = [sid for sid in list(live_bet_messages.keys()) if sid not in seen_now]
     for sid in stale:
         del live_bet_messages[sid]
+
+
+# ── Gambler role: ping on open bets + self-serve opt-in/out ──────────────
+# Reaction-role signup message + /gambler slash toggle + a ping in the live
+# bets channel whenever a new ranked match opens for betting. Additive: does
+# not touch poll_live_bets — it independently polls /series/active.
+_gambler_pinged = set()
+_gambler_seeded = False
+_gambler_signup_checked = False
+_gambler_msg_id = None
+
+
+async def _ensure_gambler_signup_message():
+    """Find (after a restart) or post the 🎲 reaction-role signup message."""
+    global _gambler_msg_id
+    if not GAMBLER_SIGNUP_CHANNEL_ID:
+        return
+    channel = bot.get_channel(GAMBLER_SIGNUP_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(GAMBLER_SIGNUP_CHANNEL_ID)
+        except Exception as e:
+            print(f"[GAMBLER] signup channel unavailable: {e}")
+            return
+    # Re-find our own message so we don't post duplicates every restart.
+    try:
+        async for msg in channel.history(limit=50):
+            if msg.author.id == bot.user.id and msg.embeds:
+                ft = msg.embeds[0].footer.text if msg.embeds[0].footer else None
+                if ft and GAMBLER_SIGNUP_MARKER in ft:
+                    _gambler_msg_id = msg.id
+                    try:
+                        await msg.add_reaction(GAMBLER_EMOJI)
+                    except Exception:
+                        pass
+                    print(f"[GAMBLER] re-using signup message {msg.id}")
+                    return
+    except Exception as e:
+        print(f"[GAMBLER] history scan failed: {e}")
+    embed = discord.Embed(
+        title="🎲 Gambler Role",
+        description=(
+            f"React with {GAMBLER_EMOJI} to get pinged whenever a new ranked match "
+            f"opens for betting.\nRemove your reaction (or use `/gambler`) to opt back out."
+        ),
+        color=0xF1C40F,
+    )
+    embed.set_footer(text=GAMBLER_SIGNUP_MARKER)
+    try:
+        msg = await channel.send(embed=embed)
+        await msg.add_reaction(GAMBLER_EMOJI)
+        _gambler_msg_id = msg.id
+        print(f"[GAMBLER] posted signup message {msg.id} in {GAMBLER_SIGNUP_CHANNEL_ID}")
+    except Exception as e:
+        print(f"[GAMBLER] failed to post signup message: {e}")
+
+
+@tasks.loop(seconds=10)
+async def poll_gambler_pings():
+    """Ping the Gambler role when a new match opens for betting."""
+    global _gambler_seeded, _gambler_signup_checked
+    if not _gambler_signup_checked:
+        _gambler_signup_checked = True
+        await _ensure_gambler_signup_message()
+    data = await api_get("/series/active")
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("series", []) or data.get("active", [])
+    else:
+        items = []
+    open_now = {}
+    for s in items:
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("series_id") or s.get("id")
+        if not sid:
+            continue
+        if s.get("bets_locked", False):
+            continue
+        open_now[str(sid)] = s
+    # First pass after startup seeds the seen-set WITHOUT pinging, so a bot
+    # restart doesn't mass-ping every match already in progress.
+    if not _gambler_seeded:
+        _gambler_seeded = True
+        _gambler_pinged.update(open_now.keys())
+        return
+    channel = bot.get_channel(LIVE_BETS_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(LIVE_BETS_CHANNEL_ID)
+        except Exception:
+            channel = None
+    for sid, s in open_now.items():
+        if sid in _gambler_pinged:
+            continue
+        _gambler_pinged.add(sid)
+        if channel is None:
+            continue
+        guild = getattr(channel, "guild", None)
+        role = discord.utils.get(guild.roles, name=GAMBLER_ROLE_NAME) if guild else None
+        p1 = s.get("p1_name") or s.get("player1_name") or s.get("p1_display_name") or "Player 1"
+        p2 = s.get("p2_name") or s.get("player2_name") or s.get("p2_display_name") or "Player 2"
+        mention = role.mention if role else f"@{GAMBLER_ROLE_NAME}"
+        try:
+            await channel.send(
+                f"{mention} 🎲 Bets are open — **{p1}** vs **{p2}**! Place yours below.",
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
+        except Exception as e:
+            print(f"[GAMBLER] ping failed for {sid}: {e}")
+    # Drop ids no longer open so memory stays bounded.
+    for sid in list(_gambler_pinged):
+        if sid not in open_now:
+            _gambler_pinged.discard(sid)
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if _gambler_msg_id is None or payload.message_id != _gambler_msg_id:
+        return
+    if str(payload.emoji) != GAMBLER_EMOJI:
+        return
+    if bot.user and payload.user_id == bot.user.id:
+        return
+    guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
+    if guild is None:
+        return
+    role = discord.utils.get(guild.roles, name=GAMBLER_ROLE_NAME)
+    if role is None:
+        return
+    member = payload.member or guild.get_member(payload.user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except Exception:
+            return
+    try:
+        await member.add_roles(role, reason="Gambler opt-in via reaction")
+    except Exception as e:
+        print(f"[GAMBLER] add_roles failed: {e}")
+
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if _gambler_msg_id is None or payload.message_id != _gambler_msg_id:
+        return
+    if str(payload.emoji) != GAMBLER_EMOJI:
+        return
+    guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
+    if guild is None:
+        return
+    role = discord.utils.get(guild.roles, name=GAMBLER_ROLE_NAME)
+    if role is None:
+        return
+    member = guild.get_member(payload.user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except Exception:
+            return
+    try:
+        await member.remove_roles(role, reason="Gambler opt-out via reaction")
+    except Exception as e:
+        print(f"[GAMBLER] remove_roles failed: {e}")
+
+
+@bot.hybrid_command(name="gambler", description="Toggle the Gambler role — get pinged when a new bet opens")
+async def cmd_gambler(ctx):
+    guild = ctx.guild
+    if guild is None:
+        await ctx.send("Use this in the server.", ephemeral=True)
+        return
+    role = discord.utils.get(guild.roles, name=GAMBLER_ROLE_NAME)
+    if role is None:
+        await ctx.send(f"The '{GAMBLER_ROLE_NAME}' role doesn't exist in this server yet.", ephemeral=True)
+        return
+    member = ctx.author if isinstance(ctx.author, discord.Member) else guild.get_member(ctx.author.id)
+    if member is None:
+        await ctx.send("Couldn't resolve your membership.", ephemeral=True)
+        return
+    try:
+        if role in member.roles:
+            await member.remove_roles(role, reason="Gambler opt-out via /gambler")
+            await ctx.send(f"🎲 Removed **{GAMBLER_ROLE_NAME}** — you won't be pinged on new bets.", ephemeral=True)
+        else:
+            await member.add_roles(role, reason="Gambler opt-in via /gambler")
+            await ctx.send(f"🎲 You now have **{GAMBLER_ROLE_NAME}** — you'll be pinged when a bet opens.", ephemeral=True)
+    except discord.Forbidden:
+        await ctx.send("I can't manage that role — make sure my bot role is above the Gambler role.", ephemeral=True)
 
 
 if __name__ == "__main__":

@@ -587,9 +587,109 @@ namespace CompetitiveRounds
 
         // \u2500\u2500 Room state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
+        // Vanilla matchmaking freeze watchdog (v1.26.8).
+        // Symptom (reported by Stan + others, ~10-15% of vanilla queue joins):
+        // after vanilla matches you with someone, the ready-up screen freezes —
+        // spacebar doesn't register, sometimes alt+F4 is the only way out.
+        // Suspected root cause: Unity's input system silently dropping events
+        // when the window isn't focused (Application.runInBackground=false).
+        //
+        // Fix: while in any Photon room, force runInBackground=true so Unity
+        // keeps processing input/network events even when the player tabbed
+        // away. Restored to whatever vanilla had set on room leave.
+        //
+        // Belt-and-suspenders: after 20s of being in a non-mod-issued room
+        // with no match started, surface an IMGUI overlay (rendered by
+        // CompetitiveUI) with a "Force exit room" button so the player
+        // never needs alt+F4 to recover.
+        private static bool _runInBackgroundOverridden = false;
+        private static bool _origRunInBackground = false;
+        private static DateTime _stuckOverlayDismissedAt = DateTime.MinValue;
+        public static bool ShouldShowMatchFoundStuckOverlay { get; private set; }
+        public static int SecondsInUnstartedRoom { get; private set; }
+        public static void DismissMatchFoundStuckOverlay()
+        {
+            _stuckOverlayDismissedAt = DateTime.UtcNow;
+            ShouldShowMatchFoundStuckOverlay = false;
+        }
+
         private static void PollRoomState()
         {
             bool inRoom = PhotonNetwork.InRoom;
+
+            // Focus-loss safety: keep Unity processing events while we're in
+            // any room, even if the window is in the background. Vanilla
+            // ROUNDS may default to runInBackground=false which makes the
+            // ready-up keybind handler silently drop space presses when the
+            // player tabs away — that's the root-cause hypothesis for the
+            // stuck-on-match-found bug. We restore the original value on
+            // room exit so vanilla menu/screensaver behavior stays normal.
+            if (inRoom && !_runInBackgroundOverridden)
+            {
+                try
+                {
+                    _origRunInBackground = UnityEngine.Application.runInBackground;
+                    UnityEngine.Application.runInBackground = true;
+                    _runInBackgroundOverridden = true;
+                    Plugin.Log.LogInfo($"[FOCUS] In Photon room — Application.runInBackground forced true (was {_origRunInBackground})");
+                }
+                catch { }
+            }
+            else if (!inRoom && _runInBackgroundOverridden)
+            {
+                try
+                {
+                    UnityEngine.Application.runInBackground = _origRunInBackground;
+                    _runInBackgroundOverridden = false;
+                    Plugin.Log.LogInfo($"[FOCUS] Left Photon room — runInBackground restored to {_origRunInBackground}");
+                }
+                catch { }
+            }
+
+            // Watchdog: detect "stuck on the ready-up screen specifically".
+            // Tight gates: suppress in mod-issued rooms (we manage those),
+            // suppress once pick phase has started (cards are being chosen),
+            // suppress once players have spawned in PlayerManager (game past
+            // the ready prompt), and suppress once combat counters have
+            // ticked (isTracking). Threshold bumped to 25s to err on the
+            // side of fewer false positives.
+            if (inRoom && !isTracking && !inPickPhase)
+            {
+                int secs = (int)(DateTime.UtcNow - roomJoinTime).TotalSeconds;
+                SecondsInUnstartedRoom = secs;
+                bool isModIssued = false;
+                bool playersSpawned = false;
+                try
+                {
+                    var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
+                    string rname = PhotonNetwork.CurrentRoom?.Name ?? "";
+                    isModIssued = (rp != null && rp.ContainsKey("cr_ff"))
+                                || rname.StartsWith("ranked_")
+                                || rname.StartsWith("team_")
+                                || rname.StartsWith("sct-");
+                    var pm = PlayerManager.instance;
+                    playersSpawned = pm != null && pm.players != null && pm.players.Count >= 1;
+                }
+                catch { }
+                // Sandbox / offline practice runs in PhotonNetwork.OfflineMode — it's a
+                // local-only "room" with no matchmaking and no ready-up screen, so the
+                // stuck-on-match-found watchdog must NEVER arm there. Before this guard the
+                // watchdog saw Sandbox as "a non-mod room with no match started", armed after
+                // 25s, and re-armed every 60s after each dismiss → the escape hatch appeared on
+                // entering Sandbox and flashed periodically while the player warmed up / searched
+                // from Sandbox. The escape hatch is strictly for recovering from a real online
+                // match-found stall, which can't happen offline.
+                bool isOffline = false;
+                try { isOffline = PhotonNetwork.OfflineMode; } catch { }
+                bool dismissExpired = (DateTime.UtcNow - _stuckOverlayDismissedAt).TotalSeconds > 60;
+                ShouldShowMatchFoundStuckOverlay =
+                    !isModIssued && !isOffline && !playersSpawned && secs >= 25 && dismissExpired;
+            }
+            else
+            {
+                SecondsInUnstartedRoom = 0;
+                ShouldShowMatchFoundStuckOverlay = false;
+            }
 
             if (inRoom && !wasInRoom)
             {
@@ -698,6 +798,9 @@ namespace CompetitiveRounds
                 }
 
                 Plugin.Log.LogInfo("[POLL] Left room");
+                // Dump per-match perf-patch hit counts so we can verify in the log
+                // which ported patches actually fired this match (and how often).
+                PerfGate.DumpAndReset();
                 ResetMatchState();
             }
 

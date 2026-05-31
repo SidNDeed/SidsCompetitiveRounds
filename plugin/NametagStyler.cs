@@ -79,6 +79,103 @@ namespace CompetitiveRounds
                 { "nametag_size_smaller", ("<size=80%>",  "</size>") },
                 { "nametag_size_bigger",  ("<size=130%>", "</size>") },
                 { "nametag_size_huge",    ("<size=160%>", "</size>") },
+                { "nametag_size_xl",      ("<size=145%>", "</size>") },
+
+                // v1.26.8 expansion: 4 more solid colors filling palette gaps.
+                // Subgroup "color" so they swap mutually with the existing red/cyan/gold
+                // and the neon set.
+                { "nametag_color_emerald", ("<color=#3DDB7B>", "</color>") },
+                { "nametag_color_amber",   ("<color=#FFB347>", "</color>") },
+                { "nametag_color_coral",   ("<color=#FF7E72>", "</color>") },
+                { "nametag_color_indigo",  ("<color=#7A6BFF>", "</color>") },
+
+                // Subtle vertical float — lifts the nametag a sliver above its baseline.
+                // Reads as "the name is hovering" against still maps. <voffset> is
+                // baked-in TMP rich text, no shader work needed.
+                { "nametag_float",         ("<voffset=0.2em>", "</voffset>") },
+            };
+
+        // Per-character cycling color across a 6-color rainbow palette.
+        // Static (no time-based animation) — TMP renders the colored runs
+        // natively, no shader work, no per-frame string rebuild.
+        private static readonly string[] _RAINBOW_COLORS = {
+            "#FF5566", "#FFB347", "#FFEE55", "#88FF99", "#55CCFF", "#BB88FF",
+        };
+        private static string _BuildRainbow(string clean)
+        {
+            if (string.IsNullOrEmpty(clean)) return clean;
+            // Skip the work if the name already has rich-text tags from a
+            // previous transform — applying per-char colors over <color> spans
+            // would produce nested-tag chaos.
+            if (clean.IndexOf('<') >= 0) return clean;
+            var sb = new System.Text.StringBuilder(clean.Length * 18);
+            int colorIdx = 0;
+            foreach (char ch in clean)
+            {
+                if (char.IsWhiteSpace(ch)) { sb.Append(ch); continue; }
+                sb.Append("<color=").Append(_RAINBOW_COLORS[colorIdx % _RAINBOW_COLORS.Length])
+                  .Append('>').Append(ch).Append("</color>");
+                colorIdx++;
+            }
+            return sb.ToString();
+        }
+
+        // Per-character interpolated gradient between two endpoint colors.
+        // Each non-whitespace char gets its own <color=#RRGGBB> wrapper with a
+        // linearly-lerped color along the [start, end] range. Whitespace passes
+        // through untagged so the gradient still reads cleanly on names with
+        // spaces. Earlier implementation did a 2-char midpoint split which
+        // collapsed to "all-one-color, all-other-color" on short names —
+        // tester reported "2 letters one color and 1 letter another", which
+        // is exactly what that did.
+        private static string _BuildGradientLerp(string clean, Color start, Color end)
+        {
+            if (string.IsNullOrEmpty(clean)) return clean;
+            if (clean.IndexOf('<') >= 0) return clean;
+            // Count the colorable (non-whitespace) chars so the lerp's t maps
+            // correctly even when the name contains spaces.
+            int colorable = 0;
+            foreach (char ch in clean) if (!char.IsWhiteSpace(ch)) colorable++;
+            if (colorable == 0) return clean;
+            // 1-char name → just emit the start color, no point lerping.
+            if (colorable == 1)
+            {
+                Color only = start;
+                return $"<color=#{ColorUtility.ToHtmlStringRGB(only)}>{clean}</color>";
+            }
+            var sb = new System.Text.StringBuilder(clean.Length * 18);
+            int idx = 0;
+            foreach (char ch in clean)
+            {
+                if (char.IsWhiteSpace(ch)) { sb.Append(ch); continue; }
+                float t = (float)idx / (float)(colorable - 1);
+                Color c = Color.Lerp(start, end, t);
+                sb.Append("<color=#")
+                  .Append(ColorUtility.ToHtmlStringRGB(c))
+                  .Append('>').Append(ch).Append("</color>");
+                idx++;
+            }
+            return sb.ToString();
+        }
+
+        // Gradient palette table — each SKU is a pair of endpoint colors that
+        // _BuildGradientLerp interpolates between for the name. New palettes
+        // added v1.26.9: aurora, ocean, ember, galaxy. Each priced higher than
+        // the neon tier in migration 096.
+        private static readonly Dictionary<string, (Color start, Color end)> _GRADIENT_PAIRS =
+            new Dictionary<string, (Color, Color)>(StringComparer.OrdinalIgnoreCase)
+            {
+                // Original sunset — warm amber → deep pink. Was a 2-char split; now
+                // a real lerp so existing owners get the upgrade for free.
+                { "nametag_gradient_sunset", (new Color(1.00f, 0.70f, 0.28f), new Color(0.90f, 0.30f, 0.54f)) },
+                // Aurora — teal → violet (cold-night sky shimmer).
+                { "nametag_gradient_aurora", (new Color(0.30f, 1.00f, 0.85f), new Color(0.65f, 0.40f, 1.00f)) },
+                // Ocean — bright cyan → deep indigo (surface → trench).
+                { "nametag_gradient_ocean",  (new Color(0.35f, 0.95f, 1.00f), new Color(0.15f, 0.20f, 0.65f)) },
+                // Ember — bright yellow → deep red (flame to coal).
+                { "nametag_gradient_ember",  (new Color(1.00f, 0.95f, 0.30f), new Color(0.80f, 0.15f, 0.10f)) },
+                // Galaxy — magenta → cyan with violet midpoint (interstellar nebula).
+                { "nametag_gradient_galaxy", (new Color(1.00f, 0.35f, 0.85f), new Color(0.35f, 0.65f, 1.00f)) },
             };
 
         /// <summary>Glow color for a given glow SKU — used by NametagGlowRenderer to set
@@ -122,6 +219,11 @@ namespace CompetitiveRounds
             if (sku.StartsWith("nametag_size_",     StringComparison.OrdinalIgnoreCase)) return "size";
             if (sku.StartsWith("nametag_typeface_", StringComparison.OrdinalIgnoreCase)) return "typeface";
             if (sku.StartsWith("nametag_font_",     StringComparison.OrdinalIgnoreCase)) return "font";
+            // v1.26.8 effect SKUs occupy the "color" slot — they fully redefine
+            // how the name is colored, so a rainbow + a plain color would fight.
+            if (sku == "nametag_rainbow"
+                || sku.StartsWith("nametag_gradient_", StringComparison.OrdinalIgnoreCase))
+                return "color";
             return null;
         }
 
@@ -181,9 +283,13 @@ namespace CompetitiveRounds
             string[][] layers = new[]
             {
                 new[] { "nametag_font_caps", "nametag_font_smallcaps", "nametag_font_spaced" },
-                new[] { "nametag_size_smaller", "nametag_size_bigger", "nametag_size_huge" },
+                new[] { "nametag_size_smaller", "nametag_size_bigger", "nametag_size_huge",
+                        "nametag_size_xl" },  // v1.26.8
                 new[] { "nametag_color_red", "nametag_color_cyan", "nametag_color_gold",
                         "nametag_color_purple", "nametag_color_green", "nametag_color_pink",
+                        // v1.26.8 additions:
+                        "nametag_color_emerald", "nametag_color_amber",
+                        "nametag_color_coral", "nametag_color_indigo",
                         // Neon items occupy the color slot (single-active vs plain colors)
                         // and ALSO drive the glow side via GetGlowColor — so they need to
                         // appear in this color-wrapping layer or the rich-text color tag
@@ -195,9 +301,29 @@ namespace CompetitiveRounds
                 new[] { "nametag_underline" },
                 new[] { "nametag_italic" },
                 new[] { "nametag_bold" },
+                new[] { "nametag_float" },  // v1.26.8 — <voffset> wrapper, applied outermost so it lifts the styled name
             };
 
+            // Effect SKUs that REPLACE the name itself rather than wrap it
+            // (per-char color cycling for rainbow, midpoint split for
+            // gradient_sunset). These run BEFORE the layer wraps so the
+            // chosen color/style still applies to the per-character pieces.
             string wrapped = clean;
+            foreach (var sku in activeSkus)
+            {
+                if (string.IsNullOrEmpty(sku)) continue;
+                if (sku == "nametag_rainbow")
+                {
+                    wrapped = _BuildRainbow(wrapped);
+                    break;
+                }
+                if (_GRADIENT_PAIRS.TryGetValue(sku, out var pair))
+                {
+                    wrapped = _BuildGradientLerp(wrapped, pair.start, pair.end);
+                    break;
+                }
+            }
+
             foreach (var layer in layers)
             {
                 foreach (var sku in layer)

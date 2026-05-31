@@ -389,10 +389,18 @@ async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: st
     # Was this Steam ID permanently deleted in a previous session?
     purged = await _is_steam_id_purged(db, steam_id)
 
+    # Default ranked_enabled=True on first creation. The mod ships with
+    # RankedEnabled=true in its default config, so the act of installing +
+    # entering any room is effectively opt-in. Vanilla players who get auto-
+    # created via opponent's /mod/check still won't drag matches into ranked
+    # because the client-side OpponentHasMod() check (Photon cr_* props)
+    # gates the matchIsRanked decision independently. Fixes the first-launch
+    # lobby-code ranked race that the queue/join opt-in didn't cover —
+    # lobby-code matches don't touch queue/join.
     player = Player(
         steam_id=steam_id,
         display_name="[Deleted User]" if purged else display_name,
-        ranked_enabled=False,
+        ranked_enabled=True,
         deleted_at=datetime.now(timezone.utc) if purged else None,
     )
     db.add(player)
@@ -509,6 +517,43 @@ def level_from_xp(total_xp: int) -> tuple[int, int, int]:
         remaining -= needed
         level = n
     return 100, 0, 0  # Max level
+
+
+def level_reward_for(level: int) -> int:
+    """Gold awarded when CROSSING into `level` (i.e., dinging up to it).
+    100g every 5 levels through 50, 500g every 5 levels 55-100. Non-multiples
+    of 5 award 0. Migration 091 retroactively backfills existing players."""
+    if level < 5 or level % 5 != 0:
+        return 0
+    return 100 if level <= 50 else 500
+
+
+def total_level_rewards_through(level: int) -> int:
+    """Cumulative level-reward gold a player should have earned by reaching `level`."""
+    return sum(level_reward_for(n) for n in range(1, level + 1))
+
+
+async def _maybe_grant_level_rewards(db, player, old_xp: int, match_or_series_ref: str):
+    """If player crossed any 5x level boundary going from old_xp to current
+    player.total_xp, grant the level-reward gold + audit row. Idempotent
+    because reference_id is unique per match/series; re-reports of the
+    same match would re-grant — guard at the caller if needed."""
+    if not player or player.total_xp is None:
+        return
+    new_level, _, _ = level_from_xp(player.total_xp)
+    old_level, _, _ = level_from_xp(old_xp)
+    if new_level <= old_level:
+        return
+    total_reward = sum(level_reward_for(lvl) for lvl in range(old_level + 1, new_level + 1))
+    if total_reward <= 0:
+        return
+    player.gold_earned = (player.gold_earned or 0) + total_reward
+    db.add(GoldTransaction(
+        player_id=player.id,
+        amount=total_reward,
+        reason="level_reward",
+        reference_id=match_or_series_ref,
+    ))
 
 
 async def calculate_match_xp(
@@ -1055,6 +1100,11 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         p2.gold_earned = (p2.gold_earned or 0) + gold_p2
         db.add(GoldTransaction(player_id=p2.id, amount=gold_p2, reason="xp", reference_id=str(match.id)))
 
+    # Level rewards (v1.26.8): 100g per 5 levels through 50, 500g per 5
+    # levels 55-100. Awarded the moment a player dings up via this match.
+    await _maybe_grant_level_rewards(db, p1, old_xp_p1, str(match.id))
+    await _maybe_grant_level_rewards(db, p2, old_xp_p2, str(match.id))
+
     # Store XP earned per player on the match record
     match.p1_xp_gained = p1_xp
     match.p2_xp_gained = p2_xp
@@ -1127,7 +1177,17 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
 
             # +10 gold to the series winner, +2 extra if it was a 2-0 sweep.
             # (Doubled from the 5/+1 payout in v1.22 to give ranked more teeth.)
-            series_winner = p1 if series.p1_series_wins >= 2 else p2
+            #
+            # IMPORTANT: pick the series winner by series.player1/player2
+            # ordering, NOT by match-report p1/p2 ordering. The two can
+            # disagree when the deciding match's reporter happened to land
+            # in the opposite slot from how the series was created — in
+            # which case `p1` from the report points at the OTHER player.
+            # This bug misrouted 62 series_win grants 2026-05-21 → 2026-05-29
+            # before being caught; migration 090 retroactively corrects.
+            series_winner = p1 if (p1.id == series.player1_id and series.p1_series_wins >= 2) \
+                              or (p1.id == series.player2_id and series.p2_series_wins >= 2) \
+                            else p2
             bonus = 10
             if series.p1_series_wins == 0 or series.p2_series_wins == 0:
                 bonus += 2
@@ -1482,12 +1542,16 @@ async def get_player_stats(
     wins = stats["wins"] or 0
     losses = stats["losses"] or 0
 
-    # Recent rating history (last 20 snapshots)
+    # Rating history — was capped at last 20 in v1.26.7 and earlier, which
+    # made the leaderboard graph appear to "lose" older points for active
+    # players. v1.26.8 bumps to 500 (covers ~6 months of heavy play) and
+    # switches to ASC ordering so the client can plot left-to-right
+    # chronologically. Client buckets to ~100 points when this is large.
     history_result = await db.execute(
         select(RatingHistory)
         .where(RatingHistory.player_id == player.id)
-        .order_by(RatingHistory.period_end.desc())
-        .limit(20)
+        .order_by(RatingHistory.period_end.asc())
+        .limit(500)
     )
     history = [
         {"rating": round(h.rating), "rd": round(h.rating_deviation), "date": h.period_end.isoformat()}
@@ -4681,7 +4745,7 @@ ACHIEVEMENT_DEFS = {
     "immovable_object":     {"name": "Immovable Object",    "desc": "Win a game without moving or jumping"},
     # v1.26.7
     "master_rank":          {"name": "Master",              "desc": "Reach 2030 rating in ranked (1v1 or 2v2)"},
-    "team_sweep":           {"name": "Tag Team Sweep",      "desc": "Win a 2v2 series 2-0"},
+    "team_sweep":           {"name": "Tag Team Sweep",      "desc": "Win a 2v2 game 5-0"},
 }
 
 # Master rank threshold — applies to both 1v1 and 2v2 Glicko rating.
@@ -4965,6 +5029,58 @@ async def list_bug_reports(
                 log_bytes=r["log_bytes"],
             ).model_dump()
             for r in rows.mappings().all()
+        ],
+    }
+
+
+@app.get("/api/v1/bug-reports/events/recent", tags=["Bug Reports"])
+async def recent_bug_report_events(seconds: int = Query(90, ge=10, le=600), db: AsyncSession = Depends(get_db)):
+    """Bot-poll endpoint. Returns bug_report_events from the last N seconds
+    joined to bug_reports + the reporter's player row so the bot can DM the
+    reporter without doing extra lookups. Includes status changes AND
+    comments — bot decides which event_types to act on."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    rows = (await db.execute(
+        text("""SELECT bre.id              AS event_id,
+                       bre.bug_report_id::text AS bug_report_id,
+                       br.bug_number,
+                       LEFT(br.description, 140) AS description_snippet,
+                       br.steam_id        AS reporter_steam_id,
+                       reporter.discord_id AS reporter_discord_id,
+                       reporter.display_name AS reporter_name,
+                       bre.actor_steam_id,
+                       bre.actor_name,
+                       bre.event_type,
+                       bre.old_status,
+                       bre.new_status,
+                       bre.comment,
+                       bre.created_at
+                  FROM bug_report_events bre
+                  JOIN bug_reports br ON br.id = bre.bug_report_id
+             LEFT JOIN players reporter ON reporter.steam_id = br.steam_id
+                 WHERE bre.created_at >= :cutoff
+              ORDER BY bre.created_at ASC"""),
+        {"cutoff": cutoff},
+    )).mappings().all()
+    return {
+        "events": [
+            {
+                "event_id": str(r["event_id"]),
+                "bug_report_id": r["bug_report_id"],
+                "bug_number": r["bug_number"] or 0,
+                "description_snippet": r["description_snippet"] or "",
+                "reporter_steam_id": r["reporter_steam_id"],
+                "reporter_discord_id": r["reporter_discord_id"],
+                "reporter_name": r["reporter_name"],
+                "actor_steam_id": r["actor_steam_id"],
+                "actor_name": r["actor_name"],
+                "event_type": r["event_type"],
+                "old_status": r["old_status"],
+                "new_status": r["new_status"],
+                "comment": r["comment"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
         ],
     }
 
@@ -6885,6 +7001,21 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
                 {"new": new_xp, "delta": xp, "pid": p.id},
             )
             series_xp_by_pid[p.id] = series_xp_by_pid.get(p.id, 0) + xp
+            # Level rewards (v1.26.8): granted when crossing 5x level
+            # boundaries. 100g per band through 50, 500g per band 55-100.
+            old_lvl, _, _ = level_from_xp(old_xp)
+            new_lvl, _, _ = level_from_xp(new_xp)
+            if new_lvl > old_lvl:
+                lvl_reward = sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
+                if lvl_reward > 0:
+                    await db.execute(
+                        text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = :pid"),
+                        {"g": lvl_reward, "pid": p.id},
+                    )
+                    db.add(GoldTransaction(
+                        player_id=p.id, amount=lvl_reward,
+                        reason="level_reward", reference_id=str(new_match.id),
+                    ))
             # 100 XP = 1 gold conversion (mirrors submit_match logic).
             gold_delta = (new_xp // 100) - (old_xp // 100)
             if gold_delta > 0:
@@ -6931,6 +7062,18 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
         })
     except Exception as agex:
         print(f"[TEAM-ECON] per-series accumulator update failed: {agex}")
+
+    # Tag Team Sweep: 5-0 (round shutout) win in this individual 2v2 game.
+    # Fires per-match — matches the canonical "sweep = 5-0 game" definition
+    # used by the 1v1 sweep stat counter. Previously this was checked at
+    # series-completion against a 2-0 series score which is a different
+    # criterion entirely; corrected in v1.26.8 to align with player intent.
+    game_sweep = (report.t1_rounds_won == 5 and report.t2_rounds_won == 0) \
+              or (report.t2_rounds_won == 5 and report.t1_rounds_won == 0)
+    if game_sweep:
+        sweep_winners = (p_t1a, p_t1b) if report.winner_team == 1 else (p_t2a, p_t2b)
+        for wp in sweep_winners:
+            await _grant_achievement_inline(db, wp.id, "team_sweep")
 
     # Advance series counters.
     if report.winner_team == 1:
@@ -7058,16 +7201,9 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
                     {"r": new_r, "rd": new_rd, "v": new_vol, "pid": pid},
                 )
             new_ratings[str(pid)] = round(new_r, 1)
-            # Master rank: crossed 2000 in 2v2.
+            # Master rank: crossed threshold in 2v2.
             if new_r >= MASTER_RANK_THRESHOLD:
                 await _grant_achievement_inline(db, pid, "master_rank")
-
-        # Tag Team Sweep: 2-0 series win goes to both winning players.
-        sweep = (new_t1w == 2 and new_t2w == 0) or (new_t2w == 2 and new_t1w == 0)
-        if sweep:
-            winners = (p_t1a, p_t1b) if winner_team == 1 else (p_t2a, p_t2b)
-            for wp in winners:
-                await _grant_achievement_inline(db, wp.id, "team_sweep")
         # Persist the per-player series Elo deltas in the team_series slot that
         # holds each player's player_id — NOT in the slot whose label happens to
         # match the report's t1a/t1b/t2a/t2b naming. The two can disagree

@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.26.7";
+        public const string ModVersion = "1.27.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -39,6 +39,21 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowBlockDebug;
         internal static ConfigEntry<bool> ShowPlayerColors;
         internal static ConfigEntry<bool> ShowInputOverlay;
+        // Performance pass — master + 7 per-patch flags so users can disable
+        // any individual port without giving up the rest. Mirrors the
+        // granularity the original "Performance Improvements" mod offered.
+        internal static ConfigEntry<bool> PerfOptimizations;
+        internal static ConfigEntry<bool> PerfStunPlayerNullGuard;
+        internal static ConfigEntry<bool> PerfDespawnOffscreenBullets;
+        internal static ConfigEntry<bool> PerfSwallowHitSoundNREs;
+        internal static ConfigEntry<bool> PerfAutoCleanupColorGhosts;
+        internal static ConfigEntry<bool> PerfSwallowEdgeBounceNREs;
+        internal static ConfigEntry<bool> PerfTagSpawnedObjectsForCleanup;
+        internal static ConfigEntry<bool> PerfSkipMenuUpdateInMatch;
+        // v1.26.9 — user-noticeable batch (cap-style perf wins).
+        internal static ConfigEntry<bool> PerfBulletHitParticleCap;
+        internal static ConfigEntry<bool> PerfClampObjectPoolInit;
+        internal static ConfigEntry<bool> PerfPauseCardPickParticles;
         // Preferred timezone for tournament time display. Values: "Local" (use OS),
         // "UTC", or an IANA / Windows tz ID that TimeZoneInfo.FindSystemTimeZoneById
         // resolves. Persisted so it survives restarts; applies only to tournament UI.
@@ -192,6 +207,63 @@ namespace CompetitiveRounds
                 "UI", "ShowInputOverlay",
                 false,
                 "Show a bottom-left WASD + Space + L/R-click input visualizer during matches. Keys glow red when pressed."
+            );
+
+            PerfOptimizations = Config.Bind(
+                "Performance", "Enabled",
+                true,
+                "Master switch for the v1.26.8 performance pass. Turn OFF to disable ALL patches below in one click. Individual patches below also have their own toggle for granular control."
+            );
+            PerfStunPlayerNullGuard = Config.Bind(
+                "Performance", "StunPlayerNullGuard",
+                true,
+                "Null-guard StunPlayer.Go so a destroyed parent Player reference doesn't NRE every frame. Pure error suppression, no visual change."
+            );
+            PerfDespawnOffscreenBullets = Config.Bind(
+                "Performance", "DespawnOffscreenBullets",
+                true,
+                "Host of each projectile despawns it once it flies outside the camera viewport (0.5s throttle). Without this, missed bullets keep ticking physics + RPC handlers indefinitely. Slight bandwidth savings, no gameplay difference."
+            );
+            PerfSwallowHitSoundNREs = Config.Bind(
+                "Performance", "SwallowHitSoundNREs",
+                true,
+                "Catch the NullReferenceException that fires from RayHitBulletSound.DoHitEffect when its parent is destroyed mid-frame, and destroy the now-dead instance. Reduces BepInEx log spam, no visual change."
+            );
+            PerfAutoCleanupColorGhosts = Config.Bind(
+                "Performance", "AutoCleanupColorGhosts",
+                true,
+                "Attach a 2-second self-destruct timer to each ChangeColor bullet-hit ghost so they don't pile up in the scene root over long matches. No visual change at typical play rates."
+            );
+            PerfSwallowEdgeBounceNREs = Config.Bind(
+                "Performance", "SwallowEdgeBounceNREs",
+                true,
+                "Catch NullReferenceExceptions from ScreenEdgeBounce.DoHit and ScreenEdgeBounce.Update when a parent bullet was destroyed mid-frame. Reduces log spam, no visual change."
+            );
+            PerfTagSpawnedObjectsForCleanup = Config.Bind(
+                "Performance", "TagSpawnedObjectsForCleanup",
+                true,
+                "Tag transient bullet-hit decoration GameObjects with a 4-second self-destruct timer so they don't accumulate across rounds. No visual change."
+            );
+            PerfSkipMenuUpdateInMatch = Config.Bind(
+                "Performance", "SkipMenuUpdateInMatch",
+                true,
+                "Skip MenuControllerHandler.Update during an active match (menu controller input routing isn't needed during gameplay). Modest CPU win, no visible change."
+            );
+            // v1.26.9 — actual frame-time wins.
+            PerfBulletHitParticleCap = Config.Bind(
+                "Performance", "BulletHitParticleCap",
+                true,
+                "Cap bullet-hit particle explosions at 2 per frame. In a heavy firefight (BombsAway / Echo / Mayhem) a single frame can spawn 20+ explosion bursts — the cap drops GC and render cost noticeably. Missed bursts are silent: the damage already registered, you just don't see every visual."
+            );
+            PerfClampObjectPoolInit = Config.Bind(
+                "Performance", "ClampObjectPoolInit",
+                true,
+                "Clamp ObjectPool initial-spawn to 4 instances while in a match (lazy growth instead of pre-allocating 30+ up-front). Reduces frame stutter when new pools are constructed mid-game."
+            );
+            PerfPauseCardPickParticles = Config.Bind(
+                "Performance", "PauseCardPickParticles",
+                true,
+                "Pause the player-skin particle system while the between-round card picker is up (8-12s per pick). Particles freeze in place, no visual gap. Saves CPU on long card-pick stretches."
             );
 
             TournamentTimezone = Config.Bind(
@@ -3388,14 +3460,46 @@ namespace CompetitiveRounds
         static void Postfix(Block __instance, bool __state)
         {
             if (NativeUI.IsOpen) return;  // F5 Prefix blocked the call; don't credit it
-            if (!__state) return;          // block was on cooldown — TryBlock didn't actually activate
             try
             {
                 var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
                 if (pv == null || !pv.IsMine) return;
+
+                // [BLOCK-TEAM] diagnostic for the "right-click block fails on non-host" report.
+                // Logs EVERY TryBlock attempt by the local player — ready or on cooldown — so
+                // we can confirm whether the bug correlates with team / playerId / IsMasterClient.
+                // Captures only competitive (mod-issued) rooms so the noise is bounded.
+                try
+                {
+                    if (CompetitiveRoomDetect.IsCompetitiveRoom() && !_diagThrottled())
+                    {
+                        var p = __instance.GetComponentInParent<global::Player>();
+                        int team = -1, playerId = -1;
+                        try { team = p != null ? p.TeamID : -1; } catch { }
+                        try { playerId = p != null ? p.PlayerID : -1; } catch { }
+                        int actor = -1;
+                        bool isMaster = false;
+                        try { actor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1; } catch { }
+                        try { isMaster = PhotonNetwork.IsMasterClient; } catch { }
+                        Plugin.Log.LogInfo($"[BLOCK-TEAM] tryBlock ready={__state} team={team} playerID={playerId} actor={actor} isMaster={isMaster}");
+                    }
+                }
+                catch { }
+
+                if (!__state) return;          // block was on cooldown — TryBlock didn't actually activate
                 GameStateWatcher.OnLocalBlockActivated();
             }
             catch { }
+        }
+
+        // Per-second throttle so a 6-second-cooldown spam doesn't write 200 log lines.
+        private static float _lastDiagLogTime;
+        private static bool _diagThrottled()
+        {
+            float now = Time.unscaledTime;
+            if (now - _lastDiagLogTime < 0.5f) return true;
+            _lastDiagLogTime = now;
+            return false;
         }
     }
 
@@ -3743,6 +3847,31 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, Material> _matCache = new Dictionary<string, Material>();
         private static bool _loggedTypes;
 
+        // Per-PS vanilla startColor cache. Read once on the first time we touch each
+        // ParticleSystem (when its color is still vanilla, before our patch has mutated
+        // it); subsequent applies pull from cache so we don't compound the tint by
+        // re-reading our own already-multiplied value. Keyed by GetInstanceID — each
+        // round's new PS instances populate fresh entries on their first apply.
+        private static readonly Dictionary<int, Color> _vanillaPSColorCache = new Dictionary<int, Color>(512);
+
+        /// <summary>Returns the vanilla startColor for a particle system, caching on
+        /// first encounter. Subsequent calls for the same instance return the cached
+        /// vanilla value even after we've mutated its current startColor. Falls back
+        /// to white if reading the .color property throws (which can happen for
+        /// gradient-mode startColors on some ROUNDS art presets).</summary>
+        private static Color GetCachedVanillaColor(ParticleSystem ps)
+        {
+            int id;
+            try { id = ps.GetInstanceID(); }
+            catch { return Color.white; }
+            if (_vanillaPSColorCache.TryGetValue(id, out var cached)) return cached;
+            Color current;
+            try { current = ps.main.startColor.color; }
+            catch { current = Color.white; }
+            _vanillaPSColorCache[id] = current;
+            return current;
+        }
+
         static void Postfix(Map __instance)
         {
             // Use whatever sku is currently live after the cycle (ArtHandlerNextArtPatch sets
@@ -3763,7 +3892,14 @@ namespace CompetitiveRounds
 
         private static System.Collections.IEnumerator DelayedApplyTints(Map mapInstance, string sku)
         {
-            yield return new WaitForSeconds(2f);
+            // 0.4s — tightened from 2.0s in v1.26.9. The 2.0s value (per learning #45)
+            // was a buffer past MapTransition.Move's animation to avoid an NRE inside
+            // MapTransition+<Move>d__15.MoveNext when we mutated particles concurrently.
+            // 0.4s is enough for the move coroutine to land but cuts the round-start
+            // "wall is still vanilla" gap by 5×. Combined with the Clear() calls in
+            // ApplyPhysicalTintsForSku this gives a near-instant snap to the new
+            // sku's colors at round start. If the NRE returns, bump this back.
+            yield return new WaitForSeconds(0.4f);
             if (mapInstance == null) yield break;
             ApplyPhysicalTintsForSku(mapInstance, sku);
         }
@@ -3801,46 +3937,107 @@ namespace CompetitiveRounds
                 // as a monotone color block. User feedback: "It should only be the map
                 // background and the two wall colors" — i.e. just walls + atmosphere.
                 if (!tintN.HasValue) return;
-                // Step 3 — tint the wall-like particle systems. Alternate between MapBlockColor
-                // and SecondaryColor by index so the wall reads as multi-tone instead of a flat
-                // single color block. Vanilla arts achieve their "atmosphere" via per-particle
-                // color variation; this restores that feel for our custom presets.
-                Color secondary = CustomMapColors.GetSecondaryColor(sku);
-                int boundaryParts = 0, idx = 0;
+                // v1.26.9 final approach — MULTIPLY vanilla startColor by our preset
+                // tint instead of replacing it. Vanilla has many particle systems with
+                // subtly-different per-PS colors layered to produce texture; multiplying
+                // preserves that variation while shifting the overall hue into our preset.
+                //
+                // Cache vanilla colors per PS instance ID — the FIRST read captures the
+                // vanilla value (before our patch has mutated it); subsequent reads on
+                // re-apply pull from the cache so we don't compound our tint by re-reading
+                // our own already-tinted value and re-multiplying.
+                //
+                // History of failed approaches (kept here so I don't repeat them):
+                //   1. Per-PS alternation by enumeration index — flashed between rounds.
+                //   2. Stable-sort by position — still flashed (random map per round).
+                //   3. MinMaxGradient TwoColors — gameplay-wide shimmer (per-particle).
+                //   4. Single primary on walls — flat (lost vanilla variation).
+                //   5. No mutation, post-process only — vanilla colors leaked through.
+                // Walls: kill the texture-flicker via STABLE draw order (v1.26.10).
+                // The OutOfBounds boundary is built from several OVERLAPPING semi-transparent
+                // particle systems. Unity sorts transparent particles by camera distance; when
+                // overlapping systems sit at ~equal depth their relative draw order flips frame to
+                // frame, so the visible sprite alternates between systems — the "flickering between
+                // textures" the user reported (DISTINCT from per-particle brightness shimmer, which
+                // is vanilla and fine). It's invisible in vanilla because the systems carry distinct
+                // colors that read as depth, and it vanishes with "1 solid object" because a single
+                // draw can't fight itself. Fix without collapsing to one object: give each system a
+                // distinct, STABLE sortingFudge so the inter-system draw order is fixed every frame.
+                // Assignment is ordered by transform path (deterministic across frames AND rounds)
+                // so the order never changes mid-session. We also two-tone the colors (primary /
+                // secondary by path parity) so both colors land in the walls as requested.
+                Color wallSecondary = CustomMapColors.GetSecondaryColor(sku);
+                var wallSystems = new List<ParticleSystem>();
                 foreach (var ps in UnityEngine.Object.FindObjectsOfType<ParticleSystem>())
                 {
                     if (ps == null) continue;
-                    string ppath = GetTransformPath(ps.transform);
-                    if (!ppath.StartsWith("OutOfBounds/", StringComparison.OrdinalIgnoreCase)) continue;
-                    var main = ps.main;
-                    Color pc = (idx++ % 2 == 0) ? c : secondary;
-                    main.startColor = new ParticleSystem.MinMaxGradient(pc);
+                    if (!GetTransformPath(ps.transform).StartsWith("OutOfBounds/", StringComparison.OrdinalIgnoreCase)) continue;
+                    wallSystems.Add(ps);
+                }
+                // Deterministic order → the same wall gets the same sortingFudge every round.
+                wallSystems.Sort((a, b) => string.CompareOrdinal(GetTransformPath(a.transform), GetTransformPath(b.transform)));
+                int boundaryParts = 0;
+                for (int wi = 0; wi < wallSystems.Count; wi++)
+                {
+                    var ps = wallSystems[wi];
+                    try
+                    {
+                        string ppath = GetTransformPath(ps.transform);
+                        Color layerTint = (StablePathParity(ppath) == 0) ? c : wallSecondary;
+                        Color vanilla = GetCachedVanillaColor(ps);
+                        Color tinted = new Color(vanilla.r * layerTint.r, vanilla.g * layerTint.g, vanilla.b * layerTint.b, vanilla.a);
+                        var main = ps.main;
+                        main.startColor = new ParticleSystem.MinMaxGradient(tinted);
+                        // Fixed inter-system draw order — the actual flicker fix. In Unity a LOWER
+                        // sortingFudge draws CLOSER to the camera (on top); higher pushes behind.
+                        // v1.26.10's first cut used positive values (wi*0.05) which shoved the walls
+                        // BEHIND the fudge-0 background atmosphere particles → the dark background
+                        // drew over them and the walls blended into the bg ("maps significantly
+                        // darker"). Use small NEGATIVE steps so every wall system sits just IN FRONT
+                        // of the background (restoring original wall brightness/visibility) while
+                        // each still gets a DISTINCT, stable order (so the flicker stays fixed). The
+                        // magnitude is tiny so walls don't leap in front of players/bullets, which
+                        // render on higher sorting layers anyway. Per-particle distance sort within
+                        // a system is untouched (that's the harmless vanilla "shimmer" we keep).
+                        var psr = ps.GetComponent<ParticleSystemRenderer>();
+                        if (psr != null) psr.sortingFudge = -0.1f - wi * 0.05f;
+                        ps.Clear(true);
+                    }
+                    catch { }
                     boundaryParts++;
                 }
 
-                // Step 4 — vanilla ArtInstance particle backdrops, also alternating.
-                // We use a single counter shared across arts so the secondary color is sprinkled
-                // evenly across the active art's particles.
+                // ArtInstance atmosphere particles get the same multiply treatment, but
+                // with a slightly brightened tint so the backdrop reads as a faint glow
+                // behind the walls rather than the same flat shade. We multiply by the
+                // brightness-boosted secondary so the layers are visually distinct.
                 int artParts = 0;
                 try
                 {
+                    Color secondary = CustomMapColors.GetSecondaryColor(sku);
                     var ah = ArtHandler.instance;
                     if (ah != null && ah.arts != null)
                     {
                         var partsField = typeof(ArtInstance).GetField("parts",
                             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                        int aidx = 0;
                         foreach (var art in ah.arts)
                         {
                             if (art == null) continue;
                             var partsArr = partsField?.GetValue(art) as ParticleSystem[];
                             if (partsArr == null) continue;
-                            foreach (var ps in partsArr)
+                            for (int i = 0; i < partsArr.Length; i++)
                             {
+                                var ps = partsArr[i];
                                 if (ps == null) continue;
-                                var main = ps.main;
-                                Color apc = (aidx++ % 2 == 0) ? c : secondary;
-                                main.startColor = new ParticleSystem.MinMaxGradient(apc);
+                                try
+                                {
+                                    Color vanilla = GetCachedVanillaColor(ps);
+                                    Color tinted = new Color(vanilla.r * secondary.r, vanilla.g * secondary.g, vanilla.b * secondary.b, vanilla.a);
+                                    var main = ps.main;
+                                    main.startColor = new ParticleSystem.MinMaxGradient(tinted);
+                                    ps.Clear(true);
+                                }
+                                catch { }
                                 artParts++;
                             }
                         }
@@ -3848,12 +4045,23 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] art-particle tint failed: {ex.Message}"); }
 
-                Plugin.Log.LogInfo($"[MAPCOLOR] tinted sku={sku}: boundary-parts={boundaryParts}, art-parts={artParts}");
+                Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: multiplied {boundaryParts} boundary + {artParts} art particles by tint (vanilla texture preserved)");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] Map tint failed: {ex.Message}"); }
         }
 
         private static bool _loggedScenePaths;
+
+        // Deterministic 0/1 bucket for a transform path, used to two-tone the wall
+        // particle systems. FNV-1a (not string.GetHashCode, which is salted per process
+        // run in modern .NET) so the SAME wall path maps to the SAME color on every map
+        // load — no between-round color flipping.
+        private static int StablePathParity(string s)
+        {
+            uint h = 2166136261u;
+            for (int i = 0; i < s.Length; i++) { h ^= s[i]; h *= 16777619u; }
+            return (int)(h & 1u);
+        }
 
         private static string GetTransformPath(Transform t)
         {
@@ -3893,14 +4101,45 @@ namespace CompetitiveRounds
         private static int _cycleIndex = 0;
         private static int _cycleLastListHash = 0;
 
+        // Last-known non-empty filtered equipped list. CachedPlayerStats can briefly
+        // become null during a stats refresh or a consent flip; we don't want a Shift
+        // press in that window to leak a vanilla random art into the rotation. Once
+        // the user has equipped at least one custom color this session we stay on
+        // that list until a NEW non-empty list replaces it.
+        private static List<string> _lastEquippedFiltered;
+
         static bool Prefix(ArtHandler __instance)
         {
             try
             {
                 var s = ApiClient.CachedPlayerStats;
                 // Multi-equip: pick the next sku in the equipped-colors list on each press.
-                // Empty list → fall through to ROUNDS' vanilla random rotation.
-                var equipped = s?.active_color_skus;
+                // Filter null/empty entries so a corrupted server response doesn't
+                // promote vanilla into the cycle.
+                var rawEquipped = s?.active_color_skus;
+                List<string> equipped = null;
+                if (rawEquipped != null && rawEquipped.Count > 0)
+                {
+                    equipped = new List<string>(rawEquipped.Count);
+                    for (int i = 0; i < rawEquipped.Count; i++)
+                    {
+                        var e = rawEquipped[i];
+                        if (!string.IsNullOrEmpty(e)) equipped.Add(e);
+                    }
+                }
+                // If the live list is empty but we cached a last-known-good one this
+                // session, use that. Prevents the "after a bit of time vanilla colors
+                // appear" bug — once the user has equipped customs, the rotation stays
+                // on customs regardless of mid-session stats churn.
+                if ((equipped == null || equipped.Count == 0) && _lastEquippedFiltered != null)
+                {
+                    equipped = _lastEquippedFiltered;
+                    Plugin.Log.LogInfo($"[MAPCOLOR] Live equipped empty/null, reusing last-known list ({equipped.Count} skus)");
+                }
+                else if (equipped != null && equipped.Count > 0)
+                {
+                    _lastEquippedFiltered = equipped;
+                }
                 string sku = null;
                 if (equipped != null && equipped.Count > 0)
                 {
@@ -3918,7 +4157,11 @@ namespace CompetitiveRounds
                 // Backward compat: if the new list field is empty, fall back to the
                 // legacy single-value active_color_sku (older clients / transitional state).
                 if (string.IsNullOrEmpty(sku)) sku = s?.active_color_sku;
-                if (string.IsNullOrEmpty(sku)) return true;
+                if (string.IsNullOrEmpty(sku))
+                {
+                    Plugin.Log.LogInfo("[MAPCOLOR] No custom sku resolved — falling through to vanilla NextArt");
+                    return true;
+                }
                 // Record the cycle-selected sku so Map.Start / physical-tint re-apply reads the
                 // same sku the post-process path is using.
                 MapColorState.CurrentSku = sku;
@@ -3933,6 +4176,19 @@ namespace CompetitiveRounds
                 {
                     string baseArt = CustomMapColors.GetBaseArt(sku);
                     if (string.IsNullOrEmpty(baseArt)) return true;
+                    // ROUNDS' ApplyArt (reached via SetSpecificArt) does NOT deactivate the
+                    // previously-active art — only NextArt/SetMenuArt call the private TurnArtsOff
+                    // first. Calling SetSpecificArt directly therefore leaves the OLD art's
+                    // particles Play()-ing alongside the new one → two overlapping art layers (a
+                    // second source of texture-flicker, confirmed by decompiling ArtHandler).
+                    // Replicate TurnArtsOff via the public ArtInstance.TogglePart so only our
+                    // chosen art stays active.
+                    try
+                    {
+                        if (__instance.arts != null)
+                            foreach (var a in __instance.arts) a?.TogglePart(false);
+                    }
+                    catch { }
                     __instance.SetSpecificArt(baseArt);
                     var basePr = __instance.volume != null ? __instance.volume.profile : null;
                     if (basePr == null)
@@ -3947,6 +4203,12 @@ namespace CompetitiveRounds
                         return false;
                     }
                     __instance.ApplyPost(clone);
+                    // Instant/sharp swap (v1.26.10): ROUNDS fades the post-process volume in
+                    // gradually, which reads as the map "sliding" into the next skin on Shift.
+                    // Force the volume to full weight on the same frame so the new ColorGrading
+                    // snaps in immediately instead of lerping. Harmless if ROUNDS already had it
+                    // at 1. Wrapped in try/catch since volume is reflected ROUNDS internals.
+                    try { if (__instance.volume != null) __instance.volume.weight = 1f; } catch { }
                     // Re-apply wall / sprite / particle tints for the new sku. Without this
                     // the post-process (ColorGrading) updates on Shift but the walls stay on
                     // whatever sku was first applied at Map.Start — user observed walls not
@@ -3956,7 +4218,11 @@ namespace CompetitiveRounds
                     return false;
                 }
 
-                if (!SKU_TO_ART.TryGetValue(sku, out string artName)) return true;
+                if (!SKU_TO_ART.TryGetValue(sku, out string artName))
+                {
+                    Plugin.Log.LogWarning($"[MAPCOLOR] Unknown sku '{sku}' — not in CustomMapColors presets, not in vanilla SKU_TO_ART. Equipped but not renderable; falling through to vanilla.");
+                    return true;
+                }
                 if (string.IsNullOrEmpty(artName)) return true;        // explicit "default" sku
 
                 // Safety: only override if the named art actually exists on this ArtHandler
