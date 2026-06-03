@@ -160,6 +160,7 @@ async def on_ready():
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
     if not poll_github_releases.is_running(): poll_github_releases.start()
     if not poll_live_bets.is_running(): poll_live_bets.start()
+    if not poll_team_live_bets.is_running(): poll_team_live_bets.start()
     if not poll_gambler_pings.is_running(): poll_gambler_pings.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
@@ -1787,6 +1788,87 @@ def _format_live_bet_embed(s: dict) -> discord.Embed:
     em = discord.Embed(title=title, description="\n".join(desc_lines), color=embed_color)
     em.set_footer(text=f"series {s['series_id'][:8]}")
     return em
+
+def _format_team_live_bet_embed(s: dict) -> discord.Embed:
+    """2v2 live-series embed for the gambler channel. Read-only (no Discord bet
+    buttons yet — in-game 2v2 betting already works; this just makes 2v2 series
+    VISIBLE in the gambler chat, which they weren't before: poll_live_bets only
+    polled the 1v1 /series/active, so every 2v2 series was silently absent)."""
+    t1a = s.get("t1a_name", "?"); t1b = s.get("t1b_name", "?")
+    t2a = s.get("t2a_name", "?"); t2b = s.get("t2b_name", "?")
+    # Per-player 2v2 ratings (not the team average).
+    t1ar = s.get("t1a_rating", 1500); t1br = s.get("t1b_rating", 1500)
+    t2ar = s.get("t2a_rating", 1500); t2br = s.get("t2b_rating", 1500)
+    t1o = s.get("t1_odds", 1.01); t2o = s.get("t2_odds", 1.01)
+    t1w = s.get("t1_wins", 0); t2w = s.get("t2_wins", 0)
+    locked = s.get("bets_locked", False)
+    reason = s.get("lock_reason")
+    title = f"👥 2v2: {t1a}+{t1b} vs {t2a}+{t2b}"
+    desc_lines = [
+        f"Team 1: **{t1a}** ({t1ar}) + **{t1b}** ({t1br})",
+        f"Team 2: **{t2a}** ({t2ar}) + **{t2b}** ({t2br})",
+        f"Series: **{t1w} - {t2w}**",
+        f"Odds: **{t1o}x** Team 1 / **{t2o}x** Team 2",
+        "_Bet in-game via the F5 → Leaderboard panel._",
+    ]
+    if locked:
+        if reason == "game_in_progress":
+            desc_lines.append("🔒 Game in progress — bets locked")
+        elif reason == "no_meaningful_odds":
+            desc_lines.append("🔒 No meaningful odds — bets disabled")
+        else:
+            desc_lines.append("🔒 Bets locked")
+    em = discord.Embed(title=title, description="\n".join(desc_lines),
+                       color=(0x666666 if locked else 0xFFB347))
+    em.set_footer(text=f"2v2 series {s['series_id'][:8]}")
+    return em
+
+
+# series_id -> message_id for the 2v2 live-bets posts (separate map from 1v1).
+team_live_bet_messages = {}
+
+
+@tasks.loop(seconds=10)
+async def poll_team_live_bets():
+    """Mirror of poll_live_bets for 2v2. Posts/updates a read-only embed per
+    active team_series so 2v2 games appear in the gambler channel (they were
+    structurally absent before — no loop polled /team/series/active)."""
+    if not LIVE_BETS_CHANNEL_ID:
+        return
+    data = await api_get("/team/series/active")
+    if not data:
+        return
+    series_list = data.get("series") or []
+    channel = bot.get_channel(LIVE_BETS_CHANNEL_ID)
+    if channel is None:
+        try: channel = await bot.fetch_channel(LIVE_BETS_CHANNEL_ID)
+        except Exception: return
+    seen_now = set()
+    for s in series_list:
+        sid = s.get("series_id")
+        if not sid: continue
+        seen_now.add(sid)
+        embed = _format_team_live_bet_embed(s)
+        msg_id = team_live_bet_messages.get(sid)
+        try:
+            if msg_id is None:
+                msg = await channel.send(embed=embed)
+                team_live_bet_messages[sid] = msg.id
+            else:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(embed=embed)
+        except discord.NotFound:
+            try:
+                msg = await channel.send(embed=embed)
+                team_live_bet_messages[sid] = msg.id
+            except Exception as e:
+                print(f"[TEAM-LIVE-BETS] re-post failed for {sid}: {e}")
+        except Exception as e:
+            print(f"[TEAM-LIVE-BETS] update failed for {sid}: {e}")
+    stale = [sid for sid in list(team_live_bet_messages.keys()) if sid not in seen_now]
+    for sid in stale:
+        del team_live_bet_messages[sid]
+
 
 @tasks.loop(seconds=10)
 async def poll_live_bets():

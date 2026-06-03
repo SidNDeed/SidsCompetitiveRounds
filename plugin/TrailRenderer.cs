@@ -430,6 +430,7 @@ namespace CompetitiveRounds
         {
             try { TrailCosmetic.OnPlayerPropertiesChanged(target, changedProps); } catch { }
             try { PlayerColorCosmetic.OnPlayerPropertiesChanged(target, changedProps); } catch { }
+            try { PlayerEffectCosmetic.OnPlayerPropertiesChanged(target, changedProps); } catch { }
         }
 
         // Unused interface methods — IInRoomCallbacks requires all of them.

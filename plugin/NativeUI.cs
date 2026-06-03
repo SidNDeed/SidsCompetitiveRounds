@@ -106,8 +106,8 @@ namespace CompetitiveRounds
             return go;
         }
 
-        public static ScrollViewRefs CreateScrollView(string name,Transform parent,float spacing=2f)
-        {var refs=new ScrollViewRefs();var sGO=new GameObject(name);sGO.transform.SetParent(parent,false);var sRT=sGO.AddComponent<RectTransform>();sRT.anchorMin=Vector2.zero;sRT.anchorMax=Vector2.one;sRT.offsetMin=Vector2.zero;sRT.offsetMax=Vector2.zero;var vp=new GameObject("Viewport");vp.transform.SetParent(sGO.transform,false);var vpRT=vp.AddComponent<RectTransform>();vpRT.anchorMin=Vector2.zero;vpRT.anchorMax=Vector2.one;vpRT.offsetMin=Vector2.zero;vpRT.offsetMax=Vector2.zero;var vpImg=vp.AddComponent(tImage);pImgColor?.SetValue(vpImg,new Color(0,0,0,0.01f));if(tMask!=null){var m=vp.AddComponent(tMask);tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(m,false);}var cnt=new GameObject("Content");cnt.transform.SetParent(vp.transform,false);var cRT=cnt.AddComponent<RectTransform>();cRT.anchorMin=new Vector2(0,1);cRT.anchorMax=new Vector2(1,1);cRT.pivot=new Vector2(0.5f,1f);cRT.sizeDelta=Vector2.zero;if(tVLG!=null){var v=cnt.AddComponent(tVLG);pVLGSpacing?.SetValue(v,spacing);pVLGChildForceW?.SetValue(v,true);pVLGChildForceH?.SetValue(v,false);pVLGChildControlW?.SetValue(v,true);pVLGChildControlH?.SetValue(v,true);}if(tCSF!=null){var csf=cnt.AddComponent(tCSF);var ft=pCSFFit?.PropertyType;if(ft!=null)pCSFFit.SetValue(csf,Enum.ToObject(ft,2));}var sr=sGO.AddComponent(tScrollRect);pSRContent?.SetValue(sr,cRT);pSRViewport?.SetValue(sr,vpRT);pSRVertical?.SetValue(sr,true);pSRHorizontal?.SetValue(sr,false);pSRScrollSensitivity?.SetValue(sr,25f);var mt=pSRMovementType?.PropertyType;if(mt!=null)pSRMovementType.SetValue(sr,Enum.ToObject(mt,1));refs.scrollGO=sGO;refs.content=cnt;refs.contentRT=cRT;return refs;}
+        public static ScrollViewRefs CreateScrollView(string name,Transform parent,float spacing=2f,bool childForceExpandWidth=true)
+        {var refs=new ScrollViewRefs();var sGO=new GameObject(name);sGO.transform.SetParent(parent,false);var sRT=sGO.AddComponent<RectTransform>();sRT.anchorMin=Vector2.zero;sRT.anchorMax=Vector2.one;sRT.offsetMin=Vector2.zero;sRT.offsetMax=Vector2.zero;var vp=new GameObject("Viewport");vp.transform.SetParent(sGO.transform,false);var vpRT=vp.AddComponent<RectTransform>();vpRT.anchorMin=Vector2.zero;vpRT.anchorMax=Vector2.one;vpRT.offsetMin=Vector2.zero;vpRT.offsetMax=Vector2.zero;var vpImg=vp.AddComponent(tImage);pImgColor?.SetValue(vpImg,new Color(0,0,0,0.01f));/* raycastTarget so the mouse wheel scrolls anywhere over the viewport — including empty space below/around the rows, not just when hovering a row button. */tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(vpImg,true);if(tMask!=null){var m=vp.AddComponent(tMask);tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(m,false);}var cnt=new GameObject("Content");cnt.transform.SetParent(vp.transform,false);var cRT=cnt.AddComponent<RectTransform>();cRT.anchorMin=new Vector2(0,1);cRT.anchorMax=new Vector2(1,1);cRT.pivot=new Vector2(0.5f,1f);cRT.sizeDelta=Vector2.zero;if(tVLG!=null){var v=cnt.AddComponent(tVLG);pVLGSpacing?.SetValue(v,spacing);pVLGChildForceW?.SetValue(v,childForceExpandWidth);pVLGChildForceH?.SetValue(v,false);pVLGChildControlW?.SetValue(v,true);pVLGChildControlH?.SetValue(v,true);}if(tCSF!=null){var csf=cnt.AddComponent(tCSF);var ft=pCSFFit?.PropertyType;if(ft!=null)pCSFFit.SetValue(csf,Enum.ToObject(ft,2));}var sr=sGO.AddComponent(tScrollRect);pSRContent?.SetValue(sr,cRT);pSRViewport?.SetValue(sr,vpRT);pSRVertical?.SetValue(sr,true);pSRHorizontal?.SetValue(sr,false);pSRScrollSensitivity?.SetValue(sr,25f);var mt=pSRMovementType?.PropertyType;if(mt!=null)pSRMovementType.SetValue(sr,Enum.ToObject(mt,1));refs.scrollGO=sGO;refs.content=cnt;refs.contentRT=cRT;return refs;}
         public struct ScrollViewRefs{public GameObject scrollGO,content;public RectTransform contentRT;}
 
         public static void AddVLG(GameObject go,float spacing=2,int padL=0,int padR=0,int padT=0,int padB=0,bool forceExpandW=true,bool forceExpandH=false){if(tVLG==null)return;var v=go.AddComponent(tVLG);pVLGSpacing?.SetValue(v,spacing);pVLGPadding?.SetValue(v,new RectOffset(padL,padR,padT,padB));pVLGChildForceW?.SetValue(v,forceExpandW);pVLGChildForceH?.SetValue(v,forceExpandH);pVLGChildControlW?.SetValue(v,true);pVLGChildControlH?.SetValue(v,true);}
@@ -119,6 +119,14 @@ namespace CompetitiveRounds
         public static void SetColor(object t,Color c){if(t!=null)pTmpColor?.SetValue(t,c);}
         public static void SetBold(object t,bool b){if(t==null)return;try{var tp=pTmpFontStyle?.PropertyType;if(tp!=null)pTmpFontStyle.SetValue(t,Enum.ToObject(tp,b?1:0));}catch{}}
         public static void SetWordWrap(object t,bool on){if(t==null||tTMP==null)return;try{var p=tTMP.GetProperty("enableWordWrapping",BindingFlags.Public|BindingFlags.Instance);p?.SetValue(t,on);}catch{}}
+        // Release a text element's fixed preferred height so its OWN TMP-reported
+        // (content-driven) height feeds the layout instead. CreateText always adds a
+        // LayoutElement with prefH = sizeDelta.y (priority 1), which OVERRIDES TMP's
+        // ILayoutElement (priority 0) — so any growing text inside a ScrollView+CSF
+        // stays locked at sizeDelta.y and never scrolls. Setting the LE's preferred
+        // dims to -1 makes the layout fall through to TMP's computed values; minH is
+        // an optional floor. This is the missing piece behind "the panel won't scroll".
+        public static void SetTextAutoHeight(object tmp,float minH=0f){if(tmp==null||tLE==null)return;try{var go=((Component)tmp).gameObject;var le=go.GetComponent(tLE);if(le==null)le=go.AddComponent(tLE);tLE.GetProperty("preferredHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,-1f);tLE.GetProperty("preferredWidth",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,-1f);if(minH>0f)tLE.GetProperty("minHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,minH);}catch{}}
         public static void SetOverflowMode(object t,int mode){if(t==null||pTmpOverflow==null)return;try{pTmpOverflow.SetValue(t,Enum.ToObject(pTmpOverflow.PropertyType,mode));}catch{}}
         public static void SetCharSpacing(object t,float spacing){if(t!=null)pTmpCharSpacing?.SetValue(t,spacing);}
         public static void SetImageColor(GameObject go,Color c){if(go==null)return;var img=go.GetComponent(tImage);if(img!=null)pImgColor?.SetValue(img,c);}
@@ -270,6 +278,15 @@ namespace CompetitiveRounds
         private class HistoryRow{public GameObject root,seriesGO;public object txtResult,txtOpp,txtFps,txtXP,txtDate,txtCards,txtOppCards,txtSeriesHead,txtSeriesElo;}
         private static List<LBRow> lbRows=new List<LBRow>();private static object txtLBCount,txtLBDetail;
         private static string selectedSteamId="";private static ApiClient.PlayerStatsData selectedStats;
+        // Clicked player's match history (for the detail panel's ranked-history + H2H-last-series
+        // sections). Fetched on click via FetchMatchHistoryForView; does NOT touch the local
+        // player's CachedMatchHistory. Keyed implicitly to selectedSteamId.
+        private static List<ApiClient.MatchHistoryEntry> selectedViewHistory;
+        // Pagination for "Ranked Series vs You" in the player-detail panel.
+        private static int h2hSeriesPage = 0;
+        private const int H2H_SERIES_PER_PAGE = 2;
+        private static int h2hSeriesTotalPages = 1; // set by BuildViewHistoryText, read by the pager refresh
+        private static GameObject h2hPager, h2hPrev, h2hNext; private static object txtH2hPage;
         private static string lbSort="rating";private static bool lbSortDesc=true;private static object[] lbSortTexts;private static GameObject[] lbSortBtns;
         private static int lbPage=0;private static object txtLBPage;private static GameObject lbPrev,lbNext,lbBlockBtn,lbBlockRow;private static object lbBlockTxt;
         private static GameObject lbGraphPanel;
@@ -324,7 +341,35 @@ namespace CompetitiveRounds
             isOpen=true;dirty=true;RefreshData();ApiClient.ResetQueueCountTimer();Plugin.Log.LogInfo($"[NATIVE] Opened competitive page (inGame={inGameMode})");
         }
 
-        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}SetClickBlocker(false);Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+
+        // Full-screen uGUI raycast blocker for IMGUI modals (bug report form, log/admin
+        // viewers). The IMGUI backdrop those draw blocks NOTHING in uGUI — they're separate
+        // input paths — so clicks on the form also hit the F5 buttons behind it (lopi #14).
+        // A transparent raycastTarget Image as the TOP child of the overlay canvas intercepts
+        // every uGUI raycast while a modal is up; the IMGUI form still works (separate path).
+        private static GameObject clickBlocker;
+        public static void SetClickBlocker(bool on)
+        {
+            try
+            {
+                if (clickBlocker == null)
+                {
+                    if (overlayCanvasGO == null) return;
+                    clickBlocker = new GameObject("CR_ClickBlocker");
+                    clickBlocker.transform.SetParent(overlayCanvasGO.transform, false);
+                    var rt = clickBlocker.AddComponent<RectTransform>();
+                    rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one; rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+                    var img = clickBlocker.AddComponent(UIFactory.tImage);
+                    UIFactory.tImage.GetProperty("color", BindingFlags.Public | BindingFlags.Instance)?.SetValue(img, new Color(0, 0, 0, 0.001f));
+                    UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(img, true);
+                    clickBlocker.SetActive(false);
+                }
+                if (on) clickBlocker.transform.SetAsLastSibling();
+                if (clickBlocker.activeSelf != on) clickBlocker.SetActive(on);
+            }
+            catch { }
+        }
 
         private static float dataCheckTimer;private static int lastMatchCount=-1,lastLBCount=-1,lastCardCount=-1;
         public static void Tick()
@@ -404,7 +449,7 @@ namespace CompetitiveRounds
             tIndRow.SetActive(false);
             tournamentIndRow = tIndRow;
             BuildTabBar(content.transform);
-            tabPanels=new GameObject[9];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);
+            tabPanels=new GameObject[10];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);
 
             var bottom=new GameObject("Bottom");bottom.transform.SetParent(content.transform,false);bottom.AddComponent<RectTransform>();UIFactory.AddHLG(bottom,spacing:8,forceExpandH:true);UIFactory.AddLE(bottom,prefH:26,minH:26,flexH:0);
             UIFactory.CreateText("Ver",bottom.transform,$"<b>v{Plugin.ModVersion}</b>",13f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(90,22));
@@ -445,9 +490,9 @@ namespace CompetitiveRounds
             declineBtn=UIFactory.CreateButton("Decline",matchBtnRow.transform,"Decline",15f,C_WHITE,C_BTN,()=>{ApiClient.DeclineMatch(MatchTracker.LocalSteamId);},sizeDelta:new Vector2(70,24));qMatchPanel.SetActive(false);
         }
 
-        private static void BuildTabBar(Transform parent){var bar=new GameObject("TabBar");bar.transform.SetParent(parent,false);bar.AddComponent<RectTransform>();UIFactory.AddHLG(bar,spacing:4);UIFactory.AddLE(bar,prefH:28,minH:28,flexH:0);tabButtons=new GameObject[9];tabTexts=new object[9];for(int i=0;i<9;i++){int idx=i;var btn=UIFactory.CreateButton($"Tab{i}",bar.transform,TAB_NAMES[i],13f,C_LABEL,C_TAB,()=>SwitchTab(idx),sizeDelta:new Vector2(0,26));if(UIFactory.tLE!=null){var el=btn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(btn,prefH:26,minH:26,flexW:1,flexH:0);tabButtons[i]=btn;tabTexts[i]=UIFactory.GetButtonText(btn);}/* Admin tab visibility flips on as soon as IsAdmin resolves true (poll-driven update from RefreshCurrentTab). */tabButtons[6].SetActive(ApiClient.IsAdmin);}
-        private static readonly string[] TAB_NAMES={"My Stats","Leaderboard","Card Stats","Achievements","Shop","Settings","Admin","Tournaments","2v2"};
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<9;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);UIFactory.SetImageColor(tabButtons[i],i==idx?C_TABACT:C_TAB);if(tabTexts[i]!=null){UIFactory.SetColor(tabTexts[i],i==idx?C_WHITE:C_LABEL);UIFactory.SetBold(tabTexts[i],i==idx);}}if(idx==1){if(ApiClient.CachedLeaderboard==null){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}dirty=true;}
+        private static void BuildTabBar(Transform parent){var bar=new GameObject("TabBar");bar.transform.SetParent(parent,false);bar.AddComponent<RectTransform>();UIFactory.AddHLG(bar,spacing:4);UIFactory.AddLE(bar,prefH:28,minH:28,flexH:0);tabButtons=new GameObject[10];tabTexts=new object[10];for(int i=0;i<10;i++){int idx=i;var btn=UIFactory.CreateButton($"Tab{i}",bar.transform,TAB_NAMES[i],13f,C_LABEL,C_TAB,()=>SwitchTab(idx),sizeDelta:new Vector2(0,26));if(UIFactory.tLE!=null){var el=btn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(btn,prefH:26,minH:26,flexW:1,flexH:0);tabButtons[i]=btn;tabTexts[i]=UIFactory.GetButtonText(btn);}/* Admin tab visibility flips on as soon as IsAdmin resolves true (poll-driven update from RefreshCurrentTab). */tabButtons[6].SetActive(ApiClient.IsAdmin);}
+        private static readonly string[] TAB_NAMES={"My Stats","Leaderboard","Card Stats","Achievements","Shop","Settings","Admin","Tournaments","2v2","Compare"};
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<10;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);UIFactory.SetImageColor(tabButtons[i],i==idx?C_TABACT:C_TAB);if(tabTexts[i]!=null){UIFactory.SetColor(tabTexts[i],i==idx?C_WHITE:C_LABEL);UIFactory.SetBold(tabTexts[i],i==idx);}}if(idx==1){if(ApiClient.CachedLeaderboard==null){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}dirty=true;}
 
         private static GameObject BuildMyStatsTab(Transform parent){var panel=new GameObject("MyStats");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:8);UIFactory.AddLE(panel,flexH:1);var left=new GameObject("Left");left.transform.SetParent(panel.transform,false);left.AddComponent<RectTransform>();UIFactory.AddVLG(left,spacing:4);UIFactory.AddLE(left,prefW:380);var rBox=UIFactory.CreatePanel("RB",left.transform,C_PANEL);UIFactory.AddVLG(rBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(rBox,flexH:0);var glHdr=UIFactory.CreateText("RL",rBox.transform,"Glicko-2 Rating",19f,C_SUB,sizeDelta:new Vector2(250,28));UIFactory.SetCharSpacing(glHdr,1f);var rRow=new GameObject("RR");rRow.transform.SetParent(rBox.transform,false);rRow.AddComponent<RectTransform>();UIFactory.AddHLG(rRow,spacing:12);UIFactory.AddLE(rRow,prefH:38);txtRating=UIFactory.CreateText("Rat",rRow.transform,"1500",30f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,38));UIFactory.SetBold(txtRating,true);txtRD=UIFactory.CreateText("RD",rRow.transform,"RD: 350",18f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,38));var xBox=UIFactory.CreatePanel("XB",left.transform,C_PANEL);UIFactory.AddVLG(xBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(xBox,flexH:0);var lvRow=new GameObject("LR");lvRow.transform.SetParent(xBox.transform,false);lvRow.AddComponent<RectTransform>();UIFactory.AddHLG(lvRow,spacing:8);UIFactory.AddLE(lvRow,prefH:28);txtLevel=UIFactory.CreateText("Lv",lvRow.transform,"Level 1",19f,C_BLUE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(100,28));UIFactory.SetBold(txtLevel,true);txtXPProg=UIFactory.CreateText("XPP",lvRow.transform,"",16f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(130,28));var xSp=new GameObject("S");xSp.transform.SetParent(lvRow.transform,false);xSp.AddComponent<RectTransform>();UIFactory.AddLE(xSp,flexW:1);txtTotalXP=UIFactory.CreateText("TXP",lvRow.transform,"0 XP",16f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(110,28));xpFill=UIFactory.CreateFillBar("XP",xBox.transform,new Color(0.2f,0.2f,0.25f,0.8f),new Color(0.3f,0.7f,1f,0.9f),10f);var recBox=UIFactory.CreatePanel("RecB",left.transform,C_PANEL);UIFactory.AddVLG(recBox,spacing:1,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(recBox,flexH:0);UIFactory.CreateText("RecL",recBox.transform,"Record",19f,C_SUB,sizeDelta:new Vector2(340,28));txtRankedRec=UIFactory.CreateText("RR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtRankedStrk=UIFactory.CreateText("RS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtTeam2v2Rec=UIFactory.CreateText("T2",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTeam2v2Strk=UIFactory.CreateText("T2S",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtCasualRec=UIFactory.CreateText("CR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtCasualStrk=UIFactory.CreateText("CS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtSweeps=UIFactory.CreateText("SW",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTotalRec=UIFactory.CreateText("TR",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtAccuracy=UIFactory.CreateText("AC",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));var sesBox=UIFactory.CreatePanel("SB",left.transform,C_PANEL);UIFactory.AddVLG(sesBox,spacing:3,padL:10,padR:10,padT:8,padB:8);UIFactory.AddLE(sesBox,flexH:0);UIFactory.CreateText("SL",sesBox.transform,"Session Info",19f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(340,28));txtSessionSum=UIFactory.CreateText("SS",sesBox.transform,"No games this session",17f,C_DIM,sizeDelta:new Vector2(340,26));txtSessionSplit=UIFactory.CreateText("SSp",sesBox.transform,"",16f,C_LABEL,sizeDelta:new Vector2(340,24));txtSessionSweeps=UIFactory.CreateText("SSw",sesBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtSessionOppLifetime=UIFactory.CreateText("SOL",sesBox.transform,"",15f,new Color(0.6f,0.75f,1f),sizeDelta:new Vector2(340,22));sessionOppContainer=new GameObject("SOC");sessionOppContainer.transform.SetParent(sesBox.transform,false);sessionOppContainer.AddComponent<RectTransform>();UIFactory.AddVLG(sessionOppContainer,spacing:1);
         var linkBox=UIFactory.CreatePanel("LkB",left.transform,C_PANEL);UIFactory.AddVLG(linkBox,spacing:4,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(linkBox,flexH:0);UIFactory.CreateText("LkL",linkBox.transform,"Discord Link",19f,new Color(0.55f,0.55f,0.95f),sizeDelta:new Vector2(340,28));var lkRow=new GameObject("LkR");lkRow.transform.SetParent(linkBox.transform,false);lkRow.AddComponent<RectTransform>();UIFactory.AddHLG(lkRow,spacing:8);UIFactory.AddLE(lkRow,prefH:28);linkCodeBtn=UIFactory.CreateButton("LkBtn",lkRow.transform,"Get Link Code",15f,C_WHITE,C_BTN,()=>{var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.GenerateLinkCode(id);},sizeDelta:new Vector2(130,26));/* Click-to-reveal on the link text - Discord ID/username defaults hidden for streamers.
@@ -475,7 +520,12 @@ liveBetsNext=UIFactory.CreateButton("lvN",liveBetsPager.transform,"Next >",10f,C
 liveBetsPager.SetActive(false);
 /* Visual spacer between Live and Recent panels - was visually jammed previously. */
 {var liveRecentSpacer=new GameObject("LRSp");liveRecentSpacer.transform.SetParent(seriesCol.transform,false);liveRecentSpacer.AddComponent<RectTransform>();UIFactory.AddLE(liveRecentSpacer,prefH:18,minH:18,flexH:0);}
-UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Series</color>",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));var rsSV=UIFactory.CreateScrollView("RSSV",seriesCol.transform,spacing:1);UIFactory.AddLE(rsSV.scrollGO,flexH:1);txtRecentSeries=UIFactory.CreateText("RST",rsSV.content.transform,"Loading...",16f,C_DIM,sizeDelta:new Vector2(280,20));var sPg=new GameObject("SPg");sPg.transform.SetParent(seriesCol.transform,false);sPg.AddComponent<RectTransform>();UIFactory.AddHLG(sPg,spacing:4,forceExpandH:true);UIFactory.AddLE(sPg,prefH:20,flexH:0);var sS1=new GameObject("S");sS1.transform.SetParent(sPg.transform,false);sS1.AddComponent<RectTransform>();UIFactory.AddLE(sS1,flexW:1);seriesPrev=UIFactory.CreateButton("sP",sPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(recentSeriesPage>0){recentSeriesPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtSeriesPage=UIFactory.CreateText("sPI",sPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));seriesNext=UIFactory.CreateButton("sN",sPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{recentSeriesPage++;dirty=true;},sizeDelta:new Vector2(50,18));var sS2=new GameObject("S");sS2.transform.SetParent(sPg.transform,false);sS2.AddComponent<RectTransform>();UIFactory.AddLE(sS2,flexW:1);/* === MIDDLE: Leaderboard list === */var mid=new GameObject("LBMid");mid.transform.SetParent(panel.transform,false);mid.AddComponent<RectTransform>();UIFactory.AddVLG(mid,spacing:2);UIFactory.AddLE(mid,prefW:560,minW:500,flexH:1);string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};var hRow=new GameObject("LBH");hRow.transform.SetParent(mid.transform,false);hRow.AddComponent<RectTransform>();UIFactory.AddHLG(hRow,spacing:2,forceExpandH:true);UIFactory.AddLE(hRow,prefH:28,minH:28,flexH:0);lbSortTexts=new object[hL.Length];lbSortBtns=new GameObject[hL.Length];var lbHSp1=new GameObject("S");lbHSp1.transform.SetParent(hRow.transform,false);lbHSp1.AddComponent<RectTransform>();UIFactory.AddLE(lbHSp1,flexW:1);for(int hi=0;hi<hL.Length;hi++){int idx=hi;string arrow=lbSort==hK[hi]?(lbSortDesc?" v":" ^"):"";var hBtn=UIFactory.CreateButton($"LH{hi}",hRow.transform,hL[hi]+arrow,14f,lbSort==hK[hi]?C_WHITE:C_LABEL,lbSort==hK[hi]?C_TABACT:C_TAB,()=>{if(lbSort==hK[idx])lbSortDesc=!lbSortDesc;else{lbSort=hK[idx];lbSortDesc=(idx>=3);}dirty=true;},sizeDelta:new Vector2(LB_COL_W[hi],22));if(UIFactory.tLE!=null){var el=hBtn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(hBtn,prefW:LB_COL_W[hi],prefH:22,flexH:0);lbSortBtns[hi]=hBtn;lbSortTexts[hi]=UIFactory.GetButtonText(hBtn);}var lbHSp2=new GameObject("S");lbHSp2.transform.SetParent(hRow.transform,false);lbHSp2.AddComponent<RectTransform>();UIFactory.AddLE(lbHSp2,flexW:1);var sv=UIFactory.CreateScrollView("LBSV",mid.transform);UIFactory.AddLE(sv.scrollGO,flexH:1);for(int i=0;i<100;i++)lbRows.Add(CreateLBRow(sv.content.transform,$"lb{i}",i));var lbPg=new GameObject("LBPg");lbPg.transform.SetParent(mid.transform,false);lbPg.AddComponent<RectTransform>();UIFactory.AddHLG(lbPg,spacing:6,forceExpandH:true);UIFactory.AddLE(lbPg,prefH:24,flexH:0);txtLBCount=UIFactory.CreateText("LBC",lbPg.transform,"",15f,C_LABEL,sizeDelta:new Vector2(160,22));var lbS1=new GameObject("S");lbS1.transform.SetParent(lbPg.transform,false);lbS1.AddComponent<RectTransform>();UIFactory.AddLE(lbS1,flexW:1);lbPrev=UIFactory.CreateButton("lbP",lbPg.transform,"< Prev",13f,C_LABEL,C_BTN,()=>{if(lbPage>0){lbPage--;dirty=true;}},sizeDelta:new Vector2(60,22));txtLBPage=UIFactory.CreateText("lbPI",lbPg.transform,"",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(40,22));lbNext=UIFactory.CreateButton("lbN",lbPg.transform,"Next >",13f,C_LABEL,C_BTN,()=>{lbPage++;dirty=true;},sizeDelta:new Vector2(60,22));/* === RIGHT: Player detail === */var right=UIFactory.CreatePanel("LBR",panel.transform,C_PANEL);UIFactory.AddVLG(right,spacing:4,padL:12,padR:12,padT:8,padB:8);UIFactory.AddLE(right,flexW:1,flexH:1);txtLBPlayerName=UIFactory.CreateText("LBName",right.transform,"Click a player",20f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,26));UIFactory.SetBold(txtLBPlayerName,true);lbGraphPanel=new GameObject("Graph");lbGraphPanel.transform.SetParent(right.transform,false);var grt=lbGraphPanel.AddComponent<RectTransform>();UIFactory.AddLE(lbGraphPanel,prefH:80,minH:80,flexH:0);/* Add mask to clip graph bars within bounds */var gMaskImg=lbGraphPanel.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMaskImg,new Color(0,0,0,0.01f));if(UIFactory.tMask!=null){var gMask=lbGraphPanel.AddComponent(UIFactory.tMask);try{UIFactory.tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMask,false);}catch{}}lbGraphPanel.SetActive(false);var lbDetailSV=UIFactory.CreateScrollView("LBDSV",right.transform,spacing:0);UIFactory.AddLE(lbDetailSV.scrollGO,flexH:1);txtLBDetail=UIFactory.CreateText("LBD",lbDetailSV.content.transform,"",16f,C_DIM,sizeDelta:new Vector2(340,24));
+UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Series</color>",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));var rsSV=UIFactory.CreateScrollView("RSSV",seriesCol.transform,spacing:1);UIFactory.AddLE(rsSV.scrollGO,flexH:1);txtRecentSeries=UIFactory.CreateText("RST",rsSV.content.transform,"Loading...",16f,C_DIM,sizeDelta:new Vector2(280,20));var sPg=new GameObject("SPg");sPg.transform.SetParent(seriesCol.transform,false);sPg.AddComponent<RectTransform>();UIFactory.AddHLG(sPg,spacing:4,forceExpandH:true);UIFactory.AddLE(sPg,prefH:20,flexH:0);var sS1=new GameObject("S");sS1.transform.SetParent(sPg.transform,false);sS1.AddComponent<RectTransform>();UIFactory.AddLE(sS1,flexW:1);seriesPrev=UIFactory.CreateButton("sP",sPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(recentSeriesPage>0){recentSeriesPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtSeriesPage=UIFactory.CreateText("sPI",sPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));seriesNext=UIFactory.CreateButton("sN",sPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{recentSeriesPage++;dirty=true;},sizeDelta:new Vector2(50,18));var sS2=new GameObject("S");sS2.transform.SetParent(sPg.transform,false);sS2.AddComponent<RectTransform>();UIFactory.AddLE(sS2,flexW:1);/* === MIDDLE: Leaderboard list === */var mid=new GameObject("LBMid");mid.transform.SetParent(panel.transform,false);mid.AddComponent<RectTransform>();UIFactory.AddVLG(mid,spacing:2);UIFactory.AddLE(mid,prefW:560,minW:500,flexH:1);string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};var hRow=new GameObject("LBH");hRow.transform.SetParent(mid.transform,false);hRow.AddComponent<RectTransform>();UIFactory.AddHLG(hRow,spacing:2,forceExpandH:true);UIFactory.AddLE(hRow,prefH:28,minH:28,flexH:0);lbSortTexts=new object[hL.Length];lbSortBtns=new GameObject[hL.Length];var lbHSp1=new GameObject("S");lbHSp1.transform.SetParent(hRow.transform,false);lbHSp1.AddComponent<RectTransform>();UIFactory.AddLE(lbHSp1,flexW:1);for(int hi=0;hi<hL.Length;hi++){int idx=hi;string arrow=lbSort==hK[hi]?(lbSortDesc?" v":" ^"):"";var hBtn=UIFactory.CreateButton($"LH{hi}",hRow.transform,hL[hi]+arrow,14f,lbSort==hK[hi]?C_WHITE:C_LABEL,lbSort==hK[hi]?C_TABACT:C_TAB,()=>{if(lbSort==hK[idx])lbSortDesc=!lbSortDesc;else{lbSort=hK[idx];lbSortDesc=(idx>=3);}dirty=true;},sizeDelta:new Vector2(LB_COL_W[hi],22));if(UIFactory.tLE!=null){var el=hBtn.GetComponent(UIFactory.tLE);if(el!=null)UnityEngine.Object.Destroy(el as UnityEngine.Object);}UIFactory.AddLE(hBtn,prefW:LB_COL_W[hi],prefH:22,flexH:0);lbSortBtns[hi]=hBtn;lbSortTexts[hi]=UIFactory.GetButtonText(hBtn);}var lbHSp2=new GameObject("S");lbHSp2.transform.SetParent(hRow.transform,false);lbHSp2.AddComponent<RectTransform>();UIFactory.AddLE(lbHSp2,flexW:1);var sv=UIFactory.CreateScrollView("LBSV",mid.transform);UIFactory.AddLE(sv.scrollGO,flexH:1);for(int i=0;i<100;i++)lbRows.Add(CreateLBRow(sv.content.transform,$"lb{i}",i));var lbPg=new GameObject("LBPg");lbPg.transform.SetParent(mid.transform,false);lbPg.AddComponent<RectTransform>();UIFactory.AddHLG(lbPg,spacing:6,forceExpandH:true);UIFactory.AddLE(lbPg,prefH:24,flexH:0);txtLBCount=UIFactory.CreateText("LBC",lbPg.transform,"",15f,C_LABEL,sizeDelta:new Vector2(160,22));var lbS1=new GameObject("S");lbS1.transform.SetParent(lbPg.transform,false);lbS1.AddComponent<RectTransform>();UIFactory.AddLE(lbS1,flexW:1);lbPrev=UIFactory.CreateButton("lbP",lbPg.transform,"< Prev",13f,C_LABEL,C_BTN,()=>{if(lbPage>0){lbPage--;dirty=true;}},sizeDelta:new Vector2(60,22));txtLBPage=UIFactory.CreateText("lbPI",lbPg.transform,"",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(40,22));lbNext=UIFactory.CreateButton("lbN",lbPg.transform,"Next >",13f,C_LABEL,C_BTN,()=>{lbPage++;dirty=true;},sizeDelta:new Vector2(60,22));/* === RIGHT: Player detail === */var right=UIFactory.CreatePanel("LBR",panel.transform,C_PANEL);UIFactory.AddVLG(right,spacing:4,padL:12,padR:12,padT:8,padB:8);UIFactory.AddLE(right,flexW:1,flexH:1);txtLBPlayerName=UIFactory.CreateText("LBName",right.transform,"Click a player",20f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,26));UIFactory.SetBold(txtLBPlayerName,true);lbGraphPanel=new GameObject("Graph");lbGraphPanel.transform.SetParent(right.transform,false);var grt=lbGraphPanel.AddComponent<RectTransform>();UIFactory.AddLE(lbGraphPanel,prefH:80,minH:80,flexH:0);/* Add mask to clip graph bars within bounds */var gMaskImg=lbGraphPanel.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMaskImg,new Color(0,0,0,0.01f));if(UIFactory.tMask!=null){var gMask=lbGraphPanel.AddComponent(UIFactory.tMask);try{UIFactory.tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(gMask,false);}catch{}}lbGraphPanel.SetActive(false);
+/* H2H series pager — controls the "Ranked Series vs You" block that BuildViewHistoryText
+ * renders at the top of the detail text. Hidden until there is >1 page of head-to-head
+ * series. Placed above the scrolling detail so it reads as a header control. */
+h2hPager=new GameObject("H2HPg");h2hPager.transform.SetParent(right.transform,false);h2hPager.AddComponent<RectTransform>();UIFactory.AddHLG(h2hPager,spacing:6,forceExpandH:true);UIFactory.AddLE(h2hPager,prefH:20,flexH:0);var h2hLbl=UIFactory.CreateText("H2HL",h2hPager.transform,"<color=#FFD94D>Series vs You</color>",12f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(120,18));var h2hSp=new GameObject("S");h2hSp.transform.SetParent(h2hPager.transform,false);h2hSp.AddComponent<RectTransform>();UIFactory.AddLE(h2hSp,flexW:1);h2hPrev=UIFactory.CreateButton("h2hP",h2hPager.transform,"< Newer",10f,C_LABEL,C_BTN,()=>{if(h2hSeriesPage>0){h2hSeriesPage--;dirty=true;}},sizeDelta:new Vector2(58,18));txtH2hPage=UIFactory.CreateText("h2hI",h2hPager.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(40,18));h2hNext=UIFactory.CreateButton("h2hN",h2hPager.transform,"Older >",10f,C_LABEL,C_BTN,()=>{h2hSeriesPage++;dirty=true;},sizeDelta:new Vector2(58,18));h2hPager.SetActive(false);
+var lbDetailSV=UIFactory.CreateScrollView("LBDSV",right.transform,spacing:0);UIFactory.AddLE(lbDetailSV.scrollGO,flexH:1);txtLBDetail=UIFactory.CreateText("LBD",lbDetailSV.content.transform,"",16f,C_DIM,sizeDelta:new Vector2(340,24));UIFactory.SetTextAutoHeight(txtLBDetail);
 /* Enable word wrap on the detail text so TMP reports a preferredHeight that
    matches the rendered multi-line content. Without this, TMP reports the
    sizeDelta height (24 px) and the ContentSizeFitter on the scroll content
@@ -483,9 +533,11 @@ UIFactory.CreateText("RSL",seriesCol.transform,"<color=#99AAEE>Recent Ranked Ser
    are rendered → the bottom of the achievement list gets clipped and the
    scroll can't reach it. With wrap on, TMP computes proper line count from
    the 340 px-wide text box and the scroll content sizes correctly. */
-UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.transform,false);lbBlockRow.AddComponent<RectTransform>();UIFactory.AddHLG(lbBlockRow,spacing:0);UIFactory.AddLE(lbBlockRow,prefH:28,minH:28,flexH:0);lbBlockBtn=UIFactory.CreateButton("LBBlock",lbBlockRow.transform,"Block from Ranked",14f,C_WHITE,new Color(0.5f,0.15f,0.15f,0.9f),()=>{if(string.IsNullOrEmpty(selectedSteamId)||selectedSteamId==MatchTracker.LocalSteamId)return;string myId=MatchTracker.LocalSteamId;if(ApiClient.IsPlayerBlocked(selectedSteamId))ApiClient.UnblockPlayer(myId,selectedSteamId);else ApiClient.BlockPlayer(myId,selectedSteamId);},sizeDelta:new Vector2(160,24));var lbBlockSpacer=new GameObject("S");lbBlockSpacer.transform.SetParent(lbBlockRow.transform,false);lbBlockSpacer.AddComponent<RectTransform>();UIFactory.AddLE(lbBlockSpacer,flexW:1);lbBlockBtn.SetActive(true);lbBlockRow.SetActive(false);lbBlockTxt=UIFactory.GetButtonText(lbBlockBtn);return panel;}
+UIFactory.SetWordWrap(txtLBDetail, true);
+UIFactory.CreateText("LBDScrollHint",right.transform,"<color=#777><i>scroll for full history — hover + mouse wheel</i></color>",11f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(340,15));
+lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.transform,false);lbBlockRow.AddComponent<RectTransform>();UIFactory.AddHLG(lbBlockRow,spacing:0);UIFactory.AddLE(lbBlockRow,prefH:28,minH:28,flexH:0);lbBlockBtn=UIFactory.CreateButton("LBBlock",lbBlockRow.transform,"Block from Ranked",14f,C_WHITE,new Color(0.5f,0.15f,0.15f,0.9f),()=>{if(string.IsNullOrEmpty(selectedSteamId)||selectedSteamId==MatchTracker.LocalSteamId)return;string myId=MatchTracker.LocalSteamId;if(ApiClient.IsPlayerBlocked(selectedSteamId))ApiClient.UnblockPlayer(myId,selectedSteamId);else ApiClient.BlockPlayer(myId,selectedSteamId);},sizeDelta:new Vector2(160,24));var lbBlockSpacer=new GameObject("S");lbBlockSpacer.transform.SetParent(lbBlockRow.transform,false);lbBlockSpacer.AddComponent<RectTransform>();UIFactory.AddLE(lbBlockSpacer,flexW:1);lbBlockBtn.SetActive(true);lbBlockRow.SetActive(false);lbBlockTxt=UIFactory.GetButtonText(lbBlockBtn);return panel;}
 
-        private static LBRow CreateLBRow(Transform parent,string name,int rowIndex){var row=new LBRow();row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:0,forceExpandH:true);UIFactory.AddLE(row.root,prefH:28);var lsp=new GameObject("S");lsp.transform.SetParent(row.root.transform,false);lsp.AddComponent<RectTransform>();UIFactory.AddLE(lsp,flexW:1);row.hlWrap=new GameObject("W");row.hlWrap.transform.SetParent(row.root.transform,false);row.hlWrap.AddComponent<RectTransform>();UIFactory.AddHLG(row.hlWrap,spacing:2,forceExpandH:true);if(UIFactory.tImage!=null){var img=row.hlWrap.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,new Color(0.15f,0.15f,0.2f,0.01f));UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,true);}row.txtRank=UIFactory.CreateText("r",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[0],25));row.txtLv=UIFactory.CreateText("l",row.hlWrap.transform,"",15f,C_BLUE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[1],25));row.txtName=UIFactory.CreateText("n",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(LB_COL_W[2],25));row.txtRating=UIFactory.CreateText("rt",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[3],25));UIFactory.SetBold(row.txtRating,true);row.txtW=UIFactory.CreateText("w",row.hlWrap.transform,"",15f,C_GREEN,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[4],25));row.txtL=UIFactory.CreateText("ls",row.hlWrap.transform,"",15f,C_RED,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[5],25));row.txtWL=UIFactory.CreateText("wl",row.hlWrap.transform,"",15f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[6],25));row.txtGold=UIFactory.CreateText("gd",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[7],25));UIFactory.SetBold(row.txtGold,true);var rsp=new GameObject("S");rsp.transform.SetParent(row.root.transform,false);rsp.AddComponent<RectTransform>();UIFactory.AddLE(rsp,flexW:1);int idx=rowIndex;var ch=row.root.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()&&idx>=0&&idx<lbRows.Count&&!string.IsNullOrEmpty(lbRows[idx].steamId)){string sid=lbRows[idx].steamId;if(selectedSteamId==sid){selectedSteamId="";selectedStats=null;}else{selectedSteamId=sid;selectedStats=null;ApiClient.FetchPlayerStatsForView(sid,(d)=>{selectedStats=d;dirty=true;});ApiClient.FetchAchievementsForView(sid);ApiClient.FetchPlayerTournaments(sid);}dirty=true;}};row.root.SetActive(false);return row;}
+        private static LBRow CreateLBRow(Transform parent,string name,int rowIndex){var row=new LBRow();row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:0,forceExpandH:true);UIFactory.AddLE(row.root,prefH:28);var lsp=new GameObject("S");lsp.transform.SetParent(row.root.transform,false);lsp.AddComponent<RectTransform>();UIFactory.AddLE(lsp,flexW:1);row.hlWrap=new GameObject("W");row.hlWrap.transform.SetParent(row.root.transform,false);row.hlWrap.AddComponent<RectTransform>();UIFactory.AddHLG(row.hlWrap,spacing:2,forceExpandH:true);if(UIFactory.tImage!=null){var img=row.hlWrap.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,new Color(0.15f,0.15f,0.2f,0.01f));UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,true);}row.txtRank=UIFactory.CreateText("r",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[0],25));row.txtLv=UIFactory.CreateText("l",row.hlWrap.transform,"",15f,C_BLUE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[1],25));row.txtName=UIFactory.CreateText("n",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(LB_COL_W[2],25));row.txtRating=UIFactory.CreateText("rt",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[3],25));UIFactory.SetBold(row.txtRating,true);row.txtW=UIFactory.CreateText("w",row.hlWrap.transform,"",15f,C_GREEN,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[4],25));row.txtL=UIFactory.CreateText("ls",row.hlWrap.transform,"",15f,C_RED,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[5],25));row.txtWL=UIFactory.CreateText("wl",row.hlWrap.transform,"",15f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[6],25));row.txtGold=UIFactory.CreateText("gd",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[7],25));UIFactory.SetBold(row.txtGold,true);var rsp=new GameObject("S");rsp.transform.SetParent(row.root.transform,false);rsp.AddComponent<RectTransform>();UIFactory.AddLE(rsp,flexW:1);int idx=rowIndex;var ch=row.root.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()&&idx>=0&&idx<lbRows.Count&&!string.IsNullOrEmpty(lbRows[idx].steamId)){string sid=lbRows[idx].steamId;h2hSeriesPage=0;if(selectedSteamId==sid){selectedSteamId="";selectedStats=null;selectedViewHistory=null;}else{selectedSteamId=sid;selectedStats=null;selectedViewHistory=null;ApiClient.FetchPlayerStatsForView(sid,(d)=>{selectedStats=d;dirty=true;});ApiClient.FetchAchievementsForView(sid);ApiClient.FetchPlayerTournaments(sid);ApiClient.FetchMatchHistoryForView(sid,(h)=>{if(selectedSteamId==sid){selectedViewHistory=h;dirty=true;}});}dirty=true;}};row.root.SetActive(false);return row;}
 
         private static GameObject BuildCardStatsTab(Transform parent){var panel=new GameObject("CardStats");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddVLG(panel,spacing:4);UIFactory.AddLE(panel,flexH:1);var fBar=new GameObject("Filt");fBar.transform.SetParent(panel.transform,false);fBar.AddComponent<RectTransform>();UIFactory.AddHLG(fBar,spacing:4,padL:12,forceExpandH:true);UIFactory.AddLE(fBar,prefH:34,minH:34,flexH:0);
         // Export Tier List button on the LEFT of the filter row (was its own
@@ -1078,7 +1130,7 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
         private static void RefreshAchievements(){var ach=ApiClient.CachedAchievements;int unlocked=0,total=ApiClient.AchievementDefs.Count;int i=0;foreach(var kvp in ApiClient.AchievementDefs){if(i>=achRows.Count)break;var row=achRows[i];bool got=ach!=null&&ach.ContainsKey(kvp.Key)&&ach[kvp.Key].unlocked;if(got)unlocked++;UIFactory.SetText(row.txtIcon,got?"[X]":"[ ]");UIFactory.SetColor(row.txtIcon,got?C_GOLD:new Color(0.3f,0.3f,0.35f));UIFactory.SetColor(row.txtName,got?C_WHITE:C_DIM);UIFactory.SetColor(row.txtDesc,got?C_LABEL:new Color(0.4f,0.4f,0.45f));string dt="";if(got&&ach!=null&&ach.ContainsKey(kvp.Key)){string ua=ach[kvp.Key].unlocked_at;if(!string.IsNullOrEmpty(ua)&&ua!="null"){try{dt=DateTime.Parse(ua).ToString("M/d/yyyy");}catch{}}}/* Append "+100g" gold-awarded tag inline with the date so users see the per-trophy reward without opening the gold ledger. Per-achievement gold is uniform (ACHIEVEMENT_GOLD on the server, currently 100). */if(got&&!string.IsNullOrEmpty(dt))dt=$"{dt}  <color=#FFD94D>+100g</color>";UIFactory.SetText(row.txtDate,dt);UIFactory.SetColor(row.txtDate,got?C_GREEN:C_DIM);i++;}UIFactory.SetText(txtAchCount,$"{unlocked} / {total} unlocked");UIFactory.SetColor(txtAchCount,unlocked==total?C_GOLD:C_LABEL);}
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshTournamentGameIndicator();/* Admin tab button visibility - IsAdmin can flip on after the async check completes. */if(tabButtons!=null&&tabButtons.Length>=7&&tabButtons[6]!=null)tabButtons[6].SetActive(ApiClient.IsAdmin);switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;}}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshTournamentGameIndicator();/* Admin tab button visibility - IsAdmin can flip on after the async check completes. */if(tabButtons!=null&&tabButtons.Length>=7&&tabButtons[6]!=null)tabButtons[6].SetActive(ApiClient.IsAdmin);switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;}}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
         // every-refresh toggle from re-firing and re-posting /toggle-ranked
@@ -1316,59 +1368,45 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
             bool localIsParticipant = !string.IsNullOrEmpty(myId)
                 && (myId == s.p1_steam_id || myId == s.p2_steam_id);
 
-            // Three exclusive states for the right side of the row:
-            //   1. The user already bet on this series - show the bet status, hide buttons.
-            //   2. Bets are locked (game past 2 points or game 1 finished) - show locked tag.
-            //   3. User is a participant - "your match" tag.
-            //   4. Otherwise: show the wager buttons.
+            // One label carrying name+odds AND any status suffix, so a status tag
+            // can't overlap the odds number (the overlap bug). Open state: label
+            // then buttons. Bet/locked/self states: status folded into the label.
             var existing = ApiClient.GetMyBetForSeries(s.series_id);
-
-            // Wider text element + disable wrap; truncate name to 10 so "Bet on <name> @1.0x:"
-            // fits even with the longest names. Was 180w with 12-char truncation -> wrapped on
-            // "bobbyjoe122333" rows.
-            var betLabel = UIFactory.CreateText("bl", row.transform,
-                $"Bet on <b>{Trunc(name, 10)}</b> @{odds:F1}x:",
-                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 22));
-            UIFactory.SetWordWrap(betLabel, false);
-
             if (existing != null)
             {
-                // Only display on the "side" the user actually bet on - the other side stays
-                // showing odds (so they can still see the live odds change as scores update).
                 bool betOnThisSide = existing.bet_on_steam_id == steamId;
-                if (betOnThisSide)
-                {
-                    var t = UIFactory.CreateText("mybet", row.transform,
-                        $"<color=#FFD94D>You bet {existing.amount}g</color>",
-                        14f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(170, 22));
-                    UIFactory.SetBold(t, true);
-                }
-                else
-                {
-                    UIFactory.CreateText("notbet", row.transform,
-                        "<color=#666>-</color>",
-                        14f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(170, 22));
-                }
+                string suffix = betOnThisSide
+                    ? $"  <color=#FFD94D><b>You bet {existing.amount}g</b></color>"
+                    : "";  // other side stays plain so live odds still read
+                var t = UIFactory.CreateText("bl", row.transform,
+                    $"<b>{Trunc(name, 10)}</b> @{odds:F1}x{suffix}",
+                    13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+                UIFactory.SetWordWrap(t, false);
                 return;
             }
-
             if (s.bets_locked)
             {
                 string lockMsg = s.lock_reason == "no_meaningful_odds"
-                    ? "<color=#A07744><i>odds too uncertain</i></color>"
-                    : "<color=#A07744><i>betting period over</i></color>";
-                UIFactory.CreateText("locked", row.transform, lockMsg,
-                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 22));
+                    ? "odds too uncertain"
+                    : "betting period over";
+                var t = UIFactory.CreateText("bl", row.transform,
+                    $"<b>{Trunc(name, 10)}</b> @{odds:F1}x  <color=#A07744><i>{lockMsg}</i></color>",
+                    13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+                UIFactory.SetWordWrap(t, false);
                 return;
             }
-
             if (localIsParticipant)
             {
-                UIFactory.CreateText("self", row.transform,
-                    "<color=#AA9955><i>your match</i></color>",
-                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(140, 22));
+                var t = UIFactory.CreateText("bl", row.transform,
+                    $"<b>{Trunc(name, 10)}</b> @{odds:F1}x  <color=#AA9955><i>your match</i></color>",
+                    13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+                UIFactory.SetWordWrap(t, false);
                 return;
             }
+            var betLabel = UIFactory.CreateText("bl", row.transform,
+                $"Bet on <b>{Trunc(name, 10)}</b> @{odds:F1}x:",
+                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(240, 22));
+            UIFactory.SetWordWrap(betLabel, false);
 
             AddBetButton(row.transform, s.series_id, steamId, 100);
             AddBetButton(row.transform, s.series_id, steamId, 500);
@@ -1378,12 +1416,14 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
         // 2v2 live-series row builders (parallel to ApplyHeaderRow / ApplyBetRow).
         private static void ApplyTeamHeaderRow(GameObject row, ApiClient.ActiveTeamSeriesEntry s)
         {
+            // Show each player's ACTUAL 2v2 rating (was the team average for both,
+            // which read as "1500 for all 4"). Format: "Name(elo)+Name(elo)".
             string line = $"<color=#FFB347>2v2</color>  " +
-                          $"<color=#AAF>{Trunc(s.t1a_name, 8)}+{Trunc(s.t1b_name, 8)}</color> ({s.t1_rating})  " +
+                          $"<color=#AAF>{Trunc(s.t1a_name, 7)}({s.t1a_rating})+{Trunc(s.t1b_name, 7)}({s.t1b_rating})</color>  " +
                           $"<b>{s.t1_wins}-{s.t2_wins}</b>  " +
-                          $"<color=#FAA>{Trunc(s.t2a_name, 8)}+{Trunc(s.t2b_name, 8)}</color> ({s.t2_rating})";
+                          $"<color=#FAA>{Trunc(s.t2a_name, 7)}({s.t2a_rating})+{Trunc(s.t2b_name, 7)}({s.t2b_rating})</color>";
             var t = UIFactory.CreateText("hdr", row.transform, line,
-                14f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(420, 24));
+                14f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 24));
             UIFactory.SetWordWrap(t, false);
             UIFactory.SetBold(t, true);
         }
@@ -1399,27 +1439,34 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
             bool localIsParticipant = !string.IsNullOrEmpty(myId)
                 && (myId == s.t1a_steam || myId == s.t1b_steam || myId == s.t2a_steam || myId == s.t2b_steam);
 
-            var betLabel = UIFactory.CreateText("tbl", row.transform,
-                $"Bet on <b>{teamLabel}</b> @{odds:F1}x:",
-                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 22));
-            UIFactory.SetWordWrap(betLabel, false);
-
+            // Single label that carries BOTH the team + odds AND any status suffix,
+            // so a locked/self state can never paint over the odds number (the
+            // overlap bug — previously a second text element was layered on top of
+            // the odds-bearing label in the same HLG row). When locked/self, the
+            // status is appended INTO this one label; when open, the buttons follow.
             if (s.bets_locked)
             {
                 string lockMsg = s.lock_reason == "no_meaningful_odds"
-                    ? "<color=#A07744><i>odds too uncertain</i></color>"
-                    : "<color=#A07744><i>betting period over</i></color>";
-                UIFactory.CreateText("tlocked", row.transform, lockMsg,
-                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(220, 22));
+                    ? "odds too uncertain"
+                    : "betting period over";
+                var lbl = UIFactory.CreateText("tbl", row.transform,
+                    $"<b>{teamLabel}</b> @{odds:F1}x  <color=#A07744><i>{lockMsg}</i></color>",
+                    13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+                UIFactory.SetWordWrap(lbl, false);
                 return;
             }
             if (localIsParticipant)
             {
-                UIFactory.CreateText("tself", row.transform,
-                    "<color=#AA9955><i>your match</i></color>",
-                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(140, 22));
+                var lbl = UIFactory.CreateText("tbl", row.transform,
+                    $"<b>{teamLabel}</b> @{odds:F1}x  <color=#AA9955><i>your match</i></color>",
+                    13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+                UIFactory.SetWordWrap(lbl, false);
                 return;
             }
+            var betLabel = UIFactory.CreateText("tbl", row.transform,
+                $"Bet on <b>{teamLabel}</b> @{odds:F1}x:",
+                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(240, 22));
+            UIFactory.SetWordWrap(betLabel, false);
             AddTeamBetButton(row.transform, s.series_id, team, 100);
             AddTeamBetButton(row.transform, s.series_id, team, 500);
             AddTeamBetButton(row.transform, s.series_id, team, 2000);
@@ -1475,6 +1522,7 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
         // -- Shop Tab -------------------------------------------
         private static object txtShopBalance, txtShopStatus;
         private static GameObject shopRowsContainer, shopTitlesHeader, shopTrailsHeader, shopColorsHeader, shopNametagsHeader, shopPColorsHeader;
+        private static GameObject shopCursorHeader, shopEffectsHeader, shopOtherHeader;
         // Shop category filter: 0=All, 1=Titles, 2=Trails, 3=Map Colors, 4=Name Styles.
         // Clicking a tab narrows the scroll view to that category so users don't have to
         // scroll through 90+ items to find one kind. Each tab has a description shown
@@ -1483,7 +1531,9 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
         private static GameObject[] shopTabBtns;
         private static object[] shopTabTexts;
         private static object txtShopCategoryDesc;
-        private static readonly string[] SHOP_TAB_NAMES = { "All", "Titles", "Trails", "Maps", "Name Styles", "Body Color" };
+        // Index order MUST match the filter switch in RefreshShop:
+        // 0 All, 1 Titles, 2 Trails, 3 Maps, 4 Name Styles, 5 Body Color, 6 Cursor, 7 Effects, 8 Other.
+        private static readonly string[] SHOP_TAB_NAMES = { "All", "Titles", "Trails", "Maps", "Name Styles", "Body Color", "Cursor", "Effects", "Other" };
         private static readonly string[] SHOP_TAB_DESCS = {
             "All cosmetics - everything available, grouped by category.",
             "Flair text shown next to your name on the leaderboard, match history, and in chat.",
@@ -1491,6 +1541,9 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
             "Map color schemes. Equip as many as you like and cycle between your owned colors with Left Shift in-game.",
             "Bold, italic, underline, strikethrough, and color/size modifiers applied to your player nametag in lobbies and matches. Visible to every player, modded or not.",
             "Override the default orange/blue team color with a tint of your choice. Only visible to modded players. Premium tiers (Prismatic, Chrome) animate during combat.",
+            "Mouse-cursor color tint (local-only). Pick the cursor SHAPE — arrow, dot, crosshair, circle — in Settings; the tint colors whichever shape you choose.",
+            "In-combat particle aura around your character. Only visible to modded players.",
+            "Utility unlocks (e.g. hide your gold total on the leaderboard).",
         };
         private static List<GameObject> shopRowPool = new List<GameObject>();
         // Per-row glow-preview state. NametagGlowRenderer.ApplyGlowToLabel caches the unmodified
@@ -1588,6 +1641,12 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                 "<color=#FFB0E0>=  NAME STYLES  =</color>");
             shopPColorsHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHPC",
                 "<color=#FFA070>=  BODY COLORS  =</color>");
+            shopCursorHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHCur",
+                "<color=#9AD0FF>=  CURSOR COLORS  =</color>");
+            shopEffectsHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHEf",
+                "<color=#C8A0FF>=  PLAYER EFFECTS  =</color>");
+            shopOtherHeader = CreateSectionHeader(shopRowsContainer.transform, "SHHOt",
+                "<color=#FFD94D>=  OTHER  =</color>");
 
             // Pre-allocate 80 item rows; reused on refresh. v1.22.x nametag expansion pushes
             // total shop items past 65 (16 titles + 12 trails + 22 colors + 17 nametags = 67),
@@ -1797,6 +1856,22 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                                 cached.active_player_color_hex = same ? null : itemColor;
                                 cached.active_player_color_name = same ? null : itemName;
                             }
+                            else if (kind == "cursor_color")
+                            {
+                                bool same = cached.active_cursor_color_sku == itemSku;
+                                cached.active_cursor_color_sku = same ? null : itemSku;
+                                cached.active_cursor_color_hex = same ? null : itemColor;
+                            }
+                            else if (kind == "player_effect")
+                            {
+                                bool same = cached.active_player_effect_sku == itemSku;
+                                cached.active_player_effect_sku = same ? null : itemSku;
+                            }
+                            else if (kind == "utility")
+                            {
+                                // Hide Gold toggle — flip the cached flag for instant UI feedback.
+                                cached.hide_gold = !cached.hide_gold;
+                            }
                             dirty = true;
                         }
 
@@ -1820,11 +1895,38 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                                     try { PlayerColorCosmetic.OnMatchEnd(); PlayerColorCosmetic.OnMatchStart(); } catch { }
                                 }
                             }
+                            // Player effect: re-publish + re-apply mid-match so the aura swaps live.
+                            if (ok && kind == "player_effect")
+                            {
+                                try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }
+                                if (GameStateWatcher.IsInMatch)
+                                {
+                                    try { PlayerEffectCosmetic.OnMatchEnd(); PlayerEffectCosmetic.OnMatchStart(); } catch { }
+                                }
+                            }
+                            // Cursor color: local-only — re-apply the tinted hardware cursor immediately.
+                            if (ok && kind == "cursor_color")
+                            {
+                                try { CursorColorCosmetic.ApplyFromStats(); } catch { }
+                            }
                         };
                         if (kind == "trail") ApiClient.SetActiveTrail(id, apiItemId, cb);
                         else if (kind == "color") ApiClient.ToggleMapColor(id, r.itemId, cb);
                         else if (kind == "nametag") ApiClient.ToggleNametagStyle(id, r.itemId, cb);
-                        else if (kind == "player_color") ApiClient.SetActivePlayerColor(id, r.itemId, cb);
+                        else if (kind == "player_color")
+                            // After the optimistic toggle, cached holds post-click state: sku still
+                            // set → equipped (send itemId); cleared → unequipped (send 0). Without
+                            // this check unequip sent the item_id back and the server re-equipped it,
+                            // so the body color reverted after a second / on refresh (lopi's report).
+                            ApiClient.SetActivePlayerColor(id, (cached != null && cached.active_player_color_sku == itemSku) ? r.itemId : 0L, cb);
+                        else if (kind == "cursor_color")
+                            // After the optimistic toggle, cached holds post-click state: sku still
+                            // set → equipped (send itemId); cleared → unequipped (send 0).
+                            ApiClient.SetActiveCursorColor(id, (cached != null && cached.active_cursor_color_sku == itemSku) ? r.itemId : 0L, cb);
+                        else if (kind == "player_effect")
+                            ApiClient.SetActivePlayerEffect(id, (cached != null && cached.active_player_effect_sku == itemSku) ? r.itemId : 0L, cb);
+                        else if (kind == "utility")
+                            ApiClient.SetHideGold(id, cached != null && cached.hide_gold, cb);
                         else ApiClient.SetActiveTitle(id, apiItemId, cb);
                     }
                     catch (Exception ex) { Plugin.Log.LogError($"[SHOP] setActive threw: {ex}"); }
@@ -1871,6 +1973,9 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
             var colors = new List<ApiClient.ShopItemData>();
             var nametags = new List<ApiClient.ShopItemData>();
             var pcolors = new List<ApiClient.ShopItemData>();
+            var cursors = new List<ApiClient.ShopItemData>();
+            var effects = new List<ApiClient.ShopItemData>();
+            var others = new List<ApiClient.ShopItemData>();
             if (rawItems != null)
             {
                 foreach (var it in rawItems)
@@ -1879,6 +1984,9 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                     else if (it.kind == "color") colors.Add(it);
                     else if (it.kind == "nametag") nametags.Add(it);
                     else if (it.kind == "player_color") pcolors.Add(it);
+                    else if (it.kind == "cursor_color") cursors.Add(it);
+                    else if (it.kind == "player_effect") effects.Add(it);
+                    else if (it.kind == "utility") others.Add(it);
                     else titles.Add(it);
                 }
                 titles.Sort((a, b) => a.price.CompareTo(b.price));
@@ -1916,19 +2024,25 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                     return string.Compare(a.name, b.name, StringComparison.OrdinalIgnoreCase);
                 });
                 pcolors.Sort((a, b) => a.price.CompareTo(b.price));
+                cursors.Sort((a, b) => a.price.CompareTo(b.price));
+                effects.Sort((a, b) => a.price.CompareTo(b.price));
+                others.Sort((a, b) => a.price.CompareTo(b.price));
             }
             var sorted = new List<ApiClient.ShopItemData>();
             // Apply tab filter: keep only items matching the active category. Tab 0=All
-            // keeps every list; 1..5 zero out the non-matching lists so the render loop
-            // skips them and their section headers hide via the if(count>0) gate below.
-            switch (shopCategoryFilter)
+            // keeps every list; any other tab keeps ONLY its own list so the render loop
+            // skips the rest and their section headers hide via the if(count>0) gate.
+            // 1 Titles, 2 Trails, 3 Maps, 4 Name Styles, 5 Body Color, 6 Cursor, 7 Effects, 8 Other.
+            if (shopCategoryFilter != 0)
             {
-                case 1: trails.Clear(); colors.Clear(); nametags.Clear(); pcolors.Clear(); break;  // Titles only
-                case 2: titles.Clear(); colors.Clear(); nametags.Clear(); pcolors.Clear(); break;  // Trails only
-                case 3: titles.Clear(); trails.Clear(); nametags.Clear(); pcolors.Clear(); break;  // Maps only
-                case 4: titles.Clear(); trails.Clear(); colors.Clear();   pcolors.Clear(); break;  // Name Styles only
-                case 5: titles.Clear(); trails.Clear(); colors.Clear();   nametags.Clear(); break; // Body Color only
-                default: break;  // 0 = All, no filter
+                if (shopCategoryFilter != 1) titles.Clear();
+                if (shopCategoryFilter != 2) trails.Clear();
+                if (shopCategoryFilter != 3) colors.Clear();
+                if (shopCategoryFilter != 4) nametags.Clear();
+                if (shopCategoryFilter != 5) pcolors.Clear();
+                if (shopCategoryFilter != 6) cursors.Clear();
+                if (shopCategoryFilter != 7) effects.Clear();
+                if (shopCategoryFilter != 8) others.Clear();
             }
 
             sorted.AddRange(titles);
@@ -1936,6 +2050,9 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
             sorted.AddRange(colors);
             sorted.AddRange(nametags);
             sorted.AddRange(pcolors);
+            sorted.AddRange(cursors);
+            sorted.AddRange(effects);
+            sorted.AddRange(others);
 
             // Slot ordering inside the container (VLG renders in sibling order):
             //   [Titles header][title rows...][Trails header][trail rows...][Colors header][color rows...]
@@ -1998,6 +2115,42 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
             for (int i = 0; i < pcolors.Count && rowIdx < shopRows.Count; i++, rowIdx++)
             {
                 ApplyShopRow(shopRows[rowIdx], pcolors[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (cursors.Count > 0 && shopCursorHeader != null)
+            {
+                shopCursorHeader.SetActive(true);
+                shopCursorHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopCursorHeader != null) shopCursorHeader.SetActive(false);
+            for (int i = 0; i < cursors.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], cursors[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (effects.Count > 0 && shopEffectsHeader != null)
+            {
+                shopEffectsHeader.SetActive(true);
+                shopEffectsHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopEffectsHeader != null) shopEffectsHeader.SetActive(false);
+            for (int i = 0; i < effects.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], effects[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (others.Count > 0 && shopOtherHeader != null)
+            {
+                shopOtherHeader.SetActive(true);
+                shopOtherHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopOtherHeader != null) shopOtherHeader.SetActive(false);
+            for (int i = 0; i < others.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], others[i], balance, s);
                 shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
             }
 
@@ -2072,7 +2225,7 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                     ? new Color(0.25f, 0.45f, 0.18f, 0.9f)
                     : new Color(0.25f, 0.25f, 0.28f, 0.8f));
             }
-            r.setActiveBtn.SetActive(ownsThis && (it.kind == "title" || it.kind == "trail" || it.kind == "color" || it.kind == "nametag" || it.kind == "player_color"));
+            r.setActiveBtn.SetActive(ownsThis && (it.kind == "title" || it.kind == "trail" || it.kind == "color" || it.kind == "nametag" || it.kind == "player_color" || it.kind == "cursor_color" || it.kind == "player_effect" || it.kind == "utility"));
             bool isActiveTitle = s != null && it.kind == "title" && s.active_title == it.name;
             bool isActiveTrail = s != null && it.kind == "trail" && s.active_trail_sku == it.sku;
             bool isActiveColor = s != null && it.kind == "color"
@@ -2080,7 +2233,12 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
             bool isActiveNametag = s != null && it.kind == "nametag" && s.active_nametag_skus != null
                 && s.active_nametag_skus.Contains(it.sku);
             bool isActivePlayerColor = s != null && it.kind == "player_color" && s.active_player_color_sku == it.sku;
-            bool isActive = isActiveTitle || isActiveTrail || isActiveColor || isActiveNametag || isActivePlayerColor;
+            bool isActiveCursor = s != null && it.kind == "cursor_color" && s.active_cursor_color_sku == it.sku;
+            bool isActiveEffect = s != null && it.kind == "player_effect" && s.active_player_effect_sku == it.sku;
+            // Utility (hide-gold) is a stateful toggle, not an equip — "active" means the mask is ON.
+            bool isActiveUtility = s != null && it.kind == "utility" && it.sku == "util_hide_gold" && s.hide_gold;
+            bool isActive = isActiveTitle || isActiveTrail || isActiveColor || isActiveNametag
+                || isActivePlayerColor || isActiveCursor || isActiveEffect || isActiveUtility;
             if (r.setActiveBtn != null)
             {
                 UIFactory.SetImageColor(r.setActiveBtn, isActive
@@ -2089,13 +2247,19 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                 var txtComp = UIFactory.GetButtonText(r.setActiveBtn);
                 // Colors are multi-equip (cycle via Shift) and nametags are stackable so
                 // their "active" label is "Remove" - clicking removes from the equipped set.
-                // Titles/trails/player-colors are single-active; clicking the equipped one
-                // unequips it so the player can run with no title / no trail / default body.
+                // Titles/trails/player-colors/cursor/effects are single-active; clicking the
+                // equipped one unequips it. Utility (hide-gold) is a plain on/off toggle.
                 bool isMultiEquip = it.kind == "nametag" || it.kind == "color";
-                if (txtComp != null) UIFactory.SetText(txtComp,
-                    isActive
-                        ? (isMultiEquip ? "Remove" : "Unequip")
-                        : (isMultiEquip ? "Equip" : "Set Active"));
+                if (txtComp != null)
+                {
+                    if (it.kind == "utility")
+                        UIFactory.SetText(txtComp, isActiveUtility ? "Show Gold" : "Hide Gold");
+                    else
+                        UIFactory.SetText(txtComp,
+                            isActive
+                                ? (isMultiEquip ? "Remove" : "Unequip")
+                                : (isMultiEquip ? "Equip" : "Set Active"));
+                }
             }
 
             // Preview button - trails only. Stash the color + price on the row so the click
@@ -2123,8 +2287,8 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
         // -- Settings Tab ----------------------------------------
         private static object txtConsentStatus, txtDeleteStatus;
         private static GameObject consentToggleBtn, deleteBtn, confirmDeleteBtn, cancelDelBtn, notifToggleBtn;
-        private static GameObject fpsToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn;
-        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt;
+        private static GameObject fpsToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn;
+        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt;
         // v1.26.8 perf-pass toggles. Master + 7 per-patch flags; renders in a
         // collapsible section at the bottom of the Settings panel.
         private static GameObject perfMasterBtn, perfStunBtn, perfBulletsBtn, perfHitSndBtn, perfColorGhBtn, perfEdgeBnBtn, perfTagBtn, perfMenuBtn;
@@ -2245,6 +2409,11 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                     dirty = true;
                 });
             ingameChatToggleTxt = UIFactory.GetButtonText(ingameChatToggleBtn);
+            // Cursor shape cycler (local-only). Combines with the equipped cursor color.
+            cursorShapeBtn = SettingsButton(dispBox.transform, "SCursor", "",
+                C_WHITE, C_BTN, new Vector2(260, 28),
+                () => { CursorColorCosmetic.CycleShape(); dirty = true; });
+            cursorShapeTxt = UIFactory.GetButtonText(cursorShapeBtn);
             trailToggleBtn = SettingsButton(dispBox.transform, "STrail", "",
                 C_WHITE, C_BTN, new Vector2(260, 28),
                 () =>
@@ -2289,6 +2458,7 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                     Plugin.Log.LogInfo("[SETTINGS] Custom player colors toggled");
                     Plugin.ShowPlayerColors.Value = !Plugin.ShowPlayerColors.Value;
                     try { PlayerColorCosmetic.OnShowPlayerColorsToggled(); } catch { }
+                    try { PlayerEffectCosmetic.OnShowPlayerColorsToggled(); } catch { }
                     dirty = true;
                 });
             playerColorToggleTxt = UIFactory.GetButtonText(playerColorToggleBtn);
@@ -2533,6 +2703,9 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                     Plugin.ShowIngameChat.Value
                         ? "In-game chat overlay: <color=#88FF88>ON</color>"
                         : "In-game chat overlay: <color=#FF9966>OFF</color>");
+            if (cursorShapeTxt != null)
+                UIFactory.SetText(cursorShapeTxt,
+                    $"Cursor: <color=#88CCFF>{CursorColorCosmetic.CurrentShapeLabel()}</color>");
             if (trailToggleTxt != null && Plugin.ShowTrails != null)
                 UIFactory.SetText(trailToggleTxt,
                     Plugin.ShowTrails.Value
@@ -2777,12 +2950,12 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
 
         private static void RefreshSession(){int games=GameStateWatcher.SessionMatchCount;bool inRoom=GameStateWatcher.IsInRoom;string oppSteamId=GameStateWatcher.OpponentSteamId;string oppName=GameStateWatcher.OpponentDisplayName;var history=ApiClient.CachedMatchHistory;/* Show opponent lifetime record when in room */if(inRoom&&!string.IsNullOrEmpty(oppSteamId)&&!oppSteamId.StartsWith("photon_")&&history!=null){int ltW=0,ltL=0;string lastPlayed="";foreach(var m in history){if(m.opponent_steam_id==oppSteamId){if(m.won)ltW++;else ltL++;if(string.IsNullOrEmpty(lastPlayed)){try{lastPlayed=DateTime.Parse(m.ended_at).ToString("M/d/yyyy");}catch{}}}}if(ltW+ltL>0){string col=ltW>ltL?"#00FF00":ltW<ltL?"#FF6666":"#AAAAAA";UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  <color={col}>{ltW}W-{ltL}L lifetime</color>  (last: {lastPlayed})");}else{UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  First time playing!");}UIFactory.SetColor(txtSessionOppLifetime,new Color(0.6f,0.75f,1f));}else if(inRoom&&!string.IsNullOrEmpty(oppName)&&oppName!="Opponent"){UIFactory.SetText(txtSessionOppLifetime,$"  In room with {oppName}");UIFactory.SetColor(txtSessionOppLifetime,C_DIM);}else{UIFactory.SetText(txtSessionOppLifetime,"");}if(games<=0){UIFactory.SetText(txtSessionSum,inRoom?"In game - no results yet":"No games this session");UIFactory.SetColor(txtSessionSum,C_DIM);UIFactory.SetText(txtSessionSplit,"");UIFactory.SetText(txtSessionSweeps,"");return;}int mins=(int)(DateTime.UtcNow-GameStateWatcher.SessionStartTime).TotalMinutes;string time=mins>=60?$"{mins/60}h {mins%60}m":$"{mins}m";int rw=GameStateWatcher.SessionRankedWins,rl=GameStateWatcher.SessionRankedLosses,cw=GameStateWatcher.SessionCasualWins,cl=GameStateWatcher.SessionCasualLosses;int t2w=GameStateWatcher.SessionTeamSeriesWins,t2l=GameStateWatcher.SessionTeamSeriesLosses;int sesSweepG=0,sesSweepT=0;if(history!=null){var sesStart=GameStateWatcher.SessionStartTime;foreach(var m in history){DateTime mTime=DateTime.UtcNow;try{if(!string.IsNullOrEmpty(m.ended_at))mTime=DateTime.Parse(m.ended_at).ToUniversalTime();}catch{}if(mTime<sesStart)continue;if(m.won&&m.opponent_rounds_won==0)sesSweepG++;if(!m.won&&m.player_rounds_won==0)sesSweepT++;}}UIFactory.SetText(txtSessionSum,$"{games} games    {rw+cw}W - {rl+cl}L    {time}");UIFactory.SetColor(txtSessionSum,C_WHITE);string splitLine="";var splitParts=new List<string>();if(rw+rl>0)splitParts.Add($"<color=#FFD94D>Ranked:</color> {rw}W/{rl}L");if(t2w+t2l>0)splitParts.Add($"<color=#FFB347>2v2:</color> {t2w}W/{t2l}L");if(cw+cl>0)splitParts.Add($"Casual: {cw}W/{cl}L");if(splitParts.Count>0)splitLine="  "+string.Join("    ",splitParts.ToArray());UIFactory.SetText(txtSessionSplit,splitLine);if(sesSweepG+sesSweepT>0)UIFactory.SetText(txtSessionSweeps,$"  Sweeps: <color=#00FF00>5-0 x{sesSweepG}</color>  <color=#FF6666>0-5 x{sesSweepT}</color>");else UIFactory.SetText(txtSessionSweeps,"");var wl=GameStateWatcher.SessionWLByOpponent;var st=GameStateWatcher.SessionTimeByOpponent;int idx=0;if(wl!=null)foreach(var kvp in wl){int[]a=kvp.Value;if(a==null||a.Length<4)continue;int ow=a[0]+a[2],ol=a[1]+a[3];string line=$"  vs {kvp.Key}:  {ow}W-{ol}L";if(a[0]+a[1]>0&&a[2]+a[3]>0)line+=$"  (R:{a[0]}-{a[1]} C:{a[2]}-{a[3]})";if(st!=null&&st.ContainsKey(kvp.Key)){int m=(int)st[kvp.Key];line+=m>=60?$"   {m/60}h {m%60}m":$"   {m}m";}while(sessionOppTexts.Count<=idx)sessionOppTexts.Add(UIFactory.CreateText($"so{sessionOppTexts.Count}",sessionOppContainer.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22)));UIFactory.SetText(sessionOppTexts[idx],line);UIFactory.SetColor(sessionOppTexts[idx],ow>ol?C_GREEN:ow<ol?C_RED:C_DIM);var go=(sessionOppTexts[idx]as Component)?.gameObject;if(go)go.SetActive(true);idx++;}for(int i=idx;i<sessionOppTexts.Count;i++){var go=(sessionOppTexts[i]as Component)?.gameObject;if(go)go.SetActive(false);}}
 
-        private static void RefreshLeaderboard(){string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,14);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);UIFactory.SetText(row.txtRating,$"{e.rating}");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");bool sel=e.steam_id==selectedSteamId;UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):new Color(0.15f,0.15f,0.2f,0.01f));row.root.SetActive(true);}UIFactory.SetText(txtLBCount,$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string detail=$"\nRating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked: {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
+        private static void RefreshLeaderboard(){string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,14);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);UIFactory.SetText(row.txtRating,$"{e.rating}");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):new Color(0.15f,0.15f,0.2f,0.01f));row.root.SetActive(true);}UIFactory.SetText(txtLBCount,$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string detail=$"\nRating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked: {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
  * earlier client-side iteration over CachedMatchHistory which was
  * limited to the viewer's most-recent 500 matches and silently dropped
  * H2H rows for older opponents. */if(selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=ps.h2h_ranked_wins,h2hL=ps.h2h_ranked_losses,h2hCW=ps.h2h_casual_wins,h2hCL=ps.h2h_casual_losses,h2hSW=ps.h2h_series_wins,h2hSL=ps.h2h_series_losses;int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+=$"\n<b>vs You:</b> <color={h2hColor}>{h2hAll}W - {h2hAllL}L ({h2hAll+h2hAllL} games)</color>\n";if(h2hSW+h2hSL>0)detail+=$"  Ranked Series: {h2hSW}W / {h2hSL}L\n";if(h2hCW+h2hCL>0)detail+=$"  Casual: {h2hCW}W / {h2hCL}L\n";}}/* Mod version this player was last seen running (X-Mod-Version
  * header on their last mod-only API call). Helps testers tell at a
- * glance who's on a build that has a given fix. */if(!string.IsNullOrEmpty(ps.mod_version)){string mvCol=ps.mod_version==Plugin.ModVersion?"#88FF88":"#FFD94D";detail+=$"\n<color=#888>Mod:</color> <color={mvCol}>v{ps.mod_version}</color>\n";}else{detail+=$"\n<color=#888>Mod: <i>not detected</i></color>\n";}/* Top cards with win rates */if(ps.top_card_names!=null&&ps.top_card_names.Count>0){detail+="\n<color=#99AAEE>Top Cards:</color>\n";for(int ci=0;ci<ps.top_card_names.Count&&ci<8;ci++){string picks=ps.top_card_picks.Count>ci?$" ({ps.top_card_picks[ci]}x)":"";float wr=ps.top_card_win_rates!=null&&ps.top_card_win_rates.Count>ci?ps.top_card_win_rates[ci]*100f:0f;string wrCol=wr>=55?"#00FF00":wr<=45?"#FF6666":"#AAAAAA";detail+=$"  {ps.top_card_names[ci]}{picks}  <color={wrCol}>{wr:F0}%</color>\n";}}/* Tournament placements + recent results for the viewed player. Trophy counts stay inline (compact), recent list is capped to 4 rows so the detail doesn't grow off-screen. */if(ApiClient.CachedPlayerTournaments.TryGetValue(selectedSteamId,out var _tHist)&&_tHist!=null&&(_tHist.participant_count>0)){detail+="\n<color=#FFD94D>Tournaments:</color> ";detail+=$"<color=#FFE580>1stx{_tHist.winner_count}</color>  <color=#C8C8C8>2ndx{_tHist.runner_up_count}</color>  <color=#D4894A>3rdx{_tHist.third_place_count}</color>  <color=#888>(played {_tHist.participant_count})</color>\n";if(_tHist.recent!=null&&_tHist.recent.Length>0){int shown=0;foreach(var te in _tHist.recent){if(shown>=4)break;string dt=te.ended_at;try{if(!string.IsNullOrEmpty(dt))dt=TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at,null,System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),_ResolveTz()).ToString("M/d/yy");}catch{}string placeTxt=te.placed_rank==1?"<color=#FFE580>1st</color>":te.placed_rank==2?"<color=#C8C8C8>2nd</color>":te.placed_rank==3?"<color=#D4894A>3rd</color>":$"<color=#888>-</color>";detail+=$"  {dt}  {placeTxt}  <color=#888>({te.signup_count}p)</color>\n";shown++;}}}UIFactory.SetText(txtLBDetail,detail+GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Unblock from Ranked":"Block from Ranked");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}}else{UIFactory.SetText(txtLBPlayerName,"Click a player");UIFactory.SetText(txtLBDetail,"");BuildFormGraph(null,null);if(lbBlockRow!=null)lbBlockRow.SetActive(false);}}
+ * glance who's on a build that has a given fix. */if(!string.IsNullOrEmpty(ps.mod_version)){string mvCol=ps.mod_version==Plugin.ModVersion?"#88FF88":"#FFD94D";detail+=$"\n<color=#888>Mod:</color> <color={mvCol}>v{ps.mod_version}</color>\n";}else{detail+=$"\n<color=#888>Mod: <i>not detected</i></color>\n";}/* Top cards with win rates */if(ps.top_card_names!=null&&ps.top_card_names.Count>0){detail+="\n<color=#99AAEE>Top Cards:</color>\n";for(int ci=0;ci<ps.top_card_names.Count&&ci<8;ci++){string picks=ps.top_card_picks.Count>ci?$" ({ps.top_card_picks[ci]}x)":"";float wr=ps.top_card_win_rates!=null&&ps.top_card_win_rates.Count>ci?ps.top_card_win_rates[ci]*100f:0f;string wrCol=wr>=55?"#00FF00":wr<=45?"#FF6666":"#AAAAAA";detail+=$"  {ps.top_card_names[ci]}{picks}  <color={wrCol}>{wr:F0}%</color>\n";}}/* Tournament placements + recent results for the viewed player. Trophy counts stay inline (compact), recent list is capped to 4 rows so the detail doesn't grow off-screen. */if(ApiClient.CachedPlayerTournaments.TryGetValue(selectedSteamId,out var _tHist)&&_tHist!=null&&(_tHist.participant_count>0)){detail+="\n<color=#FFD94D>Tournaments:</color> ";detail+=$"<color=#FFE580>1stx{_tHist.winner_count}</color>  <color=#C8C8C8>2ndx{_tHist.runner_up_count}</color>  <color=#D4894A>3rdx{_tHist.third_place_count}</color>  <color=#888>(played {_tHist.participant_count})</color>\n";if(_tHist.recent!=null&&_tHist.recent.Length>0){int shown=0;foreach(var te in _tHist.recent){if(shown>=4)break;string dt=te.ended_at;try{if(!string.IsNullOrEmpty(dt))dt=TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at,null,System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),_ResolveTz()).ToString("M/d/yy");}catch{}string placeTxt=te.placed_rank==1?"<color=#FFE580>1st</color>":te.placed_rank==2?"<color=#C8C8C8>2nd</color>":te.placed_rank==3?"<color=#D4894A>3rd</color>":$"<color=#888>-</color>";detail+=$"  {dt}  {placeTxt}  <color=#888>({te.signup_count}p)</color>\n";shown++;}}}UIFactory.SetText(txtLBDetail,detail+BuildViewHistoryText()+GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Unblock from Ranked":"Block from Ranked");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}}else{UIFactory.SetText(txtLBPlayerName,"Click a player");UIFactory.SetText(txtLBDetail,"");BuildFormGraph(null,null);if(lbBlockRow!=null)lbBlockRow.SetActive(false);if(h2hPager!=null)h2hPager.SetActive(false);}}
 
         private static void BuildFormGraph(List<float> ratingHistory, List<string> form)
         {
@@ -2927,6 +3100,969 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
             // (skip end label if it would overlap Y-axis labels)
         }
 
+        // ── Compare tab (multi-player Elo / top-card comparison) ──────────────
+        private static GameObject comparePickerContent, compareGraphPanel, compareCardsScroll, compareCardsContent;
+        private static object txtCompareStatus, compareMetricBtnTxt, txtCompareCards;
+        private static GameObject compareMetricBtn;
+        // Metric index into COMPARE_METRICS. 0 = Elo-over-games graph; the rest are
+        // table metrics rendered into the text/cards scroll panel.
+        private static int compareMetric = 0;
+        private static readonly string[] COMPARE_METRICS = {
+            "Elo over games", "Top Cards", "Worst Cards", "Hit / Block %",
+            "Avg Cards / Game", "Avg FPS", "Peak Elo", "Total XP",
+            "Achievements", "Region Time",
+        };
+        private static string compareSearch = "";
+        // Exposed so CompetitiveUI's IMGUI search field (drawn over the Compare tab)
+        // can read/write the filter — the codebase does all text entry via IMGUI.
+        public static string CompareSearch { get { return compareSearch; } set { compareSearch = value ?? ""; } }
+        // Screen-space (IMGUI/GUI coordinate) Rect of the Compare search placeholder
+        // label, so CompetitiveUI can draw its IMGUI TextField exactly over it without
+        // re-deriving the menu layout. The overlay canvas is ScreenSpaceOverlay, so
+        // RectTransform world corners ARE screen pixels; IMGUI's Y is top-down, Unity's
+        // screen Y is bottom-up, so flip. Returns Rect.zero when unavailable.
+        public static Rect GetCompareSearchScreenRect()
+        {
+            try
+            {
+                var go = (compareSearchField as Component)?.gameObject;
+                if (go == null) return new Rect(0, 0, 0, 0);
+                var rt = go.GetComponent<RectTransform>();
+                if (rt == null) return new Rect(0, 0, 0, 0);
+                var c = new Vector3[4]; rt.GetWorldCorners(c); // 0=BL,1=TL,2=TR,3=BR
+                float x = c[0].x, w = c[2].x - c[0].x, h = c[1].y - c[0].y;
+                float guiY = Screen.height - c[1].y;
+                if (w < 1f || h < 1f) return new Rect(0, 0, 0, 0);
+                return new Rect(x, guiY, w, h);
+            }
+            catch { return new Rect(0, 0, 0, 0); }
+        }
+        private static object compareSearchField;  // status label (not a real input)
+        private const int COMPARE_MAX = 12;
+        private static readonly List<string> compareSelected = new List<string>();
+        private static readonly List<string> comparePickerSteamIds = new List<string>();
+        private static readonly List<GameObject> comparePickerRows = new List<GameObject>();
+        private static readonly List<object> comparePickerTexts = new List<object>();
+        private static readonly Dictionary<string, ApiClient.PlayerStatsData> compareStatsCache
+            = new Dictionary<string, ApiClient.PlayerStatsData>();
+        // 12 visually-distinct colors so up to COMPARE_MAX players each get a unique
+        // hue on the graphs/charts and matching picker swatch.
+        private static readonly Color[] COMPARE_COLORS = {
+            new Color(0.40f, 0.80f, 1.00f), // blue
+            new Color(1.00f, 0.50f, 0.40f), // red-orange
+            new Color(0.55f, 1.00f, 0.55f), // green
+            new Color(1.00f, 0.85f, 0.30f), // gold
+            new Color(0.80f, 0.55f, 1.00f), // violet
+            new Color(0.40f, 0.95f, 0.90f), // teal
+            new Color(1.00f, 0.65f, 0.85f), // pink
+            new Color(0.70f, 0.90f, 0.45f), // lime
+            new Color(1.00f, 0.78f, 0.45f), // amber
+            new Color(0.60f, 0.70f, 1.00f), // periwinkle
+            new Color(0.90f, 0.55f, 0.55f), // salmon
+            new Color(0.65f, 0.85f, 0.75f), // sage
+        };
+
+        private static GameObject BuildCompareTab(Transform parent)
+        {
+            var panel = new GameObject("Compare");
+            panel.transform.SetParent(parent, false);
+            panel.AddComponent<RectTransform>();
+            UIFactory.AddHLG(panel, spacing: 8);
+            UIFactory.AddLE(panel, flexH: 1);
+
+            // LEFT: player picker. Narrower than before (was 300/260) — lopi wanted
+            // it shorter width-wise; the freed horizontal space on the right belongs
+            // to the chart panel. Scroll works anywhere over the viewport now
+            // (CreateScrollView sets viewport raycastTarget).
+            var left = UIFactory.CreatePanel("CmpL", panel.transform, C_PANEL);
+            UIFactory.AddVLG(left, spacing: 4, padL: 8, padR: 8, padT: 6, padB: 6);
+            UIFactory.AddLE(left, prefW: 222, minW: 200, flexW: 0, flexH: 1);
+            UIFactory.CreateText("CmpLH", left.transform, "Compare Players", 19f, C_GOLD,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(204, 26));
+            txtCompareStatus = UIFactory.CreateText("CmpSt", left.transform, "Select up to 12 players",
+                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(204, 20));
+            // Static caption ABOVE the field. The field itself is the IMGUI box drawn by
+            // CompetitiveUI over the empty `compareSearchField` anchor below — keeping the
+            // anchor's TMP text EMPTY means only one layer of text shows in the box (was
+            // double-layered before: native label text behind the IMGUI field).
+            UIFactory.CreateText("CmpSearchCap", left.transform, "<color=#88AAFF>Search players</color>",
+                12f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(204, 16));
+            compareSearchField = UIFactory.CreateText("CmpSearchLbl", left.transform, "",
+                13f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(204, 22));
+            var btnRow = new GameObject("CmpBtns"); btnRow.transform.SetParent(left.transform, false);
+            btnRow.AddComponent<RectTransform>(); UIFactory.AddHLG(btnRow, spacing: 4, forceExpandH: true);
+            UIFactory.AddLE(btnRow, prefH: 24, flexH: 0);
+            var clrBtn = UIFactory.CreateButton("CmpClr", btnRow.transform, "Clear", 13f, C_WHITE,
+                new Color(0.4f, 0.2f, 0.2f, 0.9f), () => { compareSelected.Clear(); dirty = true; },
+                sizeDelta: new Vector2(120, 24));
+            UIFactory.AddLE(clrBtn, prefH: 24, flexW: 1, flexH: 0);
+            var clrSearchBtn = UIFactory.CreateButton("CmpClrS", btnRow.transform, "Clear search", 13f, C_WHITE,
+                new Color(0.25f, 0.3f, 0.4f, 0.9f), () => { compareSearch = ""; dirty = true; },
+                sizeDelta: new Vector2(120, 24));
+            UIFactory.AddLE(clrSearchBtn, prefH: 24, flexW: 1, flexH: 0);
+            // childForceExpandWidth:false → the row buttons keep their own (narrower)
+            // width and sit left-aligned, leaving a dead strip on the right of the picker
+            // that's still inside the scroll viewport. Sid can click/scroll there without
+            // selecting a player (the freed space stays in the picker, not handed to the
+            // right panel like the previous attempt).
+            var sv = UIFactory.CreateScrollView("CmpSV", left.transform, spacing: 2, childForceExpandWidth: false);
+            UIFactory.AddLE(sv.scrollGO, flexH: 1);
+            comparePickerContent = sv.content;
+
+            // RIGHT: metric toggle + graph + cards.
+            var right = UIFactory.CreatePanel("CmpR", panel.transform, C_PANEL);
+            UIFactory.AddVLG(right, spacing: 6, padL: 10, padR: 10, padT: 8, padB: 8);
+            UIFactory.AddLE(right, flexW: 1, flexH: 1);
+            var metricRow = new GameObject("CmpMetRow"); metricRow.transform.SetParent(right.transform, false);
+            metricRow.AddComponent<RectTransform>(); UIFactory.AddHLG(metricRow, spacing: 4, forceExpandH: true);
+            UIFactory.AddLE(metricRow, prefH: 30, flexH: 0);
+            var metricPrev = UIFactory.CreateButton("CmpMetP", metricRow.transform, "<", 15f, C_WHITE, C_TAB,
+                () => { compareMetric = (compareMetric - 1 + COMPARE_METRICS.Length) % COMPARE_METRICS.Length; dirty = true; },
+                sizeDelta: new Vector2(30, 30));
+            UIFactory.AddLE(metricPrev, prefW: 30, prefH: 30, flexW: 0, flexH: 0);
+            compareMetricBtn = UIFactory.CreateButton("CmpMet", metricRow.transform, "Metric: Elo over games",
+                15f, C_WHITE, C_TAB, () => { compareMetric = (compareMetric + 1) % COMPARE_METRICS.Length; dirty = true; },
+                sizeDelta: new Vector2(320, 30));
+            UIFactory.AddLE(compareMetricBtn, prefH: 30, flexW: 1, flexH: 0);
+            compareMetricBtnTxt = UIFactory.GetButtonText(compareMetricBtn);
+            var metricNext = UIFactory.CreateButton("CmpMetN", metricRow.transform, ">", 15f, C_WHITE, C_TAB,
+                () => { compareMetric = (compareMetric + 1) % COMPARE_METRICS.Length; dirty = true; },
+                sizeDelta: new Vector2(30, 30));
+            UIFactory.AddLE(metricNext, prefW: 30, prefH: 30, flexW: 0, flexH: 0);
+
+            // Chart plot — FILLS the right panel (was a fixed 640x320 that used ~1/4 of
+            // the space, forcing abbreviated/cut-off names). The chart math reads the
+            // RectTransform's actual size at render time (CompareChartSize) so it scales.
+            compareGraphPanel = new GameObject("CmpGraph");
+            compareGraphPanel.transform.SetParent(right.transform, false);
+            compareGraphPanel.AddComponent<RectTransform>();
+            UIFactory.AddLE(compareGraphPanel, flexW: 1, flexH: 1);
+            var gbg = compareGraphPanel.AddComponent(UIFactory.tImage);
+            UIFactory.tImage.GetProperty("color", BindingFlags.Public | BindingFlags.Instance)
+                ?.SetValue(gbg, new Color(0.08f, 0.09f, 0.12f, 0.7f));
+            if (UIFactory.tMask != null)
+            {
+                var gm = compareGraphPanel.AddComponent(UIFactory.tMask);
+                try { UIFactory.tMask.GetProperty("showMaskGraphic", BindingFlags.Public | BindingFlags.Instance)?.SetValue(gm, true); } catch {}
+            }
+
+            // Table-metric scroll (shown for every metric except the Elo graph).
+            // Used for Top/Worst Cards, Hit/Block %, Avg metrics, Peak Elo, XP,
+            // Achievements, Region time. Word-wrap on so the content height tracks
+            // the rendered text and the scroll actually scrolls (learnings #63).
+            var cardsSV = UIFactory.CreateScrollView("CmpCardsSV", right.transform, spacing: 0);
+            UIFactory.AddLE(cardsSV.scrollGO, flexH: 1);
+            compareCardsScroll = cardsSV.scrollGO;
+            compareCardsContent = cardsSV.content;
+            // txtCompareCards is the empty/loading message; the actual card data is
+            // rendered as a multi-column grid of per-player blocks (BuildCompareCardGrid)
+            // so 12 players wrap sideways instead of running off the bottom.
+            txtCompareCards = UIFactory.CreateText("CmpCards", cardsSV.content.transform, "",
+                15f, C_DIM, UIFactory.AlignTopLeft, sizeDelta: new Vector2(820, 24));
+            UIFactory.SetWordWrap(txtCompareCards, true);
+            UIFactory.SetTextAutoHeight(txtCompareCards);
+            // Scroll affordance — matches the 2v2 tab's pattern (codebase avoids
+            // real Unity Scrollbars). Tells the user the panel scrolls.
+            UIFactory.CreateText("CmpScrollHint", right.transform,
+                "<color=#777><i>scroll for more — hover the panel + mouse wheel</i></color>",
+                12f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(820, 16));
+
+            return panel;
+        }
+
+        private static void ToggleCompareSelect(int rowIdx)
+        {
+            if (rowIdx < 0 || rowIdx >= comparePickerSteamIds.Count) return;
+            string sid = comparePickerSteamIds[rowIdx];
+            if (string.IsNullOrEmpty(sid)) return;
+            if (compareSelected.Contains(sid))
+            {
+                compareSelected.Remove(sid);
+            }
+            else
+            {
+                if (compareSelected.Count >= COMPARE_MAX)
+                {
+                    CompetitiveUI.ShowNotification($"Max {COMPARE_MAX} players", new Color(1f, 0.6f, 0.3f));
+                    return;
+                }
+                compareSelected.Add(sid);
+                if (!compareStatsCache.ContainsKey(sid))
+                    ApiClient.FetchPlayerStatsForView(sid, (d) => { if (d != null) compareStatsCache[sid] = d; dirty = true; });
+            }
+            dirty = true;
+        }
+
+        private static void RefreshCompare()
+        {
+            if (ApiClient.CachedLeaderboard == null) ApiClient.FetchLeaderboard();
+            string metricName = COMPARE_METRICS[Math.Max(0, Math.Min(compareMetric, COMPARE_METRICS.Length - 1))];
+            if (compareMetricBtnTxt != null)
+                UIFactory.SetText(compareMetricBtnTxt, $"Metric: {metricName}   <color=#888>(click / use < >)</color>");
+            if (txtCompareStatus != null)
+                UIFactory.SetText(txtCompareStatus, $"Selected {compareSelected.Count}/{COMPARE_MAX}  -  click a player to add/remove");
+            // Keep the anchor label EMPTY — the IMGUI text field (CompetitiveUI.DrawCompareSearch)
+            // draws over it and shows the value/placeholder. Setting text here too caused the
+            // double-layered, hard-to-read box.
+            if (compareSearchField != null) UIFactory.SetText(compareSearchField, "");
+
+            // Build the picker list from the current leaderboard, filtered by the
+            // search box. comparePickerSteamIds[rowIdx] maps the VISIBLE row index to
+            // a steam_id so ToggleCompareSelect(rowIdx) resolves correctly.
+            var board = ApiClient.CachedLeaderboard;
+            var allEntries = (board != null && board.entries != null)
+                ? board.entries : new ApiClient.LeaderboardEntry[0];
+            string q = (compareSearch ?? "").Trim();
+            var shown = new List<ApiClient.LeaderboardEntry>();
+            foreach (var e in allEntries)
+            {
+                if (string.IsNullOrEmpty(q)
+                    || (e.display_name != null && e.display_name.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0))
+                    shown.Add(e);
+            }
+            int n = shown.Count;
+            while (comparePickerSteamIds.Count < n) comparePickerSteamIds.Add("");
+            for (int i = 0; i < n; i++)
+            {
+                var e = shown[i];
+                comparePickerSteamIds[i] = e.steam_id;
+                while (comparePickerRows.Count <= i)
+                {
+                    int idx = comparePickerRows.Count;
+                    var b = UIFactory.CreateButton($"cmpP{idx}", comparePickerContent.transform, "",
+                        13f, C_WHITE, C_TAB, () => ToggleCompareSelect(idx), sizeDelta: new Vector2(168, 24));
+                    UIFactory.AddLE(b, prefW: 168, prefH: 24, flexW: 0, flexH: 0);
+                    comparePickerRows.Add(b);
+                    comparePickerTexts.Add(UIFactory.GetButtonText(b));
+                }
+                var row = comparePickerRows[i];
+                row.SetActive(true);
+                bool sel = compareSelected.Contains(e.steam_id);
+                int selOrder = compareSelected.IndexOf(e.steam_id);
+                Color swatch = sel && selOrder >= 0 ? COMPARE_COLORS[selOrder % COMPARE_COLORS.Length] : C_LABEL;
+                string dot = sel ? $"<color=#{ColorToHex(swatch)}>[X]</color> " : "<color=#555>[ ]</color> ";
+                UIFactory.SetText(comparePickerTexts[i], $"{dot}{Trunc(e.display_name, 16)}  <color=#888>{e.rating}</color>");
+                UIFactory.SetImageColor(row, sel ? new Color(0.2f, 0.3f, 0.25f, 0.9f) : C_TAB);
+            }
+            for (int i = n; i < comparePickerRows.Count; i++) comparePickerRows[i].SetActive(false);
+
+            // Route each metric to the renderer that fits its data:
+            //   "Elo over games"      → line graph        (compareGraphPanel)
+            //   "Top/Worst Cards"     → multi-column grid  (compareCardsScroll)
+            //   everything else       → bar/grouped/stacked chart (compareGraphPanel)
+            bool isCards = metricName == "Top Cards" || metricName == "Worst Cards";
+            bool useGraphPanel = !isCards;
+            if (compareGraphPanel != null) compareGraphPanel.SetActive(useGraphPanel);
+            if (compareCardsScroll != null) compareCardsScroll.SetActive(isCards);
+
+            if (metricName == "Elo over games") BuildCompareGraph();
+            else if (isCards) BuildCompareCardGrid(metricName);
+            else BuildCompareBarChart(metricName);
+        }
+
+        private static string ColorToHex(Color c)
+        {
+            int r = Mathf.Clamp((int)(c.r * 255f), 0, 255);
+            int g = Mathf.Clamp((int)(c.g * 255f), 0, 255);
+            int b = Mathf.Clamp((int)(c.b * 255f), 0, 255);
+            return $"{r:X2}{g:X2}{b:X2}";
+        }
+
+        private static void BuildCompareGraph()
+        {
+            if (compareGraphPanel == null) return;
+            for (int c = compareGraphPanel.transform.childCount - 1; c >= 0; c--)
+                UnityEngine.Object.Destroy(compareGraphPanel.transform.GetChild(c).gameObject);
+
+            // Gather each selected player's Elo-over-games series from cache.
+            var names = new List<string>();
+            var cols = new List<Color>();
+            var seriesList = new List<float[]>();
+            for (int i = 0; i < compareSelected.Count; i++)
+            {
+                string sid = compareSelected[i];
+                if (!compareStatsCache.TryGetValue(sid, out var ps) || ps == null) continue;
+                if (ps.rating_history == null || ps.rating_history.Count < 2) continue;
+                names.Add(Trunc(ps.display_name ?? "?", 14));
+                cols.Add(COMPARE_COLORS[i % COMPARE_COLORS.Length]);
+                seriesList.Add(ps.rating_history.ToArray());
+            }
+
+            CompareChartSize(out float W, out float H);
+            float padL = 56f, padR = 16f, padT = 30f, padB = 26f;
+            float plotW = W - padL - padR, plotH = H - padT - padB;
+
+            if (seriesList.Count == 0)
+            {
+                var msg = UIFactory.CreateText("CmpNone", compareGraphPanel.transform,
+                    "<color=#888>Select 2+ players with ranked history to compare Elo.</color>",
+                    15f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(W - 20, 40));
+                var mrt = (msg as Component)?.gameObject.GetComponent<RectTransform>();
+                if (mrt != null) { mrt.anchorMin = new Vector2(0.5f, 0.5f); mrt.anchorMax = new Vector2(0.5f, 0.5f); mrt.anchoredPosition = Vector2.zero; }
+                var mle = (msg as Component)?.gameObject.GetComponent(UIFactory.tLE);
+                if (mle != null) UnityEngine.Object.Destroy(mle as UnityEngine.Object);
+                return;
+            }
+
+            // Global Y range + max length (X = game index, shared across players).
+            float minV = float.MaxValue, maxV = float.MinValue; int maxLen = 0;
+            foreach (var s in seriesList)
+            {
+                if (s.Length > maxLen) maxLen = s.Length;
+                foreach (var v in s) { if (v < minV) minV = v; if (v > maxV) maxV = v; }
+            }
+            if (maxLen < 2) maxLen = 2;
+            // Round the Y range to clean Elo numbers (e.g. 1400, 1500, … 1900) instead of
+            // padded fractions like 1437→1913 with a label at 2185. Snap min DOWN and max
+            // UP to a nice step, then label every step.
+            float rawRange = Mathf.Max(1f, maxV - minV);
+            float step = NiceStep(rawRange / 4f);
+            float gMin = Mathf.Floor(minV / step) * step;
+            float gMax = Mathf.Ceil(maxV / step) * step;
+            if (gMax - gMin < step) gMax = gMin + step;
+            minV = gMin; maxV = gMax; float range = maxV - minV;
+
+            // Y-axis: a gridline + clean Elo label at every step.
+            int yDivs = Mathf.Clamp(Mathf.RoundToInt(range / step), 2, 8);
+            for (int gi = 0; gi <= yDivs; gi++)
+            {
+                float val = gMin + gi * step;
+                if (val > gMax + 0.5f) break;
+                float yy = padB + (val - gMin) / range * plotH;
+                DrawBar($"CmpYGrid{gi}", padL, yy, plotW, 1f, new Color(1f, 1f, 1f, 0.10f));
+                MakeGraphLabel($"CmpYLbl{gi}", $"<color=#999>{FullNum(val)}</color>",
+                    new Vector2(0, 0), new Vector2(padL - 4f, yy - 6f), new Vector2(50, 12), UIFactory.AlignMidRight);
+            }
+            MakeGraphLabel("CmpXLbl", "<color=#888>games -></color>", new Vector2(1, 0), new Vector2(-padR, padB - 14f), new Vector2(90, 12), UIFactory.AlignMidRight);
+
+            // Draw each player's line + legend chip (full names — there's room now).
+            for (int si = 0; si < seriesList.Count; si++)
+            {
+                var pts = seriesList[si];
+                Color col = cols[si];
+                for (int j = 0; j < pts.Length - 1; j++)
+                {
+                    float x1 = padL + (float)j / (maxLen - 1) * plotW;
+                    float y1 = padB + (pts[j] - minV) / range * plotH;
+                    float x2 = padL + (float)(j + 1) / (maxLen - 1) * plotW;
+                    float y2 = padB + (pts[j + 1] - minV) / range * plotH;
+                    DrawGraphSegment($"CmpL{si}_{j}", x1, y1, x2, y2, col, 2f);
+                }
+                // Legend: a SOLID colored line swatch (matches the player's graph line)
+                // + their name. The old "--" dashes were too thin to read as a color.
+                int perRow = 3;
+                float colW = plotW / perRow;
+                float lx = padL + (si % perRow) * colW;
+                float ly = -2f - (si / perRow) * 16f;
+                // Swatch line sits in the panel's top band; convert top-anchored ly to a
+                // bottom-left y for DrawGraphSegment (it anchors at bottom-left).
+                float swY = H + ly - 7f;
+                DrawGraphSegment($"CmpLegSw{si}", lx + 2f, swY, lx + 24f, swY, col, 4f);
+                MakeGraphLabel($"CmpLeg{si}", $"<b>{names[si]}</b>",
+                    new Vector2(0, 1), new Vector2(lx + 30f, ly), new Vector2(colW - 30f, 16), UIFactory.AlignMidLeft, 13f);
+            }
+        }
+
+        // Helper: a rotated 1px-tall rect acting as a line segment in compareGraphPanel.
+        private static void DrawGraphSegment(string name, float x1, float y1, float x2, float y2, Color col, float thick)
+        {
+            float dx = x2 - x1, dy = y2 - y1;
+            float len = Mathf.Sqrt(dx * dx + dy * dy);
+            float angle = Mathf.Atan2(dy, dx) * Mathf.Rad2Deg;
+            var seg = new GameObject(name);
+            seg.transform.SetParent(compareGraphPanel.transform, false);
+            var srt = seg.AddComponent<RectTransform>();
+            srt.anchorMin = Vector2.zero; srt.anchorMax = Vector2.zero; srt.pivot = new Vector2(0f, 0.5f);
+            srt.anchoredPosition = new Vector2(x1, y1);
+            srt.sizeDelta = new Vector2(len, thick);
+            srt.localRotation = Quaternion.Euler(0, 0, angle);
+            var img = seg.AddComponent(UIFactory.tImage);
+            UIFactory.tImage.GetProperty("color", BindingFlags.Public | BindingFlags.Instance)?.SetValue(img, col);
+        }
+
+        // Helper: a positioned label inside compareGraphPanel (bottom-left anchored coords).
+        private static void MakeGraphLabel(string name, string text, Vector2 anchor, Vector2 pos, Vector2 size, int align, float fontSize = 11f)
+        {
+            var lbl = UIFactory.CreateText(name, compareGraphPanel.transform, text, fontSize, C_DIM, align, sizeDelta: size);
+            var go = (lbl as Component)?.gameObject;
+            if (go == null) return;
+            var rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = anchor; rt.anchorMax = anchor; rt.pivot = anchor;
+            rt.anchoredPosition = pos; rt.sizeDelta = size;
+            var le = go.GetComponent(UIFactory.tLE);
+            if (le != null) UnityEngine.Object.Destroy(le as UnityEngine.Object);
+        }
+
+        // Helper: a filled rectangle bar in compareGraphPanel, anchored bottom-left
+        // (same coordinate space as DrawGraphSegment / the line graph plot math).
+        private static void DrawBar(string name, float x, float y, float w, float h, Color col)
+        {
+            if (h < 0f) h = 0f;
+            var go = new GameObject(name);
+            go.transform.SetParent(compareGraphPanel.transform, false);
+            var rt = go.AddComponent<RectTransform>();
+            rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.zero; rt.pivot = new Vector2(0f, 0f);
+            rt.anchoredPosition = new Vector2(x, y);
+            rt.sizeDelta = new Vector2(w, h);
+            var img = go.AddComponent(UIFactory.tImage);
+            UIFactory.tImage.GetProperty("color", BindingFlags.Public | BindingFlags.Instance)?.SetValue(img, col);
+        }
+
+        // Region → color for the stacked "Region Time" chart + its legend.
+        private static Color RegionColor(string region)
+        {
+            // Distinct, well-separated hues — the old palette had several near-identical
+            // blues (us/in/kr looked the same in the legend).
+            switch ((region ?? "").ToLowerInvariant())
+            {
+                case "us":   return new Color(0.25f, 0.55f, 1.00f);  // blue
+                case "usw":  return new Color(0.15f, 0.85f, 0.85f);  // cyan
+                case "ussc": return new Color(0.35f, 0.80f, 0.35f);  // green
+                case "eu":   return new Color(1.00f, 0.62f, 0.18f);  // orange
+                case "asia": return new Color(0.95f, 0.32f, 0.32f);  // red
+                case "jp":   return new Color(1.00f, 0.42f, 0.80f);  // pink
+                case "au":   return new Color(0.68f, 0.42f, 1.00f);  // purple
+                case "sa":   return new Color(0.80f, 0.85f, 0.20f);  // yellow-green
+                case "kr":   return new Color(1.00f, 0.82f, 0.28f);  // gold
+                case "in":   return new Color(0.45f, 0.40f, 0.92f);  // indigo
+                case "cae":  return new Color(0.50f, 0.78f, 0.62f);  // sea green
+                case "za":   return new Color(0.90f, 0.55f, 0.35f);  // terracotta
+                case "ru": case "rue": return new Color(0.80f, 0.50f, 0.55f); // mauve
+                default:     return new Color(0.70f, 0.70f, 0.74f);  // grey
+            }
+        }
+
+        // Actual on-screen size of the chart panel (it now FILLS the right panel, so the
+        // chart math must read the live RectTransform instead of a fixed 640x320). Falls
+        // back to sane defaults before the first layout pass computes the rect.
+        private static void CompareChartSize(out float W, out float H)
+        {
+            W = 900f; H = 460f;
+            try
+            {
+                var rt = compareGraphPanel != null ? compareGraphPanel.GetComponent<RectTransform>() : null;
+                if (rt != null)
+                {
+                    if (rt.rect.width > 50f) W = rt.rect.width;
+                    if (rt.rect.height > 50f) H = rt.rect.height;
+                }
+            }
+            catch { }
+        }
+
+        // A "nice" round step so axis labels are clean numbers (100, 250, 500, 1000, …)
+        // instead of maxV/divs giving 2185. Returns a step; caller takes ceil(max/step)*step.
+        private static float NiceStep(float roughStep)
+        {
+            if (roughStep <= 0f) return 1f;
+            float mag = Mathf.Pow(10f, Mathf.Floor(Mathf.Log10(roughStep)));
+            float norm = roughStep / mag; // 1..10
+            float nice = norm <= 1f ? 1f : norm <= 2f ? 2f : norm <= 2.5f ? 2.5f : norm <= 5f ? 5f : 10f;
+            return nice * mag;
+        }
+
+        // Whole-number formatting with thousands separators — Sid wanted "12,345" not "12.3k".
+        private static string FullNum(float v) => Mathf.RoundToInt(v).ToString("N0");
+
+        // Mirror of the server XP curve (main.py xp_for_level = 100*n^1.5, cumulative).
+        // Used to label the Total XP chart's gridlines with LEVELS instead of raw XP.
+        private static long TotalXpForLevel(int level)
+        {
+            long sum = 0;
+            for (int n = 1; n <= level && n <= 100; n++) sum += (long)(100.0 * Math.Pow(n, 1.5));
+            return sum;
+        }
+        private static int LevelForXp(float xp)
+        {
+            long rem = (long)Math.Max(0f, xp); int lvl = 0;
+            for (int n = 1; n <= 100; n++) { long need = (long)(100.0 * Math.Pow(n, 1.5)); if (rem < need) return lvl; rem -= need; lvl = n; }
+            return 100;
+        }
+
+        // Smooth green(best) → yellow → red(worst) gradient for t in [0,1].
+        private static Color GradeColor(float t)
+        {
+            t = Mathf.Clamp01(t);
+            Color green = new Color(0.35f, 0.85f, 0.40f);
+            Color amber = new Color(0.95f, 0.82f, 0.30f);
+            Color red = new Color(0.95f, 0.40f, 0.40f);
+            return t < 0.5f ? Color.Lerp(green, amber, t * 2f) : Color.Lerp(amber, red, (t - 0.5f) * 2f);
+        }
+
+        // Lazily-built white circle sprite for pie slices (Image type=Filled, Radial360).
+        private static UnityEngine.Sprite _pieCircleSprite;
+        private static UnityEngine.Sprite GetCircleSprite()
+        {
+            if (_pieCircleSprite != null) return _pieCircleSprite;
+            try
+            {
+                int S = 128; float r = S * 0.5f, cx = r, cy = r;
+                var tex = new Texture2D(S, S, TextureFormat.RGBA32, false);
+                tex.hideFlags = HideFlags.HideAndDontSave;
+                var px = new Color32[S * S];
+                for (int y = 0; y < S; y++)
+                    for (int x = 0; x < S; x++)
+                    {
+                        float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+                        bool inside = dx * dx + dy * dy <= (r - 1f) * (r - 1f);
+                        px[y * S + x] = inside ? new Color32(255, 255, 255, 255) : new Color32(255, 255, 255, 0);
+                    }
+                tex.SetPixels32(px); tex.Apply();
+                _pieCircleSprite = UnityEngine.Sprite.Create(tex, new Rect(0, 0, S, S), new Vector2(0.5f, 0.5f), 100f);
+                _pieCircleSprite.hideFlags = HideFlags.HideAndDontSave;
+            }
+            catch { _pieCircleSprite = null; }
+            return _pieCircleSprite;
+        }
+
+        // One pie wedge: a full circle Image radial-filled to `sweepFrac`, rotated so it
+        // begins at `startFrac` of the way around (clockwise from top). Anchored at a
+        // bottom-left point in compareGraphPanel.
+        private static void DrawPieSlice(string name, float cx, float cy, float radius, float startFrac, float sweepFrac, Color col)
+        {
+            var sprite = GetCircleSprite();
+            if (sprite == null) return;
+            var go = new GameObject(name);
+            go.transform.SetParent(compareGraphPanel.transform, false);
+            var rt = go.AddComponent<RectTransform>();
+            rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.zero; rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = new Vector2(cx, cy);
+            rt.sizeDelta = new Vector2(radius * 2f, radius * 2f);
+            rt.localRotation = Quaternion.Euler(0, 0, -startFrac * 360f); // clockwise
+            var img = go.AddComponent(UIFactory.tImage);
+            var bf = BindingFlags.Public | BindingFlags.Instance;
+            UIFactory.tImage.GetProperty("sprite", bf)?.SetValue(img, sprite);
+            UIFactory.tImage.GetProperty("color", bf)?.SetValue(img, col);
+            try { UIFactory.tImage.GetProperty("type", bf)?.SetValue(img, Enum.ToObject(UIFactory.tImage.GetProperty("type", bf).PropertyType, 3)); } catch {} // Filled
+            try { UIFactory.tImage.GetProperty("fillMethod", bf)?.SetValue(img, Enum.ToObject(UIFactory.tImage.GetProperty("fillMethod", bf).PropertyType, 4)); } catch {} // Radial360
+            try { UIFactory.tImage.GetProperty("fillOrigin", bf)?.SetValue(img, 2); } catch {} // Top
+            try { UIFactory.tImage.GetProperty("fillClockwise", bf)?.SetValue(img, true); } catch {}
+            try { UIFactory.tImage.GetProperty("fillAmount", bf)?.SetValue(img, Mathf.Clamp01(sweepFrac)); } catch {}
+        }
+
+        // Charts every non-card, non-line metric as bars in compareGraphPanel:
+        //   • single value per player  → one bar per player (Avg FPS, Peak Elo, Total
+        //     XP, Achievements, Avg Cards/Game)
+        //   • two values per player    → grouped bars (Hit / Block %)
+        //   • distribution per player  → stacked bar (Region Time, by region %)
+        // Y axis gets 4 gridlines + labels; player names sit under each group.
+        private static void BuildCompareBarChart(string metricName)
+        {
+            if (compareGraphPanel == null) return;
+            for (int c = compareGraphPanel.transform.childCount - 1; c >= 0; c--)
+                UnityEngine.Object.Destroy(compareGraphPanel.transform.GetChild(c).gameObject);
+
+            // Gather selected players that have cached stats, preserving select order
+            // (so bar color matches the picker swatch).
+            var idxs = new List<int>();
+            for (int i = 0; i < compareSelected.Count; i++)
+                if (compareStatsCache.TryGetValue(compareSelected[i], out var ps) && ps != null)
+                    idxs.Add(i);
+
+            CompareChartSize(out float W, out float H);
+
+            if (idxs.Count == 0)
+            {
+                MakeGraphLabel("CmpBarNone", $"<color=#888>Select players (left) to chart <b>{metricName}</b>.</color>",
+                    new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 40), UIFactory.AlignMidCenter);
+                return;
+            }
+
+            // Region distribution → pie-chart grid (much clearer than the old stacked bar).
+            if (metricName == "Region Time") { BuildComparePieChart(idxs, W, H); return; }
+
+            float padL = 60f, padR = 16f, padT = 34f, padB = 48f;
+            float plotW = W - padL - padR, plotH = H - padT - padB;
+            int n = idxs.Count;
+            float groupW = plotW / n;
+
+            string title; bool grouped = false, avgCards = false; string unit = "";
+            switch (metricName)
+            {
+                case "Hit / Block %": title = "Hit % vs Block %"; grouped = true; unit = "%"; break;
+                case "Avg Cards / Game": title = "Avg Cards per Game  (lower = stronger)"; avgCards = true; break;
+                case "Avg FPS": title = "Average FPS"; break;
+                case "Peak Elo": title = "Peak Elo"; break;
+                case "Total XP": title = "Total XP"; break;
+                case "Achievements": title = "Achievements unlocked"; break;
+                default: title = metricName; break;
+            }
+            MakeGraphLabel("CmpBarTitle", $"<color=#CCC><b>{title}</b></color>",
+                new Vector2(0, 1), new Vector2(padL, -4f), new Vector2(W - padL, 18), UIFactory.AlignMidLeft);
+
+            Func<ApiClient.PlayerStatsData, float> v1 = null, v2 = null;
+            switch (metricName)
+            {
+                case "Hit / Block %":
+                    v1 = ps => ps.bullets_fired > 0 ? (float)ps.bullets_hit * 100f / ps.bullets_fired : 0f;
+                    v2 = ps => ps.blocks_activated > 0 ? (float)ps.blocks_successful * 100f / ps.blocks_activated : 0f;
+                    break;
+                case "Avg Cards / Game": v1 = ps => ps.avg_cards_per_game; break;
+                case "Avg FPS": v1 = ps => ps.avg_fps; break;
+                case "Peak Elo": v1 = ps => ps.peak_rating; break;
+                case "Total XP": v1 = ps => ps.total_xp; break;
+                case "Achievements": v1 = ps => ps.achievements_unlocked; break;
+                default: v1 = ps => 0f; break;
+            }
+
+            // Axis scale + a NICE round step so labels are clean whole numbers.
+            float maxV, step;
+            if (grouped) { maxV = 100f; step = 25f; }          // 0..100 %
+            else if (avgCards) { maxV = 5f; step = 1f; }       // fixed 0..5, lines at each int
+            else
+            {
+                float dataMax = 0.0001f;
+                foreach (int i in idxs) { float v = v1(compareStatsCache[compareSelected[i]]); if (v > dataMax) dataMax = v; }
+                step = NiceStep(dataMax / 4f);
+                maxV = Mathf.Ceil(dataMax * 1.08f / step) * step;
+                if (maxV < step) maxV = step;
+            }
+
+            if (metricName == "Total XP")
+            {
+                // Gridlines/labels are LEVELS (at each level's cumulative-XP threshold),
+                // not raw XP — Sid's request. Levels aren't evenly XP-spaced, so the lines
+                // bunch toward the top; that's expected.
+                int topLevel = LevelForXp(maxV);
+                int lvlStep = Mathf.Max(1, Mathf.CeilToInt(topLevel / 6f));
+                MakeGraphLabel("CmpBarY0", "<color=#999>Lv 0</color>",
+                    new Vector2(0, 0), new Vector2(padL - 4f, padB - 6f), new Vector2(52, 12), UIFactory.AlignMidRight);
+                for (int L = lvlStep; L <= topLevel; L += lvlStep)
+                {
+                    float xpAt = TotalXpForLevel(L);
+                    if (xpAt > maxV) break;
+                    float yy = padB + (xpAt / maxV) * plotH;
+                    DrawBar($"CmpBarGridL{L}", padL, yy, plotW, 1f, new Color(1f, 1f, 1f, 0.10f));
+                    MakeGraphLabel($"CmpBarYL{L}", $"<color=#999>Lv {L}</color>",
+                        new Vector2(0, 0), new Vector2(padL - 4f, yy - 6f), new Vector2(52, 12), UIFactory.AlignMidRight);
+                }
+            }
+            else
+            {
+                int yDivs = Mathf.Clamp(Mathf.RoundToInt(maxV / step), 2, 10);
+                for (int gi = 0; gi <= yDivs; gi++)
+                {
+                    float val = gi * step;
+                    if (val > maxV + 0.001f) break;
+                    float yy = padB + (val / maxV) * plotH;
+                    DrawBar($"CmpBarGrid{gi}", padL, yy, plotW, 1f, new Color(1f, 1f, 1f, 0.10f));
+                    MakeGraphLabel($"CmpBarYLbl{gi}", $"<color=#999>{(avgCards ? val.ToString("0") : FullNum(val))}{unit}</color>",
+                        new Vector2(0, 0), new Vector2(padL - 4f, yy - 6f), new Vector2(52, 12), UIFactory.AlignMidRight);
+                }
+            }
+
+            if (grouped)
+                MakeGraphLabel("CmpHBLeg", "<color=#EEEEEE>solid = Hit</color>   <color=#888888>dim = Block</color>",
+                    new Vector2(1, 1), new Vector2(-padR, -4f), new Vector2(260, 14), UIFactory.AlignMidRight);
+
+            // Adaptive name length: full names when there's room, trimmed when crowded.
+            int nameLen = Mathf.Clamp((int)(groupW / 8f), 5, 18);
+
+            for (int gi2 = 0; gi2 < n; gi2++)
+            {
+                int i = idxs[gi2];
+                var ps = compareStatsCache[compareSelected[i]];
+                Color pc = COMPARE_COLORS[i % COMPARE_COLORS.Length];
+                float gx = padL + gi2 * groupW;
+
+                if (grouped)
+                {
+                    float bw = groupW * 0.32f, gap = groupW * 0.06f;
+                    float bx0 = gx + (groupW - (bw * 2f + gap)) * 0.5f;
+                    float hv = Mathf.Clamp(v1(ps), 0f, maxV), bvv = Mathf.Clamp(v2(ps), 0f, maxV);
+                    DrawBar($"CmpGrpA{gi2}", bx0, padB, bw, hv / maxV * plotH, new Color(pc.r, pc.g, pc.b, 1f));
+                    DrawBar($"CmpGrpB{gi2}", bx0 + bw + gap, padB, bw, bvv / maxV * plotH, new Color(pc.r * 0.5f, pc.g * 0.5f, pc.b * 0.5f, 1f));
+                    MakeGraphLabel($"CmpGrpVA{gi2}", $"<color=#EEE>{v1(ps):F1}</color>", new Vector2(0, 0), new Vector2(bx0 - 8f, padB + hv / maxV * plotH + 1f), new Vector2(bw + 16f, 11), UIFactory.AlignMidCenter);
+                    MakeGraphLabel($"CmpGrpVB{gi2}", $"<color=#AAA>{v2(ps):F1}</color>", new Vector2(0, 0), new Vector2(bx0 + bw + gap - 8f, padB + bvv / maxV * plotH + 1f), new Vector2(bw + 16f, 11), UIFactory.AlignMidCenter);
+                }
+                else
+                {
+                    float bw = groupW * 0.58f;
+                    float bx = gx + (groupW - bw) * 0.5f;
+                    float val = v1(ps);
+                    float clamped = Mathf.Clamp(val, 0f, maxV);
+                    Color bc = pc;
+                    if (avgCards && val > 0f) bc = GradeColor((val - 1f) / 4f); // 1=best→green, 5=worst→red
+                    DrawBar($"CmpBar{gi2}", bx, padB, bw, clamped / maxV * plotH, bc);
+                    string vlbl = avgCards ? val.ToString("F2")
+                                : metricName == "Total XP" ? $"Lv {ps.level}"
+                                : FullNum(val);
+                    MakeGraphLabel($"CmpBarV{gi2}", $"<color=#EEE>{vlbl}</color>",
+                        new Vector2(0, 0), new Vector2(bx - 6f, padB + clamped / maxV * plotH + 1f), new Vector2(bw + 12f, 12), UIFactory.AlignMidCenter);
+                }
+
+                MakeGraphLabel($"CmpBarName{gi2}", $"<b><color=#{ColorToHex(pc)}>{Trunc(ps.display_name, nameLen)}</color></b>",
+                    new Vector2(0, 0), new Vector2(gx - 4f, padB - 18f), new Vector2(groupW + 8f, 16), UIFactory.AlignMidCenter, 13f);
+            }
+        }
+
+        // Region distribution as a grid of per-player pie charts with a shared region
+        // legend; the larger (1-2 player) pies also get leader lines + % labels sticking
+        // out. Replaces the old stacked bar Sid called "hideous".
+        private static void BuildComparePieChart(List<int> idxs, float W, float H)
+        {
+            try
+            {
+                MakeGraphLabel("CmpPieTitle", "<color=#CCC><b>Region distribution</b></color>",
+                    new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
+
+                // Shared region legend.
+                var regions = new List<string>();
+                foreach (int i in idxs)
+                {
+                    var ps = compareStatsCache[compareSelected[i]];
+                    if (ps.region_names == null) continue;
+                    foreach (var rn in ps.region_names) if (!regions.Contains(rn)) regions.Add(rn);
+                }
+                // Bigger, more-readable legend chips (wrap every 4). A TMP <mark> highlight
+                // gives each a solid color swatch that stays glued to its label (a separate
+                // positioned rect drifted out of alignment).
+                for (int li = 0; li < regions.Count; li++)
+                {
+                    float lxr = -14f - (li % 4) * 104f;
+                    float lyr = -4f - (li / 4) * 17f;
+                    string hex = ColorToHex(RegionColor(regions[li]));
+                    MakeGraphLabel($"CmpPieLeg{li}",
+                        $"<mark=#{hex}FF>  </mark> <b>{regions[li].ToUpperInvariant()}</b>",
+                        new Vector2(1, 1), new Vector2(lxr, lyr), new Vector2(96, 14), UIFactory.AlignMidLeft, 13f);
+                }
+
+                int n = idxs.Count;
+                int cols = n <= 1 ? 1 : n <= 2 ? 2 : n <= 6 ? 3 : 4;
+                int rows = (n + cols - 1) / cols;
+                float topPad = 30f + Mathf.Ceil(regions.Count / 4f) * 17f;
+                float botPad = 8f;
+                float cellW = (W - 20f) / cols;
+                float cellH = (H - topPad - botPad) / Mathf.Max(1, rows);
+                float radius = Mathf.Max(26f, Mathf.Min(cellW, cellH) * 0.36f);
+                bool leaderLines = cols <= 3;
+
+                for (int k = 0; k < n; k++)
+                {
+                    int i = idxs[k];
+                    var ps = compareStatsCache[compareSelected[i]];
+                    int col = k % cols, row = k / cols;
+                    float cx = 10f + col * cellW + cellW * 0.5f;
+                    float cy = H - topPad - row * cellH - cellH * 0.5f; // bottom-left coord space
+
+                    MakeGraphLabel($"CmpPieName{k}",
+                        $"<b><color=#{ColorToHex(COMPARE_COLORS[i % COMPARE_COLORS.Length])}>{Trunc(ps.display_name, 14)}</color></b>",
+                        new Vector2(0, 0), new Vector2(cx - cellW * 0.5f, cy + radius + 4f), new Vector2(cellW, 16), UIFactory.AlignMidCenter, 14f);
+
+                    int tot = 0; if (ps.region_matches != null) foreach (var m in ps.region_matches) tot += m;
+                    if (ps.region_names == null || tot <= 0)
+                    {
+                        MakeGraphLabel($"CmpPieNo{k}", "<color=#888>no data</color>",
+                            new Vector2(0, 0), new Vector2(cx - 40f, cy - 6f), new Vector2(80, 12), UIFactory.AlignMidCenter);
+                        continue;
+                    }
+                    // Border ring: a slightly larger dark circle behind the slices gives the
+                    // pie a clean edge (Sid: "put a border around the edge, looks rough").
+                    DrawPieSlice($"CmpPieBdr{k}", cx, cy, radius + 2.5f, 0f, 1f, new Color(0.10f, 0.11f, 0.14f, 1f));
+                    float acc = 0f;
+                    for (int ri = 0; ri < ps.region_names.Count; ri++)
+                    {
+                        int mm = ps.region_matches.Count > ri ? ps.region_matches[ri] : 0;
+                        if (mm <= 0) continue;
+                        float frac = (float)mm / tot;
+                        DrawPieSlice($"CmpPie{k}_{ri}", cx, cy, radius, acc, frac, RegionColor(ps.region_names[ri]));
+                        if (leaderLines && frac >= 0.07f)
+                        {
+                            float midFrac = acc + frac * 0.5f;
+                            float ang = Mathf.PI * 0.5f - midFrac * 2f * Mathf.PI; // top, clockwise
+                            float ex = cx + Mathf.Cos(ang) * radius, ey = cy + Mathf.Sin(ang) * radius;
+                            float lx = cx + Mathf.Cos(ang) * (radius + 20f), ly = cy + Mathf.Sin(ang) * (radius + 20f);
+                            DrawGraphSegment($"CmpPieLn{k}_{ri}", ex, ey, lx, ly, new Color(0.8f, 0.8f, 0.8f, 0.7f), 1.5f);
+                            bool rightSide = Mathf.Cos(ang) >= 0f;
+                            int align = rightSide ? UIFactory.AlignMidLeft : UIFactory.AlignMidRight;
+                            float lblX = rightSide ? lx + 2f : lx - 66f;
+                            MakeGraphLabel($"CmpPieLbl{k}_{ri}",
+                                $"<color=#CCC>{ps.region_names[ri].ToUpperInvariant()} {frac * 100f:F0}%</color>",
+                                new Vector2(0, 0), new Vector2(lblX, ly - 6f), new Vector2(64, 12), align);
+                        }
+                        acc += frac;
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] pie chart failed: {ex.Message}"); }
+        }
+
+        // Card metrics (Top / Worst) as a multi-column grid of per-player blocks so
+        // many players wrap sideways instead of running off the bottom of the page.
+        // Built into compareCardsContent (the card scroll's content). 3 columns.
+        private static void BuildCompareCardGrid(string metricName)
+        {
+            if (compareCardsContent == null || txtCompareCards == null) return;
+            // Tear down any prior grid container.
+            var prev = compareCardsContent.transform.Find("CmpCardCols");
+            if (prev != null) UnityEngine.Object.Destroy(prev.gameObject);
+
+            if (compareSelected.Count == 0)
+            {
+                UIFactory.SetText(txtCompareCards, $"<color=#888>Select players (left) to compare <b>{metricName}</b>.</color>");
+                ((Component)txtCompareCards).gameObject.SetActive(true);
+                return;
+            }
+            ((Component)txtCompareCards).gameObject.SetActive(false);
+
+            // Columns container: an HLG of N vertical columns. Players fill column by
+            // column (down, then across).
+            int cols = compareSelected.Count <= 3 ? compareSelected.Count : compareSelected.Count <= 8 ? 2 : 3;
+            if (cols < 1) cols = 1;
+            int perCol = (compareSelected.Count + cols - 1) / cols;
+
+            var grid = new GameObject("CmpCardCols");
+            grid.transform.SetParent(compareCardsContent.transform, false);
+            grid.AddComponent<RectTransform>();
+            UIFactory.AddHLG(grid, spacing: 10, forceExpandH: false);
+
+            var colGOs = new GameObject[cols];
+            for (int c = 0; c < cols; c++)
+            {
+                var colGO = new GameObject($"CmpCol{c}");
+                colGO.transform.SetParent(grid.transform, false);
+                colGO.AddComponent<RectTransform>();
+                UIFactory.AddVLG(colGO, spacing: 8);
+                UIFactory.AddLE(colGO, flexW: 1);
+                colGOs[c] = colGO;
+            }
+
+            for (int i = 0; i < compareSelected.Count; i++)
+            {
+                int col = Math.Min(i / perCol, cols - 1);
+                string sid = compareSelected[i];
+                Color pc = COMPARE_COLORS[i % COMPARE_COLORS.Length];
+                var sb = new System.Text.StringBuilder();
+                if (!compareStatsCache.TryGetValue(sid, out var ps) || ps == null)
+                {
+                    sb.Append($"<color=#{ColorToHex(pc)}><b>(loading...)</b></color>");
+                }
+                else
+                {
+                    sb.Append($"<color=#{ColorToHex(pc)}><b>{ps.display_name}</b></color>\n");
+                    if (metricName == "Worst Cards")
+                        AppendCardList(sb, ps.worst_card_names, ps.worst_card_picks, ps.worst_card_win_rates, "not enough data (4+ picks)");
+                    else
+                        AppendCardList(sb, ps.top_card_names, ps.top_card_picks, ps.top_card_win_rates, "no card data");
+                }
+                var cell = UIFactory.CreateText($"CmpCell{i}", colGOs[col].transform, sb.ToString(),
+                    14f, C_DIM, UIFactory.AlignTopLeft, sizeDelta: new Vector2(250, 24));
+                UIFactory.SetWordWrap(cell, true);
+                UIFactory.SetTextAutoHeight(cell);
+            }
+        }
+
+        // Renders the currently-selected metric for all selected players into the
+        // scroll panel. metricName drives the layout: card lists, per-player rows,
+        // or a region breakdown. (Retained for reference; routing now uses
+        // BuildCompareBarChart / BuildCompareCardGrid.)
+        private static void BuildCompareMetricTable()
+        {
+            if (txtCompareCards == null) return;
+            string metricName = COMPARE_METRICS[Math.Max(0, Math.Min(compareMetric, COMPARE_METRICS.Length - 1))];
+            if (compareSelected.Count == 0)
+            {
+                UIFactory.SetText(txtCompareCards, $"<color=#888>Select players (left) to compare <b>{metricName}</b>.</color>");
+                return;
+            }
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < compareSelected.Count; i++)
+            {
+                string sid = compareSelected[i];
+                Color col = COMPARE_COLORS[i % COMPARE_COLORS.Length];
+                if (!compareStatsCache.TryGetValue(sid, out var ps) || ps == null)
+                {
+                    sb.Append($"<color=#{ColorToHex(col)}><b>(loading...)</b></color>\n\n");
+                    continue;
+                }
+                sb.Append($"<color=#{ColorToHex(col)}><b>{ps.display_name}</b></color>  ");
+                switch (metricName)
+                {
+                    case "Top Cards":
+                        sb.Append("\n");
+                        AppendCardList(sb, ps.top_card_names, ps.top_card_picks, ps.top_card_win_rates, "no card data");
+                        break;
+                    case "Worst Cards":
+                        sb.Append("\n");
+                        AppendCardList(sb, ps.worst_card_names, ps.worst_card_picks, ps.worst_card_win_rates,
+                                       "not enough card data (need 4+ picks)");
+                        break;
+                    case "Hit / Block %":
+                    {
+                        string hit = ps.bullets_fired > 0
+                            ? $"<color=#FF9988>Hit {(float)ps.bullets_hit * 100f / ps.bullets_fired:F1}%</color> <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>"
+                            : "<color=#888>Hit —</color>";
+                        string blk = ps.blocks_activated > 0
+                            ? $"<color=#99CCFF>Block {(float)ps.blocks_successful * 100f / ps.blocks_activated:F1}%</color> <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>"
+                            : "<color=#888>Block —</color>";
+                        sb.Append($"{hit}   {blk}\n");
+                        break;
+                    }
+                    case "Avg Cards / Game":
+                    {
+                        // Closer to 1 = stronger (wins faster, picks fewer cards).
+                        float v = ps.avg_cards_per_game;
+                        string vc = v > 0 && v <= 2.0f ? "#00FF00" : v <= 3.0f ? "#AAAAAA" : "#FF6666";
+                        sb.Append(v > 0 ? $"<color={vc}>{v:F2}</color> cards/game  <color=#888>(lower = stronger)</color>\n"
+                                        : "<color=#888>no data</color>\n");
+                        break;
+                    }
+                    case "Avg FPS":
+                        sb.Append(ps.avg_fps > 0 ? $"<color=#9AD0FF>{ps.avg_fps}</color> avg fps\n" : "<color=#888>no fps data</color>\n");
+                        break;
+                    case "Peak Elo":
+                        sb.Append($"<color=#FFD94D>{ps.peak_rating:F0}</color> peak  <color=#888>(now {ps.rating:F0})</color>\n");
+                        break;
+                    case "Total XP":
+                        sb.Append($"<color=#66CCFF>{ps.total_xp:N0}</color> XP  <color=#888>(Lv {ps.level})</color>\n");
+                        break;
+                    case "Achievements":
+                    {
+                        int total = ApiClient.AchievementDefs != null ? ApiClient.AchievementDefs.Count : 0;
+                        sb.Append(total > 0
+                            ? $"<color=#FFD94D>{ps.achievements_unlocked}/{total}</color> unlocked  <color=#888>({ps.achievements_unlocked * 100 / Math.Max(1, total)}%)</color>\n"
+                            : $"<color=#FFD94D>{ps.achievements_unlocked}</color> unlocked\n");
+                        break;
+                    }
+                    case "Region Time":
+                        sb.Append("\n");
+                        if (ps.region_names != null && ps.region_names.Count > 0)
+                        {
+                            int tot = 0; foreach (var m in ps.region_matches) tot += m;
+                            for (int ri = 0; ri < ps.region_names.Count && ri < 8; ri++)
+                            {
+                                int mm = ps.region_matches.Count > ri ? ps.region_matches[ri] : 0;
+                                int pct = tot > 0 ? mm * 100 / tot : 0;
+                                sb.Append($"   <color=#AAD>{ps.region_names[ri].ToUpperInvariant()}</color>  {pct}% <color=#888>({mm})</color>\n");
+                            }
+                        }
+                        else sb.Append("   <color=#888><i>no region data</i></color>\n");
+                        break;
+                    default:
+                        sb.Append("\n");
+                        break;
+                }
+                sb.Append("\n");
+            }
+            UIFactory.SetText(txtCompareCards, sb.ToString());
+        }
+
+        private static void AppendCardList(System.Text.StringBuilder sb, List<string> names,
+                                           List<int> picks, List<float> wrs, string emptyMsg)
+        {
+            if (names != null && names.Count > 0)
+            {
+                for (int ci = 0; ci < names.Count && ci < 8; ci++)
+                {
+                    string p = picks != null && picks.Count > ci ? $" <color=#888>({picks[ci]}x)</color>" : "";
+                    float wr = wrs != null && wrs.Count > ci ? wrs[ci] * 100f : 0f;
+                    string wrCol = wr >= 55 ? "#00FF00" : wr <= 45 ? "#FF6666" : "#AAAAAA";
+                    sb.Append($"   {names[ci]}{p}  <color={wrCol}>{wr:F0}%</color>\n");
+                }
+            }
+            else sb.Append($"   <color=#888><i>{emptyMsg}</i></color>\n");
+        }
+
         private static string GetAchievementText()
         {
             var ach=ApiClient.SelectedPlayerAchievements;
@@ -2943,6 +4079,119 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
             }
             achText+=$"\n  {unlocked} / {ApiClient.AchievementDefs.Count} unlocked";
             return achText;
+        }
+
+        /// <summary>Builds the clicked player's "Last Series vs You" + "Ranked History" text for
+        /// the leaderboard detail panel. Reads selectedViewHistory (the viewed player's matches,
+        /// from THEIR perspective). Appended into the existing scrollable txtLBDetail so it scrolls
+        /// for free — no new layout. Returns "" when nothing is selected.</summary>
+        private static string BuildViewHistoryText()
+        {
+            if (string.IsNullOrEmpty(selectedSteamId)) return "";
+            var hist = selectedViewHistory;
+            if (hist == null) return "\n<color=#888><i>Loading match history...</i></color>\n";
+            var sb = new System.Text.StringBuilder();
+            string myId = MatchTracker.LocalSteamId;
+            bool viewingSelf = selectedSteamId == myId;
+            string theirName = Trunc(selectedStats?.display_name ?? "Them", 12);
+
+            // ── Ranked Series vs You (only when viewing someone else) ──
+            // Shows ALL head-to-head ranked series, paginated (H2H_SERIES_PER_PAGE per
+            // page) via the h2hPager controls. History is newest-first, so GroupBySeries
+            // yields groups newest→oldest; page 0 is the most recent series.
+            int h2hGroupCount = 0;
+            if (!viewingSelf && !string.IsNullOrEmpty(myId) && myId != "unknown")
+            {
+                var vsMe = hist.FindAll(m => m.opponent_steam_id == myId
+                    && !string.IsNullOrEmpty(m.series_id) && m.series_id != "null" && m.is_ranked);
+                if (vsMe.Count > 0)
+                {
+                    var grp = GroupBySeries(vsMe);
+                    grp.RemoveAll(g => g.matches == null || g.matches.Count == 0);
+                    h2hGroupCount = grp.Count;
+                    if (h2hGroupCount > 0)
+                    {
+                        int totalPages = (h2hGroupCount + H2H_SERIES_PER_PAGE - 1) / H2H_SERIES_PER_PAGE;
+                        h2hSeriesTotalPages = totalPages;
+                        if (h2hSeriesPage < 0) h2hSeriesPage = 0;
+                        if (h2hSeriesPage > totalPages - 1) h2hSeriesPage = totalPages - 1;
+                        int start = h2hSeriesPage * H2H_SERIES_PER_PAGE;
+                        int end = Math.Min(start + H2H_SERIES_PER_PAGE, h2hGroupCount);
+                        string pageTag = totalPages > 1 ? $"  <color=#888>(page {h2hSeriesPage + 1}/{totalPages}, {h2hGroupCount} total)</color>" : "";
+                        sb.Append($"\n<color=#FFD94D>Ranked Series vs You</color>{pageTag}\n");
+                        for (int gi = start; gi < end; gi++)
+                        {
+                            var g = grp[gi];
+                            var first = g.matches[0];
+                            string score = first.series_score ?? "?-?";
+                            string hdt = ""; try { if (!string.IsNullOrEmpty(first.ended_at) && first.ended_at.Length >= 10) hdt = DateTime.Parse(first.ended_at).ToString("M/d/yy"); } catch {}
+                            // series_score is their side; flip for "your" series result.
+                            bool sComplete = false, sIWon = false;
+                            try { var p = score.Split('-'); int tw = int.Parse(p[0]), mw = int.Parse(p[1]); sComplete = tw >= 2 || mw >= 2; sIWon = mw > tw; } catch {}
+                            string sHdr = sComplete ? (sIWon ? "<color=#00FF00>WON</color>" : "<color=#FF6666>LOST</color>") : "<color=#FFD94D>in progress</color>";
+                            sb.Append($"  {sHdr}  <color=#888>{score} their side</color>  <color=#666>{hdt}</color>\n");
+                            foreach (var m in g.matches)
+                            {
+                                // m.* is the VIEWED player's perspective; flip for "my" result.
+                                bool iWon = !m.won;
+                                string r = iWon ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>";
+                                string dt = ""; try { if (!string.IsNullOrEmpty(m.ended_at) && m.ended_at.Length >= 10) dt = DateTime.Parse(m.ended_at).ToString("M/d"); } catch {}
+                                // opponent_rounds_won is MY rounds (I'm their opponent); player_rounds_won is theirs.
+                                sb.Append($"    {r}  {m.opponent_rounds_won}-{m.player_rounds_won}  <color=#888>{dt}</color>\n");
+                                if (!string.IsNullOrEmpty(m.opp_cards_display))
+                                    sb.Append($"      <color=#6677AA>You:</color> {FormatCardLine(m.opp_cards_display)}\n");
+                                if (!string.IsNullOrEmpty(m.cards_display))
+                                    sb.Append($"      <color=#AA7766>{theirName}:</color> {FormatCardLine(m.cards_display)}\n");
+                            }
+                        }
+                    }
+                }
+            }
+            // Drive the pager visibility/labels off this render (it lives outside the
+            // scrolled text so its buttons stay clickable).
+            if (h2hPager != null)
+            {
+                bool showPager = h2hGroupCount > H2H_SERIES_PER_PAGE;
+                h2hPager.SetActive(showPager);
+                if (showPager)
+                {
+                    if (txtH2hPage != null) UIFactory.SetText(txtH2hPage, $"{h2hSeriesPage + 1}/{h2hSeriesTotalPages}");
+                    if (h2hPrev != null) h2hPrev.SetActive(h2hSeriesPage > 0);
+                    if (h2hNext != null) h2hNext.SetActive(h2hSeriesPage < h2hSeriesTotalPages - 1);
+                }
+            }
+
+            // ── Ranked History (their recent completed ranked series) ──
+            var ranked = hist.FindAll(m => m.is_ranked && !string.IsNullOrEmpty(m.series_id) && m.series_id != "null");
+            if (ranked.Count > 0)
+            {
+                var grp = GroupBySeries(ranked);
+                sb.Append("\n<color=#99AAEE>Ranked History</color>  <color=#888>(recent series)</color>\n");
+                int shown = 0;
+                foreach (var g in grp)
+                {
+                    if (shown >= 12) break;
+                    if (g.matches == null || g.matches.Count == 0) continue;
+                    var first = g.matches[0];
+                    string score = first.series_score ?? "?-?";
+                    bool complete = false, won = false;
+                    try { var p = score.Split('-'); int mw = int.Parse(p[0]), tw = int.Parse(p[1]); complete = mw >= 2 || tw >= 2; won = mw > tw; } catch {}
+                    string oppName = Trunc(first.opponent_name ?? "?", 14);
+                    string dt = ""; try { if (!string.IsNullOrEmpty(first.ended_at) && first.ended_at.Length >= 10) dt = DateTime.Parse(first.ended_at).ToString("M/d"); } catch {}
+                    string res = complete ? (won ? "<color=#00FF00>W</color>" : "<color=#FF6666>L</color>") : "<color=#FFD94D>-</color>";
+                    string elo = (complete && first.series_rating_change != 0f)
+                        ? $" <color={(first.series_rating_change > 0 ? "#00FF00" : "#FF6666")}>{(first.series_rating_change > 0 ? "+" : "")}{first.series_rating_change:F0}</color>"
+                        : "";
+                    sb.Append($"  {res} {score} vs {oppName}{elo}  <color=#888>{dt}</color>\n");
+                    shown++;
+                }
+            }
+            else
+            {
+                sb.Append("\n<color=#99AAEE>Ranked History:</color> <color=#888><i>no ranked series yet</i></color>\n");
+            }
+
+            return sb.ToString();
         }
 
         private static void RefreshCardStats(){string[]hL={"Tier","Card","Rarity","Picks","Wins","WR%","Pass%"};string[]hK={"tier","card_name","card_rarity","times_picked","wins_with_card","win_rate","pass_rate"};if(cardSortTexts!=null)for(int i=0;i<7&&i<cardSortTexts.Length;i++){if(cardSortTexts[i]==null)continue;string arrow=cardSort==hK[i]?(cardSortDesc?" v":" ^"):"";UIFactory.SetText(cardSortTexts[i],hL[i]+arrow);UIFactory.SetColor(cardSortTexts[i],cardSort==hK[i]?C_WHITE:C_LABEL);if(cardSortBtns!=null&&i<cardSortBtns.Length)UIFactory.SetImageColor(cardSortBtns[i],cardSort==hK[i]?C_TABACT:C_TAB);}var cards=ApiClient.CachedCardStats;foreach(var r in cardRows)r.root.SetActive(false);if(cards==null||cards.Count==0)return;var merged=new List<ApiClient.CardStatData>();var seen=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);foreach(var c in cards){string key=(c.card_name??"?").ToLower().Replace(" ","");if(seen.ContainsKey(key)){var e=merged[seen[key]];e.times_picked+=c.times_picked;e.wins_with_card+=c.wins_with_card;e.win_rate=e.times_picked>0?(float)e.wins_with_card/e.times_picked:0;e.times_offered=Math.Max(e.times_offered,c.times_offered);if(c.times_offered>0)e.pass_rate=c.pass_rate;if((e.card_rarity==null||e.card_rarity=="Unknown")&&c.card_rarity!=null&&c.card_rarity!="Unknown")e.card_rarity=c.card_rarity;}else{seen[key]=merged.Count;merged.Add(new ApiClient.CardStatData{card_name=c.card_name,card_rarity=c.card_rarity,times_picked=c.times_picked,wins_with_card=c.wins_with_card,win_rate=c.win_rate,times_offered=c.times_offered,pass_rate=c.pass_rate});}}
@@ -5890,9 +7139,9 @@ UIFactory.SetWordWrap(txtLBDetail, true);lbBlockRow=new GameObject("BlockRow");l
                 var sbLive = new StringBuilder();
                 foreach (var ts in liveTeam)
                 {
-                    sbLive.Append($"<color=#AAF>{Trunc(ts.t1a_name, 8)}+{Trunc(ts.t1b_name, 8)}</color> ({ts.t1_rating})");
+                    sbLive.Append($"<color=#AAF>{Trunc(ts.t1a_name, 7)}({ts.t1a_rating})+{Trunc(ts.t1b_name, 7)}({ts.t1b_rating})</color>");
                     sbLive.Append($"  <b>{ts.t1_wins}-{ts.t2_wins}</b>  ");
-                    sbLive.Append($"<color=#FAA>{Trunc(ts.t2a_name, 8)}+{Trunc(ts.t2b_name, 8)}</color> ({ts.t2_rating})\n");
+                    sbLive.Append($"<color=#FAA>{Trunc(ts.t2a_name, 7)}({ts.t2a_rating})+{Trunc(ts.t2b_name, 7)}({ts.t2b_rating})</color>\n");
                 }
                 UIFactory.SetText(txtTeamLiveBody, sbLive.ToString().TrimEnd('\n'));
                 int newH = Math.Max(22, liveCount * 18 + 4);

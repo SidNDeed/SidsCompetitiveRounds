@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.27.0";
+        public const string ModVersion = "1.28.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1087,8 +1087,42 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(PlayerAssigner), "CreatePlayer")]
     class PlayerAssigner_CreatePlayer_2v2_Patch
     {
+        // Throttle for the spawn-guard warning (LateUpdate can call CreatePlayer
+        // every frame while an input device is waiting, so the bad-state window
+        // would otherwise spam the log).
+        static float _lastSpawnGuardLog = -999f;
+
         static bool Prefix(PlayerAssigner __instance, InputDevice inputDevice, bool isAI)
         {
+            // ── Spawn guard (v1.28): "no space to ready up" freeze ──────────────
+            // Vanilla CreatePlayer does PhotonNetwork.Instantiate(...).GetComponent
+            // <CharacterData>(). When the client is NOT in a room (e.g. mid region-
+            // reconnect / quickplay churn — Photon state ConnectingToMasterServer),
+            // Instantiate returns NULL and the GetComponent NREs, so the local
+            // player never spawns → no ready ring → the player is stuck unable to
+            // ready up (Sid's report, 2026-06-02 casual quickplay logs). Skip the
+            // call entirely until we're actually in a room (or OfflineMode, where
+            // Instantiate works fine). PlayerAssigner.LateUpdate keeps polling the
+            // waiting input device, so vanilla CreatePlayer runs cleanly and spawns
+            // the player as soon as the connection settles. Applies to ALL modes
+            // (1v1 casual/ranked + 2v2) since the race is in vanilla networking.
+            if (!PhotonNetwork.OfflineMode &&
+                (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null))
+            {
+                try
+                {
+                    if (Time.unscaledTime - _lastSpawnGuardLog > 2f)
+                    {
+                        _lastSpawnGuardLog = Time.unscaledTime;
+                        Plugin.Log.LogWarning(
+                            "[SPAWN-GUARD] CreatePlayer suppressed — client not in a room " +
+                            $"(state={PhotonNetwork.NetworkClientState}). Will retry when connected.");
+                    }
+                }
+                catch { }
+                return false;  // skip vanilla; LateUpdate retries next frame
+            }
+
             if (Plugin.Pending2v2Slot < 0) return true;            // not in 2v2 mode
             if (PhotonNetwork.OfflineMode) return true;
             if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return true;
@@ -1579,6 +1613,7 @@ namespace CompetitiveRounds
                             if (PhotonNetwork.LocalPlayer != null && pp.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber) continue;
                             PlayerColorCosmetic.ReapplyForActor(pp.ActorNumber);
                             TrailCosmetic.ReattachForActor(pp.ActorNumber);
+                            try { PlayerEffectCosmetic.ReapplyForActor(pp.ActorNumber); } catch { }
                         }
                     }
                 }
@@ -1998,51 +2033,115 @@ namespace CompetitiveRounds
         private static Color teamColor1 = new Color(0.45f, 0.62f, 0.95f); // blue-ish fallback
         private static bool teamColorsResolved = false;
 
+        // Public accessors so the skin-rebake guard (PlayerSkinHandlerInitRebakeGuard)
+        // can compare a baked body against the real team colors.
+        public static Color TeamColor0 { get { return teamColor0; } }
+        public static Color TeamColor1 { get { return teamColor1; } }
+        public static void EnsureTeamColors() { TryResolveTeamColors(); }
+
         private static void TryResolveTeamColors()
         {
             if (teamColorsResolved) return;
             try
             {
-                var bank = PlayerSkinBank.instance;
-                if (bank == null) return;
-                var t = bank.GetType();
-                var fSkins = t.GetField("skins", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                var arr = fSkins?.GetValue(bank) as System.Array;
-                if (arr == null || arr.Length < 2) return;
-                Color SniffSkin(object skin)
-                {
-                    if (skin == null) return Color.white;
-                    var st = skin.GetType();
-                    Color best = Color.white; float bestSat = -1f;
-                    foreach (var f in st.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                    {
-                        if (f.FieldType != typeof(Color)) continue;
-                        try
-                        {
-                            var v = (Color)f.GetValue(skin);
-                            float sat = Math.Max(v.r, Math.Max(v.g, v.b)) - Math.Min(v.r, Math.Min(v.g, v.b));
-                            if (sat > bestSat) { bestSat = sat; best = v; }
-                        }
-                        catch { }
-                    }
-                    return best;
-                }
-                teamColor0 = SniffSkin(arr.GetValue(0));
-                teamColor1 = SniffSkin(arr.GetValue(1));
+                // v1.28 fix: the OLD code reflected over PlayerSkinBank.skins[] entries
+                // looking for the "most-saturated Color FIELD". But skins[] is a
+                // PlayerSkinInstance[] whose team color lives at
+                // .currentPlayerSkin.color (a NESTED object) — the top-level struct has
+                // NO Color field, so the sniff found nothing and returned Color.white for
+                // BOTH teams (logs: "t0=#FFFFFF t1=#FFFFFF"). The card-pick retint then
+                // matched nothing (IsCloseHue vs white) and was a total no-op, so a body
+                // that rendered the wrong team color never got corrected. Read the REAL
+                // color via PlayerSkinBank.GetPlayerSkinColors(team).color through
+                // reflection (no direct PlayerSkin type ref — all-reflection rule), with
+                // the skins[].currentPlayerSkin.color path as the fallback.
+                Color? c0 = ResolveTeamColor(0);
+                Color? c1 = ResolveTeamColor(1);
+                // Saturation floor: only accept a resolved color if it's actually
+                // colored (not white/grey). Otherwise keep the sane hardcoded fallback
+                // so the retint still has two distinct hues to work with.
+                if (c0.HasValue && ColorSat(c0.Value) > 0.12f) teamColor0 = c0.Value;
+                if (c1.HasValue && ColorSat(c1.Value) > 0.12f) teamColor1 = c1.Value;
                 teamColorsResolved = true;
-                Plugin.Log.LogInfo($"[CARDPICK-TINT] resolved team colors: t0={ColorHex(teamColor0)} t1={ColorHex(teamColor1)}");
+                Plugin.Log.LogInfo($"[CARDPICK-TINT] resolved team colors: t0={ColorHex(teamColor0)} t1={ColorHex(teamColor1)} (raw c0={(c0.HasValue?ColorHex(c0.Value):"null")} c1={(c1.HasValue?ColorHex(c1.Value):"null")})");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-TINT] resolve failed: {ex.Message}"); }
+        }
+
+        private static float ColorSat(Color c)
+        {
+            float mx = Math.Max(c.r, Math.Max(c.g, c.b));
+            float mn = Math.Min(c.r, Math.Min(c.g, c.b));
+            return mx <= 0.001f ? 0f : (mx - mn) / mx;
+        }
+
+        /// <summary>Resolve a team's real body color. Primary path:
+        /// PlayerSkinBank.GetPlayerSkinColors(team) → PlayerSkin whose `.color` field
+        /// is the team body color. Fallback: instance.skins[team].currentPlayerSkin.color.
+        /// All reflection so we keep zero direct PlayerSkin/PlayerSkinBank type refs.</summary>
+        private static Color? ResolveTeamColor(int team)
+        {
+            try
+            {
+                var bankType = typeof(PlayerSkinBank);
+                // Static PlayerSkinBank.GetPlayerSkinColors(int) → PlayerSkin
+                var mGet = bankType.GetMethod("GetPlayerSkinColors",
+                    BindingFlags.Public | BindingFlags.Static);
+                object skin = null;
+                if (mGet != null)
+                {
+                    try { skin = mGet.Invoke(null, new object[] { team }); } catch { }
+                }
+                // Fallback: instance.skins[team].currentPlayerSkin
+                if (skin == null)
+                {
+                    var bank = PlayerSkinBank.instance;
+                    if (bank == null) return null;
+                    var fSkins = bankType.GetField("skins",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    var arr = fSkins?.GetValue(bank) as System.Array;
+                    if (arr == null || arr.Length <= team) return null;
+                    var inst = arr.GetValue(team);
+                    var fCur = inst?.GetType().GetField("currentPlayerSkin",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    skin = fCur?.GetValue(inst);
+                }
+                if (skin == null) return null;
+                var fColor = skin.GetType().GetField("color",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (fColor == null || fColor.FieldType != typeof(Color)) return null;
+                return (Color)fColor.GetValue(skin);
+            }
+            catch { return null; }
         }
 
         private static string ColorHex(Color c) =>
             $"#{(int)(c.r * 255):X2}{(int)(c.g * 255):X2}{(int)(c.b * 255):X2}";
 
-        public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID)
+        public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID, float xOffset = float.NaN)
         {
-            // Wait for the visualizer's body parts to populate. The Postfix fires
-            // immediately after Show(), before vanilla's child spawn coroutine runs.
-            for (int i = 0; i < 4; i++) yield return null;
+            // Re-assert the X-offset every frame for the first ~10 frames so vanilla's
+            // child-spawn anchor pass (which fires a few frames after Show) can't snap
+            // the body back to the origin and re-stack it. This is the disappearing /
+            // overlapping body fix — the offset MUST survive vanilla's re-anchor, not
+            // just be set once synchronously in the Postfix (which v1.27 did and lost).
+            bool hasOffset = !float.IsNaN(xOffset);
+            for (int i = 0; i < 10; i++)
+            {
+                if (visualizer == null) yield break;
+                if (hasOffset)
+                {
+                    try
+                    {
+                        var rt = visualizer.transform;
+                        var lp = rt.localPosition;
+                        if (Math.Abs(lp.x - xOffset) > 0.01f)
+                            rt.localPosition = new Vector3(xOffset, lp.y, lp.z);
+                    }
+                    catch { }
+                }
+                yield return null;
+            }
             if (visualizer == null) yield break;
 
             TryResolveTeamColors();
@@ -2166,29 +2265,21 @@ namespace CompetitiveRounds
                         int childCount = skin.transform.childCount;
                         skinDesc = $"name={skin.name} active={skin.activeInHierarchy} layer={skin.layer} children={childCount} localPos=({lp.x:F1},{lp.y:F1},{lp.z:F1}) localScale=({ls.x:F2},{ls.y:F2},{ls.z:F2})";
 
-                        // Re-tint the card-pick visualizer to the picker's actual
-                        // team color. The Postfix fires before children are populated,
-                        // so dispatch a coroutine that waits a few frames then walks
-                        // the spawned hierarchy.
+                        // Re-tint AND re-position the card-pick visualizer in one
+                        // deferred coroutine. The Postfix fires BEFORE children spawn
+                        // (children=0 at this point), and v1.27's synchronous X-offset
+                        // here got clobbered by vanilla's own child-spawn anchor pass a
+                        // few frames later — so bodies re-stacked at the origin and
+                        // disappeared/overlapped ("2 of 4 invisible"). Moving BOTH the
+                        // tint and the offset into RetintAfterChildrenSpawn (which now
+                        // re-asserts the X position for several frames) makes the spread
+                        // survive vanilla's re-anchor. pickerID 0,1,2,3 → X -6,-2,+2,+6.
                         if (Plugin.Instance != null && skin != null)
-                            Plugin.Instance.StartCoroutine(CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID));
-
-                        // 2v2 stack-fix: vanilla CardChoiceVisuals was designed
-                        // for 1v1 (one picker at a time) so every picker's
-                        // visualizer spawns at localPos (0,0,0) under the same
-                        // anchor. In 2v2 round 1 all 4 pick simultaneously and
-                        // they collide at the origin — only whichever rendered
-                        // last is fully visible, the other 3 hide behind it.
-                        // Reported as "2 of 4 invisible" by testers. Spread
-                        // them along X by pickerID so each is its own visible
-                        // slot. Safe in 1v1: pickerID is 0 or 1, both visible.
-                        try
                         {
-                            float xOffset = (pickerID - 1.5f) * 4.0f; // pickerID 0,1,2,3 → -6, -2, +2, +6
-                            var rt = skin.transform;
-                            rt.localPosition = new Vector3(xOffset, rt.localPosition.y, rt.localPosition.z);
+                            float xOffset = (pickerID - 1.5f) * 4.0f;
+                            Plugin.Instance.StartCoroutine(
+                                CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID, xOffset));
                         }
-                        catch (Exception offEx) { Plugin.Log.LogWarning($"[POPUP] visualizer offset failed: {offEx.Message}"); }
                     }
                     Plugin.Log.LogInfo($"[CARDPICK-DIAG] pickerID={pickerID} actor={pv.Owner.ActorNumber} pid={picker.PlayerID} team={picker.TeamID} isLocal={picker.IsLocal} currentSkin: {skinDesc}");
                 }
@@ -2349,6 +2440,99 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[2v2-COLOR] body-call mapped {key}");
             }
             catch { }
+        }
+    }
+
+    /// <summary>v1.28 — remote-player skin re-bake guard (the OTHER half of the
+    /// both-orange bug). PlayerSkinHandler.Init reads data.player.PlayerID and
+    /// bakes PlayerSkinBank.GetPlayerSkinColors(PlayerID). In a cr_ff room, if
+    /// Init runs before the player's PlayerID is assigned (it defaults to 0),
+    /// the body bakes with team-0's skin (orange) regardless of the real team.
+    /// The existing CreatePlayer override re-bakes the LOCAL player, but REMOTE
+    /// players have no equivalent — they rely on the ReadPlayerID→Start ordering,
+    /// which races. This Postfix runs a deferred check on EVERY PlayerSkinHandler
+    /// in a cr_ff room: a few frames after Init, if the player's PlayerID is now
+    /// known and the baked skin doesn't match PlayerID/2's team, force a re-bake.
+    /// Self-correcting for both local and remote, idempotent (only re-bakes on
+    /// mismatch). Gated strictly to cr_ff so 1v1 / casual are untouched.</summary>
+    [HarmonyPatch(typeof(PlayerSkinHandler), "Init")]
+    class PlayerSkinHandlerInitRebakeGuard
+    {
+        static void Postfix(PlayerSkinHandler __instance)
+        {
+            try
+            {
+                if (!Diag2v2.IsActive()) return;
+                if (__instance == null || Plugin.Instance == null) return;
+                Plugin.Instance.StartCoroutine(VerifyAndRebake(__instance));
+            }
+            catch { }
+        }
+
+        private static System.Collections.IEnumerator VerifyAndRebake(PlayerSkinHandler psh)
+        {
+            // Let PlayerID assignment + the initial bake settle.
+            for (int i = 0; i < 8; i++) yield return null;
+            if (psh == null) yield break;
+            int rebakes = 0;
+            try
+            {
+                // Resolve this skin handler's owning player + PlayerID via reflection.
+                var fData = typeof(PlayerSkinHandler).GetField("data",
+                    BindingFlags.NonPublic | BindingFlags.Instance);
+                var data = fData?.GetValue(psh);
+                if (data == null) yield break;
+                var pPlayer = data.GetType().GetField("player",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(data);
+                if (pPlayer == null) yield break;
+                var pidProp = pPlayer.GetType().GetProperty("PlayerID",
+                    BindingFlags.Public | BindingFlags.Instance);
+                if (pidProp == null) yield break;
+                int playerID = (int)pidProp.GetValue(pPlayer);
+                if (playerID < 0 || playerID > 3) yield break;
+
+                // Expected team skin index after our GetPlayerSkinColors(team/2) Prefix:
+                // the baked child should correspond to team = playerID/2 (0 or 1).
+                int expectedTeam = playerID / 2;
+                // Heuristic for "baked wrong": the child skin GO carries no reliable
+                // team marker, so instead we detect the known failure — a non-team-0
+                // player (playerID >= 2, i.e. team 1) whose body still reads team-0
+                // (orange) baseline. We re-bake whenever the player is team 1 but the
+                // first body sprite's color is closer to team 0's color than team 1's.
+                var sr = psh.GetComponentInChildren<SpriteRenderer>(true);
+                if (sr == null) yield break;
+                CardPickBodyTinter.EnsureTeamColors();
+                Color c0 = CardPickBodyTinter.TeamColor0;
+                Color c1 = CardPickBodyTinter.TeamColor1;
+                Color want = (expectedTeam == 1) ? c1 : c0;
+                Color other = (expectedTeam == 1) ? c0 : c1;
+                float dWant = ColorDist(sr.color, want);
+                float dOther = ColorDist(sr.color, other);
+                // Only re-bake when the body clearly matches the WRONG team.
+                if (dOther + 0.08f < dWant)
+                {
+                    var fInited = typeof(PlayerSkinHandler).GetField("inited",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    for (int i = psh.transform.childCount - 1; i >= 0; i--)
+                    {
+                        var ch = psh.transform.GetChild(i);
+                        if (ch != null) UnityEngine.Object.Destroy(ch.gameObject);
+                    }
+                    fInited?.SetValue(psh, false);
+                    var initMethod = typeof(PlayerSkinHandler).GetMethod("Init",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    initMethod?.Invoke(psh, null);
+                    rebakes++;
+                    Plugin.Log.LogInfo($"[2v2-COLOR] Re-baked skin for PlayerID={playerID} (expectedTeam={expectedTeam}, body matched wrong team)");
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-COLOR] rebake guard error: {ex.Message}"); }
+        }
+
+        private static float ColorDist(Color a, Color b)
+        {
+            float dr = a.r - b.r, dg = a.g - b.g, db = a.b - b.b;
+            return (float)Math.Sqrt(dr * dr + dg * dg + db * db);
         }
     }
 
@@ -3553,14 +3737,47 @@ namespace CompetitiveRounds
     // a partial managed stack-trace (top 12 frames) when we're in a
     // competitive room, so the next reproduction tells us exactly which
     // code path is calling it.
-    [HarmonyPatch(typeof(NetworkConnectionHandler), "ConnectToRegion")]
+    //
+    // v1.28: the original `[HarmonyPatch(typeof(NetworkConnectionHandler),
+    // "ConnectToRegion")]` NEVER ATTACHED — HarmonyX logged "Could not find
+    // method for type NetworkConnectionHandler and name ConnectToRegion", so we
+    // got zero trace data for ~2 release cycles. ROUNDS routes region switching
+    // through Photon's `PhotonNetwork.ConnectToRegion(string)` (a PUN static),
+    // not an NCH method of that name. Resolve the target dynamically across both
+    // types and read the region via __args so we're agnostic to the exact
+    // signature/overload. The expensive stack capture is gated to competitive
+    // rooms only — the region-select ping screen calls ConnectToRegion ~17× in a
+    // burst and we don't want to trace those.
     class NCHConnectToRegionDiagPatch
     {
-        static void Prefix(string region)
+        static IEnumerable<MethodBase> TargetMethods()
+        {
+            var seen = new HashSet<MethodBase>();
+            foreach (var t in new[] { typeof(NetworkConnectionHandler), typeof(PhotonNetwork) })
+            {
+                if (t == null) continue;
+                List<MethodInfo> methods = null;
+                try { methods = AccessTools.GetDeclaredMethods(t); }
+                catch { methods = null; }
+                if (methods == null) continue;
+                foreach (var m in methods)
+                    if (m != null && m.Name == "ConnectToRegion" && seen.Add(m))
+                        yield return m;
+            }
+        }
+
+        static void Prefix(object[] __args)
         {
             try
             {
-                bool inComp = CompetitiveRoomDetect.IsCompetitiveRoom();
+                // Only trace calls that happen while we're sitting in a competitive
+                // room — that's the abandoned-ranked-room bug (Lopi/Lexia). Normal
+                // region pinging from the menu is expected and not worth logging.
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
+
+                string region = "?";
+                if (__args != null)
+                    foreach (var a in __args) if (a is string s) { region = s; break; }
                 string roomName = "(none)";
                 try { roomName = PhotonNetwork.CurrentRoom?.Name ?? "(none)"; } catch { }
                 // Trim the stack-trace to a manageable size — the top frames
@@ -3576,7 +3793,7 @@ namespace CompetitiveRounds
                       .Append('.').Append(m.Name).Append('\n');
                 }
                 Plugin.Log.LogWarning($"[NCH-DIAG] ConnectToRegion('{region}') called " +
-                    $"while inComp={inComp} room='{roomName}'. Stack:\n{sb}");
+                    $"while in comp room='{roomName}'. Stack:\n{sb}");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[NCH-DIAG] log error: {ex.Message}"); }
         }
@@ -3722,6 +3939,61 @@ namespace CompetitiveRounds
             }
             catch { }
         }
+
+        // v1.28 — the REAL no-block root cause. ROUNDS' block system isn't a
+        // scrubbable trigger LIST; it's a set of Action delegates on Block
+        // (BlockAction, SuperFirstBlockAction, BlockActionEarly, …). Each
+        // BlockTrigger.Start() Delegate.Combine's its own DoBlock onto those,
+        // and BlockTrigger.OnDestroy() Delegate.Remove's it. When a card
+        // teardown between games DESTROYS a player's main/Default BlockTrigger
+        // GameObject, its OnDestroy strips its delegate — so Block.IDoBlock's
+        // `if (BlockAction != null) BlockAction(type)` invokes nothing and the
+        // block silently does NOTHING (goes to cooldown, no proc). Scrubbing a
+        // null list can't fix a missing delegate. This rebuild: (1) null out the
+        // Block's action delegates, (2) re-invoke Start() on every SURVIVING
+        // child BlockTrigger so they re-combine their delegates onto the Block.
+        // Net: the action chain is reconstructed from whatever triggers still
+        // exist. A trigger whose GameObject is fully gone can't be recovered
+        // (its effect is genuinely lost for that card), but the DEFAULT block
+        // trigger lives on the block prefab and virtually always survives — so
+        // re-Start'ing it restores the basic block proc, which is the symptom.
+        private static readonly string[] _blockActionFields = {
+            "SuperFirstBlockAction", "FirstBlockActionThatDelaysOthers",
+            "BlockAction", "BlockActionEarly", "BlockProjectileAction",
+            "BlockRechargeAction",
+        };
+        private static System.Reflection.MethodInfo _btStart;
+        public static int RebuildBlockActions(Block b)
+        {
+            if (b == null) return 0;
+            try
+            {
+                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                var bt = typeof(Block);
+                // 1) Clear the action delegates so re-Start doesn't double-combine.
+                foreach (var name in _blockActionFields)
+                {
+                    var f = bt.GetField(name, bf);
+                    if (f != null) { try { f.SetValue(b, null); } catch { } }
+                }
+                // 2) Re-Start every surviving BlockTrigger under this Block to
+                //    re-register its delegates.
+                if (_btStart == null)
+                    _btStart = typeof(BlockTrigger).GetMethod("Start", bf);
+                int rebuilt = 0;
+                var triggers = b.GetComponentsInChildren<BlockTrigger>(true);
+                if (triggers != null)
+                {
+                    foreach (var trig in triggers)
+                    {
+                        if (trig == null) continue;
+                        try { _btStart?.Invoke(trig, null); rebuilt++; } catch { }
+                    }
+                }
+                return rebuilt;
+            }
+            catch { return 0; }
+        }
     }
 
     [HarmonyPatch(typeof(Block), "TryBlock")]
@@ -3754,14 +4026,18 @@ namespace CompetitiveRounds
                 if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
                 var blocks = UnityEngine.Object.FindObjectsOfType<Block>();
                 if (blocks == null) return;
-                int total = 0;
+                int total = 0, rebuilt = 0;
                 foreach (var b in blocks)
                 {
                     int r = BlockReflect.ScrubNullTriggers(b);
                     total += r;
+                    // Rebuild the action-delegate chain from surviving triggers —
+                    // restores the basic block proc for any player whose main
+                    // BlockTrigger delegate got stripped by a between-game destroy.
+                    rebuilt += BlockReflect.RebuildBlockActions(b);
                     BlockReflect.ForceReady(b);
                 }
-                Plugin.Log.LogInfo($"[BLOCK-RESET] StartGame: reset {blocks.Length} Block(s), scrubbed {total} null triggers");
+                Plugin.Log.LogInfo($"[BLOCK-RESET] StartGame: reset {blocks.Length} Block(s), scrubbed {total} null triggers, re-registered {rebuilt} trigger delegate(s)");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[BLOCK-RESET] error: {ex.Message}"); }
         }
@@ -3838,6 +4114,15 @@ namespace CompetitiveRounds
     internal static class MapColorState
     {
         public static string CurrentSku;
+
+        // Bottom-screen toast shown for a few seconds when the player Shift-cycles to a
+        // new map skin (so they can find a specific one by name). Read by CompetitiveUI.
+        public static string ToastText = "";
+        public static float ToastUntil = -999f;
+        public static void ShowToast(string name)
+        {
+            try { ToastText = name ?? ""; ToastUntil = Time.unscaledTime + 2.5f; } catch { }
+        }
     }
 
     [HarmonyPatch(typeof(Map), "Start")]
@@ -3872,8 +4157,33 @@ namespace CompetitiveRounds
             return current;
         }
 
+        // Timestamp of the most recent Map.Start. ROUNDS runs Map.Start INSIDE
+        // MapTransition.Move (the coroutine that repositions players each round), and it
+        // also fires ArtHandler.NextArt during that same window. So for ~the transition
+        // duration after Map.Start, any particle mutation risks the MapTransition NRE
+        // (learning #45). NextArt uses this to decide defer-vs-apply-now.
+        public static float LastMapStartTime = -999f;
+        // How long after Map.Start we treat the scene as "still transitioning" and must
+        // NOT mutate particles. The move itself is ~0.9s; 2.0s is the proven-safe buffer
+        // from learning #45 (v1.26.9 cut it to 0.4s and reintroduced the player-freeze /
+        // off-screen bug — opponents on the shipped build hit it every round).
+        public const float MapTransitionGuardSec = 2.0f;
+
+        // Push a color away from grey toward full saturation by `mult` (1 = unchanged).
+        // Keeps luminance roughly stable so brightness is set by the lift, not this.
+        private static Color SaturateColor(Color c, float mult)
+        {
+            float g = c.r * 0.299f + c.g * 0.587f + c.b * 0.114f; // perceived grey level
+            return new Color(
+                Mathf.Clamp01(g + (c.r - g) * mult),
+                Mathf.Clamp01(g + (c.g - g) * mult),
+                Mathf.Clamp01(g + (c.b - g) * mult),
+                c.a);
+        }
+
         static void Postfix(Map __instance)
         {
+            LastMapStartTime = Time.time;
             // Use whatever sku is currently live after the cycle (ArtHandlerNextArtPatch sets
             // MapColorState.CurrentSku on every cycle advance). Fall back to the legacy single
             // field when the cycle hasn't run yet (fresh map load before any Shift press).
@@ -3881,27 +4191,25 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(sku))
                 sku = ApiClient.CachedPlayerStats?.active_color_sku;
             if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku)) return;
-            // Defer: Map.Start runs inside ROUNDS' MapTransition.Move coroutine. Mutating
-            // OutOfBounds/* + ArtInstance.parts particle systems while that coroutine is
-            // still animating produces a NullReferenceException in MapTransition+<Move>d__15
-            // that stalls the round-won animation until the next point is scored. Wait past
-            // the transition before touching particles.
-            if (__instance != null && __instance.isActiveAndEnabled)
-                __instance.StartCoroutine(DelayedApplyTints(__instance, sku));
+            // Defer past the transition before touching particles (see MapTransitionGuardSec).
+            // Hosted on the persistent Plugin object, NOT the Map — the Map can be destroyed
+            // mid-transition, which would kill a Map-hosted coroutine before it applies.
+            ScheduleDeferredTints(sku);
         }
 
-        private static System.Collections.IEnumerator DelayedApplyTints(Map mapInstance, string sku)
+        // Schedule the wall/atmosphere particle tint to run AFTER the MapTransition window.
+        // Always hosted on Plugin.Instance so it survives Map destruction during the move.
+        public static void ScheduleDeferredTints(string sku)
         {
-            // 0.4s — tightened from 2.0s in v1.26.9. The 2.0s value (per learning #45)
-            // was a buffer past MapTransition.Move's animation to avoid an NRE inside
-            // MapTransition+<Move>d__15.MoveNext when we mutated particles concurrently.
-            // 0.4s is enough for the move coroutine to land but cuts the round-start
-            // "wall is still vanilla" gap by 5×. Combined with the Clear() calls in
-            // ApplyPhysicalTintsForSku this gives a near-instant snap to the new
-            // sku's colors at round start. If the NRE returns, bump this back.
-            yield return new WaitForSeconds(0.4f);
-            if (mapInstance == null) yield break;
-            ApplyPhysicalTintsForSku(mapInstance, sku);
+            if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku)) return;
+            var host = Plugin.Instance;
+            if (host != null) host.StartCoroutine(DelayedApplyTints(sku));
+        }
+
+        private static System.Collections.IEnumerator DelayedApplyTints(string sku)
+        {
+            yield return new WaitForSeconds(MapTransitionGuardSec);
+            ApplyPhysicalTintsForSku(null, sku); // null → finds the active Map itself
         }
 
         /// <summary>Apply the SKU's wall / sprite / particle tints to the current scene. Shared
@@ -3966,7 +4274,6 @@ namespace CompetitiveRounds
                 // Assignment is ordered by transform path (deterministic across frames AND rounds)
                 // so the order never changes mid-session. We also two-tone the colors (primary /
                 // secondary by path parity) so both colors land in the walls as requested.
-                Color wallSecondary = CustomMapColors.GetSecondaryColor(sku);
                 var wallSystems = new List<ParticleSystem>();
                 foreach (var ps in UnityEngine.Object.FindObjectsOfType<ParticleSystem>())
                 {
@@ -3983,9 +4290,26 @@ namespace CompetitiveRounds
                     try
                     {
                         string ppath = GetTransformPath(ps.transform);
-                        Color layerTint = (StablePathParity(ppath) == 0) ? c : wallSecondary;
+                        // Two-color scheme that keeps BOTH colors visible:
+                        //   • Scene grading + background atmosphere = PRIMARY (named) color, so
+                        //     the map clearly reads as e.g. Magma-red overall.
+                        //   • The OutOfBounds border WALLS = SECONDARY color, drawn BRIGHT so
+                        //     it glows as a complementary accent that punches through the
+                        //     scene-wide primary ColorGrading instead of getting muddied.
+                        // (Earlier the walls carried the secondary via a wi%2 two-tone, but the
+                        // sortingFudge made the top overlapping layer win, so the secondary
+                        // covered the primary everywhere — the "wrong color" bug. All walls one
+                        // color avoids that; the primary now lives in the scene/background.)
+                        Color layerTint = CustomMapColors.GetSecondaryColor(sku);
                         Color vanilla = GetCachedVanillaColor(ps);
-                        Color tinted = new Color(vanilla.r * layerTint.r, vanilla.g * layerTint.g, vanilla.b * layerTint.b, vanilla.a);
+                        // COLORIZE (not multiply): scale the TARGET hue by the vanilla
+                        // particle's brightness so the designed hue renders true regardless of
+                        // base art. High lift → the border BLOOMS, so the secondary accent stays
+                        // vivid even after the primary-leaning ColorGrading multiplies the scene.
+                        float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
+                        Color hue = SaturateColor(layerTint, 1.35f);
+                        float lift = 1.05f + 0.55f * Mathf.Clamp01(lum); // 1.05 → 1.60 (glowing accent)
+                        Color tinted = new Color(hue.r * lift, hue.g * lift, hue.b * lift, vanilla.a);
                         var main = ps.main;
                         main.startColor = new ParticleSystem.MinMaxGradient(tinted);
                         // Fixed inter-system draw order — the actual flicker fix. In Unity a LOWER
@@ -4014,17 +4338,40 @@ namespace CompetitiveRounds
                 int artParts = 0;
                 try
                 {
-                    Color secondary = CustomMapColors.GetSecondaryColor(sku);
+                    // Background atmosphere now leans on the PRIMARY (named) color too, so the
+                    // whole map — walls + backdrop + scene grading — reads as one clear color.
+                    // (Using the secondary here made the dominant backdrop the WRONG color:
+                    // Rose's teal backdrop, Pine's brown, etc., which is what Sid kept seeing.)
+                    Color bgTint = Color.Lerp(new Color(0.5f, 0.5f, 0.5f), c, 0.50f);
+                    string baseArt = CustomMapColors.GetBaseArt(sku);
                     var ah = ArtHandler.instance;
                     if (ah != null && ah.arts != null)
                     {
                         var partsField = typeof(ArtInstance).GetField("parts",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                        var profileField = typeof(ArtInstance).GetField("profile",
                             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
                         foreach (var art in ah.arts)
                         {
                             if (art == null) continue;
                             var partsArr = partsField?.GetValue(art) as ParticleSystem[];
                             if (partsArr == null) continue;
+                            // Only the SKU's base art should paint the sky. Any other art left
+                            // playing (e.g. the Rainbow arts) bleeds purple/pink into the
+                            // background — Magma's "sky is purple and pink". Turn the others off.
+                            bool isBase = false;
+                            try
+                            {
+                                var prof = profileField?.GetValue(art) as UnityEngine.Object;
+                                isBase = prof != null && !string.IsNullOrEmpty(baseArt)
+                                         && string.Equals(prof.name, baseArt, StringComparison.OrdinalIgnoreCase);
+                            }
+                            catch { }
+                            if (!isBase)
+                            {
+                                try { art.TogglePart(false); } catch { }
+                                continue;
+                            }
                             for (int i = 0; i < partsArr.Length; i++)
                             {
                                 var ps = partsArr[i];
@@ -4032,7 +4379,9 @@ namespace CompetitiveRounds
                                 try
                                 {
                                     Color vanilla = GetCachedVanillaColor(ps);
-                                    Color tinted = new Color(vanilla.r * secondary.r, vanilla.g * secondary.g, vanilla.b * secondary.b, vanilla.a);
+                                    float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
+                                    float lift = 0.28f + 0.45f * Mathf.Clamp01(lum); // dimmer than the walls
+                                    Color tinted = new Color(bgTint.r * lift, bgTint.g * lift, bgTint.b * lift, vanilla.a);
                                     var main = ps.main;
                                     main.startColor = new ParticleSystem.MinMaxGradient(tinted);
                                     ps.Clear(true);
@@ -4045,7 +4394,7 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] art-particle tint failed: {ex.Message}"); }
 
-                Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: multiplied {boundaryParts} boundary + {artParts} art particles by tint (vanilla texture preserved)");
+                Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: colorized {boundaryParts} wall (secondary accent) + {artParts} primary bg particles; scene grading=primary; non-base arts off");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] Map tint failed: {ex.Message}"); }
         }
@@ -4150,9 +4499,21 @@ namespace CompetitiveRounds
                         _cycleIndex = 0;
                         _cycleLastListHash = listHash;
                     }
+                    // Advance the cycle ONLY on a real Left-Shift press. ROUNDS also calls
+                    // NextArt automatically every round (often 2-3× at round start), and
+                    // advancing on those made the skin auto-shuffle unpredictably — Sid kept
+                    // landing on the dull brown/grey ones over and over and saw a multi-color
+                    // FLICKER as several skus applied in a burst. Gating on Shift keeps the
+                    // chosen skin STABLE per round; the player deliberately cycles with Shift.
+                    bool manualShift = false;
+                    try { manualShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift); } catch { }
+                    if (manualShift)
+                        _cycleIndex = (_cycleIndex + 1) % equipped.Count;
                     sku = equipped[_cycleIndex % equipped.Count];
-                    Plugin.Log.LogInfo($"[MAPCOLOR] Cycle → {sku} (index {_cycleIndex}/{equipped.Count})");
-                    _cycleIndex = (_cycleIndex + 1) % equipped.Count;
+                    Plugin.Log.LogInfo($"[MAPCOLOR] {(manualShift ? "Shift cycle" : "auto-keep")} → {sku} (index {_cycleIndex}/{equipped.Count})");
+                    // Toast the friendly skin name on a manual cycle so the player can find a
+                    // specific skin (e.g. Magma) by sight.
+                    if (manualShift) MapColorState.ShowToast(CustomMapColors.FriendlyName(sku));
                 }
                 // Backward compat: if the new list field is empty, fall back to the
                 // legacy single-value active_color_sku (older clients / transitional state).
@@ -4209,12 +4570,20 @@ namespace CompetitiveRounds
                     // snaps in immediately instead of lerping. Harmless if ROUNDS already had it
                     // at 1. Wrapped in try/catch since volume is reflected ROUNDS internals.
                     try { if (__instance.volume != null) __instance.volume.weight = 1f; } catch { }
-                    // Re-apply wall / sprite / particle tints for the new sku. Without this
-                    // the post-process (ColorGrading) updates on Shift but the walls stay on
-                    // whatever sku was first applied at Map.Start — user observed walls not
-                    // cycling along with the rest of the scene.
-                    MapPhysicalColorPatch.ApplyPhysicalTintsForSku(null, sku);
-                    Plugin.Log.LogInfo($"[MAPCOLOR] applied custom sku={sku} on base='{baseArt}' (cloned profile + physical tints)");
+                    // Re-apply wall / atmosphere particle tints for the new sku. CRITICAL: ROUNDS
+                    // calls NextArt every round FROM INSIDE MapTransition.Move; mutating particles
+                    // then NREs MapTransition+<Move>d__15 and the move STALLS — players don't get
+                    // repositioned (stuck mid-screen, then off-screen next round — the freeze).
+                    // So defer the particle work past the transition window. A genuine mid-round
+                    // MANUAL Shift (well after Map.Start) is safe to apply immediately for snappy
+                    // cycling. ColorGrading (ApplyPost, above) is volume-only and stays immediate.
+                    bool inTransition = Time.time - MapPhysicalColorPatch.LastMapStartTime
+                                        < MapPhysicalColorPatch.MapTransitionGuardSec;
+                    if (inTransition)
+                        MapPhysicalColorPatch.ScheduleDeferredTints(sku);
+                    else
+                        MapPhysicalColorPatch.ApplyPhysicalTintsForSku(null, sku);
+                    Plugin.Log.LogInfo($"[MAPCOLOR] applied custom sku={sku} on base='{baseArt}' (deferParticles={inTransition})");
                     return false;
                 }
 

@@ -6,7 +6,7 @@ These define the JSON shape of data going in and out of the API.
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Match Submission ───────────────────────────────────────────
@@ -123,6 +123,14 @@ class PlayerStatsResponse(BaseModel):
     active_player_color_sku: str | None = None
     active_player_color_hex: str | None = None
     active_player_color_name: str | None = None
+    # Cursor color (kind=cursor_color) — recolors the in-menu mouse cursor.
+    active_cursor_color_sku: str | None = None
+    active_cursor_color_hex: str | None = None
+    # Player effect (kind=player_effect) — in-match particle aura, synced via Photon.
+    active_player_effect_sku: str | None = None
+    # Hide-gold utility: true when this player has the toggle on (gold masked on
+    # the leaderboard). The client uses this to render the Other-tab toggle state.
+    hide_gold: bool = False
     # Multi-equip map colors (v1.23+). The client cycles through this ordered list with
     # Left Shift in-game. Empty list → no equipped map colors → ArtHandler.NextArt falls
     # through to ROUNDS' vanilla random rotation. active_color_sku above is kept for
@@ -147,6 +155,12 @@ class PlayerStatsResponse(BaseModel):
     sweeps_taken: int = 0
     ranked_dc_count: int = 0
     recent_form: list[dict] = Field(default_factory=list)
+    # Compare-tab metrics (v1.28).
+    avg_fps: int = 0
+    avg_cards_per_game: float = 0.0
+    worst_cards: list[dict] = Field(default_factory=list)
+    achievements_unlocked: int = 0
+    region_breakdown: list[dict] = Field(default_factory=list)  # [{region, matches}]
     # Most recently observed mod version for this player (X-Mod-Version
     # header on their last mod-only request). null for non-mod players.
     mod_version: str | None = None
@@ -298,16 +312,53 @@ class AchievementListResponse(BaseModel):
 
 class BugReportRequest(BaseModel):
     """In-game bug report submission. log_text is optional plain-text — server
-    gzips it before persisting to disk."""
-    steam_id: str = Field(..., max_length=32)
-    display_name: str | None = Field(None, max_length=64)
-    mod_version: str | None = Field(None, max_length=32)
-    game_version: str | None = Field(None, max_length=32)
-    severity: str = Field("medium", max_length=16)   # low | medium | high | crash
-    category: str = Field("other", max_length=16)    # ui | gameplay | network | other
-    description: str = Field(..., min_length=4, max_length=8000)
-    repro_steps: str | None = Field(None, max_length=8000)
-    log_text: str | None = Field(None, max_length=12_000_000)  # ~12MB cap pre-gzip — covers active sessions with verbose tournament/match log spam
+    gzips it before persisting to disk.
+
+    IMPORTANT: oversized fields are TRUNCATED, never rejected. A hard Pydantic
+    max_length makes FastAPI return 422 Unprocessable Entity before the handler
+    runs, so a player with a verbose log (a 2v2 session with diagnostic spam can
+    blow past 12MB) couldn't file a bug at all — the exact failure SpicyPeppersauce
+    hit. We accept whatever they send and clamp it, keeping the TAIL of the log
+    (most recent events matter most for debugging) and the head of text fields."""
+    steam_id: str = Field(..., max_length=64)
+    display_name: str | None = Field(None, max_length=200)
+    mod_version: str | None = Field(None, max_length=64)
+    game_version: str | None = Field(None, max_length=64)
+    severity: str = Field("medium", max_length=64)   # low | medium | high | crash
+    category: str = Field("other", max_length=64)    # ui | gameplay | network | other
+    description: str = Field(..., min_length=1)       # no upper cap here — clamped in validator
+    repro_steps: str | None = None
+    log_text: str | None = None  # no Pydantic cap — clamped to the tail in the validator below
+
+    @field_validator("steam_id", "display_name", "mod_version", "game_version",
+                     "severity", "category", mode="before")
+    @classmethod
+    def _clamp_short(cls, v):
+        # Clamp short string fields to a safe length instead of letting an
+        # over-length value trip max_length → 422. Generous ceilings (the Field
+        # max_length above is the real DB-safe bound; this just prevents a hard
+        # reject if a client somehow sends more).
+        if isinstance(v, str) and len(v) > 64:
+            return v[:64]
+        return v
+
+    @field_validator("description", "repro_steps", mode="before")
+    @classmethod
+    def _clamp_text(cls, v):
+        # Keep the HEAD of free-text fields (the user's own words come first).
+        if isinstance(v, str) and len(v) > 8000:
+            return v[:8000]
+        return v
+
+    @field_validator("log_text", mode="before")
+    @classmethod
+    def _clamp_log(cls, v):
+        # Keep the TAIL of the log — the most recent events are what matter for a
+        # bug report. 12MB pre-gzip ceiling (matches the prior intent) but as a
+        # truncation, not a 422-triggering hard cap.
+        if isinstance(v, str) and len(v) > 12_000_000:
+            return v[-12_000_000:]
+        return v
 
 
 class BugReportSummary(BaseModel):

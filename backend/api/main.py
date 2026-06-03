@@ -69,6 +69,14 @@ GLICKO2_DEFAULT_RD = float(os.getenv("GLICKO2_DEFAULT_RD", "350"))
 GLICKO2_DEFAULT_VOLATILITY = float(os.getenv("GLICKO2_DEFAULT_VOLATILITY", "0.06"))
 GLICKO2_PERIOD_HOURS = int(os.getenv("GLICKO2_PERIOD_HOURS", "168"))
 
+# How long a pair's `active` ranked_series stays the "current" one for reuse.
+# A new game between the same two players within this window joins the existing
+# series (one BO3 = one series); after it, a fresh sit-down starts a fresh series.
+# Must be shorter than the 60-min stale-prune so an abandoned series can't glue a
+# later session's games onto it (the "only 1 series in history" / "subsequent
+# series don't show" bug). 25 min comfortably covers a real BO3's pace.
+SERIES_REUSE_WINDOW_MIN = int(os.getenv("SERIES_REUSE_WINDOW_MIN", "25"))
+
 
 # ── Application setup ──────────────────────────────────────────
 
@@ -622,7 +630,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.27.0"
+LATEST_MOD_VERSION = "1.28.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1132,10 +1140,19 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         # tournaments against the same opponent doesn't crash the handler with
         # MultipleResultsFound. Tournament series are inserted when a match
         # becomes ready, so "newest active series" = "current match context."
+        # Reuse the pair's CURRENT in-progress series, but only if it's recent.
+        # A stalled 'active' row (a BO3 the pair abandoned) lingers up to 60 min
+        # before the stale-prune sweeps it. Without a recency gate, when the same
+        # two players sit down again the next game gets glued onto that old row —
+        # so multiple distinct series collapse into ONE (only 1 shows in history,
+        # and a "new" series never surfaces in /series/active). Gate reuse to a
+        # recent window so a fresh sit-down starts a fresh series.
+        series_reuse_cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
         series_query = (
             select(RankedSeries)
             .where(
                 RankedSeries.status == "active",
+                RankedSeries.created_at >= series_reuse_cutoff,
                 or_(
                     (RankedSeries.player1_id == p1.id) & (RankedSeries.player2_id == p2.id),
                     (RankedSeries.player1_id == p2.id) & (RankedSeries.player2_id == p1.id),
@@ -1426,6 +1443,7 @@ async def get_leaderboard(
                  ELSE 0 END AS win_rate,
             COALESCE(p.total_xp, 0) AS total_xp,
             COALESCE(p.gold_earned, 0) - COALESCE(p.gold_spent, 0) AS gold,
+            COALESCE(p.hide_gold, false) AS hide_gold,
             si.name          AS title,
             si.preview_color AS title_color
         FROM glicko_ratings gr
@@ -1453,7 +1471,10 @@ async def get_leaderboard(
             losses=row["losses"],
             win_rate=float(row["win_rate"]),
             level=level_from_xp(row["total_xp"])[0],
-            gold=int(row["gold"] or 0),
+            # hide_gold mask: players who bought the Hide Gold utility and toggled it
+            # on report gold=-1 to everyone. The client renders -1 as "Hidden". The
+            # player still sees their own real balance in the shop / stats panel.
+            gold=(-1 if row["hide_gold"] else int(row["gold"] or 0)),
             title=row["title"],
             title_color=row["title_color"],
         )
@@ -1650,10 +1671,15 @@ async def get_player_stats(
     active_player_color_sku: str | None = None
     active_player_color_hex: str | None = None
     active_player_color_name: str | None = None
+    active_cursor_color_sku: str | None = None
+    active_cursor_color_hex: str | None = None
+    active_player_effect_sku: str | None = None
     for cosmetic_id, kind in ((player.active_title_id, "title"),
                                (player.active_trail_id, "trail"),
                                (player.active_color_id, "color"),
-                               (player.active_player_color_id, "player_color")):
+                               (player.active_player_color_id, "player_color"),
+                               (player.active_cursor_color_id, "cursor_color"),
+                               (player.active_player_effect_id, "player_effect")):
         if cosmetic_id is None:
             continue
         row = (await db.execute(
@@ -1667,10 +1693,15 @@ async def get_player_stats(
             active_trail_sku, active_trail_color, active_trail_price = row[1], row[2], row[3] or 0
         elif kind == "color":
             active_color_sku = row[1]  # kept for backward compat — "first equipped color"
-        else:  # player_color
+        elif kind == "player_color":
             active_player_color_name = row[0]
             active_player_color_sku = row[1]
             active_player_color_hex = row[2]
+        elif kind == "cursor_color":
+            active_cursor_color_sku = row[1]
+            active_cursor_color_hex = row[2]
+        else:  # player_effect
+            active_player_effect_sku = row[1]
 
     # Multi-equip colors: resolve the full active_color_ids list to skus so the client
     # can cycle between them with Left Shift in-game.
@@ -1785,6 +1816,93 @@ async def get_player_stats(
         for r in form_rows
     ]
 
+    # ── Compare-tab metrics (v1.28) ──────────────────────────────────────
+    # Extra per-player aggregates surfaced for the Compare tab. All best-effort
+    # (default to safe zeros) so a player with no data still returns a valid row.
+    # avg_fps: mean of this player's reported per-match avg fps (matches where
+    #          they were the reporter, fps > 0).
+    avg_fps = 0
+    try:
+        fps_row = (await db.execute(text("""
+            SELECT AVG(NULLIF(f, 0))::float AS avg_fps FROM (
+                SELECT CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg ELSE m.p2_fps_avg END AS f
+                  FROM matches m
+                 WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+            ) s WHERE f IS NOT NULL AND f > 0
+        """), {"pid": player.id})).mappings().first()
+        if fps_row and fps_row["avg_fps"]:
+            avg_fps = int(round(fps_row["avg_fps"]))
+    except Exception:
+        avg_fps = 0
+
+    # avg_cards_per_game: mean cards picked per match. A strong player who wins
+    # fast picks fewer cards → closer to 1. Computed as total card picks / matches.
+    avg_cards_per_game = 0.0
+    try:
+        cpg_row = (await db.execute(text("""
+            SELECT
+              (SELECT COUNT(*) FROM match_cards mc
+                 JOIN matches m2 ON m2.id = mc.match_id
+                WHERE mc.player_id = :pid)::float AS total_picks,
+              (SELECT COUNT(*) FROM matches m
+                WHERE (m.player1_id = :pid OR m.player2_id = :pid))::float AS total_matches
+        """), {"pid": player.id})).mappings().first()
+        if cpg_row and (cpg_row["total_matches"] or 0) > 0:
+            avg_cards_per_game = round((cpg_row["total_picks"] or 0) / cpg_row["total_matches"], 2)
+    except Exception:
+        avg_cards_per_game = 0.0
+
+    # worst_cards: lowest win-rate cards this player has picked at least 4 times
+    # (min sample so a 1-pick fluke doesn't dominate). Mirror of top_cards shape.
+    worst_cards: list[dict] = []
+    try:
+        wc_rows = (await db.execute(text("""
+            SELECT mc.card_name,
+                   COUNT(*) AS times_picked,
+                   SUM(CASE WHEN m.winner_id = :pid THEN 1 ELSE 0 END) AS wins_with,
+                   ROUND(SUM(CASE WHEN m.winner_id = :pid THEN 1 ELSE 0 END)::numeric
+                         / NULLIF(COUNT(*), 0), 4) AS win_rate
+              FROM match_cards mc
+              JOIN matches m ON m.id = mc.match_id
+             WHERE mc.player_id = :pid
+             GROUP BY mc.card_name
+            HAVING COUNT(*) >= 4
+             ORDER BY win_rate ASC, times_picked DESC
+             LIMIT 10
+        """), {"pid": player.id})).mappings().all()
+        worst_cards = [
+            {"card_name": c["card_name"], "times_picked": c["times_picked"],
+             "wins_with": c["wins_with"], "win_rate": float(c["win_rate"] or 0)}
+            for c in wc_rows
+        ]
+    except Exception:
+        worst_cards = []
+
+    # achievements_unlocked: count of this player's unlocked achievements.
+    achievements_unlocked = 0
+    try:
+        ach_row = (await db.execute(text(
+            "SELECT COUNT(*) FROM player_achievements WHERE player_id = :pid"
+        ), {"pid": player.id})).scalar()
+        achievements_unlocked = int(ach_row or 0)
+    except Exception:
+        achievements_unlocked = 0
+
+    # region_breakdown: how many matches this player has played per Photon region
+    # (proxy for "time spent" per region). Returned as a list of {region, matches}.
+    region_breakdown: list[dict] = []
+    try:
+        rb_rows = (await db.execute(text("""
+            SELECT COALESCE(NULLIF(m.region, ''), 'unknown') AS region, COUNT(*) AS matches
+              FROM matches m
+             WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+             GROUP BY COALESCE(NULLIF(m.region, ''), 'unknown')
+             ORDER BY matches DESC
+        """), {"pid": player.id})).mappings().all()
+        region_breakdown = [{"region": r["region"], "matches": r["matches"]} for r in rb_rows]
+    except Exception:
+        region_breakdown = []
+
     # Server-computed head-to-head record between the viewed player and the
     # viewer. Iterates the FULL matches table (not the viewer's most-recent
     # 500 like the old client-side path) so old opponents always show
@@ -1862,6 +1980,10 @@ async def get_player_stats(
         active_player_color_sku=active_player_color_sku,
         active_player_color_hex=active_player_color_hex,
         active_player_color_name=active_player_color_name,
+        active_cursor_color_sku=active_cursor_color_sku,
+        active_cursor_color_hex=active_cursor_color_hex,
+        active_player_effect_sku=active_player_effect_sku,
+        hide_gold=bool(player.hide_gold),
         active_nametag_skus=active_nametag_skus,
         last_match=stats["last_match"],
         recent_rating_history=history,
@@ -1880,6 +2002,11 @@ async def get_player_stats(
         sweeps_taken=sweeps_taken,
         ranked_dc_count=player.ranked_dc_count or 0,
         recent_form=recent_form,
+        avg_fps=avg_fps,
+        avg_cards_per_game=avg_cards_per_game,
+        worst_cards=worst_cards,
+        achievements_unlocked=achievements_unlocked,
+        region_breakdown=region_breakdown,
         mod_version=player.mod_version,
         h2h_ranked_wins=h2h_ranked_w,
         h2h_ranked_losses=h2h_ranked_l,
@@ -2793,14 +2920,16 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
         # ends. submit_match's existing find-or-create logic will reuse it whether the
         # match report's p1/p2 ordering matches our ordering or not. Skip if a row
         # already exists (e.g., re-ready after a brief disconnect).
+        ready_reuse_cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
         existing_series = (await db.execute(
             select(RankedSeries).where(
                 RankedSeries.status == "active",
+                RankedSeries.created_at >= ready_reuse_cutoff,
                 or_(
                     and_(RankedSeries.player1_id == player.id, RankedSeries.player2_id == opp["player_id"]),
                     and_(RankedSeries.player1_id == opp["player_id"], RankedSeries.player2_id == player.id),
                 ),
-            )
+            ).order_by(RankedSeries.created_at.desc()).limit(1)
         )).scalar_one_or_none()
         if existing_series is None:
             existing_series = RankedSeries(
@@ -3561,6 +3690,18 @@ async def _settle_series_bets(db: AsyncSession, series: RankedSeries):
 
 # ── Routes: Shop ─────────────────────────────────────────────
 
+# Steam IDs that own every shop item automatically — now and into the future.
+# The mod owner (Sid) never has to buy or own-gate any cosmetic; the shop
+# endpoints treat these accounts as owning everything and skip ownership checks
+# on equip. Extend the set to grant another account the same.
+SHOP_OWNER_STEAM_IDS = {"76561198040410653"}  # Sid
+
+
+def _is_shop_owner(steam_id: str | None) -> bool:
+    """True if this Steam ID auto-owns every shop item (mod owner)."""
+    return steam_id is not None and steam_id in SHOP_OWNER_STEAM_IDS
+
+
 @app.get("/api/v1/shop/items", tags=["Shop"])
 async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession = Depends(get_db)):
     """Always-available items + (future) today's rotation pick. If steam_id is
@@ -3591,7 +3732,7 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
                 "price": r.price,
                 "rarity": r.rarity,
                 "preview_color": r.preview_color,
-                "owned": r.id in owned_ids,
+                "owned": _is_shop_owner(steam_id) or (r.id in owned_ids),
             }
             for r in rows
         ]
@@ -3732,6 +3873,69 @@ async def set_active_player_color(
     return await _set_active_cosmetic(db, steam_id, "player_color", "player_color", item_id, sig)
 
 
+@app.post("/api/v1/players/{steam_id}/active-cursor-color", tags=["Shop"])
+async def set_active_cursor_color(
+    steam_id: str,
+    item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Equip / unequip a cursor color (kind='cursor_color'). Single-equip; the
+    client recolors the in-menu mouse cursor locally."""
+    return await _set_active_cosmetic(db, steam_id, "cursor_color", "cursor_color", item_id, sig)
+
+
+@app.post("/api/v1/players/{steam_id}/active-player-effect", tags=["Shop"])
+async def set_active_player_effect(
+    steam_id: str,
+    item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Equip / unequip a player effect (kind='player_effect'). Single-equip;
+    cross-visible in-match via the Photon cr_effect_sku custom prop."""
+    return await _set_active_cosmetic(db, steam_id, "player_effect", "player_effect", item_id, sig)
+
+
+@app.post("/api/v1/players/{steam_id}/hide-gold", tags=["Shop"])
+async def set_hide_gold(
+    steam_id: str,
+    on: bool = Query(..., description="True to hide gold on the leaderboard"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle the hide-gold leaderboard mask. Requires owning sku 'util_hide_gold'
+    (or being the mod owner). HMAC signs 'hide_gold:{steam_id}:{1|0}'. The player
+    still sees their own real balance everywhere; only the leaderboard masks it."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"hide_gold:{steam_id}:{1 if on else 0}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    if not _is_shop_owner(steam_id):
+        item = (await db.execute(select(ShopItem).where(ShopItem.sku == "util_hide_gold"))).scalar_one_or_none()
+        owned = None
+        if item is not None:
+            owned = (await db.execute(
+                select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item.id)
+            )).scalar_one_or_none()
+        if owned is None:
+            raise HTTPException(status_code=403, detail="Hide-gold not owned")
+
+    player.hide_gold = bool(on)
+    await db.commit()
+    return {"status": "set", "hide_gold": player.hide_gold}
+
+
 @app.post("/api/v1/players/{steam_id}/color-toggle", tags=["Shop"])
 async def toggle_color(
     steam_id: str,
@@ -3760,11 +3964,12 @@ async def toggle_color(
     if item is None or item.kind != "color":
         raise HTTPException(status_code=400, detail="Not a valid map color")
 
-    owned = (await db.execute(
-        select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
-    )).scalar_one_or_none()
-    if owned is None:
-        raise HTTPException(status_code=403, detail="Item not owned")
+    if not _is_shop_owner(steam_id):
+        owned = (await db.execute(
+            select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
+        )).scalar_one_or_none()
+        if owned is None:
+            raise HTTPException(status_code=403, detail="Item not owned")
 
     current = list(player.active_color_ids or [])
     if item_id in current:
@@ -3809,11 +4014,12 @@ async def toggle_nametag_style(
     if item is None or item.kind != "nametag":
         raise HTTPException(status_code=400, detail="Not a valid nametag style")
 
-    owned = (await db.execute(
-        select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
-    )).scalar_one_or_none()
-    if owned is None:
-        raise HTTPException(status_code=403, detail="Item not owned")
+    if not _is_shop_owner(steam_id):
+        owned = (await db.execute(
+            select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
+        )).scalar_one_or_none()
+        if owned is None:
+            raise HTTPException(status_code=403, detail="Item not owned")
 
     current = list(player.nametag_style_ids or [])
     if item_id in current:
@@ -3885,10 +4091,14 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    attr = ("active_title_id" if kind == "title"
-            else "active_trail_id" if kind == "trail"
-            else "active_color_id" if kind == "color"
-            else "active_player_color_id")
+    attr = {
+        "title": "active_title_id",
+        "trail": "active_trail_id",
+        "color": "active_color_id",
+        "player_color": "active_player_color_id",
+        "cursor_color": "active_cursor_color_id",
+        "player_effect": "active_player_effect_id",
+    }.get(kind, "active_title_id")
     if item_id is None:
         setattr(player, attr, None)
         await db.commit()
@@ -3897,11 +4107,12 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
     item = (await db.execute(select(ShopItem).where(ShopItem.id == item_id))).scalar_one_or_none()
     if item is None or item.kind != kind:
         raise HTTPException(status_code=400, detail=f"Not a valid {kind}")
-    owned = (await db.execute(
-        select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
-    )).scalar_one_or_none()
-    if owned is None:
-        raise HTTPException(status_code=403, detail="Item not owned")
+    if not _is_shop_owner(steam_id):
+        owned = (await db.execute(
+            select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
+        )).scalar_one_or_none()
+        if owned is None:
+            raise HTTPException(status_code=403, detail="Item not owned")
 
     setattr(player, attr, item_id)
     await db.commit()
@@ -4051,8 +4262,16 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         p1_odds = round(_odds_multiplier(p1_rating, p2_rating, p1_rd, p2_rd), 2)
         p2_odds = round(_odds_multiplier(p2_rating, p1_rating, p2_rd, p1_rd), 2)
         no_profit = max(p1_odds, p2_odds) < 1.10
-        score_locked = (live_p1 + live_p2) >= 2 or r["p1_series_wins"] > 0 or r["p2_series_wins"] > 0
         is_private = bool(r["is_private"])
+        # Private-room series get a 1-point wider betting window. Their ranked_series
+        # row is created LATE (client-side preflight gated on Photon prop replication),
+        # so by the time the series first appears in /series/active, game 1 may already
+        # have 2 points → bets would lock instantly and never open. Locking at sum >= 3
+        # for private rooms gives a usable window to cover the late row creation. Queue
+        # series (row created at ready-up, before the room is even joined) keep the
+        # tighter >= 2 lock since they appear in time.
+        point_lock_threshold = 3 if is_private else 2
+        score_locked = (live_p1 + live_p2) >= point_lock_threshold or r["p1_series_wins"] > 0 or r["p2_series_wins"] > 0
         is_tournament = bool(r["is_tournament"])
         tournament_kind = r["tournament_kind"]   # "sync" | "async" | None
         # Tournament + private series stay bettable on the same terms as
@@ -4116,6 +4335,7 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
             ts.t1_series_wins, ts.t2_series_wins,
             ts.created_at, ts.dc_grace_until,
             -- Team-aggregated 2v2 ratings (avg of the 2 members), 1v1 fallback for low-confidence.
+            -- Used only for ODDS. The panel ALSO shows each player's individual rating below.
             (SELECT AVG(CASE WHEN g2.completed_series >= :trust THEN g2.rating ELSE g1.rating END)
                FROM glicko_ratings_2v2 g2
                JOIN glicko_ratings g1 ON g1.player_id = g2.player_id
@@ -4129,8 +4349,24 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
               WHERE g2.player_id IN (ts.t1a_id, ts.t1b_id))         AS t1_avg_rd,
             (SELECT AVG(g2.rating_deviation)
                FROM glicko_ratings_2v2 g2
-              WHERE g2.player_id IN (ts.t2a_id, ts.t2b_id))         AS t2_avg_rd
+              WHERE g2.player_id IN (ts.t2a_id, ts.t2b_id))         AS t2_avg_rd,
+            -- Per-player 2v2 ratings (the panel shows each player's ACTUAL rating,
+            -- not the team average — fixes "Live 2v2 shows 1500 for all 4"). COALESCE
+            -- to the player's 1v1 rating then 1500 so a brand-new 2v2 player still
+            -- reads a sensible number instead of the team mean.
+            COALESCE(g2a.rating, g1a.rating, 1500) AS t1a_rating,
+            COALESCE(g2b.rating, g1b.rating, 1500) AS t1b_rating,
+            COALESCE(g2c.rating, g1c.rating, 1500) AS t2a_rating,
+            COALESCE(g2d.rating, g1d.rating, 1500) AS t2b_rating
         FROM team_series ts
+        LEFT JOIN glicko_ratings_2v2 g2a ON g2a.player_id = ts.t1a_id
+        LEFT JOIN glicko_ratings    g1a ON g1a.player_id = ts.t1a_id
+        LEFT JOIN glicko_ratings_2v2 g2b ON g2b.player_id = ts.t1b_id
+        LEFT JOIN glicko_ratings    g1b ON g1b.player_id = ts.t1b_id
+        LEFT JOIN glicko_ratings_2v2 g2c ON g2c.player_id = ts.t2a_id
+        LEFT JOIN glicko_ratings    g1c ON g1c.player_id = ts.t2a_id
+        LEFT JOIN glicko_ratings_2v2 g2d ON g2d.player_id = ts.t2b_id
+        LEFT JOIN glicko_ratings    g1d ON g1d.player_id = ts.t2b_id
         JOIN players p1a ON p1a.id = ts.t1a_id
         JOIN players p1b ON p1b.id = ts.t1b_id
         JOIN players p2a ON p2a.id = ts.t2a_id
@@ -4162,6 +4398,11 @@ async def get_active_team_series(db: AsyncSession = Depends(get_db)):
             "t2a_steam": r["t2a_steam"], "t2a_name": r["t2a_name"],
             "t2b_steam": r["t2b_steam"], "t2b_name": r["t2b_name"],
             "t1_rating": int(round(t1_r)), "t2_rating": int(round(t2_r)),
+            # Per-player 2v2 ratings (panel shows each player's actual rating).
+            "t1a_rating": int(round(float(r["t1a_rating"] or 1500))),
+            "t1b_rating": int(round(float(r["t1b_rating"] or 1500))),
+            "t2a_rating": int(round(float(r["t2a_rating"] or 1500))),
+            "t2b_rating": int(round(float(r["t2b_rating"] or 1500))),
             "t1_wins": r["t1_series_wins"] or 0,
             "t2_wins": r["t2_series_wins"] or 0,
             "t1_odds": t1_odds, "t2_odds": t2_odds,
@@ -4225,15 +4466,19 @@ async def series_preflight(
     if not p2.ranked_enabled:
         p2.ranked_enabled = True
 
-    # Idempotent: reuse existing active series between this pair.
+    # Idempotent: reuse the pair's CURRENT in-progress series — but only if it's
+    # recent (see SERIES_REUSE_WINDOW_MIN). A stale abandoned 'active' row must
+    # NOT be reused, or a fresh sit-down's games glue onto the old series.
+    preflight_cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
     existing = (await db.execute(
         select(RankedSeries).where(
             RankedSeries.status == "active",
+            RankedSeries.created_at >= preflight_cutoff,
             or_(
                 and_(RankedSeries.player1_id == p1.id, RankedSeries.player2_id == p2.id),
                 and_(RankedSeries.player1_id == p2.id, RankedSeries.player2_id == p1.id),
             ),
-        )
+        ).order_by(RankedSeries.created_at.desc()).limit(1)
     )).scalar_one_or_none()
     if existing is not None:
         await db.commit()
@@ -4389,8 +4634,12 @@ async def place_bet(
     # "is the favorite actually going to win" mystery and prevents free-money bets
     # placed mid-game once an outcome is obvious. Game 1 ending (any p?_series_wins
     # > 0) also locks via the wins check above.
-    if (series.live_p1_points or 0) + (series.live_p2_points or 0) >= 2:
-        raise HTTPException(status_code=409, detail="Bets locked — game 1 has progressed past 2 points")
+    # Private-room series get a 1-point wider window (matches /series/active) — their
+    # row is created late so the first 2 points may already be on the board when bets
+    # first become visible. Queue series keep the tighter >= 2 lock.
+    _bet_lock_pts = 3 if bool(getattr(series, "is_private", False)) else 2
+    if (series.live_p1_points or 0) + (series.live_p2_points or 0) >= _bet_lock_pts:
+        raise HTTPException(status_code=409, detail="Bets locked — game 1 has progressed too far")
 
     # Bettor can't be a participant — obvious integrity issue.
     if bettor.id in (series.player1_id, series.player2_id):
@@ -6674,24 +6923,25 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     if s_dc_grace_until is not None:
         dc_grace_seconds_remaining = max(0, int((s_dc_grace_until - datetime.now(timezone.utc)).total_seconds()))
         if dc_grace_seconds_remaining == 0 and s_status == "dc_paused":
-            # Grace expired without the original 4 re-queueing. Forfeit-win
-            # to whichever team was still around.
-            await db.execute(
-                text("""
-                    UPDATE team_series
-                       SET status = 'completed',
-                           winner_team = COALESCE(:wt, winner_team),
-                           completed_at = NOW(),
-                           invalidation_reason = 'dc_forfeit'
-                     WHERE id = :sid AND status = 'dc_paused'
-                """),
-                {"sid": sid_uuid, "wt": s_dc_team},
-            )
+            # Grace expired without the original 4 re-queueing. Forfeit-win to
+            # whichever team was still around — WITH full ratings/gold via the
+            # shared helper (pre-v1.28 this completed with no rating effect).
+            # Guard against a double-complete race: only proceed if still dc_paused.
+            still_paused = (await db.execute(
+                text("SELECT status FROM team_series WHERE id=:sid FOR UPDATE"),
+                {"sid": sid_uuid},
+            )).scalar_one_or_none()
+            new_ratings = {}
+            if still_paused == "dc_paused" and s_dc_team in (1, 2):
+                new_ratings = await _complete_team_series_with_ratings(
+                    db, sid_uuid, s_dc_team, "dc_forfeit", dc_pid=s_dc_player,
+                )
             await db.commit()
             return {
                 "status": "completed",
                 "reason": "dc_forfeit",
                 "winner_team": s_dc_team,
+                "new_ratings": new_ratings,
                 "confirmations": s_confirms,
                 "expected": 4,
                 "age_seconds": int(age_seconds),
@@ -6715,6 +6965,322 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
 
 
 _DC_GRACE_SECONDS = 300  # 5-minute sticky-team requeue window
+
+
+async def _complete_team_series_with_ratings(
+    db: AsyncSession,
+    series_uuid: UUID,
+    winner_team: int,
+    reason: str,
+    dc_pid=None,
+):
+    """Fully complete a 2v2 series — Glicko-2 + gold + xp + per-slot accumulators +
+    completed_series counter — for the DC / forfeit / admin-resolution paths.
+
+    Before v1.28 the DC paths (report-dc, grace-expiry) marked a series 'completed'
+    but applied NO ratings/gold, so a DC-decided win never moved Elo or paid out —
+    making leaving strictly better than losing on the board. This factors the SAME
+    completion math used by submit_team_match's inline block (rating period = this
+    series, each player's two opponents = the other team) so every completion path
+    produces identical economy + rating effects.
+
+    Idempotent guard: callers must only invoke this for a series transitioning OUT of
+    a non-completed status in the SAME transaction; the UPDATE ... WHERE status<>'completed'
+    in the caller is the lock. This helper assumes the row is already (or about to be)
+    marked completed and just applies the side effects. Safe to call once per series.
+
+    winner_team: 1 or 2. reason: stored in invalidation_reason. dc_pid: optional.
+    Returns dict of {str(pid): new_rating} for logging.
+    """
+    # FOR UPDATE row-locks the series so concurrent completion attempts serialize.
+    # The SECOND caller (e.g. a duo rage-quitting fires OnPlayerLeftRoom twice → two
+    # report-dc POSTs, or a DC report racing a normal match-end submit) sees the row
+    # already 'completed' and no-ops — without this guard both would apply a full
+    # rating period + gold payout + bet settle, double-crediting everyone. This is
+    # the single guard that closes the double-credit / double-settle / admin-re-pay
+    # races (2v2 audit finding #1).
+    srow = (await db.execute(
+        text("""SELECT status, t1a_id, t1b_id, t2a_id, t2b_id
+                  FROM team_series WHERE id = :sid FOR UPDATE"""),
+        {"sid": series_uuid},
+    )).mappings().first()
+    if srow is None:
+        return {}
+    if srow["status"] == "completed":
+        # Already finished by a concurrent caller — do nothing.
+        return {}
+    t1a_id, t1b_id, t2a_id, t2b_id = srow["t1a_id"], srow["t1b_id"], srow["t2a_id"], srow["t2b_id"]
+    gids = [t1a_id, t1b_id, t2a_id, t2b_id]
+    if any(g is None for g in gids):
+        # Defensive: a series with an unfilled slot can't have ratings applied.
+        await db.execute(
+            text("""UPDATE team_series SET status='completed', winner_team=:wt,
+                       completed_at=NOW(), invalidation_reason=:rsn WHERE id=:sid"""),
+            {"wt": winner_team, "rsn": reason, "sid": series_uuid},
+        )
+        return {}
+
+    # Mark completed (winner + reason) up front.
+    await db.execute(
+        text("""UPDATE team_series SET status='completed', winner_team=:wt,
+                   completed_at=NOW(), invalidation_reason=:rsn, dc_player_id=COALESCE(:dpid, dc_player_id)
+                 WHERE id=:sid"""),
+        {"wt": winner_team, "rsn": reason, "sid": series_uuid, "dpid": dc_pid},
+    )
+
+    # ── Glicko-2 (mirrors submit_team_match:7232-7306) ──
+    gres = await db.execute(
+        text("SELECT player_id, rating, rating_deviation, volatility, peak_rating, completed_series "
+             "FROM glicko_ratings_2v2 WHERE player_id = ANY(:ids) FOR UPDATE"),
+        {"ids": gids},
+    )
+    existing = {r["player_id"]: dict(r) for r in gres.mappings().all()}
+    for pid in gids:
+        if pid not in existing:
+            existing[pid] = {
+                "player_id": pid, "rating": GLICKO2_DEFAULT_RATING,
+                "rating_deviation": GLICKO2_DEFAULT_RD, "volatility": GLICKO2_DEFAULT_VOLATILITY,
+                "peak_rating": GLICKO2_DEFAULT_RATING, "completed_series": 0, "_new": True,
+            }
+    team1_won = (winner_team == 1)
+    inputs = {pid: existing[pid] for pid in gids}
+
+    def update_player(p, opps_pre, won: bool):
+        opps = [(o["rating"], o["rating_deviation"], 1.0 if won else 0.0) for o in opps_pre]
+        return calculate_new_rating(p["rating"], p["rating_deviation"], p["volatility"], opps, GLICKO2_TAU)
+
+    results = {}
+    for pid in (t1a_id, t1b_id):
+        results[pid] = update_player(inputs[pid], [inputs[t2a_id], inputs[t2b_id]], team1_won)
+    for pid in (t2a_id, t2b_id):
+        results[pid] = update_player(inputs[pid], [inputs[t1a_id], inputs[t1b_id]], not team1_won)
+
+    new_ratings = {}
+    for pid, (new_r, new_rd, new_vol) in results.items():
+        if inputs[pid].get("_new"):
+            db.add(GlickoRating2v2(
+                player_id=pid, rating=new_r, rating_deviation=new_rd, volatility=new_vol,
+                peak_rating=max(GLICKO2_DEFAULT_RATING, new_r), games_in_period=0,
+                completed_series=1, last_calculated=datetime.now(timezone.utc),
+            ))
+        else:
+            await db.execute(
+                text("""UPDATE glicko_ratings_2v2
+                       SET rating=:r, rating_deviation=:rd, volatility=:v,
+                           peak_rating=GREATEST(COALESCE(peak_rating,:r), :r),
+                           completed_series = completed_series + 1,
+                           last_calculated=NOW(), updated_at=NOW()
+                       WHERE player_id=:pid"""),
+                {"r": new_r, "rd": new_rd, "v": new_vol, "pid": pid},
+            )
+        new_ratings[str(pid)] = round(new_r, 1)
+        if new_r >= MASTER_RANK_THRESHOLD:
+            await _grant_achievement_inline(db, pid, "master_rank")
+
+    # Per-slot rating deltas (joined by player_id, same as the inline path).
+    delta_by_pid = {pid: round(results[pid][0] - inputs[pid]["rating"], 1) for pid in gids}
+    await db.execute(
+        text("""UPDATE team_series SET
+                   t1a_rating_change=:t1a_d, t1b_rating_change=:t1b_d,
+                   t2a_rating_change=:t2a_d, t2b_rating_change=:t2b_d
+                 WHERE id=:sid"""),
+        {"sid": series_uuid, "t1a_d": delta_by_pid[t1a_id], "t1b_d": delta_by_pid[t1b_id],
+         "t2a_d": delta_by_pid[t2a_id], "t2b_d": delta_by_pid[t2b_id]},
+    )
+
+    # ── Series-completion gold (+50 win / +25 loss) + per-slot accumulator ──
+    bonus_by_pid = {}
+    for pid in gids:
+        player_team = 1 if pid in (t1a_id, t1b_id) else 2
+        won_series = (player_team == winner_team)
+        bonus = TEAM_SERIES_WIN_GOLD if won_series else TEAM_SERIES_LOSS_GOLD
+        await db.execute(
+            text("UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:g, "
+                 "team_gold_earned=COALESCE(team_gold_earned,0)+:g WHERE id=:pid"),
+            {"g": bonus, "pid": pid},
+        )
+        db.add(GoldTransaction(
+            player_id=pid, amount=bonus,
+            reason=("team_series_win" if won_series else "team_series_loss"),
+            reference_id=str(series_uuid),
+        ))
+        bonus_by_pid[pid] = bonus
+    await db.execute(
+        text("UPDATE team_series SET "
+             "t1a_gold_earned=COALESCE(t1a_gold_earned,0)+:t1a_g, "
+             "t1b_gold_earned=COALESCE(t1b_gold_earned,0)+:t1b_g, "
+             "t2a_gold_earned=COALESCE(t2a_gold_earned,0)+:t2a_g, "
+             "t2b_gold_earned=COALESCE(t2b_gold_earned,0)+:t2b_g WHERE id=:sid"),
+        {"sid": series_uuid, "t1a_g": bonus_by_pid[t1a_id], "t1b_g": bonus_by_pid[t1b_id],
+         "t2a_g": bonus_by_pid[t2a_id], "t2b_g": bonus_by_pid[t2b_id]},
+    )
+
+    # Settle any open 2v2 bets on this series (mirror submit_team_match).
+    try:
+        unsettled = (await db.execute(text("""
+            SELECT id, player_id, amount, odds_multiplier, bet_on_team
+              FROM team_bets WHERE team_series_id = :sid AND settled_at IS NULL
+        """), {"sid": series_uuid})).mappings().all()
+        for b in unsettled:
+            won = (b["bet_on_team"] == winner_team)
+            payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
+            await db.execute(text("UPDATE team_bets SET settled_at=NOW(), payout=:p WHERE id=:id"),
+                             {"p": payout, "id": b["id"]})
+            if payout > 0:
+                await db.execute(text("UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:p WHERE id=:pid"),
+                                 {"p": payout, "pid": b["player_id"]})
+                db.add(GoldTransaction(player_id=b["player_id"], amount=payout,
+                                       reason="team_bet_payout", reference_id=str(series_uuid)))
+    except Exception as bex:
+        print(f"[TEAM-DC-COMPLETE] bet settle error for {series_uuid}: {bex}")
+
+    # Free the queue rows.
+    await db.execute(text("DELETE FROM team_queue WHERE series_id = :sid"), {"sid": series_uuid})
+    return new_ratings
+
+
+@app.post("/api/v1/admin/team/series/{series_id}/resolve", tags=["Admin"])
+async def admin_resolve_team_series(
+    series_id: str,
+    action: str = Query(..., description="'complete' (award winner_team) or 'void' (cancel, no result)"),
+    winner_team: int | None = Query(None, description="1 or 2; required when action=complete"),
+    x_internal_key: str = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: force-resolve a stuck 2v2 series. API_SECRET_KEY gated.
+
+    action='complete' applies the SAME Glicko/gold/xp as a normal completion via
+    _complete_team_series_with_ratings (used to award DC-leave forfeits after the
+    fact). action='void' cancels the series with no winner and no rating/economy
+    effect (used to clean up pre-match leavers / leading-leaver DCs that shouldn't
+    award anyone). Only operates on series not already 'completed'."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(403, "Internal endpoint")
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+    srow = (await db.execute(
+        text("SELECT status FROM team_series WHERE id=:sid FOR UPDATE"), {"sid": sid_uuid},
+    )).scalar_one_or_none()
+    if srow is None:
+        raise HTTPException(404, "Series not found")
+    # Guard against re-resolution: a completed OR already-voided series must not be
+    # re-paid (void→complete would otherwise double-credit). The helper has its own
+    # status guard too, but bail early for a clean response.
+    if srow in ("completed", "cancelled", "canceled"):
+        return {"status": "noop", "reason": f"already {srow}"}
+
+    if action == "void":
+        await db.execute(
+            text("""UPDATE team_series SET status='cancelled', completed_at=NOW(),
+                       invalidation_reason='admin_void' WHERE id=:sid"""),
+            {"sid": sid_uuid},
+        )
+        # Soft-invalidate any match rows so they don't pollute match-W/L stats.
+        await db.execute(
+            text("""UPDATE team_matches SET invalidated_at=NOW(),
+                       invalidation_reason='admin_void' WHERE series_id=:sid AND invalidated_at IS NULL"""),
+            {"sid": sid_uuid},
+        )
+        await db.execute(text("DELETE FROM team_queue WHERE series_id=:sid"), {"sid": sid_uuid})
+        await db.commit()
+        return {"status": "voided", "series_id": series_id}
+
+    if action == "complete":
+        if winner_team not in (1, 2):
+            raise HTTPException(400, "winner_team must be 1 or 2 for action=complete")
+        new_ratings = await _complete_team_series_with_ratings(
+            db, sid_uuid, winner_team, "admin_resolved",
+        )
+        await db.commit()
+        return {"status": "completed", "winner_team": winner_team, "new_ratings": new_ratings}
+
+    raise HTTPException(400, "action must be 'complete' or 'void'")
+
+
+@app.post("/api/v1/admin/team/rebuild-glicko", tags=["Admin"])
+async def admin_rebuild_team_glicko(
+    x_internal_key: str = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin: rebuild ALL 2v2 Glicko ratings + completed_series counters from the
+    completed-series history. API_SECRET_KEY gated. Idempotent / re-runnable.
+
+    Fixes the historical invisibility bug: prior recovery migrations (077-080)
+    inserted completed team_series + credited gold/xp but never created the
+    glicko_ratings_2v2 rows or bumped completed_series, so recovered players had
+    NULL/zero 2v2 ratings and were filtered off the 2v2 leaderboard
+    (WHERE completed_series >= 1). This replays every completed, non-invalidated
+    series in chronological order through the same Glicko-2 math, writing fresh
+    ratings + an accurate completed_series count for every participant.
+
+    Does NOT touch gold/xp (those were already credited by the live path /
+    recovery migrations — replaying them would double-pay). Ratings-only rebuild."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(403, "Internal endpoint")
+
+    series_rows = (await db.execute(text("""
+        SELECT id, t1a_id, t1b_id, t2a_id, t2b_id, winner_team, completed_at
+          FROM team_series
+         WHERE status='completed' AND winner_team IN (1,2)
+           AND t1a_id IS NOT NULL AND t1b_id IS NOT NULL
+           AND t2a_id IS NOT NULL AND t2b_id IS NOT NULL
+         ORDER BY completed_at ASC NULLS LAST
+    """))).mappings().all()
+
+    # In-memory rating state per player; seed defaults on first appearance.
+    state: dict = {}
+    counts: dict = {}
+
+    def seed(pid):
+        if pid not in state:
+            state[pid] = {"rating": GLICKO2_DEFAULT_RATING, "rating_deviation": GLICKO2_DEFAULT_RD,
+                          "volatility": GLICKO2_DEFAULT_VOLATILITY, "peak": GLICKO2_DEFAULT_RATING}
+            counts[pid] = 0
+
+    for s in series_rows:
+        t1 = [s["t1a_id"], s["t1b_id"]]
+        t2 = [s["t2a_id"], s["t2b_id"]]
+        for pid in t1 + t2:
+            seed(pid)
+        team1_won = (s["winner_team"] == 1)
+        snap = {pid: dict(state[pid]) for pid in t1 + t2}
+
+        def calc(pid, opp_pids, won):
+            opps = [(snap[o]["rating"], snap[o]["rating_deviation"], 1.0 if won else 0.0) for o in opp_pids]
+            return calculate_new_rating(snap[pid]["rating"], snap[pid]["rating_deviation"],
+                                        snap[pid]["volatility"], opps, GLICKO2_TAU)
+        for pid in t1:
+            nr, nrd, nv = calc(pid, t2, team1_won)
+            state[pid] = {"rating": nr, "rating_deviation": nrd, "volatility": nv,
+                          "peak": max(state[pid]["peak"], nr)}
+            counts[pid] += 1
+        for pid in t2:
+            nr, nrd, nv = calc(pid, t1, not team1_won)
+            state[pid] = {"rating": nr, "rating_deviation": nrd, "volatility": nv,
+                          "peak": max(state[pid]["peak"], nr)}
+            counts[pid] += 1
+
+    # Persist: upsert every participant's rebuilt rating + count.
+    written = 0
+    for pid, st in state.items():
+        await db.execute(text("""
+            INSERT INTO glicko_ratings_2v2
+                (player_id, rating, rating_deviation, volatility, peak_rating,
+                 games_in_period, completed_series, last_calculated, updated_at)
+            VALUES (:pid, :r, :rd, :v, :peak, 0, :cs, NOW(), NOW())
+            ON CONFLICT (player_id) DO UPDATE SET
+                rating=:r, rating_deviation=:rd, volatility=:v,
+                peak_rating=:peak, completed_series=:cs,
+                last_calculated=NOW(), updated_at=NOW()
+        """), {"pid": pid, "r": st["rating"], "rd": st["rating_deviation"],
+               "v": st["volatility"], "peak": st["peak"], "cs": counts[pid]})
+        written += 1
+    await db.commit()
+    return {"status": "rebuilt", "series_replayed": len(series_rows), "players_written": written}
 
 
 def _verify_team_dc_hmac(steam_id: str, series_id: str, dc_player_steam_id: str, signature: str) -> bool:
@@ -6780,6 +7346,36 @@ async def team_series_report_dc(
     other_team = 2 if dc_team == 1 else 1
     total_points = (t1_points_total or 0) + (t2_points_total or 0)
 
+    # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────
+    # If the NON-DC (remaining) team has ALREADY won at least one game of this
+    # series, a DC by the other team forfeits the WHOLE series to them
+    # immediately — regardless of the abandoned game's point total. This is the
+    # rule Sid asked for: you can't leave a 2v2 to dodge a loss once the other
+    # team is up a game. Applies full Glicko/gold/xp via the shared helper so
+    # the forfeit win actually moves the board (the old dc_decided/dc_forfeit
+    # paths completed the series with NO ratings — leaving was strictly safer
+    # than losing).
+    other_team_existing_wins = (s["t1_series_wins"] or 0) if other_team == 1 else (s["t2_series_wins"] or 0)
+    if (other_team_existing_wins or 0) >= 1:
+        # Record a synthetic forfeit game for history parity.
+        await db.execute(
+            text("""INSERT INTO team_matches
+                       (series_id, t1a_id, t1b_id, t2a_id, t2b_id,
+                        t1_rounds_won, t2_rounds_won, t1_points_total, t2_points_total,
+                        winner_team, dc_player_id, dc_at, ended_at, photon_room_id)
+                   VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 0, 0, :t1p, :t2p,
+                           :wt, :dpid, NOW(), NOW(), 'dc_leadforfeit')"""),
+            {"sid": sid_uuid, "t1a": s["t1a_id"], "t1b": s["t1b_id"],
+             "t2a": s["t2a_id"], "t2b": s["t2b_id"], "t1p": t1_points_total or 0,
+             "t2p": t2_points_total or 0, "wt": other_team, "dpid": dc_pid},
+        )
+        new_ratings = await _complete_team_series_with_ratings(
+            db, sid_uuid, other_team, "dc_leadforfeit", dc_pid=dc_pid,
+        )
+        await db.commit()
+        return {"status": "completed", "winner_team": other_team,
+                "reason": "dc_leadforfeit", "new_ratings": new_ratings}
+
     # Award the match if any meaningful play happened (>= 2 total points).
     # Below that we treat it as a clean restart — no match recorded.
     if total_points >= 2:
@@ -6813,22 +7409,14 @@ async def team_series_report_dc(
             {"sid": sid_uuid, "t1w": new_t1_wins, "t2w": new_t2_wins},
         )
         # If the series is now decided (someone has 2 wins in a BO3),
-        # complete it directly. Otherwise drop into the 5-min grace window.
+        # complete it directly WITH ratings/gold. Otherwise drop into the grace window.
         if new_t1_wins >= 2 or new_t2_wins >= 2:
-            await db.execute(
-                text("""
-                    UPDATE team_series
-                       SET status = 'completed',
-                           winner_team = :wt,
-                           completed_at = NOW(),
-                           invalidation_reason = 'dc_decided',
-                           dc_player_id = :dpid
-                     WHERE id = :sid
-                """),
-                {"sid": sid_uuid, "wt": other_team, "dpid": dc_pid},
+            new_ratings = await _complete_team_series_with_ratings(
+                db, sid_uuid, other_team, "dc_decided", dc_pid=dc_pid,
             )
             await db.commit()
-            return {"status": "completed", "winner_team": other_team, "reason": "dc_decided"}
+            return {"status": "completed", "winner_team": other_team,
+                    "reason": "dc_decided", "new_ratings": new_ratings}
 
     # Series isn't decided — start the sticky-team requeue grace.
     deadline = datetime.now(timezone.utc) + timedelta(seconds=_DC_GRACE_SECONDS)

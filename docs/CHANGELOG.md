@@ -1,5 +1,46 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.28.0 — 2026-06-03
+
+**Headlines for testers**
+- **Round-start freeze fixed** — the bug where a player got stuck mid-screen (couldn't move/block/shoot) and was off-screen the next round. Root cause: the map-color tint ran *during* the round's player-repositioning coroutine and stalled it. Deferred safely now.
+- **Map colors reworked again** — every map now clearly reads as its named color (Magma red, Pine green, Velvet purple, etc.) via scene-wide colorize. Walls flashier. **Shift now shows a map-name toast** so you can find a specific skin, and Shift-cycling no longer auto-shuffles to the dull ones each round. (Known: the secondary/accent color is washed out by the primary scene tint — being fixed next pass.)
+- **Compare tab overhaul** — compare up to **12** players; every metric is now a chart (bars for FPS/Peak Elo/XP/Achievements/Avg-cards, grouped bars for Hit/Block %, **pie charts with leader-line labels** for region split); Total XP axis shows **levels**; live search box; working scrollbars; full numbers.
+- **Cursor shapes** — pick ROUNDS-default / Arrow / Dot / Crosshair / Circle in Settings (combines with your cursor color).
+- **Shop** — Cursor, Effects, and Other categories now have their own tabs.
+- **Body color unequip fixed** (it snapped back after a second / on refresh).
+- **Bug-report form** no longer passes clicks through to the F5 menu behind it.
+
+## Unreleased — cursor colors, player effects, hide-gold, leaderboard overhaul, Magma map fix, 2v2 fixes
+
+### 2v2 (server — already deployed)
+- **2v2 leaderboard recovery**: rebuilt all 2v2 Glicko ratings + series counters from history. Players who'd played completed 2v2 series but were missing rating rows (NotHoly, feauxen, MAX1T0P, and others) now appear correctly on the 2v2 leaderboard. (migrations 099 + 100)
+- **Anti-abuse DC scoring**: leaving a 2v2 no longer dodges a loss. If the non-DC team has already won a game, the other team leaving forfeits the whole series to them — now with full Elo/gold/xp (previously DC completions awarded the win but applied no ratings). Resolved 3 stuck series (NotHoly's leave → Sid's team win; two old ones voided).
+- **Race hardening**: 2v2 series completion is now row-locked + status-guarded so a duo rage-quitting (two simultaneous DC reports) can't double-credit Elo/gold/bets.
+- New admin endpoints: force-resolve a stuck team series + rebuild 2v2 Glicko (API_SECRET_KEY gated).
+
+### 2v2 (client — in the new DLL)
+- **Both-players-orange fix**: teams now render distinct colors. Fixed the broken team-color resolution (was reading white for both teams) + added a remote-player skin re-bake guard.
+- **Pick-phase disappearing/overlapping bodies fix**: the per-player X-offset now survives vanilla's re-anchor pass instead of re-stacking at the origin.
+- **No-block fix**: rebuilds the block action-delegate chain on each game start, restoring the basic block proc for players whose main block trigger got destroyed between games.
+
+> Backend (migrations 098-100 + API) deployed; client DLL built locally, not yet shipped/tagged.
+
+**Headlines for testers**
+- **Cursor colors** (Cursor shop tab, 10 @ 150g). Recolor your mouse cursor — shows in menus and while aiming in-match. Local-only (only you see it).
+- **Player effects** (Effects shop tab, 8 @ 4000–8000g): Smoking, Lucky Clover, Hearts, Bubbles, Embers, Sparks, Rainbow Aura, Void. Particle auras on your body, visible to other modded players. One at a time; respects the "Show Player Colors" toggle.
+- **Hide Gold** (new Other shop tab, 10000g). Toggle to mask your gold on the leaderboard — everyone else sees "Hidden", you still see your real balance.
+- **Leaderboard player view**: clicking a player now shows their **Ranked History** and, vs other players, your **Last Ranked Series vs them** (per-game scores + both sides' cards). New **Compare** tab: overlay up to 5 players' Elo-over-games graph, or compare Top Cards.
+- **Magma (and other map) colors fixed**: maps now show both their colors (e.g. Magma's yellow accent) instead of only the primary.
+
+**Under the hood**
+- Owner auto-grant: the mod owner's Steam ID owns every shop item present and future (`SHOP_OWNER_STEAM_IDS` in main.py) — computed live, no per-item rows, no future migration cost.
+- Map two-tone wall coloring switched from FNV-hash parity (which collapsed nearly all walls to one color) to sorted-index parity for a guaranteed ~50/50 primary/secondary split.
+- New files: `plugin/CursorColorCosmetic.cs`, `plugin/PlayerEffectCosmetic.cs`.
+
+**Schema**
+- `098_cursor_effects_hidegold.sql`: adds `players.active_cursor_color_id`, `active_player_effect_id`, `hide_gold`; seeds 10 cursor colors, 8 player effects, 1 hide-gold utility.
+
 ## v1.27.0 — custom map colors, shop expansion, level rewards, 2v2 series rework, performance pass
 
 > Big release rolling up everything since v1.26.7. The backend (API + DB migrations 088–097) was deployed incrementally; this is the matching client ship plus the Discord Gambler bot.

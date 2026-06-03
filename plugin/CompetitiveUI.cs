@@ -115,10 +115,93 @@ namespace CompetitiveRounds
             DrawLogViewerModal();
             DrawBlockDebug();  // debug-only; toggle via BlockDebugEnabled below
             DrawInputOverlay();
-            DrawMatchFoundStuckOverlay();
+            // v1.28: the physical "match-found stuck" escape-hatch overlay is retired.
+            // Its real target — the EscapeMenuHandler/SetInputActive NRE that wedged
+            // Escape and locked inputs — is now fixed in code (PlayerManagerSetInputActiveNullGuard
+            // + EscapeMenuToggleEscFinalizer in PerfPatches.cs). The overlay also false-
+            // positived during normal matchmaking (being in the queue room legitimately
+            // looks like "in a room with no match"), which is the flicker Sid reported.
+            // DrawMatchFoundStuckOverlay();  // intentionally not called — kept for reference
             DrawCardHoverTooltip();
+            DrawCompareSearch();
+            DrawMapColorToast();
+            // Block uGUI clicks to the F5 page behind any open IMGUI modal (lopi #14:
+            // clicks on the bug-report form were also hitting F5 buttons underneath).
+            NativeUI.SetClickBlocker(bugModalOpen || logViewerOpen || bugAdminOpen);
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
+        }
+
+        // Bottom-center toast naming the map skin you just Shift-cycled to, so you can
+        // hunt for a specific one (e.g. Magma) by sight. Driven by MapColorState.ShowToast.
+        private static GUIStyle mapToastStyle;
+        private static void DrawMapColorToast()
+        {
+            try
+            {
+                if (Time.unscaledTime >= MapColorState.ToastUntil) return;
+                string t = MapColorState.ToastText;
+                if (string.IsNullOrEmpty(t)) return;
+                if (mapToastStyle == null)
+                    mapToastStyle = new GUIStyle(GUI.skin.label)
+                    { fontSize = 22, alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, richText = true };
+                float w = 460f, h = 40f;
+                float x = (Screen.width - w) / 2f;
+                float y = Screen.height - 120f;
+                // Fade out over the last 0.6s.
+                float remain = MapColorState.ToastUntil - Time.unscaledTime;
+                float a = Mathf.Clamp01(remain / 0.6f);
+                var prev = GUI.color;
+                GUI.color = new Color(0f, 0f, 0f, 0.55f * a);
+                GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
+                GUI.color = new Color(1f, 1f, 1f, a);
+                GUI.Label(new Rect(x, y, w, h), $"<color=#FFD94D>Map skin:</color> <color=#FFFFFF>{t}</color>", mapToastStyle);
+                GUI.color = prev;
+            }
+            catch { }
+        }
+
+        // IMGUI search field for the Compare tab's player picker. The native UI does
+        // all text entry via IMGUI (no TMP InputField reflection), so this field is
+        // drawn EXACTLY over the native placeholder label (NativeUI reports its real
+        // screen rect from the overlay canvas's world corners — no layout guessing).
+        // Writes to NativeUI.CompareSearch.
+        private static GUIStyle compareSearchStyle, compareSearchHintStyle;
+        // True while the Compare search IMGUI field has keyboard focus. Read by
+        // DrawChatInput so typing (e.g. "t") into the search box doesn't also open
+        // the in-game T chat. Reset every frame; set only when the field is focused.
+        private static bool compareSearchFocused = false;
+        public static bool IsCompareSearchFocused => compareSearchFocused;
+        private const string CMP_SEARCH_CTRL = "CmpSearchField";
+        private static void DrawCompareSearch()
+        {
+            compareSearchFocused = false;
+            try
+            {
+                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 9) return;
+                Rect r = NativeUI.GetCompareSearchScreenRect();
+                if (r.width < 1f || r.height < 1f) return;
+                if (compareSearchStyle == null)
+                    compareSearchStyle = new GUIStyle(GUI.skin.textField) { fontSize = 13, alignment = TextAnchor.MiddleLeft };
+                if (compareSearchHintStyle == null)
+                    compareSearchHintStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, alignment = TextAnchor.MiddleLeft, richText = true };
+                // Give the field a usable height/width even if the label is short.
+                float h = Mathf.Max(r.height, 22f);
+                var fieldRect = new Rect(r.x, r.y, Mathf.Max(r.width, 200f), h);
+                string cur = NativeUI.CompareSearch ?? "";
+                GUI.SetNextControlName(CMP_SEARCH_CTRL);
+                string next = GUI.TextField(fieldRect, cur, compareSearchStyle);
+                compareSearchFocused = GUI.GetNameOfFocusedControl() == CMP_SEARCH_CTRL;
+                if (string.IsNullOrEmpty(next))
+                    GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
+                              "<color=#7788AA><i>search players...</i></color>", compareSearchHintStyle);
+                if (next != cur)
+                {
+                    NativeUI.CompareSearch = next;
+                    NativeUI.MarkDirty();
+                }
+            }
+            catch { /* search is best-effort cosmetic */ }
         }
 
         // ── Card hover tooltip (v1.26.8) ───────────────────────────────
@@ -1481,9 +1564,10 @@ namespace CompetitiveRounds
             bool combatActive = GameStateWatcher.IsInMatch && !NativeUI.IsOpen
                 && GameStateWatcher.LocalAliveInCombatNow;
             // Don't hijack T while a modal IMGUI input is taking keystrokes —
-            // bug report form, log viewer, and admin bug viewer all have their
-            // own text areas that need T to type "the", "tree", etc.
-            if (bugModalOpen || logViewerOpen || bugAdminOpen) return;
+            // bug report form, log viewer, admin bug viewer, and the Compare-tab
+            // search field all have their own text entry that need T to type
+            // "the", "tree", etc. (lopi: typing "t" in Compare search opened chat).
+            if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused) return;
 
             var ev = Event.current;
             if (!chatInputOpen)

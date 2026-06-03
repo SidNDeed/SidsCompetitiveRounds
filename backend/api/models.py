@@ -34,6 +34,10 @@ class Player(Base):
     team_gold_earned = Column(Integer, nullable=False, default=0)
     team_xp_earned = Column(Integer, nullable=False, default=0)
     gold_spent = Column(Integer, nullable=False, default=0)
+    # Hide-gold utility (migration 098): when true, the leaderboard masks this
+    # player's gold from everyone. Unlocked by purchasing sku 'util_hide_gold',
+    # toggled via /hide-gold. The player still sees their own real balance.
+    hide_gold = Column(Boolean, nullable=False, default=False)
     # Lifetime gun accuracy + block success counters (migration 038).
     # Accumulated from each submitted non-invalidated match's local_* fields on the reporter.
     bullets_fired = Column(BigInteger, nullable=False, default=0)
@@ -46,6 +50,12 @@ class Player(Base):
     # Player BODY color (kind=player_color), overrides the default team-based
     # orange/blue. Single-equip; sync via Photon cr_pbody_color custom prop.
     active_player_color_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
+    # Cursor color (kind=cursor_color, migration 098): recolors the in-menu mouse
+    # cursor. Single-equip, local-only render. preview_color drives the tint.
+    active_cursor_color_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
+    # Player effect (kind=player_effect, migration 098): in-match particle aura on
+    # the body. Single-equip; cross-visible via Photon cr_effect_sku.
+    active_player_effect_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     # kind='color' items are multi-equip (v1.23+): player cycles between equipped colors
     # with Left Shift in-game. active_color_id above is the single-value legacy column,
     # kept for backward compat — reflects active_color_ids[0] when populated.

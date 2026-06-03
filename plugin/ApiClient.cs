@@ -133,6 +133,13 @@ namespace CompetitiveRounds
             public string active_player_color_sku;
             public string active_player_color_hex;
             public string active_player_color_name;
+            // Cursor color (kind=cursor_color). Single-equip, local-only render.
+            public string active_cursor_color_sku;
+            public string active_cursor_color_hex;
+            // Player effect (kind=player_effect). Single-equip; Photon-synced particle aura.
+            public string active_player_effect_sku;
+            // Hide-gold utility toggle state. When true the leaderboard masks our gold.
+            public bool hide_gold;
             // Stackable rich-text nametag styles by sku. Parsed manually (JsonUtility can't handle
             // string arrays without a wrapper class). Null or empty = no styling applied.
             public List<string> active_nametag_skus;
@@ -143,6 +150,16 @@ namespace CompetitiveRounds
             public List<float> top_card_win_rates;
             public List<string> recent_form; // "W","L","W"... last 20
             public List<float> rating_history; // oldest→newest
+            // Compare-tab metrics (v1.28). Scalars parse free via JsonUtility;
+            // worst_cards + region_breakdown are nested arrays parsed manually.
+            public int avg_fps;
+            public float avg_cards_per_game;
+            public int achievements_unlocked;
+            public List<string> worst_card_names;
+            public List<int> worst_card_picks;
+            public List<float> worst_card_win_rates;
+            public List<string> region_names;   // e.g. "usw"
+            public List<int> region_matches;    // parallel to region_names
             // Per-player mod version (server-tracked from X-Mod-Version header).
             public string mod_version;
             // Server-computed head-to-head against the local viewer
@@ -817,7 +834,8 @@ namespace CompetitiveRounds
             public string series_id;
             public string t1a_steam, t1a_name, t1b_steam, t1b_name;
             public string t2a_steam, t2a_name, t2b_steam, t2b_name;
-            public int t1_rating, t2_rating;
+            public int t1_rating, t2_rating;          // team-average (used for odds context)
+            public int t1a_rating, t1b_rating, t2a_rating, t2b_rating;  // per-player 2v2 ratings
             public int t1_wins, t2_wins;
             public float t1_odds, t2_odds;
             public bool bets_locked;
@@ -875,6 +893,10 @@ namespace CompetitiveRounds
                     t2b_name  = ExtractJsonString(obj, "t2b_name"),
                     t1_rating = ExtractJsonInt(obj, "t1_rating"),
                     t2_rating = ExtractJsonInt(obj, "t2_rating"),
+                    t1a_rating = ExtractJsonInt(obj, "t1a_rating"),
+                    t1b_rating = ExtractJsonInt(obj, "t1b_rating"),
+                    t2a_rating = ExtractJsonInt(obj, "t2a_rating"),
+                    t2b_rating = ExtractJsonInt(obj, "t2b_rating"),
                     t1_wins   = ExtractJsonInt(obj, "t1_wins"),
                     t2_wins   = ExtractJsonInt(obj, "t2_wins"),
                     t1_odds   = ExtractJsonFloat(obj, "t1_odds"),
@@ -1033,6 +1055,50 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[SHOP] set player_color {itemId}: ok={ok} resp={resp}");
                 callback?.Invoke(ok, resp);
                 if (ok) FetchPlayerStats(steamId);
+            }));
+        }
+
+        /// <summary>Equip / unequip a cursor color (kind=cursor_color). itemId=0 clears.
+        /// HMAC over "cursor_color:{steam_id}:{item_id}".</summary>
+        public static void SetActiveCursorColor(string steamId, long itemId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"cursor_color:{steamId}:{itemId}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/active-cursor-color?sig={sig}";
+            if (itemId > 0) url += $"&item_id={itemId}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SHOP] set cursor_color {itemId}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) FetchPlayerStats(steamId);
+            }));
+        }
+
+        /// <summary>Equip / unequip a player effect (kind=player_effect). itemId=0 clears.
+        /// HMAC over "player_effect:{steam_id}:{item_id}".</summary>
+        public static void SetActivePlayerEffect(string steamId, long itemId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"player_effect:{steamId}:{itemId}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/active-player-effect?sig={sig}";
+            if (itemId > 0) url += $"&item_id={itemId}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SHOP] set player_effect {itemId}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) FetchPlayerStats(steamId);
+            }));
+        }
+
+        /// <summary>Toggle the hide-gold leaderboard mask on/off. Requires owning the
+        /// Hide Gold utility. HMAC over "hide_gold:{steam_id}:{1|0}".</summary>
+        public static void SetHideGold(string steamId, bool on, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"hide_gold:{steamId}:{(on ? 1 : 0)}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/hide-gold?on={(on ? "true" : "false")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SHOP] set hide_gold {on}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) { FetchPlayerStats(steamId); FetchLeaderboard(); }
             }));
         }
 
@@ -1972,6 +2038,9 @@ namespace CompetitiveRounds
                             // the initial load + any later trail changes.
                             try { TrailCosmetic.PublishLocalProps(); } catch { }
                             try { PlayerColorCosmetic.PublishLocalProps(); } catch { }
+                            try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }
+                            // Cursor color is local-only — re-apply the tinted hardware cursor.
+                            try { CursorColorCosmetic.ApplyFromStats(); } catch { }
                             // Re-publish nametag styles into LocalPlayer.NickName for the same reason.
                             try { NametagStyler.PublishToPhoton(); } catch { }
                         }
@@ -2041,6 +2110,11 @@ namespace CompetitiveRounds
             data.top_card_picks = new List<int>();
             data.top_card_win_rates = new List<float>();
             data.recent_form = new List<string>();
+            data.worst_card_names = new List<string>();
+            data.worst_card_picks = new List<int>();
+            data.worst_card_win_rates = new List<float>();
+            data.region_names = new List<string>();
+            data.region_matches = new List<int>();
             try
             {
                 int tcStart = response.IndexOf("\"top_cards\"");
@@ -2078,6 +2152,68 @@ namespace CompetitiveRounds
                                     data.top_card_names.Add(name);
                                     data.top_card_picks.Add(picks);
                                     data.top_card_win_rates.Add(wr);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Parse worst_cards (same shape as top_cards: card_name/times_picked/win_rate).
+            try
+            {
+                int wcStart = response.IndexOf("\"worst_cards\"");
+                if (wcStart >= 0)
+                {
+                    int arrStart = response.IndexOf("[", wcStart);
+                    int arrEnd = FindMatchingBracket(response, arrStart);
+                    if (arrStart >= 0 && arrEnd >= 0)
+                    {
+                        string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
+                        if (arr != "[]")
+                        {
+                            var cardParts = arr.Split(new[] { "\"card_name\"" }, StringSplitOptions.None);
+                            for (int i = 1; i < cardParts.Length && i <= 10; i++)
+                            {
+                                string name = ExtractJsonString(cardParts[i], "");
+                                int picks = ExtractJsonInt(cardParts[i], "times_picked");
+                                float wr = ExtractJsonFloat(cardParts[i], "win_rate");
+                                if (!string.IsNullOrEmpty(name))
+                                {
+                                    data.worst_card_names.Add(name);
+                                    data.worst_card_picks.Add(picks);
+                                    data.worst_card_win_rates.Add(wr);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Parse region_breakdown ([{region, matches}]).
+            try
+            {
+                int rbStart = response.IndexOf("\"region_breakdown\"");
+                if (rbStart >= 0)
+                {
+                    int arrStart = response.IndexOf("[", rbStart);
+                    int arrEnd = FindMatchingBracket(response, arrStart);
+                    if (arrStart >= 0 && arrEnd >= 0)
+                    {
+                        string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
+                        if (arr != "[]")
+                        {
+                            var parts = arr.Split(new[] { "\"region\"" }, StringSplitOptions.None);
+                            for (int i = 1; i < parts.Length; i++)
+                            {
+                                string reg = ExtractJsonString(parts[i], "");
+                                int matches = ExtractJsonInt(parts[i], "matches");
+                                if (!string.IsNullOrEmpty(reg))
+                                {
+                                    data.region_names.Add(reg);
+                                    data.region_matches.Add(matches);
                                 }
                             }
                         }
@@ -2488,6 +2624,63 @@ namespace CompetitiveRounds
                             Plugin.Log.LogError($"Failed to parse match history: {ex.Message}");
                         }
                     }
+                }
+            ));
+        }
+
+        /// <summary>Parse a /matches JSON array into a MatchHistoryEntry list. Manual parse
+        /// (JsonUtility can't handle the nested cards_picked arrays). Shared helper for the
+        /// leaderboard view fetch below.</summary>
+        private static List<MatchHistoryEntry> ParseMatchHistoryJson(string response)
+        {
+            var entries = new List<MatchHistoryEntry>();
+            if (string.IsNullOrEmpty(response) || response.Trim() == "[]") return entries;
+            var parts = response.Split(new[] { "\"match_id\"" }, StringSplitOptions.None);
+            for (int i = 1; i < parts.Length; i++)
+            {
+                var entry = new MatchHistoryEntry();
+                var chunk = parts[i];
+                entry.match_id = ExtractJsonString(chunk, "");
+                entry.opponent_name = ExtractJsonString(chunk, "opponent_name");
+                entry.opponent_steam_id = ExtractJsonString(chunk, "opponent_steam_id");
+                entry.opponent_title = ExtractJsonString(chunk, "opponent_title");
+                entry.opponent_title_color = ExtractJsonString(chunk, "opponent_title_color");
+                entry.player_rounds_won = ExtractJsonInt(chunk, "player_rounds_won");
+                entry.opponent_rounds_won = ExtractJsonInt(chunk, "opponent_rounds_won");
+                entry.player_points = ExtractJsonInt(chunk, "player_points");
+                entry.opponent_points = ExtractJsonInt(chunk, "opponent_points");
+                entry.won = chunk.Contains("\"won\":true") || chunk.Contains("\"won\": true");
+                entry.is_ranked = chunk.Contains("\"is_ranked\":true") || chunk.Contains("\"is_ranked\": true");
+                entry.ended_at = ExtractJsonString(chunk, "ended_at");
+                entry.cards_display = ExtractCardNames(chunk);
+                entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
+                entry.series_id = ExtractJsonString(chunk, "series_id");
+                entry.series_score = ExtractJsonString(chunk, "series_score");
+                entry.series_rating_change = ExtractJsonFloat(chunk, "series_rating_change");
+                entry.xp_gained = ExtractJsonInt(chunk, "xp_gained");
+                entry.gold_gained = ExtractJsonInt(chunk, "gold_gained");
+                entry.series_gold_gained = ExtractJsonInt(chunk, "series_gold_gained");
+                entry.player_fps_avg = ExtractJsonInt(chunk, "player_fps_avg");
+                entry.opponent_fps_avg = ExtractJsonInt(chunk, "opponent_fps_avg");
+                entries.Add(entry);
+            }
+            return entries;
+        }
+
+        /// <summary>Fetch ANY player's match history for the leaderboard detail view. Does NOT
+        /// clobber CachedMatchHistory (that's the local player's). Used to render a clicked
+        /// player's ranked history + head-to-head last series. Callback gets the parsed list.</summary>
+        public static void FetchMatchHistoryForView(string steamId, Action<List<MatchHistoryEntry>> callback, int limit = 400)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(new List<MatchHistoryEntry>()); return; }
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/{steamId}/matches?limit={limit}",
+                (success, response) =>
+                {
+                    List<MatchHistoryEntry> list;
+                    try { list = success ? ParseMatchHistoryJson(response) : new List<MatchHistoryEntry>(); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[LBVIEW] match parse failed: {ex.Message}"); list = new List<MatchHistoryEntry>(); }
+                    try { callback?.Invoke(list); } catch { }
                 }
             ));
         }

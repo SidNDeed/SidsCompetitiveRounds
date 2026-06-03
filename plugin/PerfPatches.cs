@@ -87,6 +87,98 @@ namespace CompetitiveRounds
         }
     }
 
+    // ── CORRECTNESS FIX (v1.28): the "Escape key dies / inputs lock at match-found" bug ──
+    //
+    // Root cause is in VANILLA ROUNDS, not our mod. PlayerManager.SetInputActive:
+    //
+    //     public void SetInputActive(bool inputActive) {
+    //         foreach (Player player in players)
+    //             if (player.IsLocal)                                  // IsLocal => data.view.IsMine
+    //                 player.data.playerActions.Enabled = inputActive;
+    //     }
+    //
+    // During the match-found → spawn transition a Player can be present in `players`
+    // while its `data` / `data.view` / `data.playerActions` is still null (not yet
+    // wired). Vanilla dereferences with ZERO null checks, so the foreach throws a
+    // NullReferenceException. Observed in Sid's 2026-06-01 logs:
+    //
+    //     NullReferenceException
+    //       PlayerManager.SetInputActive (System.Boolean inputActive)
+    //       EscapeMenuHandler.ToggleEsc ()
+    //       EscapeMenuHandler.Update ()
+    //
+    // That single throw causes BOTH reported symptoms:
+    //   1. ESCAPE DIES. EscapeMenuHandler.ToggleEsc() sets `isEscMenu = true` and THEN
+    //      calls SetInputActive — which throws, aborting ToggleEsc with isEscMenu stuck
+    //      true. Every later Esc press hits `if (isEscMenu && ...) return;` and early-
+    //      exits, so Escape is permanently dead until the room is left.
+    //   2. INPUTS LOCK / CAN'T READY UP. The foreach throws on the FIRST player whose
+    //      data is null. If that player precedes the local one in the list, the loop
+    //      never reaches the local player, so local input is never (re)enabled → keys
+    //      frozen before space can be pressed. Because the un-wired player can be the
+    //      OPPONENT, the freeze can manifest on either client ("sometimes it's my
+    //      opponent, not me").
+    //
+    // Fix: replace the method body with a null-safe iteration that SKIPS un-wired
+    // players and KEEPS GOING (so the local player is always reached once its data
+    // exists) instead of letting the first null abort the whole loop. Not gated behind
+    // the perf master toggle — this is a correctness fix that must always be on. Returns
+    // false to fully replace the vanilla body. Mirrors vanilla semantics exactly for
+    // fully-wired players.
+    [HarmonyPatch(typeof(PlayerManager), "SetInputActive")]
+    internal class PlayerManagerSetInputActiveNullGuard
+    {
+        static bool Prefix(PlayerManager __instance, bool inputActive)
+        {
+            try
+            {
+                var players = __instance != null ? __instance.players : null;
+                if (players == null) return false;
+                for (int i = 0; i < players.Count; i++)
+                {
+                    var player = players[i];
+                    try
+                    {
+                        // IsLocal => data.view.IsMine; guard the whole chain. A player
+                        // mid-spawn can have null data / null view; skip it this call —
+                        // a later SetInputActive (the game issues several across the
+                        // ready-up → spawn flow) re-runs once it's wired.
+                        if (player == null) continue;
+                        var data = player.data;
+                        if (data == null || data.view == null || data.playerActions == null) continue;
+                        if (data.view.IsMine)
+                            data.playerActions.Enabled = inputActive;
+                    }
+                    catch { /* one bad player must never abort the rest of the loop */ }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Plugin.Log.LogWarning($"[INPUTFIX] SetInputActive guard error: {ex.Message}");
+            }
+            return false;  // fully replace vanilla — we've done the work safely
+        }
+    }
+
+    // Belt-and-suspenders for symptom #1: if EscapeMenuHandler.ToggleEsc still manages to
+    // throw for any OTHER reason (vanilla touches ListMenu.instance, m_pageToOpen, etc.,
+    // any of which can be null during a transition), a Finalizer swallows the exception so
+    // the Esc handler never gets wedged. Without this, a throw anywhere AFTER the
+    // `isEscMenu = !isEscMenu` line leaves isEscMenu inverted and Escape dead. We can't
+    // un-invert isEscMenu from here (it's already flipped), but swallowing the throw lets
+    // the NEXT Esc press run ToggleEsc cleanly and toggle back. The SetInputActive guard
+    // above removes the KNOWN cause; this covers the unknown ones.
+    [HarmonyPatch(typeof(EscapeMenuHandler), "ToggleEsc")]
+    internal class EscapeMenuToggleEscFinalizer
+    {
+        static System.Exception Finalizer(System.Exception __exception)
+        {
+            if (__exception != null)
+                Plugin.Log.LogWarning($"[INPUTFIX] EscapeMenuHandler.ToggleEsc threw (swallowed): {__exception.Message}");
+            return null;  // swallow — keep the Esc handler alive for the next press
+        }
+    }
+
     // Vanilla's StunPlayer.Go() walks GetComponentInParent<Player>() then deref's
     // it without a null-check. When a player is destroyed between the stun being
     // queued and Go() running, the field is null and Unity emits an NRE every

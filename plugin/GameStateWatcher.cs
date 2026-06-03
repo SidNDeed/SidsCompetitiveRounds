@@ -743,6 +743,7 @@ namespace CompetitiveRounds
                 try { NametagStyler.PublishToPhoton(); } catch { }
                 try { PlayerColorCosmetic.PublishLocalProps(); } catch { }
                 try { TrailCosmetic.PublishLocalProps(); } catch { }
+                try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }
             }
 
             if (!inRoom && wasInRoom)
@@ -1189,6 +1190,7 @@ namespace CompetitiveRounds
                         // fired (which can be much later in 2v2 due to the late-joiner
                         // assembly path).
                         try { TrailCosmetic.OnMatchStart(); } catch { }
+                        try { PlayerEffectCosmetic.OnMatchStart(); } catch { }
                     }
                 }
                 catch { }
@@ -1243,6 +1245,7 @@ namespace CompetitiveRounds
                     // team color "leak through" their cosmetic; that's
                     // these later-spawned sprites.
                     try { PlayerColorCosmetic.OnRoundStart(); } catch { }
+                    try { PlayerEffectCosmetic.OnRoundStart(); } catch { }
 
                     // Achievement: track comeback (0-4 deficit)
                     int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
@@ -1314,6 +1317,7 @@ namespace CompetitiveRounds
             // Spawn the cosmetic trail for this match (if the player owns one).
             TrailCosmetic.OnMatchStart();
             PlayerColorCosmetic.OnMatchStart();
+            try { PlayerEffectCosmetic.OnMatchStart(); } catch { }
 
             // Reset achievement tracking for this match
             achTookDamage = false;
@@ -2528,7 +2532,7 @@ namespace CompetitiveRounds
         }
 
         // Trail teardown on any match-state reset — next OnMatchStarted re-attaches.
-        private static void ResetMatchStateWithTrail() { TrailCosmetic.OnMatchEnd(); PlayerColorCosmetic.OnMatchEnd(); ResetMatchState(); }
+        private static void ResetMatchStateWithTrail() { TrailCosmetic.OnMatchEnd(); PlayerColorCosmetic.OnMatchEnd(); try { PlayerEffectCosmetic.OnMatchEnd(); } catch { } ResetMatchState(); }
 
         private static void ResetMatchState()
         {
