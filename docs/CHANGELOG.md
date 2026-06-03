@@ -11,7 +11,8 @@
 - **Body color unequip fixed** (it snapped back after a second / on refresh).
 - **Bug-report form** no longer passes clicks through to the F5 menu behind it.
 
-## Unreleased — cursor colors, player effects, hide-gold, leaderboard overhaul, Magma map fix, 2v2 fixes
+### v1.28.0 detail — cursor colors, player effects, hide-gold, leaderboard overhaul, map fixes, 2v2 fixes
+*(this block was authored as "Unreleased" across earlier turns; it all shipped in v1.28.0)*
 
 ### 2v2 (server — already deployed)
 - **2v2 leaderboard recovery**: rebuilt all 2v2 Glicko ratings + series counters from history. Players who'd played completed 2v2 series but were missing rating rows (NotHoly, feauxen, MAX1T0P, and others) now appear correctly on the 2v2 leaderboard. (migrations 099 + 100)
@@ -24,7 +25,7 @@
 - **Pick-phase disappearing/overlapping bodies fix**: the per-player X-offset now survives vanilla's re-anchor pass instead of re-stacking at the origin.
 - **No-block fix**: rebuilds the block action-delegate chain on each game start, restoring the basic block proc for players whose main block trigger got destroyed between games.
 
-> Backend (migrations 098-100 + API) deployed; client DLL built locally, not yet shipped/tagged.
+> Shipped in v1.28.0 (2026-06-03): backend (migrations 098-100 + API) deployed, client DLL released + tagged.
 
 **Headlines for testers**
 - **Cursor colors** (Cursor shop tab, 10 @ 150g). Recolor your mouse cursor — shows in menus and while aiming in-match. Local-only (only you see it).

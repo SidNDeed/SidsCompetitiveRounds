@@ -4,6 +4,25 @@ Prior sessions' "Completed This Session" entries. Newest dated heading on top. S
 
 ---
 
+## 2026-04-28 — 2v2 polish marathon (v1.25.18 → v1.25.23)
+
+- **v1.25.18** Decoupled Random vs Custom-Lobby 2v2 queues (migration 064 `team_queue.queue_type`); F5 Search Random / Find Custom Lobby; queue beacon filtered to auto.
+- **v1.25.19** Queue auto-refresh (`MaybeRefreshTeamTab`); `FindMatchingBrace` for `{}` (cards parser bailing); series-preflight gated `!inCrFf`; migration 065 cancelled 3 phantom 1v1 rows; `[POPUP-DIAG]` logging.
+- **v1.25.20** `CardPickBodyTinter` coroutine from `CardChoiceVisuals.Show` Postfix.
+- **v1.25.21** 2v2 economy (migration 066); matchmaker trusts 2v2 elo when RD≤110; `/team/all-series-paged`; leaderboard columns+sort; FacePublisher republish; toggle-off skin re-bake.
+- **v1.25.22** 2v2 tab ScrollView; click-to-sort; Avg Mate Elo; stacked card columns; mid-series rebalance backend (`AUTO_BALANCE_SWAP_MARGIN`, `rebalance_assignments`).
+- **v1.25.23** Hotfix: cards 2-per-line + tighter team columns. Ship: backend 1.25.23 + migrations 064/065/066.
+
+## 2026-04-24 — Automated tournaments (v1.24.0)
+
+- Phase 1 sync + Phase 2 async tournaments, double-elim BO3 (migration 050); bracket generator (byes, GF_RESET, prereq W/L role tags); region-pinned auto-connect; deterministic room name; plugin-level heartbeat; penalty % + speculative backfill.
+- Discord lifecycle DMs, trophy roles, `/dm-opponent`, `/opp-online`. Bracket click-to-expand UI; timezone/date pickers (culture-invariant); per-match ranked auto-enable; multi-tournament series-lookup fix.
+- Polish: round-won animation stall fix (deferred tint 2s); locale unicode strip; `<b>` bold-wrap; AFK flag requires cards_picked==0; ready-up 30s→90s. Hotfix: `/matches` AttributeError (26 min of 500s). Ship: v1.24.0 + Thunderstore zip.
+
+> Sessions between 2026-04-28 and 2026-06-03 (v1.26.x, v1.27.0) were not formally handed off — see git history + `docs/CHANGELOG.md`.
+
+---
+
 ## 2026-04-22 — v1.23.0 shipped (nametag styles, multi-color maps, hit/block/pass stats)
 
 ### v1.23.0 — Nametag Styles, Multi-Color Maps, Hit/Block/Pass Stats, Polish
