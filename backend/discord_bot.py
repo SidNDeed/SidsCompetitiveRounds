@@ -852,7 +852,8 @@ async def log_team_series_result(guild, s):
 
     def fmt_player(p):
         rc = p.get("rating_change", 0) or 0
-        rc_s = f"+{rc:.0f}" if rc > 0 else f"{rc:.0f}"
+        # 1 decimal — sub-1.0 changes were rounding to "0" (same as bug #18, 1v1 side).
+        rc_s = f"+{rc:.1f}" if rc > 0 else f"{rc:.1f}"
         return f"**{p['name']}** {p['rating']:.0f} ({rc_s})"
 
     embed = discord.Embed(title="⚔️ 2v2 Series Complete", color=discord.Color.gold())
@@ -907,8 +908,11 @@ async def log_series_result(guild, s):
     score = f"{s['p1_series_wins']}-{s['p2_series_wins']}" if p1_won else f"{s['p2_series_wins']}-{s['p1_series_wins']}"
     embed = discord.Embed(title="⚔️ Ranked Series Complete", color=discord.Color.green())
     embed.description = f"**{s['winner_name']}** wins {score}!"
-    rc1 = s["p1_rating_change"]; rc1s = f"+{rc1:.0f}" if rc1 > 0 else f"{rc1:.0f}"
-    rc2 = s["p2_rating_change"]; rc2s = f"+{rc2:.0f}" if rc2 > 0 else f"{rc2:.0f}"
+    # 1 decimal: Glicko changes for converged players are routinely sub-1.0, and :.0f
+    # rounded a real +0.4 win to "0" — the series log read as "no rating change" for a
+    # ranked win (bug #18). One decimal shows the actual movement.
+    rc1 = s["p1_rating_change"]; rc1s = f"+{rc1:.1f}" if rc1 > 0 else f"{rc1:.1f}"
+    rc2 = s["p2_rating_change"]; rc2s = f"+{rc2:.1f}" if rc2 > 0 else f"{rc2:.1f}"
     r1, r2 = get_rank_name(s["p1_rating"]), get_rank_name(s["p2_rating"])
     s1, s2 = streak_str(s.get("p1_streak",0)), streak_str(s.get("p2_streak",0))
     embed.add_field(name=f"{rank_emoji(r1)} {s['p1_name']}" + (" 👑" if p1_won else ""),

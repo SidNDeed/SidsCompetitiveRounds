@@ -1557,10 +1557,23 @@ namespace CompetitiveRounds
                 if (localWon) sessionRankedWins++; else sessionRankedLosses++;
                 // BO3 in-progress: bump the per-series game counter so the HUD
                 // can show "Series: 1-0" the moment game 1 ends, without
-                // waiting for the next /series/active fetch. The counter is
-                // reset to 0-0 in IncrementSessionRankedSeries when the
-                // server confirms series_status='completed', and on room
-                // change (OnRoomJoin path) when a fresh series begins.
+                // waiting for the next /series/active fetch.
+                //
+                // Self-correcting reset (bug #20): if the PREVIOUS series already
+                // reached the BO3 win threshold (2), this game-over belongs to a
+                // NEW series — zero the counter first so the HUD never shows >2
+                // (e.g. "4-0"). The other resets — IncrementSessionRankedSeries
+                // (server-confirmed completion) and the room-change path — only
+                // fire on the REPORTER's client (lower Steam ID reports), so the
+                // non-reporter would otherwise accumulate across back-to-back
+                // series played in the same room. Keying off the score fixes both
+                // sides and is harmless when those other resets already ran (the
+                // counter is already 0).
+                if (currentSeriesGamesWon >= 2 || currentSeriesGamesLost >= 2)
+                {
+                    currentSeriesGamesWon = 0;
+                    currentSeriesGamesLost = 0;
+                }
                 if (localWon) currentSeriesGamesWon++; else currentSeriesGamesLost++;
             }
             else

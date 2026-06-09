@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.28.0";
+        public const string ModVersion = "1.28.1";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -1784,12 +1784,16 @@ namespace CompetitiveRounds
     {
         static void Prefix()
         {
-            if (Plugin.Pending2v2Slot < 0) return;
+            // Fire in ANY competitive room (1v1 ranked OR 2v2), not just 2v2 — this
+            // was `Pending2v2Slot < 0` so 1v1 ranked DCs (e.g. the "instant DC vs Toast"
+            // room-abandonment) captured ZERO stack data. The stack here names whatever
+            // vanilla/mod path triggered the Photon restart that ejected us mid-setup.
+            try { if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return; } catch { return; }
             try
             {
                 var nch = NetworkConnectionHandler.instance;
                 bool already = nch != null && nch.m_restarting;
-                Plugin.Log.LogWarning($"[2v2-DIAG] NetworkRestart() entered (already_restarting={already}) {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}");
+                Plugin.Log.LogWarning($"[NCH-DIAG] NetworkRestart() entered (already_restarting={already}) {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}");
             }
             catch { }
         }
@@ -1802,8 +1806,9 @@ namespace CompetitiveRounds
     {
         static void Prefix(bool becomeInactive)
         {
-            if (Plugin.Pending2v2Slot < 0) return;
-            try { Plugin.Log.LogWarning($"[2v2-DIAG] PhotonNetwork.LeaveRoom(becomeInactive={becomeInactive}) {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}"); }
+            // Any competitive room (1v1 ranked OR 2v2) — was 2v2-only, blind to 1v1 DCs.
+            try { if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return; } catch { return; }
+            try { Plugin.Log.LogWarning($"[NCH-DIAG] PhotonNetwork.LeaveRoom(becomeInactive={becomeInactive}) {Diag2v2.DescribeRoom()} stack={Diag2v2.ShortStack()}"); }
             catch { }
         }
     }
@@ -4031,10 +4036,16 @@ namespace CompetitiveRounds
                 {
                     int r = BlockReflect.ScrubNullTriggers(b);
                     total += r;
-                    // Rebuild the action-delegate chain from surviving triggers —
-                    // restores the basic block proc for any player whose main
-                    // BlockTrigger delegate got stripped by a between-game destroy.
-                    rebuilt += BlockReflect.RebuildBlockActions(b);
+                    // Rebuild the action-delegate chain ONLY when a trigger was actually
+                    // destroyed (r>0). Running it unconditionally was a regression: it
+                    // NULLED the Block's action delegates every StartGame, and the re-Start
+                    // did NOT reliably re-combine them — so in matchmaking rooms (where this
+                    // reset runs) blocks activated but never procced (succ=0/0; bug #15:
+                    // "scrubbed 0 null triggers" yet block dead). Casual rooms — where the
+                    // reset doesn't run — blocked fine. When nothing was lost, the vanilla
+                    // delegates are intact; don't touch them. Only the genuine-loss case
+                    // (r>0) warrants a rebuild.
+                    if (r > 0) rebuilt += BlockReflect.RebuildBlockActions(b);
                     BlockReflect.ForceReady(b);
                 }
                 Plugin.Log.LogInfo($"[BLOCK-RESET] StartGame: reset {blocks.Length} Block(s), scrubbed {total} null triggers, re-registered {rebuilt} trigger delegate(s)");

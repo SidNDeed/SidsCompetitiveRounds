@@ -2896,6 +2896,31 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 else return;
                 float w = Mathf.Max(1f, sMax.x - sMin.x);
                 float h = Mathf.Max(1f, sMax.y - sMin.y);
+                // #22: the card text lives in a fixed-width box (900px for My
+                // Stats) but the actual text only fills part of it. Registering
+                // the whole box turned the empty right side into a dead hover
+                // zone — moving the cursor toward the refresh button at the
+                // bottom-right kept firing the tooltip and covering the button.
+                // Shrink the region to the rendered text width. The element is
+                // left-aligned (AlignTopLeft) so keep the left edge (sMin.x) and
+                // only trim the right. prefLocal and rect.width are both in the
+                // rect's local units, so their ratio maps cleanly onto screen w.
+                try
+                {
+                    var prefProp = comp.GetType().GetProperty("preferredWidth",
+                                       BindingFlags.Public | BindingFlags.Instance);
+                    float localW = rt.rect.width;
+                    if (prefProp != null && localW > 0f)
+                    {
+                        float prefLocal = (float)prefProp.GetValue(comp);
+                        if (prefLocal > 0f)
+                        {
+                            float frac = Mathf.Clamp01(prefLocal / localW);
+                            w = Mathf.Min(w, w * frac + 12f);   // +12px right-edge slack
+                        }
+                    }
+                }
+                catch { /* keep full-width region on any reflection miss */ }
                 CompetitiveUI.RegisterCardHoverRegion(new Rect(sMin.x, sMin.y, w, h), fullLine, isOpponent, titleOverride, bodyOverride);
             }
             catch { /* silent — tooltip is opt-in cosmetic */ }

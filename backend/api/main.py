@@ -630,7 +630,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.28.0"
+LATEST_MOD_VERSION = "1.28.1"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -3289,13 +3289,15 @@ async def get_recent_series(
         p = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
         if not p:
             return 0
+        # No LIMIT: the loop below breaks at the first series the player didn't win,
+        # so it only walks the actual streak. A prior LIMIT 20 capped every displayed
+        # streak at 20 (bug #17). winner_id-only rows make a full scan cheap.
         streak_q = text("""
             SELECT rs.winner_id
             FROM ranked_series rs
             WHERE rs.status = 'completed'
               AND (rs.player1_id = :pid OR rs.player2_id = :pid)
             ORDER BY rs.completed_at DESC
-            LIMIT 20
         """)
         streak_rows = (await db.execute(streak_q, {"pid": p.id})).mappings().all()
         if not streak_rows:
@@ -5134,7 +5136,7 @@ import gzip as _gzip
 import pathlib as _pathlib
 
 BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-rounds/bug-reports")
-BUG_REPORT_PER_STEAM_PER_DAY = 3
+BUG_REPORT_PER_STEAM_PER_DAY = 10
 BUG_REPORT_VALID_SEVERITIES = ("low", "medium", "high", "crash")
 BUG_REPORT_VALID_CATEGORIES = ("ui", "gameplay", "network", "other")
 
@@ -5163,7 +5165,7 @@ async def submit_bug_report(req: BugReportRequest, db: AsyncSession = Depends(ge
     if player:
         await _mark_mod_seen(db, player)
 
-    # Rate limit: 3 reports per 24h per Steam ID. Returns 429 so the client
+    # Rate limit: 10 reports per 24h per Steam ID. Returns 429 so the client
     # can show a "slow down" toast.
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     recent = await db.execute(
@@ -8053,6 +8055,8 @@ async def get_player_team_stats(steam_id: str, db: AsyncSession = Depends(get_db
     match_losses = int(mw_row["losses"] or 0)
 
     # Series streak — walk completed series newest first, count consecutive same-result.
+    # No LIMIT: the loop breaks at the first opposite result, so it only walks the actual
+    # streak. A prior LIMIT 50 silently capped the 2v2 streak at 50 (same class as #17).
     streak_q = await db.execute(
         text("""
             SELECT s.winner_team,
@@ -8061,7 +8065,6 @@ async def get_player_team_stats(steam_id: str, db: AsyncSession = Depends(get_db
             WHERE s.status = 'completed'
               AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)
             ORDER BY s.completed_at DESC
-            LIMIT 50
         """),
         {"pid": player.id},
     )

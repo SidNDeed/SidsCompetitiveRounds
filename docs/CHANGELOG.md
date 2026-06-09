@@ -1,5 +1,15 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.28.1 — 2026-06-09
+
+**Headlines for testers**
+- **Block fixed in ranked/matchmade games** — block could activate but absorb nothing (you'd "block" and still take the hit) in ranked rooms. Root cause: our round-start block reset stripped the block's action delegates every round even when nothing was actually destroyed and needed rebuilding. Now it only rebuilds when a trigger was genuinely removed. Confirmed via gameplay logs: a broken-build session showed **0 successful blocks out of 70**; a fixed-build session showed block absorbing hits normally across every game.
+- **Phantom series scores fixed** — the per-series game counter in the HUD could climb past best-of-3 (e.g. "4-0") for the player who *isn't* the match reporter. It now self-corrects off the BO3 score so both clients agree.
+- **My Stats card-hover fixed** — the card tooltip's hover zone was the full row width (mostly empty space), so moving toward the bottom-right refresh button kept popping the tooltip over it. The hover zone is now sized to the actual card text.
+- **Discord series feed** — win streaks are no longer capped at 20 (1v1 and 2v2), and rating changes now show one decimal place so sub-1.0 Glicko moves no longer display as "0".
+- **Bug reports per day raised 3 → 10.**
+- Matchmaking-disconnect diagnostics widened to cover 1v1 (groundwork for tracking down the intermittent queue DC).
+
 ## v1.28.0 — 2026-06-03
 
 **Headlines for testers**
