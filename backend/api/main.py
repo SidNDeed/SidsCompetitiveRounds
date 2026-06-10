@@ -256,7 +256,7 @@ app.include_router(tournaments_router)
 # wild). Once adoption of the header is universal, set REQUIRE_MOD_VERSION
 # to True to lock out anyone who removes it.
 
-MIN_MOD_VERSION = "1.22.0"
+MIN_MOD_VERSION = "1.28.2"  # Enforced floor: <1.28.2 clients get 426 → auto-update on relaunch.
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
 # Per-request mod version captured from the X-Mod-Version header by the
