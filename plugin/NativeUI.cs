@@ -213,6 +213,10 @@ namespace CompetitiveRounds
         private static object txtServerStatus;
         // Auto-refresh of /series/active when Leaderboard tab is open. Throttled to every 10s.
         private static float liveSeriesAutoRefreshAt;
+        // F8: manual Refresh-button debounce. Mashing it fired a burst of fetches
+        // every click (player stats + history + achievements + team + tab data) →
+        // self-DoS of the server + the local HTTP coroutines. Gate to once / 2s.
+        private static float _nextManualRefreshAt;
         public static void MaybeRefreshLiveSeries()
         {
             if (currentTab != 1) return;
@@ -458,7 +462,7 @@ namespace CompetitiveRounds
             UIFactory.CreateButton("Discord",bottom.transform,"Discord",14f,Color.white,new Color(0.345f,0.396f,0.949f,0.9f),()=>{Application.OpenURL("https://discord.gg/comp-rounds");},sizeDelta:new Vector2(80,26));
             UIFactory.CreateButton("GitHub",bottom.transform,"GitHub",14f,Color.white,new Color(0.2f,0.2f,0.2f,0.9f),()=>{Application.OpenURL("https://github.com/SidNDeed/SidsCompetitiveRounds");},sizeDelta:new Vector2(75,26));
             var bSp=new GameObject("S");bSp.transform.SetParent(bottom.transform,false);bSp.AddComponent<RectTransform>();UIFactory.AddLE(bSp,flexW:1);
-            UIFactory.CreateButton("RefreshBtn",bottom.transform,"Refresh",15f,C_WHITE,C_BTN,()=>{RefreshData();dirty=true;},sizeDelta:new Vector2(85,26));
+            UIFactory.CreateButton("RefreshBtn",bottom.transform,"Refresh",15f,C_WHITE,C_BTN,()=>{if(Time.unscaledTime>=_nextManualRefreshAt){_nextManualRefreshAt=Time.unscaledTime+2f;RefreshData();dirty=true;}else{CompetitiveUI.ShowNotification("Refreshing too fast - give it a sec",Color.yellow,1.5f);}},sizeDelta:new Vector2(85,26));
             SwitchTab(0);pageBuilt=true;Plugin.Log.LogInfo("[NATIVE] Competitive page built");
             }catch(Exception ex){Plugin.Log.LogError($"[NATIVE] BuildPage failed: {ex}");pageBuilt=false;}
         }
@@ -2524,15 +2528,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             AddPerfRow("HitSnd", "Swallow RayHitBulletSound NREs from destroyed parents.",
                 () => { if (Plugin.PerfSwallowHitSoundNREs != null) { Plugin.PerfSwallowHitSoundNREs.Value = !Plugin.PerfSwallowHitSoundNREs.Value; dirty = true; } },
                 out perfHitSndBtn, out perfHitSndTxt);
-            AddPerfRow("ColorGh", "Auto-cleanup ChangeColor bullet-hit ghosts after 2 seconds.",
-                () => { if (Plugin.PerfAutoCleanupColorGhosts != null) { Plugin.PerfAutoCleanupColorGhosts.Value = !Plugin.PerfAutoCleanupColorGhosts.Value; dirty = true; } },
-                out perfColorGhBtn, out perfColorGhTxt);
+            // ("ColorGh" + "Tag" rows removed v1.28.2 — their patches were
+            // old-game ports whose targets no longer exist; see PerfPatches.cs)
             AddPerfRow("EdgeBn", "Swallow ScreenEdgeBounce NREs from destroyed bullets.",
                 () => { if (Plugin.PerfSwallowEdgeBounceNREs != null) { Plugin.PerfSwallowEdgeBounceNREs.Value = !Plugin.PerfSwallowEdgeBounceNREs.Value; dirty = true; } },
                 out perfEdgeBnBtn, out perfEdgeBnTxt);
-            AddPerfRow("Tag", "Tag spawned hit-effect GameObjects with a 4s self-destruct timer.",
-                () => { if (Plugin.PerfTagSpawnedObjectsForCleanup != null) { Plugin.PerfTagSpawnedObjectsForCleanup.Value = !Plugin.PerfTagSpawnedObjectsForCleanup.Value; dirty = true; } },
-                out perfTagBtn, out perfTagTxt);
             AddPerfRow("Menu", "Skip MenuControllerHandler.Update during an active match.",
                 () => { if (Plugin.PerfSkipMenuUpdateInMatch != null) { Plugin.PerfSkipMenuUpdateInMatch.Value = !Plugin.PerfSkipMenuUpdateInMatch.Value; dirty = true; } },
                 out perfMenuBtn, out perfMenuTxt);
@@ -2730,13 +2730,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // ── Perf section labels (v1.26.8) ──
             if (_perfSectionHeaderTxt != null)
             {
-                int onCount = 0, total = 10;
+                int onCount = 0, total = 8;
                 if (Plugin.PerfStunPlayerNullGuard?.Value ?? false) onCount++;
                 if (Plugin.PerfDespawnOffscreenBullets?.Value ?? false) onCount++;
                 if (Plugin.PerfSwallowHitSoundNREs?.Value ?? false) onCount++;
-                if (Plugin.PerfAutoCleanupColorGhosts?.Value ?? false) onCount++;
                 if (Plugin.PerfSwallowEdgeBounceNREs?.Value ?? false) onCount++;
-                if (Plugin.PerfTagSpawnedObjectsForCleanup?.Value ?? false) onCount++;
                 if (Plugin.PerfSkipMenuUpdateInMatch?.Value ?? false) onCount++;
                 if (Plugin.PerfBulletHitParticleCap?.Value ?? false) onCount++;
                 if (Plugin.PerfClampObjectPoolInit?.Value ?? false) onCount++;
@@ -2762,9 +2760,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             SetPerfRow(perfStunTxt,      Plugin.PerfStunPlayerNullGuard,       "Stun null-guard");
             SetPerfRow(perfBulletsTxt,   Plugin.PerfDespawnOffscreenBullets,   "OOB bullet despawn");
             SetPerfRow(perfHitSndTxt,    Plugin.PerfSwallowHitSoundNREs,       "Hit-sound NRE swallow");
-            SetPerfRow(perfColorGhTxt,   Plugin.PerfAutoCleanupColorGhosts,    "ColorGhost cleanup");
             SetPerfRow(perfEdgeBnTxt,    Plugin.PerfSwallowEdgeBounceNREs,     "EdgeBounce NRE swallow");
-            SetPerfRow(perfTagTxt,       Plugin.PerfTagSpawnedObjectsForCleanup, "Spawn-object cleanup");
             SetPerfRow(perfMenuTxt,      Plugin.PerfSkipMenuUpdateInMatch,     "Menu update bail");
             SetPerfRow(perfBulletCapTxt, Plugin.PerfBulletHitParticleCap,      "Bullet-hit particle cap (2/frame)");
             SetPerfRow(perfPoolTxt,      Plugin.PerfClampObjectPoolInit,       "ObjectPool init clamp (in-match)");

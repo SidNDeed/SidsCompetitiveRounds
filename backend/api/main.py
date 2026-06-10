@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
@@ -38,6 +39,7 @@ from schemas import (
     BugReportStatusRequest,
     BugReportCommentRequest,
     BugReportInternalCommentRequest,
+    BugReportUserCommentRequest,
     CardStatEntry,
     HealthResponse,
     LeaderboardEntry,
@@ -297,6 +299,71 @@ _MAINT_BYPASS = frozenset({
     "/api/v1/admin/maintenance/stop",
     "/api/v1/admin/maintenance/status",
 })
+
+
+# ── Rate limiting + body-size cap (F7/F9 hardening) ─────────────────────────
+# In-process per-IP sliding-window limiter. This is a BACKSTOP against abuse
+# loops (gold-farm, DC-spam, F5 button hammering) — the real DDoS shield is the
+# TLS reverse proxy in the infra runbook. Limits are generous so normal play +
+# F5 polling never trips them; the bot is exempt via X-Internal-Key. Source IPs
+# are real per-client because the port-forward DNATs without source rewrite.
+import time as _rl_time
+from collections import deque as _rl_deque, defaultdict as _rl_defaultdict
+_RL_BUCKETS = _rl_defaultdict(_rl_deque)
+_RL_GLOBAL = (150, 10.0)     # 150 req / 10s per IP (a fast browser is ~10)
+_RL_SENSITIVE = (20, 10.0)   # 20 req / 10s for mutating / abuse-prone paths
+_RL_SENSITIVE_PREFIXES = (
+    "/api/v1/achievements/unlock", "/api/v1/matches", "/api/v1/team/matches",
+    "/api/v1/report-disconnect", "/api/v1/bets", "/api/v1/team-bets",
+    "/api/v1/shop/purchase", "/api/v1/queue/join", "/api/v1/team/queue/join",
+    "/api/v1/players/block", "/api/v1/players/unblock", "/api/v1/mod/toggle-ranked",
+)
+_RL_MAX_BODY = 16 * 1024 * 1024   # 16 MB hard cap (log clamp is 12 MB)
+_RL_LAST_PRUNE = [0.0]
+
+
+@app.middleware("http")
+async def rate_limit_gate(request: Request, call_next):
+    path = request.url.path
+    if (not path.startswith("/api/v1/")) or path in _VERSION_GATE_BYPASS \
+            or path.startswith("/api/v1/internal/"):
+        return await call_next(request)
+    internal_key = request.headers.get("X-Internal-Key")
+    if internal_key and internal_key == os.getenv("API_SECRET_KEY", ""):
+        return await call_next(request)   # bot is exempt
+    # Cheap body-size gate (header only; the proxy enforces the real limit).
+    cl = request.headers.get("content-length")
+    if cl:
+        try:
+            if int(cl) > _RL_MAX_BODY:
+                return JSONResponse(status_code=413, content={"error": "payload_too_large"})
+        except ValueError:
+            pass
+    ip = request.client.host if request.client else "unknown"
+    now = _rl_time.monotonic()
+    sensitive = any(path.startswith(p) for p in _RL_SENSITIVE_PREFIXES)
+    limit, window = _RL_SENSITIVE if sensitive else _RL_GLOBAL
+    key = f"{ip}|{'s' if sensitive else 'g'}"
+    dq = _RL_BUCKETS[key]
+    cutoff = now - window
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+    if len(dq) >= limit:
+        return JSONResponse(
+            status_code=429, content={"error": "rate_limited", "retry_after": int(window)},
+            headers={"Retry-After": str(int(window))},
+        )
+    dq.append(now)
+    # Periodic prune of idle buckets so the dict can't grow unbounded.
+    if now - _RL_LAST_PRUNE[0] > 60:
+        _RL_LAST_PRUNE[0] = now
+        for k in list(_RL_BUCKETS.keys()):
+            d = _RL_BUCKETS[k]
+            while d and d[0] < now - 30:
+                d.popleft()
+            if not d:
+                del _RL_BUCKETS[k]
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -630,7 +697,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.28.1"
+LATEST_MOD_VERSION = "1.28.2"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -948,7 +1015,12 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     # Determine winner
     winner = p1 if report.p1_rounds_won > report.p2_rounds_won else p2
 
-    # Find the reporting player
+    # Find the reporting player. F2 hardening: the reporter MUST be one of the two
+    # match participants. Previously this defaulted to p2 when reported_by matched
+    # neither — silently crediting/stamping a non-participant and accepting a report
+    # from someone who wasn't in the match. Reject instead.
+    if report.reported_by_steam_id not in (report.player1.steam_id, report.player2.steam_id):
+        raise HTTPException(status_code=400, detail="reporter is not a participant in this match")
     reporter = p1 if report.reported_by_steam_id == report.player1.steam_id else p2
     # Reporter clearly has the mod installed — stamp them and grant Beta.
     await _mark_mod_seen(db, reporter)
@@ -1164,6 +1236,7 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         series_result = await db.execute(series_query)
         series = series_result.scalar_one_or_none()
 
+        series_was_new = False
         if not series:
             # Create new series — p1/p2 order matches first match's order
             series = RankedSeries(
@@ -1172,6 +1245,7 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             )
             db.add(series)
             await db.flush()
+            series_was_new = True
 
         # Link match to series
         match.series_id = series.id
@@ -1183,6 +1257,35 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             series.p2_series_wins += 1
 
         series_score = f"{series.p1_series_wins}-{series.p2_series_wins}"
+
+        # ── Server-side speedhack flag (advisory) ──────────────────────────
+        # A Cheat-Engine-style speedhack speeds the GAME clock — and the client's
+        # own reference clock with it — so client-reported match_duration is
+        # untrustworthy. The SERVER's wall clock can't be sped up by a client, so
+        # series.created_at→now is the unfakeable baseline. Only meaningful when
+        # the series existed BEFORE this report (an inline-created series has
+        # created_at≈now → no baseline). Conservative floor (20s/game) so a false
+        # positive is near-impossible; FLAG only (no auto-invalidate) → it just
+        # pings #scr-admin via the existing flagged_matches poller for review.
+        if not series_was_new:
+            try:
+                games_played = series.p1_series_wins + series.p2_series_wins
+                elapsed = (datetime.now(timezone.utc) - series.created_at).total_seconds()
+                MIN_SEC_PER_GAME = 20.0
+                if games_played >= 1 and 0 < elapsed < games_played * MIN_SEC_PER_GAME:
+                    db.add(FlaggedMatch(
+                        match_id=match.id,
+                        series_id=series.id,
+                        player_steam_ids=[p1.steam_id, p2.steam_id],
+                        flag_reason="suspected_speedhack",
+                        flag_details=f"{games_played} game(s) in {elapsed:.0f}s server wall-time "
+                                     f"(below {MIN_SEC_PER_GAME:.0f}s/game floor)",
+                        auto_invalidated=False,
+                    ))
+                    print(f"[ANTICHEAT] suspected_speedhack series={series.id} "
+                          f"{games_played} games in {elapsed:.0f}s")
+            except Exception as _sx:
+                print(f"[ANTICHEAT] speedhack check error: {_sx}")
 
         # Check if series is complete (first to 2)
         if series.p1_series_wins >= 2 or series.p2_series_wins >= 2:
@@ -1219,7 +1322,31 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         else:
             series_status = "active"
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # F2: an exact-duplicate match (same room + same two players) hits the
+        # unique constraint and is rejected ATOMICALLY — the whole transaction
+        # rolls back, so there's no double Elo/gold. Return the existing match
+        # idempotently instead of surfacing a 500. (A determined key-holder who
+        # mutates the room_id suffix to dodge the constraint is the residual
+        # shared-secret limitation noted in the audit; tracked as follow-up.)
+        await db.rollback()
+        existing = (await db.execute(
+            select(Match).where(
+                Match.photon_room_id == report.photon_room_id,
+                Match.player1_id == p1.id, Match.player2_id == p2.id,
+            ).order_by(Match.created_at.desc()).limit(1)
+        )).scalar_one_or_none()
+        return MatchResponse(
+            match_id=existing.id if existing else match.id,
+            winner_steam_id=winner.steam_id,
+            message="already recorded (duplicate)",
+            xp_gained=0, xp_bonuses=[], total_xp=reporter_total_xp or 0,
+            level=reporter_level,
+            series_status="duplicate", series_score=series_score,
+            gold_gained=0, gold_bonuses=[],
+        )
 
     # Trigger Glicko recalculation only when a series completes
     # (for non-ranked matches, Glicko is not affected)
@@ -2433,18 +2560,28 @@ async def check_player_registered(steam_id: str, db: AsyncSession = Depends(get_
     player = result.scalar_one_or_none()
 
     if not player:
-        return {"registered": False, "ranked": False}
+        return {"registered": False, "ranked": False, "banned": False, "ban_reason": ""}
 
+    # Item 4: surface mod-wide ban status here so the OTHER player's client (which
+    # already calls /mod/check on its opponent at room handshake) can notify +
+    # leave when it's matched against a banned cheater.
+    ban_reason = await _is_banned(db, steam_id)
     return {
         "registered": True,
         "ranked": player.ranked_enabled,
         "display_name": player.display_name,
+        "banned": ban_reason is not None,
+        "ban_reason": ban_reason or "",
     }
 
 
 @app.post("/api/v1/mod/toggle-ranked/{steam_id}", tags=["Mod"])
-async def toggle_ranked(steam_id: str, enabled: bool = Query(...), db: AsyncSession = Depends(get_db)):
-    """Toggle a player's ranked mode on or off. Auto-registers if needed."""
+async def toggle_ranked(steam_id: str, enabled: bool = Query(...), sig: str | None = Query(None), db: AsyncSession = Depends(get_db)):
+    """Toggle a player's ranked mode on or off. Auto-registers if needed.
+    HMAC signs 'toggle-ranked:{steam_id}:{true|false}' (F5: was unauthenticated —
+    anyone could flip any account in/out of matchmaking)."""
+    if not _verify_action_sig(f"toggle-ranked:{steam_id}:{str(enabled).lower()}", sig):
+        raise HTTPException(status_code=403, detail="Invalid signature")
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
 
@@ -3004,9 +3141,13 @@ async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get
 async def block_player(
     steam_id: str = Query(...),
     target_steam_id: str = Query(...),
+    sig: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Permanently block a player from ranked matchmaking against you."""
+    """Permanently block a player from ranked matchmaking against you.
+    HMAC signs 'block:{steam_id}:{target_steam_id}' (F5: was unauthenticated)."""
+    if not _verify_action_sig(f"block:{steam_id}:{target_steam_id}", sig):
+        raise HTTPException(status_code=403, detail="Invalid signature")
     p1 = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     p2 = (await db.execute(select(Player).where(Player.steam_id == target_steam_id))).scalar_one_or_none()
     if not p1 or not p2:
@@ -3027,9 +3168,13 @@ async def block_player(
 async def unblock_player(
     steam_id: str = Query(...),
     target_steam_id: str = Query(...),
+    sig: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove a permanent ranked matchmaking block."""
+    """Remove a permanent ranked matchmaking block.
+    HMAC signs 'unblock:{steam_id}:{target_steam_id}' (F5: was unauthenticated)."""
+    if not _verify_action_sig(f"unblock:{steam_id}:{target_steam_id}", sig):
+        raise HTTPException(status_code=403, detail="Invalid signature")
     p1 = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     p2 = (await db.execute(select(Player).where(Player.steam_id == target_steam_id))).scalar_one_or_none()
     if not p1 or not p2:
@@ -3083,8 +3228,39 @@ async def report_disconnect(
     if reporter.id == disconnected.id:
         raise HTTPException(status_code=400, detail="Cannot report yourself")
 
+    # F5 hardening: this endpoint was fully unauthenticated — anyone could loop it
+    # to inflate any rival's ranked_dc_count (which feeds the leave-% denominator,
+    # learning #37). Bind it to reality server-side: the two players must actually
+    # share a RECENT ranked series, and the same DC can't be counted twice for the
+    # same series. (Full HMAC signing lands with the 1.28.2 client; this closes the
+    # raw-curl / replay abuse without needing the client.)
+    recent = (await db.execute(text(
+        "SELECT rs.id FROM ranked_series rs "
+        "WHERE rs.created_at > NOW() - INTERVAL '20 minutes' "
+        "  AND ((rs.player1_id = :a AND rs.player2_id = :b) "
+        "    OR (rs.player1_id = :b AND rs.player2_id = :a)) "
+        "ORDER BY rs.created_at DESC LIMIT 1"
+    ), {"a": reporter.id, "b": disconnected.id})).first()
+    if not recent:
+        raise HTTPException(status_code=403, detail="no recent shared ranked series for this DC report")
+    series_id = recent[0]
+    # Per-series dedup: one DC increment per (series, disconnected player). A
+    # FlaggedMatch-style marker row would be heavier; reuse AdminAction's audit
+    # table is wrong here, so dedup via a dc-events guard on ranked_dc_count by
+    # checking we haven't already logged this series for this player this window.
+    already = (await db.execute(text(
+        "SELECT 1 FROM dc_events WHERE series_id = :sid AND disconnected_player_id = :dp LIMIT 1"
+    ), {"sid": series_id, "dp": disconnected.id})).first()
+    if already:
+        return {"status": "already_recorded", "disconnected_steam_id": disconnected_steam_id,
+                "ranked_dc_count": disconnected.ranked_dc_count or 0}
+
     # Increment the disconnected player's DC count
     disconnected.ranked_dc_count = (disconnected.ranked_dc_count or 0) + 1
+    await db.execute(text(
+        "INSERT INTO dc_events (series_id, disconnected_player_id, reporter_player_id) "
+        "VALUES (:sid, :dp, :rp) ON CONFLICT DO NOTHING"
+    ), {"sid": series_id, "dp": disconnected.id, "rp": reporter.id})
     await db.commit()
 
     print(f"[DC] {reporter_steam_id} reported disconnect by {disconnected_steam_id} (total: {disconnected.ranked_dc_count})")
@@ -3126,12 +3302,20 @@ async def link_discord(
     code: str = Query(...),
     discord_id: str = Query(...),
     discord_username: str | None = Query(None, max_length=64),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
     """
     Link a Discord account to a Steam account via verification code.
     Called by the Discord bot after !link CODE.
     """
+    # F10: bot-only. The bot is the sole legitimate caller (it learns the real
+    # Discord author from the !link message) and already sends X-Internal-Key.
+    # Without this gate, anyone who glimpsed a victim's 6-char code could bind
+    # THEIR OWN discord_id to the victim's Steam account.
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="bot-only endpoint")
     # Clean up expired codes
     await db.execute(text("DELETE FROM link_codes WHERE expires_at < now()"))
 
@@ -3278,6 +3462,17 @@ async def get_recent_series(
         LEFT JOIN players pw ON pw.id = rs.winner_id
         WHERE rs.status = 'completed'
           AND rs.completed_at >= :cutoff
+          -- Only surface series whose Glicko rating_change is finalized.
+          -- Series completion commits status='completed' first, then writes
+          -- p1/p2_rating_change in a second commit a beat later. The Discord
+          -- series feed polls this endpoint on status and would otherwise
+          -- catch that window and post "+0" permanently (bug #18 — Stan saw
+          -- a real +2 posted as +0). Every real series finalizes to a
+          -- non-NULL value (0 of 535 are permanently NULL), so this never
+          -- hides a series for good — it just defers it to the next poll
+          -- once the rating change is written.
+          AND rs.p1_rating_change IS NOT NULL
+          AND rs.p2_rating_change IS NOT NULL
         ORDER BY rs.completed_at DESC
         LIMIT :limit
     """)
@@ -4436,9 +4631,18 @@ async def series_preflight(
     so either player can compute it without knowing who's p1/p2 server-side.
     Server returns the series_id which the client then uses for live-points
     reports during game 1."""
+    # Diagnostics for private-room series that fail to register. Grep `PREFLIGHT`
+    # in the api log: every successful call logs a 'call' + ('created'|'reuse');
+    # a 'call' with no follow-up means a DB error, and a rejection logs why.
+    # If a private game produced NO ranked_series row, look here first — NO
+    # 'call' line at all means the client never reached preflight (room not
+    # detected as competitive, both clients offline, etc.), not a server fault.
+    print(f"[PREFLIGHT-DIAG] call: p1={p1_steam_id}({p1_name}) p2={p2_steam_id}({p2_name})")
     if not MATCH_HMAC_SECRET:
+        print("[PREFLIGHT-DIAG] reject: HMAC not configured")
         raise HTTPException(status_code=503, detail="HMAC not configured")
     if p1_steam_id == p2_steam_id:
+        print(f"[PREFLIGHT-DIAG] reject: same steam id {p1_steam_id}")
         raise HTTPException(status_code=400, detail="Players must be distinct")
     a, b = sorted([p1_steam_id, p2_steam_id])
     expected = hmac.new(
@@ -4447,6 +4651,7 @@ async def series_preflight(
         hashlib.sha256,
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
+        print(f"[PREFLIGHT-DIAG] reject: bad HMAC for {a} vs {b} (got {sig[:12]}...)")
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     # Use the caller-provided NickNames so first-time-seen players don't
@@ -4483,6 +4688,7 @@ async def series_preflight(
         ).order_by(RankedSeries.created_at.desc()).limit(1)
     )).scalar_one_or_none()
     if existing is not None:
+        print(f"[PREFLIGHT-DIAG] reuse: existing active series {existing.id} for {p1_steam_id} vs {p2_steam_id}")
         await db.commit()
         return {"status": "exists", "series_id": str(existing.id)}
 
@@ -5106,21 +5312,32 @@ async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = D
     )
     db.add(ach)
 
-    # 25 gold per achievement — uniform for now; rarity-scaled pricing can come
-    # with the shop rollout. ACHIEVEMENT_GOLD is now module-level so admin_grant_achievement
-    # can reuse the same constant without a NameError.
-    player.gold_earned = (player.gold_earned or 0) + ACHIEVEMENT_GOLD
-    db.add(GoldTransaction(
-        player_id=player.id,
-        amount=ACHIEVEMENT_GOLD,
-        reason="achievement",
-        reference_id=req.achievement_key,
-    ))
+    # F1 hardening — the GOLD payout is the abused part (this endpoint was fully
+    # unauthenticated → a scriptable gold farm for any steam_id + any key). Gate
+    # the gold on a valid client signature 'achievement:{steam_id}:{key}'.
+    # Transition-safe: an unsigned/old-client call still RECORDS the unlock (so
+    # players don't lose achievements during the auto-update window) but pays
+    # 0 gold; a raw-curl outsider with no secret gets neither. Server-derived
+    # achievements pay via _grant_achievement_inline, which is unaffected.
+    gold_ok = _verify_action_sig(f"achievement:{req.steam_id}:{req.achievement_key}", req.hmac_signature)
+    gold_awarded = 0
+    if gold_ok:
+        gold_awarded = ACHIEVEMENT_GOLD
+        player.gold_earned = (player.gold_earned or 0) + ACHIEVEMENT_GOLD
+        db.add(GoldTransaction(
+            player_id=player.id,
+            amount=ACHIEVEMENT_GOLD,
+            reason="achievement",
+            reference_id=req.achievement_key,
+        ))
+    else:
+        print(f"[ACH] unlock recorded WITHOUT gold (unsigned/old client) "
+              f"steam={req.steam_id} key={req.achievement_key}")
 
     await db.commit()
 
     name = ACHIEVEMENT_DEFS[req.achievement_key]["name"]
-    return {"status": "unlocked", "achievement_key": req.achievement_key, "name": name, "gold_awarded": ACHIEVEMENT_GOLD}
+    return {"status": "unlocked", "achievement_key": req.achievement_key, "name": name, "gold_awarded": gold_awarded}
 
 
 # ── Routes: Bug reports (v1.26.7) ────────────────────────────
@@ -5558,6 +5775,51 @@ async def internal_comment_on_bug_report(
     return {"status": "ok"}
 
 
+@app.post("/api/v1/internal/bug-reports/by-number/{bug_number}/user-comment", tags=["Bug Reports"])
+async def user_comment_on_bug_report(
+    bug_number: int,
+    req: BugReportUserCommentRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """A reporter adds a comment to their OWN ticket via a Discord DM, relayed
+    by the bot. Local-network gated (only the in-cluster bot reaches this);
+    ownership is verified by matching the requester's Discord id to the
+    report's reporter. 403 if it isn't their ticket / their Discord isn't
+    linked, 404 if the bug number doesn't exist."""
+    client_host = (request.client.host if request.client else "") or ""
+    if not (client_host in ("127.0.0.1", "::1", "localhost")
+            or client_host.startswith("172.")):
+        raise HTTPException(403, f"Internal endpoint — local-only (saw {client_host})")
+    comment = (req.comment or "").strip()
+    if not comment:
+        raise HTTPException(400, "Comment cannot be empty")
+    if len(comment) > 2000:
+        comment = comment[:2000]
+    discord_id = (req.discord_id or "").strip()
+    if not discord_id:
+        raise HTTPException(400, "Missing discord_id")
+    report = (await db.execute(
+        select(BugReport).where(BugReport.bug_number == bug_number)
+    )).scalar_one_or_none()
+    if not report:
+        raise HTTPException(404, "Bug report not found")
+    # Ownership: the report's reporter (matched by steam_id) must have THIS
+    # Discord account linked. No link or a mismatch → not their ticket.
+    owner = (await db.execute(
+        select(Player).where(Player.steam_id == report.steam_id)
+    )).scalar_one_or_none()
+    owner_discord = str(owner.discord_id) if (owner and owner.discord_id) else None
+    if not owner_discord or owner_discord != discord_id:
+        raise HTTPException(403, "not_owner")
+    actor_name = (report.display_name
+                  or (owner.display_name if owner else None)
+                  or "Reporter")
+    await _record_bug_event(db, report.id, report.steam_id, actor_name, "comment", comment=comment)
+    await db.commit()
+    return {"status": "ok", "bug_number": bug_number}
+
+
 # ── Routes: Admin ────────────────────────────────────────────
 #
 # Auth: every mutating admin endpoint requires
@@ -5569,9 +5831,23 @@ def _admin_canonical(admin_steam_id: str, action: str, target: str = "") -> str:
     return f"admin:{admin_steam_id}:{action}:{target or ''}"
 
 
+def _verify_action_sig(canonical: str, signature) -> bool:
+    """Verify a client action signature (shared mod secret). Fails CLOSED if the
+    secret is unset or the signature is missing/wrong. Used by the v1.28.2
+    HMAC-gated state endpoints (toggle-ranked, block/unblock, achievements).
+    The mod secret only proves 'a copy of the mod produced this' — it stops
+    raw-curl/outsider abuse, not a determined key-extractor (see audit)."""
+    if not MATCH_HMAC_SECRET or not signature:
+        return False
+    expected = hmac.new(MATCH_HMAC_SECRET.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
 def _verify_admin_hmac(admin_steam_id: str, action: str, target: str, signature):
     if not MATCH_HMAC_SECRET:
-        return True
+        # Fail CLOSED (F10): if the secret is somehow unset, DENY admin actions
+        # rather than letting every signature pass unconditionally.
+        return False
     if not signature:
         return False
     expected = hmac.new(
@@ -5724,7 +6000,47 @@ async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
         details={"reason": req.reason},
     ))
     await db.commit()
+    # The bot's poll_new_bans loop picks this up from /internal/recent-bans and
+    # posts it to #scr-admin (item 4).
     return {"status": "banned", "steam_id": req.target_steam_id, "reason": req.reason}
+
+
+@app.get("/api/v1/internal/recent-bans", tags=["Internal"])
+async def get_recent_bans(
+    since_id: str | None = Query(None, description="Last ban id the bot already posted"),
+    limit: int = Query(50, ge=1, le=200),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only feed for the #scr-admin poller: newly-added active bans,
+    chronological. Mirrors /internal/recent-flags."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    cutoff = None
+    if since_id:
+        row = (await db.execute(
+            text("SELECT banned_at FROM player_bans WHERE id = :id"), {"id": since_id}
+        )).first()
+        cutoff = row[0] if row else None
+    q = (
+        "SELECT pb.id::text AS id, pb.steam_id, pb.reason, pb.banned_by_steam_id, "
+        "       pb.banned_at, p.display_name "
+        "FROM player_bans pb LEFT JOIN players p ON p.steam_id = pb.steam_id "
+        "WHERE pb.unbanned_at IS NULL "
+        + ("AND pb.banned_at > :cutoff " if cutoff else "")
+        + "ORDER BY pb.banned_at ASC LIMIT :limit"
+    )
+    params = {"limit": limit}
+    if cutoff:
+        params["cutoff"] = cutoff
+    rows = (await db.execute(text(q), params)).mappings().all()
+    return {"bans": [
+        {"id": r["id"], "steam_id": r["steam_id"], "reason": r["reason"],
+         "banned_by_steam_id": r["banned_by_steam_id"], "display_name": r["display_name"],
+         "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None}
+        for r in rows
+    ]}
 
 
 class _AdminUnbanReq(BaseModel):
@@ -7346,6 +7662,24 @@ async def team_series_report_dc(
     if dc_team is None:
         raise HTTPException(400, "DC'd player isn't part of this series")
     other_team = 2 if dc_team == 1 else 1
+
+    # F6 hardening: the reporter must be a member of THIS series and on the team
+    # that did NOT disconnect. The DC HMAC proves "a mod produced this", not that
+    # the reporter was in the match (shared-secret limitation), so bind to series
+    # membership server-side — stops attributing a DC to an arbitrary player.
+    rep_pid = (await db.execute(
+        select(Player.id).where(Player.steam_id == reporter_steam_id)
+    )).scalar_one_or_none()
+    rep_team = 1 if rep_pid in (s["t1a_id"], s["t1b_id"]) else 2 if rep_pid in (s["t2a_id"], s["t2b_id"]) else None
+    if rep_team is None or rep_team == dc_team:
+        raise HTTPException(400, "reporter must be a member of the non-DC team")
+
+    # F6 FOLLOW-UP (tracked in docs/SECURITY_ACTION_ITEMS.md): t1/t2_points_total
+    # are still client-supplied + outside the DC HMAC, so a member could misreport
+    # the abandoned game's score to flip the >=2-points game-award branch. Lower
+    # impact (one 2v2 game; the lead-forfeit rule below ignores points entirely)
+    # and needs a coordinated client-canonical change — folding points into the
+    # DC signature is the next pass.
     total_points = (t1_points_total or 0) + (t2_points_total or 0)
 
     # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────

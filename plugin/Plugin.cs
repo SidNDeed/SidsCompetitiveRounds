@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.28.1";
+        public const string ModVersion = "1.28.2";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -46,9 +46,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> PerfStunPlayerNullGuard;
         internal static ConfigEntry<bool> PerfDespawnOffscreenBullets;
         internal static ConfigEntry<bool> PerfSwallowHitSoundNREs;
-        internal static ConfigEntry<bool> PerfAutoCleanupColorGhosts;
         internal static ConfigEntry<bool> PerfSwallowEdgeBounceNREs;
-        internal static ConfigEntry<bool> PerfTagSpawnedObjectsForCleanup;
         internal static ConfigEntry<bool> PerfSkipMenuUpdateInMatch;
         // v1.26.9 — user-noticeable batch (cap-style perf wins).
         internal static ConfigEntry<bool> PerfBulletHitParticleCap;
@@ -229,21 +227,18 @@ namespace CompetitiveRounds
                 true,
                 "Catch the NullReferenceException that fires from RayHitBulletSound.DoHitEffect when its parent is destroyed mid-frame, and destroy the now-dead instance. Reduces BepInEx log spam, no visual change."
             );
-            PerfAutoCleanupColorGhosts = Config.Bind(
-                "Performance", "AutoCleanupColorGhosts",
-                true,
-                "Attach a 2-second self-destruct timer to each ChangeColor bullet-hit ghost so they don't pile up in the scene root over long matches. No visual change at typical play rates."
-            );
+            // (v1.28.2) AutoCleanupColorGhosts bind removed — current ROUNDS'
+            // ChangeColor is an empty MonoBehaviour (no Start to patch, no
+            // Update tick to save); hit effects are pooled via PrefabPool now.
             PerfSwallowEdgeBounceNREs = Config.Bind(
                 "Performance", "SwallowEdgeBounceNREs",
                 true,
                 "Catch NullReferenceExceptions from ScreenEdgeBounce.DoHit and ScreenEdgeBounce.Update when a parent bullet was destroyed mid-frame. Reduces log spam, no visual change."
             );
-            PerfTagSpawnedObjectsForCleanup = Config.Bind(
-                "Performance", "TagSpawnedObjectsForCleanup",
-                true,
-                "Tag transient bullet-hit decoration GameObjects with a 4-second self-destruct timer so they don't accumulate across rounds. No visual change."
-            );
+            // (v1.28.2) TagSpawnedObjectsForCleanup bind removed — the 3-arg
+            // SpawnObject overload is void (the patch could never compile its
+            // __result Postfix), and the 8-arg overload returns POOLED
+            // PoolableWrappers that a RemoveAfterSeconds Destroy would corrupt.
             PerfSkipMenuUpdateInMatch = Config.Bind(
                 "Performance", "SkipMenuUpdateInMatch",
                 true,
@@ -3864,7 +3859,10 @@ namespace CompetitiveRounds
         // the remaining triggers instead of aborting the whole block.
         static Exception Finalizer(Exception __exception, BlockTrigger __instance, BlockTrigger.BlockTriggerType triggerType)
         {
-            if (__exception is NullReferenceException)
+            // MissingReferenceException is what Unity actually throws when a
+            // destroyed component's members are touched (zombie DoBlock reads
+            // base.gameObject.name) — it does NOT derive from NRE.
+            if (__exception is NullReferenceException || __exception is UnityEngine.MissingReferenceException)
             {
                 string state = "alive";
                 try { if (__instance == null) state = "destroyed"; } catch { state = "introspection-failed"; }
@@ -3877,22 +3875,40 @@ namespace CompetitiveRounds
         }
     }
 
-    // ── Block state recovery for 2v2 series (v1.26.7) ──────────────────────
-    // Symptom: in 2v2 series, after game 1 some players right-click but the
-    // block goes straight to cooldown instead of activating. Never happens
-    // game 1; intermittent across game 2+. Diagnosis: ROUNDS' card teardowns
-    // between games can leave null entries in Block.triggers AND can leave
-    // BlockTrigger sub-components destroyed. Vanilla iterates the list without
-    // scrubbing, hits the NRE, and abandons the iteration mid-block —
-    // cooldown still starts because Block.TryBlock already committed. The
-    // BlockTriggerDoBlockNullSafetyPatch above is reactive (per-call). This
-    // proactive pass scrubs the triggers list at each Block.TryBlock entry
-    // AND on game start (every game in a series, the moment the bug window
-    // opens). Gated on competitive (mod-issued) rooms so vanilla pickup
-    // games are unaffected.
+    // ── Block zombie-delegate scrub (v1.28.2) ──────────────────────────────
+    // THE ranked no-block / infinite-empower root cause, established from the
+    // CURRENT game decompile (logs-snapshot/decompiled/), not the old-game PI
+    // source. There is NO `Block.triggers` list in ROUNDS 1.1.2 — the previous
+    // ScrubNullTriggers reflected a field that does not exist and was a silent
+    // no-op forever ("scrubbed 0" was structural, not evidence).
+    //
+    // Real mechanism: card components (Empower, ShieldCharge, BlockTrigger,
+    // …) Delegate.Combine their handlers onto Block/Gun/HealthHandler action
+    // fields in Start() and Delegate.Remove them in OnDestroy(). But their
+    // OnDestroy bodies dereference the parent chain FIRST (e.g. ShieldCharge:
+    // `data.GetComponent<PlayerCollision>()` line 1; Empower:
+    // `GetComponentInParent<Player>().data.healthHandler`). During the
+    // between-games teardown (our auto-Continue rematch) destruction order is
+    // arbitrary; those lookups NRE (proven: lopi's log shows
+    // ShieldCharge.OnDestroy + EmpowerStopBlockObjectFollow.OnDestroy NREs at
+    // LOADING SCENE), OnDestroy aborts, and the dead component's handlers stay
+    // subscribed as ZOMBIES:
+    //   • zombie BlockTrigger/ShieldCharge handler → MissingReferenceException
+    //     inside Block.IDoBlock (which runs synchronously) → coroutine dies
+    //     BEFORE `sinceBlock = 0f` → cooldown engages, no effects, no
+    //     absorption = "block broken after game 1" (#15/#19/#23/#24). Each
+    //     client simulates BOTH players' blocks from replicated input, so a
+    //     zombie on the opponent's replica breaks your block on THEIR screen
+    //     only ("effects show but nothing blocks").
+    //   • zombie Empower.Block/Empower.Attack → invisible infinite empower,
+    //     ×2 damage after each block, no particles, no card shown (#25).
+    //
+    // Fix: surgically remove ONLY invocation-list entries whose Target is a
+    // destroyed UnityEngine.Object. Live subscribers are never touched; no
+    // wholesale nulling, no re-running Start() (the old rebuild re-Started
+    // INACTIVE template triggers vanilla never starts — the #15 regression).
     internal static class BlockReflect
     {
-        private static System.Reflection.FieldInfo _fTriggers;
         private static System.Reflection.FieldInfo _fCounter;
         private static System.Reflection.FieldInfo _fCooldown;
         private static bool _resolved;
@@ -3903,32 +3919,88 @@ namespace CompetitiveRounds
             {
                 var t = typeof(Block);
                 var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
-                _fTriggers = t.GetField("triggers", bf);
                 _fCounter  = t.GetField("counter", bf);
                 _fCooldown = t.GetField("cooldown", bf);
             }
             catch { }
             _resolved = true;
         }
-        public static int ScrubNullTriggers(Block b)
+
+        // Per-type cache of delegate-typed instance fields (Block has 6,
+        // Gun/HealthHandler/PlayerCollision a few each). Walks the inheritance
+        // chain so subclass fields are covered too.
+        private static readonly System.Collections.Generic.Dictionary<System.Type, System.Reflection.FieldInfo[]> _delFieldCache
+            = new System.Collections.Generic.Dictionary<System.Type, System.Reflection.FieldInfo[]>();
+
+        public static int ScrubDeadDelegateFields(UnityEngine.Component c)
         {
-            if (b == null) return 0;
-            Resolve();
-            if (_fTriggers == null) return 0;
+            if (c == null) return 0;
+            int removed = 0;
             try
             {
-                var raw = _fTriggers.GetValue(b);
-                var list = raw as System.Collections.IList;
-                if (list == null) return 0;
-                int removed = 0;
-                for (int i = list.Count - 1; i >= 0; i--)
+                var t = c.GetType();
+                System.Reflection.FieldInfo[] fields;
+                if (!_delFieldCache.TryGetValue(t, out fields))
                 {
-                    var item = list[i] as UnityEngine.Object;
-                    if (item == null) { list.RemoveAt(i); removed++; }
+                    var acc = new System.Collections.Generic.List<System.Reflection.FieldInfo>();
+                    var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                           | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly;
+                    for (var cur = t; cur != null && cur != typeof(UnityEngine.MonoBehaviour) && cur != typeof(UnityEngine.Behaviour) && cur != typeof(object); cur = cur.BaseType)
+                        foreach (var f in cur.GetFields(bf))
+                            if (typeof(System.Delegate).IsAssignableFrom(f.FieldType)) acc.Add(f);
+                    fields = acc.ToArray();
+                    _delFieldCache[t] = fields;
                 }
-                return removed;
+                foreach (var f in fields)
+                {
+                    var del = f.GetValue(c) as System.Delegate;
+                    if (del == null) continue;
+                    var inv = del.GetInvocationList();
+                    System.Delegate rebuilt = null;
+                    int dead = 0;
+                    foreach (var d in inv)
+                    {
+                        // Unity fake-null: the managed wrapper survives while the
+                        // native object is destroyed — exactly the zombie state an
+                        // aborted OnDestroy leaves behind. Static handlers
+                        // (Target == null) and plain managed targets are kept.
+                        var uo = d.Target as UnityEngine.Object;
+                        bool zombie = !object.ReferenceEquals(uo, null) && uo == null;
+                        if (zombie) { dead++; continue; }
+                        rebuilt = System.Delegate.Combine(rebuilt, d);
+                    }
+                    if (dead > 0)
+                    {
+                        f.SetValue(c, rebuilt);
+                        removed += dead;
+                    }
+                }
             }
-            catch { return 0; }
+            catch { }
+            return removed;
+        }
+
+        // Scrub every delegate holder a card can hook on a player. Covers the
+        // confirmed zombie hosts (Block actions, Gun.ShootPojectileAction,
+        // HealthHandler.reviveAction, PlayerCollision.collideWithPlayerAction)
+        // plus CharacterData/stats for the same pattern on other cards.
+        public static int ScrubPlayerDelegates(Player p)
+        {
+            int n = 0;
+            try
+            {
+                if (p == null || p.data == null) return 0;
+                n += ScrubDeadDelegateFields(p.data);
+                n += ScrubDeadDelegateFields(p.data.block);
+                n += ScrubDeadDelegateFields(p.data.healthHandler);
+                n += ScrubDeadDelegateFields(p.data.stats);
+                if (p.data.weaponHandler != null)
+                    n += ScrubDeadDelegateFields(p.data.weaponHandler.gun);
+                n += ScrubDeadDelegateFields(p.GetComponent<PlayerCollision>());
+                n += ScrubDeadDelegateFields(p.GetComponent<PlayerVelocity>());
+            }
+            catch { }
+            return n;
         }
         public static void ForceReady(Block b)
         {
@@ -3945,110 +4017,80 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        // v1.28 — the REAL no-block root cause. ROUNDS' block system isn't a
-        // scrubbable trigger LIST; it's a set of Action delegates on Block
-        // (BlockAction, SuperFirstBlockAction, BlockActionEarly, …). Each
-        // BlockTrigger.Start() Delegate.Combine's its own DoBlock onto those,
-        // and BlockTrigger.OnDestroy() Delegate.Remove's it. When a card
-        // teardown between games DESTROYS a player's main/Default BlockTrigger
-        // GameObject, its OnDestroy strips its delegate — so Block.IDoBlock's
-        // `if (BlockAction != null) BlockAction(type)` invokes nothing and the
-        // block silently does NOTHING (goes to cooldown, no proc). Scrubbing a
-        // null list can't fix a missing delegate. This rebuild: (1) null out the
-        // Block's action delegates, (2) re-invoke Start() on every SURVIVING
-        // child BlockTrigger so they re-combine their delegates onto the Block.
-        // Net: the action chain is reconstructed from whatever triggers still
-        // exist. A trigger whose GameObject is fully gone can't be recovered
-        // (its effect is genuinely lost for that card), but the DEFAULT block
-        // trigger lives on the block prefab and virtually always survives — so
-        // re-Start'ing it restores the basic block proc, which is the symptom.
-        private static readonly string[] _blockActionFields = {
-            "SuperFirstBlockAction", "FirstBlockActionThatDelaysOthers",
-            "BlockAction", "BlockActionEarly", "BlockProjectileAction",
-            "BlockRechargeAction",
-        };
-        private static System.Reflection.MethodInfo _btStart;
-        public static int RebuildBlockActions(Block b)
-        {
-            if (b == null) return 0;
-            try
-            {
-                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
-                var bt = typeof(Block);
-                // 1) Clear the action delegates so re-Start doesn't double-combine.
-                foreach (var name in _blockActionFields)
-                {
-                    var f = bt.GetField(name, bf);
-                    if (f != null) { try { f.SetValue(b, null); } catch { } }
-                }
-                // 2) Re-Start every surviving BlockTrigger under this Block to
-                //    re-register its delegates.
-                if (_btStart == null)
-                    _btStart = typeof(BlockTrigger).GetMethod("Start", bf);
-                int rebuilt = 0;
-                var triggers = b.GetComponentsInChildren<BlockTrigger>(true);
-                if (triggers != null)
-                {
-                    foreach (var trig in triggers)
-                    {
-                        if (trig == null) continue;
-                        try { _btStart?.Invoke(trig, null); rebuilt++; } catch { }
-                    }
-                }
-                return rebuilt;
-            }
-            catch { return 0; }
-        }
     }
 
-    [HarmonyPatch(typeof(Block), "TryBlock")]
-    class BlockTryBlockScrubPatch
+    [HarmonyPatch(typeof(Block), "RPCA_DoBlock")]
+    class BlockRpcaDoBlockZombieScrubPatch
     {
-        // Runs BEFORE BlockTryBlockCounterPatch's Prefix (same target, multiple
-        // patches both fire). Scrubs null triggers so vanilla's iteration in
-        // IDoBlock has a clean list to work with — eliminates the cascade
-        // where a single dead trigger silently aborts the rest of the block.
+        // RPCA_DoBlock is the single gateway into IDoBlock for EVERY block
+        // path: local TryBlock, remote replicas driven by replicated input,
+        // and card-forced CallDoBlock RPCs. Scrubbing zombie delegate entries
+        // here guarantees the action chain holds only live subscribers at the
+        // moment vanilla invokes it — IDoBlock runs synchronously, so one
+        // throwing zombie would otherwise kill `sinceBlock = 0f` (absorption)
+        // for that block press. UNGATED: casual in-room rematches hit the
+        // same vanilla teardown bug, and removing provably-dead entries is
+        // side-effect-free.
         static void Prefix(Block __instance)
         {
-            if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
-            int removed = BlockReflect.ScrubNullTriggers(__instance);
+            int removed = BlockReflect.ScrubDeadDelegateFields(__instance);
+            // Same sweep for this player's Gun + HealthHandler: a zombie
+            // Empower deals its ×2 damage via gun.ShootPojectileAction on the
+            // first SHOT after a block — scrubbing the gun at block time kills
+            // it before it can ever buff a bullet, even if it formed mid-game.
+            try
+            {
+                var data = __instance.GetComponent<CharacterData>();
+                if (data != null)
+                {
+                    if (data.weaponHandler != null)
+                        removed += BlockReflect.ScrubDeadDelegateFields(data.weaponHandler.gun);
+                    removed += BlockReflect.ScrubDeadDelegateFields(data.healthHandler);
+                }
+            }
+            catch { }
             if (removed > 0)
-                Plugin.Log.LogInfo($"[BLOCK-SCRUB] removed {removed} null trigger(s) from Block before TryBlock");
+                Plugin.Log.LogWarning($"[BLOCK-DBG] ZOMBIE-SCRUB removed {removed} dead delegate entry(ies) at block time (an earlier card OnDestroy aborted mid-teardown)");
         }
     }
 
     [HarmonyPatch(typeof(GM_ArmsRace), "StartGame")]
     class GMArmsRaceStartGameBlockResetPatch
     {
-        // Each game in a series fires StartGame fresh. Scrub null triggers on
-        // every Block in the scene and force them ready. Without this, players
-        // whose triggers got nulled between games are stuck — right-click
-        // appears to start cooldown but does nothing.
+        // Each game in a series fires StartGame fresh, right after the
+        // between-games teardown that creates zombie delegates (see
+        // BlockReflect header). Sweep every player's delegate holders —
+        // Block actions, Gun.ShootPojectileAction (zombie Empower.Attack =
+        // the invisible ×2 damage of #25), HealthHandler.reviveAction,
+        // PlayerCollision.collideWithPlayerAction (zombie ShieldCharge) —
+        // and drop only destroyed-target entries. UNGATED: the scrub is pure
+        // repair and the same vanilla bug exists in casual in-room rematches.
+        // ForceReady stays competitive-gated: it changes gameplay (block
+        // ready at game start) and that behavior was only ever promised for
+        // mod-issued rooms.
         static void Postfix()
         {
             try
             {
-                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
-                var blocks = UnityEngine.Object.FindObjectsOfType<Block>();
-                if (blocks == null) return;
-                int total = 0, rebuilt = 0;
-                foreach (var b in blocks)
+                int dead = 0, players = 0;
+                var pm = PlayerManager.instance;
+                if (pm != null && pm.players != null)
                 {
-                    int r = BlockReflect.ScrubNullTriggers(b);
-                    total += r;
-                    // Rebuild the action-delegate chain ONLY when a trigger was actually
-                    // destroyed (r>0). Running it unconditionally was a regression: it
-                    // NULLED the Block's action delegates every StartGame, and the re-Start
-                    // did NOT reliably re-combine them — so in matchmaking rooms (where this
-                    // reset runs) blocks activated but never procced (succ=0/0; bug #15:
-                    // "scrubbed 0 null triggers" yet block dead). Casual rooms — where the
-                    // reset doesn't run — blocked fine. When nothing was lost, the vanilla
-                    // delegates are intact; don't touch them. Only the genuine-loss case
-                    // (r>0) warrants a rebuild.
-                    if (r > 0) rebuilt += BlockReflect.RebuildBlockActions(b);
-                    BlockReflect.ForceReady(b);
+                    foreach (var p in pm.players)
+                    {
+                        if (p == null) continue;
+                        dead += BlockReflect.ScrubPlayerDelegates(p);
+                        players++;
+                    }
                 }
-                Plugin.Log.LogInfo($"[BLOCK-RESET] StartGame: reset {blocks.Length} Block(s), scrubbed {total} null triggers, re-registered {rebuilt} trigger delegate(s)");
+                bool comp = CompetitiveRoomDetect.IsCompetitiveRoom();
+                if (comp)
+                {
+                    var blocks = UnityEngine.Object.FindObjectsOfType<Block>();
+                    if (blocks != null)
+                        foreach (var b in blocks) BlockReflect.ForceReady(b);
+                }
+                Plugin.Log.LogInfo($"[BLOCK-RESET] StartGame v2: scrubbed {dead} zombie delegate entry(ies) across {players} player(s) (competitive={comp})");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[BLOCK-RESET] error: {ex.Message}"); }
         }
@@ -4295,23 +4337,50 @@ namespace CompetitiveRounds
                 // Deterministic order → the same wall gets the same sortingFudge every round.
                 wallSystems.Sort((a, b) => string.CompareOrdinal(GetTransformPath(a.transform), GetTransformPath(b.transform)));
                 int boundaryParts = 0;
+                // v1.28.2 — TRUE two-tone walls, finally done right. History:
+                // per-SYSTEM parity (wi%2 or path-hash) was wrong because the
+                // border is several OVERLAPPING systems at the SAME spot — the
+                // topmost draw (sortingFudge) always won, so the walls read as
+                // ONE color (#86) and we retreated to all-secondary. The unit
+                // that must share a color is the WALL GROUP: the child
+                // container under OutOfBounds/ (overlapping layers live in the
+                // same group; different groups are different border segments).
+                // Group-level parity ⇒ segments alternate PRIMARY/SECONDARY
+                // (Magma: red AND amber visible at once) with zero same-spot
+                // color fights, and the per-system sortingFudge stays for
+                // flicker stability. If a map ships a single group, fall back
+                // to spatial cells so two-tone still appears.
+                var groupKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var ps0 in wallSystems)
+                {
+                    string gp = GetTransformPath(ps0.transform).Substring("OutOfBounds/".Length);
+                    int slash = gp.IndexOf('/');
+                    groupKeys.Add(slash >= 0 ? gp.Substring(0, slash) : gp);
+                }
+                bool useSpatialCells = groupKeys.Count < 2;
                 for (int wi = 0; wi < wallSystems.Count; wi++)
                 {
                     var ps = wallSystems[wi];
                     try
                     {
                         string ppath = GetTransformPath(ps.transform);
-                        // Two-color scheme that keeps BOTH colors visible:
-                        //   • Scene grading + background atmosphere = PRIMARY (named) color, so
-                        //     the map clearly reads as e.g. Magma-red overall.
-                        //   • The OutOfBounds border WALLS = SECONDARY color, drawn BRIGHT so
-                        //     it glows as a complementary accent that punches through the
-                        //     scene-wide primary ColorGrading instead of getting muddied.
-                        // (Earlier the walls carried the secondary via a wi%2 two-tone, but the
-                        // sortingFudge made the top overlapping layer win, so the secondary
-                        // covered the primary everywhere — the "wrong color" bug. All walls one
-                        // color avoids that; the primary now lives in the scene/background.)
-                        Color layerTint = CustomMapColors.GetSecondaryColor(sku);
+                        bool usePrimary;
+                        if (useSpatialCells)
+                        {
+                            // One container for the whole border → alternate by
+                            // world-position cell so segments still two-tone.
+                            var wp = ps.transform.position;
+                            int cell = Mathf.FloorToInt(wp.x / 14f) + Mathf.FloorToInt(wp.y / 14f);
+                            usePrimary = ((cell % 2) + 2) % 2 == 0;
+                        }
+                        else
+                        {
+                            string gp = ppath.Substring("OutOfBounds/".Length);
+                            int slash = gp.IndexOf('/');
+                            string groupKey = slash >= 0 ? gp.Substring(0, slash) : gp;
+                            usePrimary = StablePathParity(groupKey) == 0;
+                        }
+                        Color layerTint = usePrimary ? c : CustomMapColors.GetSecondaryColor(sku);
                         Color vanilla = GetCachedVanillaColor(ps);
                         // COLORIZE (not multiply): scale the TARGET hue by the vanilla
                         // particle's brightness so the designed hue renders true regardless of
@@ -4349,11 +4418,13 @@ namespace CompetitiveRounds
                 int artParts = 0;
                 try
                 {
-                    // Background atmosphere now leans on the PRIMARY (named) color too, so the
-                    // whole map — walls + backdrop + scene grading — reads as one clear color.
-                    // (Using the secondary here made the dominant backdrop the WRONG color:
-                    // Rose's teal backdrop, Pine's brown, etc., which is what Sid kept seeing.)
-                    Color bgTint = Color.Lerp(new Color(0.5f, 0.5f, 0.5f), c, 0.50f);
+                    // Background atmosphere leans on the PRIMARY (named) color so the map
+                    // reads as its name even from the backdrop alone. v1.28.2: punched up
+                    // from 0.50→0.72 saturation toward the primary (and slightly higher
+                    // lift below) — repeated feedback that backgrounds were "boring". The
+                    // walls now carry BOTH palette colors, so a more confident backdrop
+                    // no longer risks drowning the only accent.
+                    Color bgTint = Color.Lerp(new Color(0.5f, 0.5f, 0.5f), c, 0.72f);
                     string baseArt = CustomMapColors.GetBaseArt(sku);
                     var ah = ArtHandler.instance;
                     if (ah != null && ah.arts != null)
@@ -4391,7 +4462,7 @@ namespace CompetitiveRounds
                                 {
                                     Color vanilla = GetCachedVanillaColor(ps);
                                     float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
-                                    float lift = 0.28f + 0.45f * Mathf.Clamp01(lum); // dimmer than the walls
+                                    float lift = 0.36f + 0.52f * Mathf.Clamp01(lum); // dimmer than walls, livelier than v1.28.0
                                     Color tinted = new Color(bgTint.r * lift, bgTint.g * lift, bgTint.b * lift, vanilla.a);
                                     var main = ps.main;
                                     main.startColor = new ParticleSystem.MinMaxGradient(tinted);
@@ -4405,7 +4476,7 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] art-particle tint failed: {ex.Message}"); }
 
-                Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: colorized {boundaryParts} wall (secondary accent) + {artParts} primary bg particles; scene grading=primary; non-base arts off");
+                Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: two-tone walls ({boundaryParts} systems, keying={(useSpatialCells ? "spatial-cells" : "path-groups")}, groups={groupKeys.Count}) + {artParts} primary bg particles; non-base arts off");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] Map tint failed: {ex.Message}"); }
         }

@@ -1,8 +1,10 @@
 // PerfPatches.cs — selected ports from the community "Performance Improvements"
-// mod for old-ROUNDS. Updated 2026-05-30 to add 2 more patches:
-//   RayHitBulletSoundDoHitEffectFinalizer — swallow NRE from destroyed parents
-//   ChangeColorStartAutoCleanup           — force 2s destruction so the bullet
-//                                            hit color-change ghosts don't pile up
+// mod for old-ROUNDS. v1.28.2 audit: every patch target re-verified against the
+// CURRENT game decompile (logs-snapshot/decompiled/). Two old-game ports were
+// DELETED (ChangeColorStartAutoCleanup — target method gone, class is empty now;
+// ObjectsToSpawnSpawnObjectTagger — target is void, and tagging pooled wrappers
+// would corrupt FriendlyFoe.PrefabPool), and the NRE swallowers no longer call
+// Destroy (bullets are Photon-owned with pooled sub-effects).
 //
 // Original-perf-mod intro:
 // mod for old-ROUNDS, adapted to ROUNDS 1.1.2 (v1.26.8). Each patch is gated on
@@ -268,24 +270,23 @@ namespace CompetitiveRounds
 
     // Vanilla's RayHitBulletSound.DoHitEffect iterates components on a GameObject
     // that may already be in mid-destruction (Photon-side destroy raced the local
-    // coroutine). The original throws NREs which propagate up through Unity's
-    // event loop and log-spam BepInEx. Mirroring the BlockTrigger Finalizer
-    // pattern we already use elsewhere: swallow the NRE and destroy the now-dead
-    // instance so it doesn't try again next frame.
+    // coroutine). Swallow the NRE so it doesn't log-spam.
+    //
+    // v1.28.2: swallow WITHOUT destroying. The old-game port destroyed the
+    // GameObject — but on current ROUNDS the host object is a Photon-owned
+    // bullet carrying POOLED sub-effects (BulletPoolInstancer). A plain
+    // Object.Destroy here killed bullets before BulletPoolInstancer.Start ran
+    // (PrefabPool.Release NREs in its OnDestroy) and orphaned PhotonViews on
+    // the remote, producing the later ProjectileHit.RPCA_DoHit NRE storms
+    // seen in lopi's log. Log-silencing only; vanilla owns the lifecycle.
     [HarmonyPatch(typeof(RayHitBulletSound), "DoHitEffect")]
     internal class RayHitBulletSoundDoHitEffectFinalizer
     {
-        static System.Exception Finalizer(RayHitBulletSound __instance, System.Exception __exception)
+        static System.Exception Finalizer(System.Exception __exception)
         {
             if (!PerfGate.Check(Plugin.PerfSwallowHitSoundNREs)) return __exception;
-            if (__exception is System.NullReferenceException)
+            if (__exception is System.NullReferenceException || __exception is UnityEngine.MissingReferenceException)
             {
-                try
-                {
-                    if (__instance != null && __instance.gameObject != null)
-                        UnityEngine.Object.Destroy(__instance.gameObject);
-                }
-                catch { }
                 PerfGate.Hit("SwallowHitSoundNRE");
                 return null;
             }
@@ -293,28 +294,15 @@ namespace CompetitiveRounds
         }
     }
 
-    // Vanilla's ChangeColor (the bullet-hit color-change ghost) doesn't always
-    // self-clean. After heavy firefights you get N hundred of these GameObjects
-    // hanging around the scene root, each running an Update tick. Force a 2s
-    // RemoveAfterSeconds component on each newly-Started ChangeColor so they
-    // self-destruct shortly after their visual purpose is served.
-    [HarmonyPatch(typeof(ChangeColor), "Start")]
-    internal class ChangeColorStartAutoCleanup
-    {
-        static void Postfix(ChangeColor __instance)
-        {
-            if (!PerfGate.Check(Plugin.PerfAutoCleanupColorGhosts)) return;
-            if (__instance == null || __instance.gameObject == null) return;
-            try
-            {
-                if (__instance.gameObject.GetComponent<RemoveAfterSeconds>() != null) return;
-                var ras = __instance.gameObject.AddComponent<RemoveAfterSeconds>();
-                ras.seconds = 2f;
-                PerfGate.Hit("AutoCleanupColorGhosts");
-            }
-            catch { }
-        }
-    }
+    // (v1.28.2) ChangeColorStartAutoCleanup REMOVED. It was ported blind from
+    // the old-game PI mod and never attached on current ROUNDS 1.1.2 —
+    // startup log: "AccessTools.DeclaredMethod: Could not find method for
+    // type ChangeColor and name Start" / "Failed to patch
+    // ChangeColorStartAutoCleanup". The current decompile
+    // (logs-snapshot/decompiled/ChangeColor.cs) shows ChangeColor is an EMPTY
+    // MonoBehaviour: no Start, no Update tick, nothing to clean. Hit effects
+    // are pooled via FriendlyFoe.PrefabPool now, so the old "ghost pile-up"
+    // problem this solved no longer exists.
 
     // ScreenEdgeBounce.DoHit / Update both can NRE when the parent bullet has
     // been destroyed mid-frame but the bounce coroutine ticks one more time
@@ -341,12 +329,16 @@ namespace CompetitiveRounds
     }
     internal static class _PerfHelpers
     {
+        // v1.28.2: renamed semantics — swallow ONLY, never Destroy. Current
+        // ROUNDS bullets are Photon-owned with pooled sub-effects; destroying
+        // them locally corrupted FriendlyFoe.PrefabPool and desynced
+        // PhotonViews (see RayHitBulletSoundDoHitEffectFinalizer note). A
+        // repeated swallowed NRE costs a log counter tick; a destroyed pooled
+        // object costs pool integrity for the rest of the session.
         internal static System.Exception SwallowAndDestroy(MonoBehaviour mb, System.Exception ex)
         {
-            if (ex is System.NullReferenceException)
+            if (ex is System.NullReferenceException || ex is UnityEngine.MissingReferenceException)
             {
-                try { if (mb != null && mb.gameObject != null) UnityEngine.Object.Destroy(mb.gameObject); }
-                catch { }
                 PerfGate.Hit("SwallowEdgeBounceNRE");
                 return null;
             }
@@ -494,58 +486,17 @@ namespace CompetitiveRounds
         }
     }
 
-    // Postfix on ObjectsToSpawn.SpawnObject (the 3-arg overload taking position +
-    // rotation) — tags each spawned GameObject with a small marker so that the
-    // existing round-cleanup paths can find and destroy them at point-over.
-    // Without this, transient bullet-hit decorations accumulate across rounds
-    // and the scene root grows by ~50-300 objects per firefight on Stan's setup.
-    //
-    // ROUNDS may not have `RemoveAfterPoint` in vanilla 1.1.2 — if not, the
-    // try/catch silently no-ops and we lose the cleanup-on-point side but
-    // nothing breaks.
-    [HarmonyPatch]
-    internal class ObjectsToSpawnSpawnObjectTagger
-    {
-        static System.Reflection.MethodBase TargetMethod()
-        {
-            try
-            {
-                var t = typeof(ObjectsToSpawn);
-                // Try the 3-arg static overload first (Position + Rotation).
-                foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public))
-                {
-                    if (m.Name != "SpawnObject") continue;
-                    var pars = m.GetParameters();
-                    if (pars.Length == 3
-                        && pars[1].ParameterType == typeof(Vector3)
-                        && pars[2].ParameterType == typeof(Quaternion))
-                        return m;
-                }
-            }
-            catch { }
-            return null;
-        }
-
-        static void Postfix(GameObject[] __result)
-        {
-            if (!PerfGate.Check(Plugin.PerfTagSpawnedObjectsForCleanup)) return;
-            if (__result == null) return;
-            foreach (var go in __result)
-            {
-                if (go == null) continue;
-                try
-                {
-                    // Best-effort: 4s timeout component caps the lifespan
-                    // regardless of whether the round ever ends.
-                    if (go.GetComponent<RemoveAfterSeconds>() == null)
-                    {
-                        var ras = go.AddComponent<RemoveAfterSeconds>();
-                        ras.seconds = 4f;
-                        PerfGate.Hit("TagSpawnedObjectsForCleanup");
-                    }
-                }
-                catch { }
-            }
-        }
-    }
+    // (v1.28.2) ObjectsToSpawnSpawnObjectTagger REMOVED — two independent
+    // fatal mismatches against current ROUNDS 1.1.2
+    // (logs-snapshot/decompiled/ObjectsToSpawn.cs):
+    //   1. The 3-arg SpawnObject(ObjectsToSpawn, Vector3, Quaternion) it
+    //      targeted is VOID — the GameObject[] __result Postfix can never
+    //      bind ("Cannot get result from void method" / "IL Compile Error"
+    //      at startup; the patch never attached).
+    //   2. The 8-arg overload returns PoolableWrapper[] from
+    //      FriendlyFoe.PrefabPool — POOLED instances. Adding a
+    //      RemoveAfterSeconds (a Destroy timer) to pooled objects destroys
+    //      pool members and corrupts the pool (PrefabPool.Release NREs).
+    // Vanilla's pooling already solves the accumulation problem this patch
+    // existed for on the old game. Nothing to port — delete.
 }

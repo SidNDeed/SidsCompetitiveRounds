@@ -198,6 +198,8 @@ namespace CompetitiveRounds
             public bool registered;
             public bool ranked;
             public string display_name;
+            public bool banned;
+            public string ban_reason;
         }
 
         [Serializable]
@@ -1623,6 +1625,20 @@ namespace CompetitiveRounds
                         try
                         {
                             var data = JsonUtility.FromJson<ModCheckResponse>(response);
+                            // Item 4: matched against a mod-banned cheater → tell the
+                            // player and leave the room. Treated as not-ranked so no
+                            // series spins up around a ban-aborted match.
+                            if (data.banned)
+                            {
+                                Plugin.Log.LogWarning($"[BAN] Opponent {steamId} is mod-banned ({data.ban_reason}) — leaving match");
+                                CompetitiveUI.ShowNotification(
+                                    "Opponent is banned from the mod for cheating - leaving match.",
+                                    new Color(1f, 0.3f, 0.3f), 8f);
+                                try { if (Photon.Pun.PhotonNetwork.InRoom) Photon.Pun.PhotonNetwork.LeaveRoom(); }
+                                catch (Exception ex) { Plugin.Log.LogWarning($"[BAN] LeaveRoom failed: {ex.Message}"); }
+                                callback(false);
+                                return;
+                            }
                             bool isRanked = data.registered && data.ranked;
                             Plugin.Log.LogInfo($"Opponent ranked check: registered={data.registered}, ranked={data.ranked}");
                             callback(isRanked);
@@ -2894,7 +2910,7 @@ namespace CompetitiveRounds
         public static void ToggleRanked(string steamId, bool enabled)
         {
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/mod/toggle-ranked/{steamId}?enabled={enabled.ToString().ToLower()}",
+                $"{baseUrl}/api/v1/mod/toggle-ranked/{steamId}?enabled={enabled.ToString().ToLower()}&sig={ComputeHmacHex($"toggle-ranked:{steamId}:{enabled.ToString().ToLower()}")}",
                 "",
                 (success, response) =>
                 {
@@ -4453,7 +4469,7 @@ namespace CompetitiveRounds
         public static void BlockPlayer(string mySteamId, string targetSteamId, Action<bool> callback = null)
         {
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/players/block?steam_id={Escape(mySteamId)}&target_steam_id={Escape(targetSteamId)}",
+                $"{baseUrl}/api/v1/players/block?steam_id={Escape(mySteamId)}&target_steam_id={Escape(targetSteamId)}&sig={ComputeHmacHex($"block:{mySteamId}:{targetSteamId}")}",
                 "",
                 (success, response) =>
                 {
@@ -4471,7 +4487,7 @@ namespace CompetitiveRounds
         public static void UnblockPlayer(string mySteamId, string targetSteamId, Action<bool> callback = null)
         {
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/players/unblock?steam_id={Escape(mySteamId)}&target_steam_id={Escape(targetSteamId)}",
+                $"{baseUrl}/api/v1/players/unblock?steam_id={Escape(mySteamId)}&target_steam_id={Escape(targetSteamId)}&sig={ComputeHmacHex($"unblock:{mySteamId}:{targetSteamId}")}",
                 "",
                 (success, response) =>
                 {
@@ -4750,7 +4766,8 @@ namespace CompetitiveRounds
         public static void UnlockAchievement(string steamId, string achievementKey, string matchId = null)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
-            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"achievement_key\":\"{Escape(achievementKey)}\"";
+            string achSig = ComputeHmacHex($"achievement:{steamId}:{achievementKey}");
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"achievement_key\":\"{Escape(achievementKey)}\",\"hmac_signature\":\"{Escape(achSig)}\"";
             if (!string.IsNullOrEmpty(matchId))
                 json += $",\"match_id\":\"{Escape(matchId)}\"";
             json += "}";

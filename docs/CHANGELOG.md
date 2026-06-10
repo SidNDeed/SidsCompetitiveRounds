@@ -1,5 +1,18 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.28.2 — 2026-06-10
+
+**Headlines for testers**
+- **Block + Empower finally fixed at the root.** Block dying after game 1 in ranked (and the "infinite empower" carryover) were the same bug: a card's teardown between games could abort mid-way and leave a dead "zombie" handler on your block/gun, which then threw and killed the block (or kept empower firing invisibly). The mod now sweeps those dead handlers at every game start and every block press. Verified against the current game's decompiled source.
+- **Map walls are two-tone again** — primary + secondary alternating by wall segment (e.g. Magma red *and* amber), keyed so overlapping layers can't fight over color. Backgrounds read more strongly as their named color.
+- **Performance patches corrected** — two old-game ports that no longer matched current ROUNDS were removed, and the crash-error swallowers no longer destroy pooled/Photon bullets (a likely source of stutters).
+
+**Security hardening (full review)**
+- Closed an unauthenticated achievement gold-farm; match reports now verify the reporter is a participant + reject duplicates/replays.
+- Added server rate limiting + request size cap; HMAC-signed the previously-open state endpoints (ranked toggle, block/unblock, achievements).
+- Server-side **speedhack flagging** and mod-wide **bans** now post to the admin channel; matching a banned cheater leaves the match.
+- Hardened the disconnect report (bound to a real recent series), the Discord-link endpoint, and admin signatures (fail-closed).
+
 ## v1.28.1 — 2026-06-09
 
 **Headlines for testers**

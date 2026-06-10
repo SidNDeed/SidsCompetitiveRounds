@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.28.2 — block/empower root-cause fix, two-tone maps, security hardening
+
+- Fixed block dying after game 1 in ranked AND the "infinite empower" carryover — same root cause (a card's between-games teardown leaving a dead handler on your block/gun). The mod now sweeps dead handlers at game start + each block press.
+- Map walls are two-tone again (primary + secondary by segment, e.g. Magma red + amber); backgrounds read more strongly as their named color.
+- Performance: removed two stale old-game patches; crash-error swallowers no longer destroy pooled/Photon bullets (a likely stutter source).
+- Security review: rate limiting + request cap, HMAC-signed the previously-open state endpoints, server-side speedhack flagging, mod-wide bans (matching a banned cheater leaves the match), hardened match-report/disconnect/admin paths.
+
 ## v1.28.1 — block fix (ranked), phantom series scores, hover/refresh fix, Discord feed
 
 - Fixed block in ranked/matchmade games: it could activate but absorb nothing (you'd "block" and still take the hit). Caused by the round-start block reset stripping the block's action delegates each round; now it only rebuilds when a trigger was actually destroyed.

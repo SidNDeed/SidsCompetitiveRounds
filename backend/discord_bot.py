@@ -113,6 +113,58 @@ async def api_post(path, params=None):
     except Exception as e:
         print(f"API POST error: {e}"); return None
 
+
+async def _handle_ticket_dm(message):
+    """A user DMed the bot (not a command). Parse '#N <text>' / 'ticket N <text>'
+    and post it as a comment on bug report N. The API verifies the DMer actually
+    owns ticket N (their linked Discord must match the report's reporter)."""
+    import re
+    content = (message.content or "").strip()
+    m = re.match(r'^(?:ticket\s*)?#?\s*(\d+)\s*[:.\-]?\s+(.+)$', content, re.IGNORECASE | re.DOTALL)
+    if not m:
+        await message.channel.send(
+            "💬 To add to one of your bug reports, DM me like:\n"
+            "`#12 it still happens after relaunching`\n"
+            "(use your report number — shown when you submit, and in the F5 bug list). "
+            "Your Discord must be linked in-game first: F5 → My Stats → Get Link Code, then `!link YOUR_CODE` here."
+        )
+        return
+    num = int(m.group(1))
+    body = m.group(2).strip()
+    if not body:
+        await message.channel.send(f"Add a message after the number, e.g. `#{num} more detail here`.")
+        return
+    if http_session is None or not API_SECRET_KEY:
+        await message.channel.send("⚠️ The report system is temporarily unreachable — try again shortly.")
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/bug-reports/by-number/{num}/user-comment",
+            json={"discord_id": str(message.author.id), "comment": body},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            status = resp.status
+            if status == 200:
+                await message.channel.send(
+                    f"✅ Added your note to bug report **#{num}** — it's on the ticket; "
+                    "the team reviews reports regularly."
+                )
+            elif status == 403:
+                await message.channel.send(
+                    f"❌ Bug report **#{num}** isn't linked to your account (or it isn't yours). "
+                    "Make sure your Discord is linked in-game: F5 → My Stats → Get Link Code, then `!link YOUR_CODE` here."
+                )
+            elif status == 404:
+                await message.channel.send(f"❌ I couldn't find bug report **#{num}** — double-check the number.")
+            else:
+                t = await resp.text()
+                print(f"[TICKET-DM] #{num} unexpected {status}: {t[:120]}")
+                await message.channel.send("⚠️ Couldn't add that right now — try again in a moment.")
+    except Exception as ex:
+        print(f"[TICKET-DM] post error: {ex}")
+        await message.channel.send("⚠️ Couldn't reach the report system — try again shortly.")
+
 def get_rank_name(rating):
     for threshold, name in RANK_ROLES:
         if rating >= threshold: return name
@@ -158,6 +210,7 @@ async def on_ready():
     if not poll_team_queue_beacon.is_running(): poll_team_queue_beacon.start()
     if not poll_team_recent_series.is_running(): poll_team_recent_series.start()
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
+    if not poll_new_bans.is_running(): poll_new_bans.start()
     if not poll_github_releases.is_running(): poll_github_releases.start()
     if not poll_live_bets.is_running(): poll_live_bets.start()
     if not poll_team_live_bets.is_running(): poll_team_live_bets.start()
@@ -248,6 +301,15 @@ async def on_message(message: discord.Message):
                     print(f"[CHAT] Relay Discord→API: status={resp.status} body={body[:100]}")
             except Exception as e:
                 print(f"[CHAT] Failed to relay Discord -> API: {e}")
+    # A plain (non-command) DM to the bot is treated as a follow-up on one of
+    # the sender's own bug reports (e.g. "#12 still happens after relaunch").
+    if isinstance(message.channel, discord.DMChannel) and message.content \
+            and not message.content.startswith("!"):
+        try:
+            await _handle_ticket_dm(message)
+        except Exception as ex:
+            print(f"[TICKET-DM] handler error: {ex}")
+        return
     await bot.process_commands(message)
 
 
@@ -590,7 +652,10 @@ async def poll_queue_beacon():
                 except:
                     continue
 
-            await channel.send(f"🔍 **{name}** ({rating}) is searching for a ranked match!")
+            await channel.send(
+                f"🔍 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for a ranked match!",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
     except Exception as e:
         print(f"Queue beacon error: {e}")
 
@@ -629,7 +694,8 @@ async def poll_team_queue_beacon():
                 except:
                     continue
             await channel.send(
-                f"🎯 **{name}** ({rating}) is searching for **2v2** — **{qsize}/4** queued!"
+                f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **2v2** — **{qsize}/4** queued!",
+                allowed_mentions=discord.AllowedMentions.none(),
             )
     except Exception as e:
         print(f"Team queue beacon error: {e}")
@@ -718,14 +784,15 @@ async def poll_bug_report_events():
             if len(seen_bug_events) > 2000:
                 seen_bug_events.clear()
 
-            # Skip events not worth DMing about.
-            if e.get("event_type") == "created":
-                continue
             reporter_discord = e.get("reporter_discord_id")
             if not reporter_discord:
                 continue
+            etype = e.get("event_type")
             reporter_steam = e.get("reporter_steam_id")
-            if e.get("actor_steam_id") and reporter_steam and \
+            # Don't DM someone about their OWN action (their own comment or
+            # status change) — but DO send the 'created' confirmation, which
+            # carries the how-to-reply hint.
+            if etype != "created" and e.get("actor_steam_id") and reporter_steam and \
                e["actor_steam_id"] == reporter_steam:
                 continue  # self-attributed; no point pinging yourself
 
@@ -746,9 +813,16 @@ async def poll_bug_report_events():
             snippet = (e.get("description_snippet") or "").strip()
             if len(snippet) > 100:
                 snippet = snippet[:100] + "..."
-            etype = e.get("event_type")
-
-            if etype == "status_change":
+            if etype == "created":
+                embed = discord.Embed(
+                    title=f"✅ Bug report #{bug_num} received",
+                    description=("Thanks — the team can see it now. I'll DM you "
+                                 "here when there's a reply or a status change."),
+                    color=0x44CC44,
+                )
+                if snippet:
+                    embed.add_field(name="Your report", value=snippet, inline=False)
+            elif etype == "status_change":
                 old_s = (e.get("old_status") or "?").upper()
                 new_s = (e.get("new_status") or "?").upper()
                 # Color-code by destination status.
@@ -785,7 +859,12 @@ async def poll_bug_report_events():
                 # Unknown event type — skip silently.
                 continue
 
-            embed.set_footer(text=f"Open the F5 menu in-game and look up #{bug_num} for the full thread.")
+            embed.add_field(
+                name="Reply",
+                value=f"DM me `#{bug_num} your message` to add to this report.",
+                inline=False,
+            )
+            embed.set_footer(text=f"Or open the F5 menu in-game and look up #{bug_num} for the full thread.")
             try:
                 await user.send(embed=embed)
                 print(f"[BUG-DM] #{bug_num} → {user} ({reporter_discord}): {etype}")
@@ -1051,6 +1130,64 @@ async def publish_lb(guild):
 # remembering the latest ID without posting (handled by the first poll tick).
 _last_flag_id_posted: str | None = None
 _flag_poller_initialized = False
+
+_last_ban_id_posted: str | None = None
+_ban_poller_initialized = False
+
+
+@tasks.loop(seconds=60)
+async def poll_new_bans():
+    """Poll new mod-wide player bans and post them to #scr-admin (item 4)."""
+    global _last_ban_id_posted, _ban_poller_initialized
+    if not http_session or not API_SECRET_KEY or not ADMIN_CHANNEL_ID:
+        return
+    try:
+        params = {"limit": 50}
+        if _last_ban_id_posted:
+            params["since_id"] = _last_ban_id_posted
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/internal/recent-bans",
+            params=params, headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[BANS] feed status={resp.status}")
+                return
+            payload = await resp.json()
+    except Exception as e:
+        print(f"[BANS] feed error: {e}")
+        return
+    bans = payload.get("bans") or []
+    if not bans:
+        return
+    # Cold start: anchor at newest, don't replay the whole ban history.
+    if not _ban_poller_initialized:
+        _ban_poller_initialized = True
+        _last_ban_id_posted = bans[-1]["id"]
+        print(f"[BANS] cold start, anchored at {_last_ban_id_posted[:8]}")
+        return
+    channel = bot.get_channel(ADMIN_CHANNEL_ID) or await bot.fetch_channel(ADMIN_CHANNEL_ID)
+    if channel is None:
+        print(f"[BANS] admin channel {ADMIN_CHANNEL_ID} not resolvable")
+        return
+    for b in bans:
+        try:
+            name = b.get("display_name") or b["steam_id"]
+            embed = discord.Embed(
+                title="🔨 Player banned (mod-wide)",
+                description=(
+                    f"**{discord.utils.escape_markdown(str(name))}** (`{b['steam_id']}`)\n"
+                    f"Reason: **{b.get('reason') or 'violation'}**\n"
+                    f"By: `{b.get('banned_by_steam_id') or '—'}`"
+                ),
+                color=0xCC2222,
+                timestamp=datetime.fromisoformat(b["banned_at"].replace("Z", "+00:00")) if b.get("banned_at") else None,
+            )
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            _last_ban_id_posted = b["id"]
+            print(f"[BANS] posted ban {b['steam_id']}")
+        except Exception as ex:
+            print(f"[BANS] post error: {ex}")
 
 
 def _flag_color_and_emoji(reason: str, auto_inv: bool):

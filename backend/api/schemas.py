@@ -291,6 +291,7 @@ class AchievementUnlockRequest(BaseModel):
     steam_id: str = Field(..., max_length=20)
     achievement_key: str = Field(..., max_length=64)
     match_id: str | None = None  # optional match reference
+    hmac_signature: str | None = None  # 'achievement:{steam_id}:{key}' — gates the gold payout (F1)
 
 
 class AchievementEntry(BaseModel):
@@ -408,6 +409,14 @@ class BugReportInternalCommentRequest(BaseModel):
     """Internal-only POST body (no HMAC, gated to localhost) used by the
     assistant to leave notes on triage. actor_name is free-form."""
     actor_name: str
+    comment: str
+
+
+class BugReportUserCommentRequest(BaseModel):
+    """Bot-only POST body: a reporter replies to their OWN ticket via a Discord
+    DM. Local-network gated (only the in-cluster bot can call it); ownership is
+    verified server-side by matching discord_id to the report's reporter."""
+    discord_id: str
     comment: str
 
 
