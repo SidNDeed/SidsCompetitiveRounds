@@ -72,8 +72,123 @@ namespace CompetitiveRounds
         public static bool InitFont()
         {
             if(fontReady)return true;if(!typesReady)return false;
-            foreach(var tmp in UnityEngine.Object.FindObjectsOfType(tTMP)){try{var f=pTmpFont?.GetValue(tmp);if(f!=null){tmpFont=f;fontReady=true;return true;}}catch{}}
+            foreach(var tmp in UnityEngine.Object.FindObjectsOfType(tTMP)){try{var f=pTmpFont?.GetValue(tmp);if(f!=null){tmpFont=f;fontReady=true;TryInstallUnicodeFallback();return true;}}catch{}}
             return false;
+        }
+
+        // ── Unicode font fallback (v1.29, multi-language support) ─────────────
+        // ROUNDS' Gravity SDF atlas has no Cyrillic / CJK / most non-ASCII —
+        // foreign Steam names and chat rendered as squares (learning #47). Fix:
+        // build DYNAMIC TMP font assets from installed OS fonts at runtime and
+        // append them to (a) the Gravity asset's own fallback table (covers every
+        // label that uses Gravity: our UI, chat log, vanilla nametags) and (b)
+        // TMP_Settings' global fallback list (covers everything else). Dynamic
+        // atlas mode populates glyphs on demand, so one Segoe UI asset covers
+        // Latin-ext + Cyrillic + Greek, and the CJK families cover zh/ja/ko.
+        // Foreign glyphs render in the OS font's style rather than Gravity —
+        // an acceptable trade against □□□□.
+        private static bool _unicodeFallbackInstalled;
+        public static void TryInstallUnicodeFallback()
+        {
+            if (_unicodeFallbackInstalled || tmpFont == null) return;
+            try
+            {
+                var fontAssetType = tmpFont.GetType();               // TMPro.TMP_FontAsset
+                var mCreate = fontAssetType.GetMethod("CreateFontAsset",
+                    BindingFlags.Public | BindingFlags.Static, null, new Type[] { typeof(Font) }, null);
+                if (mCreate == null) { Plugin.Log.LogWarning("[FONT] TMP_FontAsset.CreateFontAsset(Font) not found — unicode fallback disabled"); return; }
+
+                string[] installed;
+                try { installed = Font.GetOSInstalledFontNames(); } catch { installed = new string[0]; }
+                var installedSet = new HashSet<string>(installed, StringComparer.OrdinalIgnoreCase);
+                // One candidate list per script family — first installed name wins.
+                string[][] families = new string[][]
+                {
+                    new[] { "Segoe UI", "Arial", "Tahoma" },                        // Latin-ext / Cyrillic / Greek
+                    new[] { "Microsoft YaHei", "SimHei", "SimSun" },                // Chinese
+                    new[] { "Yu Gothic UI", "Meiryo", "MS Gothic" },                // Japanese
+                    new[] { "Malgun Gothic", "Gulim" },                             // Korean
+                };
+                var created = new List<object>();
+                foreach (var fam in families)
+                {
+                    foreach (var name in fam)
+                    {
+                        if (!installedSet.Contains(name)) continue;
+                        try
+                        {
+                            var osFont = Font.CreateDynamicFontFromOSFont(name, 48);
+                            if (osFont == null) continue;
+                            var asset = mCreate.Invoke(null, new object[] { osFont });
+                            if (asset != null)
+                            {
+                                created.Add(asset);
+                                Plugin.Log.LogInfo($"[FONT] built dynamic fallback font asset from OS font '{name}'");
+                            }
+                        }
+                        catch (Exception fx) { Plugin.Log.LogWarning($"[FONT] fallback build failed for '{name}': {fx.Message}"); }
+                        break; // one per family, whether it worked or not
+                    }
+                }
+                if (created.Count == 0) { Plugin.Log.LogWarning("[FONT] no OS fallback fonts available"); return; }
+
+                // (a) Gravity's instance fallback table. TMP 2.x: fallbackFontAssetTable;
+                // TMP 1.x: fallbackFontAssets. Try property then field, both names.
+                AppendToFontList(tmpFont, fontAssetType, created, "fallbackFontAssetTable");
+                AppendToFontList(tmpFont, fontAssetType, created, "fallbackFontAssets");
+                // (b) Global TMP_Settings fallback list (static property).
+                try
+                {
+                    var tSettings = fontAssetType.Assembly.GetType("TMPro.TMP_Settings");
+                    var pGlobal = tSettings?.GetProperty("fallbackFontAssets", BindingFlags.Public | BindingFlags.Static);
+                    var list = pGlobal?.GetValue(null) as System.Collections.IList;
+                    if (list != null) foreach (var a in created) list.Add(a);
+                }
+                catch (Exception gx) { Plugin.Log.LogWarning($"[FONT] TMP_Settings fallback append failed: {gx.Message}"); }
+
+                _unicodeFallbackInstalled = true;
+                Plugin.Log.LogInfo($"[FONT] unicode fallback installed ({created.Count} OS font asset(s)) — foreign names/chat now render");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FONT] unicode fallback install failed: {ex.Message}"); }
+        }
+
+        private static void AppendToFontList(object fontAsset, Type fontAssetType, List<object> assets, string memberName)
+        {
+            try
+            {
+                var bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                System.Collections.IList list = null;
+                var prop = fontAssetType.GetProperty(memberName, bf);
+                if (prop != null) list = prop.GetValue(fontAsset) as System.Collections.IList;
+                if (list == null)
+                {
+                    var field = fontAssetType.GetField(memberName, bf);
+                    if (field != null) list = field.GetValue(fontAsset) as System.Collections.IList;
+                    if (list == null && field != null)
+                    {
+                        // Null list — create one of the right type and assign.
+                        try
+                        {
+                            list = (System.Collections.IList)Activator.CreateInstance(field.FieldType);
+                            field.SetValue(fontAsset, list);
+                        }
+                        catch { }
+                    }
+                    if (list == null && prop != null && prop.CanWrite)
+                    {
+                        try
+                        {
+                            list = (System.Collections.IList)Activator.CreateInstance(prop.PropertyType);
+                            prop.SetValue(fontAsset, list);
+                        }
+                        catch { }
+                    }
+                }
+                if (list == null) return;
+                foreach (var a in assets)
+                    if (!list.Contains(a)) list.Add(a);
+            }
+            catch { }
         }
 
         public static GameObject CreatePanel(string name,Transform parent,Color bgColor,Vector2? sizeDelta=null)
@@ -339,9 +454,14 @@ namespace CompetitiveRounds
             inGameMode=inRoom;
             // Always use our own overlay canvas - guarantees we render on top of all ROUNDS UI
             EnsureOverlayCanvas();
-            if(!pageBuilt||pageGO==null||pageGO.transform.parent!=overlayCanvasGO.transform){if(pageGO!=null)UnityEngine.Object.Destroy(pageGO);pageBuilt=false;BuildPage(overlayCanvasGO.transform);if(!pageBuilt)return;}
+            bool builtThisOpen=false;
+            if(!pageBuilt||pageGO==null||pageGO.transform.parent!=overlayCanvasGO.transform){if(pageGO!=null)UnityEngine.Object.Destroy(pageGO);pageBuilt=false;BuildPage(overlayCanvasGO.transform);if(!pageBuilt)return;builtThisOpen=true;}
             pageGO.SetActive(true);
-            try{UIFactory.tCanvas?.GetMethod("ForceUpdateCanvases",BindingFlags.Public|BindingFlags.Static)?.Invoke(null,null);}catch{}
+            // ForceUpdateCanvases is a synchronous whole-canvas layout rebuild — one of the
+            // F5-open hitches (v1.29). Only needed right after a fresh BuildPage; a plain
+            // SetActive(true) re-open lays out through Unity's normal end-of-frame pass.
+            if(builtThisOpen)
+                try{UIFactory.tCanvas?.GetMethod("ForceUpdateCanvases",BindingFlags.Public|BindingFlags.Static)?.Invoke(null,null);}catch{}
             isOpen=true;dirty=true;RefreshData();ApiClient.ResetQueueCountTimer();Plugin.Log.LogInfo($"[NATIVE] Opened competitive page (inGame={inGameMode})");
         }
 
@@ -1102,6 +1222,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             catch (Exception ex) { Plugin.Log.LogWarning($"[CARD-PREVIEW] destroy: {ex.Message}"); }
         }
 
+        // Filters (0=All,1=Ranked,2=Casual) whose tier fetch has COMPLETED this
+        // session. Lets RefreshCardStats tell "tiers legitimately empty" apart
+        // from "fetch never landed" (failed / raced the panel build) so it can
+        // self-heal instead of showing blank tiers until a manual Refresh (#32).
+        private static readonly HashSet<int> _tierFiltersLoaded = new HashSet<int>();
+        private static float _tierAutoFetchAt = -999f;
+        private static float _seriesAutoFetchAt = -999f;
+        private static float _cardStatsAutoFetchAt = -999f;
+
         // Load the player's saved tiers for the active filter, repopulate
         // cardTierMap, mark dirty so the rows re-render.
         public static void LoadCardTiersForCurrentFilter()
@@ -1121,6 +1250,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 {
                     cardTierMap[CardTierKey(filterIdx, kv.Key)] = kv.Value;
                 }
+                _tierFiltersLoaded.Add(filterIdx);
                 dirty = true;
             });
         }
@@ -1415,6 +1545,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             AddBetButton(row.transform, s.series_id, steamId, 100);
             AddBetButton(row.transform, s.series_id, steamId, 500);
             AddBetButton(row.transform, s.series_id, steamId, 2000);
+            AddCustomBetButton(row.transform, s.series_id, steamId, 0, false, Trunc(name, 14));
         }
 
         // 2v2 live-series row builders (parallel to ApplyHeaderRow / ApplyBetRow).
@@ -1474,6 +1605,75 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             AddTeamBetButton(row.transform, s.series_id, team, 100);
             AddTeamBetButton(row.transform, s.series_id, team, 500);
             AddTeamBetButton(row.transform, s.series_id, team, 2000);
+            AddCustomBetButton(row.transform, s.series_id, null, team, true, teamLabel);
+        }
+
+        // ── Custom bet amount prompt (v1.29, F6) ─────────────────────────────
+        // The "..." button next to the preset amounts opens an IMGUI prompt
+        // (all text entry in this codebase is IMGUI) where any amount from 1
+        // to 2,000 gold can be entered (cap requested by Sid; the server
+        // enforces the same le=2000 on every bet endpoint).
+        public static bool CustomBetPromptOpen { get; private set; }
+        public static string CustomBetAmountText = "";
+        public static string CustomBetTargetLabel { get; private set; } = "";
+        private static string customBetSeriesId, customBetOnSteamId;
+        private static int customBetTeam;
+        private static bool customBetIsTeam;
+
+        public static void OpenCustomBetPrompt(string seriesId, string betOnSteamId, int team, bool isTeam, string targetLabel)
+        {
+            customBetSeriesId = seriesId;
+            customBetOnSteamId = betOnSteamId;
+            customBetTeam = team;
+            customBetIsTeam = isTeam;
+            CustomBetTargetLabel = targetLabel ?? "";
+            CustomBetAmountText = "";
+            CustomBetPromptOpen = true;
+        }
+
+        public static void CancelCustomBet() { CustomBetPromptOpen = false; }
+
+        public static void SubmitCustomBet()
+        {
+            CustomBetPromptOpen = false;
+            string raw = (CustomBetAmountText ?? "").Replace(",", "").Replace(" ", "").Trim();
+            int amount;
+            if (!int.TryParse(raw, out amount) || amount < 1 || amount > 2000)
+            {
+                CompetitiveUI.ShowNotification("Enter a whole amount between 1 and 2,000 gold.", new Color(1f, 0.5f, 0.5f), 3f);
+                return;
+            }
+            string id = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(id) || id == "unknown") return;
+            if (customBetIsTeam)
+            {
+                Plugin.Log.LogInfo($"[TEAM-BET] Placing CUSTOM {amount}g on team {customBetTeam} (series {customBetSeriesId})");
+                ApiClient.PlaceTeamBet(id, customBetSeriesId, customBetTeam, amount, (ok, resp) =>
+                {
+                    var col = ok ? new Color(0.4f, 1f, 0.4f) : new Color(1f, 0.5f, 0.5f);
+                    CompetitiveUI.ShowNotification(ok ? $"Bet placed: {amount}g on Team {customBetTeam}" : $"Bet failed: {resp}", col, 3f);
+                    if (ok) { ApiClient.FetchActiveTeamSeries(); ApiClient.FetchPlayerStats(id); }
+                });
+            }
+            else
+            {
+                Plugin.Log.LogInfo($"[BET] Placing CUSTOM {amount}g on {customBetOnSteamId} (series {customBetSeriesId})");
+                ApiClient.PlaceBet(id, customBetSeriesId, customBetOnSteamId, amount, (ok, resp) =>
+                {
+                    var col = ok ? new Color(0.4f, 1f, 0.4f) : new Color(1f, 0.5f, 0.5f);
+                    CompetitiveUI.ShowNotification(ok ? $"Bet placed: {amount}g" : $"Bet failed: {resp}", col, 3f);
+                    if (ok) { ApiClient.FetchActiveSeries(); ApiClient.FetchPlayerStats(id); ApiClient.FetchMyBets(id); }
+                });
+            }
+        }
+
+        private static void AddCustomBetButton(Transform parent, string seriesId, string betOnSteamId, int team, bool isTeam, string targetLabel)
+        {
+            var btn = UIFactory.CreateButton(isTeam ? $"tbc{team}" : "bc", parent,
+                "...", 11f, C_WHITE, new Color(0.28f, 0.24f, 0.12f, 0.9f),
+                () => OpenCustomBetPrompt(seriesId, betOnSteamId, team, isTeam, targetLabel),
+                sizeDelta: new Vector2(30, 22));
+            UIFactory.AddLE(btn, prefW: 30, prefH: 22, flexW: 0, flexH: 0);
         }
 
         private static void AddTeamBetButton(Transform parent, string seriesId, int team, int amount)
@@ -2298,8 +2498,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static GameObject perfMasterBtn, perfStunBtn, perfBulletsBtn, perfHitSndBtn, perfColorGhBtn, perfEdgeBnBtn, perfTagBtn, perfMenuBtn;
         private static object perfMasterTxt, perfStunTxt, perfBulletsTxt, perfHitSndTxt, perfColorGhTxt, perfEdgeBnTxt, perfTagTxt, perfMenuTxt;
         // v1.26.9 additions (cap-style perf wins).
-        private static GameObject perfBulletCapBtn, perfPoolBtn, perfCardPickBtn;
-        private static object perfBulletCapTxt, perfPoolTxt, perfCardPickTxt;
+        private static GameObject perfBulletCapBtn, perfPoolBtn;
+        private static object perfBulletCapTxt, perfPoolTxt;
         private static bool _perfSectionOpen = false;
         private static object _perfSectionHeaderTxt;
         private static GameObject _perfSectionBody;
@@ -2542,9 +2742,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             AddPerfRow("PoolInit", "Clamp ObjectPool init-spawn to 4 in-match — reduces frame stutter from new pool allocation.",
                 () => { if (Plugin.PerfClampObjectPoolInit != null) { Plugin.PerfClampObjectPoolInit.Value = !Plugin.PerfClampObjectPoolInit.Value; dirty = true; } },
                 out perfPoolBtn, out perfPoolTxt);
-            AddPerfRow("CardPickPart", "Pause player-skin particles during the card pick UI — saves CPU on long picks.",
-                () => { if (Plugin.PerfPauseCardPickParticles != null) { Plugin.PerfPauseCardPickParticles.Value = !Plugin.PerfPauseCardPickParticles.Value; dirty = true; } },
-                out perfCardPickBtn, out perfCardPickTxt);
+            // "CardPickPart" row removed v1.28.3 — pausing the pick-phase skin
+            // particles made the picker's body invisible (bug #29).
 
             // -- Chat pop-up notifications --
             var notifBox = UIFactory.CreatePanel("SNB", panel.transform, C_PANEL);
@@ -2730,7 +2929,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // ── Perf section labels (v1.26.8) ──
             if (_perfSectionHeaderTxt != null)
             {
-                int onCount = 0, total = 8;
+                int onCount = 0, total = 7;
                 if (Plugin.PerfStunPlayerNullGuard?.Value ?? false) onCount++;
                 if (Plugin.PerfDespawnOffscreenBullets?.Value ?? false) onCount++;
                 if (Plugin.PerfSwallowHitSoundNREs?.Value ?? false) onCount++;
@@ -2738,7 +2937,6 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (Plugin.PerfSkipMenuUpdateInMatch?.Value ?? false) onCount++;
                 if (Plugin.PerfBulletHitParticleCap?.Value ?? false) onCount++;
                 if (Plugin.PerfClampObjectPoolInit?.Value ?? false) onCount++;
-                if (Plugin.PerfPauseCardPickParticles?.Value ?? false) onCount++;
                 bool masterOn = Plugin.PerfOptimizations?.Value ?? false;
                 string masterTag = masterOn
                     ? $"<color=#88FF88>{onCount}/{total} active</color>"
@@ -2764,14 +2962,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             SetPerfRow(perfMenuTxt,      Plugin.PerfSkipMenuUpdateInMatch,     "Menu update bail");
             SetPerfRow(perfBulletCapTxt, Plugin.PerfBulletHitParticleCap,      "Bullet-hit particle cap (2/frame)");
             SetPerfRow(perfPoolTxt,      Plugin.PerfClampObjectPoolInit,       "ObjectPool init clamp (in-match)");
-            SetPerfRow(perfCardPickTxt,  Plugin.PerfPauseCardPickParticles,    "Pause skin particles during card pick");
         }
 
         private static void RefreshRecentSeries()
         {
             if(txtRecentSeries==null)return;
             var series=ApiClient.CachedRecentSeries;
-            if(series==null||series.Count==0){UIFactory.SetText(txtRecentSeries,"No recent series");if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;}
+            if(series==null)
+            {
+                // Self-heal (#32): null = never loaded OR the open-time fetch
+                // failed (timeout/server blip) — nothing used to retry until
+                // the user clicked Refresh. Throttled refetch while the panel
+                // is visibly empty; the fetch callback MarkDirty()s us back.
+                if(Time.realtimeSinceStartup-_seriesAutoFetchAt>8f)
+                {
+                    _seriesAutoFetchAt=Time.realtimeSinceStartup;
+                    ApiClient.FetchRecentSeries();
+                }
+                UIFactory.SetText(txtRecentSeries,"Loading recent series...");
+                if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;
+            }
+            if(series.Count==0){UIFactory.SetText(txtRecentSeries,"No recent series");if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;}
             // 20 series per page (was 8). Server returns up to 100 - see FetchRecentSeries.
             int perPage=20,totalPages=(series.Count+perPage-1)/perPage;
             recentSeriesPage=Math.Max(0,Math.Min(recentSeriesPage,totalPages-1));
@@ -2971,7 +3182,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
         private static void RefreshSession(){int games=GameStateWatcher.SessionMatchCount;bool inRoom=GameStateWatcher.IsInRoom;string oppSteamId=GameStateWatcher.OpponentSteamId;string oppName=GameStateWatcher.OpponentDisplayName;var history=ApiClient.CachedMatchHistory;/* Show opponent lifetime record when in room */if(inRoom&&!string.IsNullOrEmpty(oppSteamId)&&!oppSteamId.StartsWith("photon_")&&history!=null){int ltW=0,ltL=0;string lastPlayed="";foreach(var m in history){if(m.opponent_steam_id==oppSteamId){if(m.won)ltW++;else ltL++;if(string.IsNullOrEmpty(lastPlayed)){try{lastPlayed=DateTime.Parse(m.ended_at).ToString("M/d/yyyy");}catch{}}}}if(ltW+ltL>0){string col=ltW>ltL?"#00FF00":ltW<ltL?"#FF6666":"#AAAAAA";UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  <color={col}>{ltW}W-{ltL}L lifetime</color>  (last: {lastPlayed})");}else{UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  First time playing!");}UIFactory.SetColor(txtSessionOppLifetime,new Color(0.6f,0.75f,1f));}else if(inRoom&&!string.IsNullOrEmpty(oppName)&&oppName!="Opponent"){UIFactory.SetText(txtSessionOppLifetime,$"  In room with {oppName}");UIFactory.SetColor(txtSessionOppLifetime,C_DIM);}else{UIFactory.SetText(txtSessionOppLifetime,"");}if(games<=0){UIFactory.SetText(txtSessionSum,inRoom?"In game - no results yet":"No games this session");UIFactory.SetColor(txtSessionSum,C_DIM);UIFactory.SetText(txtSessionSplit,"");UIFactory.SetText(txtSessionSweeps,"");return;}int mins=(int)(DateTime.UtcNow-GameStateWatcher.SessionStartTime).TotalMinutes;string time=mins>=60?$"{mins/60}h {mins%60}m":$"{mins}m";int rw=GameStateWatcher.SessionRankedWins,rl=GameStateWatcher.SessionRankedLosses,cw=GameStateWatcher.SessionCasualWins,cl=GameStateWatcher.SessionCasualLosses;int t2w=GameStateWatcher.SessionTeamSeriesWins,t2l=GameStateWatcher.SessionTeamSeriesLosses;int sesSweepG=0,sesSweepT=0;if(history!=null){var sesStart=GameStateWatcher.SessionStartTime;foreach(var m in history){DateTime mTime=DateTime.UtcNow;try{if(!string.IsNullOrEmpty(m.ended_at))mTime=DateTime.Parse(m.ended_at).ToUniversalTime();}catch{}if(mTime<sesStart)continue;if(m.won&&m.opponent_rounds_won==0)sesSweepG++;if(!m.won&&m.player_rounds_won==0)sesSweepT++;}}UIFactory.SetText(txtSessionSum,$"{games} games    {rw+cw}W - {rl+cl}L    {time}");UIFactory.SetColor(txtSessionSum,C_WHITE);string splitLine="";var splitParts=new List<string>();if(rw+rl>0)splitParts.Add($"<color=#FFD94D>Ranked:</color> {rw}W/{rl}L");if(t2w+t2l>0)splitParts.Add($"<color=#FFB347>2v2:</color> {t2w}W/{t2l}L");if(cw+cl>0)splitParts.Add($"Casual: {cw}W/{cl}L");if(splitParts.Count>0)splitLine="  "+string.Join("    ",splitParts.ToArray());UIFactory.SetText(txtSessionSplit,splitLine);if(sesSweepG+sesSweepT>0)UIFactory.SetText(txtSessionSweeps,$"  Sweeps: <color=#00FF00>5-0 x{sesSweepG}</color>  <color=#FF6666>0-5 x{sesSweepT}</color>");else UIFactory.SetText(txtSessionSweeps,"");var wl=GameStateWatcher.SessionWLByOpponent;var st=GameStateWatcher.SessionTimeByOpponent;int idx=0;if(wl!=null)foreach(var kvp in wl){int[]a=kvp.Value;if(a==null||a.Length<4)continue;int ow=a[0]+a[2],ol=a[1]+a[3];string line=$"  vs {kvp.Key}:  {ow}W-{ol}L";if(a[0]+a[1]>0&&a[2]+a[3]>0)line+=$"  (R:{a[0]}-{a[1]} C:{a[2]}-{a[3]})";if(st!=null&&st.ContainsKey(kvp.Key)){int m=(int)st[kvp.Key];line+=m>=60?$"   {m/60}h {m%60}m":$"   {m}m";}while(sessionOppTexts.Count<=idx)sessionOppTexts.Add(UIFactory.CreateText($"so{sessionOppTexts.Count}",sessionOppContainer.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22)));UIFactory.SetText(sessionOppTexts[idx],line);UIFactory.SetColor(sessionOppTexts[idx],ow>ol?C_GREEN:ow<ol?C_RED:C_DIM);var go=(sessionOppTexts[idx]as Component)?.gameObject;if(go)go.SetActive(true);idx++;}for(int i=idx;i<sessionOppTexts.Count;i++){var go=(sessionOppTexts[i]as Component)?.gameObject;if(go)go.SetActive(false);}}
 
-        private static void RefreshLeaderboard(){string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,14);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);UIFactory.SetText(row.txtRating,$"{e.rating}");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):new Color(0.15f,0.15f,0.2f,0.01f));row.root.SetActive(true);}UIFactory.SetText(txtLBCount,$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string detail=$"\nRating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked: {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
+        private static void RefreshLeaderboard(){string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,14);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):new Color(0.15f,0.15f,0.2f,0.01f));row.root.SetActive(true);}UIFactory.SetText(txtLBCount,$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?$"Rank: <b><color={(string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color)}>{ps.rank_name}</color></b>   ":"";string detail=$"\n{_rkLine}Rating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked: {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
  * earlier client-side iteration over CachedMatchHistory which was
  * limited to the viewer's most-recent 500 matches and silently dropped
  * H2H rows for older opponents. */if(selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=ps.h2h_ranked_wins,h2hL=ps.h2h_ranked_losses,h2hCW=ps.h2h_casual_wins,h2hCL=ps.h2h_casual_losses,h2hSW=ps.h2h_series_wins,h2hSL=ps.h2h_series_losses;int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+=$"\n<b>vs You:</b> <color={h2hColor}>{h2hAll}W - {h2hAllL}L ({h2hAll+h2hAllL} games)</color>\n";if(h2hSW+h2hSL>0)detail+=$"  Ranked Series: {h2hSW}W / {h2hSL}L\n";if(h2hCW+h2hCL>0)detail+=$"  Casual: {h2hCW}W / {h2hCL}L\n";}}/* Mod version this player was last seen running (X-Mod-Version
@@ -3129,9 +3340,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // table metrics rendered into the text/cards scroll panel.
         private static int compareMetric = 0;
         private static readonly string[] COMPARE_METRICS = {
-            "Elo over games", "Top Cards", "Worst Cards", "Hit / Block %",
+            "Elo over games", "Elo over time", "Top Cards", "Worst Cards", "Hit / Block %",
             "Avg Cards / Game", "Avg FPS", "Peak Elo", "Total XP",
-            "Achievements", "Region Time",
+            "Achievements", "Achievement Grid", "Region Time",
+            // v1.29 additions (Sid's Compare wishlist).
+            "Top Streaks", "5-0s Given / Taken", "Bets Won / Lost",
+            "Keys / Sec", "Keys / Game", "Avg Game Length", "2v2 Rating",
         };
         private static string compareSearch = "";
         // Exposed so CompetitiveUI's IMGUI search field (drawn over the Compare tab)
@@ -3377,6 +3591,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (compareCardsScroll != null) compareCardsScroll.SetActive(isCards);
 
             if (metricName == "Elo over games") BuildCompareGraph();
+            else if (metricName == "Elo over time") BuildCompareGraph(timeAxis: true);
             else if (isCards) BuildCompareCardGrid(metricName);
             else BuildCompareBarChart(metricName);
         }
@@ -3389,24 +3604,36 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return $"{r:X2}{g:X2}{b:X2}";
         }
 
-        private static void BuildCompareGraph()
+        private static void BuildCompareGraph(bool timeAxis = false)
         {
             if (compareGraphPanel == null) return;
             for (int c = compareGraphPanel.transform.childCount - 1; c >= 0; c--)
                 UnityEngine.Object.Destroy(compareGraphPanel.transform.GetChild(c).gameObject);
 
-            // Gather each selected player's Elo-over-games series from cache.
+            // Gather each selected player's Elo series from cache. timeAxis
+            // (v1.29 "Elo over time") plots x by SNAPSHOT DATE instead of game
+            // index, so gaps in play show as flat stretches, and players who
+            // started months apart line up on a real calendar.
             var names = new List<string>();
             var cols = new List<Color>();
             var seriesList = new List<float[]>();
+            var timesList = new List<float[]>();
             for (int i = 0; i < compareSelected.Count; i++)
             {
                 string sid = compareSelected[i];
                 if (!compareStatsCache.TryGetValue(sid, out var ps) || ps == null) continue;
                 if (ps.rating_history == null || ps.rating_history.Count < 2) continue;
+                float[] times = null;
+                if (timeAxis)
+                {
+                    if (ps.rating_history_times == null || ps.rating_history_times.Count != ps.rating_history.Count)
+                        continue; // no usable timestamps for this player
+                    times = ps.rating_history_times.ToArray();
+                }
                 names.Add(Trunc(ps.display_name ?? "?", 14));
                 cols.Add(COMPARE_COLORS[i % COMPARE_COLORS.Length]);
                 seriesList.Add(ps.rating_history.ToArray());
+                timesList.Add(times);
             }
 
             CompareChartSize(out float W, out float H);
@@ -3454,18 +3681,46 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 MakeGraphLabel($"CmpYLbl{gi}", $"<color=#999>{FullNum(val)}</color>",
                     new Vector2(0, 0), new Vector2(padL - 4f, yy - 6f), new Vector2(50, 12), UIFactory.AlignMidRight);
             }
-            MakeGraphLabel("CmpXLbl", "<color=#888>games -></color>", new Vector2(1, 0), new Vector2(-padR, padB - 14f), new Vector2(90, 12), UIFactory.AlignMidRight);
+            // X axis: game index (default) or calendar time (timeAxis).
+            float tMin = 0f, tRange = 1f;
+            if (timeAxis)
+            {
+                tMin = float.MaxValue; float tMax = float.MinValue;
+                foreach (var ts in timesList)
+                    foreach (var t in ts) { if (t < tMin) tMin = t; if (t > tMax) tMax = t; }
+                tRange = Mathf.Max(0.5f, tMax - tMin);
+                // Date gridlines: 4 divisions labeled M/d (days since 2020-01-01 base).
+                var epoch = new DateTime(2020, 1, 1);
+                for (int d = 0; d <= 4; d++)
+                {
+                    float tv = tMin + tRange * d / 4f;
+                    float xx = padL + (tv - tMin) / tRange * plotW;
+                    DrawBar($"CmpXGrid{d}", xx, padB, 1f, plotH, new Color(1f, 1f, 1f, 0.07f));
+                    string dl = epoch.AddDays(tv).ToString("M/d", System.Globalization.CultureInfo.InvariantCulture);
+                    MakeGraphLabel($"CmpXDate{d}", $"<color=#999>{dl}</color>",
+                        new Vector2(0, 0), new Vector2(xx - 24f, padB - 16f), new Vector2(48, 12), UIFactory.AlignMidCenter);
+                }
+            }
+            else
+            {
+                MakeGraphLabel("CmpXLbl", "<color=#888>games -></color>", new Vector2(1, 0), new Vector2(-padR, padB - 14f), new Vector2(90, 12), UIFactory.AlignMidRight);
+            }
 
             // Draw each player's line + legend chip (full names — there's room now).
             for (int si = 0; si < seriesList.Count; si++)
             {
                 var pts = seriesList[si];
+                var ts = timesList[si];
                 Color col = cols[si];
                 for (int j = 0; j < pts.Length - 1; j++)
                 {
-                    float x1 = padL + (float)j / (maxLen - 1) * plotW;
+                    float x1 = timeAxis
+                        ? padL + (ts[j] - tMin) / tRange * plotW
+                        : padL + (float)j / (maxLen - 1) * plotW;
                     float y1 = padB + (pts[j] - minV) / range * plotH;
-                    float x2 = padL + (float)(j + 1) / (maxLen - 1) * plotW;
+                    float x2 = timeAxis
+                        ? padL + (ts[j + 1] - tMin) / tRange * plotW
+                        : padL + (float)(j + 1) / (maxLen - 1) * plotW;
                     float y2 = padB + (pts[j + 1] - minV) / range * plotH;
                     DrawGraphSegment($"CmpL{si}_{j}", x1, y1, x2, y2, col, 2f);
                 }
@@ -3691,6 +3946,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
             // Region distribution → pie-chart grid (much clearer than the old stacked bar).
             if (metricName == "Region Time") { BuildComparePieChart(idxs, W, H); return; }
+            // Per-achievement comparison grid (v1.29).
+            if (metricName == "Achievement Grid") { BuildCompareAchievementGrid(idxs, W, H); return; }
 
             float padL = 60f, padR = 16f, padT = 34f, padB = 48f;
             float plotW = W - padL - padR, plotH = H - padT - padB;
@@ -3706,8 +3963,25 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 case "Peak Elo": title = "Peak Elo"; break;
                 case "Total XP": title = "Total XP"; break;
                 case "Achievements": title = "Achievements unlocked"; break;
+                // v1.29 —  grouped pairs get data-driven scale (groupedData below).
+                case "Top Streaks": title = "Best Win Streak"; grouped = true; break;
+                case "5-0s Given / Taken": title = "5-0 Sweeps"; grouped = true; break;
+                case "Bets Won / Lost": title = "Betting Record"; grouped = true; break;
+                case "Keys / Sec": title = "Avg Keystrokes per Second (in combat)"; break;
+                case "Keys / Game": title = "Avg Key Presses per Game"; break;
+                case "Avg Game Length": title = "Avg Game Length (minutes)"; break;
+                case "2v2 Rating": title = "2v2 Rating"; break;
                 default: title = metricName; break;
             }
+            // Per-pair legend labels for grouped metrics (solid vs dim bars).
+            string legA = "Hit", legB = "Block";
+            switch (metricName)
+            {
+                case "Top Streaks": legA = "Ranked"; legB = "Casual"; break;
+                case "5-0s Given / Taken": legA = "Given"; legB = "Taken"; break;
+                case "Bets Won / Lost": legA = "Won"; legB = "Lost"; break;
+            }
+            bool groupedPct = metricName == "Hit / Block %";
             MakeGraphLabel("CmpBarTitle", $"<color=#CCC><b>{title}</b></color>",
                 new Vector2(0, 1), new Vector2(padL, -4f), new Vector2(W - padL, 18), UIFactory.AlignMidLeft);
 
@@ -3723,17 +3997,39 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 case "Peak Elo": v1 = ps => ps.peak_rating; break;
                 case "Total XP": v1 = ps => ps.total_xp; break;
                 case "Achievements": v1 = ps => ps.achievements_unlocked; break;
+                // v1.29 metrics — all server-computed fields on PlayerStatsData.
+                case "Top Streaks":
+                    v1 = ps => ps.best_ranked_streak;
+                    v2 = ps => ps.best_casual_streak;
+                    break;
+                case "5-0s Given / Taken":
+                    v1 = ps => ps.sweeps_given;
+                    v2 = ps => ps.sweeps_taken;
+                    break;
+                case "Bets Won / Lost":
+                    v1 = ps => ps.bets_won;
+                    v2 = ps => ps.bets_lost;
+                    break;
+                case "Keys / Sec": v1 = ps => ps.avg_keys_per_sec; break;
+                case "Keys / Game": v1 = ps => ps.avg_keys_per_game; break;
+                case "Avg Game Length": v1 = ps => ps.avg_game_seconds / 60f; break;
+                case "2v2 Rating": v1 = ps => ps.team_rating; break;
                 default: v1 = ps => 0f; break;
             }
 
             // Axis scale + a NICE round step so labels are clean whole numbers.
             float maxV, step;
-            if (grouped) { maxV = 100f; step = 25f; }          // 0..100 %
+            if (groupedPct) { maxV = 100f; step = 25f; }       // 0..100 %
             else if (avgCards) { maxV = 5f; step = 1f; }       // fixed 0..5, lines at each int
             else
             {
                 float dataMax = 0.0001f;
-                foreach (int i in idxs) { float v = v1(compareStatsCache[compareSelected[i]]); if (v > dataMax) dataMax = v; }
+                foreach (int i in idxs)
+                {
+                    var psX = compareStatsCache[compareSelected[i]];
+                    float v = v1(psX); if (v > dataMax) dataMax = v;
+                    if (grouped && v2 != null) { float vb = v2(psX); if (vb > dataMax) dataMax = vb; }
+                }
                 step = NiceStep(dataMax / 4f);
                 maxV = Mathf.Ceil(dataMax * 1.08f / step) * step;
                 if (maxV < step) maxV = step;
@@ -3773,7 +4069,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
 
             if (grouped)
-                MakeGraphLabel("CmpHBLeg", "<color=#EEEEEE>solid = Hit</color>   <color=#888888>dim = Block</color>",
+                MakeGraphLabel("CmpHBLeg", $"<color=#EEEEEE>solid = {legA}</color>   <color=#888888>dim = {legB}</color>",
                     new Vector2(1, 1), new Vector2(-padR, -4f), new Vector2(260, 14), UIFactory.AlignMidRight);
 
             // Adaptive name length: full names when there's room, trimmed when crowded.
@@ -3807,6 +4103,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     DrawBar($"CmpBar{gi2}", bx, padB, bw, clamped / maxV * plotH, bc);
                     string vlbl = avgCards ? val.ToString("F2")
                                 : metricName == "Total XP" ? $"Lv {ps.level}"
+                                // Small-float metrics keep their decimals — FullNum's
+                                // whole-number rounding made every game length a solid
+                                // minute (Sid). 5.4m reads as 5m24s.
+                                : metricName == "Avg Game Length" ? $"{val:F1}m"
+                                : metricName == "Keys / Sec" ? val.ToString("F1")
                                 : FullNum(val);
                     MakeGraphLabel($"CmpBarV{gi2}", $"<color=#EEE>{vlbl}</color>",
                         new Vector2(0, 0), new Vector2(bx - 6f, padB + clamped / maxV * plotH + 1f), new Vector2(bw + 12f, 12), UIFactory.AlignMidCenter);
@@ -3815,6 +4116,90 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 MakeGraphLabel($"CmpBarName{gi2}", $"<b><color=#{ColorToHex(pc)}>{Trunc(ps.display_name, nameLen)}</color></b>",
                     new Vector2(0, 0), new Vector2(gx - 4f, padB - 18f), new Vector2(groupW + 8f, 16), UIFactory.AlignMidCenter, 13f);
             }
+        }
+
+        // v1.29 — per-achievement comparison: one row per achievement, one column
+        // per selected player, YES/no cells in each player's compare color. Data
+        // comes from FetchAchievementsForCompare (cached per steam id).
+        private static void BuildCompareAchievementGrid(List<int> idxs, float W, float H)
+        {
+            try
+            {
+                MakeGraphLabel("CmpAchTitle", "<color=#CCC><b>Achievement comparison</b></color>",
+                    new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
+
+                bool missing = false;
+                foreach (int i in idxs)
+                {
+                    string sid = compareSelected[i];
+                    if (!ApiClient.CompareAchievements.ContainsKey(sid))
+                    {
+                        ApiClient.FetchAchievementsForCompare(sid);
+                        missing = true;
+                    }
+                }
+                if (missing)
+                {
+                    MakeGraphLabel("CmpAchLoad", "<color=#888>Loading achievements...</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                    return;
+                }
+
+                // Union of keys across the selected players, stable-sorted by display name.
+                var keys = new List<string>();
+                foreach (int i in idxs)
+                    foreach (var k in ApiClient.CompareAchievements[compareSelected[i]].Keys)
+                        if (!keys.Contains(k)) keys.Add(k);
+                keys.Sort((a, b) => string.CompareOrdinal(AchName(a), AchName(b)));
+                if (keys.Count == 0)
+                {
+                    MakeGraphLabel("CmpAchNone", "<color=#888>No achievement data.</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                    return;
+                }
+
+                float nameW = Mathf.Min(280f, W * 0.34f);
+                float colW = (W - nameW - 24f) / Mathf.Max(1, idxs.Count);
+                float headerY = -26f;
+                for (int c = 0; c < idxs.Count; c++)
+                {
+                    int i = idxs[c];
+                    var ps = compareStatsCache[compareSelected[i]];
+                    Color pc = COMPARE_COLORS[i % COMPARE_COLORS.Length];
+                    MakeGraphLabel($"CmpAchHdr{c}",
+                        $"<b><color=#{ColorToHex(pc)}>{Trunc(ps.display_name, Mathf.Clamp((int)(colW / 9f), 4, 16))}</color></b>",
+                        new Vector2(0, 1), new Vector2(nameW + 12f + c * colW, headerY), new Vector2(colW, 16), UIFactory.AlignMidCenter, 13f);
+                }
+                float rowH = Mathf.Clamp((H - 60f) / keys.Count, 15f, 26f);
+                float fontSz = rowH >= 22f ? 13f : 11f;
+                for (int r = 0; r < keys.Count; r++)
+                {
+                    float y = headerY - 20f - r * rowH;
+                    MakeGraphLabel($"CmpAchN{r}", $"<color=#CCCCCC>{Trunc(AchName(keys[r]), 30)}</color>",
+                        new Vector2(0, 1), new Vector2(12f, y), new Vector2(nameW, rowH), UIFactory.AlignMidLeft, fontSz);
+                    for (int c = 0; c < idxs.Count; c++)
+                    {
+                        int i = idxs[c];
+                        var achs = ApiClient.CompareAchievements[compareSelected[i]];
+                        bool has = achs.TryGetValue(keys[r], out var ad) && ad.unlocked;
+                        Color pc = COMPARE_COLORS[i % COMPARE_COLORS.Length];
+                        string cell = has ? $"<b><color=#{ColorToHex(pc)}>YES</color></b>" : "<color=#555555>-</color>";
+                        MakeGraphLabel($"CmpAchC{r}_{c}", cell,
+                            new Vector2(0, 1), new Vector2(nameW + 12f + c * colW, y), new Vector2(colW, rowH), UIFactory.AlignMidCenter, fontSz);
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] achievement grid failed: {ex.Message}"); }
+        }
+
+        private static string AchName(string key)
+        {
+            if (ApiClient.AchievementDisplayNames.TryGetValue(key, out var n) && !string.IsNullOrEmpty(n)) return n;
+            // Fallback: prettify the key ("stan_slayer" → "Stan Slayer").
+            var parts = (key ?? "").Split('_');
+            for (int i = 0; i < parts.Length; i++)
+                if (parts[i].Length > 0) parts[i] = char.ToUpperInvariant(parts[i][0]) + parts[i].Substring(1);
+            return string.Join(" ", parts);
         }
 
         // Region distribution as a grid of per-player pie charts with a shared region
@@ -4215,7 +4600,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return sb.ToString();
         }
 
-        private static void RefreshCardStats(){string[]hL={"Tier","Card","Rarity","Picks","Wins","WR%","Pass%"};string[]hK={"tier","card_name","card_rarity","times_picked","wins_with_card","win_rate","pass_rate"};if(cardSortTexts!=null)for(int i=0;i<7&&i<cardSortTexts.Length;i++){if(cardSortTexts[i]==null)continue;string arrow=cardSort==hK[i]?(cardSortDesc?" v":" ^"):"";UIFactory.SetText(cardSortTexts[i],hL[i]+arrow);UIFactory.SetColor(cardSortTexts[i],cardSort==hK[i]?C_WHITE:C_LABEL);if(cardSortBtns!=null&&i<cardSortBtns.Length)UIFactory.SetImageColor(cardSortBtns[i],cardSort==hK[i]?C_TABACT:C_TAB);}var cards=ApiClient.CachedCardStats;foreach(var r in cardRows)r.root.SetActive(false);if(cards==null||cards.Count==0)return;var merged=new List<ApiClient.CardStatData>();var seen=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);foreach(var c in cards){string key=(c.card_name??"?").ToLower().Replace(" ","");if(seen.ContainsKey(key)){var e=merged[seen[key]];e.times_picked+=c.times_picked;e.wins_with_card+=c.wins_with_card;e.win_rate=e.times_picked>0?(float)e.wins_with_card/e.times_picked:0;e.times_offered=Math.Max(e.times_offered,c.times_offered);if(c.times_offered>0)e.pass_rate=c.pass_rate;if((e.card_rarity==null||e.card_rarity=="Unknown")&&c.card_rarity!=null&&c.card_rarity!="Unknown")e.card_rarity=c.card_rarity;}else{seen[key]=merged.Count;merged.Add(new ApiClient.CardStatData{card_name=c.card_name,card_rarity=c.card_rarity,times_picked=c.times_picked,wins_with_card=c.wins_with_card,win_rate=c.win_rate,times_offered=c.times_offered,pass_rate=c.pass_rate});}}
+        private static void RefreshCardStats(){string[]hL={"Tier","Card","Rarity","Picks","Wins","WR%","Pass%"};string[]hK={"tier","card_name","card_rarity","times_picked","wins_with_card","win_rate","pass_rate"};if(cardSortTexts!=null)for(int i=0;i<7&&i<cardSortTexts.Length;i++){if(cardSortTexts[i]==null)continue;string arrow=cardSort==hK[i]?(cardSortDesc?" v":" ^"):"";UIFactory.SetText(cardSortTexts[i],hL[i]+arrow);UIFactory.SetColor(cardSortTexts[i],cardSort==hK[i]?C_WHITE:C_LABEL);if(cardSortBtns!=null&&i<cardSortBtns.Length)UIFactory.SetImageColor(cardSortBtns[i],cardSort==hK[i]?C_TABACT:C_TAB);}var cards=ApiClient.CachedCardStats;foreach(var r in cardRows)r.root.SetActive(false);
+        // Self-heal (#32): refetch when the open-time fetch never landed —
+        // stats null, or the tier set for the current filter never completed.
+        if(cards==null&&Time.realtimeSinceStartup-_cardStatsAutoFetchAt>8f){_cardStatsAutoFetchAt=Time.realtimeSinceStartup;ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);}
+        if(!_tierFiltersLoaded.Contains(cardFilter)&&Time.realtimeSinceStartup-_tierAutoFetchAt>8f){_tierAutoFetchAt=Time.realtimeSinceStartup;LoadCardTiersForCurrentFilter();}
+        if(cards==null||cards.Count==0)return;var merged=new List<ApiClient.CardStatData>();var seen=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);foreach(var c in cards){string key=(c.card_name??"?").ToLower().Replace(" ","");if(seen.ContainsKey(key)){var e=merged[seen[key]];e.times_picked+=c.times_picked;e.wins_with_card+=c.wins_with_card;e.win_rate=e.times_picked>0?(float)e.wins_with_card/e.times_picked:0;e.times_offered=Math.Max(e.times_offered,c.times_offered);if(c.times_offered>0)e.pass_rate=c.pass_rate;if((e.card_rarity==null||e.card_rarity=="Unknown")&&c.card_rarity!=null&&c.card_rarity!="Unknown")e.card_rarity=c.card_rarity;}else{seen[key]=merged.Count;merged.Add(new ApiClient.CardStatData{card_name=c.card_name,card_rarity=c.card_rarity,times_picked=c.times_picked,wins_with_card=c.wins_with_card,win_rate=c.win_rate,times_offered=c.times_offered,pass_rate=c.pass_rate});}}
         // Tier sort: map S/A/B/C/D/E/F to 0..6, unset to 99 so they sort to the
         // bottom regardless of direction. Comparator pulls each card's tier
         // from cardTierMap keyed by the active filter.
@@ -4687,6 +5077,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // -- Chat --------------------------------------------------
         /// <summary>Called from the background ChatClient thread. Appends a formatted
         /// line to the log with thread-safety.</summary>
+        // Highest server chat id we've rendered. Server messages carry their DB
+        // row id (v1.28.3); the scrollback refetch that ChatClient fires on
+        // EVERY reconnect used to re-append all 50 recent entries to the log —
+        // each WS blip re-printed old chat (one of #30's "duplicated" reports).
+        // Local echoes carry no id and always render.
+        private static int _lastChatIdSeen = 0;
+
         public static void OnChatMessage(string json)
         {
             try
@@ -4698,6 +5095,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 string title = ExtractChatField(json, "title");
                 string titleColor = ExtractChatField(json, "title_color");
                 if (string.IsNullOrEmpty(message)) return;
+                int chatId = ExtractChatIntField(json, "id");
+                if (chatId > 0)
+                {
+                    if (chatId <= _lastChatIdSeen) return;  // already rendered (reconnect replay)
+                    _lastChatIdSeen = chatId;
+                }
                 // Local mute filter. Hides messages from any name in MutedChatNames.
                 // Case-insensitive comparison so /mute Sid matches "sid" too.
                 if (IsMuted(name))
@@ -4904,7 +5307,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return sb.ToString();
         }
 
-        private static void RefreshQueueUI(){if(txtRankedStatus==null)return;bool ranked=Plugin.RankedEnabled.Value;var qs=ApiClient.CurrentQueueState;UIFactory.SetText(txtRankedStatus,ranked?"RANKED: ON":"RANKED: OFF");UIFactory.SetColor(txtRankedStatus,ranked?C_GREEN:Color.gray);rankOnBtn.SetActive(!ranked);rankOffBtn.SetActive(ranked&&!inGameMode);bool inRankedMatch=GameStateWatcher.IsInMatch&&GameStateWatcher.MatchIsRanked;qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCancelBtn.SetActive(ranked&&qs==ApiClient.QueueState.Searching);if(qs==ApiClient.QueueState.Searching){var poll=ApiClient.LastPollData;string line="Searching...";if(poll!=null&&poll.status=="searching"){int m=poll.wait_time/60,sec=poll.wait_time%60;line=$"Searching... {(m>0?$"{m}m ":"")}{sec}s  +/-{poll.elo_range}"+(poll.queue_size>1?$"  ({poll.queue_size} in queue)":"");}UIFactory.SetText(txtQueueInfo,line);UIFactory.SetColor(txtQueueInfo,C_BLUE);((txtQueueInfo as Component)?.gameObject)?.SetActive(true);}else if(qs==ApiClient.QueueState.Idle&&ranked){int qc=ApiClient.CachedQueueSearching;if(qc>0){UIFactory.SetText(txtQueueInfo,$"{qc} searching");UIFactory.SetColor(txtQueueInfo,C_GREEN);}else{UIFactory.SetText(txtQueueInfo,"0 in queue");UIFactory.SetColor(txtQueueInfo,C_DIM);}((txtQueueInfo as Component)?.gameObject)?.SetActive(true);}else{UIFactory.SetText(txtQueueInfo,"");((txtQueueInfo as Component)?.gameObject)?.SetActive(false);}if(qs==ApiClient.QueueState.Matched||qs==ApiClient.QueueState.ReadySent){qMatchPanel.SetActive(true);var poll=ApiClient.LastPollData;if(poll!=null){string oppInfo=$"MATCH FOUND!  vs {poll.opponent_name} ({poll.opponent_rating:F0})";if(qs==ApiClient.QueueState.ReadySent&&poll.opponent_ready)oppInfo+="  [Opponent Ready]";UIFactory.SetText(txtMatchFound,oppInfo);}bool readySent=qs==ApiClient.QueueState.ReadySent;readyBtn.SetActive(!readySent);connectLabel.SetActive(readySent);if(readySent&&txtConnectLabel!=null&&poll!=null){string waitTxt=!string.IsNullOrEmpty(poll.opponent_name)?$"Waiting for {poll.opponent_name} ({poll.opponent_rating:F0})...":"Waiting for opponent...";if(poll.opponent_ready)waitTxt=$"{poll.opponent_name} ready! Joining...";UIFactory.SetText(txtConnectLabel,waitTxt);}declineBtn.SetActive(true);}else qMatchPanel.SetActive(false);}
+        private static void RefreshQueueUI(){if(txtRankedStatus==null)return;bool ranked=Plugin.RankedEnabled.Value;var qs=ApiClient.CurrentQueueState;UIFactory.SetText(txtRankedStatus,ranked?"RANKED: ON":"RANKED: OFF");UIFactory.SetColor(txtRankedStatus,ranked?C_GREEN:Color.gray);rankOnBtn.SetActive(!ranked);rankOffBtn.SetActive(ranked&&!inGameMode);bool inRankedMatch=GameStateWatcher.IsInMatch&&GameStateWatcher.MatchIsRanked;qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCancelBtn.SetActive(ranked&&qs==ApiClient.QueueState.Searching);if(qs==ApiClient.QueueState.Searching){var poll=ApiClient.LastPollData;string line="Searching...";if(poll!=null&&poll.status=="searching"){int m=poll.wait_time/60,sec=poll.wait_time%60;line=$"Searching... {(m>0?$"{m}m ":"")}{sec}s  +/-{poll.elo_range}"+(poll.queue_size>1?$"  ({poll.queue_size} in queue)":"");}line+=OnlineSuffix();UIFactory.SetText(txtQueueInfo,line);UIFactory.SetColor(txtQueueInfo,C_BLUE);((txtQueueInfo as Component)?.gameObject)?.SetActive(true);}else if(qs==ApiClient.QueueState.Idle&&ranked){int qc=ApiClient.CachedQueueSearching;if(qc>0){UIFactory.SetText(txtQueueInfo,$"{qc} searching"+OnlineSuffix());UIFactory.SetColor(txtQueueInfo,C_GREEN);}else{UIFactory.SetText(txtQueueInfo,"0 in queue"+OnlineSuffix());UIFactory.SetColor(txtQueueInfo,C_DIM);}((txtQueueInfo as Component)?.gameObject)?.SetActive(true);}else{UIFactory.SetText(txtQueueInfo,"");((txtQueueInfo as Component)?.gameObject)?.SetActive(false);}if(qs==ApiClient.QueueState.Matched||qs==ApiClient.QueueState.ReadySent){qMatchPanel.SetActive(true);var poll=ApiClient.LastPollData;if(poll!=null){string oppInfo=$"MATCH FOUND!  vs {poll.opponent_name} ({poll.opponent_rating:F0})";if(qs==ApiClient.QueueState.ReadySent&&poll.opponent_ready)oppInfo+="  [Opponent Ready]";UIFactory.SetText(txtMatchFound,oppInfo);}bool readySent=qs==ApiClient.QueueState.ReadySent;readyBtn.SetActive(!readySent);connectLabel.SetActive(readySent);if(readySent&&txtConnectLabel!=null&&poll!=null){string waitTxt=!string.IsNullOrEmpty(poll.opponent_name)?$"Waiting for {poll.opponent_name} ({poll.opponent_rating:F0})...":"Waiting for opponent...";if(poll.opponent_ready)waitTxt=$"{poll.opponent_name} ready! Joining...";UIFactory.SetText(txtConnectLabel,waitTxt);}declineBtn.SetActive(true);}else qMatchPanel.SetActive(false);}
+
+        // "N online" suffix for the queue-status line (v1.29). Rich-text grey so it
+        // reads as secondary info next to the queue count. Empty until the first
+        // presence response lands (0 would be a lie — we ourselves are online).
+        private static string OnlineSuffix(){int on=ApiClient.CachedOnlineCount;return on>0?$"  <color=#7FDBFF>|</color>  <color=#AAAAAA>{on} online</color>":"";}
 
         private static int CalcStreak(List<ApiClient.MatchHistoryEntry> m){if(m==null||m.Count==0)return 0;bool t=m[0].won;int c=0;for(int i=0;i<m.Count;i++){if(m[i].won==t)c++;else break;}return t?c:-c;}
         private static string Trunc(string s,int max){if(string.IsNullOrEmpty(s))return "";return s.Length<=max?s:s.Substring(0,max-2)+"..";}

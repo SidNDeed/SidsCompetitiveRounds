@@ -61,6 +61,10 @@ namespace CompetitiveRounds
         // ranked matches in /series/active immediately rather than after the
         // first match completes.
         private static bool seriesPreflightSent = false;
+        // (#26) Opponent-never-arrived watchdog state (ranked_* rooms only).
+        private static bool rankedRoomStallHandled = false;
+        private static bool rankedRoomStallWarned = false;
+        private static bool rankedRoomEverFull = false;
         private static bool matchIsRanked = false;
 
         // Harmony opponent card tracking
@@ -169,6 +173,13 @@ namespace CompetitiveRounds
         // Counters reset in OnMatchStarted alongside the achievement flags.
         public static int LocalShotsThisMatch { get; private set; }
         public static int LocalBlocksThisMatch { get; private set; }
+        // v1.29 — input-rate metrics for the Compare tab ("avg keystrokes/sec").
+        // Keys = discrete anyKeyDown events during active combat (movement, shots,
+        // blocks — anything). Seconds = wall time actually spent alive in combat
+        // (pick phase / death / menus excluded), so the ratio is a true in-game
+        // input rate. Reset with the other per-match counters.
+        public static int LocalKeysThisMatch { get; private set; }
+        public static float LocalActiveSecondsThisMatch { get; private set; }
         // v1.23 — hit/block lifetime counters.
         //   bullets_fired  — sum of Gun.numberOfProjectiles across every Gun.Attack call by the
         //                    local player (counts individual pellets/bullets, not trigger pulls;
@@ -349,6 +360,31 @@ namespace CompetitiveRounds
         {
             currentSeriesGamesWon = 0;
             currentSeriesGamesLost = 0;
+        }
+        /// <summary>Adopt a resumed BO3's tally from the server (preflight
+        /// "exists" response after a DC + reconnect, #33) so the HUD picks up
+        /// at the real score instead of 0-0.</summary>
+        public static void AdoptSeriesScore(int myWins, int oppWins)
+        {
+            currentSeriesGamesWon = Mathf.Max(0, myWins);
+            currentSeriesGamesLost = Mathf.Max(0, oppWins);
+            Plugin.Log.LogInfo($"[SESSION] Adopted resumed series score {currentSeriesGamesWon}-{currentSeriesGamesLost} from preflight");
+        }
+        /// <summary>v1.29 (#42): the server refused a ranked series for this
+        /// pairing (one side has ranked explicitly disabled). Flip the match
+        /// to casual so the HUD and the eventual match report agree with the
+        /// server-side enforcement — no bets, no series, no rating.</summary>
+        public static void DowngradeToCasual(string reason)
+        {
+            if (!matchIsRanked) return;
+            matchIsRanked = false;
+            Plugin.Log.LogInfo($"[POLL] Match downgraded to CASUAL ({reason})");
+            try
+            {
+                CompetitiveUI.QueueNotification("Casual match — a player has ranked disabled",
+                    new Color(0.85f, 0.8f, 0.5f), 4f);
+            }
+            catch { }
         }
         public static int SessionCasualWins => sessionCasualWins;
         public static int SessionCasualLosses => sessionCasualLosses;
@@ -726,6 +762,10 @@ namespace CompetitiveRounds
                 catch { }
                 seriesPreflightSent = false;
                 lastOpponentRankCheck = -999f;
+                // (#26) Re-arm the opponent-never-arrived watchdog for this room.
+                rankedRoomStallHandled = false;
+                rankedRoomStallWarned = false;
+                rankedRoomEverFull = false;
                 // Fresh room = new series. Reset the in-match HUD's BO3 score
                 // counter so it doesn't carry over from the prior room. The
                 // session game / series tallies stay (they're cumulative).
@@ -810,6 +850,38 @@ namespace CompetitiveRounds
                 TryResolveOpponent();
             }
 
+            // (#26) Opponent-never-arrived watchdog for mod-issued 1v1 ranked
+            // rooms. Lopi's log (bug #26): the queue matched, both readied, HE
+            // joined ranked_13acb279b859 fine — but the opponent never arrived
+            // (players stuck 1/2), the vanilla loading screen sat there forever,
+            // and the only way out was Escape (which vanilla treats as a raw
+            // NetworkRestart during loading). Detect the stall, tell the player
+            // what happened, and return to menu cleanly. No match ever started,
+            // so no DC/leave penalty applies on either side.
+            if (inRoom && !rankedRoomStallHandled && photonRoomId.StartsWith("ranked_"))
+            {
+                int pc = 0;
+                try { pc = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { }
+                if (pc >= 2) rankedRoomEverFull = true;
+                if (!rankedRoomEverFull && !isTracking)
+                {
+                    double waited = (DateTime.UtcNow - roomJoinTime).TotalSeconds;
+                    if (!rankedRoomStallWarned && waited >= 25)
+                    {
+                        rankedRoomStallWarned = true;
+                        CompetitiveUI.ShowNotification("Opponent hasn't connected yet — hang tight...", new Color(1f, 0.8f, 0.3f), 6f);
+                    }
+                    if (waited >= 60)
+                    {
+                        rankedRoomStallHandled = true;
+                        Plugin.Log.LogWarning($"[QUEUE-STALL] Opponent never joined {photonRoomId} after {(int)waited}s — returning to menu (no match started, no penalty)");
+                        CompetitiveUI.ShowNotification("Opponent failed to join — returning to menu. Requeue when ready.", new Color(1f, 0.5f, 0.4f), 10f);
+                        try { NetworkConnectionHandler.instance.NetworkRestart(); }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[QUEUE-STALL] NetworkRestart failed: {ex.Message}"); }
+                    }
+                }
+            }
+
             // Eager preflight for private rooms. The matchIsRanked-gated
             // preflight inside the CheckOpponentRanked callback (further
             // down) is async — it waits for an HTTP /mod/check round
@@ -842,10 +914,15 @@ namespace CompetitiveRounds
                 catch { }
                 string rNameEager = "";
                 try { rNameEager = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
-                bool isModIssuedEager = rNameEager.StartsWith("ranked_")
-                                     || rNameEager.StartsWith("team_")
-                                     || rNameEager.StartsWith("sct-");
-                if (!inCrFfEager && !isModIssuedEager)
+                // 2v2 rooms (cr_ff / team_) keep their own team_series pipeline —
+                // never 1v1-preflight there. ranked_* / sct-* rooms ARE allowed
+                // now (v1.28.3, #36): series 1 already has ActiveRankedSeriesId
+                // from the queue/tournament flow (so the id-empty gate above
+                // skips them), but REMATCH series in the same room need this
+                // preflight to exist before game 1 ends or they're born
+                // bet-locked. Server side is idempotent find-or-create.
+                bool is2v2Eager = inCrFfEager || rNameEager.StartsWith("team_");
+                if (!is2v2Eager)
                 {
                     seriesPreflightSent = true;
                     Plugin.Log.LogInfo($"[POLL] Eager preflight: opponent {opponentSteamId} has mod props — firing /series/preflight before /mod/check completes");
@@ -1311,6 +1388,25 @@ namespace CompetitiveRounds
                     // Vanilla casual room with both players opted-in for cross-room ranked.
                     matchIsRanked = true;
                 }
+
+                // Re-arm the series preflight when a ranked game starts with no
+                // live series id (#36). Two cases land here: (a) game 1 of a
+                // REMATCH series in the same room — the previous BO3 completed,
+                // ActiveRankedSeriesId was cleared, and without a fresh preflight
+                // the new series row would only be born at first match report
+                // (already 1-0 → permanently bet-locked); (b) games 2/3 of any
+                // series (id cleared after each report) — the refire is harmless
+                // there: the server's find-or-create returns the same active
+                // series, restoring the id for live-points. cr_ff (2v2) keeps
+                // its own team_series pipeline and is excluded by the poll-side
+                // preflight gates.
+                bool inCrFfStart = rp != null && rp.ContainsKey("cr_ff");
+                if (matchIsRanked && !inCrFfStart && seriesPreflightSent
+                    && string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId))
+                {
+                    seriesPreflightSent = false;
+                    Plugin.Log.LogInfo("[POLL] Re-armed series preflight at game start (no live series id)");
+                }
             }
             catch { }
 
@@ -1333,6 +1429,8 @@ namespace CompetitiveRounds
             pendingRegicideCheck = false;
             LocalShotsThisMatch = 0;
             LocalBlocksThisMatch = 0;
+            LocalKeysThisMatch = 0;
+            LocalActiveSecondsThisMatch = 0f;
             LocalBulletsFiredThisMatch = 0;
             LocalBulletsHitThisMatch = 0;
             LocalBlocksActivatedThisMatch = 0;
@@ -1778,7 +1876,9 @@ namespace CompetitiveRounds
                     localBlocksActivated: LocalBlocksActivatedThisMatch,
                     localBlocksSuccessful: LocalBlocksSuccessfulThisMatch,
                     localAvgFps: LocalAvgFps,
-                    opponentAvgFps: OpponentAvgFps
+                    opponentAvgFps: OpponentAvgFps,
+                    localKeysPressed: LocalKeysThisMatch,
+                    localActiveSeconds: LocalActiveSecondsThisMatch
                 );
             }
 
@@ -2056,6 +2156,11 @@ namespace CompetitiveRounds
                 // GetMouseButton(0)/(1) above covers held-state for achievements; ButtonDown gives discrete events.
                 if (Input.GetMouseButtonDown(0)) LocalShotsThisMatch++;
                 if (Input.GetMouseButtonDown(1)) LocalBlocksThisMatch++;
+                // v1.29 input-rate metric: active-combat seconds + discrete key events.
+                // anyKeyDown covers keyboard AND mouse buttons (one tick per frame with
+                // any new press). Chat/menu focus excluded below via the same gate as
+                // the movement flag so typing doesn't count as gameplay input.
+                LocalActiveSecondsThisMatch += Time.deltaTime;
                 // Skip key-down sampling while the chat overlay has focus — typing
                 // "wasd" in a Discord-bridged message previously false-flagged
                 // Immovable Object. Same gate applies to Pacifist's mouse-shot
@@ -2063,6 +2168,7 @@ namespace CompetitiveRounds
                 // typing so it's a non-issue. Same for the F5 menu.
                 bool typingInChat = false;
                 try { typingInChat = CompetitiveUI.IsChatInputOpen || NativeUI.IsOpen; } catch { }
+                if (!typingInChat && Input.anyKeyDown) LocalKeysThisMatch++;
                 if (!typingInChat && !achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
                     Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
                     Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||
@@ -2596,6 +2702,8 @@ namespace CompetitiveRounds
             pendingRegicideCheck = false;
             LocalShotsThisMatch = 0;
             LocalBlocksThisMatch = 0;
+            LocalKeysThisMatch = 0;
+            LocalActiveSecondsThisMatch = 0f;
             LocalBulletsFiredThisMatch = 0;
             LocalBulletsHitThisMatch = 0;
             LocalBlocksActivatedThisMatch = 0;

@@ -434,32 +434,17 @@ namespace CompetitiveRounds
         }
     }
 
-    // CardChoiceVisuals.Show puts up the giant card-pick UI between rounds.
-    // The skin preview underneath the card array runs a particle system
-    // (bullet trail, gun particles) that costs CPU for the entire 8-12s the
-    // pick UI is up. Pause that ParticleSystem when the picker shows — it
-    // looks identical (the particles freeze in place rather than animating)
-    // and the card render itself uses no particles. ROUNDS' CardChoiceVisuals
-    // private field is ___currentSkin.
-    [HarmonyPatch(typeof(CardChoiceVisuals), "Show")]
-    internal class CardChoiceVisualsShowParticlePause
-    {
-        static void Postfix(CardChoiceVisuals __instance)
-        {
-            if (!PerfGate.Check(Plugin.PerfPauseCardPickParticles)) return;
-            if (__instance == null) return;
-            try
-            {
-                var f = typeof(CardChoiceVisuals).GetField("currentSkin",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                var skin = f?.GetValue(__instance) as GameObject;
-                if (skin == null) return;
-                var ps = skin.GetComponentInChildren<ParticleSystem>();
-                if (ps != null) { ps.Pause(); PerfGate.Hit("PauseCardPickParticles"); }
-            }
-            catch { }
-        }
-    }
+    // REMOVED v1.28.3 (bug #29): CardChoiceVisualsShowParticlePause. It paused
+    // the card-pick visualizer's first ParticleSystem to save CPU while the
+    // pick UI was up — but that ParticleSystem IS the picker's character body:
+    // vanilla CardChoiceVisuals.Show clones the PlayerSkinBank skin template
+    // and Play()s exactly that system. Our Postfix ran in the same frame,
+    // before a single particle had been emitted, so "freeze in place" really
+    // meant "freeze at zero particles" — the pick-phase body rendered
+    // invisible (face + cosmetics unaffected; they aren't particle-driven).
+    // Verified live: 29 patch hits in the session where Sid reproduced it
+    // 100% in a room-code ranked lobby. The CPU win was one paused particle
+    // system for ~10s — not worth a patch at all.
 
     // MenuControllerHandler.Update runs every frame even when the player is in
     // an active match — the menu controller routes pad/keyboard input to the

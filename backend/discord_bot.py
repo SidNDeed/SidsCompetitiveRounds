@@ -220,6 +220,8 @@ async def on_ready():
     if not nag_pending_async_matches.is_running(): nag_pending_async_matches.start()
     if not poll_bug_reports.is_running(): poll_bug_reports.start()
     if not poll_bug_report_events.is_running(): poll_bug_report_events.start()
+    if not push_rank_role_colors.is_running(): push_rank_role_colors.start()
+    if not grant_booster_gold.is_running(): grant_booster_gold.start()
     # Chat bridge: subscribe to the WS firehose so we can forward in-game
     # messages to the Discord channel. Discord -> in-game goes the other way
     # via on_message below. The poll_chat_catchup task above is a belt-and-
@@ -340,13 +342,31 @@ def _claim_msg_id(msg_id: str) -> bool:
     return True
 
 
+def _entry_msg_id(data: dict) -> str:
+    """Canonical dedup key for a chat entry. The server stamps every message
+    with its DB row id and sends THE SAME id via both the WS broadcast and
+    /chat/recent, so the live path and the catchup poll agree on identity.
+    (The old composite key embedded the timestamp — and the WS broadcast carried
+    a broadcast-time stamp while /chat/recent carried the row's created_at: same
+    message, two keys, so every WS-relayed message was eligible for a second
+    post from the poll. Bug #34.) Id-less entries (persist failure / older API)
+    fall back to the legacy composite."""
+    mid = data.get("id")
+    if mid is not None:
+        return f"db:{mid}"
+    content = (data.get("message") or "").strip()
+    return f"{data.get('steam_id') or data.get('discord_id') or ''}|{data.get('timestamp') or ''}|{content[:80]}"
+
+
 async def _forward_ingame_to_discord(data: dict) -> bool:
     """Render one ingame chat entry into the Discord channel. Returns True on
-    success. Two-layer dedup:
-      1. Synchronous _claim_msg_id — wins the race between WS path and catchup
-         poll (which both run concurrently and can both pass the ts check).
-      2. _last_relayed_ts — kept as a coarse "don't bother with old messages"
-         filter so cold-start catchup doesn't iterate hundreds of historical rows."""
+    success. Dedup layers:
+      1. Synchronous _claim_msg_id on the DB-id key — wins the race between the
+         WS path and the catchup poll AND matches across them (same id on both).
+      2. _last_relayed_ts — coarse "don't bother with old messages" filter for
+         id-LESS (legacy/persist-failed) entries only. Id-bearing entries rely
+         on the claim set + startup priming instead — the WS stamp and the DB
+         created_at were never comparable values."""
     global _last_relayed_ts
     if (data.get("source") or "") != "ingame":
         return False
@@ -354,13 +374,11 @@ async def _forward_ingame_to_discord(data: dict) -> bool:
     if not content:
         return False
     ts = data.get("timestamp")
-    if ts and _last_relayed_ts and ts <= _last_relayed_ts:
+    if data.get("id") is None and ts and _last_relayed_ts and ts <= _last_relayed_ts:
         return False
     # Claim the message id BEFORE any await — synchronous so the second concurrent
-    # caller sees the first's add and bails. ts + steam_id + first 80 chars of msg
-    # is unique enough for chat (collisions are vanishingly unlikely).
-    msg_id = f"{data.get('steam_id') or data.get('discord_id') or ''}|{ts or ''}|{content[:80]}"
-    if not _claim_msg_id(msg_id):
+    # caller sees the first's add and bails.
+    if not _claim_msg_id(_entry_msg_id(data)):
         return False
     name = data.get("display_name") or "player"
     rating = data.get("rating")
@@ -387,10 +405,19 @@ async def _forward_ingame_to_discord(data: dict) -> bool:
         return False
 
 
+_catchup_primed = False
+
+
 async def _catchup_ingame_since():
-    """On WS (re)connect, pull /chat/recent and forward any ingame entries
-    newer than _last_relayed_ts. Closes the gap where the bot's WS was down
-    and the server broadcast had no subscriber."""
+    """On WS (re)connect, pull /chat/recent and forward any ingame entries we
+    haven't relayed. Closes the gap where the bot's WS was down and the server
+    broadcast had no subscriber.
+
+    First call after bot boot PRIMES instead of posting: it claims every entry
+    currently in /chat/recent without sending. The claim set is in-memory, so
+    after a restart it's empty — without priming, the first catchup would
+    re-post up to 50 messages the previous bot process already relayed."""
+    global _catchup_primed
     if http_session is None:
         return
     try:
@@ -407,6 +434,12 @@ async def _catchup_ingame_since():
         print(f"[CHAT] catchup fetch failed: {e}")
         return
     msgs = payload.get("messages") or []
+    if not _catchup_primed:
+        for m in msgs:
+            _claim_msg_id(_entry_msg_id(m))
+        _catchup_primed = True
+        print(f"[CHAT] catchup primed {len(msgs)} pre-boot entries (not re-posted)")
+        return
     forwarded = 0
     for m in msgs:  # already chronological (oldest first)
         if await _forward_ingame_to_discord(m):
@@ -705,16 +738,37 @@ async def poll_team_queue_beacon():
 # Polls /bug-reports/recent every 30s, posts new ones to BUG_REPORTS_CHANNEL.
 # Only metadata + description — no log content and no triage comments (per
 # Sid: keep the public-ish channel free of attached game logs).
+#
+# v1.29 (#30/#38): ack-based delivery. The API returns reports whose
+# channel_posted_at is NULL; after a successful post we ack. A bot restart
+# mid-window can no longer swallow a report. Each report also gets its own
+# THREAD under the feed message — comments/status changes are posted into
+# the thread, which gives the "organized bug category" Sid asked for.
 seen_bug_reports = set()
+
+
+async def _bug_thread_for(channel, bug_num: int):
+    """Find the existing thread for bug #N in the feed channel (active or
+    archived). Returns None when there isn't one."""
+    prefix = f"#{bug_num} "
+    try:
+        for th in channel.threads:
+            if th.name.startswith(prefix) or th.name == f"#{bug_num}":
+                return th
+        async for th in channel.archived_threads(limit=100):
+            if th.name.startswith(prefix) or th.name == f"#{bug_num}":
+                return th
+    except Exception as ex:
+        print(f"[BUG-THREAD] lookup for #{bug_num} failed: {ex}")
+    return None
+
 
 @tasks.loop(seconds=30)
 async def poll_bug_reports():
     if not BUG_REPORTS_CHANNEL_ID:
         return
     try:
-        # Look back 90s so a missed tick doesn't drop a report. Dedup is via
-        # the set so repeated fetches of the same row are harmless.
-        data = await api_get("/bug-reports/recent?seconds=90")
+        data = await api_get("/bug-reports/recent?unposted=true")
         if not data or not data.get("reports"):
             return
         channel = bot.get_channel(BUG_REPORTS_CHANNEL_ID)
@@ -753,7 +807,17 @@ async def poll_bug_reports():
             embed.add_field(name="Reporter", value=f"`{who}` (mod v{mod})", inline=False)
             embed.set_footer(text=f"Triage in-game (F5 -> Admin -> Bug Reports) or quote as #{bug_num}.")
             try:
-                await channel.send(embed=embed)
+                msg = await channel.send(embed=embed)
+                # One thread per bug — replies/status changes land in it.
+                try:
+                    await msg.create_thread(
+                        name=f"#{bug_num} {who[:40]} — {cat}"[:100],
+                        auto_archive_duration=10080,  # 7 days
+                    )
+                except Exception as tex:
+                    print(f"[BUG-THREAD] create for #{bug_num} failed: {tex}")
+                # Ack only after the channel post succeeded.
+                await api_post(f"/internal/bug-reports/{rid}/channel-posted")
             except Exception as ex:
                 print(f"[BUG-REPORT-POST] send failed for #{bug_num}: {ex}")
     except Exception as e:
@@ -766,42 +830,86 @@ async def poll_bug_reports():
 #   - 'created' events (they just submitted; no useful DM)
 #   - events where actor_steam_id == reporter_steam_id (don't DM yourself)
 #   - reporters with no discord_id linked (can't DM)
+#
+# v1.29 (#38): ack-based delivery — the API serves events whose notified_at
+# is NULL; we ack each one after handling it (DM sent, posted to the bug's
+# thread, or permanently undeliverable). Previously a 90s rolling window +
+# in-memory dedup dropped every event that landed while the bot was
+# restarting/deploying — which is exactly when comment sweeps happen.
 seen_bug_events = set()
+
+
+async def _ack_bug_events(event_ids):
+    if not event_ids or http_session is None or not API_SECRET_KEY:
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/bug-reports/events/ack",
+            json={"event_ids": list(event_ids)},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[BUG-DM] ack failed: {resp.status} {(await resp.text())[:120]}")
+    except Exception as ex:
+        print(f"[BUG-DM] ack error: {ex}")
+
 
 @tasks.loop(seconds=30)
 async def poll_bug_report_events():
     try:
-        # Look back 90s so a missed tick doesn't drop an event. Dedup via the
-        # set so repeated fetches of the same row are harmless.
-        data = await api_get("/bug-reports/events/recent?seconds=90")
+        data = await api_get("/bug-reports/events/recent?unnotified=true")
         if not data or not data.get("events"):
             return
+        to_ack = []
         for e in data["events"]:
             eid = e.get("event_id")
-            if not eid or eid in seen_bug_events:
+            if not eid:
                 continue
-            seen_bug_events.add(eid)
-            if len(seen_bug_events) > 2000:
-                seen_bug_events.clear()
+            if eid in seen_bug_events:
+                # Already handled this process-lifetime — the earlier ack must
+                # have failed (or raced); just re-ack, don't re-send.
+                to_ack.append(eid)
+                continue
+
+            etype = e.get("event_type")
+            bug_num = e.get("bug_number") or 0
+            # Mirror comments + status changes into the bug's feed-channel
+            # thread (v1.29, #30) regardless of DM deliverability.
+            if etype in ("comment", "status_change"):
+                try:
+                    await _post_bug_event_to_thread(e)
+                except Exception as tex:
+                    print(f"[BUG-THREAD] event post for #{bug_num} failed: {tex}")
 
             reporter_discord = e.get("reporter_discord_id")
             if not reporter_discord:
+                # Nothing to DM — reporter unlinked. Delivered as far as
+                # possible; ack so it stops coming back.
+                seen_bug_events.add(eid)
+                to_ack.append(eid)
                 continue
-            etype = e.get("event_type")
             reporter_steam = e.get("reporter_steam_id")
             # Don't DM someone about their OWN action (their own comment or
             # status change) — but DO send the 'created' confirmation, which
             # carries the how-to-reply hint.
             if etype != "created" and e.get("actor_steam_id") and reporter_steam and \
                e["actor_steam_id"] == reporter_steam:
+                seen_bug_events.add(eid)
+                to_ack.append(eid)
                 continue  # self-attributed; no point pinging yourself
 
             # Resolve the Discord user. fetch_user falls back to a REST call
-            # if the user isn't in any shared guild cache.
+            # if the user isn't in any shared guild cache. Transient failure →
+            # DON'T ack; the next poll retries.
             try:
                 user = bot.get_user(int(reporter_discord))
                 if not user:
                     user = await bot.fetch_user(int(reporter_discord))
+            except discord.NotFound:
+                seen_bug_events.add(eid)
+                to_ack.append(eid)
+                continue
             except Exception as ex:
                 print(f"[BUG-DM] fetch_user({reporter_discord}) failed: {ex}")
                 continue
@@ -856,7 +964,9 @@ async def poll_bug_report_events():
                     embed.add_field(name="Your report", value=snippet, inline=False)
                 embed.add_field(name=f"{actor} says", value=comment_text[:1024], inline=False)
             else:
-                # Unknown event type — skip silently.
+                # Unknown event type — nothing to send; ack so it doesn't loop.
+                seen_bug_events.add(eid)
+                to_ack.append(eid)
                 continue
 
             embed.add_field(
@@ -868,12 +978,48 @@ async def poll_bug_report_events():
             try:
                 await user.send(embed=embed)
                 print(f"[BUG-DM] #{bug_num} → {user} ({reporter_discord}): {etype}")
+                seen_bug_events.add(eid)
+                to_ack.append(eid)
             except discord.Forbidden:
+                # DMs closed — permanently undeliverable; ack.
                 print(f"[BUG-DM] #{bug_num} → {reporter_discord} forbidden (DMs closed)")
+                seen_bug_events.add(eid)
+                to_ack.append(eid)
             except Exception as ex:
+                # Transient (rate limit / gateway blip) — no ack, retried next poll.
                 print(f"[BUG-DM] #{bug_num} → {reporter_discord} failed: {ex}")
+        if len(seen_bug_events) > 2000:
+            seen_bug_events.clear()
+        await _ack_bug_events(to_ack)
     except Exception as ex:
         print(f"poll_bug_report_events error: {ex}")
+
+
+async def _post_bug_event_to_thread(e):
+    """Mirror a comment / status change into the bug's feed-channel thread."""
+    if not BUG_REPORTS_CHANNEL_ID:
+        return
+    channel = bot.get_channel(BUG_REPORTS_CHANNEL_ID)
+    if channel is None:
+        return
+    bug_num = e.get("bug_number") or 0
+    thread = await _bug_thread_for(channel, bug_num)
+    if thread is None:
+        return
+    actor = e.get("actor_name") or "Someone"
+    if e.get("event_type") == "status_change":
+        new_s = (e.get("new_status") or "?").upper()
+        text_out = f"**{actor}** → **{new_s}**"
+        if e.get("comment"):
+            text_out += f"\n{e['comment'][:1500]}"
+    else:
+        text_out = f"**{actor}:** {(e.get('comment') or '')[:1800]}"
+    try:
+        if getattr(thread, "archived", False):
+            await thread.edit(archived=False)
+        await thread.send(text_out)
+    except Exception as ex:
+        print(f"[BUG-THREAD] send to #{bug_num} thread failed: {ex}")
 
 
 # ── 2v2 Series Result Posting ─────────────────────────────────────
@@ -1043,6 +1189,112 @@ async def sync_roles_periodic():
 
 @sync_roles_periodic.before_loop
 async def before_sync(): await bot.wait_until_ready()
+
+
+# ── Rank role color push (v1.29) ──────────────────────────────────
+# Sends the guild's ACTUAL rank-role colors to the API so in-game rank
+# displays (leaderboard rank column, 'Current Rank' title) match Discord
+# exactly. Runs every 6h + on startup; cheap (one POST).
+
+def _clean_rank_name(role_name: str) -> str:
+    """'Master V 2270-2329' -> 'Master V'; 'Beginner 1515>' -> 'Beginner'."""
+    parts = [p for p in role_name.split() if not any(ch.isdigit() for ch in p)]
+    return " ".join(parts).strip()
+
+
+@tasks.loop(hours=6)
+async def push_rank_role_colors():
+    if http_session is None or not API_SECRET_KEY:
+        return
+    payload = []
+    for guild in bot.guilds:
+        for role in guild.roles:
+            if role.name in ALL_RANK_ROLE_NAMES and role.color.value:
+                payload.append({
+                    "name": _clean_rank_name(role.name),
+                    "color": f"#{role.color.value:06X}",
+                })
+        if payload:
+            break  # one guild is the source of truth
+    if not payload:
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/rank-role-colors",
+            json=payload,
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            body = await resp.text()
+            print(f"[RANK-COLORS] pushed {len(payload)} colors: {resp.status} {body[:80]}")
+    except Exception as ex:
+        print(f"[RANK-COLORS] push failed: {ex}")
+
+
+@push_rank_role_colors.before_loop
+async def before_rank_colors(): await bot.wait_until_ready()
+
+
+# ── Discord booster monthly gold (v1.29) ──────────────────────────
+# Every boosting member with a linked account gets 2000 gold per calendar
+# month. Idempotent server-side (unique on discord_id+month), so this daily
+# sweep just re-asserts the current month. Note: Discord's API doesn't expose
+# HOW MANY boosts a single member has — a double-booster still gets one
+# monthly grant.
+
+@tasks.loop(hours=12)
+async def grant_booster_gold():
+    if http_session is None or not API_SECRET_KEY:
+        return
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    for guild in bot.guilds:
+        boosters = list(guild.premium_subscribers or [])
+        if not boosters:
+            continue
+        for member in boosters:
+            try:
+                async with http_session.post(
+                    f"{API_BASE_URL}/api/v1/internal/booster-grant",
+                    params={"discord_id": str(member.id), "month": month},
+                    headers={"X-Internal-Key": API_SECRET_KEY},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status != 200:
+                        print(f"[BOOSTER] grant for {member} failed: {resp.status}")
+                        continue
+                    data = await resp.json()
+                status = data.get("status")
+                if status == "granted":
+                    print(f"[BOOSTER] {member} granted {data.get('amount')}g for {month}")
+                    try:
+                        await member.send(
+                            f"💜 Thanks for boosting the server! **{data.get('amount', 2000)} gold** "
+                            f"has been added to your Competitive ROUNDS account for {month}."
+                        )
+                    except Exception:
+                        pass  # DMs closed — gold still granted
+                elif status == "not_linked":
+                    # Nudge once per process lifetime so we don't nag monthly.
+                    if member.id not in _booster_nudged:
+                        _booster_nudged.add(member.id)
+                        try:
+                            await member.send(
+                                "💜 You're boosting the server — boosters get **2000 gold/month** "
+                                "in Competitive ROUNDS! Link your account to claim it: in-game "
+                                "F5 → My Stats → Get Link Code, then `!link YOUR_CODE` here."
+                            )
+                        except Exception:
+                            pass
+            except Exception as ex:
+                print(f"[BOOSTER] {member}: {ex}")
+            await asyncio.sleep(0.3)
+
+
+_booster_nudged = set()
+
+
+@grant_booster_gold.before_loop
+async def before_booster(): await bot.wait_until_ready()
 
 LB_PAGE_SIZE = 20
 LB_TOTAL_FETCH = 100  # we cache this many; pages of 20 ⇒ up to 5 pages
@@ -1828,11 +2080,13 @@ class LiveBetView(discord.ui.View):
         self.p1_name = p1_name
         self.p2_steam = p2_steam
         self.p2_name = p2_name
-        # 6 buttons: 3 amounts × 2 players. Layout in two rows.
+        # 8 buttons: (3 preset amounts + custom) × 2 players, in three rows.
         for amt in LIVE_BET_AMOUNTS:
             self.add_item(LiveBetButton(self, amt, on_p1=True))
         for amt in LIVE_BET_AMOUNTS:
             self.add_item(LiveBetButton(self, amt, on_p1=False))
+        self.add_item(LiveBetCustomButton(self, on_p1=True))
+        self.add_item(LiveBetCustomButton(self, on_p1=False))
 
 class LiveBetButton(discord.ui.Button):
     def __init__(self, parent: LiveBetView, amount: int, on_p1: bool):
@@ -1882,6 +2136,83 @@ class LiveBetButton(discord.ui.Button):
             f"✅ Bet placed: **{self.amount:,}g** on **{side_name}**.",
             ephemeral=True,
         )
+
+
+async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
+                             bet_on_steam: str, side_name: str, amount: int):
+    """Shared bet-placement path for preset buttons + the custom modal."""
+    try:
+        result = await api_post(
+            "/discord-bets",
+            params={
+                "discord_user_id": str(interaction.user.id),
+                "series_id": series_id,
+                "bet_on_steam_id": bet_on_steam,
+                "amount": amount,
+            },
+        )
+    except Exception as e:
+        await interaction.response.send_message(f"Bet failed: {e}", ephemeral=True)
+        return
+    if not result:
+        await interaction.response.send_message("Bet failed: backend unreachable.", ephemeral=True)
+        return
+    if isinstance(result, dict) and "error" in result:
+        err = result.get("error", "")
+        try:
+            err_obj = json.loads(err)
+            msg = err_obj.get("detail") or err
+        except Exception:
+            msg = err
+        await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        f"✅ Bet placed: **{amount:,}g** on **{side_name}**.",
+        ephemeral=True,
+    )
+
+
+class LiveBetCustomButton(discord.ui.Button):
+    """v1.29: opens a modal for an arbitrary bet amount (1 – 100,000g)."""
+    def __init__(self, parent: LiveBetView, on_p1: bool):
+        side_label = parent.p1_name if on_p1 else parent.p2_name
+        style = discord.ButtonStyle.primary if on_p1 else discord.ButtonStyle.success
+        super().__init__(label=f"Custom on {side_label[:12]}...", style=style, row=2,
+                         custom_id=f"livebetc:{parent.series_id}:{'p1' if on_p1 else 'p2'}")
+        self.parent_view = parent
+        self.on_p1 = on_p1
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(LiveBetModal(self.parent_view, self.on_p1))
+
+
+class LiveBetModal(discord.ui.Modal):
+    def __init__(self, parent: LiveBetView, on_p1: bool):
+        side = parent.p1_name if on_p1 else parent.p2_name
+        super().__init__(title=f"Bet on {side[:38]}")
+        self.parent_view = parent
+        self.on_p1 = on_p1
+        self.amount_input = discord.ui.TextInput(
+            label="Gold amount (1 - 2,000)",
+            placeholder="e.g. 1250",
+            min_length=1, max_length=5, required=True,
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = (self.amount_input.value or "").replace(",", "").replace(".", "").strip()
+        try:
+            amount = int(raw)
+        except ValueError:
+            await interaction.response.send_message("❌ Enter a whole number of gold, e.g. `1250`.", ephemeral=True)
+            return
+        if amount < 1 or amount > 2000:
+            await interaction.response.send_message("❌ Bet must be between 1 and 2,000 gold.", ephemeral=True)
+            return
+        bet_on_steam = self.parent_view.p1_steam if self.on_p1 else self.parent_view.p2_steam
+        side_name = self.parent_view.p1_name if self.on_p1 else self.parent_view.p2_name
+        await _place_discord_bet(interaction, self.parent_view.series_id, bet_on_steam, side_name, amount)
+
 
 def _format_live_bet_embed(s: dict) -> discord.Embed:
     p1n = s.get("p1_name", "?"); p2n = s.get("p2_name", "?")

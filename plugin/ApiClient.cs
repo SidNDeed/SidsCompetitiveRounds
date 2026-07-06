@@ -87,6 +87,9 @@ namespace CompetitiveRounds
             public int gold;
             public string title;
             public string title_color;
+            // v1.29 — rank tier (mirrors Discord rank roles; color synced from Discord).
+            public string rank_name;
+            public string rank_color;
         }
 
         [Serializable]
@@ -150,6 +153,10 @@ namespace CompetitiveRounds
             public List<float> top_card_win_rates;
             public List<string> recent_form; // "W","L","W"... last 20
             public List<float> rating_history; // oldest→newest
+            // Parallel to rating_history: days since 2020-01-01 per snapshot
+            // (v1.29, "Elo over time" compare graph). Same length as
+            // rating_history, including the prepended 1500 baseline point.
+            public List<float> rating_history_times;
             // Compare-tab metrics (v1.28). Scalars parse free via JsonUtility;
             // worst_cards + region_breakdown are nested arrays parsed manually.
             public int avg_fps;
@@ -172,6 +179,22 @@ namespace CompetitiveRounds
             public int h2h_casual_losses;
             public int h2h_series_wins;
             public int h2h_series_losses;
+            // Compare-tab metrics (v1.29). Flat scalars — JsonUtility parses
+            // them automatically (learning #73), zero manual parser changes.
+            public float avg_keys_per_sec;
+            public int avg_keys_per_game;
+            public int avg_game_seconds;
+            public int bets_won;
+            public int bets_lost;
+            public int bet_gold_net;
+            public int sweeps_given;
+            public int sweeps_taken;
+            public int casual_wins;
+            public int casual_losses;
+            public string rank_name;
+            public string rank_color;
+            public float team_rating;              // 0 = no completed 2v2 series
+            public int team_completed_series;
         }
 
         [Serializable]
@@ -257,11 +280,14 @@ namespace CompetitiveRounds
             {"rise_from_the_ashes", new[]{"Rise from the Ashes", "Win 5-0 with Phoenix without losing a life"}},
             {"the_comeback_kid",    new[]{"The Comeback Kid",    "Win after being down 0-4"}},
             {"stacked_deck",        new[]{"Stacked Deck",        "Get 5 copies of one card in a game"}},
-            {"regicide",            new[]{"Regicide",            "Win against Sid in a ranked series"}},
+            // Key stays 'regicide' (server rows unchanged); display renamed v1.29.
+            {"regicide",            new[]{"Sid Slayer",          "Win against Sid in a ranked series"}},
+            {"stan_slayer",         new[]{"Stan Slayer",         "Win against Stan in a ranked series"}},
             {"pacifist",            new[]{"Pacifist",            "Win a game without firing a single shot"}},
             {"immovable_object",    new[]{"Immovable Object",    "Win a game without moving or jumping"}},
             {"master_rank",         new[]{"Master",              "Reach 2030 rating in ranked (1v1 or 2v2)"}},
             {"team_sweep",          new[]{"Tag Team Sweep",      "Win a 2v2 game 5-0"}},
+            {"grand_master",        new[]{"Grand Master",        "Reach 2330 rating in ranked (1v1 or 2v2)"}},
         };
 
         // Cached data
@@ -283,6 +309,8 @@ namespace CompetitiveRounds
             // this the player's ready_at would go stale during their match
             // and the server would auto-forfeit their NEXT match.
             Plugin.Instance.StartCoroutine(TournamentHeartbeatLoop());
+            // v1.29: always-on presence ping (mod-clients-online counter).
+            Plugin.Instance.StartCoroutine(PresenceLoop());
         }
 
         // Per-match dispatch memo. Mirrors the per-tab one in NativeUI but
@@ -1681,7 +1709,9 @@ namespace CompetitiveRounds
             int localBlocksActivated = 0, int localBlocksSuccessful = 0,
             // v1.25 — average FPS this match. localAvgFps from our own counter, opponentAvgFps
             // sniffed from their Photon `cr_fps` custom property (0 = no data / no mod).
-            int localAvgFps = 0, int opponentAvgFps = 0)
+            int localAvgFps = 0, int opponentAvgFps = 0,
+            // v1.29 — Compare-tab input-rate metrics (keys per active-combat second).
+            int localKeysPressed = 0, float localActiveSeconds = 0f)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -1716,6 +1746,10 @@ namespace CompetitiveRounds
             sb.Append($"\"local_blocks_successful\":{localBlocksSuccessful},");
             sb.Append($"\"local_avg_fps\":{localAvgFps},");
             sb.Append($"\"opponent_avg_fps\":{opponentAvgFps},");
+            // v1.29 input-rate metrics (advisory, not in HMAC). InvariantCulture so a
+            // comma-decimal locale can't produce invalid JSON (learning #47 family).
+            sb.Append($"\"local_keys_pressed\":{localKeysPressed},");
+            sb.Append($"\"local_active_seconds\":{localActiveSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)},");
             string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
@@ -1868,7 +1902,9 @@ namespace CompetitiveRounds
 
         // ── Data fetching ─────────────────────────────────────
 
-        public static void FetchLeaderboard(int limit = 100, int minMatches = 1)
+        // limit 100 → 500 (v1.29): with 105 ranked players the top-100 fetch cut
+        // the bottom of the board off. The tab already pages locally at 100/page.
+        public static void FetchLeaderboard(int limit = 500, int minMatches = 1)
         {
             IsLoading = true;
             Plugin.Instance.StartCoroutine(GetRequest(
@@ -1936,6 +1972,8 @@ namespace CompetitiveRounds
                                 entry.gold = ExtractJsonInt(chunk, "gold");
                                 entry.title = ExtractJsonString(chunk, "title");
                                 entry.title_color = ExtractJsonString(chunk, "title_color");
+                                entry.rank_name = ExtractJsonString(chunk, "rank_name");
+                                entry.rank_color = ExtractJsonString(chunk, "rank_color");
 
                                 if (!string.IsNullOrEmpty(entry.steam_id))
                                     entries.Add(entry);
@@ -2029,6 +2067,32 @@ namespace CompetitiveRounds
             ));
         }
 
+        // Signature of the last cosmetic set we pushed to Photon — publish only on change.
+        private static string _lastPublishedCosmeticSig;
+
+        private static string BuildCosmeticSig(PlayerStatsData s)
+        {
+            if (s == null) return "";
+            try
+            {
+                return string.Join("|", new[]
+                {
+                    s.active_trail_sku ?? "", s.active_trail_color ?? "",
+                    s.active_player_color_sku ?? "", s.active_player_color_hex ?? "",
+                    s.active_player_effect_sku ?? "",
+                    s.active_cursor_color_sku ?? "", s.active_cursor_color_hex ?? "",
+                    s.active_title ?? "", s.active_title_color ?? "",
+                    s.display_name ?? "",
+                    s.active_nametag_skus != null ? string.Join(",", s.active_nametag_skus) : "",
+                });
+            }
+            catch { return Guid.NewGuid().ToString(); } // never block a publish on a sig failure
+        }
+
+        /// <summary>Force the next stats refresh to republish cosmetics (used by the
+        /// shop equip paths so a just-equipped item still pushes immediately).</summary>
+        public static void InvalidateCosmeticSig() { _lastPublishedCosmeticSig = null; }
+
         public static void FetchPlayerStats(string steamId, bool force = false)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
@@ -2050,15 +2114,26 @@ namespace CompetitiveRounds
                             // the Shop + NametagStyler both read.
                             ParseTopCards(CachedPlayerStats, response);
                             Plugin.Log.LogInfo($"Player stats loaded for {CachedPlayerStats.display_name}");
-                            // Re-publish Photon trail props whenever local stats refresh — covers
-                            // the initial load + any later trail changes.
-                            try { TrailCosmetic.PublishLocalProps(); } catch { }
-                            try { PlayerColorCosmetic.PublishLocalProps(); } catch { }
-                            try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }
-                            // Cursor color is local-only — re-apply the tinted hardware cursor.
-                            try { CursorColorCosmetic.ApplyFromStats(); } catch { }
-                            // Re-publish nametag styles into LocalPlayer.NickName for the same reason.
-                            try { NametagStyler.PublishToPhoton(); } catch { }
+                            // Re-publish Photon cosmetic props when they CHANGED (v1.29,
+                            // F5-lag fix). Every stats refresh used to fire 5 publishes —
+                            // SetCustomProperties + NickName each broadcast to every
+                            // client in the room, so opening the menu mid-match caused a
+                            // visible network blip on the OPPONENT's side too. Photon
+                            // player props persist for the room lifetime and the
+                            // room-join hooks republish on entry, so identical
+                            // re-publishes add nothing.
+                            string cosmeticSig = BuildCosmeticSig(CachedPlayerStats);
+                            if (cosmeticSig != _lastPublishedCosmeticSig)
+                            {
+                                _lastPublishedCosmeticSig = cosmeticSig;
+                                try { TrailCosmetic.PublishLocalProps(); } catch { }
+                                try { PlayerColorCosmetic.PublishLocalProps(); } catch { }
+                                try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }
+                                // Cursor color is local-only — re-apply the tinted hardware cursor.
+                                try { CursorColorCosmetic.ApplyFromStats(); } catch { }
+                                // Re-publish nametag styles into LocalPlayer.NickName too.
+                                try { NametagStyler.PublishToPhoton(); } catch { }
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -2320,8 +2395,9 @@ namespace CompetitiveRounds
             }
             catch { }
 
-            // Parse recent_rating_history
+            // Parse recent_rating_history (rating + snapshot date per entry).
             data.rating_history = new List<float>();
+            data.rating_history_times = new List<float>();
             try
             {
                 int rhStart = response.IndexOf("\"recent_rating_history\"");
@@ -2334,6 +2410,8 @@ namespace CompetitiveRounds
                         string arr = response.Substring(arrStart, arrEnd - arrStart + 1);
                         if (arr != "[]")
                         {
+                            var epoch = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                            float lastT = 0f;
                             var parts = arr.Split(new[] { "\"rating\"" }, StringSplitOptions.None);
                             for (int i = 1; i < parts.Length; i++)
                             {
@@ -2349,6 +2427,23 @@ namespace CompetitiveRounds
                                     {
                                         float val = float.Parse(parts[i].Substring(vStart, vEnd - vStart), System.Globalization.CultureInfo.InvariantCulture);
                                         data.rating_history.Add(val);
+                                        // Snapshot date → fractional days since 2020-01-01 (the
+                                        // "Elo over time" x-axis). Missing/bad date → nudge past
+                                        // the previous point so the lists stay parallel.
+                                        float t = lastT + 0.01f;
+                                        try
+                                        {
+                                            string ds = ExtractJsonString(parts[i], "date");
+                                            if (!string.IsNullOrEmpty(ds))
+                                            {
+                                                var dt = DateTime.Parse(ds, System.Globalization.CultureInfo.InvariantCulture,
+                                                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
+                                                t = (float)(dt - epoch).TotalDays;
+                                            }
+                                        }
+                                        catch { }
+                                        lastT = t;
+                                        data.rating_history_times.Add(t);
                                     }
                                 }
                             }
@@ -2368,7 +2463,13 @@ namespace CompetitiveRounds
             // 1500 for everyone?") and turns the first slope into a meaningful "your
             // first series gain/loss from baseline" visualization.
             if (data.rating_history.Count > 0 && data.rating_history[0] != 1500f)
+            {
                 data.rating_history.Insert(0, 1500f);
+                // Keep the time axis parallel: baseline sits one day before the
+                // first real snapshot.
+                if (data.rating_history_times.Count > 0)
+                    data.rating_history_times.Insert(0, data.rating_history_times[0] - 1f);
+            }
             Plugin.Log.LogInfo($"[STATS] Parsed {data.rating_history.Count} rating history points for {data.display_name} (oldest→newest, 1500 baseline prepended)");
         }
 
@@ -2405,6 +2506,50 @@ namespace CompetitiveRounds
                         }
                         catch { }
                     }
+                }
+            ));
+        }
+
+        // ── Compare-tab achievement grid (v1.29) ─────────────────
+        // Per-player unlocked-achievement sets for the "Achievement Grid"
+        // compare metric, plus key→display-name captured from the same
+        // response (so renamed achievements — Regicide → Sid Slayer — show
+        // their server-side names without a client mapping).
+
+        public static readonly Dictionary<string, Dictionary<string, AchievementData>> CompareAchievements =
+            new Dictionary<string, Dictionary<string, AchievementData>>();
+        public static readonly Dictionary<string, string> AchievementDisplayNames =
+            new Dictionary<string, string>();
+        private static readonly HashSet<string> _compareAchFetching = new HashSet<string>();
+
+        public static void FetchAchievementsForCompare(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            if (CompareAchievements.ContainsKey(steamId) || _compareAchFetching.Contains(steamId)) return;
+            _compareAchFetching.Add(steamId);
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/achievements/{steamId}",
+                (success, response) =>
+                {
+                    _compareAchFetching.Remove(steamId);
+                    if (!success) return;
+                    try
+                    {
+                        var dict = new Dictionary<string, AchievementData>();
+                        var parts = response.Split(new[] { "\"achievement_key\"" }, StringSplitOptions.None);
+                        for (int i = 1; i < parts.Length; i++)
+                        {
+                            string key = ExtractJsonString(parts[i], "");
+                            if (string.IsNullOrEmpty(key)) continue;
+                            bool unlocked = parts[i].Contains("\"unlocked\":true") || parts[i].Contains("\"unlocked\": true");
+                            dict[key] = new AchievementData { achievement_key = key, unlocked = unlocked };
+                            string nm = ExtractJsonString(parts[i], "name");
+                            if (!string.IsNullOrEmpty(nm)) AchievementDisplayNames[key] = nm;
+                        }
+                        CompareAchievements[steamId] = dict;
+                        NativeUI.MarkDirty();
+                    }
+                    catch { }
                 }
             ));
         }
@@ -2577,71 +2722,77 @@ namespace CompetitiveRounds
                 $"{baseUrl}/api/v1/players/{steamId}/matches?limit={limit}",
                 (success, response) =>
                 {
-                    if (success)
-                    {
-                        try
-                        {
-                            if (string.IsNullOrEmpty(response) || response.Trim() == "[]")
-                            {
-                                CachedMatchHistory = new List<MatchHistoryEntry>();
-                                return;
-                            }
-
-                            // Manual parse since JsonUtility can't handle
-                            // nested arrays (cards_picked) in list items
-                            var entries = new List<MatchHistoryEntry>();
-                            // Split by match_id to find each entry
-                            var parts = response.Split(new[] { "\"match_id\"" }, StringSplitOptions.None);
-
-                            for (int i = 1; i < parts.Length; i++)
-                            {
-                                var entry = new MatchHistoryEntry();
-                                var chunk = parts[i];
-
-                                entry.match_id = ExtractJsonString(chunk, "");
-                                entry.opponent_name = ExtractJsonString(chunk, "opponent_name");
-                                entry.opponent_steam_id = ExtractJsonString(chunk, "opponent_steam_id");
-                                entry.opponent_title = ExtractJsonString(chunk, "opponent_title");
-                                entry.opponent_title_color = ExtractJsonString(chunk, "opponent_title_color");
-
-                                entry.player_rounds_won = ExtractJsonInt(chunk, "player_rounds_won");
-                                entry.opponent_rounds_won = ExtractJsonInt(chunk, "opponent_rounds_won");
-                                entry.player_points = ExtractJsonInt(chunk, "player_points");
-                                entry.opponent_points = ExtractJsonInt(chunk, "opponent_points");
-                                entry.won = chunk.Contains("\"won\":true") || chunk.Contains("\"won\": true");
-                                entry.is_ranked = chunk.Contains("\"is_ranked\":true") || chunk.Contains("\"is_ranked\": true");
-                                entry.ended_at = ExtractJsonString(chunk, "ended_at");
-
-                                // Extract card names from cards_picked array
-                                entry.cards_display = ExtractCardNames(chunk);
-
-                                // Extract opponent card names from opponent_cards_picked array
-                                entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
-
-                                // Extract series fields for BO3 grouping
-                                entry.series_id = ExtractJsonString(chunk, "series_id");
-                                entry.series_score = ExtractJsonString(chunk, "series_score");
-                                entry.series_rating_change = ExtractJsonFloat(chunk, "series_rating_change");
-                                entry.xp_gained = ExtractJsonInt(chunk, "xp_gained");
-                                entry.gold_gained = ExtractJsonInt(chunk, "gold_gained");
-                                entry.series_gold_gained = ExtractJsonInt(chunk, "series_gold_gained");
-                                entry.player_fps_avg = ExtractJsonInt(chunk, "player_fps_avg");
-                                entry.opponent_fps_avg = ExtractJsonInt(chunk, "opponent_fps_avg");
-
-                                entries.Add(entry);
-                            }
-
-                            CachedMatchHistory = entries;
-                            Plugin.Log.LogInfo($"Match history loaded: {CachedMatchHistory.Count} matches");
-                        }
-                        catch (Exception ex)
-                        {
-                            CachedMatchHistory = new List<MatchHistoryEntry>();
-                            Plugin.Log.LogError($"Failed to parse match history: {ex.Message}");
-                        }
-                    }
+                    if (!success) return;
+                    // v1.29 (F5 lag): parse SPREAD ACROSS FRAMES. The manual
+                    // string-split parse of up to 2000 matches (~hundreds of KB)
+                    // used to run in one callback — a solid main-thread hitch the
+                    // moment the response landed after every menu open, felt
+                    // in-game as "F5 causes lag". The chunked coroutine caps the
+                    // per-frame work; the list lands identically, ~20 frames later.
+                    Plugin.Instance.StartCoroutine(ParseMatchHistoryChunked(response));
                 }
             ));
+        }
+
+        private static System.Collections.IEnumerator ParseMatchHistoryChunked(string response)
+        {
+            if (string.IsNullOrEmpty(response) || response.Trim() == "[]")
+            {
+                CachedMatchHistory = new List<MatchHistoryEntry>();
+                yield break;
+            }
+            string[] parts = null;
+            try
+            {
+                parts = response.Split(new[] { "\"match_id\"" }, StringSplitOptions.None);
+            }
+            catch (Exception ex)
+            {
+                CachedMatchHistory = new List<MatchHistoryEntry>();
+                Plugin.Log.LogError($"Failed to parse match history: {ex.Message}");
+                yield break;
+            }
+            var entries = new List<MatchHistoryEntry>(Math.Max(0, parts.Length - 1));
+            const int PER_FRAME = 80;
+            for (int i = 1; i < parts.Length; i++)
+            {
+                try
+                {
+                    entries.Add(ParseMatchHistoryChunkEntry(parts[i]));
+                }
+                catch { }
+                if (i % PER_FRAME == 0) yield return null;
+            }
+            CachedMatchHistory = entries;
+            Plugin.Log.LogInfo($"Match history loaded: {CachedMatchHistory.Count} matches (chunked parse)");
+        }
+
+        private static MatchHistoryEntry ParseMatchHistoryChunkEntry(string chunk)
+        {
+            var entry = new MatchHistoryEntry();
+            entry.match_id = ExtractJsonString(chunk, "");
+            entry.opponent_name = ExtractJsonString(chunk, "opponent_name");
+            entry.opponent_steam_id = ExtractJsonString(chunk, "opponent_steam_id");
+            entry.opponent_title = ExtractJsonString(chunk, "opponent_title");
+            entry.opponent_title_color = ExtractJsonString(chunk, "opponent_title_color");
+            entry.player_rounds_won = ExtractJsonInt(chunk, "player_rounds_won");
+            entry.opponent_rounds_won = ExtractJsonInt(chunk, "opponent_rounds_won");
+            entry.player_points = ExtractJsonInt(chunk, "player_points");
+            entry.opponent_points = ExtractJsonInt(chunk, "opponent_points");
+            entry.won = chunk.Contains("\"won\":true") || chunk.Contains("\"won\": true");
+            entry.is_ranked = chunk.Contains("\"is_ranked\":true") || chunk.Contains("\"is_ranked\": true");
+            entry.ended_at = ExtractJsonString(chunk, "ended_at");
+            entry.cards_display = ExtractCardNames(chunk);
+            entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
+            entry.series_id = ExtractJsonString(chunk, "series_id");
+            entry.series_score = ExtractJsonString(chunk, "series_score");
+            entry.series_rating_change = ExtractJsonFloat(chunk, "series_rating_change");
+            entry.xp_gained = ExtractJsonInt(chunk, "xp_gained");
+            entry.gold_gained = ExtractJsonInt(chunk, "gold_gained");
+            entry.series_gold_gained = ExtractJsonInt(chunk, "series_gold_gained");
+            entry.player_fps_avg = ExtractJsonInt(chunk, "player_fps_avg");
+            entry.opponent_fps_avg = ExtractJsonInt(chunk, "opponent_fps_avg");
+            return entry;
         }
 
         /// <summary>Parse a /matches JSON array into a MatchHistoryEntry list. Manual parse
@@ -2883,8 +3034,14 @@ namespace CompetitiveRounds
             // the bare Steam ID until their next /stats call.
             string myName = MatchTracker.LocalDisplayName ?? mySteamId;
             string oppName = GameStateWatcher.OpponentDisplayName ?? oppSteamId;
+            // Room context → server decides is_private (queue/tournament rooms
+            // keep the tight bet lock and no PRIVATE tag; code-join rooms get
+            // the wider private window). #36.
+            string roomName = "";
+            try { roomName = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
             string url = $"{baseUrl}/api/v1/series/preflight?p1_steam_id={Escape(mySteamId)}&p2_steam_id={Escape(oppSteamId)}"
-                       + $"&p1_name={Escape(myName)}&p2_name={Escape(oppName)}&sig={sig}";
+                       + $"&p1_name={Escape(myName)}&p2_name={Escape(oppName)}"
+                       + $"&room_id={UnityEngine.Networking.UnityWebRequest.EscapeURL(roomName)}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 if (ok)
@@ -2893,11 +3050,47 @@ namespace CompetitiveRounds
                     if (!string.IsNullOrEmpty(sid))
                     {
                         ActiveRankedSeriesId = sid;
-                        Plugin.Log.LogInfo($"[PREFLIGHT] series_id={sid} (private room)");
+                        Plugin.Log.LogInfo($"[PREFLIGHT] series_id={sid} status={ExtractJsonString(resp, "status")}");
+                        // Resumed series (#33): adopt the server-side BO3 tally so
+                        // the HUD doesn't restart at 0-0 after a DC + reconnect.
+                        try
+                        {
+                            string status = ExtractJsonString(resp, "status");
+                            if (status == "exists")
+                            {
+                                int p1w = (int)ExtractJsonFloat(resp, "p1_wins");
+                                int p2w = (int)ExtractJsonFloat(resp, "p2_wins");
+                                if (p1w > 0 || p2w > 0)
+                                {
+                                    string sp1 = ExtractJsonString(resp, "p1_steam_id");
+                                    bool meIsP1 = sp1 == mySteamId;
+                                    int myWins = meIsP1 ? p1w : p2w;
+                                    int oppWins = meIsP1 ? p2w : p1w;
+                                    GameStateWatcher.AdoptSeriesScore(myWins, oppWins);
+                                    CompetitiveUI.QueueNotification(
+                                        $"Resuming series at {myWins}-{oppWins}",
+                                        new Color(1f, 0.85f, 0.3f), 4f);
+                                }
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[PREFLIGHT] score adopt failed: {ex.Message}"); }
                     }
                     else
                     {
-                        Plugin.Log.LogInfo($"[PREFLIGHT] response: {resp}");
+                        // v1.29 (#42): the server refuses a series when either player
+                        // has ranked explicitly disabled. Downgrade the client's view
+                        // of the match to casual so the HUD + report agree with the
+                        // server (which also enforces this at match submit).
+                        string status = ExtractJsonString(resp, "status");
+                        if (status == "not_ranked")
+                        {
+                            Plugin.Log.LogInfo("[PREFLIGHT] server says not_ranked (a player has ranked disabled) — treating match as casual");
+                            try { GameStateWatcher.DowngradeToCasual("opponent has ranked disabled"); } catch { }
+                        }
+                        else
+                        {
+                            Plugin.Log.LogInfo($"[PREFLIGHT] response: {resp}");
+                        }
                     }
                 }
                 else
@@ -3151,11 +3344,17 @@ namespace CompetitiveRounds
                             // Both ready — room assigned, join it!
                             string room = ExtractJsonString(response, "room_name");
                             string region = ExtractJsonString(response, "photon_region");
+                            // Adopt the pre-created series id (parity with the
+                            // /queue/ready both_ready path). Without it the
+                            // poll-discovered client never posted live points
+                            // and the betting lock logic ran blind (#36).
+                            string sid = ExtractJsonString(response, "series_id");
+                            if (!string.IsNullOrEmpty(sid)) ActiveRankedSeriesId = sid;
                             IsQueuePolling = false;
                             CurrentQueueState = QueueState.Idle;
                             LastPollData = null;
                             Plugin.SetPendingRoom(room, region);
-                            Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"})");
+                            Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"}) series={ActiveRankedSeriesId ?? "(none)"}");
                             CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
                             NativeUI.MarkDirty();
                         }
@@ -3235,6 +3434,9 @@ namespace CompetitiveRounds
 
         public static int CachedQueueSearching { get; private set; } = 0;
         public static int CachedQueueTotal { get; private set; } = 0;
+        // Mod clients online right now (v1.29). Fed by /queue/count while the
+        // menu is open and by the always-on presence loop while it isn't.
+        public static int CachedOnlineCount { get; private set; } = 0;
         private static float queueCountTimer = 0f;
         private static float queueCountInterval = 10f;
 
@@ -3244,18 +3446,23 @@ namespace CompetitiveRounds
             if (queueCountTimer < queueCountInterval) return;
             queueCountTimer = 0f;
 
+            // steam_id makes this call count US toward the online figure.
+            string sid = MatchTracker.LocalSteamId;
+            string q = (!string.IsNullOrEmpty(sid) && sid != "unknown") ? $"?steam_id={Escape(sid)}" : "";
             Plugin.Instance.StartCoroutine(GetRequest(
-                $"{baseUrl}/api/v1/queue/count",
+                $"{baseUrl}/api/v1/queue/count{q}",
                 (success, response) =>
                 {
                     if (success)
                     {
                         int s = ExtractJsonInt(response, "searching");
                         int t = ExtractJsonInt(response, "total");
-                        if (s != CachedQueueSearching || t != CachedQueueTotal)
+                        int on = ExtractJsonInt(response, "online");
+                        if (s != CachedQueueSearching || t != CachedQueueTotal || on != CachedOnlineCount)
                         {
                             CachedQueueSearching = s;
                             CachedQueueTotal = t;
+                            CachedOnlineCount = on;
                             NativeUI.MarkDirty();
                         }
                     }
@@ -3264,6 +3471,36 @@ namespace CompetitiveRounds
         }
 
         public static void ResetQueueCountTimer() { queueCountTimer = queueCountInterval; }
+
+        /// <summary>Always-on presence heartbeat (v1.29). Pings every 60s while the
+        /// game runs — with or without the F5 menu — so the server can count mod
+        /// clients online, and keeps CachedOnlineCount fresh for the queue tab.</summary>
+        public static IEnumerator PresenceLoop()
+        {
+            yield return new WaitForSeconds(15f);
+            while (true)
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (!string.IsNullOrEmpty(sid) && sid != "unknown")
+                {
+                    yield return GetRequest(
+                        $"{baseUrl}/api/v1/presence/ping?steam_id={Escape(sid)}",
+                        (success, response) =>
+                        {
+                            if (success)
+                            {
+                                int on = ExtractJsonInt(response, "online");
+                                if (on != CachedOnlineCount)
+                                {
+                                    CachedOnlineCount = on;
+                                    NativeUI.MarkDirty();
+                                }
+                            }
+                        });
+                }
+                yield return new WaitForSeconds(60f);
+            }
+        }
 
         // ════════════════════════════════════════════════════════════
         // 2v2 RANKED (Phase 2 — client side)
@@ -4810,6 +5047,36 @@ namespace CompetitiveRounds
                     .Replace("\r", "\\r");
         }
 
+        // Full JSON string escaping — every control char < 0x20 gets \uXXXX'd.
+        // Escape() above only covers \ " \n \r, which is fine for our own clean
+        // strings but NOT for log files: a raw TAB, NUL, or console ESC byte in
+        // a log embedded as a JSON literal makes the server's (strict) JSON
+        // parser reject the whole request with 422 BEFORE validation runs —
+        // that's why one player's log attach failed on every submit (#31) while
+        // the no-log retry succeeded. Use this for any payload that carries
+        // text we didn't author (logs, user-typed descriptions).
+        private static string JsonEscapeFull(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            var sb = new System.Text.StringBuilder(s.Length + 64);
+            foreach (char c in s)
+            {
+                switch (c)
+                {
+                    case '\\': sb.Append("\\\\"); break;
+                    case '"':  sb.Append("\\\""); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < 0x20 || c == 0x7F) sb.Append($"\\u{(int)c:x4}");
+                        else sb.Append(c);
+                        break;
+                }
+            }
+            return sb.ToString();
+        }
+
         // ── Bug reports ──────────────────────────────────────────────────────
         // POST /api/v1/bug-reports. Server gzips + persists the log blob to
         // disk; we just pass plain text up. Caps log payload at ~3.5MB to
@@ -4826,19 +5093,21 @@ namespace CompetitiveRounds
             }
             if (logText != null && logText.Length > BUG_REPORT_LOG_CAP_CHARS)
                 logText = logText.Substring(logText.Length - BUG_REPORT_LOG_CAP_CHARS); // tail-most window
+            // JsonEscapeFull everywhere — logs (and even typed descriptions) can
+            // carry raw control bytes that strict JSON parsers reject (#31).
             var sb = new System.Text.StringBuilder();
             sb.Append("{");
-            sb.Append($"\"steam_id\":\"{Escape(steamId)}\"");
-            sb.Append($",\"display_name\":\"{Escape(displayName ?? "")}\"");
-            sb.Append($",\"mod_version\":\"{Escape(Plugin.ModVersion)}\"");
-            sb.Append($",\"game_version\":\"{Escape(UnityEngine.Application.version ?? "")}\"");
-            sb.Append($",\"severity\":\"{Escape(severity ?? "medium")}\"");
-            sb.Append($",\"category\":\"{Escape(category ?? "other")}\"");
-            sb.Append($",\"description\":\"{Escape(description ?? "")}\"");
+            sb.Append($"\"steam_id\":\"{JsonEscapeFull(steamId)}\"");
+            sb.Append($",\"display_name\":\"{JsonEscapeFull(displayName ?? "")}\"");
+            sb.Append($",\"mod_version\":\"{JsonEscapeFull(Plugin.ModVersion)}\"");
+            sb.Append($",\"game_version\":\"{JsonEscapeFull(UnityEngine.Application.version ?? "")}\"");
+            sb.Append($",\"severity\":\"{JsonEscapeFull(severity ?? "medium")}\"");
+            sb.Append($",\"category\":\"{JsonEscapeFull(category ?? "other")}\"");
+            sb.Append($",\"description\":\"{JsonEscapeFull(description ?? "")}\"");
             if (!string.IsNullOrEmpty(reproSteps))
-                sb.Append($",\"repro_steps\":\"{Escape(reproSteps)}\"");
+                sb.Append($",\"repro_steps\":\"{JsonEscapeFull(reproSteps)}\"");
             if (!string.IsNullOrEmpty(logText))
-                sb.Append($",\"log_text\":\"{Escape(logText)}\"");
+                sb.Append($",\"log_text\":\"{JsonEscapeFull(logText)}\"");
             sb.Append("}");
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/bug-reports", sb.ToString(),

@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.28.2";
+        public const string ModVersion = "1.29.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -51,7 +51,9 @@ namespace CompetitiveRounds
         // v1.26.9 — user-noticeable batch (cap-style perf wins).
         internal static ConfigEntry<bool> PerfBulletHitParticleCap;
         internal static ConfigEntry<bool> PerfClampObjectPoolInit;
-        internal static ConfigEntry<bool> PerfPauseCardPickParticles;
+        // PerfPauseCardPickParticles REMOVED v1.28.3 — the "skin preview particle
+        // system" it paused IS the picker's body; pausing it the frame it spawns
+        // rendered the pick-phase character invisible (bug #29).
         // Preferred timezone for tournament time display. Values: "Local" (use OS),
         // "UTC", or an IANA / Windows tz ID that TimeZoneInfo.FindSystemTimeZoneById
         // resolves. Persisted so it survives restarts; applies only to tournament UI.
@@ -255,12 +257,6 @@ namespace CompetitiveRounds
                 true,
                 "Clamp ObjectPool initial-spawn to 4 instances while in a match (lazy growth instead of pre-allocating 30+ up-front). Reduces frame stutter when new pools are constructed mid-game."
             );
-            PerfPauseCardPickParticles = Config.Bind(
-                "Performance", "PauseCardPickParticles",
-                true,
-                "Pause the player-skin particle system while the between-round card picker is up (8-12s per pick). Particles freeze in place, no visual gap. Saves CPU on long card-pick stretches."
-            );
-
             TournamentTimezone = Config.Bind(
                 "Tournaments", "Timezone",
                 "Local",
@@ -388,6 +384,11 @@ namespace CompetitiveRounds
         private bool joinInitiated = false;
         private string targetRoom;
         private string targetRegion;
+        // One automatic full-sequence retry before giving up (#26 — "matched but
+        // failed to auto join"). A slow Photon region connect or a transient
+        // disconnect race eats the first 30s window; a second attempt from a
+        // clean state recovers it without the player touching anything.
+        private int joinAttempts = 0;
 
         private void Awake()
         {
@@ -402,6 +403,7 @@ namespace CompetitiveRounds
                 joinInitiated = false;
                 state = JoinState.Idle;
                 stateTimer = 0f;
+                joinAttempts = 0;
                 return;
             }
 
@@ -416,17 +418,32 @@ namespace CompetitiveRounds
             // could then suppress legitimate DC-win counting. Clear everything.
             if (state != JoinState.Idle && stateTimer > 30f)
             {
-                Plugin.Log.LogWarning($"[QUEUE-JOINER] Timed out waiting for room join (state={state}, target='{targetRoom}'), resetting all queue state");
+                joinAttempts++;
+                if (joinAttempts <= 1)
+                {
+                    // First timeout: retry the whole sequence from a clean slate.
+                    // The pending room is still set, so the Idle branch below
+                    // re-initiates leave/connect/join on the next frame.
+                    Plugin.Log.LogWarning($"[QUEUE-JOINER] Join attempt {joinAttempts} timed out (state={state}, target='{targetRoom}') — retrying once");
+                    joinInitiated = false;
+                    state = JoinState.Idle;
+                    stateTimer = 0f;
+                    try { GameStateWatcher.LeavingForRanked = false; } catch { }
+                    CompetitiveUI.ShowNotification("Slow connection — retrying ranked room join...", new Color(1f, 0.8f, 0.3f), 6f);
+                    return;
+                }
+                Plugin.Log.LogWarning($"[QUEUE-JOINER] Timed out waiting for room join after {joinAttempts} attempts (state={state}, target='{targetRoom}'), resetting all queue state");
                 Plugin.ClearPendingRoom();
                 joinInitiated = false;
                 state = JoinState.Idle;
                 stateTimer = 0f;
+                joinAttempts = 0;
                 targetRoom = null;
                 targetRegion = null;
                 // We may have set this when state went to LeavingRoom — clear so a
                 // future legitimate leave doesn't mistakenly cancel match-result counting.
                 try { GameStateWatcher.LeavingForRanked = false; } catch { }
-                CompetitiveUI.ShowNotification("Failed to join ranked room", new Color(1f, 0.4f, 0.4f));
+                CompetitiveUI.ShowNotification("Failed to join ranked room — please requeue", new Color(1f, 0.4f, 0.4f), 8f);
                 return;
             }
 
@@ -590,6 +607,7 @@ namespace CompetitiveRounds
             joinInitiated = false;
             state = JoinState.Idle;
             stateTimer = 0f;
+            joinAttempts = 0;
 
             // Clear force region flag so NCH works normally for vanilla play afterward
             try
@@ -1086,6 +1104,9 @@ namespace CompetitiveRounds
         // every frame while an input device is waiting, so the bad-state window
         // would otherwise spam the log).
         static float _lastSpawnGuardLog = -999f;
+        // First moment of the CURRENT continuous suppression episode (-1 = not
+        // suppressing). Drives the #37 watchdog below.
+        static float _suppressEpisodeStart = -1f;
 
         static bool Prefix(PlayerAssigner __instance, InputDevice inputDevice, bool isAI)
         {
@@ -1113,10 +1134,28 @@ namespace CompetitiveRounds
                             "[SPAWN-GUARD] CreatePlayer suppressed — client not in a room " +
                             $"(state={PhotonNetwork.NetworkClientState}). Will retry when connected.");
                     }
+                    // ── #37 watchdog: the guard can be CORRECT forever ──────────
+                    // Bug #37's log: casual quickplay left the room, a region-ping
+                    // sweep + Network restart followed, and a stale game scene kept
+                    // polling CreatePlayer with no room for the rest of the session
+                    // — guard suppressing each time, "Press jump to join" dead. The
+                    // suppressed state can't self-heal without a room, so after 30s
+                    // of CONTINUOUS suppression, pull the vanilla ripcord
+                    // (NetworkRestart → clean return to menu) instead of letting
+                    // the player sit on an unjoinable screen.
+                    if (_suppressEpisodeStart < 0f) _suppressEpisodeStart = Time.unscaledTime;
+                    else if (Time.unscaledTime - _suppressEpisodeStart > 30f)
+                    {
+                        _suppressEpisodeStart = -1f;  // one shot per episode
+                        Plugin.Log.LogWarning("[SPAWN-GUARD] stuck >30s with no room — NetworkRestart back to menu");
+                        try { CompetitiveUI.ShowNotification("Connection was lost — returning to menu.", new Color(1f, 0.8f, 0.3f), 6f); } catch { }
+                        try { NetworkConnectionHandler.instance.NetworkRestart(); } catch { }
+                    }
                 }
                 catch { }
                 return false;  // skip vanilla; LateUpdate retries next frame
             }
+            _suppressEpisodeStart = -1f;  // in a room (or offline) — episode over
 
             if (Plugin.Pending2v2Slot < 0) return true;            // not in 2v2 mode
             if (PhotonNetwork.OfflineMode) return true;
@@ -2274,9 +2313,16 @@ namespace CompetitiveRounds
                         // tint and the offset into RetintAfterChildrenSpawn (which now
                         // re-asserts the X position for several frames) makes the spread
                         // survive vanilla's re-anchor. pickerID 0,1,2,3 → X -6,-2,+2,+6.
+                        //
+                        // 2v2 ONLY (bug #29): in a 1v1 ranked room this spread shoved the
+                        // visualizer body to X=-6 (picker 0 = orange) / X=-2 while the face
+                        // applied to the un-shifted CardChoiceVisuals root — so the orange
+                        // player's pick-phase character rendered as a floating face with no
+                        // body, 100% of the time. Vanilla 1v1 centers the single visualizer
+                        // correctly; only 4-picker cr_ff rooms need the anti-stack spread.
                         if (Plugin.Instance != null && skin != null)
                         {
-                            float xOffset = (pickerID - 1.5f) * 4.0f;
+                            float xOffset = Diag2v2.IsActive() ? (pickerID - 1.5f) * 4.0f : float.NaN;
                             Plugin.Instance.StartCoroutine(
                                 CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID, xOffset));
                         }
@@ -2787,6 +2833,8 @@ namespace CompetitiveRounds
         private static int retryCount = 0;
         private static int maxRetries = 30; // 30 seconds of trying — enough for slow scene loads
         private static bool loggedFirstInjection = false; // Suppress verbose re-injection logs, not warnings
+        private static bool wasInRoomLastCheck = false;   // detect room-exit → fresh retry budget
+        private static bool loggedBudgetExhausted = false;
 
         /// <summary>
         /// Resets injector state — called when persistent object respawns
@@ -2807,6 +2855,28 @@ namespace CompetitiveRounds
             if (checkTimer < 1f) return;
             checkTimer = 0f;
 
+            // Only inject when not in a Photon room (i.e., on main menu). This
+            // check MUST come before the retry accounting: the old order burned
+            // the whole 30-try budget at 1/sec while the player was mid-match
+            // (button destroyed on room join → injected=false → tick, tick,
+            // tick...), so after any game longer than 30s the button never came
+            // back for the rest of the session (bug #27, "menu item always
+            // disappears after a few games"). In-room ticks are free now, and
+            // leaving a room refreshes the budget.
+            bool inRoomNow = false;
+            try { inRoomNow = Photon.Pun.PhotonNetwork.InRoom; } catch { }
+            if (inRoomNow)
+            {
+                wasInRoomLastCheck = true;
+                return;
+            }
+            if (wasInRoomLastCheck)
+            {
+                wasInRoomLastCheck = false;
+                retryCount = 0;          // fresh budget back at the menu
+                loggedBudgetExhausted = false;
+            }
+
             // Already injected and button still exists
             if (injected && injectedButton != null) return;
 
@@ -2818,12 +2888,19 @@ namespace CompetitiveRounds
                 // Don't re-log on re-injection — already logged once
             }
 
-            // Stop trying after max retries (resets on scene change)
-            if (retryCount >= maxRetries) return;
+            // After the budget, don't stop forever — degrade to a slow retry
+            // (every ~10s) as a self-healing failsafe. A menu that exists but
+            // briefly lacked its QUIT button (mid-rebuild) used to strand us.
+            if (retryCount >= maxRetries)
+            {
+                if (!loggedBudgetExhausted)
+                {
+                    loggedBudgetExhausted = true;
+                    Plugin.Log.LogWarning($"[MENU] Injection still failing after {maxRetries} attempts — dropping to slow retry (10s)");
+                }
+                if (retryCount % 10 != 0) { retryCount++; return; }
+            }
             retryCount++;
-
-            // Only inject when not in a Photon room (i.e., on main menu)
-            if (Photon.Pun.PhotonNetwork.InRoom) return;
 
             try
             {
@@ -3980,10 +4057,64 @@ namespace CompetitiveRounds
             return removed;
         }
 
+        /// <summary>Scrub ChildRPC's string→delegate DICTIONARIES (bug #39/#40).
+        /// Card components register RPC handlers by Dictionary.Add with a fixed
+        /// key ("ShieldChargeCollide" etc.) in Start() and Remove them in
+        /// OnDestroy(). When OnDestroy aborts mid-teardown (the same #92 NRE —
+        /// proven in lopi's log: ShieldCharge.OnDestroy threw, then next game
+        /// ShieldCharge.Start threw ArgumentException 'same key already added'
+        /// and ABORTED BEFORE its SuperFirstBlockAction subscription — so
+        /// blocking worked but the charge never fired), the stale key blocks
+        /// the next game's re-registration. Remove entries whose delegate
+        /// targets are ALL destroyed objects; live or mixed entries are kept.</summary>
+        public static int ScrubChildRpcDictionaries(UnityEngine.Component rpc)
+        {
+            if (rpc == null) return 0;
+            int removed = 0;
+            try
+            {
+                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                       | System.Reflection.BindingFlags.Instance;
+                foreach (var f in rpc.GetType().GetFields(bf))
+                {
+                    var dict = f.GetValue(rpc) as System.Collections.IDictionary;
+                    if (dict == null || dict.Count == 0) continue;
+                    System.Collections.Generic.List<object> deadKeys = null;
+                    foreach (System.Collections.DictionaryEntry e in dict)
+                    {
+                        var del = e.Value as System.Delegate;
+                        if (del == null) continue;
+                        bool anyLive = false, anyDead = false;
+                        foreach (var d in del.GetInvocationList())
+                        {
+                            var uo = d.Target as UnityEngine.Object;
+                            bool zombie = !object.ReferenceEquals(uo, null) && uo == null;
+                            if (zombie) anyDead = true; else anyLive = true;
+                        }
+                        if (anyDead && !anyLive)
+                        {
+                            if (deadKeys == null) deadKeys = new System.Collections.Generic.List<object>();
+                            deadKeys.Add(e.Key);
+                        }
+                    }
+                    if (deadKeys != null)
+                        foreach (var k in deadKeys)
+                        {
+                            dict.Remove(k);
+                            removed++;
+                            Plugin.Log.LogWarning($"[BLOCK-RESET] removed stale ChildRPC key '{k}' (dead card handler — aborted OnDestroy)");
+                        }
+                }
+            }
+            catch { }
+            return removed;
+        }
+
         // Scrub every delegate holder a card can hook on a player. Covers the
         // confirmed zombie hosts (Block actions, Gun.ShootPojectileAction,
         // HealthHandler.reviveAction, PlayerCollision.collideWithPlayerAction)
-        // plus CharacterData/stats for the same pattern on other cards.
+        // plus CharacterData/stats for the same pattern on other cards, and
+        // the ChildRPC dictionaries (stale keys abort card Start()s, #39/#40).
         public static int ScrubPlayerDelegates(Player p)
         {
             int n = 0;
@@ -3998,6 +4129,9 @@ namespace CompetitiveRounds
                     n += ScrubDeadDelegateFields(p.data.weaponHandler.gun);
                 n += ScrubDeadDelegateFields(p.GetComponent<PlayerCollision>());
                 n += ScrubDeadDelegateFields(p.GetComponent<PlayerVelocity>());
+                var childRpc = (UnityEngine.Component)p.GetComponentInChildren<ChildRPC>(true)
+                            ?? p.GetComponentInParent<ChildRPC>();
+                n += ScrubChildRpcDictionaries(childRpc);
             }
             catch { }
             return n;
@@ -4222,6 +4356,72 @@ namespace CompetitiveRounds
         // off-screen bug — opponents on the shipped build hit it every round).
         public const float MapTransitionGuardSec = 2.0f;
 
+        // Recolor a particle system's LIVE particles in place (#28, final form).
+        // History: a bare Clear(true) killed burst-emission walls until next
+        // round (invisible Velvet walls); the v1.28.3 attempt (Clear +
+        // Simulate(0, restart) + Play) was supposed to re-fire the burst, but
+        // Sid's retest showed burst systems can still come back EMPTY — Unity
+        // doesn't reliably re-fire a t=0 burst from a zero-length Simulate. So
+        // stop depending on re-emission entirely: rewrite the CURRENT
+        // particles' startColor via GetParticles/SetParticles (positions,
+        // lifetimes, per-particle alpha untouched) and let main.startColor
+        // (set by the caller) cover everything emitted afterwards. Nothing is
+        // cleared, so nothing can go invisible — on any emitter type.
+        private static ParticleSystem.Particle[] _retintBuf;
+        private static void RetintLiveParticles(ParticleSystem ps, Color tinted, Color? sparkle = null, uint tick = 0)
+        {
+            try
+            {
+                int live = ps.particleCount;
+                if (live <= 0) return;
+                if (_retintBuf == null || _retintBuf.Length < live)
+                    _retintBuf = new ParticleSystem.Particle[Mathf.Max(live, 256)];
+                int n = ps.GetParticles(_retintBuf);
+                var rgb = new Color32(
+                    (byte)Mathf.Clamp(Mathf.RoundToInt(tinted.r * 255f), 0, 255),
+                    (byte)Mathf.Clamp(Mathf.RoundToInt(tinted.g * 255f), 0, 255),
+                    (byte)Mathf.Clamp(Mathf.RoundToInt(tinted.b * 255f), 0, 255),
+                    0);
+                // Premium sparkle: live particles alternate between the base and the
+                // glint color by a stable per-particle key (randomSeed), matching the
+                // random-between-two-colors look of new emissions.
+                Color32 rgb2 = rgb;
+                bool twoTone = sparkle.HasValue;
+                if (twoTone)
+                {
+                    var sp = sparkle.Value;
+                    rgb2 = new Color32(
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(sp.r * 255f), 0, 255),
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(sp.g * 255f), 0, 255),
+                        (byte)Mathf.Clamp(Mathf.RoundToInt(sp.b * 255f), 0, 255),
+                        0);
+                }
+                for (int i = 0; i < n; i++)
+                {
+                    Color32 cur = _retintBuf[i].startColor;
+                    // tick rotates which particles carry the glint (the twinkle loop);
+                    // tick=0 gives the stable emission-matching split. Only 1-in-3
+                    // particles glint at a time — a sparse drift, not a strobe.
+                    var pick = twoTone && (((_retintBuf[i].randomSeed + tick) % 3u) == 0u) ? rgb2 : rgb;
+                    _retintBuf[i].startColor = new Color32(pick.r, pick.g, pick.b, cur.a);
+                }
+                if (n > 0) ps.SetParticles(_retintBuf, n);
+            }
+            catch { }
+        }
+
+        // Cap a lifted color's brightest channel so bright hues can't blow out
+        // into HDR bloom (Sid: platinum/gilded were "blindingly shiny" — silver
+        // × 1.6 lift = 1.4+ per channel = nuclear bloom). 1.15 keeps a gentle
+        // glow for dark hues (Magma's molten look) without the white-out.
+        private static Color CapBrightness(Color c, float maxChannel = 1.15f)
+        {
+            float mx = Mathf.Max(c.r, Mathf.Max(c.g, c.b));
+            if (mx <= maxChannel || mx <= 0f) return c;
+            float s = maxChannel / mx;
+            return new Color(c.r * s, c.g * s, c.b * s, c.a);
+        }
+
         // Push a color away from grey toward full saturation by `mult` (1 = unchanged).
         // Keeps luminance roughly stable so brightness is set by the lift, not this.
         private static Color SaturateColor(Color c, float mult)
@@ -4243,7 +4443,18 @@ namespace CompetitiveRounds
             string sku = MapColorState.CurrentSku;
             if (string.IsNullOrEmpty(sku))
                 sku = ApiClient.CachedPlayerStats?.active_color_sku;
-            if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku)) return;
+            if (string.IsNullOrEmpty(sku) || !CustomMapColors.IsCustomSku(sku))
+            {
+                // Vanilla/default skin active — un-tint the persistent sky object +
+                // camera clears + backdrop quads so a previous custom skin's
+                // backdrop doesn't linger.
+                RestoreVanillaSky();
+                RestoreCameraBackground();
+                RestoreBackdropQuads();
+                RestoreLighting();
+                _twinkleSystems.Clear();
+                return;
+            }
             // Defer past the transition before touching particles (see MapTransitionGuardSec).
             // Hosted on the persistent Plugin object, NOT the Map — the Map can be destroyed
             // mid-transition, which would kill a Map-hosted coroutine before it applies.
@@ -4262,6 +4473,15 @@ namespace CompetitiveRounds
         private static System.Collections.IEnumerator DelayedApplyTints(string sku)
         {
             yield return new WaitForSeconds(MapTransitionGuardSec);
+            // Stale-apply guard: if the player Shift-cycled again during the wait,
+            // this scheduled apply is for an OLD sku — proven in Sid's log
+            // ("burgundy" tints landing right after "pine" was selected). Skip;
+            // the newer selection has its own apply in flight.
+            if (!string.Equals(MapColorState.CurrentSku, sku, StringComparison.OrdinalIgnoreCase))
+            {
+                Plugin.Log.LogInfo($"[MAPCOLOR] skipped stale deferred tint for {sku} (current={MapColorState.CurrentSku})");
+                yield break;
+            }
             ApplyPhysicalTintsForSku(null, sku); // null → finds the active Map itself
         }
 
@@ -4327,104 +4547,28 @@ namespace CompetitiveRounds
                 // Assignment is ordered by transform path (deterministic across frames AND rounds)
                 // so the order never changes mid-session. We also two-tone the colors (primary /
                 // secondary by path parity) so both colors land in the walls as requested.
-                var wallSystems = new List<ParticleSystem>();
-                foreach (var ps in UnityEngine.Object.FindObjectsOfType<ParticleSystem>())
-                {
-                    if (ps == null) continue;
-                    if (!GetTransformPath(ps.transform).StartsWith("OutOfBounds/", StringComparison.OrdinalIgnoreCase)) continue;
-                    wallSystems.Add(ps);
-                }
-                // Deterministic order → the same wall gets the same sortingFudge every round.
-                wallSystems.Sort((a, b) => string.CompareOrdinal(GetTransformPath(a.transform), GetTransformPath(b.transform)));
-                int boundaryParts = 0;
-                // v1.28.2 — TRUE two-tone walls, finally done right. History:
-                // per-SYSTEM parity (wi%2 or path-hash) was wrong because the
-                // border is several OVERLAPPING systems at the SAME spot — the
-                // topmost draw (sortingFudge) always won, so the walls read as
-                // ONE color (#86) and we retreated to all-secondary. The unit
-                // that must share a color is the WALL GROUP: the child
-                // container under OutOfBounds/ (overlapping layers live in the
-                // same group; different groups are different border segments).
-                // Group-level parity ⇒ segments alternate PRIMARY/SECONDARY
-                // (Magma: red AND amber visible at once) with zero same-spot
-                // color fights, and the per-system sortingFudge stays for
-                // flicker stability. If a map ships a single group, fall back
-                // to spatial cells so two-tone still appears.
-                var groupKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var ps0 in wallSystems)
-                {
-                    string gp = GetTransformPath(ps0.transform).Substring("OutOfBounds/".Length);
-                    int slash = gp.IndexOf('/');
-                    groupKeys.Add(slash >= 0 ? gp.Substring(0, slash) : gp);
-                }
-                bool useSpatialCells = groupKeys.Count < 2;
-                for (int wi = 0; wi < wallSystems.Count; wi++)
-                {
-                    var ps = wallSystems[wi];
-                    try
-                    {
-                        string ppath = GetTransformPath(ps.transform);
-                        bool usePrimary;
-                        if (useSpatialCells)
-                        {
-                            // One container for the whole border → alternate by
-                            // world-position cell so segments still two-tone.
-                            var wp = ps.transform.position;
-                            int cell = Mathf.FloorToInt(wp.x / 14f) + Mathf.FloorToInt(wp.y / 14f);
-                            usePrimary = ((cell % 2) + 2) % 2 == 0;
-                        }
-                        else
-                        {
-                            string gp = ppath.Substring("OutOfBounds/".Length);
-                            int slash = gp.IndexOf('/');
-                            string groupKey = slash >= 0 ? gp.Substring(0, slash) : gp;
-                            usePrimary = StablePathParity(groupKey) == 0;
-                        }
-                        Color layerTint = usePrimary ? c : CustomMapColors.GetSecondaryColor(sku);
-                        Color vanilla = GetCachedVanillaColor(ps);
-                        // COLORIZE (not multiply): scale the TARGET hue by the vanilla
-                        // particle's brightness so the designed hue renders true regardless of
-                        // base art. High lift → the border BLOOMS, so the secondary accent stays
-                        // vivid even after the primary-leaning ColorGrading multiplies the scene.
-                        float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
-                        Color hue = SaturateColor(layerTint, 1.35f);
-                        float lift = 1.05f + 0.55f * Mathf.Clamp01(lum); // 1.05 → 1.60 (glowing accent)
-                        Color tinted = new Color(hue.r * lift, hue.g * lift, hue.b * lift, vanilla.a);
-                        var main = ps.main;
-                        main.startColor = new ParticleSystem.MinMaxGradient(tinted);
-                        // Fixed inter-system draw order — the actual flicker fix. In Unity a LOWER
-                        // sortingFudge draws CLOSER to the camera (on top); higher pushes behind.
-                        // v1.26.10's first cut used positive values (wi*0.05) which shoved the walls
-                        // BEHIND the fudge-0 background atmosphere particles → the dark background
-                        // drew over them and the walls blended into the bg ("maps significantly
-                        // darker"). Use small NEGATIVE steps so every wall system sits just IN FRONT
-                        // of the background (restoring original wall brightness/visibility) while
-                        // each still gets a DISTINCT, stable order (so the flicker stays fixed). The
-                        // magnitude is tiny so walls don't leap in front of players/bullets, which
-                        // render on higher sorting layers anyway. Per-particle distance sort within
-                        // a system is untouched (that's the harmless vanilla "shimmer" we keep).
-                        var psr = ps.GetComponent<ParticleSystemRenderer>();
-                        if (psr != null) psr.sortingFudge = -0.1f - wi * 0.05f;
-                        ps.Clear(true);
-                    }
-                    catch { }
-                    boundaryParts++;
-                }
-
-                // ArtInstance atmosphere particles get the same multiply treatment, but
-                // with a slightly brightened tint so the backdrop reads as a faint glow
-                // behind the walls rather than the same flat shade. We multiply by the
-                // brightness-boosted secondary so the layers are visually distinct.
+                // ── v1.29 round 6: the "OutOfBounds/" pass is RETIRED (learning #118).
+                // Sid's WALLDIAG log proved those 14 systems are the two PLAYERS'
+                // out-of-bounds WARNING effects (OutOfBounds/Particles/Wall, Burst,
+                // ShieldWall, Warning... — 7 per player, playing=False by design,
+                // played by OutOfBoundsHandler only near the boundary). They were
+                // never map walls: the old Clear/Restart code force-played them into
+                // permanent visibility (our "colored border beams"), and clearing
+                // them mid-shift was the ACTUAL invisible-walls bug. They now stay
+                // vanilla (red warnings, gameplay-readable). The visible "walls" of
+                // a skin are the base art's glow slabs — the atmosphere pass below
+                // carries the PRIMARY/SECONDARY two-tone there instead.
+                // ArtInstance atmosphere particles — THE VISIBLE WALLS of a skin
+                // (learning #118): the base art's glow slabs hugging the map
+                // geometry. They now carry the skin's PRIMARY/SECONDARY two-tone
+                // (alternating per system) while the BACKGROUND is carried by the
+                // SFSS light + ambient. That's the wall/background separation Sid
+                // asked for: walls get their designed colors, backdrop its own.
                 int artParts = 0;
+                _twinkleSystems.Clear();
                 try
                 {
-                    // Background atmosphere leans on the PRIMARY (named) color so the map
-                    // reads as its name even from the backdrop alone. v1.28.2: punched up
-                    // from 0.50→0.72 saturation toward the primary (and slightly higher
-                    // lift below) — repeated feedback that backgrounds were "boring". The
-                    // walls now carry BOTH palette colors, so a more confident backdrop
-                    // no longer risks drowning the only accent.
-                    Color bgTint = Color.Lerp(new Color(0.5f, 0.5f, 0.5f), c, 0.72f);
+                    Color secondary = CustomMapColors.GetSecondaryColor(sku);
                     string baseArt = CustomMapColors.GetBaseArt(sku);
                     var ah = ArtHandler.instance;
                     if (ah != null && ah.arts != null)
@@ -4454,6 +4598,10 @@ namespace CompetitiveRounds
                                 try { art.TogglePart(false); } catch { }
                                 continue;
                             }
+                            // Premium sparkle skins: the atmosphere particles ARE the visible
+                            // glitter (the wall border systems are thin edge strips), so they
+                            // get the full-brightness two-color glint instead of the dim haze.
+                            Color? atmoSparkle = CustomMapColors.GetSparkleColor(sku);
                             for (int i = 0; i < partsArr.Length; i++)
                             {
                                 var ps = partsArr[i];
@@ -4462,11 +4610,47 @@ namespace CompetitiveRounds
                                 {
                                     Color vanilla = GetCachedVanillaColor(ps);
                                     float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
-                                    float lift = 0.36f + 0.52f * Mathf.Clamp01(lum); // dimmer than walls, livelier than v1.28.0
-                                    Color tinted = new Color(bgTint.r * lift, bgTint.g * lift, bgTint.b * lift, vanilla.a);
                                     var main = ps.main;
-                                    main.startColor = new ParticleSystem.MinMaxGradient(tinted);
-                                    ps.Clear(true);
+                                    if (atmoSparkle.HasValue)
+                                    {
+                                        // Premium: primary-colored slabs at SUB-BLOOM brightness
+                                        // (Sid: "way too flashy") + a subtle glint. The visible
+                                        // twinkle comes from the shimmer loop re-rolling which
+                                        // particles are glinted a few times a second.
+                                        Color baseHue = SaturateColor(c, 1.15f);
+                                        float gLift = 0.62f + 0.28f * Mathf.Clamp01(lum);
+                                        Color gA = CapBrightness(new Color(baseHue.r * gLift, baseHue.g * gLift, baseHue.b * gLift, vanilla.a), 0.85f);
+                                        Color glintHue = Color.Lerp(gA, SaturateColor(atmoSparkle.Value, 1.0f), 0.5f);
+                                        Color gB = CapBrightness(new Color(glintHue.r * 1.15f, glintHue.g * 1.15f, glintHue.b * 1.15f, vanilla.a), 0.95f);
+                                        main.startColor = new ParticleSystem.MinMaxGradient(gA, gB);
+                                        RetintLiveParticles(ps, gA, gB);
+                                        _twinkleSystems.Add(new TwinkleEntry { ps = ps, baseColor = gA, glintColor = gB });
+                                    }
+                                    else
+                                    {
+                                        // Two-tone: even systems PRIMARY, odd SECONDARY — the
+                                        // designed wall pair, independent of the backdrop.
+                                        // Brightness kept BELOW the bloom threshold (Sid: glow
+                                        // "right above 0") — the faint remaining glow comes
+                                        // from the neutered bloom pass, not HDR colors.
+                                        Color layer = (i % 2 == 0) ? c : secondary;
+                                        Color hue = SaturateColor(layer, 1.30f);
+                                        float lift = 0.70f + 0.30f * Mathf.Clamp01(lum);
+                                        Color tinted = CapBrightness(new Color(hue.r * lift, hue.g * lift, hue.b * lift, vanilla.a), 1.0f);
+                                        main.startColor = new ParticleSystem.MinMaxGradient(tinted);
+                                        RetintLiveParticles(ps, tinted);
+                                    }
+                                    // Green-hunt diagnostic: name every art part with its vanilla
+                                    // + applied color so any hue that still looks wrong on screen
+                                    // is attributable to a specific object from one log line.
+                                    try
+                                    {
+                                        var psr0 = ps.GetComponent<ParticleSystemRenderer>();
+                                        var b = psr0 != null ? psr0.bounds.size : Vector3.zero;
+                                        Color applied = ps.main.startColor.color;
+                                        Plugin.Log.LogInfo($"[MAPCOLOR-ART] part='{ps.gameObject.name}' vanilla=#{(int)(vanilla.r*255):X2}{(int)(vanilla.g*255):X2}{(int)(vanilla.b*255):X2} applied=#{(int)(Mathf.Clamp01(applied.r)*255):X2}{(int)(Mathf.Clamp01(applied.g)*255):X2}{(int)(Mathf.Clamp01(applied.b)*255):X2} size={b.x:F0}x{b.y:F0}");
+                                    }
+                                    catch { }
                                 }
                                 catch { }
                                 artParts++;
@@ -4476,12 +4660,386 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] art-particle tint failed: {ex.Message}"); }
 
-                Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: two-tone walls ({boundaryParts} systems, keying={(useSpatialCells ? "spatial-cells" : "path-groups")}, groups={groupKeys.Count}) + {artParts} primary bg particles; non-base arts off");
+                // v1.29: tint the ACTUAL sky. ArtHandler carries a dedicated
+                // m_background GameObject that the particle passes never touched —
+                // its vanilla (blue-leaning) art is what kept showing through and
+                // made even green skins read blue once the colorFilter stopped
+                // masking it (Sid: "Pine/Forest turned blue").
+                int skyParts = TintArtBackground(sku);
+                // And the flat backdrop itself: color-clearing cameras + per-map
+                // backdrop quads (learning #116 v2 — MainCam clears Depth only, so
+                // whatever is under it paints the sky).
+                ApplyCameraBackground(sku);
+                int quadParts = TintBackdropQuads(sku);
+                if (quadParts > 0) Plugin.Log.LogInfo($"[MAPCOLOR] tinted {quadParts} backdrop quad(s) for {sku}");
+                // The strongest lever: SFSS light + ambient carry the sky and the
+                // shadow beams (learning #116 v3).
+                ApplyLighting(sku);
+
+                EnsureTwinkleLoop();
+                Plugin.Log.LogInfo($"[MAPCOLOR] sku={sku}: {artParts} two-tone wall slab system(s) + {skyParts} sky renderer(s) + lighting; OOB player-warning effects untouched (vanilla)");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] Map tint failed: {ex.Message}"); }
         }
 
         private static bool _loggedScenePaths;
+
+        // ── Camera clear color = THE background (v1.29 final, learning #116) ──
+        // The big flat backdrop is MainCam's clear color — an editor constant
+        // (blue-ish) that vanilla never changes per-art (arts repaint it with
+        // strong colorFilters instead). Setting it directly gives each skin an
+        // exact background with ZERO effect on walls/geometry, and it swaps
+        // instantly on Shift. Vignette + postExposure still shape it into the
+        // soft gradient look.
+        // v2 (learning #116 correction): MainCam clears DEPTH ONLY (proven in
+        // Sid's log: "flags=Depth"), so its backgroundColor is ignored — the
+        // backdrop is rendered by something UNDER it: a lower-depth camera
+        // and/or a per-map full-screen quad. Tint every color-clearing camera
+        // AND every huge backdrop renderer, and dump a one-time [MAPCOLOR-CAMS]
+        // inventory so the real painter is identified from a single test log.
+        private static readonly Dictionary<int, Color> _vanillaCamClears = new Dictionary<int, Color>();
+        private static bool _loggedCams;
+
+        public static void ApplyCameraBackground(string sku)
+        {
+            try
+            {
+                Color? bgN = CustomMapColors.GetBackgroundColor(sku) ?? CustomMapColors.GetMapBlockColor(sku);
+                if (!bgN.HasValue) return;
+                Color bg = bgN.Value;
+                var cams = UnityEngine.Object.FindObjectsOfType<Camera>();
+                foreach (var cam in cams)
+                {
+                    if (cam == null) continue;
+                    if (!_loggedCams)
+                        Plugin.Log.LogInfo($"[MAPCOLOR-CAMS] '{cam.gameObject.name}' depth={cam.depth} flags={cam.clearFlags} bg={cam.backgroundColor} rt={(cam.targetTexture != null)} mask={cam.cullingMask}");
+                    // ROUND 8 FIX (the universal green cast, learning #119): only
+                    // SCREEN cameras may be tinted. 'LightCamera' renders the SFSS
+                    // light/shadow TEXTURE and its SolidColor clear RGBA(1,0,0,0) is
+                    // the buffer's required init value — round 4..7 overwrote it with
+                    // skin colors at alpha 1, corrupting the lighting buffer on every
+                    // skin (the "so much green"). Off-screen cameras are restored if
+                    // we ever touched them, then left strictly alone.
+                    bool offscreen = cam.targetTexture != null
+                                  || cam.gameObject.name.IndexOf("Light", StringComparison.OrdinalIgnoreCase) >= 0;
+                    int id = cam.GetInstanceID();
+                    if (offscreen)
+                    {
+                        if (_vanillaCamClears.TryGetValue(id, out var v))
+                        {
+                            cam.backgroundColor = v;
+                            _vanillaCamClears.Remove(id);
+                            Plugin.Log.LogInfo($"[MAPCOLOR-CAMS] restored off-screen camera '{cam.gameObject.name}' clear to {v}");
+                        }
+                        continue;
+                    }
+                    // Only cameras that actually CLEAR to a color paint backdrop.
+                    if (cam.clearFlags != CameraClearFlags.SolidColor && cam.clearFlags != CameraClearFlags.Skybox)
+                        continue;
+                    if (!_vanillaCamClears.ContainsKey(id)) _vanillaCamClears[id] = cam.backgroundColor;
+                    cam.backgroundColor = new Color(
+                        Mathf.Clamp01(bg.r * 1.15f), Mathf.Clamp01(bg.g * 1.15f),
+                        Mathf.Clamp01(bg.b * 1.15f), 1f);
+                    if (cam.clearFlags == CameraClearFlags.Skybox)
+                        cam.clearFlags = CameraClearFlags.SolidColor;
+                }
+                _loggedCams = true;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] camera bg failed: {ex.Message}"); }
+        }
+
+        public static void RestoreCameraBackground()
+        {
+            try
+            {
+                foreach (var cam in UnityEngine.Object.FindObjectsOfType<Camera>())
+                {
+                    if (cam == null) continue;
+                    if (_vanillaCamClears.TryGetValue(cam.GetInstanceID(), out var v))
+                        cam.backgroundColor = v;
+                }
+            }
+            catch { }
+        }
+
+        // ── Premium twinkle loop (v1.29 round 6) ──────────────────────────────
+        // Static two-color gradients only vary at EMISSION — big slow slabs never
+        // visibly "sparkle". This loop re-rolls WHICH particles carry the glint a
+        // few times a second (stable per-particle randomSeed + a rolling tick),
+        // producing an actual twinkle at sub-bloom brightness.
+        internal struct TwinkleEntry { public ParticleSystem ps; public Color baseColor; public Color glintColor; }
+        internal static readonly List<TwinkleEntry> _twinkleSystems = new List<TwinkleEntry>();
+        private static bool _twinkleLoopRunning;
+        private static uint _twinkleTick;
+
+        internal static void EnsureTwinkleLoop()
+        {
+            if (_twinkleLoopRunning || Plugin.Instance == null) return;
+            _twinkleLoopRunning = true;
+            Plugin.Instance.StartCoroutine(TwinkleLoop());
+        }
+
+        private static System.Collections.IEnumerator TwinkleLoop()
+        {
+            // 1.6s between re-rolls (was 0.45s — Sid: "premium colors are
+            // shifting too fast"). A slow drift of which particles glint reads
+            // as shimmer; the old rate read as strobing.
+            var wait = new WaitForSeconds(1.6f);
+            while (true)
+            {
+                yield return wait;
+                if (_twinkleSystems.Count == 0) continue;
+                _twinkleTick++;
+                for (int i = 0; i < _twinkleSystems.Count; i++)
+                {
+                    var e = _twinkleSystems[i];
+                    try
+                    {
+                        if (e.ps == null) continue;
+                        RetintLiveParticles(e.ps, e.baseColor, e.glintColor, _twinkleTick);
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        // ── SFSS lighting = the REAL background system (learning #116 v3) ─────
+        // The scene composite is: sprites × lightmap, where lightmap = SFLight
+        // glow + SFRenderer._ambientLight everywhere else. The "sky" is a
+        // backdrop lit by the big light; the shadow beams are ambient-only
+        // regions ("a darker grey, BLUE..." per the asset's own tooltip — the
+        // ever-blue tone). Tint the big light toward a bright version of the
+        // skin background and the ambient toward a dark version: sky and
+        // shadows become the designed hue, walls/geometry sprites keep their
+        // own colors. Small lights (muzzle flashes etc.) are left alone.
+        private static readonly Dictionary<int, Color> _vanillaLightColors = new Dictionary<int, Color>();
+        private static readonly Dictionary<int, Color> _vanillaAmbient = new Dictionary<int, Color>();
+        private static bool _loggedLights;
+
+        public static void ApplyLighting(string sku)
+        {
+            try
+            {
+                Color? bgN = CustomMapColors.GetBackgroundColor(sku) ?? CustomMapColors.GetMapBlockColor(sku);
+                if (!bgN.HasValue) return;
+                Color bg = SaturateColor(bgN.Value, 1.10f);
+                // Lit areas = bright designed hue; shadowed areas = deep shade of it.
+                Color lit = CapBrightness(new Color(
+                    0.22f + bg.r * 0.95f, 0.22f + bg.g * 0.95f, 0.22f + bg.b * 0.95f, 1f), 1.0f);
+                // Alpha 0.85 matches the vanilla ambient's alpha (its meaning is
+                // internal to the SFSS shader — keep the semantics identical).
+                Color amb = new Color(bg.r * 0.45f, bg.g * 0.45f, bg.b * 0.45f, 0.85f);
+
+                foreach (var rend in UnityEngine.Object.FindObjectsOfType<SFRenderer>())
+                {
+                    if (rend == null) continue;
+                    int id = rend.GetInstanceID();
+                    if (!_vanillaAmbient.ContainsKey(id))
+                    {
+                        _vanillaAmbient[id] = rend.ambientLight;
+                        Plugin.Log.LogInfo($"[MAPCOLOR-LIGHT] SFRenderer '{rend.gameObject.name}' vanilla ambient={rend.ambientLight}");
+                    }
+                    rend.ambientLight = amb;
+                }
+                if (SFLight._lights != null)
+                    foreach (var l in SFLight._lights)
+                    {
+                        if (l == null) continue;
+                        if (!_loggedLights)
+                            Plugin.Log.LogInfo($"[MAPCOLOR-LIGHT] SFLight '{l.gameObject.name}' color={l._color} intensity={l._intensity} radius={l._radius} parallax={l._parallaxLight}");
+                        // Scene light detection: Sid's log shows THE sun-light is
+                        // radius=0.5, intensity=10, vanilla color PURE BLUE — the
+                        // radius>=20 filter skipped exactly the light that paints the
+                        // sky. Key on intensity/parallax instead; gameplay flashes are
+                        // low-intensity.
+                        if (!l._parallaxLight && l._intensity < 5f) continue;
+                        int id = l.GetInstanceID();
+                        if (!_vanillaLightColors.ContainsKey(id)) _vanillaLightColors[id] = l._color;
+                        l._color = lit;
+                    }
+                _loggedLights = true;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] lighting tint failed: {ex.Message}"); }
+        }
+
+        public static void RestoreLighting()
+        {
+            try
+            {
+                foreach (var rend in UnityEngine.Object.FindObjectsOfType<SFRenderer>())
+                {
+                    if (rend == null) continue;
+                    if (_vanillaAmbient.TryGetValue(rend.GetInstanceID(), out var a))
+                        rend.ambientLight = a;
+                }
+                if (SFLight._lights != null)
+                    foreach (var l in SFLight._lights)
+                    {
+                        if (l == null) continue;
+                        if (_vanillaLightColors.TryGetValue(l.GetInstanceID(), out var c))
+                            l._color = c;
+                    }
+            }
+            catch { }
+        }
+
+        // Per-map backdrop quads: any renderer wide enough to cover the play
+        // area (x span [-35.56, 35.56] per OutOfBoundsHandler) that isn't a
+        // particle. Cached vanilla colors per instance; logged once per object
+        // so a wrong-looking map's log names its backdrop immediately.
+        private static readonly Dictionary<int, Color> _vanillaQuadColors = new Dictionary<int, Color>();
+        private static readonly HashSet<int> _loggedQuads = new HashSet<int>();
+
+        private static int TintBackdropQuads(string sku)
+        {
+            int touched = 0;
+            try
+            {
+                Color? bgN = CustomMapColors.GetBackgroundColor(sku) ?? CustomMapColors.GetMapBlockColor(sku);
+                if (!bgN.HasValue) return 0;
+                Color bg = SaturateColor(bgN.Value, 1.10f);
+                foreach (var r in UnityEngine.Object.FindObjectsOfType<Renderer>())
+                {
+                    if (r == null || r is ParticleSystemRenderer) continue;
+                    // SpriteRenderers only (round 8): the sole MeshRenderer ever
+                    // matched was 'CLEAR_STENCIL_BUFFER' — a sprite-masking utility
+                    // quad, not scenery. Tinting utility materials corrupts render
+                    // plumbing (same lesson as the LightCamera, learning #119).
+                    var sr = r as SpriteRenderer;
+                    if (sr == null) continue;
+                    if (r.gameObject.name.IndexOf("STENCIL", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    var size = r.bounds.size;
+                    if (size.x < 60f || size.y < 25f) continue;   // not backdrop-sized
+                    int id = r.GetInstanceID();
+                    if (_loggedQuads.Add(id))
+                        Plugin.Log.LogInfo($"[MAPCOLOR-BG] backdrop candidate: '{GetTransformPath(r.transform)}' type={r.GetType().Name} size={size.x:F0}x{size.y:F0}");
+                    if (!_vanillaQuadColors.TryGetValue(id, out var vanilla))
+                    { vanilla = sr.color; _vanillaQuadColors[id] = vanilla; }
+                    float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
+                    float lift = 0.50f + 0.60f * Mathf.Clamp01(lum);
+                    sr.color = new Color(Mathf.Clamp01(bg.r * lift), Mathf.Clamp01(bg.g * lift),
+                                         Mathf.Clamp01(bg.b * lift), vanilla.a);
+                    touched++;
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] backdrop quad tint failed: {ex.Message}"); }
+            return touched;
+        }
+
+        private static void RestoreBackdropQuads()
+        {
+            try
+            {
+                foreach (var r in UnityEngine.Object.FindObjectsOfType<Renderer>())
+                {
+                    if (r == null) continue;
+                    if (!_vanillaQuadColors.TryGetValue(r.GetInstanceID(), out var v)) continue;
+                    var sr = r as SpriteRenderer;
+                    if (sr != null) sr.color = v;
+                    else if (r.material != null && r.material.HasProperty("_Color")) r.material.color = v;
+                }
+            }
+            catch { }
+        }
+
+        // ── Sky (ArtHandler.m_background) tint, v1.29 ─────────────────────────
+        // The real backdrop is a dedicated GameObject on ArtHandler, separate
+        // from the art particles. Colorize its SpriteRenderers + ParticleSystems
+        // toward the skin's BackgroundColor (luminance-preserving, like walls but
+        // dimmer), caching vanilla colors per instance so vanilla skins restore.
+        private static readonly Dictionary<int, Color> _vanillaSkyColors = new Dictionary<int, Color>();
+
+        private static int TintArtBackground(string sku)
+        {
+            int touched = 0;
+            try
+            {
+                var ah = ArtHandler.instance;
+                var bgGO = ah != null ? ah.m_background : null;
+                if (bgGO == null) return 0;
+                Color? bgN = CustomMapColors.GetBackgroundColor(sku) ?? CustomMapColors.GetMapBlockColor(sku);
+                if (!bgN.HasValue) return 0;
+                Color bg = SaturateColor(bgN.Value, 1.15f);
+
+                foreach (var sr in bgGO.GetComponentsInChildren<SpriteRenderer>(true))
+                {
+                    if (sr == null) continue;
+                    int id = sr.GetInstanceID();
+                    if (!_vanillaSkyColors.TryGetValue(id, out var vanilla))
+                    {
+                        vanilla = sr.color;
+                        _vanillaSkyColors[id] = vanilla;
+                    }
+                    float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
+                    float lift = 0.45f + 0.60f * Mathf.Clamp01(lum);
+                    sr.color = new Color(bg.r * lift, bg.g * lift, bg.b * lift, vanilla.a);
+                    touched++;
+                }
+                Color? skySparkle = CustomMapColors.GetSparkleColor(sku);
+                foreach (var ps in bgGO.GetComponentsInChildren<ParticleSystem>(true))
+                {
+                    if (ps == null) continue;
+                    Color vanilla = GetCachedVanillaColor(ps);
+                    float lum = vanilla.r * 0.299f + vanilla.g * 0.587f + vanilla.b * 0.114f;
+                    float lift = 0.45f + 0.60f * Mathf.Clamp01(lum);
+                    Color tinted = new Color(bg.r * lift, bg.g * lift, bg.b * lift, vanilla.a);
+                    var main = ps.main;
+                    if (skySparkle.HasValue)
+                    {
+                        // Premium skins: sky particles glint gently between the backdrop
+                        // tint and a slightly brighter sparkle — star-field, not floodlight.
+                        Color glint = CapBrightness(
+                            Color.Lerp(tinted, skySparkle.Value, 0.5f) * 1.10f, 1.0f);
+                        glint.a = vanilla.a;
+                        main.startColor = new ParticleSystem.MinMaxGradient(tinted, glint);
+                        RetintLiveParticles(ps, tinted, glint);
+                    }
+                    else
+                    {
+                        main.startColor = new ParticleSystem.MinMaxGradient(tinted);
+                        RetintLiveParticles(ps, tinted);
+                    }
+                    touched++;
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] sky tint failed: {ex.Message}"); }
+            return touched;
+        }
+
+        /// <summary>Restore the sky renderers to their cached vanilla colors —
+        /// called when a vanilla/default skin becomes active so a previous custom
+        /// skin's sky tint doesn't linger (the background object persists).</summary>
+        public static void RestoreVanillaSky()
+        {
+            try
+            {
+                if (_vanillaSkyColors.Count == 0) return;
+                var ah = ArtHandler.instance;
+                var bgGO = ah != null ? ah.m_background : null;
+                if (bgGO == null) return;
+                int restored = 0;
+                foreach (var sr in bgGO.GetComponentsInChildren<SpriteRenderer>(true))
+                {
+                    if (sr == null) continue;
+                    if (_vanillaSkyColors.TryGetValue(sr.GetInstanceID(), out var vanilla))
+                    {
+                        sr.color = vanilla;
+                        restored++;
+                    }
+                }
+                foreach (var ps in bgGO.GetComponentsInChildren<ParticleSystem>(true))
+                {
+                    if (ps == null) continue;
+                    Color vanilla = GetCachedVanillaColor(ps);
+                    var main = ps.main;
+                    main.startColor = new ParticleSystem.MinMaxGradient(vanilla);
+                    RetintLiveParticles(ps, vanilla);
+                    restored++;
+                }
+                if (restored > 0) Plugin.Log.LogInfo($"[MAPCOLOR] restored vanilla sky ({restored} renderer(s))");
+            }
+            catch { }
+        }
 
         // Deterministic 0/1 bucket for a transform path, used to two-tone the wall
         // particle systems. FNV-1a (not string.GetHashCode, which is salted per process
@@ -4646,6 +5204,11 @@ namespace CompetitiveRounds
                         return false;
                     }
                     __instance.ApplyPost(clone);
+                    // Backdrop levers that are safe mid-transition (no particle
+                    // mutation): camera clears + SFSS light/ambient. Applying here
+                    // makes Shift visibly swap the background on the same frame.
+                    MapPhysicalColorPatch.ApplyCameraBackground(sku);
+                    MapPhysicalColorPatch.ApplyLighting(sku);
                     // Instant/sharp swap (v1.26.10): ROUNDS fades the post-process volume in
                     // gradually, which reads as the map "sliding" into the next skin on Shift.
                     // Force the volume to full weight on the same frame so the new ColorGrading

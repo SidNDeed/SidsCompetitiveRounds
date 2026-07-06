@@ -44,6 +44,11 @@ class Player(Base):
     bullets_hit = Column(BigInteger, nullable=False, default=0)
     blocks_activated = Column(BigInteger, nullable=False, default=0)
     blocks_successful = Column(BigInteger, nullable=False, default=0)
+    # Lifetime input-rate counters (migration 102, v1.29 Compare tab).
+    # Accumulated from the reporter's per-match local_keys_pressed /
+    # local_active_seconds — same one-sided pattern as bullets_fired.
+    keys_pressed_total = Column(BigInteger, nullable=False, default=0)
+    active_seconds_total = Column(Double, nullable=False, default=0)
     active_title_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_trail_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_color_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
@@ -143,6 +148,9 @@ class Match(Base):
     duration_seconds = Column(Integer, nullable=True)
     local_bullets_fired = Column(Integer, nullable=True)
     local_blocks_raised = Column(Integer, nullable=True)
+    # Reporter's per-match input-rate metrics (migration 102, v1.29).
+    local_keys_pressed = Column(Integer, nullable=True)
+    local_active_seconds = Column(Double, nullable=True)
     invalidated_at = Column(DateTime(timezone=True), nullable=True)
     invalidation_reason = Column(String(64), nullable=True)
     p1_fps_avg = Column(SmallInteger, nullable=True)
@@ -274,6 +282,34 @@ class Bet(Base):
     payout = Column(Integer, nullable=True)
 
     __table_args__ = (UniqueConstraint("player_id", "series_id", name="uq_bet_player_series"),)
+
+
+class RankRoleColor(Base):
+    """Discord rank-role colors, synced by the bot (migration 102, v1.29).
+    Keyed by the CLEAN tier name ("Master V", not "Master V 2270-2329").
+    Drives rank display colors in the leaderboard + the 'Current Rank' title;
+    hardcoded fallback palette applies while a name is missing here."""
+    __tablename__ = "rank_role_colors"
+
+    name = Column(String(48), primary_key=True)
+    color_hex = Column(String(16), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class BoosterGrant(Base):
+    """Monthly Discord-booster gold grants (migration 102, v1.29). One row per
+    booster per calendar month — the unique constraint is the idempotency key,
+    so the bot's daily sweep can re-post the same grant without double-paying."""
+    __tablename__ = "booster_grants"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    discord_id = Column(String(20), nullable=False)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    month = Column(String(7), nullable=False)  # "2026-07"
+    amount = Column(Integer, nullable=False)
+    granted_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (UniqueConstraint("discord_id", "month", name="uq_booster_grant_month"),)
 
 
 class RankedQueue(Base):

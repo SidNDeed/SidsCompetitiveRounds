@@ -53,6 +53,11 @@ namespace CompetitiveRounds
             // → flat single-tone wall. With it, half the particles get Main and half get
             // Secondary → restores the multi-color "atmosphere" feel of vanilla arts.
             public Color? SecondaryColor;
+            // Premium sparkle (v1.29): when set, wall particles emit BETWEEN their
+            // layer color and this color (per-particle random) — the per-particle
+            // shimmer that was a bug for normal skins (failed approach #3 in
+            // Plugin.cs) is the FEATURE for the gold/platinum/aurora skins.
+            public Color? Sparkle;
             public Action<ColorGrading> Configure;
         }
 
@@ -148,17 +153,20 @@ namespace CompetitiveRounds
 
                 // ── Jewel / nature tones ──
 
-                // Forest — deep evergreen walls + warm bark-brown accent on a green-grey
-                // bg. Green+wood reads as a real forest (was green+autumn-amber).
+                // Forest — deep evergreen walls + warm bark-brown accent on a BROWN
+                // forest-floor bg (Sid, v1.29). Magma-style shadow mood: darker
+                // exposure + warm light so the greens glow against deep shade.
                 { "mapcolor_forest", new Preset {
                     BaseArt = "Poison",
                     MapBlockColor = new Color(0.26f, 0.54f, 0.30f),
-                    SecondaryColor = new Color(0.54f, 0.40f, 0.24f),
+                    // Secondary switched bark-brown → light leaf green (Sid: "make
+                    // Forest GREEN; the bg carries the brown now").
+                    SecondaryColor = new Color(0.46f, 0.72f, 0.34f),
                     Configure = cg => {
-                        cg.saturation.Override(-14f);
-                        cg.temperature.Override(-4f);
-                        cg.postExposure.Override(-0.54f);
-                        cg.colorFilter.Override(new Color(0.39f, 0.45f, 0.39f));
+                        cg.saturation.Override(-8f);
+                        cg.temperature.Override(10f);
+                        cg.postExposure.Override(-0.66f);
+                        cg.colorFilter.Override(new Color(0.42f, 0.41f, 0.35f));
                     }
                 }},
                 // Amethyst — amethyst purple walls + warm gold accent on a violet-grey bg.
@@ -278,7 +286,9 @@ namespace CompetitiveRounds
                 { "mapcolor_pine", new Preset {
                     BaseArt = "Poison",
                     MapBlockColor = new Color(0.28f, 0.52f, 0.44f),
-                    SecondaryColor = new Color(0.62f, 0.40f, 0.26f),
+                    // Secondary switched rust-brown → lighter pine green (Sid: pine
+                    // walls read brown; keep the whole skin in the green family).
+                    SecondaryColor = new Color(0.44f, 0.68f, 0.52f),
                     Configure = cg => {
                         cg.saturation.Override(-14f);
                         cg.temperature.Override(-6f);
@@ -324,16 +334,18 @@ namespace CompetitiveRounds
                         cg.colorFilter.Override(new Color(0.46f, 0.40f, 0.35f));
                     }
                 }},
-                // Velvet — royal purple walls + gilded gold accent on a dark plum bg.
+                // Velvet — royal purple walls + gilded gold accent on a deep purple bg.
+                // Magma-style shadow mood (Sid, v1.29): deeper exposure, richer
+                // saturation — candle-lit theatre look.
                 { "mapcolor_velvet", new Preset {
                     BaseArt = "Sky",
                     MapBlockColor = new Color(0.50f, 0.28f, 0.70f),
                     SecondaryColor = new Color(0.90f, 0.70f, 0.36f),
                     Configure = cg => {
-                        cg.saturation.Override(-10f);
+                        cg.saturation.Override(-4f);
                         cg.temperature.Override(8f);
-                        cg.postExposure.Override(-0.64f);
-                        cg.colorFilter.Override(new Color(0.40f, 0.36f, 0.45f));
+                        cg.postExposure.Override(-0.70f);
+                        cg.colorFilter.Override(new Color(0.42f, 0.36f, 0.48f));
                     }
                 }},
                 // Blackwood — charred slate timber walls + smoldering ember accent on a dark
@@ -348,6 +360,52 @@ namespace CompetitiveRounds
                         cg.temperature.Override(12f);
                         cg.postExposure.Override(-0.66f);
                         cg.colorFilter.Override(new Color(0.38f, 0.37f, 0.38f));
+                    }
+                }},
+
+                // ── Premium (v1.29) — sparkle skins ──
+                // Sparkle = per-particle random-between(layer color, Sparkle color) on
+                // the walls: every particle glints its own shade. Gold base art brings
+                // the bloom that sells the glitter.
+
+                // Gilded — molten gold walls glinting to white-gold, deep bronze bg.
+                { "mapcolor_gilded", new Preset {
+                    BaseArt = "Gold",
+                    MapBlockColor = new Color(1.00f, 0.80f, 0.26f),
+                    SecondaryColor = new Color(0.94f, 0.62f, 0.18f),
+                    Sparkle = new Color(1.00f, 0.97f, 0.80f),
+                    Configure = cg => {
+                        cg.saturation.Override(8f);
+                        cg.temperature.Override(18f);
+                        cg.postExposure.Override(-0.52f);
+                        cg.colorFilter.Override(new Color(0.50f, 0.45f, 0.36f));
+                    }
+                }},
+                // Platinum — cold silver walls glinting to pure white, gunmetal bg.
+                { "mapcolor_platinum", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.80f, 0.84f, 0.90f),
+                    SecondaryColor = new Color(0.58f, 0.62f, 0.70f),
+                    Sparkle = new Color(1.00f, 1.00f, 1.00f),
+                    Configure = cg => {
+                        cg.saturation.Override(-55f);
+                        cg.temperature.Override(-4f);
+                        cg.postExposure.Override(-0.54f);
+                        cg.colorFilter.Override(new Color(0.44f, 0.45f, 0.48f));
+                    }
+                }},
+                // Aurora — northern-lights walls shimmering between polar teal and
+                // violet over a polar-night bg.
+                { "mapcolor_aurora", new Preset {
+                    BaseArt = "Sky",
+                    MapBlockColor = new Color(0.22f, 0.88f, 0.62f),
+                    SecondaryColor = new Color(0.58f, 0.36f, 0.96f),
+                    Sparkle = new Color(0.55f, 0.95f, 1.00f),
+                    Configure = cg => {
+                        cg.saturation.Override(10f);
+                        cg.temperature.Override(-10f);
+                        cg.postExposure.Override(-0.66f);
+                        cg.colorFilter.Override(new Color(0.38f, 0.42f, 0.47f));
                     }
                 }},
             };
@@ -395,6 +453,71 @@ namespace CompetitiveRounds
             return new Color(main.r * 0.6f, main.g * 0.6f, main.b * 0.6f, main.a);
         }
 
+        // ── Background (atmosphere) colors, v1.29 ─────────────────────────────
+        // Dedicated per-skin BACKDROP hue for the ArtInstance atmosphere
+        // particles. Design rules (Sid's feedback: "backgrounds are too
+        // grey/blue... more diverse... at least slightly different from the
+        // walls so they don't all blend into one"):
+        //   * Same color FAMILY as the skin's primary (the map must still read
+        //     as its name) but hue-shifted and saturated so the backdrop is
+        //     clearly its own layer, never a dimmer copy of the walls.
+        //   * Warm skins get warm backdrops, cool skins cool — but NOT grey
+        //     unless the skin is deliberately monochrome (mono/charcoal).
+        // The bg pass in Plugin.cs lerps toward this from grey and applies its
+        // own luminance lift, so these read darker in-game than raw values.
+        // v1.29 second pass (Sid's feedback: "still too blue — only 2-3 blue
+        // backgrounds; Mono/Lavender/Pine/Charcoal same-ish as their walls;
+        // Forest brown; backgrounds should COMPLEMENT walls, not clone them").
+        // Blue is reserved for the three naturally-blue skins: dusk, obsidian,
+        // abyss (+ aurora's polar night). Everything else is warm or green.
+        private static readonly Dictionary<string, Color> _backgroundColors =
+            new Dictionary<string, Color>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "mapcolor_soft",        new Color(0.62f, 0.50f, 0.40f) }, // warm taupe (peach family)
+                { "mapcolor_moss",        new Color(0.30f, 0.42f, 0.22f) }, // deep olive green
+                { "mapcolor_cream",       new Color(0.72f, 0.52f, 0.30f) }, // warm amber
+                { "mapcolor_lavender",    new Color(0.52f, 0.42f, 0.68f) }, // muted lavender (same-ish as walls)
+                { "mapcolor_dusk",        new Color(0.24f, 0.26f, 0.52f) }, // indigo night (BLUE - by design)
+                { "mapcolor_sand",        new Color(0.72f, 0.46f, 0.22f) }, // burnt dune orange
+                { "mapcolor_mono",        new Color(0.42f, 0.42f, 0.44f) }, // grey (same-ish as walls, darker)
+                { "mapcolor_forest",      new Color(0.44f, 0.30f, 0.16f) }, // BROWN forest floor (Sid)
+                { "mapcolor_amethyst",    new Color(0.50f, 0.24f, 0.46f) }, // plum-magenta
+                { "mapcolor_charcoal",    new Color(0.27f, 0.27f, 0.29f) }, // dark slate (same-ish as walls)
+                { "mapcolor_crimson_map", new Color(0.48f, 0.14f, 0.18f) }, // deep blood red
+                { "mapcolor_slate",       new Color(0.52f, 0.36f, 0.24f) }, // warm copper behind cool walls
+                { "mapcolor_rose",        new Color(0.56f, 0.26f, 0.34f) }, // deep rose
+                { "mapcolor_mint",        new Color(0.20f, 0.44f, 0.28f) }, // deep leaf green (not teal)
+                { "mapcolor_sunset",      new Color(0.66f, 0.28f, 0.30f) }, // hot coral-red horizon
+                { "mapcolor_obsidian",    new Color(0.20f, 0.24f, 0.40f) }, // steel indigo (BLUE - by design)
+                { "mapcolor_abyss",       new Color(0.08f, 0.24f, 0.46f) }, // ocean depth (BLUE - by design)
+                { "mapcolor_pine",        new Color(0.20f, 0.40f, 0.34f) }, // deep pine (same-ish as walls, darker)
+                { "mapcolor_iron",        new Color(0.40f, 0.30f, 0.22f) }, // rusted umber
+                { "mapcolor_burgundy",    new Color(0.36f, 0.14f, 0.24f) }, // deep wine
+                { "mapcolor_magma",       new Color(0.64f, 0.28f, 0.06f) }, // molten burnt orange (Sid likes it)
+                { "mapcolor_velvet",      new Color(0.34f, 0.18f, 0.44f) }, // deep royal purple (was indigo)
+                { "mapcolor_blackwood",   new Color(0.42f, 0.22f, 0.09f) }, // smoldering ember-brown
+                // Premium
+                { "mapcolor_gilded",      new Color(0.42f, 0.30f, 0.10f) }, // deep bronze vault
+                { "mapcolor_platinum",    new Color(0.24f, 0.26f, 0.29f) }, // gunmetal
+                { "mapcolor_aurora",      new Color(0.10f, 0.14f, 0.28f) }, // polar night
+            };
+
+        /// <summary>Dedicated backdrop hue for the atmosphere particles, or null
+        /// to fall back to the primary-leaning legacy tint.</summary>
+        public static Color? GetBackgroundColor(string sku)
+        {
+            if (sku != null && _backgroundColors.TryGetValue(sku, out var c)) return c;
+            return null;
+        }
+
+        /// <summary>Premium sparkle endpoint — wall particles emit random-between
+        /// (layer color, this) when set. Null for standard skins.</summary>
+        public static Color? GetSparkleColor(string sku)
+        {
+            if (sku != null && _presets.TryGetValue(sku, out var p)) return p.Sparkle;
+            return null;
+        }
+
         /// <summary>
         /// Build (or fetch from cache) a cloned PostProcessProfile derived from the supplied
         /// base profile. The clone has our SKU's ColorGrading replacing the base's ColorGrading;
@@ -434,18 +557,25 @@ namespace CompetitiveRounds
                 // primary, so they stay grey for free. Moderate blend keeps gameplay readable.
                 try
                 {
+                    // v1.29 FINAL model (third pass — see learning #116): the big flat
+                    // backdrop is the CAMERA CLEAR COLOR (an editor constant; vignette
+                    // fakes the gradient). Vanilla arts repaint the whole screen with
+                    // brutally strong colorFilters — which is exactly why a strong
+                    // filter here wrecked the walls ("Forest completely not green",
+                    // walls == background). Correct split: the camera clear color
+                    // carries the designed BACKGROUND (set in Plugin.cs,
+                    // ApplyCameraBackground), and the filter stays NEAR-NEUTRAL with a
+                    // mild primary lean so walls/geometry keep their own colors.
                     Color prim = GetMapBlockColor(sku) ?? new Color(0.5f, 0.5f, 0.5f);
-                    // Lift the primary so the filter isn't too dark, then blend with a neutral
-                    // mid-grey so it tints without washing the scene to a flat color.
                     Color litPrim = new Color(
                         Mathf.Clamp01(0.35f + prim.r * 0.75f),
                         Mathf.Clamp01(0.35f + prim.g * 0.75f),
                         Mathf.Clamp01(0.35f + prim.b * 0.75f));
-                    Color cf = Color.Lerp(new Color(0.5f, 0.5f, 0.5f), litPrim, 0.6f);
+                    Color cf = Color.Lerp(new Color(0.5f, 0.5f, 0.5f), litPrim, 0.30f);
                     cg.colorFilter.Override(cf);
-                    // Keep the named hue vivid for COLORED skins (don't let a preset's negative
-                    // saturation mute the new colorFilter). Detect grey skins (mono/charcoal —
-                    // primary r≈g≈b) and leave THEIR preset saturation (e.g. -100) untouched.
+                    // Keep the hue vivid for COLORED skins (don't let a preset's negative
+                    // saturation mute the scene). Grey skins (mono/charcoal — primary
+                    // r≈g≈b) keep THEIR preset saturation (e.g. -100) untouched.
                     float mx = Mathf.Max(prim.r, Mathf.Max(prim.g, prim.b));
                     float mn = Mathf.Min(prim.r, Mathf.Min(prim.g, prim.b));
                     bool greySkin = (mx - mn) < 0.08f;
@@ -453,6 +583,26 @@ namespace CompetitiveRounds
                 }
                 catch { }
                 clone.AddSettings(cg);
+
+                // Bloom pass (v1.29 round 7, Sid: "I like the effect but it needs
+                // to be set to like right above 0"). The base arts ship strong,
+                // TINTED bloom — on the cyan-leaning Sky profile that tint washes
+                // warm backdrops toward GREEN (the "still green" maps) and is most
+                // of the wall flashiness. Keep the effect but barely: low intensity,
+                // neutral white tint, slightly higher threshold so only true
+                // highlights glow.
+                try
+                {
+                    UnityEngine.Rendering.PostProcessing.Bloom bloom;
+                    if (clone.TryGetSettings(out bloom) && bloom != null)
+                    {
+                        Plugin.Log.LogInfo($"[MAPCOLOR] {sku}: base bloom intensity={bloom.intensity.value:F1} tint={bloom.color.value} threshold={bloom.threshold.value:F2}");
+                        bloom.intensity.Override(Mathf.Min(bloom.intensity.value, 1.2f));
+                        bloom.color.Override(Color.white);
+                        bloom.threshold.Override(Mathf.Max(bloom.threshold.value, 1.05f));
+                    }
+                }
+                catch (Exception bx) { Plugin.Log.LogWarning($"[MAPCOLOR] bloom tune failed for {sku}: {bx.Message}"); }
 
                 _profileCache[sku] = clone;
                 return clone;

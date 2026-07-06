@@ -11,6 +11,7 @@ import math
 import os
 import random
 import string
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import uuid
@@ -28,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import AdminUser, AdminAction, Bet, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard
+from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -77,7 +78,200 @@ GLICKO2_PERIOD_HOURS = int(os.getenv("GLICKO2_PERIOD_HOURS", "168"))
 # Must be shorter than the 60-min stale-prune so an abandoned series can't glue a
 # later session's games onto it (the "only 1 series in history" / "subsequent
 # series don't show" bug). 25 min comfortably covers a real BO3's pace.
+#
+# v1.28.3 (#33/#35): the window is measured from LAST ACTIVITY (newest match
+# ended_at), not just series creation — see _find_current_active_series. A BO3
+# interrupted by a DC 30+ min after creation used to be unfindable (created_at
+# outside the window), so the reconnect spawned a parallel series and the old
+# one lingered 'active' with its bets stuck until the stale-prune refunded them.
 SERIES_REUSE_WINDOW_MIN = int(os.getenv("SERIES_REUSE_WINDOW_MIN", "25"))
+# Cross-session resume window: an undecided mid-BO3 (1-0 / 0-1 / 1-1) stays
+# the pair's "current" series for this many days, so a series interrupted one
+# night RESUMES at its real score the next time the pair plays (bug #43).
+SERIES_RESUME_WINDOW_DAYS = int(os.getenv("SERIES_RESUME_WINDOW_DAYS", "7"))
+
+
+# ── Rank tiers (v1.29) ─────────────────────────────────────────
+# Mirror of the Discord bot's RANK_ROLES ladder, with the rating range
+# stripped ("Master V", not "Master V 2270-2329"). Drives the leaderboard
+# rank column, the dynamic 'Current Rank' title, and rank colors. Colors are
+# synced from the live Discord roles into rank_role_colors by the bot; the
+# fallback palette below covers names the bot hasn't pushed yet.
+RANK_TIERS = [
+    (2610, "Grand Master V"),
+    (2540, "Grand Master IV"),
+    (2470, "Grand Master III"),
+    (2400, "Grand Master II"),
+    (2330, "Grand Master"),
+    (2270, "Master V"),
+    (2210, "Master IV"),
+    (2150, "Master III"),
+    (2090, "Master II"),
+    (2030, "Master"),
+    (1980, "Advanced V"),
+    (1930, "Advanced IV"),
+    (1880, "Advanced III"),
+    (1830, "Advanced II"),
+    (1780, "Advanced"),
+    (1740, "Intermediate V"),
+    (1700, "Intermediate IV"),
+    (1660, "Intermediate III"),
+    (1620, "Intermediate II"),
+    (1580, "Intermediate"),
+    (1564, "Beginner V"),
+    (1548, "Beginner IV"),
+    (1532, "Beginner III"),
+    (1516, "Beginner II"),
+    (0,    "Beginner"),
+]
+
+RANK_FALLBACK_COLORS = {
+    "Grand Master": "#F1C40F",   # gold
+    "Master":       "#2ECC71",   # green (matches the Discord Master roles)
+    "Advanced":     "#3498DB",   # blue
+    "Intermediate": "#E67E22",   # orange
+    "Beginner":     "#95A5A6",   # grey
+}
+
+
+def _rank_name_for(rating: float | None) -> str:
+    r = rating if rating is not None else 1500.0
+    for threshold, name in RANK_TIERS:
+        if r >= threshold:
+            return name
+    return "Beginner"
+
+
+def _rank_fallback_color(name: str) -> str:
+    for prefix, color in RANK_FALLBACK_COLORS.items():
+        if name.startswith(prefix):
+            return color
+    return "#95A5A6"
+
+
+# 5-minute cache over rank_role_colors so per-row leaderboard lookups don't
+# hammer the table. Refreshed lazily; bot pushes invalidate it directly.
+_rank_colors_cache: dict = {"at": 0.0, "map": {}}
+
+
+async def _rank_colors(db: AsyncSession) -> dict:
+    now = time.monotonic()
+    if now - _rank_colors_cache["at"] > 300:
+        try:
+            rows = (await db.execute(select(RankRoleColor))).scalars().all()
+            _rank_colors_cache["map"] = {r.name: r.color_hex for r in rows}
+        except Exception as ex:
+            print(f"[RANK] color cache refresh failed: {ex}")
+        _rank_colors_cache["at"] = now
+    return _rank_colors_cache["map"]
+
+
+async def _rank_info(db: AsyncSession, rating: float | None) -> tuple[str, str]:
+    """(rank_name, color_hex) for a 1v1 rating."""
+    name = _rank_name_for(rating)
+    colors = await _rank_colors(db)
+    return name, colors.get(name) or _rank_fallback_color(name)
+
+
+def _display_title_sync(colors: dict, sku: str | None, name: str | None,
+                        color: str | None, rating: float | None) -> tuple[str | None, str | None]:
+    """Resolve the DISPLAYED title text/color for a player row. The dynamic
+    'Current Rank' title renders as the player's live rank tier + tier color;
+    every other title passes through unchanged."""
+    if sku == TITLE_RANK_SKU:
+        rn = _rank_name_for(rating)
+        return rn, colors.get(rn) or _rank_fallback_color(rn)
+    return name, color
+
+
+# Colors for the achievement-gated slayer titles (also stamped on the shop
+# items by migration 102; kept here for the dynamic-title override path).
+TITLE_RANK_SKU = "title_rank"
+
+
+# ── Presence (mod clients online, v1.29) ───────────────────────
+# In-memory: steam_id -> monotonic seconds of last sighting. Populated by the
+# client's presence ping (60s cadence from the always-on heartbeat loop) and
+# opportunistically by queue polls. Process-local by design — repopulates
+# within a minute of an API restart, no DB writes on the hot path.
+_presence_seen: dict[str, float] = {}
+PRESENCE_TTL_SEC = 180
+
+
+def _presence_touch(steam_id: str | None) -> None:
+    if steam_id:
+        _presence_seen[steam_id] = time.monotonic()
+
+
+def _presence_online_count() -> int:
+    now = time.monotonic()
+    stale = [sid for sid, at in _presence_seen.items() if now - at > PRESENCE_TTL_SEC]
+    for sid in stale:
+        _presence_seen.pop(sid, None)
+    return len(_presence_seen)
+
+
+def _series_pair_filter(pid_a, pid_b):
+    """Order-independent ranked_series player-pair predicate."""
+    return or_(
+        and_(RankedSeries.player1_id == pid_a, RankedSeries.player2_id == pid_b),
+        and_(RankedSeries.player1_id == pid_b, RankedSeries.player2_id == pid_a),
+    )
+
+
+async def _find_current_active_series(db, pid_a, pid_b):
+    """The pair's CURRENT in-progress series, shared by every find-or-create
+    site (match report, queue ready/poll, preflight) so they can't diverge.
+
+    'Current' means status='active' AND any of:
+      - created within SERIES_REUSE_WINDOW_MIN (fresh series), or
+      - has a match that ENDED within the window (an in-flight BO3 stays
+        current however long ago it was created — fixes DC+reconnect spawning
+        a parallel series while the 1-1 original sat in limbo, bug #33/#35), or
+      - is an UNDECIDED mid-BO3 (>=1 match played, nobody at 2 wins) whose
+        last activity is within SERIES_RESUME_WINDOW_DAYS — cross-SESSION
+        resumption (bug #43: Stan/G1ow_Hunter's 0-1 from 6/26 should resume
+        on 6/29, not spawn a parallel fresh series). Pairs with the prune
+        change that keeps stalled mid-BO3 series 'active' (bets refunded at
+        60 min, row abandoned only after the resume window lapses), or
+      - is a tournament series (created at lock/activation, potentially days
+        before the players actually meet — must always be reused, never
+        shadowed by a fresh auto-created row).
+
+    Newest-first so a recent normal series still wins over an old tournament
+    row when both exist (learning #52: newest = current match context)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
+    resume_cutoff = datetime.now(timezone.utc) - timedelta(days=SERIES_RESUME_WINDOW_DAYS)
+    recent_match_exists = (
+        select(Match.id)
+        .where(Match.series_id == RankedSeries.id, Match.ended_at >= cutoff)
+        .exists()
+    )
+    resumable_match_exists = (
+        select(Match.id)
+        .where(Match.series_id == RankedSeries.id, Match.ended_at >= resume_cutoff)
+        .exists()
+    )
+    q = (
+        select(RankedSeries)
+        .where(
+            RankedSeries.status == "active",
+            _series_pair_filter(pid_a, pid_b),
+            or_(
+                RankedSeries.created_at >= cutoff,
+                RankedSeries.is_tournament == True,  # noqa: E712
+                recent_match_exists,
+                and_(
+                    RankedSeries.p1_series_wins < 2,
+                    RankedSeries.p2_series_wins < 2,
+                    resumable_match_exists,
+                ),
+            ),
+        )
+        .order_by(RankedSeries.created_at.desc())
+        .limit(1)
+    )
+    return (await db.execute(q)).scalar_one_or_none()
 
 
 # ── Application setup ──────────────────────────────────────────
@@ -697,7 +891,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.28.2"
+LATEST_MOD_VERSION = "1.29.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1000,17 +1194,24 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     # Get or create both players
     p1 = await get_or_create_player(db, report.player1.steam_id, report.player1.display_name)
     p2 = await get_or_create_player(db, report.player2.steam_id, report.player2.display_name)
-    # First-launch race fallback: a fresh-install player's async /toggle-ranked
-    # may not have landed before their first ranked match completes. If the
-    # client reports a ranked match (room name starts with ranked_ / cr_ff /
-    # sct- — the mod gates is_ranked=true on that), both participants consented
-    # to ranked by being in the room. Flip ranked_enabled so subsequent series
-    # creation, preflight, and stats render correctly.
-    if report.is_ranked:
-        if not p1.ranked_enabled:
-            p1.ranked_enabled = True
-        if not p2.ranked_enabled:
-            p2.ranked_enabled = True
+    # Server-side ranked enforcement (bug #42). ranked_enabled defaults TRUE
+    # and every explicit opt-in path (queue join, toggle) sets it, so a FALSE
+    # here means the player deliberately turned ranked off. The old behavior
+    # force-enabled both players whenever a client claimed is_ranked=true,
+    # which overrode a player's opt-out (Stan vs dgnfly: dgnfly had ranked
+    # disabled, yet the pairing produced a series + gambler ping). Mod-issued
+    # rooms (ranked_*/sct-*) are exempt: joining the queue IS consent, and
+    # queue join already flipped the flag. For everything else (code-join /
+    # casual rooms), downgrade the report to casual when either player has
+    # ranked disabled.
+    _mod_room = bool(report.photon_room_id) and (
+        report.photon_room_id.lower().startswith("ranked_")
+        or report.photon_room_id.lower().startswith("sct-"))
+    if report.is_ranked and not _mod_room and (not p1.ranked_enabled or not p2.ranked_enabled):
+        print(f"[MATCH] downgraded to casual: ranked disabled for "
+              f"{p1.steam_id if not p1.ranked_enabled else ''} {p2.steam_id if not p2.ranked_enabled else ''} "
+              f"(room={report.photon_room_id})")
+        report.is_ranked = False
 
     # Determine winner
     winner = p1 if report.p1_rounds_won > report.p2_rounds_won else p2
@@ -1050,6 +1251,8 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         duration_seconds=report.match_duration,
         local_bullets_fired=report.local_shots_fired,
         local_blocks_raised=report.local_blocks_raised,
+        local_keys_pressed=report.local_keys_pressed,
+        local_active_seconds=report.local_active_seconds,
         photon_room_id=report.photon_room_id,
         game_version=report.game_version,
         region=report.region,
@@ -1146,6 +1349,12 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         reporter.blocks_activated = (reporter.blocks_activated or 0) + report.local_blocks_activated
     if report.local_blocks_successful:
         reporter.blocks_successful = (reporter.blocks_successful or 0) + report.local_blocks_successful
+    # Input-rate accumulators (v1.29 Compare tab: avg keystrokes/sec). Only
+    # accumulate when BOTH values are present and sane — a keys count with no
+    # timebase (or vice versa) would skew the lifetime average.
+    if report.local_keys_pressed and report.local_active_seconds and report.local_active_seconds >= 5:
+        reporter.keys_pressed_total = (reporter.keys_pressed_total or 0) + report.local_keys_pressed
+        reporter.active_seconds_total = (reporter.active_seconds_total or 0) + report.local_active_seconds
 
     # Award XP to both players
     winner_rounds = max(report.p1_rounds_won, report.p2_rounds_won)
@@ -1207,34 +1416,9 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     series_completed = False
 
     if report.is_ranked:
-        # Find active series between these two players (order-independent).
-        # Use the MOST RECENTLY CREATED active series so a player in multiple
-        # tournaments against the same opponent doesn't crash the handler with
-        # MultipleResultsFound. Tournament series are inserted when a match
-        # becomes ready, so "newest active series" = "current match context."
-        # Reuse the pair's CURRENT in-progress series, but only if it's recent.
-        # A stalled 'active' row (a BO3 the pair abandoned) lingers up to 60 min
-        # before the stale-prune sweeps it. Without a recency gate, when the same
-        # two players sit down again the next game gets glued onto that old row —
-        # so multiple distinct series collapse into ONE (only 1 shows in history,
-        # and a "new" series never surfaces in /series/active). Gate reuse to a
-        # recent window so a fresh sit-down starts a fresh series.
-        series_reuse_cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
-        series_query = (
-            select(RankedSeries)
-            .where(
-                RankedSeries.status == "active",
-                RankedSeries.created_at >= series_reuse_cutoff,
-                or_(
-                    (RankedSeries.player1_id == p1.id) & (RankedSeries.player2_id == p2.id),
-                    (RankedSeries.player1_id == p2.id) & (RankedSeries.player2_id == p1.id),
-                )
-            )
-            .order_by(RankedSeries.created_at.desc())
-            .limit(1)
-        )
-        series_result = await db.execute(series_query)
-        series = series_result.scalar_one_or_none()
+        # Find the pair's CURRENT active series via the shared helper
+        # (activity-based recency + tournament-aware — see its docstring).
+        series = await _find_current_active_series(db, p1.id, p2.id)
 
         series_was_new = False
         if not series:
@@ -1412,20 +1596,18 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                         period_end=now,
                     ))
 
-                # Auto-grant Master rank achievement when either player crosses
-                # the threshold on this series' Glicko update.
-                if new_r1 >= MASTER_RANK_THRESHOLD:
-                    await _grant_achievement_inline(db, p1.id, "master_rank")
-                if new_r2 >= MASTER_RANK_THRESHOLD:
-                    await _grant_achievement_inline(db, p2.id, "master_rank")
+                # Auto-grant rating achievements (Master / Grand Master) when
+                # either player crosses a threshold on this Glicko update.
+                await _grant_rating_achievements(db, p1.id, new_r1)
+                await _grant_rating_achievements(db, p2.id, new_r2)
 
             await db.commit()
         except Exception as ex:
             print(f"Series Glicko update error: {ex}")
 
-        # ── Auto-grant Regicide achievement ──
-        # If someone beat Sid (the mod creator) in a ranked series, unlock "regicide"
-        SID_STEAM_ID = "76561198040410653"
+        # ── Auto-grant slayer achievements (Sid Slayer / Stan Slayer) ──
+        # Beat one of the SLAYER_TARGETS players in a ranked series → unlock.
+        # _grant_achievement_inline also grants the matching equippable title.
         try:
             winner_steam = (await db.execute(
                 select(Player.steam_id).where(Player.id == series.winner_id)
@@ -1434,32 +1616,13 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             loser_steam = (await db.execute(
                 select(Player.steam_id).where(Player.id == loser_id)
             )).scalar_one_or_none()
-            if loser_steam == SID_STEAM_ID and winner_steam and winner_steam != SID_STEAM_ID:
-                # Winner beat Sid — check if they already have it
-                existing = (await db.execute(
-                    select(PlayerAchievement).where(
-                        PlayerAchievement.player_id == series.winner_id,
-                        PlayerAchievement.achievement_key == "regicide",
-                    )
-                )).scalar_one_or_none()
-                if not existing:
-                    ach = PlayerAchievement(
-                        player_id=series.winner_id,
-                        achievement_key="regicide",
-                    )
-                    db.add(ach)
-                    # Match the /achievements/unlock gold grant (25 gold).
-                    winner_row = (await db.execute(select(Player).where(Player.id == series.winner_id))).scalar_one_or_none()
-                    if winner_row is not None:
-                        winner_row.gold_earned = (winner_row.gold_earned or 0) + 25
-                        db.add(GoldTransaction(
-                            player_id=series.winner_id, amount=25,
-                            reason="achievement", reference_id="regicide",
-                        ))
+            slayer_key = SLAYER_TARGETS.get(loser_steam or "")
+            if slayer_key and winner_steam and winner_steam != loser_steam:
+                if await _grant_achievement_inline(db, series.winner_id, slayer_key):
                     await db.commit()
-                    print(f"[ACH] Regicide auto-granted to {winner_steam} for beating Sid in ranked series (+25 gold)")
+                    print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
         except Exception as ex:
-            print(f"Regicide auto-grant error: {ex}")
+            print(f"Slayer auto-grant error: {ex}")
 
         # Tournament bracket advancement. Noop for non-tournament series.
         try:
@@ -1507,7 +1670,9 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
 
 @app.get("/api/v1/leaderboard", response_model=LeaderboardResponse, tags=["Leaderboard"])
 async def get_leaderboard(
-    limit: int = Query(50, ge=1, le=200),
+    # le raised 200 → 500 (v1.29): 105 ranked players outgrew the client's
+    # 100-row fetch; the client now pulls 500 and pages locally at 100/page.
+    limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     min_matches: int = Query(5, ge=0, description="Minimum matches to appear"),
     db: AsyncSession = Depends(get_db),
@@ -1572,7 +1737,8 @@ async def get_leaderboard(
             COALESCE(p.gold_earned, 0) - COALESCE(p.gold_spent, 0) AS gold,
             COALESCE(p.hide_gold, false) AS hide_gold,
             si.name          AS title,
-            si.preview_color AS title_color
+            si.preview_color AS title_color,
+            si.sku           AS title_sku
         FROM glicko_ratings gr
         JOIN players p ON p.id = gr.player_id
         LEFT JOIN combined c ON c.player_id = p.id
@@ -1586,8 +1752,13 @@ async def get_leaderboard(
     result = await db.execute(query, {"min_matches": min_matches, "limit": limit, "offset": offset})
     rows = result.mappings().all()
 
-    entries = [
-        LeaderboardEntry(
+    _colors = await _rank_colors(db)
+    entries = []
+    for row in rows:
+        _title, _title_color = _display_title_sync(
+            _colors, row["title_sku"], row["title"], row["title_color"], float(row["rating"]))
+        _rank = _rank_name_for(float(row["rating"]))
+        entries.append(LeaderboardEntry(
             rank=row["rank"] + offset,
             steam_id=row["steam_id"],
             display_name=row["display_name"],
@@ -1602,11 +1773,11 @@ async def get_leaderboard(
             # on report gold=-1 to everyone. The client renders -1 as "Hidden". The
             # player still sees their own real balance in the shop / stats panel.
             gold=(-1 if row["hide_gold"] else int(row["gold"] or 0)),
-            title=row["title"],
-            title_color=row["title_color"],
-        )
-        for row in rows
-    ]
+            title=_title,
+            title_color=_title_color,
+            rank_name=_rank,
+            rank_color=_colors.get(_rank) or _rank_fallback_color(_rank),
+        ))
 
     # Total players who qualify
     count_query = text("""
@@ -1816,6 +1987,12 @@ async def get_player_stats(
             continue
         if kind == "title":
             active_title_name, active_title_color = row[0], row[2]
+            # Dynamic 'Current Rank' title (v1.29): displayed text/color track
+            # the player's live rank tier, so rank-ups/downs update the title
+            # automatically without re-equipping.
+            if row[1] == TITLE_RANK_SKU:
+                active_title_name, active_title_color = await _rank_info(
+                    db, glicko.rating if glicko else None)
         elif kind == "trail":
             active_trail_sku, active_trail_color, active_trail_price = row[1], row[2], row[3] or 0
         elif kind == "color":
@@ -2077,6 +2254,61 @@ async def get_player_stats(
                     if s["p1w"] > s["p2w"]: h2h_series_l += 1
                     else: h2h_series_w += 1
 
+    # v1.29 Compare-tab additions: input rate, average game length, betting
+    # record, and the player's rank tier.
+    avg_keys_per_sec = 0.0
+    if (player.active_seconds_total or 0) >= 60:
+        avg_keys_per_sec = round((player.keys_pressed_total or 0) / player.active_seconds_total, 2)
+    # Average key presses per game — from the per-match column, reporter-side
+    # only (same one-sided basis as the other input metrics).
+    avg_keys_per_game = 0
+    try:
+        avg_keys_per_game = int((await db.execute(text(
+            "SELECT COALESCE(AVG(m.local_keys_pressed), 0) FROM matches m "
+            " WHERE m.reported_by = :pid AND m.local_keys_pressed > 0 "
+            "   AND m.invalidated_at IS NULL"
+        ), {"pid": player.id})).scalar() or 0)
+    except Exception:
+        pass
+    try:
+        avg_game_seconds = int((await db.execute(text(
+            "SELECT COALESCE(AVG(COALESCE(m.duration_seconds, m.match_duration)), 0) "
+            "  FROM matches m "
+            " WHERE (m.player1_id = :pid OR m.player2_id = :pid) "
+            "   AND COALESCE(m.duration_seconds, m.match_duration) BETWEEN 30 AND 7200 "
+            "   AND m.invalidated_at IS NULL"
+        ), {"pid": player.id})).scalar() or 0)
+    except Exception:
+        avg_game_seconds = 0
+    bets_won = bets_lost = bet_gold_net = 0
+    try:
+        bet_row = (await db.execute(text(
+            "SELECT COUNT(*) FILTER (WHERE b.payout > b.amount)              AS won, "
+            "       COUNT(*) FILTER (WHERE COALESCE(b.payout, -1) = 0)       AS lost, "
+            "       COALESCE(SUM(CASE WHEN b.payout > b.amount THEN b.payout - b.amount "
+            "                         WHEN b.payout = 0 THEN -b.amount ELSE 0 END), 0) AS net "
+            "  FROM bets b WHERE b.player_id = :pid AND b.settled_at IS NOT NULL"
+        ), {"pid": player.id})).mappings().first()
+        if bet_row:
+            bets_won = int(bet_row["won"] or 0)
+            bets_lost = int(bet_row["lost"] or 0)
+            bet_gold_net = int(bet_row["net"] or 0)
+    except Exception:
+        pass
+    rank_name, rank_color = await _rank_info(db, glicko.rating if glicko else None)
+    team_rating = 0.0
+    team_completed = 0
+    try:
+        trow = (await db.execute(text(
+            "SELECT rating, COALESCE(completed_series, 0) AS cs "
+            "  FROM glicko_ratings_2v2 WHERE player_id = :pid"
+        ), {"pid": player.id})).mappings().first()
+        if trow and (trow["cs"] or 0) > 0:
+            team_rating = round(float(trow["rating"] or 0), 1)
+            team_completed = int(trow["cs"] or 0)
+    except Exception:
+        pass
+
     return PlayerStatsResponse(
         steam_id=player.steam_id,
         display_name=player.display_name,
@@ -2141,6 +2373,16 @@ async def get_player_stats(
         h2h_casual_losses=h2h_casual_l,
         h2h_series_wins=h2h_series_w,
         h2h_series_losses=h2h_series_l,
+        avg_keys_per_sec=avg_keys_per_sec,
+        avg_keys_per_game=avg_keys_per_game,
+        avg_game_seconds=avg_game_seconds,
+        bets_won=bets_won,
+        bets_lost=bets_lost,
+        bet_gold_net=bet_gold_net,
+        rank_name=rank_name,
+        rank_color=rank_color,
+        team_rating=team_rating,
+        team_completed_series=team_completed,
     )
 
 
@@ -2704,8 +2946,12 @@ async def queue_leave(steam_id: str = Query(...), db: AsyncSession = Depends(get
 
 
 @app.get("/api/v1/queue/count", tags=["Queue"])
-async def queue_count(db: AsyncSession = Depends(get_db)):
-    """Lightweight endpoint: returns number of players searching in the ranked queue."""
+async def queue_count(steam_id: str | None = Query(None), db: AsyncSession = Depends(get_db)):
+    """Lightweight endpoint: returns number of players searching in the ranked
+    queue plus the number of mod clients online right now. Pass steam_id so
+    the caller counts toward the online figure (v1.29 clients do; older
+    clients omit it and simply aren't counted)."""
+    _presence_touch(steam_id)
     result = await db.execute(
         text("SELECT COUNT(*) FROM ranked_queue WHERE status = 'searching'")
     )
@@ -2714,7 +2960,100 @@ async def queue_count(db: AsyncSession = Depends(get_db)):
         text("SELECT COUNT(*) FROM ranked_queue")
     )
     total = result2.scalar() or 0
-    return {"searching": searching, "total": total}
+    return {"searching": searching, "total": total, "online": _presence_online_count()}
+
+
+@app.get("/api/v1/presence/ping", tags=["Queue"])
+async def presence_ping(steam_id: str = Query(..., max_length=20)):
+    """Presence heartbeat (v1.29). The mod's always-on loop calls this every
+    ~60s while the game is running; the response carries the current online
+    count for the queue tab's 'N online' readout. In-memory only."""
+    _presence_touch(steam_id)
+    return {"online": _presence_online_count()}
+
+
+class RankRoleColorPush(BaseModel):
+    name: str
+    color: str
+
+
+@app.post("/api/v1/internal/rank-role-colors", tags=["Internal"])
+async def push_rank_role_colors(
+    roles: list[RankRoleColorPush],
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only (v1.29): upsert the live Discord rank-role colors so in-game
+    rank displays match the server's actual role colors. Names arrive CLEAN
+    (rating range already stripped by the bot)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    known = {name for _, name in RANK_TIERS}
+    updated = 0
+    for r in roles[:64]:
+        name = (r.name or "").strip()
+        color = (r.color or "").strip()
+        if name not in known or not color.startswith("#") or len(color) > 9:
+            continue
+        await db.execute(text(
+            "INSERT INTO rank_role_colors (name, color_hex, updated_at) "
+            "VALUES (:n, :c, NOW()) "
+            "ON CONFLICT (name) DO UPDATE SET color_hex = :c, updated_at = NOW()"
+        ), {"n": name, "c": color})
+        updated += 1
+    await db.commit()
+    # Invalidate the cache so the new colors serve immediately.
+    _rank_colors_cache["at"] = 0.0
+    return {"updated": updated}
+
+
+BOOSTER_MONTHLY_GOLD = 2000
+
+
+@app.post("/api/v1/internal/booster-grant", tags=["Internal"])
+async def booster_grant(
+    discord_id: str = Query(..., max_length=20),
+    month: str = Query(..., min_length=7, max_length=7, description="YYYY-MM"),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only (v1.29): grant the monthly Discord-booster gold (2000/month
+    per boosting member). Idempotent per (discord_id, month) via the
+    booster_grants unique constraint, so the bot's daily sweep can retry
+    safely. Returns granted | already_granted | not_linked."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    if not (month[:4].isdigit() and month[4] == "-" and month[5:].isdigit()):
+        raise HTTPException(status_code=400, detail="month must be YYYY-MM")
+    player = (await db.execute(
+        select(Player).where(Player.discord_id == discord_id, Player.deleted_at.is_(None))
+    )).scalar_one_or_none()
+    if player is None:
+        return {"status": "not_linked", "discord_id": discord_id}
+    existing = (await db.execute(
+        select(BoosterGrant).where(BoosterGrant.discord_id == discord_id,
+                                   BoosterGrant.month == month)
+    )).scalar_one_or_none()
+    if existing is not None:
+        return {"status": "already_granted", "discord_id": discord_id, "month": month}
+    db.add(BoosterGrant(discord_id=discord_id, player_id=player.id,
+                        month=month, amount=BOOSTER_MONTHLY_GOLD))
+    player.gold_earned = (player.gold_earned or 0) + BOOSTER_MONTHLY_GOLD
+    db.add(GoldTransaction(
+        player_id=player.id, amount=BOOSTER_MONTHLY_GOLD,
+        reason="booster_monthly", reference_id=month,
+    ))
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two sweeps raced — the unique constraint makes the second a no-op.
+        await db.rollback()
+        return {"status": "already_granted", "discord_id": discord_id, "month": month}
+    print(f"[BOOSTER] granted {BOOSTER_MONTHLY_GOLD}g to {player.steam_id} (discord {discord_id}) for {month}")
+    return {"status": "granted", "discord_id": discord_id, "month": month,
+            "steam_id": player.steam_id, "amount": BOOSTER_MONTHLY_GOLD}
 
 
 @app.get("/api/v1/queue/recent-joins", tags=["Queue"])
@@ -2747,6 +3086,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     """
     import uuid as uuid_mod
 
+    _presence_touch(steam_id)
     # Clean up expired blocks opportunistically
     await db.execute(text("DELETE FROM queue_blocks WHERE expires_at < now()"))
 
@@ -2852,6 +3192,21 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                         text("UPDATE ranked_queue SET room_name = :room, room_region = :region WHERE player_id = :pid"),
                         {"room": room_name, "region": chosen_region, "pid": pid},
                     )
+            # Find-or-create the series row so this poll path matches /queue/ready's
+            # both_ready branch — previously this branch created the ROOM but no
+            # series, so the row was born at first match report (already 1-0 →
+            # permanently bet-locked, bug #36) and the client never got a
+            # series_id for live-points.
+            series = await _find_current_active_series(db, my_pid, opp["player_id"])
+            if series is None:
+                series = RankedSeries(
+                    player1_id=my_pid, player2_id=opp["player_id"],
+                    p1_series_wins=0, p2_series_wins=0,
+                    live_p1_points=0, live_p2_points=0,
+                    status="active",
+                )
+                db.add(series)
+                await db.flush()
             await db.commit()
             return QueuePollResponse(
                 status="ready_join",
@@ -2862,10 +3217,13 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 opponent_ready=True,
                 room_name=room_name,
                 photon_region=entry["room_region"] or entry["region"] or "us",
+                series_id=str(series.id),
             )
 
         # Room already set (by /ready endpoint) but we see it on poll
         if room_name:
+            series = await _find_current_active_series(db, my_pid, opp["player_id"])
+            sid_str = str(series.id) if series is not None else None
             await db.commit()
             return QueuePollResponse(
                 status="ready_join",
@@ -2876,6 +3234,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 opponent_ready=opp_ready,
                 room_name=room_name,
                 photon_region=entry["room_region"] or entry["region"] or "us",
+                series_id=sid_str,
             )
 
         # Waiting for ready-up
@@ -3056,18 +3415,9 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
         # Pre-create the ranked_series row so /series/active returns it BEFORE game 1
         # ends. submit_match's existing find-or-create logic will reuse it whether the
         # match report's p1/p2 ordering matches our ordering or not. Skip if a row
-        # already exists (e.g., re-ready after a brief disconnect).
-        ready_reuse_cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
-        existing_series = (await db.execute(
-            select(RankedSeries).where(
-                RankedSeries.status == "active",
-                RankedSeries.created_at >= ready_reuse_cutoff,
-                or_(
-                    and_(RankedSeries.player1_id == player.id, RankedSeries.player2_id == opp["player_id"]),
-                    and_(RankedSeries.player1_id == opp["player_id"], RankedSeries.player2_id == player.id),
-                ),
-            ).order_by(RankedSeries.created_at.desc()).limit(1)
-        )).scalar_one_or_none()
+        # already exists (e.g., re-ready after a brief disconnect) — shared helper,
+        # activity-based recency so an interrupted BO3 resumes instead of forking.
+        existing_series = await _find_current_active_series(db, player.id, opp["player_id"])
         if existing_series is None:
             existing_series = RankedSeries(
                 player1_id=player.id,
@@ -3523,6 +3873,13 @@ async def get_recent_series(
             "ORDER BY b.settled_at DESC NULLS LAST, b.created_at DESC"
         ), {"ids": series_ids})).mappings().all()
         for br in bet_rows:
+            # Refunded bets (payout == stake, from the stalled-series refund)
+            # are not wins or losses — hide them entirely. Rendering them with
+            # `won: payout > amount` showed refunds as LOSSES (bug #41:
+            # lopidav "lost" a bet on a cross-session series whose bets had
+            # been refunded mid-way).
+            if br["payout"] is not None and br["payout"] == br["amount"]:
+                continue
             bets_by_series.setdefault(br["series_id"], []).append({
                 "bettor_name": br["bettor_name"],
                 "bettor_steam_id": br["bettor_steam_id"],
@@ -3605,15 +3962,24 @@ class _ChatManager:
 chat_manager = _ChatManager()
 
 
-async def _persist_chat(db_session_factory, entry: dict):
-    """Insert one chat row. Swallows failures — chat durability is nice-to-have, never critical path."""
+async def _persist_chat(entry: dict) -> tuple[int | None, str | None]:
+    """Insert one chat row and return (id, created_at_iso). Swallows failures
+    (returns (None, None)) — chat durability is nice-to-have, never critical path.
+
+    The DB id + created_at are THE canonical identity of a message: they go out
+    in the WS broadcast AND /chat/recent, so the Discord bot's dedup sees one
+    consistent key. (The old flow broadcast a now()-stamp then inserted a row
+    with a *different* created_at — the bot's WS path and catchup poll couldn't
+    match them, and every WS-relayed message was eligible for a second post from
+    the poll. Bug #34/#30 'double sent to discord'.)"""
     from database import async_session
     try:
         async with async_session() as db:
-            await db.execute(
+            row = (await db.execute(
                 text(
                     "INSERT INTO chat_messages (source, steam_id, discord_id, display_name, message) "
-                    "VALUES (:source, :steam_id, :discord_id, :display_name, :message)"
+                    "VALUES (:source, :steam_id, :discord_id, :display_name, :message) "
+                    "RETURNING id, created_at"
                 ),
                 {
                     "source": entry.get("source", "ingame"),
@@ -3622,10 +3988,37 @@ async def _persist_chat(db_session_factory, entry: dict):
                     "display_name": entry.get("display_name", "")[:64],
                     "message": entry.get("message", "")[:500],
                 },
-            )
+            )).first()
             await db.commit()
+            if row is not None:
+                return (row[0], row[1].isoformat() if row[1] else None)
+            return (None, None)
     except Exception as e:
         print(f"[CHAT] persist failed: {e}")
+        return (None, None)
+
+
+# Resend dedup for the in-game WS path. The client re-queues a message when its
+# socket dies mid-send — if the first send actually REACHED us before the drop,
+# the resend would broadcast + persist a second copy (the other dupe source in
+# #30/#34). The client stamps every message with a client_msg_id nonce; we keep
+# the recent ones and drop repeats. In-memory is fine: single API process, and
+# a restart only forgets nonces (worst case one historical dupe, never a loss).
+import collections as collections_mod
+_chat_nonces_q = collections_mod.deque(maxlen=500)
+_chat_nonces_set: set = set()
+
+
+def _claim_chat_nonce(steam_id: str, nonce: str) -> bool:
+    """True if this (steam_id, nonce) is new (caller should relay); False on repeat."""
+    key = f"{steam_id}|{nonce}"
+    if key in _chat_nonces_set:
+        return False
+    if len(_chat_nonces_q) == _chat_nonces_q.maxlen:
+        _chat_nonces_set.discard(_chat_nonces_q[0])
+    _chat_nonces_q.append(key)
+    _chat_nonces_set.add(key)
+    return True
 
 
 async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | None = None) -> dict:
@@ -3643,7 +4036,7 @@ async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | No
             else:
                 return {"rating": None, "title": None, "title_color": None}
             r = await db.execute(text(
-                f"SELECT gr.rating, si.name AS title, si.preview_color AS title_color "
+                f"SELECT gr.rating, si.name AS title, si.preview_color AS title_color, si.sku AS title_sku "
                 f"FROM glicko_ratings gr "
                 f"JOIN players p ON p.id = gr.player_id "
                 f"LEFT JOIN shop_items si ON si.id = p.active_title_id "
@@ -3652,10 +4045,13 @@ async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | No
             row = r.mappings().first()
             if row is None:
                 return {"rating": None, "title": None, "title_color": None}
+            _title, _tcolor = _display_title_sync(
+                await _rank_colors(db), row["title_sku"], row["title"],
+                row["title_color"], row["rating"])
             return {
                 "rating": int(round(row["rating"])) if row["rating"] is not None else None,
-                "title": row["title"],
-                "title_color": row["title_color"],
+                "title": _title,
+                "title_color": _tcolor,
             }
     except Exception as e:
         print(f"[CHAT] meta lookup failed: {e}")
@@ -3688,6 +4084,13 @@ async def ws_chat(ws: WebSocket):
             display_name = str(data.get("display_name", ""))[:64]
             if not message or not steam_id:
                 continue
+            # Client resend dedup — the mod re-queues a message when its socket
+            # dies mid-send; if the original actually landed, the resend carries
+            # the same nonce and we drop it here instead of double-relaying.
+            client_msg_id = str(data.get("client_msg_id", ""))[:64]
+            if client_msg_id and not _claim_chat_nonce(steam_id, client_msg_id):
+                print(f"[CHAT] dropped resend (nonce {client_msg_id[:12]}) from {display_name}")
+                continue
             # Banned players can't chat. Silently drop — telling them they're banned would
             # encourage griefing on alts. The mod's queue-join 409 is the primary signal.
             if await _is_banned_via_session(steam_id):
@@ -3701,12 +4104,17 @@ async def ws_chat(ws: WebSocket):
                 "title": meta["title"],
                 "title_color": meta["title_color"],
                 "message": message,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
+            # Persist FIRST so the broadcast carries the row's id + created_at —
+            # the bot's dedup key. Fall back to a broadcast-time stamp (no id)
+            # if the insert failed; the bot treats id-less entries legacy-style.
+            mid, created_iso = await _persist_chat(out)
+            out["timestamp"] = created_iso or datetime.now(timezone.utc).isoformat()
+            if mid is not None:
+                out["id"] = mid
             print(f"[CHAT] <- ingame {display_name}({meta['rating']}): {message[:80]}")
             # Exclude the sender so they don't double-render (local echo on the client covers it).
             await chat_manager.broadcast(out, exclude=ws)
-            await _persist_chat(None, out)
     except WebSocketDisconnect:
         print(f"[CHAT] subscriber disconnected")
         chat_manager.disconnect(ws)
@@ -3753,11 +4161,13 @@ async def post_chat_from_discord(
         "title": meta["title"],
         "title_color": meta["title_color"],
         "message": message,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    mid, created_iso = await _persist_chat(out)
+    out["timestamp"] = created_iso or datetime.now(timezone.utc).isoformat()
+    if mid is not None:
+        out["id"] = mid
     print(f"[CHAT] <- discord {out['display_name']}({meta['rating']}): {message[:80]} (subs={chat_manager.count})")
     await chat_manager.broadcast(out)
-    await _persist_chat(None, out)
     return {"status": "posted", "subscribers": chat_manager.count}
 
 
@@ -3771,8 +4181,8 @@ async def get_recent_chat(
     # Join to current rating + active title so scrollback shows them too.
     rows = (await db.execute(
         text(
-            "SELECT cm.source, cm.steam_id, cm.discord_id, cm.display_name, cm.message, cm.created_at, "
-            "       ROUND(gr.rating)::int AS rating, si.name AS title, si.preview_color AS title_color "
+            "SELECT cm.id, cm.source, cm.steam_id, cm.discord_id, cm.display_name, cm.message, cm.created_at, "
+            "       ROUND(gr.rating)::int AS rating, si.name AS title, si.preview_color AS title_color, si.sku AS title_sku "
             "FROM chat_messages cm "
             "LEFT JOIN players p ON "
             "   (cm.steam_id IS NOT NULL AND p.steam_id = cm.steam_id) OR "
@@ -3783,20 +4193,29 @@ async def get_recent_chat(
         ),
         {"limit": limit},
     )).mappings().all()
-    entries = list(reversed([
-        {
+    # Key order is LOAD-BEARING for the mod's manual parser (learning #25 /
+    # CLAUDE.md): the client splits entries on the literal '{"source"' (so
+    # "source" MUST stay the first key) and trims each chunk at the first '"}'
+    # (so the LAST key must be a string value — keep "timestamp" last, and the
+    # numeric "id" strictly in the middle or scrollback drops every entry).
+    _colors = await _rank_colors(db)
+    entries = []
+    for r in rows:
+        _title, _tcolor = _display_title_sync(
+            _colors, r["title_sku"], r["title"], r["title_color"], r["rating"])
+        entries.append({
             "source": r["source"],
+            "id": r["id"],
             "steam_id": r["steam_id"],
             "discord_id": r["discord_id"],
             "display_name": r["display_name"],
             "rating": r["rating"],
-            "title": r["title"],
-            "title_color": r["title_color"],
+            "title": _title,
+            "title_color": _tcolor,
             "message": r["message"],
             "timestamp": r["created_at"].isoformat() if r["created_at"] else None,
-        }
-        for r in rows
-    ]))
+        })
+    entries.reverse()
     return {"messages": entries}
 
 
@@ -3992,6 +4411,11 @@ async def purchase_item(
     item = (await db.execute(select(ShopItem).where(ShopItem.sku == sku))).scalar_one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found")
+    # Achievement-gated items (Sid Slayer / Stan Slayer titles) can't be
+    # bought — they're granted by their achievement. rotation_pool doubles as
+    # the gate marker; these items are also hidden from /shop/items.
+    if item.rotation_pool == "achievement":
+        raise HTTPException(status_code=403, detail="Unlocked by achievement, not purchasable")
 
     already = (await db.execute(
         select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item.id)
@@ -4318,26 +4742,48 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
 
 # ── Routes: Betting + Live series ────────────────────────────
 
-async def _prune_stale_series(db: AsyncSession) -> int:
-    """Mark series abandoned + refund any pending bets. Catches two failure
-    modes:
-      1. **No match reported within 30 min of creation** — players never
-         actually played anything (preflight created the series row but
-         the room died before round 1).
-      2. **Series stalled mid-BO3** — at least one match was reported but
-         no further match in the last 60 minutes AND the series isn't
-         decided (no team has 2 wins). Reproduced 2026-05-07 when Stan
-         had 2000g stuck on a series that played match 1 then never
-         finished — the original prune path only matched mode (1) so the
-         series sat in `status='active'` indefinitely.
+async def _refund_series_bets(db: AsyncSession, sid, reason: str = "refund_abandoned") -> int:
+    """Refund every UNSETTLED bet on a series. Stake was charged via gold_spent
+    at place-time; back it out and add a gold_transactions entry per bet.
+    Idempotent — already-settled bets (won/lost/refunded) are untouched."""
+    bets = (await db.execute(
+        select(Bet).where(Bet.series_id == sid, Bet.settled_at.is_(None))
+    )).scalars().all()
+    for b in bets:
+        player = (await db.execute(select(Player).where(Player.id == b.player_id))).scalar_one_or_none()
+        if player is not None:
+            player.gold_spent = max(0, (player.gold_spent or 0) - b.amount)
+        db.add(GoldTransaction(
+            player_id=b.player_id, amount=b.amount,
+            reason=reason, reference_id=str(sid),
+        ))
+        b.settled_at = datetime.now(timezone.utc)
+        b.payout = b.amount  # full stake returned
+    return len(bets)
 
-    Tournament series are exempt from BOTH paths — async tournament
-    matches have a 7-day match deadline and the series row is created at
-    lock time (potentially days before the players actually meet up).
-    Returns the number of series pruned across both modes."""
+
+async def _prune_stale_series(db: AsyncSession) -> int:
+    """Clean up stale series. Three modes:
+      1. **No match reported within 30 min of creation** — players never
+         actually played anything (preflight created the series row but the
+         room died before round 1). Series abandoned + bets refunded.
+      2. **Series stalled mid-BO3 for 60 min** — bets are REFUNDED (bettors
+         shouldn't wait days for a resolution) but the series row STAYS
+         'active' so the pair can resume it across sessions (bug #43). The
+         refunded bets stay refunded even if the series later completes —
+         _settle_series_bets only touches settled_at IS NULL rows.
+      3. **Undecided series with no activity for SERIES_RESUME_WINDOW_DAYS**
+         — the resume window has lapsed; abandon for the audit trail (any
+         bets were already refunded by mode 2, the refund here is a no-op
+         safety net).
+
+    Tournament series are exempt from ALL paths — async tournament matches
+    have a 7-day match deadline and the series row is created at lock time
+    (potentially days before the players actually meet up).
+    Returns the number of series changed across all modes."""
     cutoff_min = 30
     stalled_min = 60
-    # Mode 1: no match reported. Same query as before.
+    # Mode 1: no match reported → abandon.
     stale_rows_a = (await db.execute(text(
         "SELECT rs.id FROM ranked_series rs "
         "WHERE rs.status = 'active' "
@@ -4346,11 +4792,22 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         "  AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
         "LIMIT 50"
     ), {"cutoff_min": str(cutoff_min)})).all()
-    # Mode 2: stalled after match 1 (or 2). Last match >1h ago AND nobody
-    # has 2 wins yet (so the series isn't actually decided — a 2-0 or 2-1
-    # final state still gets caught by the regular series-completion path
-    # in the match-report handler).
+    # Mode 2: stalled mid-BO3 with unsettled bets → refund bets, KEEP active.
     stale_rows_b = (await db.execute(text(
+        "SELECT rs.id FROM ranked_series rs "
+        "WHERE rs.status = 'active' "
+        "  AND rs.is_tournament = FALSE "
+        "  AND rs.p1_series_wins < 2 "
+        "  AND rs.p2_series_wins < 2 "
+        "  AND EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
+        "  AND EXISTS (SELECT 1 FROM bets b WHERE b.series_id = rs.id AND b.settled_at IS NULL) "
+        "  AND COALESCE(("
+        "        SELECT MAX(m.ended_at) FROM matches m WHERE m.series_id = rs.id"
+        "      ), rs.created_at) < NOW() - (:stalled_min || ' minutes')::interval "
+        "LIMIT 50"
+    ), {"stalled_min": str(stalled_min)})).all()
+    # Mode 3: resume window lapsed → abandon.
+    stale_rows_c = (await db.execute(text(
         "SELECT rs.id FROM ranked_series rs "
         "WHERE rs.status = 'active' "
         "  AND rs.is_tournament = FALSE "
@@ -4359,40 +4816,29 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         "  AND EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
         "  AND COALESCE(("
         "        SELECT MAX(m.ended_at) FROM matches m WHERE m.series_id = rs.id"
-        "      ), rs.created_at) < NOW() - (:stalled_min || ' minutes')::interval "
+        "      ), rs.created_at) < NOW() - (:resume_days || ' days')::interval "
         "LIMIT 50"
-    ), {"stalled_min": str(stalled_min)})).all()
-    stale_rows = list(stale_rows_a) + list(stale_rows_b)
-    if not stale_rows:
-        return 0
-    pruned = 0
-    for (sid,) in stale_rows:
-        # Refund bets on this series. Stake was charged via gold_spent at place-time;
-        # back it out and add a 'refund_abandoned' gold_transactions entry per bet.
-        bets = (await db.execute(
-            select(Bet).where(Bet.series_id == sid, Bet.settled_at.is_(None))
-        )).scalars().all()
-        for b in bets:
-            player = (await db.execute(select(Player).where(Player.id == b.player_id))).scalar_one_or_none()
-            if player is not None:
-                player.gold_spent = max(0, (player.gold_spent or 0) - b.amount)
-            db.add(GoldTransaction(
-                player_id=b.player_id, amount=b.amount,
-                reason="refund_abandoned", reference_id=str(sid),
-            ))
-            b.settled_at = datetime.now(timezone.utc)
-            b.payout = b.amount  # full stake returned
-        # Mark the series itself abandoned for the audit trail.
+    ), {"resume_days": str(SERIES_RESUME_WINDOW_DAYS)})).all()
+    changed = 0
+    for (sid,) in stale_rows_b:
+        n = await _refund_series_bets(db, sid, "refund_abandoned")
+        if n:
+            changed += 1
+            print(f"[SERIES] refunded {n} bet(s) on stalled series {sid} (series stays resumable)")
+    abandon_rows = [(sid, "no_match_reported") for (sid,) in stale_rows_a] \
+                 + [(sid, "series_expired") for (sid,) in stale_rows_c]
+    for (sid, prune_reason) in abandon_rows:
+        n = await _refund_series_bets(db, sid, "refund_abandoned")
         await db.execute(text(
             "UPDATE ranked_series SET status = 'abandoned', "
-            "  invalidated_at = NOW(), invalidation_reason = 'no_match_reported' "
+            "  invalidated_at = NOW(), invalidation_reason = :reason "
             "WHERE id = :sid"
-        ), {"sid": sid})
-        pruned += 1
-        print(f"[SERIES] abandoned stale series {sid} — refunded {len(bets)} bet(s)")
-    if pruned:
+        ), {"sid": sid, "reason": prune_reason})
+        changed += 1
+        print(f"[SERIES] abandoned stale series {sid} ({prune_reason}) — refunded {n} bet(s)")
+    if changed:
         await db.commit()
-    return pruned
+    return changed
 
 
 @app.get("/api/v1/series/active", tags=["Series"])
@@ -4432,7 +4878,14 @@ async def get_active_series(db: AsyncSession = Depends(get_db)):
         LEFT JOIN glicko_ratings gr2 ON gr2.player_id = rs.player2_id
         LEFT JOIN tournaments t      ON t.id = rs.tournament_id
         WHERE rs.status = 'active'
-          AND rs.created_at > NOW() - INTERVAL '2 hours'
+          -- "Live" = created recently OR being actively played. The second
+          -- arm keeps a RESUMED cross-session series (created days ago,
+          -- kept active by the resume window) visible while its games are
+          -- actually happening, without surfacing every dormant resumable
+          -- series in the live list for days.
+          AND (rs.created_at > NOW() - INTERVAL '2 hours'
+               OR EXISTS (SELECT 1 FROM matches m2 WHERE m2.series_id = rs.id
+                          AND m2.ended_at > NOW() - INTERVAL '2 hours'))
           -- Reject phantom 1v1 series whose only matches were 2v2 misroutes.
           AND NOT EXISTS (
               SELECT 1 FROM matches m
@@ -4618,6 +5071,7 @@ async def series_preflight(
     sig: str = Query(...),
     p1_name: str | None = Query(None, max_length=64),
     p2_name: str | None = Query(None, max_length=64),
+    room_id: str | None = Query(None, max_length=64),
     db: AsyncSession = Depends(get_db),
 ):
     """Pre-create a ranked_series for two players who are about to play a
@@ -4664,52 +5118,65 @@ async def series_preflight(
     # so both are confirmed mod users.
     await _mark_mod_seen(db, p1)
     await _mark_mod_seen(db, p2)
-    # Preflight is only called when the local mod has decided the match is
-    # ranked (opponent has the mod + ranked_enabled per /mod/check). Both
-    # participants are mod users in a ranked context; flip ranked_enabled so
-    # first-launch race conditions don't kill the series visibility.
-    if not p1.ranked_enabled:
-        p1.ranked_enabled = True
-    if not p2.ranked_enabled:
-        p2.ranked_enabled = True
-
-    # Idempotent: reuse the pair's CURRENT in-progress series — but only if it's
-    # recent (see SERIES_REUSE_WINDOW_MIN). A stale abandoned 'active' row must
-    # NOT be reused, or a fresh sit-down's games glue onto the old series.
-    preflight_cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
-    existing = (await db.execute(
-        select(RankedSeries).where(
-            RankedSeries.status == "active",
-            RankedSeries.created_at >= preflight_cutoff,
-            or_(
-                and_(RankedSeries.player1_id == p1.id, RankedSeries.player2_id == p2.id),
-                and_(RankedSeries.player1_id == p2.id, RankedSeries.player2_id == p1.id),
-            ),
-        ).order_by(RankedSeries.created_at.desc()).limit(1)
-    )).scalar_one_or_none()
-    if existing is not None:
-        print(f"[PREFLIGHT-DIAG] reuse: existing active series {existing.id} for {p1_steam_id} vs {p2_steam_id}")
+    # Ranked gate (bug #42). ranked_enabled defaults TRUE; a FALSE means the
+    # player explicitly opted out via the Settings toggle. The old code
+    # force-enabled both players here "for first-launch races", which
+    # overrode real opt-outs: a casual code-join game against a
+    # ranked-disabled player still spawned a series row + a Discord gambler
+    # ping (Stan vs dgnfly, 6/24). Mod-issued rooms are exempt — queueing is
+    # itself the opt-in and queue join already set the flag.
+    rl = (room_id or "").lower()
+    _mod_room = rl.startswith("ranked_") or rl.startswith("sct-")
+    if not _mod_room and (not p1.ranked_enabled or not p2.ranked_enabled):
+        who = " ".join(s for s, en in ((p1_steam_id, p1.ranked_enabled), (p2_steam_id, p2.ranked_enabled)) if not en)
+        print(f"[PREFLIGHT-DIAG] not_ranked: opted-out player(s) {who} (room={room_id or '?'})")
         await db.commit()
-        return {"status": "exists", "series_id": str(existing.id)}
+        return {"status": "not_ranked", "series_id": "", "p1_steam_id": p1_steam_id,
+                "p2_steam_id": p2_steam_id, "p1_wins": 0, "p2_wins": 0}
 
+    # Idempotent: reuse the pair's CURRENT in-progress series (shared helper —
+    # activity-based recency so an interrupted BO3 resumes when the pair
+    # reconnects, and tournament series are always reused). A stale abandoned
+    # 'active' row is still excluded, so a fresh sit-down starts fresh.
+    existing = await _find_current_active_series(db, p1.id, p2.id)
+    if existing is not None:
+        print(f"[PREFLIGHT-DIAG] reuse: existing active series {existing.id} for {p1_steam_id} vs {p2_steam_id} "
+              f"(score {existing.p1_series_wins}-{existing.p2_series_wins})")
+        await db.commit()
+        # Echo the series score + player order so a reconnecting client can
+        # adopt the resumed BO3 tally into its HUD instead of starting at 0-0.
+        sp1 = p1_steam_id if existing.player1_id == p1.id else p2_steam_id
+        sp2 = p2_steam_id if existing.player1_id == p1.id else p1_steam_id
+        return {
+            "status": "exists", "series_id": str(existing.id),
+            "p1_steam_id": sp1, "p2_steam_id": sp2,
+            "p1_wins": existing.p1_series_wins, "p2_wins": existing.p2_series_wins,
+        }
+
+    # Queue (ranked_*) and sync-tournament (sct-*) rooms are mod-issued — series
+    # created there keep the tight 2-point bet lock and no PRIVATE tag. This is
+    # what makes REMATCH series in a queue room bettable (#36): the client
+    # re-preflights at each series start, and the room context tells us it's
+    # still a queue pairing. Rooms without context (older clients) stay private.
+    rl = (room_id or "").lower()
+    is_priv = not (rl.startswith("ranked_") or rl.startswith("sct-"))
     series = RankedSeries(
         player1_id=p1.id, player2_id=p2.id,
         p1_series_wins=0, p2_series_wins=0,
         live_p1_points=0, live_p2_points=0,
         status="active",
+        is_private=is_priv,
     )
     db.add(series)
     await db.flush()
-    # Mark as private-room so Live Ranked Games can render it with the
-    # "PRIVATE — no bets" tag (preflight surfaces these right at game
-    # start with no usable betting window).
-    await db.execute(
-        text("UPDATE ranked_series SET is_private = TRUE WHERE id = :sid"),
-        {"sid": series.id},
-    )
     await db.commit()
-    print(f"[SERIES-PREFLIGHT] created series {series.id} for {p1_steam_id} vs {p2_steam_id} (private room)")
-    return {"status": "created", "series_id": str(series.id)}
+    print(f"[SERIES-PREFLIGHT] created series {series.id} for {p1_steam_id} vs {p2_steam_id} "
+          f"(room={room_id or '?'} private={is_priv})")
+    return {
+        "status": "created", "series_id": str(series.id),
+        "p1_steam_id": p1_steam_id, "p2_steam_id": p2_steam_id,
+        "p1_wins": 0, "p2_wins": 0,
+    }
 
 
 @app.post("/api/v1/series/{series_id}/live-points", tags=["Series"])
@@ -4771,7 +5238,7 @@ async def place_discord_bet(
     discord_user_id: str = Query(..., max_length=32),
     series_id: str = Query(...),
     bet_on_steam_id: str = Query(..., description="Which player's Steam ID to bet on"),
-    amount: int = Query(..., ge=1, le=100000),
+    amount: int = Query(..., ge=1, le=2000),  # max bet 2000g (Sid, 2026-07-06)
     db: AsyncSession = Depends(get_db),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
 ):
@@ -4805,7 +5272,7 @@ async def place_bet(
     steam_id: str = Query(...),
     series_id: str = Query(...),
     bet_on_steam_id: str = Query(..., description="Which player's Steam ID to bet on"),
-    amount: int = Query(..., ge=1, le=100000),
+    amount: int = Query(..., ge=1, le=2000),  # max bet 2000g (Sid, 2026-07-06)
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
@@ -4838,10 +5305,15 @@ async def place_bet(
         raise HTTPException(status_code=409, detail="Series is not active")
     if series.p1_series_wins >= 2 or series.p2_series_wins >= 2:
         raise HTTPException(status_code=409, detail="Series already effectively concluded")
+    # Any decided game locks betting. /series/active has always REPORTED this
+    # as bets_locked, but the endpoint itself only rejected at >= 2 wins — so a
+    # crafted request could bet on a 1-0 series (including a resumed
+    # cross-session series whose game-1 live points were long since reset).
+    if series.p1_series_wins > 0 or series.p2_series_wins > 0:
+        raise HTTPException(status_code=409, detail="Bets locked — a game in this series is already decided")
     # Bet cutoff: once 2 points are scored in game 1, betting locks. Preserves the
     # "is the favorite actually going to win" mystery and prevents free-money bets
-    # placed mid-game once an outcome is obvious. Game 1 ending (any p?_series_wins
-    # > 0) also locks via the wins check above.
+    # placed mid-game once an outcome is obvious.
     # Private-room series get a 1-point wider window (matches /series/active) — their
     # row is created late so the first 2 points may already be on the board when bets
     # first become visible. Queue series keep the tighter >= 2 lock.
@@ -4914,7 +5386,7 @@ async def place_team_bet(
     steam_id: str = Query(...),
     team_series_id: str = Query(...),
     bet_on_team: int = Query(..., ge=1, le=2),
-    amount: int = Query(..., ge=1, le=100000),
+    amount: int = Query(..., ge=1, le=2000),  # max bet 2000g (Sid, 2026-07-06)
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
@@ -5197,16 +5669,59 @@ ACHIEVEMENT_DEFS = {
     "rise_from_the_ashes":  {"name": "Rise from the Ashes", "desc": "Win 5-0 with Phoenix without losing a life"},
     "the_comeback_kid":     {"name": "The Comeback Kid",    "desc": "Win after being down 0-4"},
     "stacked_deck":         {"name": "Stacked Deck",        "desc": "Get 5 copies of one card in a game"},
-    "regicide":             {"name": "Regicide",            "desc": "Win against Sid in a ranked series"},
+    # Key stays 'regicide' so existing PlayerAchievement rows keep working;
+    # only the display name changed (Regicide -> Sid Slayer, v1.29).
+    "regicide":             {"name": "Sid Slayer",          "desc": "Win against Sid in a ranked series"},
+    "stan_slayer":          {"name": "Stan Slayer",         "desc": "Win against Stan in a ranked series"},
     "pacifist":             {"name": "Pacifist",            "desc": "Win a game without firing a single shot"},
     "immovable_object":     {"name": "Immovable Object",    "desc": "Win a game without moving or jumping"},
     # v1.26.7
     "master_rank":          {"name": "Master",              "desc": "Reach 2030 rating in ranked (1v1 or 2v2)"},
     "team_sweep":           {"name": "Tag Team Sweep",      "desc": "Win a 2v2 game 5-0"},
+    # v1.29
+    "grand_master":         {"name": "Grand Master",        "desc": "Reach 2330 rating in ranked (1v1 or 2v2)"},
 }
 
 # Master rank threshold — applies to both 1v1 and 2v2 Glicko rating.
 MASTER_RANK_THRESHOLD = 2030.0
+GRAND_MASTER_THRESHOLD = 2330.0
+
+# Slayer achievements: beat one of these players in a ranked series.
+# steam_id -> achievement key. Extend to add more community bosses.
+SLAYER_TARGETS = {
+    "76561198040410653": "regicide",     # Sid  -> "Sid Slayer"
+    "76561198983423367": "stan_slayer",  # Stan -> "Stan Slayer"
+}
+
+# Achievement-gated titles: unlocking the achievement auto-grants the shop
+# title item so it becomes equippable (the items are non-purchasable).
+ACHIEVEMENT_TITLE_SKUS = {
+    "regicide":    "title_sid_slayer",
+    "stan_slayer": "title_stan_slayer",
+}
+
+
+async def _grant_rating_achievements(db: AsyncSession, player_id, new_rating: float) -> None:
+    """Grant rating-threshold achievements crossed by a Glicko update."""
+    if new_rating >= MASTER_RANK_THRESHOLD:
+        await _grant_achievement_inline(db, player_id, "master_rank")
+    if new_rating >= GRAND_MASTER_THRESHOLD:
+        await _grant_achievement_inline(db, player_id, "grand_master")
+
+
+async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
+    """Idempotently grant a shop title item (used for achievement titles)."""
+    item_id = (await db.execute(
+        select(ShopItem.id).where(ShopItem.sku == sku))).scalar_one_or_none()
+    if item_id is None:
+        print(f"[ACHIEVEMENT] title sku {sku} missing from shop_items — run the titles migration")
+        return
+    owned = (await db.execute(
+        select(PlayerItem).where(PlayerItem.player_id == player_id,
+                                 PlayerItem.item_id == item_id))).scalar_one_or_none()
+    if owned is None:
+        db.add(PlayerItem(player_id=player_id, item_id=item_id, purchase_price=0))
+        print(f"[ACHIEVEMENT] granted title item {sku} to {player_id}")
 
 
 async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key: str) -> bool:
@@ -5232,6 +5747,14 @@ async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key
         player_id=player_id, amount=ACHIEVEMENT_GOLD,
         reason="achievement", reference_id=achievement_key,
     ))
+    # Achievement-gated titles (Sid Slayer / Stan Slayer) become equippable
+    # the moment the achievement lands, whatever the grant path.
+    title_sku = ACHIEVEMENT_TITLE_SKUS.get(achievement_key)
+    if title_sku:
+        try:
+            await _grant_title_item(db, player_id, title_sku)
+        except Exception as tex:
+            print(f"[ACHIEVEMENT] title grant failed for {achievement_key}: {tex}")
     print(f"[ACHIEVEMENT] auto-granted {achievement_key} to {player_id}")
     return True
 
@@ -5502,14 +6025,30 @@ async def list_bug_reports(
 
 
 @app.get("/api/v1/bug-reports/events/recent", tags=["Bug Reports"])
-async def recent_bug_report_events(seconds: int = Query(90, ge=10, le=600), db: AsyncSession = Depends(get_db)):
-    """Bot-poll endpoint. Returns bug_report_events from the last N seconds
-    joined to bug_reports + the reporter's player row so the bot can DM the
-    reporter without doing extra lookups. Includes status changes AND
-    comments — bot decides which event_types to act on."""
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+async def recent_bug_report_events(
+    seconds: int = Query(90, ge=10, le=600),
+    unnotified: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-poll endpoint. Returns bug_report_events joined to bug_reports +
+    the reporter's player row so the bot can DM the reporter without extra
+    lookups. Includes status changes AND comments — bot decides which
+    event_types to act on.
+
+    unnotified=true (v1.29, bug #38): instead of a rolling time window,
+    return events not yet acked via /internal/bug-reports/events/ack (up to
+    7 days back). The old window approach dropped every event that landed
+    while the bot was restarting/deploying — which is exactly when comment
+    sweeps happen — so DMs looked 'inconsistent'. Ack-based delivery makes
+    them at-least-once."""
+    if unnotified:
+        where = "bre.notified_at IS NULL AND bre.created_at >= NOW() - INTERVAL '7 days'"
+        params = {}
+    else:
+        where = "bre.created_at >= :cutoff"
+        params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
-        text("""SELECT bre.id              AS event_id,
+        text(f"""SELECT bre.id              AS event_id,
                        bre.bug_report_id::text AS bug_report_id,
                        br.bug_number,
                        LEFT(br.description, 140) AS description_snippet,
@@ -5526,9 +6065,10 @@ async def recent_bug_report_events(seconds: int = Query(90, ge=10, le=600), db: 
                   FROM bug_report_events bre
                   JOIN bug_reports br ON br.id = bre.bug_report_id
              LEFT JOIN players reporter ON reporter.steam_id = br.steam_id
-                 WHERE bre.created_at >= :cutoff
-              ORDER BY bre.created_at ASC"""),
-        {"cutoff": cutoff},
+                 WHERE {where}
+              ORDER BY bre.created_at ASC
+                 LIMIT 100"""),
+        params,
     )).mappings().all()
     return {
         "events": [
@@ -5553,19 +6093,78 @@ async def recent_bug_report_events(seconds: int = Query(90, ge=10, le=600), db: 
     }
 
 
+class _BugEventAck(BaseModel):
+    event_ids: list[str]
+
+
+@app.post("/api/v1/internal/bug-reports/events/ack", tags=["Bug Reports"])
+async def ack_bug_report_events(
+    body: _BugEventAck,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only (v1.29): mark bug_report_events as notified so the unnotified
+    poll stops returning them. Called after the DM is sent (or is known to be
+    permanently undeliverable — reporter unlinked / DMs closed)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    ids = [i for i in body.event_ids[:200] if i]
+    if not ids:
+        return {"acked": 0}
+    res = await db.execute(text(
+        "UPDATE bug_report_events SET notified_at = NOW() "
+        "WHERE id::text = ANY(:ids) AND notified_at IS NULL"
+    ), {"ids": ids})
+    await db.commit()
+    return {"acked": res.rowcount or 0}
+
+
+@app.post("/api/v1/internal/bug-reports/{report_id}/channel-posted", tags=["Bug Reports"])
+async def ack_bug_report_posted(
+    report_id: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only (v1.29): mark a bug report as posted to the Discord feed
+    channel (same at-least-once pattern as event acks)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    res = await db.execute(text(
+        "UPDATE bug_reports SET channel_posted_at = NOW() "
+        "WHERE id::text = :rid AND channel_posted_at IS NULL"
+    ), {"rid": report_id})
+    await db.commit()
+    return {"acked": res.rowcount or 0}
+
+
 @app.get("/api/v1/bug-reports/recent", tags=["Bug Reports"])
-async def recent_bug_reports(seconds: int = Query(60, ge=10, le=600), db: AsyncSession = Depends(get_db)):
+async def recent_bug_reports(
+    seconds: int = Query(60, ge=10, le=600),
+    unposted: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
     """Bot-poll endpoint. Returns reports filed in the last N seconds, minus
     logs/comments — only the metadata + description that's safe to post in
-    a public-ish Discord channel."""
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    a public-ish Discord channel.
+
+    unposted=true (v1.29): ack-based variant — reports not yet posted to the
+    feed channel (up to 7 days back), so a bot restart can't drop one."""
+    if unposted:
+        where = "channel_posted_at IS NULL AND created_at >= NOW() - INTERVAL '7 days'"
+        params = {}
+    else:
+        where = "created_at >= :cutoff"
+        params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
-        text("""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
+        text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
                        severity, category, status, description
                   FROM bug_reports
-                 WHERE created_at >= :cutoff
-                 ORDER BY created_at ASC"""),
-        {"cutoff": cutoff},
+                 WHERE {where}
+                 ORDER BY created_at ASC
+                 LIMIT 50"""),
+        params,
     )).mappings().all()
     return {
         "reports": [
@@ -7392,8 +7991,7 @@ async def _complete_team_series_with_ratings(
                 {"r": new_r, "rd": new_rd, "v": new_vol, "pid": pid},
             )
         new_ratings[str(pid)] = round(new_r, 1)
-        if new_r >= MASTER_RANK_THRESHOLD:
-            await _grant_achievement_inline(db, pid, "master_rank")
+        await _grant_rating_achievements(db, pid, new_r)
 
     # Per-slot rating deltas (joined by player_id, same as the inline path).
     delta_by_pid = {pid: round(results[pid][0] - inputs[pid]["rating"], 1) for pid in gids}
@@ -8125,9 +8723,8 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
                     {"r": new_r, "rd": new_rd, "v": new_vol, "pid": pid},
                 )
             new_ratings[str(pid)] = round(new_r, 1)
-            # Master rank: crossed threshold in 2v2.
-            if new_r >= MASTER_RANK_THRESHOLD:
-                await _grant_achievement_inline(db, pid, "master_rank")
+            # Rating achievements: crossed threshold in 2v2.
+            await _grant_rating_achievements(db, pid, new_r)
         # Persist the per-player series Elo deltas in the team_series slot that
         # holds each player's player_id — NOT in the slot whose label happens to
         # match the report's t1a/t1b/t2a/t2b naming. The two can disagree

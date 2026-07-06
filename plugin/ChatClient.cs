@@ -73,9 +73,16 @@ namespace CompetitiveRounds
         public static void Send(string steamId, string displayName, string message)
         {
             if (string.IsNullOrEmpty(message)) return;
+            // client_msg_id: per-message nonce baked into the queued JSON. When a
+            // send fails mid-flight the SAME string is re-queued, so a resend
+            // carries the same nonce — if the first copy actually reached the
+            // server before the socket died, the server drops the repeat instead
+            // of double-relaying it to Discord + other players (bug #30/#34).
+            string nonce = Guid.NewGuid().ToString("N");
             string outbound =
                 "{\"steam_id\":\"" + JsonEscape(steamId ?? "") + "\"," +
                 "\"display_name\":\"" + JsonEscape(displayName ?? "") + "\"," +
+                "\"client_msg_id\":\"" + nonce + "\"," +
                 "\"message\":\"" + JsonEscape(message) + "\"}";
             sendQueue.Enqueue(outbound);
             try { sendSignal?.Release(); } catch { }

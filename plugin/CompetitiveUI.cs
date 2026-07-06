@@ -125,9 +125,10 @@ namespace CompetitiveRounds
             DrawCardHoverTooltip();
             DrawCompareSearch();
             DrawMapColorToast();
+            DrawCustomBetPrompt();
             // Block uGUI clicks to the F5 page behind any open IMGUI modal (lopi #14:
             // clicks on the bug-report form were also hitting F5 buttons underneath).
-            NativeUI.SetClickBlocker(bugModalOpen || logViewerOpen || bugAdminOpen);
+            NativeUI.SetClickBlocker(bugModalOpen || logViewerOpen || bugAdminOpen || NativeUI.CustomBetPromptOpen);
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
         }
@@ -157,6 +158,55 @@ namespace CompetitiveRounds
                 GUI.color = new Color(1f, 1f, 1f, a);
                 GUI.Label(new Rect(x, y, w, h), $"<color=#FFD94D>Map skin:</color> <color=#FFFFFF>{t}</color>", mapToastStyle);
                 GUI.color = prev;
+            }
+            catch { }
+        }
+
+        // ── Custom bet amount prompt (v1.29, F6) ───────────────────────────────
+        // Small centered IMGUI modal opened by the "..." button on a bet row.
+        // Enter = place, Escape = cancel. Digits only; validation + placement
+        // live in NativeUI.SubmitCustomBet.
+        private static GUIStyle betPromptStyle, betPromptTitleStyle;
+        private const string BET_AMOUNT_CTRL = "CustomBetAmount";
+        private static void DrawCustomBetPrompt()
+        {
+            if (!NativeUI.CustomBetPromptOpen) return;
+            try
+            {
+                var ev = Event.current;
+                if (ev != null && ev.type == EventType.KeyDown)
+                {
+                    if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter)
+                    { ev.Use(); NativeUI.SubmitCustomBet(); return; }
+                    if (ev.keyCode == KeyCode.Escape)
+                    { ev.Use(); NativeUI.CancelCustomBet(); return; }
+                }
+                if (betPromptStyle == null)
+                    betPromptStyle = new GUIStyle(GUI.skin.textField) { fontSize = 18, alignment = TextAnchor.MiddleCenter };
+                if (betPromptTitleStyle == null)
+                    betPromptTitleStyle = new GUIStyle(GUI.skin.label) { fontSize = 14, alignment = TextAnchor.MiddleCenter, richText = true, fontStyle = FontStyle.Bold };
+                float w = 340f, h = 128f;
+                float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+                // Dim backdrop + eat stray clicks outside the box (IMGUI side).
+                GUI.color = new Color(0f, 0f, 0f, 0.55f);
+                GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
+                GUI.color = new Color(0.10f, 0.11f, 0.14f, 0.98f);
+                GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
+                GUI.color = Color.white;
+                GUI.Label(new Rect(x, y + 6f, w, 22f),
+                    $"<color=#FFD94D>Custom bet</color> on <color=#FFFFFF>{NativeUI.CustomBetTargetLabel}</color>", betPromptTitleStyle);
+                GUI.SetNextControlName(BET_AMOUNT_CTRL);
+                string next = GUI.TextField(new Rect(x + 40f, y + 34f, w - 80f, 30f), NativeUI.CustomBetAmountText ?? "", 5, betPromptStyle);
+                // Digits only (commas allowed, stripped at submit).
+                var filtered = new System.Text.StringBuilder(next.Length);
+                foreach (char c in next) if (char.IsDigit(c) || c == ',') filtered.Append(c);
+                NativeUI.CustomBetAmountText = filtered.ToString();
+                GUI.FocusControl(BET_AMOUNT_CTRL);
+                GUI.Label(new Rect(x, y + 64f, w, 16f), "<color=#8899AA>1 - 2,000 gold</color>", betPromptTitleStyle);
+                if (GUI.Button(new Rect(x + 34f, y + 86f, 130f, 30f), "Place bet"))
+                    NativeUI.SubmitCustomBet();
+                if (GUI.Button(new Rect(x + w - 164f, y + 86f, 130f, 30f), "Cancel"))
+                    NativeUI.CancelCustomBet();
             }
             catch { }
         }
@@ -1567,7 +1617,8 @@ namespace CompetitiveRounds
             // bug report form, log viewer, admin bug viewer, and the Compare-tab
             // search field all have their own text entry that need T to type
             // "the", "tree", etc. (lopi: typing "t" in Compare search opened chat).
-            if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused) return;
+            if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused
+                || NativeUI.CustomBetPromptOpen) return;
 
             var ev = Event.current;
             if (!chatInputOpen)

@@ -68,6 +68,11 @@ class MatchReport(BaseModel):
     # opponent also has the mod). Display-only; never feeds Glicko or anti-cheat.
     local_avg_fps: int | None = Field(None, ge=0, le=10000)
     opponent_avg_fps: int | None = Field(None, ge=0, le=10000)
+    # Input-rate metrics (v1.29, Compare tab "avg keystrokes/sec"). Reporter's
+    # per-match counts, gathered only during active combat (alive + in round).
+    # Advisory / display-only, NOT in HMAC.
+    local_keys_pressed: int | None = Field(None, ge=0)
+    local_active_seconds: float | None = Field(None, ge=0, le=86400)
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -161,6 +166,19 @@ class PlayerStatsResponse(BaseModel):
     worst_cards: list[dict] = Field(default_factory=list)
     achievements_unlocked: int = 0
     region_breakdown: list[dict] = Field(default_factory=list)  # [{region, matches}]
+    # Compare-tab metrics (v1.29): input rate, game length, betting record,
+    # and the player's rank tier (also drives the "Current Rank" title).
+    avg_keys_per_sec: float = 0.0
+    avg_keys_per_game: int = 0
+    avg_game_seconds: int = 0
+    bets_won: int = 0
+    bets_lost: int = 0
+    bet_gold_net: int = 0
+    rank_name: str = ""
+    rank_color: str = ""
+    # 2v2 headline stats inline (saves the Compare tab a second endpoint).
+    team_rating: float = 0.0
+    team_completed_series: int = 0
     # Most recently observed mod version for this player (X-Mod-Version
     # header on their last mod-only request). null for non-mod players.
     mod_version: str | None = None
@@ -191,6 +209,10 @@ class LeaderboardEntry(BaseModel):
     gold: int = 0
     title: str | None = None
     title_color: str | None = None
+    # Rank tier (v1.29) — mirrors the Discord rank roles (name without the
+    # rating range) + the role's color as synced from Discord.
+    rank_name: str = ""
+    rank_color: str = ""
 
     model_config = {"from_attributes": True}
 
@@ -276,6 +298,10 @@ class QueuePollResponse(BaseModel):
     opponent_ready: bool = False
     room_name: str | None = None
     photon_region: str | None = None
+    # Pre-created ranked_series id (ready_join only) — lets the poll-path client
+    # set ActiveRankedSeriesId just like the /queue/ready both_ready path, so
+    # live-points reporting + bet locking work for poll-discovered matches too.
+    series_id: str | None = None
 
 
 class QueueDeclineRequest(BaseModel):
