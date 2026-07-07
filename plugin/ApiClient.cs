@@ -125,6 +125,11 @@ namespace CompetitiveRounds
             public long blocks_successful;
             public string active_title;
             public string active_title_color;
+            // Raw sku of the equipped title. active_title carries the DISPLAY name,
+            // which the server rewrites for the dynamic Current Rank title — so the
+            // shop's equip-state check must compare by sku, not name (#48). Flat
+            // scalar => JsonUtility parses it for free (learning #73).
+            public string active_title_sku;
             public string active_trail_sku;
             public string active_trail_color;
             public int active_trail_price;
@@ -1711,7 +1716,10 @@ namespace CompetitiveRounds
             // sniffed from their Photon `cr_fps` custom property (0 = no data / no mod).
             int localAvgFps = 0, int opponentAvgFps = 0,
             // v1.29 — Compare-tab input-rate metrics (keys per active-combat second).
-            int localKeysPressed = 0, float localActiveSeconds = 0f)
+            int localKeysPressed = 0, float localActiveSeconds = 0f,
+            // v1.29.1 (#50) — count of 1s windows whose gameplay-key rate was
+            // superhuman (macro suspicion). Advisory, not in HMAC.
+            int localMacroSuspectSeconds = 0)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -1750,6 +1758,7 @@ namespace CompetitiveRounds
             // comma-decimal locale can't produce invalid JSON (learning #47 family).
             sb.Append($"\"local_keys_pressed\":{localKeysPressed},");
             sb.Append($"\"local_active_seconds\":{localActiveSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)},");
+            sb.Append($"\"local_macro_suspect_seconds\":{localMacroSuspectSeconds},");
             string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
@@ -4773,9 +4782,24 @@ namespace CompetitiveRounds
         {
             if (Plugin.DataConsentGranted)
             {
+                // Heal the consent trap (bug #47): if ranked was auto-disabled by a
+                // previous revoke/decline (not by the user clicking Disable), restore
+                // it now and re-sync the server. Otherwise the flag stayed false
+                // forever, the startup sync kept pushing false, and every game vs
+                // this player silently recorded casual.
+                if (Plugin.RankedDisabledByConsent != null && Plugin.RankedDisabledByConsent.Value)
+                {
+                    Plugin.RankedDisabledByConsent.Value = false;
+                    if (Plugin.RankedEnabled != null && !Plugin.RankedEnabled.Value)
+                    {
+                        Plugin.RankedEnabled.Value = true;
+                        Plugin.Log.LogInfo("[CONSENT] Ranked mode restored on consent grant (was auto-disabled by revoke)");
+                    }
+                }
                 string id = MatchTracker.LocalSteamId;
                 if (!string.IsNullOrEmpty(id) && id != "unknown")
                 {
+                    ToggleRanked(id, Plugin.RankedEnabled != null && Plugin.RankedEnabled.Value);
                     FetchPlayerStats(id);
                     FetchMatchHistory(id);
                     FetchAchievements(id);
@@ -4799,9 +4823,13 @@ namespace CompetitiveRounds
                 // Flip ranked off — if the user is in queue, server rejects further polls (410)
                 // and the queue entry expires via the cleanup cron. No more match reports will
                 // leave the client because every helper short-circuits on !DataConsentGranted.
+                // Mark WHY it flipped so a later consent grant can restore it — a plain flip
+                // persisted as if the user chose Disable and never healed (bug #47).
                 if (Plugin.RankedEnabled != null && Plugin.RankedEnabled.Value)
                 {
                     Plugin.RankedEnabled.Value = false;
+                    if (Plugin.RankedDisabledByConsent != null)
+                        Plugin.RankedDisabledByConsent.Value = true;
                     Plugin.Log.LogInfo("[CONSENT] Ranked mode disabled due to revoke");
                 }
             }

@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.29.0";
+        public const string ModVersion = "1.29.1";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -31,6 +31,7 @@ namespace CompetitiveRounds
         // Config entries
         internal static ConfigEntry<string> ApiBaseUrl;
         internal static ConfigEntry<bool> RankedEnabled;
+        internal static ConfigEntry<bool> RankedDisabledByConsent;
         internal static ConfigEntry<bool> ShowNotifications;
         internal static ConfigEntry<bool> ShowFps;
         internal static ConfigEntry<bool> ShowRegionPing;
@@ -159,6 +160,18 @@ namespace CompetitiveRounds
                 "Ranked", "Enabled",
                 true,
                 "Whether ranked tracking is active"
+            );
+
+            // Set when a consent REVOKE auto-disabled ranked (vs. the user clicking
+            // Disable). On the next consent grant, ranked is restored automatically —
+            // without this, a decline/revoke silently left ranked off forever and the
+            // startup sync kept pushing ranked_enabled=false, so every game vs that
+            // player recorded casual (bug #47's "opponents have ranked disabled and
+            // I'm not sure they intended it").
+            RankedDisabledByConsent = Config.Bind(
+                "Ranked", "DisabledByConsentRevoke",
+                false,
+                "Internal: ranked was auto-disabled by a data-consent revoke, not by the user"
             );
 
             ShowNotifications = Config.Bind(
@@ -4824,8 +4837,18 @@ namespace CompetitiveRounds
                 if (!bgN.HasValue) return;
                 Color bg = SaturateColor(bgN.Value, 1.10f);
                 // Lit areas = bright designed hue; shadowed areas = deep shade of it.
+                // v1.29.1: the +0.22 brightness floor is now LUMINANCE-SCALED. The
+                // fixed floor meant even a pitch-black background rendered as a
+                // grey sky (0.22 minimum) — the dark skins (charcoal/obsidian/
+                // blackwood/abyss) could never go actually dark (Sid: "Charcoal
+                // should be pretty dark"). Backgrounds at luminance >= 0.25 keep
+                // the exact old math (floor 0.22, zero visual change for the
+                // mid/light skins); below that the floor sinks toward 0.04 so a
+                // near-black value reads as pitch-black smoke instead of fog.
+                float bgLum = 0.299f * bg.r + 0.587f * bg.g + 0.114f * bg.b;
+                float skyFloor = Mathf.Lerp(0.04f, 0.22f, Mathf.InverseLerp(0.04f, 0.25f, bgLum));
                 Color lit = CapBrightness(new Color(
-                    0.22f + bg.r * 0.95f, 0.22f + bg.g * 0.95f, 0.22f + bg.b * 0.95f, 1f), 1.0f);
+                    skyFloor + bg.r * 0.95f, skyFloor + bg.g * 0.95f, skyFloor + bg.b * 0.95f, 1f), 1.0f);
                 // Alpha 0.85 matches the vanilla ambient's alpha (its meaning is
                 // internal to the SFSS shader — keep the semantics identical).
                 Color amb = new Color(bg.r * 0.45f, bg.g * 0.45f, bg.b * 0.45f, 0.85f);

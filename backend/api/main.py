@@ -891,7 +891,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.29.0"
+LATEST_MOD_VERSION = "1.29.1"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1148,6 +1148,23 @@ async def _check_anti_cheat(
             False,
         ))
 
+    # 4. Macro suspicion (#50, advisory — flag only). The client counts
+    # 1-second windows whose gameplay-key event rate exceeded a sustained-
+    # superhuman threshold (25 events/s across WASD/arrows/space/mouse).
+    # A couple of suspect seconds can be frame-timing artifacts; a double-
+    # digit count across one match means a repeating input device.
+    if (report.local_macro_suspect_seconds or 0) >= 10:
+        flags.append((
+            "suspected_macro",
+            {
+                "reporter_steam": report.reported_by_steam_id,
+                "macro_suspect_seconds": report.local_macro_suspect_seconds,
+                "keys_pressed": report.local_keys_pressed or 0,
+                "active_seconds": report.local_active_seconds or 0,
+            },
+            False,
+        ))
+
     return {"flags": flags, "invalidate": invalidate}
 
 
@@ -1208,10 +1225,38 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         report.photon_room_id.lower().startswith("ranked_")
         or report.photon_room_id.lower().startswith("sct-"))
     if report.is_ranked and not _mod_room and (not p1.ranked_enabled or not p2.ranked_enabled):
-        print(f"[MATCH] downgraded to casual: ranked disabled for "
-              f"{p1.steam_id if not p1.ranked_enabled else ''} {p2.steam_id if not p2.ranked_enabled else ''} "
-              f"(room={report.photon_room_id})")
-        report.is_ranked = False
+        # Bug #47: an ACTIVE series is the durable consent record for the
+        # sitting — both players were ranked-enabled when preflight created it.
+        # A flag that flips false mid-series (late startup sync pushing a stale
+        # config, or a deliberate mid-series toggle) must not void the series'
+        # remaining games; that both mis-records real ranked games AND would
+        # let a losing player dodge a live BO3 by toggling ranked off.
+        _live_series = await _find_current_active_series(db, p1.id, p2.id)
+        if _live_series is not None:
+            print(f"[MATCH] kept ranked despite disabled flag: live series {_live_series.id} "
+                  f"is the sitting's consent record (room={report.photon_room_id})")
+        else:
+            print(f"[MATCH] downgraded to casual: ranked disabled for "
+                  f"{p1.steam_id if not p1.ranked_enabled else ''} {p2.steam_id if not p2.ranked_enabled else ''} "
+                  f"(room={report.photon_room_id})")
+            report.is_ranked = False
+    elif not report.is_ranked and not _mod_room:
+        # Bug #47, other direction: the client's matchIsRanked snapshot races
+        # (opponent Photon props lost on join, /mod/check vs preflight-registration
+        # race, opponent's startup ranked-sync landing mid-game) and the FIRST
+        # game(s) of a code-room sitting report casual even though every later
+        # game of the same sitting reports ranked. Server truth wins: two mod
+        # users (mod_seen_at set by mod-only endpoints) who BOTH have ranked
+        # enabled are playing ranked — this community plays no "practice" games.
+        # Vanilla quickplay opponents never get mod_seen_at, so genuine casual
+        # games vs non-mod players are untouched; a deliberate opt-out
+        # (ranked_enabled=false) is respected as before.
+        if (p1.mod_seen_at is not None and p2.mod_seen_at is not None
+                and p1.ranked_enabled and p2.ranked_enabled):
+            print(f"[MATCH] upgraded to ranked: both mod users ranked-enabled, client "
+                  f"reported casual (race) (room={report.photon_room_id} "
+                  f"reporter={report.reported_by_steam_id})")
+            report.is_ranked = True
 
     # Determine winner
     winner = p1 if report.p1_rounds_won > report.p2_rounds_won else p2
@@ -1251,8 +1296,11 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         duration_seconds=report.match_duration,
         local_bullets_fired=report.local_shots_fired,
         local_blocks_raised=report.local_blocks_raised,
-        local_keys_pressed=report.local_keys_pressed,
-        local_active_seconds=report.local_active_seconds,
+        # Same pre-1.29.1 gate as the lifetime accumulators: only persist key
+        # metrics from clients running the per-frame sampler (macro field present).
+        local_keys_pressed=report.local_keys_pressed if report.local_macro_suspect_seconds is not None else None,
+        local_active_seconds=report.local_active_seconds if report.local_macro_suspect_seconds is not None else None,
+        local_macro_suspect_seconds=report.local_macro_suspect_seconds,
         photon_room_id=report.photon_room_id,
         game_version=report.game_version,
         region=report.region,
@@ -1351,8 +1399,14 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         reporter.blocks_successful = (reporter.blocks_successful or 0) + report.local_blocks_successful
     # Input-rate accumulators (v1.29 Compare tab: avg keystrokes/sec). Only
     # accumulate when BOTH values are present and sane — a keys count with no
-    # timebase (or vice versa) would skew the lifetime average.
-    if report.local_keys_pressed and report.local_active_seconds and report.local_active_seconds >= 5:
+    # timebase (or vice versa) would skew the lifetime average. The
+    # local_macro_suspect_seconds presence check gates out pre-1.29.1 clients:
+    # their 10 Hz sampler undercounted keys ~10-30x (bug #50) and migration 106
+    # zeroed all data it produced — letting old clients keep accumulating would
+    # re-poison the clean baseline. New clients always send the field (>= 0).
+    if (report.local_macro_suspect_seconds is not None
+            and report.local_keys_pressed and report.local_active_seconds
+            and report.local_active_seconds >= 5):
         reporter.keys_pressed_total = (reporter.keys_pressed_total or 0) + report.local_keys_pressed
         reporter.active_seconds_total = (reporter.active_seconds_total or 0) + report.local_active_seconds
 
@@ -1440,7 +1494,17 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         else:
             series.p2_series_wins += 1
 
-        series_score = f"{series.p1_series_wins}-{series.p2_series_wins}"
+        # Orient the score to the REPORTER's perspective (their wins first).
+        # This response goes only to the reporting client, which displays the
+        # string raw ("Series: 0-1" toasts). The old series-row (p1,p2) order
+        # read backwards whenever the series row was created by the opponent's
+        # preflight — Sid won game 1 vs slarn and was toasted "Series: 0-1"
+        # (bug #47's "one of the games doesn't show").
+        _reporter_id = p1.id if report.reported_by_steam_id == report.player1.steam_id else p2.id
+        if _reporter_id == series.player1_id:
+            series_score = f"{series.p1_series_wins}-{series.p2_series_wins}"
+        else:
+            series_score = f"{series.p2_series_wins}-{series.p1_series_wins}"
 
         # ── Server-side speedhack flag (advisory) ──────────────────────────
         # A Cheat-Engine-style speedhack speeds the GAME clock — and the client's
@@ -1961,6 +2025,7 @@ async def get_player_stats(
     # Active cosmetic lookups (title + trail + map color)
     active_title_name: str | None = None
     active_title_color: str | None = None
+    active_title_sku: str | None = None
     active_trail_sku: str | None = None
     active_trail_color: str | None = None
     active_trail_price: int = 0
@@ -1987,6 +2052,11 @@ async def get_player_stats(
             continue
         if kind == "title":
             active_title_name, active_title_color = row[0], row[2]
+            # Raw sku travels alongside the DISPLAY name so the shop can match
+            # equip state by sku — the dynamic title rewrites the name to the
+            # live rank ("Master"), which broke the old name-based equality and
+            # made an equipped Current Rank title render unequipped (#48).
+            active_title_sku = row[1]
             # Dynamic 'Current Rank' title (v1.29): displayed text/color track
             # the player's live rank tier, so rank-ups/downs update the title
             # automatically without re-equipping.
@@ -2331,6 +2401,7 @@ async def get_player_stats(
         blocks_successful=player.blocks_successful or 0,
         active_title=active_title_name,
         active_title_color=active_title_color,
+        active_title_sku=active_title_sku,
         active_trail_sku=active_trail_sku,
         active_trail_color=active_trail_color,
         active_trail_price=active_trail_price,
@@ -2418,6 +2489,9 @@ async def get_player_matches(
             -- Opponent's CURRENT active title (view-time, not match-time snapshot — cheaper and good enough).
             CASE WHEN m.player1_id = :pid THEN si2.name        ELSE si1.name        END AS opp_title,
             CASE WHEN m.player1_id = :pid THEN si2.preview_color ELSE si1.preview_color END AS opp_title_color,
+            -- sku + live rating feed the dynamic 'Current Rank' title override (#45).
+            CASE WHEN m.player1_id = :pid THEN si2.sku ELSE si1.sku END AS opp_title_sku,
+            CASE WHEN m.player1_id = :pid THEN gr2.rating ELSE gr1.rating END AS opp_rating,
             m.series_id::text AS series_id,
             rs.status AS series_status,
             rs.p1_series_wins AS s_p1w,
@@ -2444,6 +2518,8 @@ async def get_player_matches(
         JOIN players p2 ON p2.id = m.player2_id
         LEFT JOIN shop_items si1 ON si1.id = p1.active_title_id
         LEFT JOIN shop_items si2 ON si2.id = p2.active_title_id
+        LEFT JOIN glicko_ratings gr1 ON gr1.player_id = m.player1_id
+        LEFT JOIN glicko_ratings gr2 ON gr2.player_id = m.player2_id
         LEFT JOIN ranked_series rs ON rs.id = m.series_id
         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
           AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
@@ -2451,6 +2527,11 @@ async def get_player_matches(
         LIMIT :limit OFFSET :offset
     """)
     rows = (await db.execute(query, {"pid": player.id, "limit": limit, "offset": offset})).mappings().all()
+
+    # Dynamic 'Current Rank' title override for opponents (#45): without this,
+    # the raw shop-item name "Current Rank" leaked into history rows and the
+    # client rendered a literal "[Current Rank]".
+    _colors = await _rank_colors(db)
 
     entries = []
     for row in rows:
@@ -2493,12 +2574,16 @@ async def get_player_matches(
                 series_score_str = f"{s_p2w}-{s_p1w}"
             series_rc = float(row["series_rating_change"]) if row["series_rating_change"] is not None else None
 
+        _opp_title, _opp_title_color = _display_title_sync(
+            _colors, row["opp_title_sku"], row["opp_title"], row["opp_title_color"],
+            float(row["opp_rating"]) if row["opp_rating"] is not None else None)
+
         entries.append(MatchHistoryEntry(
             match_id=row["match_id"],
             opponent_steam_id=row["opp_steam_id"],
             opponent_name=row["opp_name"],
-            opponent_title=row["opp_title"],
-            opponent_title_color=row["opp_title_color"],
+            opponent_title=_opp_title,
+            opponent_title_color=_opp_title_color,
             player_rounds_won=row["player_rounds"],
             opponent_rounds_won=row["opp_rounds"],
             player_points=row["player_points"] or 0,
@@ -5773,7 +5858,8 @@ async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_
     if not player:
         # Return all locked if player not found
         entries = [
-            AchievementEntry(achievement_key=k, unlocked=False)
+            AchievementEntry(achievement_key=k, unlocked=False,
+                             name=ACHIEVEMENT_DEFS[k].get("name"))
             for k in ACHIEVEMENT_DEFS
         ]
         return AchievementListResponse(steam_id=steam_id, achievements=entries)
@@ -5789,6 +5875,9 @@ async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_
             achievement_key=key,
             unlocked=key in unlocked,
             unlocked_at=unlocked.get(key),
+            # Display name rides along so renamed achievements (regicide ->
+            # "Sid Slayer") label correctly in the Compare grid (#44).
+            name=ACHIEVEMENT_DEFS[key].get("name"),
         ))
     return AchievementListResponse(steam_id=steam_id, achievements=entries)
 
@@ -9230,8 +9319,14 @@ async def team_all_series_paged(
                p1b.steam_id AS t1b_sid, p1b.display_name AS t1b_name, ti1b.name AS t1b_title, ti1b.preview_color AS t1b_title_color,
                p2a.steam_id AS t2a_sid, p2a.display_name AS t2a_name, ti2a.name AS t2a_title, ti2a.preview_color AS t2a_title_color,
                p2b.steam_id AS t2b_sid, p2b.display_name AS t2b_name, ti2b.name AS t2b_title, ti2b.preview_color AS t2b_title_color,
+               ti1a.sku AS t1a_title_sku, ti1b.sku AS t1b_title_sku,
+               ti2a.sku AS t2a_title_sku, ti2b.sku AS t2b_title_sku,
                g1a.rating AS t1a_rating, g1b.rating AS t1b_rating,
-               g2a.rating AS t2a_rating, g2b.rating AS t2b_rating
+               g2a.rating AS t2a_rating, g2b.rating AS t2b_rating,
+               -- 1v1 ratings feed the dynamic 'Current Rank' title (#48) —
+               -- rank tiers are defined on the 1v1 ladder, not the 2v2 one.
+               v1a.rating AS t1a_rating_1v1, v1b.rating AS t1b_rating_1v1,
+               v2a.rating AS t2a_rating_1v1, v2b.rating AS t2b_rating_1v1
           FROM team_series s
           JOIN players p1a ON p1a.id = s.t1a_id
           JOIN players p1b ON p1b.id = s.t1b_id
@@ -9245,12 +9340,17 @@ async def team_all_series_paged(
           LEFT JOIN glicko_ratings_2v2 g1b ON g1b.player_id = s.t1b_id
           LEFT JOIN glicko_ratings_2v2 g2a ON g2a.player_id = s.t2a_id
           LEFT JOIN glicko_ratings_2v2 g2b ON g2b.player_id = s.t2b_id
+          LEFT JOIN glicko_ratings v1a ON v1a.player_id = s.t1a_id
+          LEFT JOIN glicko_ratings v1b ON v1b.player_id = s.t1b_id
+          LEFT JOIN glicko_ratings v2a ON v2a.player_id = s.t2a_id
+          LEFT JOIN glicko_ratings v2b ON v2b.player_id = s.t2b_id
          WHERE s.status = 'completed'
          ORDER BY s.completed_at DESC
          LIMIT :lim OFFSET :off
     """)
     rows = (await db.execute(series_q, {"lim": page_size, "off": page * page_size})).mappings().all()
 
+    _colors = await _rank_colors(db)
     out_series = []
     for r in rows:
         # Per-series matches.
@@ -9293,9 +9393,13 @@ async def team_all_series_paged(
             })
 
         def slot(prefix):
+            # Dynamic 'Current Rank' title resolves against the 1v1 rating (#48).
+            _t, _tc = _display_title_sync(
+                _colors, r[f"{prefix}_title_sku"], r[f"{prefix}_title"], r[f"{prefix}_title_color"],
+                float(r[f"{prefix}_rating_1v1"]) if r[f"{prefix}_rating_1v1"] is not None else None)
             return {
                 "steam_id": r[f"{prefix}_sid"], "name": r[f"{prefix}_name"],
-                "title": r[f"{prefix}_title"], "title_color": r[f"{prefix}_title_color"],
+                "title": _t, "title_color": _tc,
                 "rating": float(r[f"{prefix}_rating"]) if r[f"{prefix}_rating"] is not None else 1500.0,
                 "rating_change": float(r[f"{prefix}_rating_change"] or 0),
                 "gold_earned": int(r[f"{prefix}_gold_earned"] or 0),
@@ -9397,20 +9501,28 @@ async def team_leaderboard(
             COALESCE(p.team_xp_earned,   0) AS team_xp_earned,
             COALESCE(te.avg_teammate_elo, 0) AS avg_teammate_elo,
             si.name AS title,
-            si.preview_color AS title_color
+            si.preview_color AS title_color,
+            si.sku AS title_sku,
+            g1.rating AS rating_1v1
         FROM glicko_ratings_2v2 g2
         JOIN players p ON p.id = g2.player_id
         LEFT JOIN series_stats ss ON ss.player_id = p.id
         LEFT JOIN teammate_elo te  ON te.player_id = p.id
         LEFT JOIN shop_items si    ON si.id = p.active_title_id
+        LEFT JOIN glicko_ratings g1 ON g1.player_id = p.id
         WHERE g2.completed_series >= :min_series
           AND p.deleted_at IS NULL
         ORDER BY {order_clause}
         LIMIT :limit
     """)
     rows = (await db.execute(q, {"min_series": min_series, "limit": limit})).mappings().all()
+    _colors = await _rank_colors(db)
     entries = []
     for idx, r in enumerate(rows, start=1):
+        # Dynamic 'Current Rank' title (#48) — resolves against the 1v1 ladder.
+        _t, _tc = _display_title_sync(
+            _colors, r["title_sku"], r["title"], r["title_color"],
+            float(r["rating_1v1"]) if r["rating_1v1"] is not None else None)
         entries.append(Team2v2LeaderboardEntry(
             rank=idx,
             steam_id=r["steam_id"],
@@ -9422,8 +9534,8 @@ async def team_leaderboard(
             series_losses=r["losses"],
             win_rate=float(r["win_rate"]),
             level=level_from_xp(r["total_xp"])[0],
-            title=r["title"],
-            title_color=r["title_color"],
+            title=_t,
+            title_color=_tc,
             avg_teammate_elo=int(r["avg_teammate_elo"] or 0),
             team_gold_earned=int(r["team_gold_earned"] or 0),
             team_xp_earned=int(r["team_xp_earned"] or 0),

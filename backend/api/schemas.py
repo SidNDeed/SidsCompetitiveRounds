@@ -73,6 +73,9 @@ class MatchReport(BaseModel):
     # Advisory / display-only, NOT in HMAC.
     local_keys_pressed: int | None = Field(None, ge=0)
     local_active_seconds: float | None = Field(None, ge=0, le=86400)
+    # #50 macro detector: count of 1-second windows whose gameplay-key event
+    # rate was superhuman on the reporter's client. Advisory, NOT in HMAC.
+    local_macro_suspect_seconds: int | None = Field(None, ge=0, le=86400)
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -120,6 +123,9 @@ class PlayerStatsResponse(BaseModel):
     blocks_successful: int = 0
     active_title: str | None = None
     active_title_color: str | None = None
+    # Raw sku of the equipped title (the display name above is REWRITTEN for the
+    # dynamic 'Current Rank' title, so name equality can't identify equip state).
+    active_title_sku: str | None = None
     active_trail_sku: str | None = None
     active_trail_color: str | None = None
     active_trail_price: int = 0
@@ -325,6 +331,10 @@ class AchievementEntry(BaseModel):
     achievement_key: str
     unlocked_at: datetime | None = None
     unlocked: bool = False
+    # Server-side display name from ACHIEVEMENT_DEFS. The Compare tab reads this
+    # to label its grid; without it the client prettifies the raw key and renamed
+    # achievements regress to their key name ("regicide" -> "Regicide", bug #44).
+    name: str | None = None
 
     model_config = {"from_attributes": True}
 

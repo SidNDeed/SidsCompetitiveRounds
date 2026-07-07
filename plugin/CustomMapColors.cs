@@ -181,15 +181,17 @@ namespace CompetitiveRounds
                         cg.colorFilter.Override(new Color(0.45f, 0.42f, 0.49f));
                     }
                 }},
-                // Charcoal — neutral light grey + mid slate walls on a dark neutral bg.
-                // Kept genuinely grey (no blue lean) — Sid/lopi wanted the original look.
+                // Charcoal — neutral light grey + mid slate walls on a PITCH-BLACK
+                // smoky bg (Sid v1.29.1: "Charcoal should be pretty dark"). Exposure
+                // at the dark end of the band; the near-black background + scaled
+                // sky floor carry the darkness, walls stay readable light grey.
                 { "mapcolor_charcoal", new Preset {
                     BaseArt = "Sky",
                     MapBlockColor = new Color(0.74f, 0.75f, 0.76f),
                     SecondaryColor = new Color(0.44f, 0.45f, 0.47f),
                     Configure = cg => {
                         cg.saturation.Override(-80f);
-                        cg.postExposure.Override(-0.60f);
+                        cg.postExposure.Override(-0.72f);
                         cg.colorFilter.Override(new Color(0.39f, 0.39f, 0.41f));
                     }
                 }},
@@ -473,33 +475,40 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, Color> _backgroundColors =
             new Dictionary<string, Color>(StringComparer.OrdinalIgnoreCase)
             {
+                // v1.29.1 (Sid): dark/black-walled skins get PITCH BLACK or dark
+                // smoky backgrounds (charcoal/obsidian/blackwood/abyss/aurora).
+                // Works with the luminance-scaled sky floor in Plugin.ApplyLighting
+                // — a near-black value here now renders near-black instead of
+                // being lifted to grey by the old fixed +0.22 floor. Also: wall
+                // and background must NEVER be the exact same shade (mono's bg
+                // matched its secondary wall to 1/255 in blue — pushed darker).
                 { "mapcolor_soft",        new Color(0.62f, 0.50f, 0.40f) }, // warm taupe (peach family)
                 { "mapcolor_moss",        new Color(0.30f, 0.42f, 0.22f) }, // deep olive green
                 { "mapcolor_cream",       new Color(0.72f, 0.52f, 0.30f) }, // warm amber
-                { "mapcolor_lavender",    new Color(0.52f, 0.42f, 0.68f) }, // muted lavender (same-ish as walls)
+                { "mapcolor_lavender",    new Color(0.52f, 0.42f, 0.68f) }, // muted lavender (walls are 2 shades lighter)
                 { "mapcolor_dusk",        new Color(0.24f, 0.26f, 0.52f) }, // indigo night (BLUE - by design)
                 { "mapcolor_sand",        new Color(0.72f, 0.46f, 0.22f) }, // burnt dune orange
-                { "mapcolor_mono",        new Color(0.42f, 0.42f, 0.44f) }, // grey (same-ish as walls, darker)
+                { "mapcolor_mono",        new Color(0.28f, 0.28f, 0.30f) }, // dark neutral smoke (was 1/255 off the dark wall)
                 { "mapcolor_forest",      new Color(0.44f, 0.30f, 0.16f) }, // BROWN forest floor (Sid)
                 { "mapcolor_amethyst",    new Color(0.50f, 0.24f, 0.46f) }, // plum-magenta
-                { "mapcolor_charcoal",    new Color(0.27f, 0.27f, 0.29f) }, // dark slate (same-ish as walls)
+                { "mapcolor_charcoal",    new Color(0.07f, 0.07f, 0.08f) }, // PITCH-BLACK smoke (Sid: "pretty dark")
                 { "mapcolor_crimson_map", new Color(0.48f, 0.14f, 0.18f) }, // deep blood red
                 { "mapcolor_slate",       new Color(0.52f, 0.36f, 0.24f) }, // warm copper behind cool walls
                 { "mapcolor_rose",        new Color(0.56f, 0.26f, 0.34f) }, // deep rose
                 { "mapcolor_mint",        new Color(0.20f, 0.44f, 0.28f) }, // deep leaf green (not teal)
                 { "mapcolor_sunset",      new Color(0.66f, 0.28f, 0.30f) }, // hot coral-red horizon
-                { "mapcolor_obsidian",    new Color(0.20f, 0.24f, 0.40f) }, // steel indigo (BLUE - by design)
-                { "mapcolor_abyss",       new Color(0.08f, 0.24f, 0.46f) }, // ocean depth (BLUE - by design)
-                { "mapcolor_pine",        new Color(0.20f, 0.40f, 0.34f) }, // deep pine (same-ish as walls, darker)
+                { "mapcolor_obsidian",    new Color(0.06f, 0.07f, 0.13f) }, // BLACK volcanic glass w/ blue depth
+                { "mapcolor_abyss",       new Color(0.03f, 0.09f, 0.18f) }, // lightless ocean floor (near-black blue)
+                { "mapcolor_pine",        new Color(0.20f, 0.40f, 0.34f) }, // deep pine (same family, darker than walls)
                 { "mapcolor_iron",        new Color(0.40f, 0.30f, 0.22f) }, // rusted umber
                 { "mapcolor_burgundy",    new Color(0.36f, 0.14f, 0.24f) }, // deep wine
                 { "mapcolor_magma",       new Color(0.64f, 0.28f, 0.06f) }, // molten burnt orange (Sid likes it)
                 { "mapcolor_velvet",      new Color(0.34f, 0.18f, 0.44f) }, // deep royal purple (was indigo)
-                { "mapcolor_blackwood",   new Color(0.42f, 0.22f, 0.09f) }, // smoldering ember-brown
+                { "mapcolor_blackwood",   new Color(0.10f, 0.06f, 0.04f) }, // charred black w/ ember warmth (dark smoke)
                 // Premium
                 { "mapcolor_gilded",      new Color(0.42f, 0.30f, 0.10f) }, // deep bronze vault
                 { "mapcolor_platinum",    new Color(0.24f, 0.26f, 0.29f) }, // gunmetal
-                { "mapcolor_aurora",      new Color(0.10f, 0.14f, 0.28f) }, // polar night
+                { "mapcolor_aurora",      new Color(0.05f, 0.08f, 0.18f) }, // polar night (near-black, aurora pops)
             };
 
         /// <summary>Dedicated backdrop hue for the atmosphere particles, or null

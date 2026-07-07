@@ -450,7 +450,10 @@ namespace CompetitiveRounds
         public static void Open()
         {
             if(!UIFactory.Ready){UIFactory.InitTypes();UIFactory.InitFont();}if(!UIFactory.Ready)return;
-            bool inRoom=GameStateWatcher.IsInRoom;
+            /* Bug #46: use IsInOnlineRoom, not IsInRoom — Photon's OfflineMode (Sandbox)
+             * counts as "in a room" and lingers at the main menu after leaving Sandbox,
+             * which kept inGameMode=true and hid the ranked Disable button until relaunch. */
+            bool inRoom=GameStateWatcher.IsInOnlineRoom;
             inGameMode=inRoom;
             // Always use our own overlay canvas - guarantees we render on top of all ROUNDS UI
             EnsureOverlayCanvas();
@@ -1983,7 +1986,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         // the active_*_id when item_id is None, so we send 0
                         // (translated to omitted query param in ApiClient).
                         var cached = ApiClient.CachedPlayerStats;
-                        bool clickedActiveTitle = kind == "title" && cached != null && cached.active_title == itemName;
+                        // Compare titles by SKU (active_title holds the DISPLAY name, which
+                        // the dynamic Current Rank title rewrites to e.g. "Master" — name
+                        // equality made an equipped rank title look unequipped, #48).
+                        // Name fallback covers stats cached by a pre-1.29.1 server.
+                        bool clickedActiveTitle = kind == "title" && cached != null
+                            && (!string.IsNullOrEmpty(cached.active_title_sku)
+                                ? cached.active_title_sku == itemSku
+                                : cached.active_title == itemName);
                         bool clickedActiveTrail = kind == "trail" && cached != null && cached.active_trail_sku == itemSku;
                         bool unequipping = clickedActiveTitle || clickedActiveTrail;
                         long apiItemId = unequipping ? 0L : r.itemId;
@@ -1998,11 +2008,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                                 {
                                     cached.active_title = null;
                                     cached.active_title_color = null;
+                                    cached.active_title_sku = null;
                                 }
                                 else
                                 {
                                     cached.active_title = itemName;
                                     cached.active_title_color = itemColor;
+                                    cached.active_title_sku = itemSku;
                                 }
                             }
                             else if (kind == "trail")
@@ -2430,7 +2442,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     : new Color(0.25f, 0.25f, 0.28f, 0.8f));
             }
             r.setActiveBtn.SetActive(ownsThis && (it.kind == "title" || it.kind == "trail" || it.kind == "color" || it.kind == "nametag" || it.kind == "player_color" || it.kind == "cursor_color" || it.kind == "player_effect" || it.kind == "utility"));
-            bool isActiveTitle = s != null && it.kind == "title" && s.active_title == it.name;
+            // Sku compare, name fallback for pre-1.29.1 server payloads: the dynamic
+            // Current Rank title's DISPLAY name is rewritten to the live rank, so name
+            // equality showed it unequipped while equipped (#48).
+            bool isActiveTitle = s != null && it.kind == "title"
+                && (!string.IsNullOrEmpty(s.active_title_sku)
+                    ? s.active_title_sku == it.sku
+                    : s.active_title == it.name);
             bool isActiveTrail = s != null && it.kind == "trail" && s.active_trail_sku == it.sku;
             bool isActiveColor = s != null && it.kind == "color"
                 && s.active_color_skus != null && s.active_color_skus.Contains(it.sku);

@@ -151,6 +151,8 @@ class Match(Base):
     # Reporter's per-match input-rate metrics (migration 102, v1.29).
     local_keys_pressed = Column(Integer, nullable=True)
     local_active_seconds = Column(Double, nullable=True)
+    # #50 macro detector (migration 106): 1s windows with superhuman key rates.
+    local_macro_suspect_seconds = Column(Integer, nullable=True)
     invalidated_at = Column(DateTime(timezone=True), nullable=True)
     invalidation_reason = Column(String(64), nullable=True)
     p1_fps_avg = Column(SmallInteger, nullable=True)

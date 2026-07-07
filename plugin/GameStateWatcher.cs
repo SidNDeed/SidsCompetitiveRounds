@@ -179,6 +179,9 @@ namespace CompetitiveRounds
         // (pick phase / death / menus excluded), so the ratio is a true in-game
         // input rate. Reset with the other per-match counters.
         public static int LocalKeysThisMatch { get; private set; }
+        // #50 macro detector: count of 1-second windows whose gameplay-key event
+        // rate exceeded MACRO_EVENTS_PER_SEC. Advisory — reported with the match.
+        public static int LocalMacroSuspectSeconds { get; private set; }
         public static float LocalActiveSecondsThisMatch { get; private set; }
         // v1.23 — hit/block lifetime counters.
         //   bullets_fired  — sum of Gun.numberOfProjectiles across every Gun.Attack call by the
@@ -374,15 +377,27 @@ namespace CompetitiveRounds
         /// pairing (one side has ranked explicitly disabled). Flip the match
         /// to casual so the HUD and the eventual match report agree with the
         /// server-side enforcement — no bets, no series, no rating.</summary>
+        // One-shot per room so the toast can't spam on preflight retries.
+        private static bool casualDowngradeNotified = false;
         public static void DowngradeToCasual(string reason)
         {
-            if (!matchIsRanked) return;
+            bool wasRanked = matchIsRanked;
             matchIsRanked = false;
-            Plugin.Log.LogInfo($"[POLL] Match downgraded to CASUAL ({reason})");
+            if (wasRanked)
+                Plugin.Log.LogInfo($"[POLL] Match downgraded to CASUAL ({reason})");
+            // Bug #47: the toast must fire even when matchIsRanked was still false
+            // (the eager preflight usually resolves BEFORE the opponent mod-check
+            // flips the flag, so the old early-return swallowed the notification
+            // and nobody learned their opponent had ranked disabled until they
+            // noticed games missing from their history).
+            if (casualDowngradeNotified) return;
+            casualDowngradeNotified = true;
             try
             {
-                CompetitiveUI.QueueNotification("Casual match — a player has ranked disabled",
-                    new Color(0.85f, 0.8f, 0.5f), 4f);
+                string opp = string.IsNullOrEmpty(opponentDisplayName) ? "your opponent" : opponentDisplayName;
+                CompetitiveUI.QueueNotification(
+                    $"CASUAL match — {opp} has Ranked disabled (fix: F5 top row - Enable)",
+                    new Color(0.85f, 0.8f, 0.5f), 8f);
             }
             catch { }
         }
@@ -586,6 +601,88 @@ namespace CompetitiveRounds
                 BroadcastFps();
                 PollOpponentFps();
             }
+            TickInputSampling(dt);
+        }
+
+        // ── Per-frame input metrics (bug #50) ─────────────────────────────
+        // Unity's GetKeyDown / GetMouseButtonDown / anyKeyDown are per-FRAME edge
+        // triggers. The old sampling lived inside the 10 Hz poll, so it saw only
+        // the frames the poll happened to land on: whole games recorded ~8 active
+        // seconds and ~30 keys (proven in prod data — 294s game, 7.7s / 31 keys).
+        // Sampling must run every frame; the combat gate (LocalAliveInCombatNow,
+        // refreshed by the poll at 10 Hz) is plenty fresh for gating.
+        //
+        // Counted events per Sid's #50 spec: WASD + arrows + Space + left/right
+        // click — gameplay inputs only (move / jump / shoot / block), never menu
+        // keys, so KPS reads as combat input speed.
+        private const int MACRO_EVENTS_PER_SEC = 25; // sustained superhuman rate
+        private static float inputBucketTimer = 0f;
+        private static int inputBucketCount = 0;
+        private static float lastMacroLogAt = -999f;
+
+        private static void TickInputSampling(float dt)
+        {
+            // Combat gate: alive, not pick phase / transitions (same flag the
+            // achievements use). Reset the macro bucket across gaps so a burst
+            // straddling a round transition can't join two half-buckets.
+            if (!LocalAliveInCombatNow)
+            {
+                inputBucketTimer = 0f;
+                inputBucketCount = 0;
+                return;
+            }
+            bool typingInChat = false;
+            try { typingInChat = CompetitiveUI.IsChatInputOpen || NativeUI.IsOpen; } catch { }
+            if (typingInChat) return;
+
+            LocalActiveSecondsThisMatch += dt;
+
+            int downs = 0;
+            if (Input.GetKeyDown(KeyCode.W)) downs++;
+            if (Input.GetKeyDown(KeyCode.A)) downs++;
+            if (Input.GetKeyDown(KeyCode.S)) downs++;
+            if (Input.GetKeyDown(KeyCode.D)) downs++;
+            if (Input.GetKeyDown(KeyCode.Space)) downs++;
+            if (Input.GetKeyDown(KeyCode.UpArrow)) downs++;
+            if (Input.GetKeyDown(KeyCode.DownArrow)) downs++;
+            if (Input.GetKeyDown(KeyCode.LeftArrow)) downs++;
+            if (Input.GetKeyDown(KeyCode.RightArrow)) downs++;
+            if (Input.GetMouseButtonDown(0))
+            {
+                downs++;
+                LocalShotsThisMatch++;
+                if (!achFiredShot)
+                {
+                    achFiredShot = true;
+                    Plugin.Log.LogInfo("[ACH] Player fired a shot");
+                }
+            }
+            if (Input.GetMouseButtonDown(1))
+            {
+                downs++;
+                LocalBlocksThisMatch++;
+            }
+            if (downs > 0) LocalKeysThisMatch += downs;
+
+            // Macro detector (#50): rolling 1-second buckets; a bucket beyond
+            // MACRO_EVENTS_PER_SEC is past sustained human speed. Advisory
+            // counter only — reported with the match, flagged server-side.
+            inputBucketTimer += dt;
+            inputBucketCount += downs;
+            if (inputBucketTimer >= 1f)
+            {
+                if (inputBucketCount >= MACRO_EVENTS_PER_SEC)
+                {
+                    LocalMacroSuspectSeconds++;
+                    if (Time.realtimeSinceStartup - lastMacroLogAt > 10f)
+                    {
+                        lastMacroLogAt = Time.realtimeSinceStartup;
+                        Plugin.Log.LogWarning($"[INPUT] macro-suspect second: {inputBucketCount} gameplay key events in 1s (total suspect s: {LocalMacroSuspectSeconds})");
+                    }
+                }
+                inputBucketTimer = 0f;
+                inputBucketCount = 0;
+            }
         }
 
         private static void BroadcastFps()
@@ -738,6 +835,7 @@ namespace CompetitiveRounds
                 opponentRankChecked = false;
                 opponentIsRanked = false;
                 matchIsRanked = false;
+                casualDowngradeNotified = false;
                 // Mod-issued competitive rooms are definitionally ranked. Set
                 // immediately at room-join so [POLL] === Match Started === doesn't
                 // log CASUAL while CheckOpponentRanked is still racing. cr_ff
@@ -839,6 +937,11 @@ namespace CompetitiveRounds
                 }
 
                 Plugin.Log.LogInfo("[POLL] Left room");
+                // A series id is only meaningful for the pairing it was preflighted
+                // for. Carrying it across rooms would let the ranked-override at
+                // report time force-rank a later casual game vs an unrelated
+                // (possibly vanilla) opponent.
+                ApiClient.ActiveRankedSeriesId = null;
                 // Dump per-match perf-patch hit counts so we can verify in the log
                 // which ported patches actually fired this match (and how often).
                 PerfGate.DumpAndReset();
@@ -1430,6 +1533,9 @@ namespace CompetitiveRounds
             LocalShotsThisMatch = 0;
             LocalBlocksThisMatch = 0;
             LocalKeysThisMatch = 0;
+            LocalMacroSuspectSeconds = 0;
+            inputBucketTimer = 0f;
+            inputBucketCount = 0;
             LocalActiveSecondsThisMatch = 0f;
             LocalBulletsFiredThisMatch = 0;
             LocalBulletsHitThisMatch = 0;
@@ -1827,6 +1933,21 @@ namespace CompetitiveRounds
                 Plugin.Log.LogError($"[POLL] 2v2 routing error: {ex.Message}");
             }
 
+            // Bug #47: matchIsRanked races (opponent props lost on join, /mod/check
+            // vs preflight-registration race) can leave the FIRST game of a sitting
+            // flagged casual while a live ranked series for this exact pairing
+            // already exists (our own preflight created/found it — that required
+            // both players ranked-enabled). The series id is the durable signal;
+            // trust it over the racy flag so game 1 counts. Server-side mirrors
+            // this with a mod-pair upgrade at submit time for old clients.
+            if (shouldReport && !matchIsRanked
+                && !string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
+                && OpponentHasMod())
+            {
+                Plugin.Log.LogInfo($"[REPORT-ROUTE] forcing isRanked=true: live series {ApiClient.ActiveRankedSeriesId} exists for this pairing (flag lost a race)");
+                matchIsRanked = true;
+            }
+
             if (shouldReport)
             {
                 // Diagnostic for the 1v1 / tournament report path. Same shape as
@@ -1878,7 +1999,8 @@ namespace CompetitiveRounds
                     localAvgFps: LocalAvgFps,
                     opponentAvgFps: OpponentAvgFps,
                     localKeysPressed: LocalKeysThisMatch,
-                    localActiveSeconds: LocalActiveSecondsThisMatch
+                    localActiveSeconds: LocalActiveSecondsThisMatch,
+                    localMacroSuspectSeconds: LocalMacroSuspectSeconds
                 );
             }
 
@@ -2141,10 +2263,11 @@ namespace CompetitiveRounds
             // Sync our exposed flag — true ONLY when we're truly in combat (not pick / dead / menu).
             LocalAliveInCombatNow = localAliveInCombat && !inPickPhase;
 
-            // Input tracking — ONLY during active combat AND not in pick phase.
-            // CharacterData persists with !dead && health>0 during the card-pick UI, so
-            // localAliveInCombat alone is insufficient. The inPickPhase flag is driven by
-            // "PICK PHASE" / "MOVE PLAYERS END" log markers in OnUnityLog.
+            // Input tracking — discrete key/click COUNTS moved to TickInputSampling
+            // (per-frame; the *Down APIs are frame-edge triggers and missed ~97% of
+            // events at this 10 Hz cadence — bug #50). Only HELD-state achievement
+            // edges remain here: GetKey/GetMouseButton read held state, which a
+            // 10 Hz sample sees reliably.
             if (localAliveInCombat && !inPickPhase)
             {
                 if (!achFiredShot && Input.GetMouseButton(0))
@@ -2152,23 +2275,11 @@ namespace CompetitiveRounds
                     achFiredShot = true;
                     Plugin.Log.LogInfo("[ACH] Player fired a shot");
                 }
-                // Anti-cheat counters — increment on KeyDown so we get one per click, not one per frame held.
-                // GetMouseButton(0)/(1) above covers held-state for achievements; ButtonDown gives discrete events.
-                if (Input.GetMouseButtonDown(0)) LocalShotsThisMatch++;
-                if (Input.GetMouseButtonDown(1)) LocalBlocksThisMatch++;
-                // v1.29 input-rate metric: active-combat seconds + discrete key events.
-                // anyKeyDown covers keyboard AND mouse buttons (one tick per frame with
-                // any new press). Chat/menu focus excluded below via the same gate as
-                // the movement flag so typing doesn't count as gameplay input.
-                LocalActiveSecondsThisMatch += Time.deltaTime;
-                // Skip key-down sampling while the chat overlay has focus — typing
-                // "wasd" in a Discord-bridged message previously false-flagged
-                // Immovable Object. Same gate applies to Pacifist's mouse-shot
-                // detection above, but mouse buttons aren't generally used while
-                // typing so it's a non-issue. Same for the F5 menu.
+                // Skip while the chat overlay / F5 menu has focus — typing "wasd"
+                // in a Discord-bridged message previously false-flagged Immovable
+                // Object.
                 bool typingInChat = false;
                 try { typingInChat = CompetitiveUI.IsChatInputOpen || NativeUI.IsOpen; } catch { }
-                if (!typingInChat && Input.anyKeyDown) LocalKeysThisMatch++;
                 if (!typingInChat && !achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
                     Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
                     Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||
@@ -2703,6 +2814,9 @@ namespace CompetitiveRounds
             LocalShotsThisMatch = 0;
             LocalBlocksThisMatch = 0;
             LocalKeysThisMatch = 0;
+            LocalMacroSuspectSeconds = 0;
+            inputBucketTimer = 0f;
+            inputBucketCount = 0;
             LocalActiveSecondsThisMatch = 0f;
             LocalBulletsFiredThisMatch = 0;
             LocalBulletsHitThisMatch = 0;
@@ -2740,6 +2854,19 @@ namespace CompetitiveRounds
 
         public static bool IsInMatch => isTracking;
         public static bool IsInRoom => wasInRoom;
+        /// <summary>Like IsInRoom but false for Sandbox / offline practice.
+        /// Photon's OfflineMode simulates a room, and ROUNDS keeps that offline
+        /// "room" alive at the main menu after leaving Sandbox — so anything
+        /// gating UI on "in a game" via IsInRoom stays stuck after a Sandbox
+        /// visit (bug #46: the ranked Disable button vanished until relaunch).</summary>
+        public static bool IsInOnlineRoom
+        {
+            get
+            {
+                if (!wasInRoom) return false;
+                try { return !PhotonNetwork.OfflineMode; } catch { return true; }
+            }
+        }
         public static bool LeavingForRanked { get; set; } = false;
         public static string LocalSteamId => localSteamId;
         public static string LocalDisplayName => localDisplayName;
