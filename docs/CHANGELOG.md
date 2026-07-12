@@ -1,5 +1,12 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.30.1 — RELEASED 2026-07-12 (same-day patch)
+
+- **Bug #62 (lopidav) — cursor click point offset**: ROUNDS' vanilla cursor is a target/crosshair icon (`streamline-icon-cursor-target-1@32x32`) whose hotspot is its CENTER; the tinted default-shape cursor shipped with an arrow-style top-left hotspot, so the actual click landed at the crosshair's top-left corner. Hotspot now = texture center.
+- **Bug #63 (lopidav) — unreadable dark shop names**: item NAME colors get a lightness floor (dark hues lerped toward white); swatches/art keep the true color.
+- **Star Earmuffs art corrected** — the artist's intended composition (wider flat band, muffs at the edges, larger stars).
+- Build hygiene: shipped DLLs are deterministic and symbol-free.
+
 ## v1.30.0 — RELEASED 2026-07-12
 
 The biggest release since ranked launched. Everything under the `v1.30.0-dev` sections below shipped in this version; highlights:

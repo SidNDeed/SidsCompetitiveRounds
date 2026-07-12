@@ -3235,12 +3235,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
         }
 
+        // Bug #63: shop-item NAME colors get a lightness floor so dark preview
+        // colors (deep map-skin hues) stay readable on the dark panel.
+        private static string ReadableNameColor(string hex)
+        {
+            if (string.IsNullOrEmpty(hex)) return "#FFFFFF";
+            Color c;
+            if (!ColorUtility.TryParseHtmlString(hex.StartsWith("#") ? hex : "#" + hex, out c)) return "#FFFFFF";
+            float lum = 0.299f * c.r + 0.587f * c.g + 0.114f * c.b;
+            if (lum < 0.45f) c = Color.Lerp(c, Color.white, (0.45f - lum) / 0.45f * 0.8f);
+            return "#" + ColorUtility.ToHtmlStringRGB(c);
+        }
+
         private static void ApplyShopRow(ShopRow r, ApiClient.ShopItemData it, int balance, ApiClient.PlayerStatsData s)
         {
             r.itemId = it.id;
             r.sku = it.sku;
             r.kind = it.kind;
-            string col = string.IsNullOrEmpty(it.preview_color) ? "#FFFFFF" : it.preview_color;
+            // Bug #63 (lopidav): dark preview colors made some NAMES unreadable on
+            // the dark panel — floor the name color's lightness (swatches/art
+            // elsewhere keep the true color).
+            string col = ReadableNameColor(it.preview_color);
             // Item 9: artist credit inline — makes the by-artist grouping legible.
             string artistTag = !string.IsNullOrEmpty(it.artist_name) ? $"  <color=#7FE8C3>by {it.artist_name}</color>" : "";
             UIFactory.SetText(r.txtName, $"<color={col}>{it.name}</color>  <color=#888>({it.rarity})</color>{artistTag}");

@@ -116,7 +116,12 @@ namespace CompetitiveRounds
                         _activeSku = "default|" + (sku ?? "");
                         _activeColor = ParseHex(hex, Color.white);
                         _activeTex = vanillaTinted;
-                        _activeHotspot = new Vector2(1f, 1f);
+                        // Bug #62 (lopidav): ROUNDS' vanilla cursor is a TARGET /
+                        // crosshair icon ('streamline-icon-cursor-target-1@32x32'),
+                        // so its hotspot is the CENTER — a (1,1) arrow-style
+                        // hotspot put the real click point at the crosshair's
+                        // top-left corner.
+                        _activeHotspot = new Vector2(vanillaTinted.width / 2f, vanillaTinted.height / 2f);
                         Cursor.SetCursor(_activeTex, _activeHotspot, CursorMode.Auto);
                         return;
                     }
