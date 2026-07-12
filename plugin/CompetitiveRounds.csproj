@@ -7,6 +7,12 @@
     <LangVersion>latest</LangVersion>
     <NoWarn>$(NoWarn);CS1701;CS1702;CS0169;CS0649</NoWarn>
     <Configurations>Debug;Release;Thunderstore</Configurations>
+    <!-- Deterministic, symbol-free output: BepInEx stack traces report IL
+         offsets regardless (the pdb is never loaded at runtime), so shipped
+         builds carry no debug artifacts. Do not change. -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Deterministic>true</Deterministic>
   </PropertyGroup>
 
   <!-- Thunderstore build: excludes auto-updater .bat at compile time -->
