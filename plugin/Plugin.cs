@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.29.1";
+        public const string ModVersion = "1.30.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -842,6 +842,7 @@ namespace CompetitiveRounds
             ApiClient.Initialize(Plugin.ApiBaseUrl.Value);
             GameStateWatcher.Initialize();
             CardImageLoader.Initialize();
+            try { CustomCosmetics.Initialize(); } catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] init failed: {ex.Message}"); }
             CompetitiveUI.CacheRaycasters(); // No-op but kept for compat
             initialized = true;
 
@@ -902,6 +903,9 @@ namespace CompetitiveRounds
                     try { ApiClient.FetchMatchHistory(sid); } catch { }
                     try { ApiClient.FetchBlockedPlayers(sid); } catch { }
                     try { ApiClient.CheckAdminStatus(sid); } catch { }
+                    // Warm the shop cache so the character editor knows owned
+                    // cosmetics even if the F5 page was never opened this session.
+                    try { ApiClient.FetchShopItems(sid); } catch { }
                     yield break;
                 }
                 yield return new WaitForSeconds(0.5f);
@@ -2170,7 +2174,7 @@ namespace CompetitiveRounds
         private static string ColorHex(Color c) =>
             $"#{(int)(c.r * 255):X2}{(int)(c.g * 255):X2}{(int)(c.b * 255):X2}";
 
-        public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID, float xOffset = float.NaN)
+        public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID, float xOffset = float.NaN, int pickerActor = -1)
         {
             // Re-assert the X-offset every frame for the first ~10 frames so vanilla's
             // child-spawn anchor pass (which fires a few frames after Show) can't snap
@@ -2181,17 +2185,7 @@ namespace CompetitiveRounds
             for (int i = 0; i < 10; i++)
             {
                 if (visualizer == null) yield break;
-                if (hasOffset)
-                {
-                    try
-                    {
-                        var rt = visualizer.transform;
-                        var lp = rt.localPosition;
-                        if (Math.Abs(lp.x - xOffset) > 0.01f)
-                            rt.localPosition = new Vector3(xOffset, lp.y, lp.z);
-                    }
-                    catch { }
-                }
+                AssertOffset(visualizer, hasOffset, xOffset);
                 yield return null;
             }
             if (visualizer == null) yield break;
@@ -2200,15 +2194,47 @@ namespace CompetitiveRounds
             Color desired = (pickerTeamID == 1) ? teamColor1 : teamColor0;
             Color wrongTeam = (pickerTeamID == 1) ? teamColor0 : teamColor1;
 
+            // v1.30 (#58 "wrong avatar"): if the picker has a CUSTOM body color
+            // equipped (cr_pcolor_color Photon prop), that — not the vanilla team
+            // hue — is what their body should read as. In that case both vanilla
+            // team baselines count as "wrong" and get repainted to the custom color.
+            bool hasCustom = false;
+            try
+            {
+                if (pickerActor > 0 && PhotonNetwork.PlayerList != null)
+                {
+                    foreach (var pl in PhotonNetwork.PlayerList)
+                    {
+                        if (pl == null || pl.ActorNumber != pickerActor) continue;
+                        if (pl.CustomProperties != null && pl.CustomProperties.ContainsKey("cr_pcolor_color"))
+                        {
+                            string hex = pl.CustomProperties["cr_pcolor_color"] as string;
+                            Color cc;
+                            if (!string.IsNullOrEmpty(hex) && ColorUtility.TryParseHtmlString(hex, out cc))
+                            {
+                                desired = cc;
+                                hasCustom = true;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            catch { }
+
             int sprites = 0, particles = 0, skinFields = 0;
             try
             {
+                Func<Color, bool> looksWrong = c =>
+                    hasCustom ? (IsCloseHue(c, teamColor0) || IsCloseHue(c, teamColor1))
+                              : IsCloseHue(c, wrongTeam);
+
                 // 1) Replace SpriteRenderer colors that look like the WRONG team's hue.
                 var sprs = visualizer.GetComponentsInChildren<SpriteRenderer>(true);
                 foreach (var sr in sprs)
                 {
                     if (sr == null) continue;
-                    if (IsCloseHue(sr.color, wrongTeam))
+                    if (looksWrong(sr.color))
                     {
                         sr.color = new Color(desired.r, desired.g, desired.b, sr.color.a);
                         sprites++;
@@ -2223,7 +2249,7 @@ namespace CompetitiveRounds
                     var main = ps.main;
                     var sc = main.startColor;
                     Color current = sc.color;
-                    if (IsCloseHue(current, wrongTeam))
+                    if (looksWrong(current))
                     {
                         sc.color = new Color(desired.r, desired.g, desired.b, current.a);
                         main.startColor = sc;
@@ -2246,7 +2272,7 @@ namespace CompetitiveRounds
                         try
                         {
                             var v = (Color)f.GetValue(c);
-                            if (IsCloseHue(v, wrongTeam))
+                            if (looksWrong(v))
                             {
                                 f.SetValue(c, new Color(desired.r, desired.g, desired.b, v.a));
                                 skinFields++;
@@ -2259,7 +2285,53 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-TINT] retint failed: {ex.Message}"); }
 
             if (sprites > 0 || particles > 0 || skinFields > 0)
-                Plugin.Log.LogInfo($"[CARDPICK-TINT] pickerID={pickerID} team={pickerTeamID} retinted: sprites={sprites} particles={particles} skinFields={skinFields}");
+                Plugin.Log.LogInfo($"[CARDPICK-TINT] pickerID={pickerID} team={pickerTeamID} custom={hasCustom} retinted: sprites={sprites} particles={particles} skinFields={skinFields}");
+
+            // v1.30 (#58 "no body, cosmetics still show"): the picker's body IS the
+            // clone's root particle system (learning #96 — vanilla Play()s exactly
+            // one PS at Show-time, before children spawn). If it isn't emitting by
+            // now, kick it — and ALWAYS log its state so the next report tells us
+            // which layer failed instead of guessing. Never Pause/Stop/Clear (#96/#108).
+            try
+            {
+                var bodyPs = visualizer.GetComponent<ParticleSystem>() ?? visualizer.GetComponentInChildren<ParticleSystem>(true);
+                if (bodyPs != null)
+                {
+                    bool wasPlaying = bodyPs.isPlaying;
+                    if (!wasPlaying) bodyPs.Play(true);
+                    Plugin.Log.LogInfo($"[CARDPICK-BODY] pickerID={pickerID} ps={bodyPs.gameObject.name} wasPlaying={wasPlaying} count={bodyPs.particleCount} activeInHierarchy={bodyPs.gameObject.activeInHierarchy} worldPos={bodyPs.transform.position}");
+                }
+                else
+                {
+                    Plugin.Log.LogWarning($"[CARDPICK-BODY] pickerID={pickerID} NO ParticleSystem found on visualizer — body cannot render");
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-BODY] check failed: {ex.Message}"); }
+
+            // v1.30 (#58 "bodies vanish/stack"): vanilla can re-anchor the skin well
+            // after our first 10 frames (card switches, layout passes). Keep holding
+            // the anti-stack X for the remainder of the pick phase (~8s). Cheap — one
+            // localPosition compare per frame; exits the moment the clone is destroyed
+            // (next Show or Hide destroys it, which also ends the pick display).
+            for (int i = 0; i < 480; i++)
+            {
+                if (visualizer == null) yield break;
+                AssertOffset(visualizer, hasOffset, xOffset);
+                yield return null;
+            }
+        }
+
+        private static void AssertOffset(GameObject visualizer, bool hasOffset, float xOffset)
+        {
+            if (!hasOffset) return;
+            try
+            {
+                var rt = visualizer.transform;
+                var lp = rt.localPosition;
+                if (Math.Abs(lp.x - xOffset) > 0.01f)
+                    rt.localPosition = new Vector3(xOffset, lp.y, lp.z);
+            }
+            catch { }
         }
 
         // RGB distance — works for any hue without needing to convert to HSV.
@@ -2295,6 +2367,9 @@ namespace CompetitiveRounds
                 // A republish here gives the remote a fresh property right
                 // before they need it.
                 if (picker.IsLocal) FacePublisher.PublishLocal();
+                // Instinct achievement (v1.30): remember whose pick popup this is
+                // so the RPCA_SetCurrentSelected postfix only counts LOCAL scrolls.
+                CardPickSelectionTracker.CurrentPickerIsLocal = picker.IsLocal;
 
                 bool ok = FacePublisher.TryReadAndApply(pv.Owner.ActorNumber, __instance.gameObject);
                 if (ok)
@@ -2337,7 +2412,7 @@ namespace CompetitiveRounds
                         {
                             float xOffset = Diag2v2.IsActive() ? (pickerID - 1.5f) * 4.0f : float.NaN;
                             Plugin.Instance.StartCoroutine(
-                                CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID, xOffset));
+                                CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID, xOffset, pv.Owner.ActorNumber));
                         }
                     }
                     Plugin.Log.LogInfo($"[CARDPICK-DIAG] pickerID={pickerID} actor={pv.Owner.ActorNumber} pid={picker.PlayerID} team={picker.TeamID} isLocal={picker.IsLocal} currentSkin: {skinDesc}");
@@ -2345,6 +2420,153 @@ namespace CompetitiveRounds
                 catch (Exception dex) { Plugin.Log.LogWarning($"[CARDPICK-DIAG] log error: {dex.Message}"); }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] CardChoiceVisuals.Show postfix error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Instinct achievement tracker (v1.30). ROUNDS broadcasts every
+    /// card-selection change through CardChoiceVisuals.RPCA_SetCurrentSelected;
+    /// selection starts at index 0 (the left-most card). If the LOCAL player's
+    /// own pick popup ever moves off index 0, they "viewed the other cards" and
+    /// the match's Instinct run is broken. GameStateWatcher resets the flag per
+    /// match and evaluates it at game over.</summary>
+    internal static class CardPickSelectionTracker
+    {
+        public static bool CurrentPickerIsLocal;
+    }
+
+    /// <summary>Deep End achievement tracker (v1.30, July 12 spec). ROUNDS routes
+    /// every Abyssal Countdown activation through AbyssalCountdown.RPCA_Activate
+    /// (a ChildRPC that fires on ALL clients). Count only the LOCAL player's
+    /// activations; GameStateWatcher banks them per round and requires one in
+    /// every round of a won game.</summary>
+    [HarmonyPatch(typeof(AbyssalCountdown), "RPCA_Activate")]
+    class AbyssalCountdown_Activate_DeepEnd_Patch
+    {
+        static void Postfix(AbyssalCountdown __instance)
+        {
+            try
+            {
+                var cd = __instance.GetComponentInParent<CharacterData>();
+                if (cd != null && cd.view != null && cd.view.IsMine)
+                    GameStateWatcher.OnAbyssalActivatedLocal();
+            }
+            catch { }
+        }
+    }
+
+    [HarmonyPatch(typeof(CardChoiceVisuals), "RPCA_SetCurrentSelected")]
+    class CardChoiceVisuals_SetSelected_Instinct_Patch
+    {
+        static void Postfix(int toSet)
+        {
+            try
+            {
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
+                if (!CardPickSelectionTracker.CurrentPickerIsLocal) return;
+                if (toSet != 0 && !GameStateWatcher.achLeftmostViolated)
+                {
+                    GameStateWatcher.achLeftmostViolated = true;
+                    Plugin.Log.LogInfo("[ACH] Instinct run broken — selection moved off the left-most card");
+                }
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>2v2 crown fix (bug #59). Vanilla GameCrownHandler is hard-coded
+    /// 1v1: one crown GameObject whose LateUpdate lerps strictly between
+    /// players[0] and players[1] head positions — in a 4-player cr_ff room the
+    /// crown can only ever sit on ONE player, and never on players[2]/[3] at
+    /// all. This prefix fully replaces LateUpdate in cr_ff rooms: it computes
+    /// the leading TEAM from GM_ArmsRace rounds→points (same precedence as
+    /// vanilla PointOver), then parks the vanilla crown on one member and a
+    /// clone ("cr_mate_crown") on the other. The clone lives as a SIBLING of
+    /// the handler (not a child) so positioning the handler on player A can't
+    /// drag it, and it dies with the scene — re-created lazily per map.
+    /// 1v1 rooms return true and run vanilla untouched.</summary>
+    [HarmonyPatch(typeof(GameCrownHandler), "LateUpdate")]
+    class GameCrownHandler2v2Patch
+    {
+        private static GameObject mateCrown;   // Unity fake-null after scene unload → lazily re-cloned
+
+        static bool Prefix(GameCrownHandler __instance)
+        {
+            if (!Diag2v2.IsActive()) return true;
+            try
+            {
+                var gm = __instance.gm != null ? __instance.gm : __instance.GetComponentInParent<GM_ArmsRace>();
+                if (gm == null || PlayerManager.instance == null || PlayerManager.instance.players == null)
+                    return false;
+
+                // Leading team: rounds first, points as tiebreak (vanilla PointOver order).
+                int lead = -1;
+                if (gm.p1Rounds != gm.p2Rounds) lead = gm.p1Rounds > gm.p2Rounds ? 0 : 1;
+                else if (gm.p1Points != gm.p2Points) lead = gm.p1Points > gm.p2Points ? 0 : 1;
+
+                GameObject crown = __instance.transform.childCount > 0
+                    ? __instance.transform.GetChild(0).gameObject : null;
+                if (crown == null) return false;
+
+                if (lead == -1)
+                {
+                    // Tied — no crown for anyone (vanilla shows none until a first leader too).
+                    if (crown.activeSelf) crown.SetActive(false);
+                    if (mateCrown != null && mateCrown.activeSelf) mateCrown.SetActive(false);
+                    return false;
+                }
+
+                Player a = null, b = null;
+                foreach (var p in PlayerManager.instance.players)
+                {
+                    if (p == null || p.data == null || p.TeamID != lead) continue;
+                    if (a == null) a = p; else if (b == null) { b = p; break; }
+                }
+                if (a == null)
+                {
+                    if (crown.activeSelf) crown.SetActive(false);
+                    if (mateCrown != null && mateCrown.activeSelf) mateCrown.SetActive(false);
+                    return false;
+                }
+
+                bool aVisible = a.gameObject.activeInHierarchy;
+                if (crown.activeSelf != aVisible) crown.SetActive(aVisible);
+                if (aVisible) __instance.transform.position = a.data.GetCrownPos();
+
+                if (b != null)
+                {
+                    if (mateCrown == null)
+                    {
+                        mateCrown = UnityEngine.Object.Instantiate(crown, __instance.transform.parent);
+                        mateCrown.name = "cr_mate_crown";
+                        // Match the handler chain's world scale — the clone's new parent
+                        // is one level up, so inherit the handler's local scale too.
+                        mateCrown.transform.localScale = Vector3.Scale(
+                            __instance.transform.localScale, crown.transform.localScale);
+                        Plugin.Log.LogInfo("[2v2-CROWN] mate crown cloned");
+                    }
+                    bool bVisible = b.gameObject.activeInHierarchy;
+                    if (mateCrown.activeSelf != bVisible) mateCrown.SetActive(bVisible);
+                    if (bVisible)
+                    {
+                        // The vanilla crown renders at handlerPos + its child-local
+                        // offset; mirror that exact world offset on the clone so both
+                        // crowns float at the same height above their player.
+                        Vector3 childOfs = crown.transform.position - __instance.transform.position;
+                        mateCrown.transform.position = b.data.GetCrownPos() + childOfs;
+                    }
+                }
+                else if (mateCrown != null && mateCrown.activeSelf)
+                {
+                    mateCrown.SetActive(false);
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                // Never break the round over a cosmetic — fall through to vanilla.
+                Plugin.Log.LogWarning($"[2v2-CROWN] prefix error: {ex.Message}");
+                return true;
+            }
         }
     }
 
@@ -2708,6 +2930,27 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Instinct (bug #60): the scroll tracker alone can miss a pick
+                // (stale CurrentPickerIsLocal, RPC ordering), so also verify the
+                // card actually TAKEN. theInt is the pick-UI slot index, 0 =
+                // left-most. Resolve "is this my pick" via the player's own
+                // PhotonView instead of localTeam so pre-match picks (localTeam
+                // not yet resolved) are covered too.
+                try
+                {
+                    if (theInt != 0 && CompetitiveRoomDetect.IsCompetitiveRoom())
+                    {
+                        var pkr = PlayerManager.instance != null ? PlayerManager.instance.GetPlayerWithID(pickId) : null;
+                        if (pkr != null && pkr.data != null && pkr.data.view != null && pkr.data.view.IsMine
+                            && !GameStateWatcher.achLeftmostViolated)
+                        {
+                            GameStateWatcher.achLeftmostViolated = true;
+                            Plugin.Log.LogInfo($"[ACH] Instinct run broken — took card slot {theInt} (not the left-most)");
+                        }
+                    }
+                }
+                catch { }
+
                 int localTeam = GameStateWatcher.LocalTeamId;
 
                 // Resolve card name via Photon ViewID

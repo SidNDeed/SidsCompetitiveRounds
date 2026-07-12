@@ -222,6 +222,8 @@ async def on_ready():
     if not poll_bug_report_events.is_running(): poll_bug_report_events.start()
     if not push_rank_role_colors.is_running(): push_rank_role_colors.start()
     if not grant_booster_gold.is_running(): grant_booster_gold.start()
+    if not poll_channel_posts.is_running(): poll_channel_posts.start()
+    if not publish_lb_loop.is_running(): publish_lb_loop.start()
     # Chat bridge: subscribe to the WS firehose so we can forward in-game
     # messages to the Discord channel. Discord -> in-game goes the other way
     # via on_message below. The poll_chat_catchup task above is a belt-and-
@@ -637,7 +639,7 @@ async def cmd_stats(ctx, member: discord.Member = None):
 @bot.hybrid_command(name="lb", description="Show the ranked leaderboard")
 @app_commands.describe(page="Page number (default: 1)")
 async def cmd_leaderboard(ctx, page: int = 1):
-    per_page = 10
+    per_page = 20  # match the #scr-leaderboard channel board (was 10; Sid 07-11 item 8)
     page = max(1, page)
     offset = (page - 1) * per_page
     data = await api_get(f"/leaderboard?limit={per_page}&offset={offset}&min_matches=1")
@@ -1116,6 +1118,11 @@ async def poll_recent_series():
             except Exception as e: print(f"Series log error: {e}")
             try: await update_series_roles(guild, s)
             except Exception as e: print(f"Series role error: {e}")
+        # Item 9 (Sid 07-11): after a series completes, tell the gambler
+        # channel who bet on it and how it went. /series/recent already
+        # carries the settled (non-refunded) bets per series.
+        try: await post_bet_outcomes(s)
+        except Exception as e: print(f"Bet outcome post error: {e}")
 
 @poll_recent_series.before_loop
 async def before_poll():
@@ -1124,6 +1131,34 @@ async def before_poll():
     if data and data.get("series"):
         for s in data["series"]: seen_series.add(s["series_id"])
     print(f"Pre-loaded {len(seen_series)} recent series")
+
+async def post_bet_outcomes(s):
+    """Post settled bet outcomes for a completed series to the gambler channel
+    (same channel the live-bet buttons live in). Mirrors the in-game Recent
+    Ranked Series bet rows. Skips series nobody bet on."""
+    bets = s.get("bets") or []
+    if not bets or LIVE_BETS_CHANNEL_ID <= 0:
+        return
+    ch = bot.get_channel(LIVE_BETS_CHANNEL_ID)
+    if ch is None:
+        return
+    p1_won = s["winner_steam_id"] == s["p1_steam_id"]
+    score = f"{s['p1_series_wins']}-{s['p2_series_wins']}" if p1_won else f"{s['p2_series_wins']}-{s['p1_series_wins']}"
+    lines = []
+    for b in bets:
+        if b.get("won"):
+            profit = (b.get("payout") or 0) - b["amount"]
+            lines.append(f"🟢 **{b['bettor_name']}** bet {b['amount']:,}g on **{b['bet_on_name']}** → won **+{profit:,}g** (x{b.get('odds_multiplier', 1.0)})")
+        else:
+            lines.append(f"🔴 **{b['bettor_name']}** bet {b['amount']:,}g on **{b['bet_on_name']}** → lost")
+    em = discord.Embed(
+        title=f"💰 Bets settled: {s['winner_name']} wins {score} vs {s['p2_name'] if p1_won else s['p1_name']}",
+        description="\n".join(lines[:15]),
+        color=0x33AA55,
+    )
+    em.set_footer(text=f"series {s['series_id'][:8]}")
+    await ch.send(embed=em)
+
 
 async def log_series_result(guild, s):
     if SERIES_LOG_CHANNEL_ID <= 0: return
@@ -1163,32 +1198,57 @@ async def update_series_roles(guild, s):
 
 @tasks.loop(minutes=30)
 async def sync_roles_periodic():
-    for guild in bot.guilds:
-        # Fetch all members since we disabled auto-chunking
-        try:
-            await guild.chunk()
-        except Exception as e:
-            print(f"Guild chunk error: {e}")
-            continue
-        data = await api_get("/leaderboard?limit=200&min_matches=1")
-        if not data or not data.get("entries"): continue
-        rmap = {e["steam_id"]: e["rating"] for e in data["entries"]}
-        for member in guild.members:
-            if member.bot: continue
-            link = await api_get(f"/players/by-discord/{member.id}")
-            if not link: continue
-            rat = rmap.get(link.get("steam_id"), link.get("rating", 0))
-            try: await update_member_role(member, rat)
-            except: pass
-            await asyncio.sleep(0.5)
+    """Rank-role sync. Item 8 rework (Sid 07-11): the old loop made one
+    /players/by-discord API call PER GUILD MEMBER with a 0.5s sleep — ~2,500
+    members meant ~21 minutes per tick and thousands of requests, and the
+    leaderboard publish (which used to live at the end of this loop) only ran
+    after all of it. One unhandled exception also killed the whole tasks.loop
+    permanently (discord.py stops a loop on error) — the likely cause of
+    "scr-leaderboard hasn't been updating". Now: one batched /internal/linked-
+    players call, only linked members are touched, the whole body is guarded,
+    and the leaderboard has its own dedicated loop below."""
+    try:
+        linked = await api_get("/internal/linked-players")
+        rmap = {}
+        if linked and linked.get("players"):
+            rmap = {p["discord_id"]: p.get("rating", 0) for p in linked["players"] if p.get("discord_id")}
+        if not rmap:
+            return
+        for guild in bot.guilds:
+            try:
+                await guild.chunk()
+            except Exception as e:
+                print(f"Guild chunk error: {e}")
+                continue
+            for member in guild.members:
+                if member.bot: continue
+                rat = rmap.get(str(member.id))
+                if rat is None: continue
+                try:
+                    await update_member_role(member, rat)
+                    await asyncio.sleep(0.3)   # rate-limit slack only for actual role work
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[ROLE-SYNC] tick failed: {e}")
+
+@sync_roles_periodic.before_loop
+async def before_sync(): await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=10)
+async def publish_lb_loop():
+    """Dedicated leaderboard-channel refresh (item 8). Was piggybacked on the
+    end of the 30-min role sync — any role-sync failure or slowness starved
+    it. Fully guarded so one bad tick can never stop the loop."""
     for guild in bot.guilds:
         try:
             await publish_lb(guild)
         except Exception as e:
             print(f"Leaderboard publish error: {e}")
 
-@sync_roles_periodic.before_loop
-async def before_sync(): await bot.wait_until_ready()
+@publish_lb_loop.before_loop
+async def before_publish_lb(): await bot.wait_until_ready()
 
 
 # ── Rank role color push (v1.29) ──────────────────────────────────
@@ -1359,9 +1419,18 @@ class LeaderboardPaginator(discord.ui.View):
         )
 
 
+# Remembered per-channel leaderboard message id — direct edits instead of a
+# history scan. If the message got deleted we fall back to a (wider) scan and
+# finally post a fresh one. The old 5-message scan silently posted duplicates
+# (or found nothing to edit) once a few chat messages buried the board (item 8).
+_lb_message_ids: dict = {}
+
 async def publish_lb(guild):
     if LEADERBOARD_CHANNEL_ID <= 0: return
     ch = guild.get_channel(LEADERBOARD_CHANNEL_ID)
+    if not ch:
+        try: ch = await bot.fetch_channel(LEADERBOARD_CHANNEL_ID)
+        except Exception: return
     if not ch: return
     data = await api_get(f"/leaderboard?limit={LB_TOTAL_FETCH}&min_matches=1")
     if not data or not data.get("entries"): return
@@ -1371,10 +1440,22 @@ async def publish_lb(guild):
     embed = _build_lb_embed(entries, total_players, 0, total_pages)
     view = LeaderboardPaginator(entries, total_players)
     view._update_buttons()
-    async for msg in ch.history(limit=5):
+    # Fast path: edit the message we already know about.
+    mid = _lb_message_ids.get(ch.id)
+    if mid:
+        try:
+            msg = await ch.fetch_message(mid)
+            await msg.edit(embed=embed, view=view)
+            return
+        except Exception:
+            _lb_message_ids.pop(ch.id, None)  # deleted/unreachable — rediscover
+    async for msg in ch.history(limit=25):
         if msg.author == bot.user and msg.embeds and "Ranked Leaderboard" in (msg.embeds[0].title or ""):
+            _lb_message_ids[ch.id] = msg.id
             await msg.edit(embed=embed, view=view); return
-    await ch.send(embed=embed, view=view)
+    sent = await ch.send(embed=embed, view=view)
+    _lb_message_ids[ch.id] = sent.id
+    print(f"[LB] posted fresh leaderboard message in {ch.id}")
 
 # ── Anti-cheat flag relay ────────────────────────────────────────
 # Tracks the most-recently-posted flag ID so we don't repeat on bot restart.
@@ -1440,6 +1521,42 @@ async def poll_new_bans():
             print(f"[BANS] posted ban {b['steam_id']}")
         except Exception as ex:
             print(f"[BANS] post error: {ex}")
+
+
+@tasks.loop(seconds=30)
+async def poll_channel_posts():
+    """Generic announce queue (v1.30): the API's pending_channel_posts table
+    holds messages destined for arbitrary channels (first use: the #scr-faq
+    sheet, migration 110). Ack-after-send (learning #105) so a bot restart
+    can't drop a queued post; a failed send just retries next tick. Posts are
+    delivered in (sort_order, id) order, one batch per tick."""
+    if http_session is None or not API_SECRET_KEY:
+        return
+    data = await api_get("/internal/channel-posts/pending")
+    if not data or not data.get("posts"):
+        return
+    for p in data["posts"]:
+        try:
+            ch = bot.get_channel(int(p["channel_id"]))
+            if ch is None:
+                ch = await bot.fetch_channel(int(p["channel_id"]))
+            if ch is None:
+                print(f"[CHANNEL-POST] channel {p['channel_id']} not found — leaving post {p['id']} queued")
+                return  # bail — order matters, don't skip ahead
+            await ch.send(p["content"][:2000])
+            await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
+            print(f"[CHANNEL-POST] posted {p['id']} to {p['channel_id']}")
+        except discord.Forbidden:
+            print(f"[CHANNEL-POST] forbidden in channel {p['channel_id']} — leaving post {p['id']} queued")
+            return
+        except Exception as e:
+            print(f"[CHANNEL-POST] send failed for {p['id']}: {e} — will retry")
+            return  # keep strict ordering; retry from this post next tick
+
+
+@poll_channel_posts.before_loop
+async def before_channel_posts():
+    await bot.wait_until_ready()
 
 
 def _flag_color_and_emoji(reason: str, auto_inv: bool):
@@ -1701,6 +1818,8 @@ _tournament_state = {}          # tournament_id -> last seen status
 _notified_match_ready = set()   # match_ids we've already DM'd "match ready" for
 _notified_completed = set()     # tournament_ids we've already paid trophies for
 _notified_deadline_warn = set() # match_ids we've already DM'd a 24h-deadline warning for (async only)
+_notified_prestart = set()      # tournament_ids we've sent the T-15min "get in ROUNDS" reminder for (item 3)
+_match_nag_at = {}              # match_id -> monotonic ts of the last sync last-call/stall nag (item 3)
 _notified_nag_date = {}         # match_id -> YYYY-MM-DD last day we sent a "still pending" nag
 _dm_opponent_history = _coll.defaultdict(_coll.deque)  # discord_id -> deque[datetime]
 _DM_OPPONENT_LIMIT = 8
@@ -1864,19 +1983,50 @@ async def poll_tournaments():
         # voting -> locked -> DM every signup their seed + scheduled start
         if prev == "voting" and status == "locked":
             scheduled = _fmt_pt(t.get("scheduled_start_ts"))
+            latest_ver = payload.get("latest_mod_version")
             await _announce_in_channel(
                 f"**Tournament locked.** {len([s for s in t['signups'] if not s['is_speculative']])} players confirmed. "
                 f"Starts {scheduled}. Bracket visible in-game."
             )
-            # Individual DMs with seed.
+            # Individual DMs. Wording matters (item 3): since v1.24 the mod
+            # heartbeats automatically while ROUNDS is running — players do NOT
+            # need to sit in the Tournaments tab. What actually matters is
+            # having the game open at start time. Outdated clients get an
+            # explicit extra warning: an old mod is version-gated by the API,
+            # can't heartbeat, and would silently no-show-forfeit.
             for s in t.get("signups", []):
                 if s.get("is_speculative"):
                     continue
-                body = (f"Tournament locked. You're in — match starts {scheduled}. "
-                        f"Open the Tournaments tab in-game to see your bracket. "
-                        f"You must be ready in the tab within 5 minutes of each match starting or you forfeit.")
+                body = (f"Tournament locked — you're in! It starts **{scheduled}**.\n"
+                        f"**All you need to do: have ROUNDS open (main menu) at that time.** "
+                        f"The mod connects you to your opponent automatically each round. "
+                        f"If ROUNDS isn't running within 5 minutes of your match, you forfeit that match.")
+                sv = s.get("mod_version")
+                if latest_ver and sv and sv != latest_ver:
+                    body += (f"\n⚠️ **Your mod is v{sv}, latest is v{latest_ver}.** "
+                             f"Update before the tournament (launch ROUNDS, quit, launch again) — "
+                             f"an outdated mod may not be able to connect.")
                 await _dm_user(s.get("discord_id"), body)
                 await asyncio.sleep(0.1)
+        # locked: pre-start reminder DM ~15 min out (item 3 — "players not
+        # knowing they have a tournament"). Once per tournament.
+        if status == "locked" and tid not in _notified_prestart and t.get("scheduled_start_ts"):
+            try:
+                from datetime import datetime as _dt
+                st = _dt.fromisoformat(t["scheduled_start_ts"].replace("Z", "+00:00"))
+                mins_out = (st - _dt.now(st.tzinfo)).total_seconds() / 60.0
+                if 0 < mins_out <= 15:
+                    _notified_prestart.add(tid)
+                    await _announce_in_channel(f"**Tournament starts in {int(mins_out)} minutes.** Signed-up players: get ROUNDS open to the main menu!")
+                    for s in t.get("signups", []):
+                        if s.get("is_speculative") or s.get("forfeited"):
+                            continue
+                        await _dm_user(s.get("discord_id"),
+                                       f"⏰ **Your tournament starts in ~{int(mins_out)} minutes.** "
+                                       f"Open ROUNDS now and sit at the main menu — the mod does the rest.")
+                        await asyncio.sleep(0.1)
+            except Exception as e:
+                print(f"[TOURNAMENT-POLL] prestart parse: {e}")
         # locked -> running -> channel announce
         if prev == "locked" and status == "running":
             await _announce_in_channel("**Tournament started.** Round 1 is live.")
@@ -1899,8 +2049,33 @@ async def poll_tournaments():
                         await _dm_user(p2d, f"Your async tournament match vs **{p1n}** is live. Deadline to play: {dl_str}. "
                                              f"Coordinate via `/dm-opponent` or Discord. Use the Tournaments → ASYNC tab in-game to see the bracket + room code.")
                     else:
-                        await _dm_user(p1d, f"Your tournament match vs **{p2n}** is ready. Open the Tournaments tab and ready up within 5 minutes or you forfeit.")
-                        await _dm_user(p2d, f"Your tournament match vs **{p1n}** is ready. Open the Tournaments tab and ready up within 5 minutes or you forfeit.")
+                        await _dm_user(p1d, f"🎮 Your tournament match vs **{p2n}** is ready — **get in ROUNDS now**. The mod auto-connects you from the main menu. No-show forfeits in a few minutes.")
+                        await _dm_user(p2d, f"🎮 Your tournament match vs **{p1n}** is ready — **get in ROUNDS now**. The mod auto-connects you from the main menu. No-show forfeits in a few minutes.")
+                # Sync last-call + stall nag (item 3): if a ready match is
+                # about to hit its no-show deadline (<90s) — or sat past it
+                # for 5+ minutes because both players heartbeat but neither
+                # joined the room — DM both sides again. Repeats at most
+                # every 5 minutes per match.
+                if kind != "async" and m.get("ready_deadline_at"):
+                    try:
+                        from datetime import datetime as _dt
+                        dl = _dt.fromisoformat(m["ready_deadline_at"].replace("Z", "+00:00"))
+                        secs_left = (dl - _dt.now(dl.tzinfo)).total_seconds()
+                        now_mono = asyncio.get_event_loop().time()
+                        last = _match_nag_at.get(mid, 0.0)
+                        if secs_left <= 90 and (now_mono - last) >= 300:
+                            _match_nag_at[mid] = now_mono
+                            if secs_left > 0:
+                                msg = (f"⚠️ **{int(secs_left)} seconds left** to show up for your tournament match "
+                                       f"— open ROUNDS immediately or you forfeit!")
+                            else:
+                                msg = ("⚠️ Your tournament match is **waiting on you** — you're marked present "
+                                       "but the game hasn't started. Get to the ROUNDS main menu (leave any "
+                                       "casual game) so the mod can connect you.")
+                            await _dm_user(p1d, msg)
+                            await _dm_user(p2d, msg)
+                    except Exception as e:
+                        print(f"[TOURNAMENT-POLL] nag parse: {e}")
                 # Async 24h deadline warning (once per match).
                 if kind == "async" and mid not in _notified_deadline_warn and m.get("deadline_at"):
                     try:
@@ -2105,6 +2280,7 @@ class LiveBetButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         bet_on_steam = self.parent_view.p1_steam if self.on_p1 else self.parent_view.p2_steam
         side_name = self.parent_view.p1_name if self.on_p1 else self.parent_view.p2_name
+        vs_name = self.parent_view.p2_name if self.on_p1 else self.parent_view.p1_name
         try:
             result = await api_post(
                 "/discord-bets",
@@ -2132,14 +2308,18 @@ class LiveBetButton(discord.ui.Button):
                 msg = err
             await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
             return
+        # Name the MATCHUP, not just the side — a player can have two live
+        # series (a stalled one + the one everyone's watching) and bettors
+        # need to know which pairing their gold landed on (bug #53).
         await interaction.response.send_message(
-            f"✅ Bet placed: **{self.amount:,}g** on **{side_name}**.",
+            f"✅ Bet placed: **{self.amount:,}g** on **{side_name}** (vs {vs_name}, series `{self.parent_view.series_id[:8]}`).",
             ephemeral=True,
         )
 
 
 async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
-                             bet_on_steam: str, side_name: str, amount: int):
+                             bet_on_steam: str, side_name: str, amount: int,
+                             vs_name: str = ""):
     """Shared bet-placement path for preset buttons + the custom modal."""
     try:
         result = await api_post(
@@ -2166,8 +2346,9 @@ async def _place_discord_bet(interaction: discord.Interaction, series_id: str,
             msg = err
         await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
         return
+    vs_part = f" (vs {vs_name}, series `{series_id[:8]}`)" if vs_name else f" (series `{series_id[:8]}`)"
     await interaction.response.send_message(
-        f"✅ Bet placed: **{amount:,}g** on **{side_name}**.",
+        f"✅ Bet placed: **{amount:,}g** on **{side_name}**{vs_part}.",
         ephemeral=True,
     )
 
@@ -2211,7 +2392,8 @@ class LiveBetModal(discord.ui.Modal):
             return
         bet_on_steam = self.parent_view.p1_steam if self.on_p1 else self.parent_view.p2_steam
         side_name = self.parent_view.p1_name if self.on_p1 else self.parent_view.p2_name
-        await _place_discord_bet(interaction, self.parent_view.series_id, bet_on_steam, side_name, amount)
+        vs_name = self.parent_view.p2_name if self.on_p1 else self.parent_view.p1_name
+        await _place_discord_bet(interaction, self.parent_view.series_id, bet_on_steam, side_name, amount, vs_name)
 
 
 def _format_live_bet_embed(s: dict) -> discord.Embed:

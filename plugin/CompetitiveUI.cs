@@ -105,11 +105,13 @@ namespace CompetitiveRounds
         public static void DrawUI()
         {
             DrawFPS();
+            TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             DrawNotification();
             DrawMatchStatus();
             DrawInGameChat();
             DrawChatInput();
             DrawAdminPrompt();
+            DrawConfirm();
             DrawBugReportModal();
             DrawBugReportAdminViewer();
             DrawLogViewerModal();
@@ -123,14 +125,140 @@ namespace CompetitiveRounds
             // looks like "in a room with no match"), which is the flicker Sid reported.
             // DrawMatchFoundStuckOverlay();  // intentionally not called — kept for reference
             DrawCardHoverTooltip();
+            DrawScoreHoverGraph();
             DrawCompareSearch();
             DrawMapColorToast();
             DrawCustomBetPrompt();
+            DrawArtistInput();
+            DrawArtistPicker();
+            DrawPlayerSearch();
+            DrawCosmeticReview();
+            DrawTournamentBanner();
             // Block uGUI clicks to the F5 page behind any open IMGUI modal (lopi #14:
             // clicks on the bug-report form were also hitting F5 buttons underneath).
-            NativeUI.SetClickBlocker(bugModalOpen || logViewerOpen || bugAdminOpen || NativeUI.CustomBetPromptOpen);
+            NativeUI.SetClickBlocker(bugModalOpen || logViewerOpen || bugAdminOpen || NativeUI.CustomBetPromptOpen || artistPromptOpen || artistPickerOpen || playerSearchOpen || cosReviewOpen);
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
+        }
+
+        // ── Tournament banner (item 3, v1.30) ─────────────────────────────
+        // Big top-center banner so nobody misses a sync tournament. Four states:
+        //   yellow  — signed-up tournament starts in <=15 min: "stay in ROUNDS"
+        //   green   — my match is ready, auto-connect in progress
+        //   red     — my match is ready but I'm sitting in ANOTHER room: leave!
+        //             (shows the live no-show countdown)
+        //   thin blue — tournament running, I'm alive in the bracket, waiting
+        //             for my next match (menu only, so it never clutters games)
+        // Plays the match-found sound + flashes the taskbar once per match.
+        private static readonly HashSet<string> _tourneyBannerAnnounced = new HashSet<string>();
+        private static GUIStyle tourneyBannerStyle;
+
+        private static void DrawTournamentBanner()
+        {
+            try
+            {
+                ApiClient.ActiveTournamentMatch ready = null;
+                var list = ApiClient.CachedMyActiveTournamentMatches;
+                if (list != null)
+                    foreach (var m in list)
+                        if (m != null && m.kind == "sync" && m.status == "ready") { ready = m; break; }
+
+                string text = null;
+                Color bg = Color.black;
+                float barH = 44f;
+
+                if (ready != null)
+                {
+                    bool inRoom = false, inTargetRoom = false;
+                    try
+                    {
+                        inRoom = Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode;
+                        var room = Photon.Pun.PhotonNetwork.CurrentRoom;
+                        inTargetRoom = inRoom && room != null && room.Name == ready.photon_room_name;
+                    }
+                    catch { }
+                    if (inTargetRoom) return; // we're where we should be
+
+                    if (!_tourneyBannerAnnounced.Contains(ready.match_id))
+                    {
+                        _tourneyBannerAnnounced.Add(ready.match_id);
+                        try { PlayMatchFoundSound(); } catch { }
+                        try { TaskbarFlash.Flash(); } catch { }
+                    }
+                    // Live countdown from the snapshot + elapsed-since-fetch.
+                    int secs = -1;
+                    if (ready.ready_seconds_left >= 0)
+                        secs = Mathf.Max(0, ready.ready_seconds_left - (int)(Time.realtimeSinceStartup - ready.fetched_at_realtime));
+                    string clock = secs >= 0 ? $"   {secs / 60}:{secs % 60:00}" : "";
+                    string opp = ready.opponent_display_name ?? "opponent";
+                    if (inRoom)
+                    {
+                        text = $"TOURNAMENT MATCH vs {opp} IS WAITING - LEAVE THIS GAME NOW!{clock}";
+                        bg = new Color(0.72f, 0.10f, 0.10f, 0.93f);
+                    }
+                    else
+                    {
+                        text = $"TOURNAMENT MATCH vs {opp} - connecting automatically, hold tight...{clock}";
+                        bg = new Color(0.08f, 0.48f, 0.20f, 0.93f);
+                    }
+                }
+                else
+                {
+                    var t = ApiClient.CachedTournament;
+                    if (t == null || t.kind != "sync" || string.IsNullOrEmpty(t.my_signup_id)) return;
+                    if (t.status == "locked" && !string.IsNullOrEmpty(t.scheduled_start_ts))
+                    {
+                        DateTime start;
+                        if (DateTime.TryParse(t.scheduled_start_ts, null,
+                                System.Globalization.DateTimeStyles.RoundtripKind, out start))
+                        {
+                            double mins = (start.ToUniversalTime() - DateTime.UtcNow).TotalMinutes;
+                            if (mins > 0 && mins <= 15)
+                            {
+                                int s = (int)((start.ToUniversalTime() - DateTime.UtcNow).TotalSeconds);
+                                text = $"TOURNAMENT STARTS IN {s / 60}:{s % 60:00} - stay in ROUNDS at the main menu!";
+                                bg = new Color(0.75f, 0.60f, 0.05f, 0.93f);
+                            }
+                            else if (mins <= 0 && mins > -10)
+                            {
+                                text = "TOURNAMENT STARTING - matches are being created, hold tight...";
+                                bg = new Color(0.75f, 0.60f, 0.05f, 0.93f);
+                            }
+                        }
+                    }
+                    else if (t.status == "running")
+                    {
+                        // Alive in the bracket, between matches, at the menu.
+                        bool inRoom = false;
+                        try { inRoom = Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode; } catch { }
+                        if (inRoom) return;
+                        bool alive = false;
+                        if (t.signups != null)
+                            foreach (var s in t.signups)
+                                if (s != null && s.signup_id == t.my_signup_id)
+                                { alive = !s.forfeited && s.placed_rank <= 0; break; }
+                        if (!alive) return;
+                        text = "Tournament in progress - your next match will connect automatically. Keep ROUNDS open.";
+                        bg = new Color(0.12f, 0.25f, 0.45f, 0.85f);
+                        barH = 26f;
+                    }
+                }
+
+                if (text == null) return;
+                if (tourneyBannerStyle == null)
+                    tourneyBannerStyle = new GUIStyle(GUI.skin.label)
+                    { fontSize = 17, alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, richText = false };
+                tourneyBannerStyle.fontSize = barH > 30f ? 17 : 13;
+                // Pulse the big banners' alpha slightly so they read as live.
+                float pulse = barH > 30f ? 0.85f + 0.15f * Mathf.PingPong(Time.unscaledTime * 1.6f, 1f) : 1f;
+                var prev = GUI.color;
+                GUI.color = new Color(bg.r, bg.g, bg.b, bg.a * pulse);
+                GUI.DrawTexture(new Rect(0, 0, Screen.width, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
+                GUI.color = Color.white;
+                GUI.Label(new Rect(0, 0, Screen.width, barH), text, tourneyBannerStyle);
+                GUI.color = prev;
+            }
+            catch { }
         }
 
         // Bottom-center toast naming the map skin you just Shift-cycled to, so you can
@@ -271,22 +399,198 @@ namespace CompetitiveRounds
             // pre-formatted (possibly multi-line, rich-text) string verbatim.
             public string titleOverride;
             public string bodyOverride;
+            // Bug #61: live tracking. When sourceRT is set the hit test recomputes
+            // the screen rect from the element's CURRENT world corners each frame,
+            // so scrolling the history list can't desync the region from its text.
+            // screenRect stays as the fallback if the element is destroyed.
+            public RectTransform sourceRT;
+            public Camera sourceCam;      // null = overlay canvas (corners are screen coords)
+            public float widthFrac;       // rendered-text width fraction (learning #90); <=0 = full
+            public RectTransform clipRT;  // scroll Viewport (Mask) — rows scrolled out don't hover
         }
         private static readonly List<CardHoverRegion> _cardHoverRegions = new List<CardHoverRegion>(40);
         public static void ClearCardHoverRegions()
         {
             _cardHoverRegions.Clear();
+            _scoreGraphRegions.Clear();
+        }
+
+        // Bug #61: recompute a region's screen rect from its source element every
+        // hit test. GetWorldCorners reflects the ScrollRect's current content
+        // offset, so regions follow their rows while the user scrolls. Falls back
+        // to the registration-time rect when the element is gone (pooled rows are
+        // reused, not destroyed, so this only happens in teardown races).
+        private static readonly Vector3[] _liveCornerBuf = new Vector3[4];
+        private static readonly Rect _offscreenRect = new Rect(-99999f, -99999f, 1f, 1f);
+        internal static Rect LiveRegionRect(RectTransform rt, Camera cam, float frac, RectTransform clip, Rect fallback)
+        {
+            try
+            {
+                if (rt == null) return fallback;          // Unity fake-null when destroyed
+                if (!rt.gameObject.activeInHierarchy) return _offscreenRect;
+                Rect r = ScreenRectOf(rt, cam);
+                if (frac > 0f && frac <= 1f) r.width = Mathf.Min(r.width, r.width * frac + 12f);
+                // Clip against the scroll Viewport (its Mask hides rows visually;
+                // without this a row scrolled out of the box would still hover).
+                if (clip != null)
+                {
+                    Rect c = ScreenRectOf(clip, cam);
+                    float xMin = Mathf.Max(r.xMin, c.xMin), xMax = Mathf.Min(r.xMax, c.xMax);
+                    float yMin = Mathf.Max(r.yMin, c.yMin), yMax = Mathf.Min(r.yMax, c.yMax);
+                    if (xMax - xMin < 1f || yMax - yMin < 1f) return _offscreenRect;
+                    r = new Rect(xMin, yMin, xMax - xMin, yMax - yMin);
+                }
+                return r;
+            }
+            catch { return fallback; }
+        }
+        private static Rect ScreenRectOf(RectTransform rt, Camera cam)
+        {
+            rt.GetWorldCorners(_liveCornerBuf);
+            Vector2 sMin, sMax;
+            if (cam == null)
+            {
+                sMin = new Vector2(_liveCornerBuf[0].x, _liveCornerBuf[0].y);
+                sMax = new Vector2(_liveCornerBuf[2].x, _liveCornerBuf[2].y);
+            }
+            else
+            {
+                Vector3 p0 = cam.WorldToScreenPoint(_liveCornerBuf[0]);
+                Vector3 p2 = cam.WorldToScreenPoint(_liveCornerBuf[2]);
+                sMin = new Vector2(p0.x, p0.y);
+                sMax = new Vector2(p2.x, p2.y);
+            }
+            return new Rect(sMin.x, sMin.y, Mathf.Max(1f, sMax.x - sMin.x), Mathf.Max(1f, sMax.y - sMin.y));
+        }
+
+        // ── Score-history hover graph (item 4, v1.30) ──────────────────
+        // FillRow registers each history row's W/L score text with the match's
+        // cumulative scoring timeline ("myTotal:oppTotal,..."). Hovering pops a
+        // small line graph: green = you, red = opponent, x = scoring events.
+        public struct ScoreGraphRegion
+        {
+            public Rect screenRect;   // bottom-left-origin screen coords
+            public string timeline;
+            public bool won;
+            public RectTransform sourceRT;   // bug #61: live tracking (see CardHoverRegion)
+            public Camera sourceCam;
+            public float widthFrac;
+            public RectTransform clipRT;
+        }
+        private static readonly List<ScoreGraphRegion> _scoreGraphRegions = new List<ScoreGraphRegion>(40);
+        public static void RegisterScoreGraphRegion(Rect screenRect, string timeline, bool won)
+            => RegisterScoreGraphRegion(screenRect, timeline, won, null, null, -1f, null);
+        public static void RegisterScoreGraphRegion(Rect screenRect, string timeline, bool won,
+                                                    RectTransform sourceRT, Camera sourceCam, float widthFrac,
+                                                    RectTransform clipRT)
+        {
+            if (string.IsNullOrEmpty(timeline)) return;
+            _scoreGraphRegions.Add(new ScoreGraphRegion {
+                screenRect = screenRect, timeline = timeline, won = won,
+                sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
+            });
+        }
+
+        // Rotated-texture line segment — IMGUI has no native line primitive.
+        private static void GuiLine(Vector2 a, Vector2 b, Color color, float width)
+        {
+            var prev = GUI.color;
+            GUI.color = color;
+            float len = Vector2.Distance(a, b);
+            if (len < 0.5f) { GUI.color = prev; return; }
+            float ang = Mathf.Atan2(b.y - a.y, b.x - a.x) * Mathf.Rad2Deg;
+            var mtx = GUI.matrix;
+            GUIUtility.RotateAroundPivot(ang, a);
+            GUI.DrawTexture(new Rect(a.x, a.y - width / 2f, len, width), Texture2D.whiteTexture);
+            GUI.matrix = mtx;
+            GUI.color = prev;
+        }
+
+        private static GUIStyle _scoreGraphLbl;
+        private static void DrawScoreHoverGraph()
+        {
+            if (!NativeUI.IsOpen || NativeUI.CurrentTab != 0) return;
+            if (_scoreGraphRegions.Count == 0) return;
+            Vector2 mp = Input.mousePosition;
+            ScoreGraphRegion? hit = null;
+            for (int i = _scoreGraphRegions.Count - 1; i >= 0; i--)
+            {
+                var reg = _scoreGraphRegions[i];
+                // Bug #61: live rect so scrolling can't desync region from row.
+                Rect rr = LiveRegionRect(reg.sourceRT, reg.sourceCam, reg.widthFrac, reg.clipRT, reg.screenRect);
+                if (rr.Contains(mp)) { hit = reg; break; }
+            }
+            if (hit == null) return;
+
+            // Parse "a:b,a:b,..." into two cumulative series (prepend 0:0).
+            var parts = hit.Value.timeline.Split(',');
+            int n = parts.Length + 1;
+            if (n < 3) return;
+            var mine = new int[n]; var theirs = new int[n];
+            int maxV = 1;
+            for (int i = 1; i < n; i++)
+            {
+                var ab = parts[i - 1].Split(':');
+                if (ab.Length != 2) return;
+                int a, b;
+                if (!int.TryParse(ab[0], out a) || !int.TryParse(ab[1], out b)) return;
+                mine[i] = a; theirs[i] = b;
+                if (a > maxV) maxV = a; if (b > maxV) maxV = b;
+            }
+
+            if (_scoreGraphLbl == null)
+                _scoreGraphLbl = new GUIStyle(GUI.skin.label)
+                { fontSize = 12, richText = true, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
+
+            float w = 280f, h = 170f, pad = 30f;
+            // IMGUI is top-left origin; mousePosition is bottom-left.
+            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
+            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
+            GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 20),
+                "<color=#CCCCCC>Scoring history</color>  <color=#66DD66>you</color> <color=#888>vs</color> <color=#DD7777>opponent</color>",
+                _scoreGraphLbl);
+
+            Rect plot = new Rect(gx + pad, gy + 26f, w - pad - 10f, h - 26f - 22f);
+            // Gridlines at each full round (2 points).
+            for (int v = 0; v <= maxV; v += 2)
+            {
+                float y = plot.yMax - plot.height * v / maxV;
+                GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), new Color(1f, 1f, 1f, 0.08f), 1f);
+                GUI.Label(new Rect(gx + 4, y - 9f, pad - 6f, 18f), $"<color=#777>{v / 2}</color>", _scoreGraphLbl);
+            }
+            // Polylines.
+            for (int i = 1; i < n; i++)
+            {
+                float x0 = plot.xMin + plot.width * (i - 1) / (n - 1);
+                float x1 = plot.xMin + plot.width * i / (n - 1);
+                float myY0 = plot.yMax - plot.height * mine[i - 1] / maxV;
+                float myY1 = plot.yMax - plot.height * mine[i] / maxV;
+                float opY0 = plot.yMax - plot.height * theirs[i - 1] / maxV;
+                float opY1 = plot.yMax - plot.height * theirs[i] / maxV;
+                GuiLine(new Vector2(x0, opY0), new Vector2(x1, opY1), new Color(0.87f, 0.47f, 0.47f, 0.95f), 2f);
+                GuiLine(new Vector2(x0, myY0), new Vector2(x1, myY1), new Color(0.40f, 0.87f, 0.40f, 0.95f), 2f);
+            }
+            GUI.Label(new Rect(gx + 8, gy + h - 20f, w - 16, 18f),
+                "<color=#777>rounds on the left - each step is one point scored</color>", _scoreGraphLbl);
         }
         public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent)
-            => RegisterCardHoverRegion(screenRect, fullCardLine, isOpponent, null, null);
+            => RegisterCardHoverRegion(screenRect, fullCardLine, isOpponent, null, null, null, null, -1f, null);
         public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent,
                                                    string titleOverride, string bodyOverride)
+            => RegisterCardHoverRegion(screenRect, fullCardLine, isOpponent, titleOverride, bodyOverride, null, null, -1f, null);
+        public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent,
+                                                   string titleOverride, string bodyOverride,
+                                                   RectTransform sourceRT, Camera sourceCam, float widthFrac,
+                                                   RectTransform clipRT)
         {
             // Need SOMETHING to show — either a legacy comma line or an explicit body.
             if (string.IsNullOrEmpty(fullCardLine) && string.IsNullOrEmpty(bodyOverride)) return;
             _cardHoverRegions.Add(new CardHoverRegion {
                 screenRect = screenRect, fullCardLine = fullCardLine, isOpponent = isOpponent,
                 titleOverride = titleOverride, bodyOverride = bodyOverride,
+                sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
             });
         }
 
@@ -307,9 +611,12 @@ namespace CompetitiveRounds
             // Last-registered first so newer rows on top of stacked layouts win.
             for (int i = _cardHoverRegions.Count - 1; i >= 0; i--)
             {
-                if (_cardHoverRegions[i].screenRect.Contains(mp))
+                var reg = _cardHoverRegions[i];
+                // Bug #61: live rect so scrolling can't desync region from row.
+                Rect rr = LiveRegionRect(reg.sourceRT, reg.sourceCam, reg.widthFrac, reg.clipRT, reg.screenRect);
+                if (rr.Contains(mp))
                 {
-                    hit = _cardHoverRegions[i];
+                    hit = reg;
                     break;
                 }
             }
@@ -1022,8 +1329,15 @@ namespace CompetitiveRounds
         private static readonly string[] ADMIN_ACHIEVEMENT_KEYS = new[] {
             "untouchable", "silent_assassin", "total_mayhem", "fragile_perfection",
             "no_escape", "rise_from_the_ashes", "the_comeback_kid", "stacked_deck",
-            "regicide", "pacifist", "immovable_object",
-            "master_rank", "team_sweep",
+            "regicide", "stan_slayer", "pacifist", "immovable_object",
+            "master_rank", "team_sweep", "grand_master",
+            // v1.30 expansion (item 5, revised July 12)
+            "flawless", "bullet_hell", "spray_and_pray", "demolitionist",
+            "controlled_burst", "field_medic", "god_build", "double_nova",
+            "lumberjack", "pristine_perfection", "silent_drill", "double_glass",
+            "sustained_power", "deep_end", "clutch", "collector",
+            "grounded", "instinct", "rising_star", "on_fire", "unstoppable",
+            "immortal", "casual_century", "casual_conqueror", "touch_grass",
         };
 
         public static void OpenAdminPrompt(string mode)
@@ -1032,6 +1346,428 @@ namespace CompetitiveRounds
             adminInputA = "";
             adminInputB = mode == "grant" ? ADMIN_ACHIEVEMENT_KEYS[0] : "";
             adminPromptOpen = true;
+        }
+
+        // Generic yes/no confirm modal, used by the admin recent-series resolve/reverse
+        // buttons so a destructive ranked action can't be a single misclick.
+        private static bool confirmOpen = false;
+        private static string confirmMessage = "";
+        private static Action confirmOnYes = null;
+
+        public static void OpenConfirm(string message, Action onYes)
+        {
+            confirmMessage = message ?? "Are you sure?";
+            confirmOnYes = onYes;
+            confirmOpen = true;
+        }
+
+        private static void DrawConfirm()
+        {
+            if (!confirmOpen) return;
+            if (!NativeUI.IsOpen) { confirmOpen = false; confirmOnYes = null; return; }
+            var ev = Event.current;
+            bool yes = false, no = false;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape) { no = true; ev.Use(); }
+            if (adminLabelStyle == null) adminLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+
+            float w = 540, h = 170;
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.94f), 0, 0);
+            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26), "Confirm",
+                new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
+            GUI.Label(new Rect(x + 12, y + 42, w - 24, 70), confirmMessage,
+                new GUIStyle(adminLabelStyle) { fontSize = 14, wordWrap = true });
+            if (GUI.Button(new Rect(x + 12, y + h - 40, 120, 30), "Cancel")) no = true;
+            if (GUI.Button(new Rect(x + w - 132, y + h - 40, 120, 30), "Confirm")) yes = true;
+
+            if (no) { confirmOpen = false; confirmOnYes = null; return; }
+            if (yes)
+            {
+                var cb = confirmOnYes;
+                confirmOpen = false; confirmOnYes = null;
+                try { cb?.Invoke(); } catch (Exception ex) { Plugin.Log.LogWarning($"[ADMIN] confirm action: {ex.Message}"); }
+            }
+        }
+
+        // ── Artist input modal (v1.30) ─────────────────────────
+        // Generic one-field prompt used by the Artist tab (set price / set
+        // stock / gift / block). Mirrors the admin prompt's IMGUI pattern:
+        // Escape cancels, Submit invokes the callback with the field text.
+        private static bool artistPromptOpen = false;
+        private static string artistPromptTitle = "", artistPromptLabel = "", artistPromptValue = "";
+        private static Action<string> artistPromptOnSubmit = null;
+
+        public static void OpenArtistInput(string title, string label, string initial, Action<string> onSubmit)
+        {
+            artistPromptTitle = title ?? "Artist action";
+            artistPromptLabel = label ?? "Value";
+            artistPromptValue = initial ?? "";
+            artistPromptOnSubmit = onSubmit;
+            artistPromptOpen = true;
+        }
+
+        public static bool ArtistPromptOpen => artistPromptOpen || artistPickerOpen || playerSearchOpen || cosReviewOpen;
+
+        // ── Artist picker modal (July 12 item 3; list form per bug batch item 5) ──
+        // Lists the full artist roster so admins assign/revoke without typing steam
+        // ids. Click a row to select, then confirm with the action button. onPick
+        // receives the steam id ("" = clear/house item, assignment mode only).
+        private static bool artistPickerOpen = false;
+        private static string artistPickerTitle = "";
+        private static string[] artistPickerNames = null;
+        private static string[] artistPickerIds = null;
+        private static int artistPickerIdx = 0;
+        private static Action<string> artistPickerOnPick = null;
+        private static string artistPickerAction = "Assign";
+        private static bool artistPickerShowClear = true;
+        private static Vector2 artistPickerScroll = Vector2.zero;
+        private static GUIStyle pickerRowStyle;
+
+        public static void OpenArtistPicker(string title, string[] names, string[] ids, Action<string> onPick,
+                                            string actionLabel = "Assign", bool showClear = true)
+        {
+            if (names == null || ids == null || names.Length == 0 || names.Length != ids.Length) return;
+            artistPickerTitle = title ?? "Pick an artist";
+            artistPickerNames = names;
+            artistPickerIds = ids;
+            artistPickerIdx = 0;
+            artistPickerOnPick = onPick;
+            artistPickerAction = string.IsNullOrEmpty(actionLabel) ? "Assign" : actionLabel;
+            artistPickerShowClear = showClear;
+            artistPickerScroll = Vector2.zero;
+            artistPickerOpen = true;
+        }
+
+        private static void DrawArtistPicker()
+        {
+            if (!artistPickerOpen) return;
+            if (!NativeUI.IsOpen) { artistPickerOpen = false; artistPickerOnPick = null; return; }
+            var ev = Event.current;
+            bool cancel = false;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape) { cancel = true; ev.Use(); }
+            if (adminLabelStyle == null) adminLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+            if (pickerRowStyle == null)
+                pickerRowStyle = new GUIStyle(GUI.skin.button)
+                { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft, richText = true };
+
+            int n = artistPickerNames.Length;
+            artistPickerIdx = Mathf.Clamp(artistPickerIdx, 0, n - 1);
+            float rowH = 32f;
+            float listH = Mathf.Min(n * rowH + 4f, 330f);
+            float w = 540, h = 118f + listH;
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.93f), 0, 0);
+            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26), $"{artistPickerTitle}  <color=#999>({n} artist{(n == 1 ? "" : "s")})</color>",
+                new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold, richText = true });
+
+            artistPickerScroll = GUI.BeginScrollView(new Rect(x + 12, y + 44, w - 24, listH),
+                artistPickerScroll, new Rect(0, 0, w - 45, n * rowH));
+            for (int i = 0; i < n; i++)
+            {
+                bool sel = (i == artistPickerIdx);
+                if (sel)
+                    GUI.DrawTexture(new Rect(0, i * rowH, w - 45, rowH - 2), Texture2D.whiteTexture,
+                        ScaleMode.StretchToFill, true, 0, new Color(0.25f, 0.45f, 0.25f, 0.85f), 0, 0);
+                string line = $"{(sel ? "> " : "")}{artistPickerNames[i]}   <color=#888><size=11>{artistPickerIds[i]}</size></color>";
+                if (GUI.Button(new Rect(0, i * rowH, w - 45, rowH - 2), line, pickerRowStyle))
+                    artistPickerIdx = i;
+            }
+            GUI.EndScrollView();
+
+            if (GUI.Button(new Rect(x + 12, y + h - 40, 110, 30), "Cancel")) cancel = true;
+            if (artistPickerShowClear &&
+                GUI.Button(new Rect(x + (w - 130) / 2f, y + h - 40, 130, 30), "Clear (house)"))
+            {
+                var cb = artistPickerOnPick;
+                artistPickerOpen = false; artistPickerOnPick = null;
+                try { cb?.Invoke(""); } catch (Exception ex) { Plugin.Log.LogWarning($"[ARTIST] picker clear: {ex.Message}"); }
+                return;
+            }
+            if (GUI.Button(new Rect(x + w - 122, y + h - 40, 110, 30), artistPickerAction))
+            {
+                var cb = artistPickerOnPick;
+                string picked = artistPickerIds[artistPickerIdx];
+                artistPickerOpen = false; artistPickerOnPick = null;
+                try { cb?.Invoke(picked); } catch (Exception ex) { Plugin.Log.LogWarning($"[ARTIST] picker pick: {ex.Message}"); }
+                return;
+            }
+            if (cancel) { artistPickerOpen = false; artistPickerOnPick = null; }
+        }
+
+        // ── Player search modal (bug batch item 8) ──────────────────────
+        // Search players by steam display name; each result shows the CURRENT elo
+        // beside the name so a rename-imposter can't pass as the real player.
+        // onPick receives (steam_id, display_name).
+        private static bool playerSearchOpen = false;
+        private static string playerSearchTitle = "";
+        private static string playerSearchQuery = "", playerSearchPrevQuery = "";
+        private static string playerSearchLastFetched = null;
+        private static float playerSearchTypedAt = 0f;
+        private static bool playerSearchBusy = false;
+        private static string playerSearchStatus = "";
+        private static List<ApiClient.PlayerSearchResult> playerSearchResults = new List<ApiClient.PlayerSearchResult>();
+        private static Action<string, string> playerSearchOnPick = null;
+
+        public static void OpenPlayerSearch(string title, Action<string, string> onPick)
+        {
+            playerSearchTitle = title ?? "Find a player";
+            playerSearchQuery = ""; playerSearchPrevQuery = "";
+            playerSearchLastFetched = null;
+            playerSearchBusy = false;
+            playerSearchStatus = "Type at least 2 letters of the player's name.";
+            playerSearchResults.Clear();
+            playerSearchOnPick = onPick;
+            playerSearchOpen = true;
+        }
+
+        private static void DrawPlayerSearch()
+        {
+            if (!playerSearchOpen) return;
+            if (!NativeUI.IsOpen) { playerSearchOpen = false; playerSearchOnPick = null; return; }
+            var ev = Event.current;
+            bool cancel = false;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape) { cancel = true; ev.Use(); }
+            if (adminFieldStyle == null) adminFieldStyle = new GUIStyle(GUI.skin.textField) { fontSize = 15 };
+            if (adminLabelStyle == null) adminLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+            if (pickerRowStyle == null)
+                pickerRowStyle = new GUIStyle(GUI.skin.button)
+                { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft, richText = true };
+
+            int n = playerSearchResults.Count;
+            float rowH = 32f;
+            float listH = Mathf.Max(64f, Mathf.Min(n * rowH + 4f, 8 * rowH));
+            float w = 560, h = 158f + listH;
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.93f), 0, 0);
+            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26), playerSearchTitle,
+                new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
+            GUI.Label(new Rect(x + 12, y + 40, w - 24, 20), "Steam name", adminLabelStyle);
+            playerSearchQuery = GUI.TextField(new Rect(x + 12, y + 62, w - 24, 28), playerSearchQuery ?? "", adminFieldStyle);
+            if (playerSearchQuery != playerSearchPrevQuery)
+            {
+                playerSearchPrevQuery = playerSearchQuery;
+                playerSearchTypedAt = Time.unscaledTime;
+            }
+
+            // Debounced auto-search: 0.35s after the last keystroke, once per query.
+            // Repaint-gated so IMGUI's multiple per-frame passes can't double-fire.
+            string q = (playerSearchQuery ?? "").Trim();
+            if (ev != null && ev.type == EventType.Repaint && !playerSearchBusy
+                && q.Length >= 2 && q != playerSearchLastFetched
+                && Time.unscaledTime - playerSearchTypedAt > 0.35f)
+            {
+                playerSearchBusy = true;
+                playerSearchStatus = "Searching...";
+                string sent = q;
+                ApiClient.SearchPlayers(sent, (ok, list) =>
+                {
+                    playerSearchBusy = false;
+                    if (!playerSearchOpen) return;
+                    playerSearchLastFetched = sent;
+                    if (ok)
+                    {
+                        playerSearchResults = list ?? new List<ApiClient.PlayerSearchResult>();
+                        playerSearchStatus = playerSearchResults.Count == 0
+                            ? "No players match."
+                            : "Click a player. The elo beside the name is live - an imposter with a copied name won't have their rating.";
+                    }
+                    else playerSearchStatus = "Search failed - server unreachable?";
+                });
+            }
+
+            GUI.Label(new Rect(x + 12, y + 92, w - 24, 20), playerSearchStatus,
+                new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = false });
+
+            float listY = y + 114;
+            for (int i = 0; i < n && i < 8; i++)
+            {
+                var r = playerSearchResults[i];
+                string line = $"{r.display_name}   <color=#FFD75E>{r.rating} elo</color>   <color=#777><size=11>{r.steam_id}</size></color>";
+                if (GUI.Button(new Rect(x + 12, listY + i * rowH, w - 24, rowH - 2), line, pickerRowStyle))
+                {
+                    var cb = playerSearchOnPick;
+                    string sid = r.steam_id, sname = r.display_name;
+                    playerSearchOpen = false; playerSearchOnPick = null;
+                    try { cb?.Invoke(sid, sname); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[SEARCH] pick: {ex.Message}"); }
+                    return;
+                }
+            }
+
+            if (GUI.Button(new Rect(x + 12, y + h - 40, 110, 30), "Cancel")) cancel = true;
+            if (cancel) { playerSearchOpen = false; playerSearchOnPick = null; }
+        }
+
+        // ── Cosmetic review modal (July 12 round 3, item 2) ──────────────
+        // Admin queue for artist-submitted cosmetics: real art preview (decoded
+        // from the server's base64), Approve mints the shop row (born out of
+        // stock), Deny asks for a note the artist will see.
+        private static bool cosReviewOpen = false;
+        private static List<ApiClient.CosmeticSubmission> cosReviewSubs = null;
+        private static int cosReviewIdx = 0;
+        private static bool cosReviewBusy = false;
+        private static string cosReviewStatus = "";
+        private static readonly Dictionary<int, Texture2D> cosReviewTex = new Dictionary<int, Texture2D>();
+
+        public static bool CosmeticReviewOpen => cosReviewOpen;
+
+        public static void OpenCosmeticReview()
+        {
+            cosReviewOpen = true;
+            cosReviewSubs = null;
+            cosReviewIdx = 0;
+            cosReviewBusy = true;
+            cosReviewStatus = "Loading pending submissions...";
+            ApiClient.FetchCosmeticSubmissionsAdmin(MatchTracker.LocalSteamId, (ok, list) =>
+            {
+                cosReviewBusy = false;
+                if (!cosReviewOpen) return;
+                if (!ok) { cosReviewStatus = "Fetch failed - are you an admin?"; return; }
+                cosReviewSubs = list;
+                cosReviewStatus = list.Count == 0 ? "No pending submissions." : "";
+            });
+        }
+
+        private static void CloseCosmeticReview()
+        {
+            cosReviewOpen = false;
+            foreach (var t in cosReviewTex.Values) { try { if (t != null) UnityEngine.Object.Destroy(t); } catch { } }
+            cosReviewTex.Clear();
+            cosReviewSubs = null;
+        }
+
+        private static Texture2D CosReviewTexture(ApiClient.CosmeticSubmission s)
+        {
+            Texture2D t;
+            if (cosReviewTex.TryGetValue(s.id, out t)) return t;
+            try
+            {
+                var bytes = Convert.FromBase64String(s.png_base64 ?? "");
+                t = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (!t.LoadImage(bytes)) { UnityEngine.Object.Destroy(t); t = null; }
+            }
+            catch { t = null; }
+            cosReviewTex[s.id] = t;
+            return t;
+        }
+
+        private static void RemoveCosReview(int id)
+        {
+            if (cosReviewSubs == null) return;
+            cosReviewSubs.RemoveAll(q => q.id == id);
+            Texture2D t;
+            if (cosReviewTex.TryGetValue(id, out t)) { try { if (t != null) UnityEngine.Object.Destroy(t); } catch { } cosReviewTex.Remove(id); }
+            if (cosReviewSubs.Count == 0) cosReviewStatus = "All reviewed!";
+        }
+
+        private static string CosTrunc(string s, int n) => string.IsNullOrEmpty(s) ? "" : (s.Length <= n ? s : s.Substring(0, n));
+
+        private static void DrawCosmeticReview()
+        {
+            if (!cosReviewOpen) return;
+            if (!NativeUI.IsOpen) { CloseCosmeticReview(); return; }
+            var ev = Event.current;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape) { ev.Use(); CloseCosmeticReview(); return; }
+            if (adminLabelStyle == null) adminLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+
+            float w = 560, h = 470;
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.94f), 0, 0);
+            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26), "Cosmetic submissions",
+                new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
+            if (GUI.Button(new Rect(x + w - 90, y + 10, 78, 26), "Close")) { CloseCosmeticReview(); return; }
+
+            var subs = cosReviewSubs;
+            if (cosReviewBusy || subs == null || subs.Count == 0)
+            {
+                GUI.Label(new Rect(x + 12, y + 60, w - 24, 30),
+                    string.IsNullOrEmpty(cosReviewStatus) ? "..." : cosReviewStatus, adminLabelStyle);
+                return;
+            }
+            cosReviewIdx = Mathf.Clamp(cosReviewIdx, 0, subs.Count - 1);
+            var s = subs[cosReviewIdx];
+            int approxKb = (s.png_base64 != null ? s.png_base64.Length * 3 / 4 : 0) / 1024;
+            GUI.Label(new Rect(x + 12, y + 42, w - 24, 22),
+                $"#{s.id}  '{s.name}'  ({s.slot})  by {s.artist_name}  512x512, {approxKb} KB   -   {cosReviewIdx + 1}/{subs.Count}",
+                new GUIStyle(adminLabelStyle) { fontStyle = FontStyle.Bold });
+            // Mid-grey backdrop so the transparent regions are visible as such.
+            Rect prev = new Rect(x + (w - 256) / 2f, y + 72, 256, 256);
+            GUI.DrawTexture(prev, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0.45f, 0.45f, 0.5f, 1f), 0, 0);
+            var tex = CosReviewTexture(s);
+            if (tex != null) GUI.DrawTexture(prev, tex, ScaleMode.ScaleToFit, true);
+            else GUI.Label(new Rect(prev.x, prev.y + 110, prev.width, 30), "  (preview failed to decode)", adminLabelStyle);
+            GUI.Label(new Rect(x + 12, y + 338, w - 24, 40),
+                "Approve creates the shop row (OUT OF STOCK until the artist opens sales) and queues the art for the next mod bundle.",
+                new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
+
+            float by = y + h - 46;
+            if (!cosReviewBusy && GUI.Button(new Rect(x + 12, by, 120, 32), "Approve"))
+            {
+                cosReviewBusy = true;
+                int sid = s.id; string nm = s.name;
+                ApiClient.AdminReviewCosmetic(MatchTracker.LocalSteamId, sid, true, "", (ok, resp) =>
+                {
+                    cosReviewBusy = false;
+                    if (!cosReviewOpen) return;
+                    if (ok) { ShowNotification($"Approved '{nm}'.", new Color(0.4f, 0.9f, 0.5f), 5f); RemoveCosReview(sid); }
+                    else ShowNotification("Approve failed: " + CosTrunc(resp, 90), new Color(1f, 0.45f, 0.4f), 6f);
+                });
+            }
+            if (!cosReviewBusy && GUI.Button(new Rect(x + 142, by, 120, 32), "Deny..."))
+            {
+                int sid = s.id; string nm = s.name;
+                OpenArtistInput($"Deny '{nm}' - why?", "Reason (shown to the artist)", "", note =>
+                {
+                    ApiClient.AdminReviewCosmetic(MatchTracker.LocalSteamId, sid, false, note ?? "", (ok, resp) =>
+                    {
+                        if (!cosReviewOpen) return;
+                        if (ok) { ShowNotification($"Denied '{nm}'.", new Color(1f, 0.7f, 0.4f), 4f); RemoveCosReview(sid); }
+                        else ShowNotification("Deny failed: " + CosTrunc(resp, 90), new Color(1f, 0.45f, 0.4f), 6f);
+                    });
+                });
+            }
+            if (subs.Count > 1 && GUI.Button(new Rect(x + w - 132, by, 120, 32), "Next >"))
+                cosReviewIdx = (cosReviewIdx + 1) % subs.Count;
+        }
+
+        private static void DrawArtistInput()
+        {
+            if (!artistPromptOpen) return;
+            if (!NativeUI.IsOpen) { artistPromptOpen = false; artistPromptOnSubmit = null; return; }
+            var ev = Event.current;
+            bool submit = false, cancel = false;
+            if (ev != null && ev.type == EventType.KeyDown)
+            {
+                if (ev.keyCode == KeyCode.Escape) { cancel = true; ev.Use(); }
+                else if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter) { submit = true; ev.Use(); }
+            }
+            if (adminFieldStyle == null) adminFieldStyle = new GUIStyle(GUI.skin.textField) { fontSize = 15 };
+            if (adminLabelStyle == null) adminLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+
+            float w = 520, h = 168;
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.93f), 0, 0);
+            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26), artistPromptTitle,
+                new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
+            GUI.Label(new Rect(x + 12, y + 44, w - 24, 20), artistPromptLabel, adminLabelStyle);
+            artistPromptValue = GUI.TextField(new Rect(x + 12, y + 68, w - 24, 28), artistPromptValue ?? "", adminFieldStyle);
+            if (GUI.Button(new Rect(x + 12, y + h - 40, 110, 30), "Cancel")) cancel = true;
+            if (GUI.Button(new Rect(x + w - 122, y + h - 40, 110, 30), "Submit")) submit = true;
+
+            if (cancel) { artistPromptOpen = false; artistPromptOnSubmit = null; return; }
+            if (submit)
+            {
+                var cb = artistPromptOnSubmit;
+                string v = artistPromptValue;
+                artistPromptOpen = false; artistPromptOnSubmit = null;
+                try { cb?.Invoke(v?.Trim() ?? ""); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[ARTIST] prompt action: {ex.Message}"); }
+            }
         }
 
         private static void DrawAdminPrompt()
@@ -1618,7 +2354,10 @@ namespace CompetitiveRounds
             // search field all have their own text entry that need T to type
             // "the", "tree", etc. (lopi: typing "t" in Compare search opened chat).
             if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused
-                || NativeUI.CustomBetPromptOpen) return;
+                || NativeUI.CustomBetPromptOpen
+                // July 12 round 2 item 4: the artist input / roster picker / player
+                // search modals all take typed text — 't' there must not open chat.
+                || ArtistPromptOpen) return;
 
             var ev = Event.current;
             if (!chatInputOpen)

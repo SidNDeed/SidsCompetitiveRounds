@@ -681,13 +681,17 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         # so older clients that still derive client-side won't see a
         # mismatch (they'll arrive at the same room name).
         m.photon_room_name = "sct-" + str(m.id).replace("-", "")[:12]
-        # Sync: 5-min ready-up window. Async: 7-day match deadline. The tick
-        # enforces both via _apply_no_show_forfeits + the async deadline path.
+        # Sync: ready-up window — 5 min for round 1 (players were just told the
+        # start time), 10 min for later rounds (a finalist may have stepped away
+        # while the other semi finishes; the bot's match-ready DM covers the
+        # recall). Async: 7-day match deadline. The tick enforces both via
+        # _apply_no_show_forfeits + the async deadline path.
         if t.kind == "async":
             m.deadline_at = now + timedelta(days=ASYNC_MATCH_DEADLINE_DAYS)
             m.ready_deadline_at = m.deadline_at
         else:
-            m.ready_deadline_at = now + timedelta(seconds=MATCH_READY_GRACE_SECONDS)
+            grace = MATCH_READY_GRACE_SECONDS * (2 if (m.round or 1) > 1 else 1)
+            m.ready_deadline_at = now + timedelta(seconds=grace)
 
 
 async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> None:
@@ -1492,7 +1496,8 @@ async def internal_watch(
     for t in trows:
         sq = text("""
             SELECT s.id AS signup_id, s.is_speculative, s.forfeited, s.placed_rank,
-                   p.id AS player_id, p.steam_id, p.display_name, p.discord_id, p.discord_username
+                   p.id AS player_id, p.steam_id, p.display_name, p.discord_id, p.discord_username,
+                   p.mod_version, p.ranked_enabled
             FROM tournament_signups s
             JOIN players p ON p.id = s.player_id
             WHERE s.tournament_id = :tid
@@ -1536,6 +1541,12 @@ async def internal_watch(
                 "display_name": s["display_name"],
                 "discord_id": s["discord_id"],
                 "discord_username": s["discord_username"],
+                # Last-seen mod version + ranked flag (item 3 hardening): the
+                # bot's lock DM warns signups whose client is outdated — an
+                # outdated client can't heartbeat (426-gated) and would silently
+                # auto-forfeit at start.
+                "mod_version": s["mod_version"],
+                "ranked_enabled": bool(s["ranked_enabled"]),
             } for s in signups],
             "matches": [{
                 "match_id": str(m["match_id"]),
@@ -1552,7 +1563,13 @@ async def internal_watch(
                 "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
             } for m in matches],
         })
-    return {"tournaments": result}
+    # Latest recommended client version — the bot pairs this with each
+    # signup's mod_version for the outdated-client warning DM.
+    try:
+        from main import LATEST_MOD_VERSION as _latest
+    except Exception:
+        _latest = None
+    return {"tournaments": result, "latest_mod_version": _latest}
 
 
 @router.get("/my-active-matches")
@@ -1568,7 +1585,7 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
         return {"matches": []}
     q = text("""
         SELECT m.id AS match_id, m.status, m.bracket_side, m.round,
-               m.photon_room_name,
+               m.photon_room_name, m.ready_deadline_at,
                t.id AS tournament_id, t.kind, t.photon_region,
                p1.steam_id AS p1_steam_id, p1.display_name AS p1_name,
                p2.steam_id AS p2_steam_id, p2.display_name AS p2_name,
@@ -1587,12 +1604,20 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(q, {"pid": player.id})).all()
     # Ready iff the heartbeat is recent (within 60s) — mirrors the
     # forfeit-deadline logic in _apply_no_show_forfeits.
-    ready_cutoff = datetime.now(timezone.utc) - timedelta(seconds=READY_STALE_SECONDS)
+    now = datetime.now(timezone.utc)
+    ready_cutoff = now - timedelta(seconds=READY_STALE_SECONDS)
     result = []
     for r in rows:
         is_p1 = r.p1_steam_id == steam_id
         my_ready = (r.p1_ready_at if is_p1 else r.p2_ready_at)
         opp_ready = (r.p2_ready_at if is_p1 else r.p1_ready_at)
+        # Seconds until the no-show forfeit fires — drives the client's big
+        # "TOURNAMENT MATCH WAITING (M:SS)" banner (item 3). Negative once the
+        # deadline passed (heartbeating players are spared, so a match can
+        # legitimately sit past its deadline while both are present).
+        secs_left = -1
+        if r.kind == "sync" and r.ready_deadline_at is not None:
+            secs_left = int((r.ready_deadline_at - now).total_seconds())
         result.append({
             "tournament_id": str(r.tournament_id),
             "kind": r.kind,
@@ -1606,6 +1631,7 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
             "photon_region": r.photon_region,
             "my_ready": my_ready is not None and my_ready >= ready_cutoff,
             "opp_ready": opp_ready is not None and opp_ready >= ready_cutoff,
+            "ready_seconds_left": secs_left,
         })
     return {"matches": result}
 

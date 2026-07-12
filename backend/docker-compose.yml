@@ -30,6 +30,18 @@ services:
       dockerfile: Dockerfile
     container_name: comp-rounds-api
     restart: unless-stopped
+    # HARD REQUIREMENT: exactly ONE uvicorn worker. The API keeps live state
+    # in process memory — the chat WebSocket registry (_ChatManager), the
+    # presence dict (online counter), chat resend nonces, maintenance mode,
+    # caches. With N workers each process gets its own copy: chat broadcasts
+    # only reach sockets on the same worker (bug #52 — "messages don't
+    # populate on other mod clients") and the online count splits per worker
+    # (bug #51 — "says 1 online"). This command: overrides whatever CMD the
+    # image's Dockerfile carries, so a stray --workers flag there can never
+    # resurface those bugs. If the API ever needs more throughput, scale
+    # verticals (asyncio handles this community's load easily) or move the
+    # shared state to Redis FIRST.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
       db:
         condition: service_healthy

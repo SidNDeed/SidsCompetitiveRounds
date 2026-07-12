@@ -4,12 +4,14 @@ FastAPI backend for match tracking, Glicko-2 ratings, and leaderboards.
 """
 
 import asyncio
+import base64
 import contextvars
 import hashlib
 import hmac
 import math
 import os
 import random
+import re as _re
 import string
 import time
 from contextlib import asynccontextmanager
@@ -19,7 +21,7 @@ from uuid import UUID
 
 import json as _json
 from pydantic import BaseModel
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, func, or_, select, text
@@ -891,7 +893,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.29.1"
+LATEST_MOD_VERSION = "1.30.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1176,6 +1178,7 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     Submit a completed match result.
     Called by the BepInEx mod on the host player's client.
     """
+    _presence_touch(report.reported_by_steam_id)
     # Validate HMAC if configured
     if not verify_hmac(report):
         raise HTTPException(status_code=403, detail="Invalid match signature")
@@ -1284,6 +1287,21 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     p1_fps = _local_fps if reporter_is_p1 else _opp_fps
     p2_fps = _opp_fps if reporter_is_p1 else _local_fps
 
+    # Per-game combat stats, both sides (v1.30 item 4) — same reporter-side
+    # mapping as FPS. Zero-fired AND zero-blocks means "no data" (old client /
+    # vanilla opponent) → NULL so history rows don't render fake 0% stats.
+    def _side(f, h, ba, bs, k, a):
+        has_data = (f or 0) > 0 or (ba or 0) > 0 or (k or 0) > 0
+        return (f, h, ba, bs, k, a) if has_data else (None, None, None, None, None, None)
+    _loc = _side(report.local_bullets_fired, report.local_bullets_hit,
+                 report.local_blocks_activated, report.local_blocks_successful,
+                 report.local_keys_pressed, report.local_active_seconds)
+    _opp = _side(report.opp_bullets_fired, report.opp_bullets_hit,
+                 report.opp_blocks_activated, report.opp_blocks_successful,
+                 report.opp_keys_pressed, report.opp_active_seconds)
+    _p1s = _loc if reporter_is_p1 else _opp
+    _p2s = _opp if reporter_is_p1 else _loc
+
     match = Match(
         player1_id=p1.id,
         player2_id=p2.id,
@@ -1310,6 +1328,13 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         started_at=report.started_at,
         p1_fps_avg=p1_fps,
         p2_fps_avg=p2_fps,
+        p1_bullets_fired=_p1s[0], p1_bullets_hit=_p1s[1],
+        p1_blocks_activated=_p1s[2], p1_blocks_successful=_p1s[3],
+        p1_keys_pressed=_p1s[4], p1_active_seconds=_p1s[5],
+        p2_bullets_fired=_p2s[0], p2_bullets_hit=_p2s[1],
+        p2_blocks_activated=_p2s[2], p2_blocks_successful=_p2s[3],
+        p2_keys_pressed=_p2s[4], p2_active_seconds=_p2s[5],
+        point_timeline=(report.point_timeline or None),
     )
     db.add(match)
     await db.flush()  # Get match.id
@@ -1447,6 +1472,39 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     # levels 55-100. Awarded the moment a player dings up via this match.
     await _maybe_grant_level_rewards(db, p1, old_xp_p1, str(match.id))
     await _maybe_grant_level_rewards(db, p2, old_xp_p2, str(match.id))
+
+    # v1.30 (item 5): server-side card-combo / sweep / clutch achievements for
+    # the winner. Reporter-side payload covers both players — works even when
+    # the winner's client is old (invalidated matches never reach this point).
+    await _check_match_achievements(
+        db, report, winner.id,
+        report.player1.cards if p1_won else report.player2.cards,
+        winner_rounds, loser_rounds, winner_is_p1=p1_won,
+    )
+
+    # Win-streak counters (July 12 item 2, migration 112). Flawless = five 5-0
+    # WINS in a row (any non-sweep game, or any loss, resets); casual streaks
+    # count consecutive casual WINS (losing a casual game resets; ranked games
+    # don't touch the casual counter). Counters start at 0 from this deploy.
+    try:
+        loser = p2 if p1_won else p1
+        swept_now = winner_rounds >= 5 and loser_rounds == 0
+        winner.consecutive_sweeps = (winner.consecutive_sweeps or 0) + 1 if swept_now else 0
+        loser.consecutive_sweeps = 0
+        if (winner.consecutive_sweeps or 0) >= 5:
+            await _grant_achievement_inline(db, winner.id, "flawless")
+        if not report.is_ranked:
+            winner.casual_win_streak = (winner.casual_win_streak or 0) + 1
+            loser.casual_win_streak = 0
+            cws = winner.casual_win_streak or 0
+            if cws >= 100:
+                await _grant_achievement_inline(db, winner.id, "casual_century")
+            if cws >= 200:
+                await _grant_achievement_inline(db, winner.id, "casual_conqueror")
+            if cws >= 500:
+                await _grant_achievement_inline(db, winner.id, "touch_grass")
+    except Exception as e:
+        print(f"[ACHIEVEMENT] streak counters failed: {e}")
 
     # Store XP earned per player on the match record
     match.p1_xp_gained = p1_xp
@@ -1685,6 +1743,19 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
                 if await _grant_achievement_inline(db, series.winner_id, slayer_key):
                     await db.commit()
                     print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
+            # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
+            if winner_steam:
+                streak = await get_ranked_streak(winner_steam)
+                granted_streak = False
+                if streak >= 25:
+                    granted_streak |= await _grant_achievement_inline(db, series.winner_id, "on_fire")
+                if streak >= 50:
+                    granted_streak |= await _grant_achievement_inline(db, series.winner_id, "unstoppable")
+                if streak >= 100:
+                    granted_streak |= await _grant_achievement_inline(db, series.winner_id, "immortal")
+                if granted_streak:
+                    await db.commit()
+                    print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
         except Exception as ex:
             print(f"Slayer auto-grant error: {ex}")
 
@@ -1882,6 +1953,39 @@ async def get_leaderboard(
 
 
 # ── Routes: Player Stats ──────────────────────────────────────
+
+# NOTE: must be registered BEFORE /players/{steam_id} — FastAPI matches routes
+# in registration order and the path param would otherwise swallow "search".
+@app.get("/api/v1/players/search", tags=["Players"])
+async def search_players(
+    q: str = Query(..., min_length=1, max_length=40),
+    limit: int = Query(8, ge=1, le=12),
+    db: AsyncSession = Depends(get_db),
+):
+    """Name search for the gift/block/admin player pickers (bug batch item 8).
+    Public data only (name + rating are already on the leaderboard). The live
+    rating is returned so a rename-imposter can't pass as the real player —
+    the elo beside the name is the tell."""
+    needle = (q or "").strip().replace("\\", "").replace("%", "").replace("_", "")
+    if len(needle) < 2:
+        return {"results": []}
+    rows = (await db.execute(text("""
+        SELECT p.steam_id, p.display_name, COALESCE(gr.rating, 1500) AS rating
+        FROM players p
+        LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+        WHERE p.display_name ILIKE :pat
+        ORDER BY (LOWER(p.display_name) = LOWER(:exact)) DESC,
+                 (p.display_name ILIKE :prefix) DESC,
+                 COALESCE(gr.rating, 0) DESC
+        LIMIT :lim
+    """), {"pat": f"%{needle}%", "exact": needle, "prefix": f"{needle}%", "lim": limit})).mappings().all()
+    return {"results": [
+        {"steam_id": r["steam_id"],
+         "display_name": r["display_name"] or r["steam_id"],
+         "rating": int(r["rating"] or 1500)}
+        for r in rows
+    ]}
+
 
 @app.get("/api/v1/players/{steam_id}", response_model=PlayerStatsResponse, tags=["Players"])
 async def get_player_stats(
@@ -2503,6 +2607,24 @@ async def get_player_matches(
                  ELSE m.p2_xp_gained END AS xp_gained,
             CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg ELSE m.p2_fps_avg END AS player_fps_avg,
             CASE WHEN m.player1_id = :pid THEN m.p2_fps_avg ELSE m.p1_fps_avg END AS opponent_fps_avg,
+            -- v1.30 item 4: viewer-relative per-game combat stats.
+            CASE WHEN m.player1_id = :pid THEN m.p1_bullets_fired ELSE m.p2_bullets_fired END AS pl_bf,
+            CASE WHEN m.player1_id = :pid THEN m.p1_bullets_hit ELSE m.p2_bullets_hit END AS pl_bh,
+            CASE WHEN m.player1_id = :pid THEN m.p1_blocks_activated ELSE m.p2_blocks_activated END AS pl_ba,
+            CASE WHEN m.player1_id = :pid THEN m.p1_blocks_successful ELSE m.p2_blocks_successful END AS pl_bs,
+            CASE WHEN m.player1_id = :pid THEN m.p1_keys_pressed ELSE m.p2_keys_pressed END AS pl_kp,
+            CASE WHEN m.player1_id = :pid THEN m.p1_active_seconds ELSE m.p2_active_seconds END AS pl_as,
+            CASE WHEN m.player1_id = :pid THEN m.p2_bullets_fired ELSE m.p1_bullets_fired END AS op_bf,
+            CASE WHEN m.player1_id = :pid THEN m.p2_bullets_hit ELSE m.p1_bullets_hit END AS op_bh,
+            CASE WHEN m.player1_id = :pid THEN m.p2_blocks_activated ELSE m.p1_blocks_activated END AS op_ba,
+            CASE WHEN m.player1_id = :pid THEN m.p2_blocks_successful ELSE m.p1_blocks_successful END AS op_bs,
+            CASE WHEN m.player1_id = :pid THEN m.p2_keys_pressed ELSE m.p1_keys_pressed END AS op_kp,
+            CASE WHEN m.player1_id = :pid THEN m.p2_active_seconds ELSE m.p1_active_seconds END AS op_as,
+            (m.player1_id = :pid) AS viewer_is_p1,
+            m.point_timeline,
+            -- Bug batch item 4: game length. duration_seconds is canonical
+            -- (mig 027); match_duration covers pre-027 rows.
+            COALESCE(m.duration_seconds, m.match_duration, 0) AS duration_seconds,
             -- Gold earned ON this match (xp crossings), and series bonus if applicable.
             COALESCE((
                 SELECT SUM(gt.amount) FROM gold_transactions gt
@@ -2601,9 +2723,31 @@ async def get_player_matches(
             series_gold_gained=row["series_gold_gained"] or 0,
             player_fps_avg=row["player_fps_avg"],
             opponent_fps_avg=row["opponent_fps_avg"],
+            player_bullets_fired=row["pl_bf"], player_bullets_hit=row["pl_bh"],
+            player_blocks_activated=row["pl_ba"], player_blocks_successful=row["pl_bs"],
+            player_keys_pressed=row["pl_kp"], player_active_seconds=row["pl_as"],
+            opp_bullets_fired=row["op_bf"], opp_bullets_hit=row["op_bh"],
+            opp_blocks_activated=row["op_ba"], opp_blocks_successful=row["op_bs"],
+            opp_keys_pressed=row["op_kp"], opp_active_seconds=row["op_as"],
+            point_timeline=_viewer_timeline(row["point_timeline"], bool(row["viewer_is_p1"])),
+            duration_seconds=row["duration_seconds"] or 0,
         ))
 
     return entries
+
+
+def _viewer_timeline(tl: str | None, viewer_is_p1: bool) -> str | None:
+    """Flip a 'p1:p2,p1:p2,...' scoring timeline to the viewer's perspective
+    (their own total first). Stored in match-row p1/p2 orientation."""
+    if not tl:
+        return None
+    if viewer_is_p1:
+        return tl
+    try:
+        return ",".join(f"{b}:{a}" for a, b in
+                        (pair.split(":", 1) for pair in tl.split(",")))
+    except Exception:
+        return tl
 
 
 # ── Routes: Card Stats ─────────────────────────────────────────
@@ -2954,6 +3098,7 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
     Join the ranked matchmaking queue.
     Upserts the player into ranked_queue with status='searching'.
     """
+    _presence_touch(req.steam_id)
     # Banned players can't queue. Let them load the leaderboard so they see the status.
     await _check_ban_or_raise(db, req.steam_id)
     # Get or create the player (auto-register on first queue join)
@@ -4169,6 +4314,8 @@ async def ws_chat(ws: WebSocket):
             display_name = str(data.get("display_name", ""))[:64]
             if not message or not steam_id:
                 continue
+            # Any chat send proves the client is alive — feed the online counter.
+            _presence_touch(steam_id)
             # Client resend dedup — the mod re-queues a message when its socket
             # dies mid-send; if the original actually landed, the resend carries
             # the same nonce and we drop it here instead of double-relaying.
@@ -4422,6 +4569,27 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
                 )).all()
             }
 
+    # Artist annotations (v1.30): display name per artist steam id, plus a
+    # sold-count per stock-limited item so the shop can render "3 of 10 left"
+    # and grey out sold-out rows. Both maps are tiny (a handful of artist
+    # items) so two small queries beat complicating the main select.
+    artist_names: dict[str, str] = {}
+    artist_ids = {r.artist_steam_id for r in rows if getattr(r, "artist_steam_id", None)}
+    if artist_ids:
+        for sid_, name_ in (await db.execute(
+            select(Player.steam_id, Player.display_name).where(Player.steam_id.in_(artist_ids))
+        )).all():
+            artist_names[sid_] = name_
+    sold_counts: dict[int, int] = {}
+    limited_ids = [r.id for r in rows if getattr(r, "stock_limit", None)]
+    if limited_ids:
+        for iid_, cnt_ in (await db.execute(
+            select(PlayerItem.item_id, func.count())
+            .where(PlayerItem.item_id.in_(limited_ids))
+            .group_by(PlayerItem.item_id)
+        )).all():
+            sold_counts[iid_] = int(cnt_)
+
     return {
         "items": [
             {
@@ -4434,6 +4602,10 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
                 "rarity": r.rarity,
                 "preview_color": r.preview_color,
                 "owned": _is_shop_owner(steam_id) or (r.id in owned_ids),
+                "artist_steam_id": getattr(r, "artist_steam_id", None) or "",
+                "artist_name": artist_names.get(getattr(r, "artist_steam_id", None) or "", ""),
+                "stock_limit": getattr(r, "stock_limit", None) or 0,
+                "stock_sold": sold_counts.get(r.id, 0) if getattr(r, "stock_limit", None) else 0,
             }
             for r in rows
         ]
@@ -4502,6 +4674,29 @@ async def purchase_item(
     if item.rotation_pool == "achievement":
         raise HTTPException(status_code=403, detail="Unlocked by achievement, not purchasable")
 
+    # Artist controls (v1.30): an artist can bar specific players from buying
+    # their items, and can cap how many copies exist. Gifts from the artist
+    # bypass the block (the artist explicitly chose the recipient) but still
+    # consume stock — both enforced in the /artist/gift endpoint.
+    if getattr(item, "artist_steam_id", None):
+        blocked = (await db.execute(text(
+            "SELECT 1 FROM artist_item_blocks "
+            "WHERE artist_steam_id = :a AND blocked_steam_id = :b"
+        ), {"a": item.artist_steam_id, "b": steam_id})).first()
+        if blocked is not None:
+            raise HTTPException(status_code=403, detail="This artist has restricted you from buying their items")
+    if getattr(item, "stock_limit", None):
+        # Round 3 item 2: -1 = the artist hasn't opened sales yet (every new
+        # community cosmetic is born this way so nobody sneaks a purchase in
+        # before the artist sets price/stock).
+        if item.stock_limit < 0:
+            raise HTTPException(status_code=409, detail="Not for sale yet — the artist hasn't opened sales")
+        sold = (await db.execute(
+            select(func.count()).select_from(PlayerItem).where(PlayerItem.item_id == item.id)
+        )).scalar() or 0
+        if sold >= item.stock_limit:
+            raise HTTPException(status_code=409, detail="Sold out")
+
     already = (await db.execute(
         select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item.id)
     )).scalar_one_or_none()
@@ -4518,6 +4713,25 @@ async def purchase_item(
         player_id=player.id, amount=-item.price,
         reason="purchase", reference_id=sku,
     ))
+
+    # Artist royalty (July 12 item 3): the creator earns 30% of every sale of
+    # their item. Not on gifts (price 0 never reaches here) and not on buying
+    # your own art.
+    if getattr(item, "artist_steam_id", None) and item.artist_steam_id != steam_id and item.price > 0:
+        royalty = int(item.price * 0.30)
+        if royalty > 0:
+            artist_player = (await db.execute(
+                select(Player).where(Player.steam_id == item.artist_steam_id,
+                                     Player.deleted_at.is_(None))
+            )).scalar_one_or_none()
+            if artist_player is not None:
+                artist_player.gold_earned = (artist_player.gold_earned or 0) + royalty
+                db.add(GoldTransaction(
+                    player_id=artist_player.id, amount=royalty,
+                    reason="artist_royalty", reference_id=sku,
+                ))
+                print(f"[ARTIST] royalty {royalty}g -> {item.artist_steam_id} for {sku} (buyer {steam_id})")
+
     await db.commit()
 
     return {
@@ -5170,6 +5384,7 @@ async def series_preflight(
     so either player can compute it without knowing who's p1/p2 server-side.
     Server returns the series_id which the client then uses for live-points
     reports during game 1."""
+    _presence_touch(p1_steam_id)
     # Diagnostics for private-room series that fail to register. Grep `PREFLIGHT`
     # in the api log: every successful call logs a 'call' + ('created'|'reuse');
     # a 'call' with no follow-up means a DB error, and a rejection logs why.
@@ -5285,6 +5500,7 @@ async def update_live_points(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
+    _presence_touch(reporter_steam_id)
     try:
         sid = UUID(series_id)
     except Exception:
@@ -5636,6 +5852,7 @@ async def get_player_bets(
             b.series_id::text AS series_id,
             bo.steam_id      AS bet_on_steam_id,
             bo.display_name  AS bet_on_name,
+            vs.display_name  AS vs_name,
             rs.status        AS series_status,
             rs.winner_id     AS series_winner_id,
             rs.p1_series_wins, rs.p2_series_wins
@@ -5643,6 +5860,8 @@ async def get_player_bets(
         JOIN players p        ON p.id = b.player_id
         JOIN players bo       ON bo.id = b.bet_on_player_id
         JOIN ranked_series rs ON rs.id = b.series_id
+        JOIN players vs       ON vs.id = CASE WHEN rs.player1_id = b.bet_on_player_id
+                                              THEN rs.player2_id ELSE rs.player1_id END
         WHERE p.steam_id = :sid
         ORDER BY b.created_at DESC
         LIMIT :limit
@@ -5659,12 +5878,593 @@ async def get_player_bets(
                 "series_id": r["series_id"],
                 "bet_on_steam_id": r["bet_on_steam_id"],
                 "bet_on_name": r["bet_on_name"],
+                # The OTHER player in the series — "on X (vs Y)" (item 6).
+                "vs_name": r["vs_name"],
                 "series_status": r["series_status"],
                 "series_score": f"{r['p1_series_wins']}-{r['p2_series_wins']}",
             }
             for r in rows
         ]
     }
+
+
+# ── Routes: Artist (v1.30) ───────────────────────────────────
+# Community artists control their OWN shop items: price, stock cap, gifting
+# copies, and blocking specific players from purchase. Membership lives in
+# artist_users (mirrors admin_users); an item belongs to an artist when
+# shop_items.artist_steam_id matches. Mutations are HMAC-signed like the admin
+# tab ("artist:{steam_id}:{action}:{args}") and audited to artist_actions.
+
+ARTIST_PRICE_MAX = 100_000
+
+
+async def _is_artist(db: AsyncSession, steam_id: str) -> bool:
+    row = (await db.execute(
+        text("SELECT 1 FROM artist_users WHERE steam_id = :sid"), {"sid": steam_id}
+    )).first()
+    return row is not None
+
+
+def _artist_hmac_ok(sig: str, canonical: str) -> bool:
+    if not MATCH_HMAC_SECRET:
+        return False
+    expected = hmac.new(MATCH_HMAC_SECRET.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, expected)
+
+
+async def _artist_own_item(db: AsyncSession, steam_id: str, sku: str) -> ShopItem:
+    """403/404 guard: caller must be an artist and the sku must be theirs."""
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    item = (await db.execute(select(ShopItem).where(ShopItem.sku == sku))).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if (getattr(item, "artist_steam_id", None) or "") != steam_id:
+        raise HTTPException(status_code=403, detail="Not your item")
+    return item
+
+
+async def _artist_audit(db: AsyncSession, steam_id: str, action: str, target: str, detail: str):
+    await db.execute(text(
+        "INSERT INTO artist_actions (artist_steam_id, action, target, detail) "
+        "VALUES (:a, :ac, :t, :d)"
+    ), {"a": steam_id, "ac": action, "t": target, "d": detail})
+
+
+@app.get("/api/v1/artist/status/{steam_id}", tags=["Artist"])
+async def artist_status(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """Mirrors /admin/status — the client shows the Artist tab when true."""
+    return {"is_artist": await _is_artist(db, steam_id)}
+
+
+@app.get("/api/v1/artist/{steam_id}/items", tags=["Artist"])
+async def artist_items(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """The artist's own items with live sales/stock numbers, plus their
+    purchase-block list. Read-only, no HMAC (same trust level as /shop/items)."""
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    rows = (await db.execute(text(
+        "SELECT si.id, si.sku, si.kind, si.name, si.description, si.price, si.rarity, si.stock_limit, "
+        "       COALESCE(pi.n, 0) AS sold, COALESCE(pi.gifted, 0) AS gifted, "
+        "       COALESCE(roy.earned, 0) AS earned "
+        "FROM shop_items si "
+        "LEFT JOIN (SELECT item_id, COUNT(*) AS n, "
+        "                  COUNT(*) FILTER (WHERE purchase_price = 0) AS gifted "
+        "           FROM player_items GROUP BY item_id) pi ON pi.item_id = si.id "
+        "LEFT JOIN (SELECT gt.reference_id AS sku, SUM(gt.amount) AS earned "
+        "           FROM gold_transactions gt "
+        "           JOIN players ap ON ap.id = gt.player_id "
+        "           WHERE gt.reason = 'artist_royalty' AND ap.steam_id = :sid "
+        "           GROUP BY gt.reference_id) roy ON roy.sku = si.sku "
+        "WHERE si.artist_steam_id = :sid "
+        "ORDER BY si.created_at, si.id"
+    ), {"sid": steam_id})).mappings().all()
+    blocks = (await db.execute(text(
+        "SELECT ab.blocked_steam_id, COALESCE(p.display_name, ab.blocked_steam_id) AS display_name "
+        "FROM artist_item_blocks ab "
+        "LEFT JOIN players p ON p.steam_id = ab.blocked_steam_id "
+        "WHERE ab.artist_steam_id = :sid ORDER BY ab.created_at"
+    ), {"sid": steam_id})).mappings().all()
+    return {
+        "items": [
+            {
+                "sku": r["sku"], "kind": r["kind"], "name": r["name"],
+                "description": r["description"] or "",
+                "price": r["price"], "rarity": r["rarity"],
+                "stock_limit": r["stock_limit"] or 0,
+                "sold": int(r["sold"]), "gifted": int(r["gifted"]),
+                "earned": int(r["earned"]),
+            } for r in rows
+        ],
+        "blocked": [
+            {"steam_id": b["blocked_steam_id"], "display_name": b["display_name"]}
+            for b in blocks
+        ],
+    }
+
+
+@app.post("/api/v1/artist/set-price", tags=["Artist"])
+async def artist_set_price(
+    steam_id: str = Query(...),
+    sku: str = Query(...),
+    price: int = Query(..., ge=0, le=ARTIST_PRICE_MAX),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """HMAC signs 'artist:{steam_id}:set-price:{sku}:{price}'."""
+    if not _artist_hmac_ok(sig, f"artist:{steam_id}:set-price:{sku}:{price}"):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    item = await _artist_own_item(db, steam_id, sku)
+    old = item.price
+    item.price = price
+    await _artist_audit(db, steam_id, "set-price", sku, f"{old} -> {price}")
+    await db.commit()
+    print(f"[ARTIST] {steam_id} set price of {sku}: {old} -> {price}")
+    return {"status": "ok", "sku": sku, "price": price}
+
+
+def _sanitize_item_text(v: str, max_len: int) -> str:
+    """Artist-supplied display text: strip rich-text angle brackets (the shop
+    renders names inside <color> tags — injection would break rows for
+    everyone) and clamp length."""
+    v = (v or "").replace("<", "(").replace(">", ")").strip()
+    return v[:max_len]
+
+
+@app.post("/api/v1/artist/set-name", tags=["Artist"])
+async def artist_set_name(
+    steam_id: str = Query(...),
+    sku: str = Query(...),
+    value: str = Query(..., min_length=1, max_length=64),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rename the artist's own item (July 12 item 3). HMAC signs
+    'artist:{steam_id}:set-name:{sku}'."""
+    if not _artist_hmac_ok(sig, f"artist:{steam_id}:set-name:{sku}"):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    item = await _artist_own_item(db, steam_id, sku)
+    clean = _sanitize_item_text(value, 64)
+    if not clean:
+        raise HTTPException(status_code=400, detail="Name can't be empty")
+    old = item.name
+    item.name = clean
+    await _artist_audit(db, steam_id, "set-name", sku, f"'{old}' -> '{clean}'")
+    await db.commit()
+    print(f"[ARTIST] {steam_id} renamed {sku}: '{old}' -> '{clean}'")
+    return {"status": "ok", "sku": sku, "name": clean}
+
+
+@app.post("/api/v1/artist/set-desc", tags=["Artist"])
+async def artist_set_desc(
+    steam_id: str = Query(...),
+    sku: str = Query(...),
+    value: str = Query("", max_length=200),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the artist's own item description. HMAC signs
+    'artist:{steam_id}:set-desc:{sku}'."""
+    if not _artist_hmac_ok(sig, f"artist:{steam_id}:set-desc:{sku}"):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    item = await _artist_own_item(db, steam_id, sku)
+    item.description = _sanitize_item_text(value, 200)
+    await _artist_audit(db, steam_id, "set-desc", sku, item.description)
+    await db.commit()
+    print(f"[ARTIST] {steam_id} set desc of {sku}")
+    return {"status": "ok", "sku": sku, "description": item.description}
+
+
+@app.get("/api/v1/artists", tags=["Artist"])
+async def list_artists(db: AsyncSession = Depends(get_db)):
+    """Public artist roster — display names already show on shop items, so this
+    is not sensitive. Drives the admin item-assignment dropdown (July 12)."""
+    rows = (await db.execute(text(
+        "SELECT au.steam_id, COALESCE(p.display_name, au.display_name, au.steam_id) AS display_name "
+        "FROM artist_users au LEFT JOIN players p ON p.steam_id = au.steam_id "
+        "ORDER BY 2"
+    ))).mappings().all()
+    return {"artists": [{"steam_id": r["steam_id"], "display_name": r["display_name"]} for r in rows]}
+
+
+# ── Cosmetic submissions (July 12 round 3, item 2) ────────────────────────
+# Artists upload 512x512 transparent PNGs in-game; admins review; approval
+# creates the shop row (born OUT OF STOCK, stock_limit = -1) and the art
+# ships with the next mod bundle (pulled from the DB at packaging time).
+
+COSMETIC_SLOTS = {"eyes", "mouth", "detail"}
+COSMETIC_MAX_B64 = 1_600_000          # ~1.2 MB decoded — 512px flat art is ~50-300 KB
+COSMETIC_MAX_PENDING_PER_ARTIST = 5
+
+
+def _png_dims_and_alpha(data: bytes):
+    """(width, height, has_alpha) straight from the PNG header. The real
+    per-pixel transparency check runs CLIENT-side (it has the decoded texture);
+    here we verify the container: PNG magic, IHDR dims, an alpha-capable color
+    type (4/6) or a tRNS chunk."""
+    if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG file")
+    if data[12:16] != b"IHDR":
+        raise ValueError("malformed PNG (IHDR missing)")
+    w = int.from_bytes(data[16:20], "big")
+    h = int.from_bytes(data[20:24], "big")
+    color_type = data[25]
+    has_alpha = color_type in (4, 6) or (b"tRNS" in data[:8192])
+    return w, h, has_alpha
+
+
+@app.post("/api/v1/artist/submit-cosmetic", tags=["Artist"])
+async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
+    """HMAC signs 'artist:{steam_id}:submit:{slot}:{len(png_base64)}' — the
+    length pins the payload without name-encoding ambiguity."""
+    steam_id = str(payload.get("steam_id") or "")
+    raw_name = str(payload.get("name") or "")
+    name = _re.sub(r"[^A-Za-z0-9 '\-]", "", raw_name).strip()[:40]
+    slot = str(payload.get("slot") or "").lower().strip()
+    b64 = str(payload.get("png_base64") or "")
+    sig = str(payload.get("sig") or "")
+    if not _artist_hmac_ok(sig, f"artist:{steam_id}:submit:{slot}:{len(b64)}"):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    if slot not in COSMETIC_SLOTS:
+        raise HTTPException(status_code=400, detail="slot must be eyes, mouth or detail")
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="name too short (letters/numbers/spaces only)")
+    if not b64 or len(b64) > COSMETIC_MAX_B64:
+        raise HTTPException(status_code=400, detail="PNG missing or too large (1 MB max)")
+    try:
+        data = base64.b64decode(b64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="png_base64 is not valid base64")
+    try:
+        w, h, has_alpha = _png_dims_and_alpha(data)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    if (w, h) != (512, 512):
+        raise HTTPException(status_code=400, detail=f"must be exactly 512x512 (got {w}x{h})")
+    if not has_alpha:
+        raise HTTPException(status_code=400, detail="PNG has no transparency layer — export with alpha")
+    pending = (await db.execute(text(
+        "SELECT COUNT(*) FROM cosmetic_submissions WHERE artist_steam_id = :s AND status = 'pending'"
+    ), {"s": steam_id})).scalar() or 0
+    if pending >= COSMETIC_MAX_PENDING_PER_ARTIST:
+        raise HTTPException(status_code=429, detail=f"{pending} submissions already awaiting review — wait for those first")
+    new_id = (await db.execute(text(
+        "INSERT INTO cosmetic_submissions (artist_steam_id, name, slot, png_data, png_bytes) "
+        "VALUES (:s, :n, :sl, :png, :b) RETURNING id"
+    ), {"s": steam_id, "n": name, "sl": slot, "png": data, "b": len(data)})).scalar()
+    await _artist_audit(db, steam_id, "submit-cosmetic", f"sub#{new_id}", f"{name} ({slot}, {len(data)}b)")
+    await db.commit()
+    print(f"[COSMETIC] submission #{new_id} '{name}' ({slot}) from {steam_id}")
+    return {"status": "submitted", "id": new_id}
+
+
+@app.get("/api/v1/artist/my-submissions", tags=["Artist"])
+async def artist_my_submissions(
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    if not _artist_hmac_ok(sig, f"artist:{steam_id}:my-submissions"):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    rows = (await db.execute(text(
+        "SELECT id, name, slot, status, review_note, shop_sku, created_at "
+        "FROM cosmetic_submissions WHERE artist_steam_id = :s "
+        "ORDER BY created_at DESC LIMIT 20"
+    ), {"s": steam_id})).mappings().all()
+    return {"submissions": [
+        {"id": r["id"], "name": r["name"], "slot": r["slot"], "status": r["status"],
+         "review_note": r["review_note"] or "", "shop_sku": r["shop_sku"] or "",
+         "created_at": r["created_at"].isoformat() if r["created_at"] else ""}
+        for r in rows
+    ]}
+
+
+@app.get("/api/v1/admin/cosmetic-submissions", tags=["Admin"])
+async def admin_cosmetic_submissions(
+    admin_steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pending queue incl. the art itself (base64) so the review UI can render
+    a real preview. HMAC action 'cosmetic-subs', target 'list'."""
+    await _require_admin(db, admin_steam_id, "cosmetic-subs", "list", sig)
+    rows = (await db.execute(text(
+        "SELECT cs.id, cs.name, cs.slot, cs.png_data, cs.png_bytes, cs.created_at, "
+        "       cs.artist_steam_id, COALESCE(p.display_name, au.display_name, cs.artist_steam_id) AS artist_name "
+        "FROM cosmetic_submissions cs "
+        "LEFT JOIN artist_users au ON au.steam_id = cs.artist_steam_id "
+        "LEFT JOIN players p ON p.steam_id = cs.artist_steam_id "
+        "WHERE cs.status = 'pending' ORDER BY cs.created_at LIMIT 10"
+    ))).mappings().all()
+    return {"submissions": [
+        {"id": r["id"], "name": r["name"], "slot": r["slot"], "png_bytes": r["png_bytes"],
+         "artist_steam_id": r["artist_steam_id"], "artist_name": r["artist_name"],
+         "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+         "png_base64": base64.b64encode(r["png_data"]).decode("ascii")}
+        for r in rows
+    ]}
+
+
+@app.post("/api/v1/admin/cosmetic-review", tags=["Admin"])
+async def admin_cosmetic_review(
+    admin_steam_id: str = Query(...),
+    submission_id: int = Query(...),
+    action: str = Query(...),
+    note: str = Query(""),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve/deny a submission. HMAC action 'cosmetic-review', target
+    '{submission_id}:{action}'. Approval creates the shop row born OUT OF
+    STOCK (stock_limit=-1); the art ships with the next mod bundle."""
+    await _require_admin(db, admin_steam_id, "cosmetic-review", f"{submission_id}:{action}", sig)
+    if action not in ("approve", "deny"):
+        raise HTTPException(status_code=400, detail="action must be approve or deny")
+    row = (await db.execute(text(
+        "SELECT id, artist_steam_id, name, slot FROM cosmetic_submissions "
+        "WHERE id = :i AND status = 'pending' FOR UPDATE"
+    ), {"i": submission_id})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No pending submission with that id")
+    note = (note or "").strip()[:200]
+    if action == "deny":
+        await db.execute(text(
+            "UPDATE cosmetic_submissions SET status='denied', review_note=:n, "
+            "reviewed_by=:a, reviewed_at=NOW() WHERE id=:i"
+        ), {"n": note or "denied", "a": admin_steam_id, "i": submission_id})
+        await db.commit()
+        print(f"[COSMETIC] submission #{submission_id} denied by {admin_steam_id}")
+        return {"status": "denied", "id": submission_id}
+    # approve: mint the shop row (unique sku from the name).
+    slug = _re.sub(r"[^a-z0-9]+", "_", row["name"].lower()).strip("_")[:32] or f"sub{submission_id}"
+    sku = f"face_{row['slot']}_{slug}"
+    exists = (await db.execute(select(ShopItem.id).where(ShopItem.sku == sku))).scalar_one_or_none()
+    if exists is not None:
+        sku = f"{sku}_{submission_id}"
+    db.add(ShopItem(
+        sku=sku, kind="face", name=row["name"],
+        description=f"{row['slot'].capitalize()}: community cosmetic. Ships with the next mod update; equip in the Character editor.",
+        price=750, rarity="rare", preview_color="#7FE8C3",
+        artist_steam_id=row["artist_steam_id"], stock_limit=-1,
+    ))
+    await db.execute(text(
+        "UPDATE cosmetic_submissions SET status='approved', review_note=:n, "
+        "reviewed_by=:a, reviewed_at=NOW(), shop_sku=:k WHERE id=:i"
+    ), {"n": note, "a": admin_steam_id, "k": sku, "i": submission_id})
+    db.add(AdminAction(admin_steam_id=admin_steam_id, action="cosmetic-approve",
+                       target_steam_id=row["artist_steam_id"],
+                       details={"submission_id": submission_id, "name": row["name"], "sku": sku}))
+    await db.commit()
+    print(f"[COSMETIC] submission #{submission_id} approved -> {sku}")
+    return {"status": "approved", "id": submission_id, "sku": sku}
+
+
+@app.post("/api/v1/artist/set-stock", tags=["Artist"])
+async def artist_set_stock(
+    steam_id: str = Query(...),
+    sku: str = Query(...),
+    stock: int = Query(..., ge=0, le=100_000, description="0 = unlimited"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """HMAC signs 'artist:{steam_id}:set-stock:{sku}:{stock}'. A cap below the
+    already-sold count simply reads as sold out — existing owners keep theirs."""
+    if not _artist_hmac_ok(sig, f"artist:{steam_id}:set-stock:{sku}:{stock}"):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    item = await _artist_own_item(db, steam_id, sku)
+    old = getattr(item, "stock_limit", None) or 0
+    item.stock_limit = stock if stock > 0 else None
+    await _artist_audit(db, steam_id, "set-stock", sku, f"{old} -> {stock}")
+    await db.commit()
+    print(f"[ARTIST] {steam_id} set stock of {sku}: {old} -> {stock}")
+    return {"status": "ok", "sku": sku, "stock_limit": stock}
+
+
+@app.post("/api/v1/artist/gift", tags=["Artist"])
+async def artist_gift(
+    steam_id: str = Query(...),
+    sku: str = Query(...),
+    target_steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Grant a copy of the artist's item to a player, free of charge. Bypasses
+    the artist's purchase blocks (an explicit gift is consent) but still
+    consumes stock. HMAC signs 'artist:{steam_id}:gift:{sku}:{target_steam_id}'."""
+    if not _artist_hmac_ok(sig, f"artist:{steam_id}:gift:{sku}:{target_steam_id}"):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    item = await _artist_own_item(db, steam_id, sku)
+    target = (await db.execute(
+        select(Player).where(Player.steam_id == target_steam_id, Player.deleted_at.is_(None))
+    )).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="Player not found — they need to have used the mod once")
+    already = (await db.execute(
+        select(PlayerItem).where(PlayerItem.player_id == target.id, PlayerItem.item_id == item.id)
+    )).scalar_one_or_none()
+    if already is not None:
+        return {"status": "already_owned", "sku": sku, "target": target.display_name}
+    # Gifts only gate on POSITIVE caps: an unopened item (stock_limit = -1)
+    # can still be gifted by its artist (pre-launch copies for friends).
+    if getattr(item, "stock_limit", None) and item.stock_limit > 0:
+        sold = (await db.execute(
+            select(func.count()).select_from(PlayerItem).where(PlayerItem.item_id == item.id)
+        )).scalar() or 0
+        if sold >= item.stock_limit:
+            raise HTTPException(status_code=409, detail="Sold out — raise the stock cap first")
+    db.add(PlayerItem(player_id=target.id, item_id=item.id, purchase_price=0))
+    await _artist_audit(db, steam_id, "gift", sku, f"to {target_steam_id} ({target.display_name})")
+    await db.commit()
+    print(f"[ARTIST] {steam_id} gifted {sku} to {target_steam_id}")
+    return {"status": "gifted", "sku": sku, "target": target.display_name}
+
+
+@app.post("/api/v1/artist/block", tags=["Artist"])
+async def artist_block(
+    steam_id: str = Query(...),
+    target_steam_id: str = Query(...),
+    block: bool = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Block/unblock a player from purchasing ANY of this artist's items.
+    HMAC signs 'artist:{steam_id}:block:{target_steam_id}:{1|0}'."""
+    if not _artist_hmac_ok(sig, f"artist:{steam_id}:block:{target_steam_id}:{1 if block else 0}"):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    if block:
+        await db.execute(text(
+            "INSERT INTO artist_item_blocks (artist_steam_id, blocked_steam_id) "
+            "VALUES (:a, :b) ON CONFLICT DO NOTHING"
+        ), {"a": steam_id, "b": target_steam_id})
+    else:
+        await db.execute(text(
+            "DELETE FROM artist_item_blocks WHERE artist_steam_id = :a AND blocked_steam_id = :b"
+        ), {"a": steam_id, "b": target_steam_id})
+    await _artist_audit(db, steam_id, "block" if block else "unblock", target_steam_id, "")
+    await db.commit()
+    print(f"[ARTIST] {steam_id} {'blocked' if block else 'unblocked'} {target_steam_id}")
+    return {"status": "ok", "blocked": block, "target": target_steam_id}
+
+
+# ── Admin ↔ artist management (v1.30, Sid item 1) ────────────
+# Admins grant/revoke the artist role and assign shop items to artists from
+# the F5 UI (Admin tab + an admin-only button on cosmetic shop rows) instead
+# of hand-run migrations. Standard admin HMAC ("admin:{id}:{action}:{target}").
+
+@app.post("/api/v1/admin/artists/set", tags=["Admin"])
+async def admin_set_artist(
+    admin_steam_id: str = Query(...),
+    target_steam_id: str = Query(...),
+    grant: bool = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Grant or revoke the artist role. HMAC action 'artist-set',
+    target '{target_steam_id}:{1|0}'."""
+    if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(status_code=403, detail="Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, "artist-set",
+                              f"{target_steam_id}:{1 if grant else 0}", sig):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    target = (await db.execute(
+        select(Player).where(Player.steam_id == target_steam_id, Player.deleted_at.is_(None))
+    )).scalar_one_or_none()
+    if grant and target is None:
+        raise HTTPException(status_code=404, detail="Player not found — they need to have used the mod once")
+    if grant:
+        await db.execute(text(
+            "INSERT INTO artist_users (steam_id, display_name, granted_by_steam_id, notes) "
+            "VALUES (:s, :n, :g, 'granted via admin tab') ON CONFLICT (steam_id) DO NOTHING"
+        ), {"s": target_steam_id, "n": target.display_name if target else None, "g": admin_steam_id})
+    else:
+        # Blocks + item assignments cascade/persist: items keep their
+        # artist_steam_id (history), the role row + purchase blocks go.
+        await db.execute(text("DELETE FROM artist_users WHERE steam_id = :s"), {"s": target_steam_id})
+    db.add(AdminAction(
+        admin_steam_id=admin_steam_id, action="artist-set", target_steam_id=target_steam_id,
+        details={"grant": grant},
+    ))
+    await db.commit()
+    print(f"[ADMIN] {admin_steam_id} {'granted' if grant else 'revoked'} artist for {target_steam_id}")
+    return {"status": "ok", "target": target_steam_id, "artist": grant}
+
+
+@app.post("/api/v1/admin/shop/set-artist", tags=["Admin"])
+async def admin_set_item_artist(
+    admin_steam_id: str = Query(...),
+    sku: str = Query(...),
+    artist_steam_id: str = Query("", description="Empty = clear (house item)"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Assign a shop item to an artist (or clear it). HMAC action 'item-artist',
+    target '{sku}:{artist_steam_id}'."""
+    if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(status_code=403, detail="Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, "item-artist",
+                              f"{sku}:{artist_steam_id}", sig):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    item = (await db.execute(select(ShopItem).where(ShopItem.sku == sku))).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if artist_steam_id:
+        if not await _is_artist(db, artist_steam_id):
+            raise HTTPException(status_code=409, detail="Target isn't an artist yet — grant the role first")
+        item.artist_steam_id = artist_steam_id
+    else:
+        item.artist_steam_id = None
+    db.add(AdminAction(
+        admin_steam_id=admin_steam_id, action="item-artist", target_steam_id=artist_steam_id or None,
+        details={"sku": sku},
+    ))
+    await db.commit()
+    print(f"[ADMIN] {admin_steam_id} set artist of {sku} -> {artist_steam_id or '(none)'}")
+    return {"status": "ok", "sku": sku, "artist_steam_id": artist_steam_id}
+
+
+# ── Routes: pending channel posts (bot announce pipeline, v1.30) ──
+# Generic "post this to a Discord channel" queue: rows land in
+# pending_channel_posts (via migration or future admin tooling), the bot polls
+# every 30s and posts in (sort_order, id) order, acking after each successful
+# send. Ack-after-delivery mirrors the bug-report event pipeline (learning
+# #105) so bot restarts can't drop announcements. First consumer: the #scr-faq
+# sheet.
+
+@app.get("/api/v1/internal/linked-players", tags=["Internal"])
+async def internal_linked_players(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only (item 8, v1.30): every Discord-linked player with their current
+    rating, in ONE call. Replaces the bot role-sync's per-member
+    /players/by-discord loop (~2,500 sequential requests per tick)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    rows = (await db.execute(text(
+        "SELECT p.discord_id, p.steam_id, COALESCE(gr.rating, 1500) AS rating "
+        "FROM players p LEFT JOIN glicko_ratings gr ON gr.player_id = p.id "
+        "WHERE p.discord_id IS NOT NULL AND p.deleted_at IS NULL"
+    ))).mappings().all()
+    return {"players": [
+        {"discord_id": r["discord_id"], "steam_id": r["steam_id"], "rating": float(r["rating"])}
+        for r in rows
+    ]}
+
+
+@app.get("/api/v1/internal/channel-posts/pending", tags=["Internal"])
+async def pending_channel_posts(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    rows = (await db.execute(text(
+        "SELECT id, channel_id, content FROM pending_channel_posts "
+        "WHERE posted_at IS NULL ORDER BY sort_order, id LIMIT 20"
+    ))).mappings().all()
+    return {"posts": [{"id": r["id"], "channel_id": r["channel_id"], "content": r["content"]} for r in rows]}
+
+
+@app.post("/api/v1/internal/channel-posts/ack", tags=["Internal"])
+async def ack_channel_post(
+    post_id: int = Query(...),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    await db.execute(text(
+        "UPDATE pending_channel_posts SET posted_at = NOW() WHERE id = :pid"
+    ), {"pid": post_id})
+    await db.commit()
+    return {"status": "acked", "id": post_id}
 
 
 # ── Routes: Privacy ──────────────────────────────────────────
@@ -5765,6 +6565,44 @@ ACHIEVEMENT_DEFS = {
     "team_sweep":           {"name": "Tag Team Sweep",      "desc": "Win a 2v2 game 5-0"},
     # v1.29
     "grand_master":         {"name": "Grand Master",        "desc": "Reach 2330 rating in ranked (1v1 or 2v2)"},
+    # v1.30 expansion (Sid item 5) — every one of these requires WINNING.
+    # Hard-card 5-0s (picked from live card stats: lowest win rates with real
+    # sample sizes — Barrage 16.5%, Mayhem/Sneaky/Chase already have theirs):
+    "bullet_hell":          {"name": "Bullet Hell",         "desc": "Win a game 5-0 with Barrage in your build"},
+    "spray_and_pray":       {"name": "Spray and Pray",      "desc": "Win a game 5-0 with Spray in your build"},
+    "demolitionist":        {"name": "Demolitionist",       "desc": "Win a game 5-0 with Explosive Bullet in your build"},
+    "controlled_burst":     {"name": "Controlled Burst",    "desc": "Win a game 5-0 with Burst in your build"},
+    # Build achievements:
+    # god_build detection is CLIENT-side (July 12 item 2): it checks the real
+    # gun stats at game end — max ammo 1 + reload <= 1s + Shields Up — not a
+    # card-list proxy.
+    "god_build":            {"name": "Unkillable",          "desc": "Win with Shields Up, exactly 1 ammo, and a lightning-fast reload"},
+    "double_nova":          {"name": "Double Nova",         "desc": "Win with two or more Supernovas"},
+    "lumberjack":           {"name": "Lumberjack",          "desc": "Win with two or more Saws"},
+    "pristine_perfection":  {"name": "Pristine Perfection", "desc": "Win with two or more Pristines"},
+    # Display renamed Silent -> Silly Drill (Sid: the combo is comically bad).
+    "silent_drill":         {"name": "Silly Drill",         "desc": "Win with Sneaky and Drill together"},
+    "double_glass":         {"name": "Living on the Edge",  "desc": "Win with two Glass Cannons in your build"},
+    "sustained_power":      {"name": "Sustained Power",     "desc": "Win with Empower and Healing Field together"},
+    "field_medic":          {"name": "Field Medic",         "desc": "Win a game 5-0 with Healing Field in your build"},
+    # deep_end detection is CLIENT-side: first pick + the ability actually
+    # ACTIVATED every round of the game (AbyssalCountdown.RPCA_Activate hook).
+    "deep_end":             {"name": "Into the Deep End",   "desc": "Win with Abyssal Countdown as your FIRST pick, activating it every round"},
+    # Easier siblings of existing achievements (still require the win):
+    "clutch":               {"name": "Clutch",              "desc": "Win a game after being down 0-3"},
+    "collector":            {"name": "Collector",           "desc": "Win with four copies of the same card"},
+    "flawless":             {"name": "Flawless",            "desc": "Win five games 5-0 in a row"},
+    "rising_star":          {"name": "Rising Star",         "desc": "Reach 1700 rating in ranked (1v1 or 2v2)"},
+    # Streaks (ranked series / casual games):
+    "on_fire":              {"name": "On Fire",             "desc": "Win 25 ranked series in a row"},
+    "unstoppable":          {"name": "Unstoppable",         "desc": "Win 50 ranked series in a row"},
+    "immortal":             {"name": "Immortal",            "desc": "Win 100 ranked series in a row"},
+    "casual_century":       {"name": "Century Club",        "desc": "Win 100 casual games in a row"},
+    "casual_conqueror":     {"name": "Casual Conqueror",    "desc": "Win 200 casual games in a row"},
+    "touch_grass":          {"name": "Touch Grass",         "desc": "Win 500 casual games in a row"},
+    # Client-detected (input / pick tracking):
+    "grounded":             {"name": "Grounded",            "desc": "Win a game without ever jumping"},
+    "instinct":             {"name": "Instinct",            "desc": "Win taking only the left-most card on every pick, without ever looking at the others"},
 }
 
 # Master rank threshold — applies to both 1v1 and 2v2 Glicko rating.
@@ -5788,10 +6626,94 @@ ACHIEVEMENT_TITLE_SKUS = {
 
 async def _grant_rating_achievements(db: AsyncSession, player_id, new_rating: float) -> None:
     """Grant rating-threshold achievements crossed by a Glicko update."""
+    if new_rating >= RISING_STAR_THRESHOLD:
+        await _grant_achievement_inline(db, player_id, "rising_star")
     if new_rating >= MASTER_RANK_THRESHOLD:
         await _grant_achievement_inline(db, player_id, "master_rank")
     if new_rating >= GRAND_MASTER_THRESHOLD:
         await _grant_achievement_inline(db, player_id, "grand_master")
+
+
+RISING_STAR_THRESHOLD = 1700.0
+
+
+def _norm_card(name: str | None) -> str:
+    """Normalize a card name for matching — the DB carries both display and
+    GameObject spellings ("Fast Ball" vs "Fastball", learning #19)."""
+    return "".join(ch for ch in (name or "").upper() if ch.isalnum())
+
+
+# v1.30 card-combo achievements: key -> (predicate over the winner's
+# normalized card multiset + score). Kept data-driven so new combos are a
+# one-line add. All fire only for the WINNER of a completed, non-invalidated
+# match — evaluated in _check_match_achievements below.
+def _check_combo_achievements(counts: dict[str, int], swept: bool) -> list[str]:
+    have = counts.keys()
+    got: list[str] = []
+    if swept:
+        if "BARRAGE" in have: got.append("bullet_hell")
+        if "SPRAY" in have: got.append("spray_and_pray")
+        if "EXPLOSIVEBULLET" in have: got.append("demolitionist")
+        if "BURST" in have: got.append("controlled_burst")
+        if "HEALINGFIELD" in have: got.append("field_medic")
+    # god_build + deep_end are CLIENT-detected (gun stats / ability activations)
+    # — see GameStateWatcher.EvaluateAchievements. flawless is streak-based
+    # (consecutive_sweeps counter in submit_match), not per-match.
+    if counts.get("SUPERNOVA", 0) >= 2: got.append("double_nova")
+    if counts.get("SAW", 0) >= 2: got.append("lumberjack")
+    # Prod spellings (verified against match_cards, July 12): the card
+    # normalizes to PRISTINEPERSEVERANCE, and Drill Ammo to DRILLAMMO — the
+    # original bare "PRISTINE"/"DRILL" keys never matched anything, so these
+    # two achievements could never fire. Keep the short forms as aliases.
+    if counts.get("PRISTINEPERSEVERANCE", 0) + counts.get("PRISTINE", 0) >= 2:
+        got.append("pristine_perfection")
+    if ("SNEAKY" in have or "SNEAKYBULLETS" in have) and ("DRILL" in have or "DRILLAMMO" in have):
+        got.append("silent_drill")
+    if counts.get("GLASSCANNON", 0) >= 2: got.append("double_glass")
+    if "EMPOWER" in have and "HEALINGFIELD" in have: got.append("sustained_power")
+    if any(counts.get(k, 0) >= 4 for k in counts): got.append("collector")
+    return got
+
+
+async def _check_match_achievements(db: AsyncSession, report, winner_id,
+                                    winner_cards, winner_rounds: int,
+                                    loser_rounds: int, winner_is_p1: bool) -> None:
+    """v1.30 (item 5): server-side per-match achievement detection for the
+    winner. Runs at submit time from the reporter's payload — covers BOTH
+    players (only the reporter needs an up-to-date mod). Never raises."""
+    try:
+        counts: dict[str, int] = {}
+        first_pick_norm = ""
+        for c in winner_cards:
+            n = _norm_card(getattr(c, "card_name", None))
+            if not n:
+                continue
+            counts[n] = counts.get(n, 0) + 1
+            po = getattr(c, "pick_order", None)
+            if po == 1:
+                first_pick_norm = n
+        swept = winner_rounds >= 5 and loser_rounds == 0
+        keys = _check_combo_achievements(counts, swept)
+        # Clutch: down 0-3 (six cumulative points against, none for) at some
+        # point in the scoring timeline (stored in match p1/p2 orientation).
+        tl = report.point_timeline or ""
+        if tl:
+            try:
+                for pair in tl.split(","):
+                    a_s, b_s = pair.split(":", 1)
+                    a, b = int(a_s), int(b_s)
+                    mine, theirs = (a, b) if winner_is_p1 else (b, a)
+                    if mine == 0 and theirs >= 6:
+                        keys.append("clutch")
+                        break
+            except Exception:
+                pass
+        for k in keys:
+            await _grant_achievement_inline(db, winner_id, k)
+        if keys:
+            print(f"[ACHIEVEMENT] match-combo grants for {winner_id}: {keys}")
+    except Exception as e:
+        print(f"[ACHIEVEMENT] match-combo check failed: {e}")
 
 
 async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
@@ -5853,13 +6775,15 @@ async def get_achievement_definitions():
 @app.get("/api/v1/achievements/{steam_id}", tags=["Achievements"])
 async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_db)):
     """Get all achievements for a player, merged with definitions."""
+    pct = await _achievement_global_pcts(db)
     player = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = player.scalar_one_or_none()
     if not player:
         # Return all locked if player not found
         entries = [
             AchievementEntry(achievement_key=k, unlocked=False,
-                             name=ACHIEVEMENT_DEFS[k].get("name"))
+                             name=ACHIEVEMENT_DEFS[k].get("name"),
+                             global_pct=pct.get(k, 0.0))
             for k in ACHIEVEMENT_DEFS
         ]
         return AchievementListResponse(steam_id=steam_id, achievements=entries)
@@ -5878,8 +6802,43 @@ async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_
             # Display name rides along so renamed achievements (regicide ->
             # "Sid Slayer") label correctly in the Compare grid (#44).
             name=ACHIEVEMENT_DEFS[key].get("name"),
+            global_pct=pct.get(key, 0.0),
         ))
     return AchievementListResponse(steam_id=steam_id, achievements=entries)
+
+
+# Steam-style global achievement stats: % of all players who have unlocked
+# each achievement. Denominator = every non-deleted player row (rows are only
+# created by real activity — a match report or a queue join — so this tracks
+# "players who actually played" closely enough). Cached 5 min; single process,
+# so a plain module dict is safe.
+_ach_pct_cache: dict = {"at": 0.0, "pcts": {}}
+
+
+async def _achievement_global_pcts(db: AsyncSession) -> dict[str, float]:
+    now = time.monotonic()
+    if now - _ach_pct_cache["at"] < 300 and _ach_pct_cache["pcts"]:
+        return _ach_pct_cache["pcts"]
+    try:
+        total = (await db.execute(text(
+            "SELECT COUNT(*) FROM players WHERE deleted_at IS NULL"
+        ))).scalar() or 0
+        pcts: dict[str, float] = {}
+        if total > 0:
+            rows = (await db.execute(text(
+                "SELECT pa.achievement_key, COUNT(DISTINCT pa.player_id) AS n "
+                "FROM player_achievements pa "
+                "JOIN players p ON p.id = pa.player_id AND p.deleted_at IS NULL "
+                "GROUP BY pa.achievement_key"
+            ))).mappings().all()
+            for r in rows:
+                pcts[r["achievement_key"]] = round(100.0 * int(r["n"]) / total, 1)
+        _ach_pct_cache["at"] = now
+        _ach_pct_cache["pcts"] = pcts
+        return pcts
+    except Exception as e:
+        print(f"[ACHIEVEMENT] global pct query failed: {e}")
+        return _ach_pct_cache["pcts"] or {}
 
 
 @app.post("/api/v1/achievements/unlock", tags=["Achievements"])
@@ -7036,6 +7995,7 @@ def _team_balance_rating(rating: float, completed_series: int, fallback_rating: 
 async def team_queue_join(req: TeamQueueJoinRequest, db: AsyncSession = Depends(get_db)):
     """Upsert player into team_queue. Snapshots their 2v2 + 1v1 ratings so the
     balancer at lock-time uses queue-join values (not drifted live ratings)."""
+    _presence_touch(req.steam_id)
     await _check_ban_or_raise(db, req.steam_id)
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
@@ -7254,6 +8214,8 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     SELECT FOR UPDATE SKIP LOCKED on the candidate set, atomic update of all 4 rows."""
     import uuid as uuid_mod
 
+    _presence_touch(steam_id)
+
     # Find caller's queue row (locked).
     me_q = await db.execute(
         text("""
@@ -7422,6 +8384,15 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     # ── SEARCHING ── try to lock 4 mutually-acceptable players
     elo_range = compute_elo_range(wait_seconds)
     my_balance = _team_balance_rating(me["rating"], me["completed_series"], me["fallback_rating"], me["rating_deviation"])
+
+    # Custom lobbies (manual queue) are consent-based — 4 friends who joined the
+    # same lobby type on purpose. The auto-queue Elo band (±100 widening to ±800
+    # only after 120s) made mixed-rating friend groups wait minutes before the
+    # lock could even see each other (bug #57: ">1 minute for the game to be
+    # created"). Manual queues skip the rating gate entirely; the balancer /
+    # preferred_team logic downstream still decides the teams.
+    if (me.get("queue_type") or "auto").lower() == "manual":
+        elo_range = 1_000_000
 
     # Find 3 other compatible players. Bilateral Elo overlap, no mutual blocks.
     # Use the SAME elo_range as the caller's tier — wider tier callers find each
@@ -7929,25 +8900,21 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     if s_dc_grace_until is not None:
         dc_grace_seconds_remaining = max(0, int((s_dc_grace_until - datetime.now(timezone.utc)).total_seconds()))
         if dc_grace_seconds_remaining == 0 and s_status == "dc_paused":
-            # Grace expired without the original 4 re-queueing. Forfeit-win to
-            # whichever team was still around — WITH full ratings/gold via the
-            # shared helper (pre-v1.28 this completed with no rating effect).
-            # Guard against a double-complete race: only proceed if still dc_paused.
-            still_paused = (await db.execute(
-                text("SELECT status FROM team_series WHERE id=:sid FOR UPDATE"),
+            # Manual-control policy: a lapsed grace window no longer auto-forfeits to
+            # the remaining team (a long 2v2 restart must not hand someone the series).
+            # Flip to dc_incomplete so it surfaces in the admin panel for a manual call.
+            # (New DCs no longer enter dc_paused at all; this only catches legacy rows.)
+            await db.execute(
+                text("""UPDATE team_series SET status='dc_incomplete',
+                           invalidation_reason='dc_manual_pending'
+                         WHERE id=:sid AND status='dc_paused'"""),
                 {"sid": sid_uuid},
-            )).scalar_one_or_none()
-            new_ratings = {}
-            if still_paused == "dc_paused" and s_dc_team in (1, 2):
-                new_ratings = await _complete_team_series_with_ratings(
-                    db, sid_uuid, s_dc_team, "dc_forfeit", dc_pid=s_dc_player,
-                )
+            )
             await db.commit()
             return {
-                "status": "completed",
-                "reason": "dc_forfeit",
-                "winner_team": s_dc_team,
-                "new_ratings": new_ratings,
+                "status": "dc_incomplete",
+                "reason": "awaiting_admin_resolution",
+                "winner_team": None,
                 "confirmations": s_confirms,
                 "expected": 4,
                 "age_seconds": int(age_seconds),
@@ -8150,22 +9117,38 @@ async def admin_resolve_team_series(
     action: str = Query(..., description="'complete' (award winner_team) or 'void' (cancel, no result)"),
     winner_team: int | None = Query(None, description="1 or 2; required when action=complete"),
     x_internal_key: str = Header(None, alias="X-Internal-Key"),
+    admin_steam_id: str = Query(None),
+    hmac_signature: str = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Admin: force-resolve a stuck 2v2 series. API_SECRET_KEY gated.
+    """Admin: force-resolve a stuck / incomplete 2v2 series.
+
+    Callable two ways: (1) API_SECRET_KEY via the X-Internal-Key header (server-side
+    scripts), or (2) admin-HMAC (admin_steam_id + hmac_signature) so the mod's in-game
+    admin panel can resolve a series. Canonical for (2):
+    admin:{steam}:resolve_team_series:{series_id}:{action}:{winner_team or 0}.
 
     action='complete' applies the SAME Glicko/gold/xp as a normal completion via
-    _complete_team_series_with_ratings (used to award DC-leave forfeits after the
-    fact). action='void' cancels the series with no winner and no rating/economy
-    effect (used to clean up pre-match leavers / leading-leaver DCs that shouldn't
-    award anyone). Only operates on series not already 'completed'."""
+    _complete_team_series_with_ratings (awards a DC/forfeit after the fact).
+    action='void' cancels the series with no winner and no rating/economy effect.
+    Operates on any series not already completed/cancelled."""
     expected = os.getenv("API_SECRET_KEY", "")
-    if not expected or x_internal_key != expected:
-        raise HTTPException(403, "Internal endpoint")
+    internal_ok = bool(expected) and x_internal_key == expected
+    admin_ok = False
+    if not internal_ok and admin_steam_id:
+        _tgt = f"{series_id}:{action}:{winner_team if winner_team is not None else 0}"
+        admin_ok = (await _is_admin(db, admin_steam_id)) and _verify_admin_hmac(
+            admin_steam_id, "resolve_team_series", _tgt, hmac_signature)
+    if not (internal_ok or admin_ok):
+        raise HTTPException(403, "Not authorized")
     try:
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid series_id")
+    if admin_steam_id and admin_ok:
+        db.add(AdminAction(admin_steam_id=admin_steam_id, action="resolve_team_series",
+                           target_series_id=sid_uuid,
+                           details={"action": action, "winner_team": winner_team}))
     srow = (await db.execute(
         text("SELECT status FROM team_series WHERE id=:sid FOR UPDATE"), {"sid": sid_uuid},
     )).scalar_one_or_none()
@@ -8203,6 +9186,201 @@ async def admin_resolve_team_series(
         return {"status": "completed", "winner_team": winner_team, "new_ratings": new_ratings}
 
     raise HTTPException(400, "action must be 'complete' or 'void'")
+
+
+@app.get("/api/v1/admin/recent-series", tags=["Admin"])
+async def admin_recent_series(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    limit: int = Query(30, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Unified recent 1v1 + 2v2 series for the mod admin panel. Each entry carries a
+    per-ladder series #, players + card picks, series score, status, and who DC'd (2v2).
+    incomplete=true → resolvable (Award/Void); completed → reversible. Admin-HMAC gated
+    (canonical admin:{steam}:list_recent_series:)."""
+    if not await _is_admin(db, admin_steam_id):
+        raise HTTPException(403, "Not an admin")
+    if not _verify_admin_hmac(admin_steam_id, "list_recent_series", "", hmac_signature):
+        raise HTTPException(403, "Bad admin signature")
+
+    # ── 2v2 ──
+    team_rows = (await db.execute(text("""
+        WITH numbered AS (SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) AS num FROM team_series)
+        SELECT s.id, n.num, s.status, s.created_at, s.completed_at,
+               s.t1_series_wins, s.t2_series_wins, s.winner_team,
+               s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id, s.dc_player_id,
+               p1a.display_name AS t1a_name, p1a.steam_id AS t1a_sid,
+               p1b.display_name AS t1b_name, p1b.steam_id AS t1b_sid,
+               p2a.display_name AS t2a_name, p2a.steam_id AS t2a_sid,
+               p2b.display_name AS t2b_name, p2b.steam_id AS t2b_sid,
+               dcp.display_name AS dc_name, dcp.steam_id AS dc_sid
+          FROM team_series s
+          JOIN numbered n ON n.id = s.id
+          JOIN players p1a ON p1a.id = s.t1a_id
+          JOIN players p1b ON p1b.id = s.t1b_id
+          JOIN players p2a ON p2a.id = s.t2a_id
+          JOIN players p2b ON p2b.id = s.t2b_id
+          LEFT JOIN players dcp ON dcp.id = s.dc_player_id
+         ORDER BY s.created_at DESC LIMIT :lim
+    """), {"lim": limit})).mappings().all()
+
+    team_ids = [r["id"] for r in team_rows]
+    team_cards = {}
+    if team_ids:
+        for cr in (await db.execute(text("""
+            SELECT tm.series_id, tmc.player_id, tmc.card_name
+              FROM team_matches tm JOIN team_match_cards tmc ON tmc.match_id = tm.id
+             WHERE tm.series_id = ANY(:sids)
+             ORDER BY tm.ended_at, tmc.pick_order
+        """), {"sids": team_ids})).mappings().all():
+            team_cards.setdefault((cr["series_id"], cr["player_id"]), []).append(cr["card_name"])
+
+    def _tc(r, pre):  # pipe-joined card names for a 2v2 slot
+        return "|".join(team_cards.get((r["id"], r[f"{pre}_id"]), []))
+
+    # Flat scalar fields only (cards pipe-joined) so the client parses the whole
+    # payload with JsonUtility — nested arrays silently fail there (learning #25).
+    two = []
+    for r in team_rows:
+        two.append({
+            "ladder": "2v2", "series_number": int(r["num"]), "series_id": str(r["id"]),
+            "status": r["status"], "num_players": 4,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else "",
+            "score": f"{r['t1_series_wins'] or 0}-{r['t2_series_wins'] or 0}",
+            "winner_team": r["winner_team"] or 0,
+            "incomplete": r["status"] in ("active", "dc_paused", "dc_incomplete"),
+            "dc_name": r["dc_name"] or "", "dc_steam": r["dc_sid"] or "",
+            "p1_name": r["t1a_name"], "p1_steam": r["t1a_sid"], "p1_team": 1, "p1_cards": _tc(r, "t1a"),
+            "p2_name": r["t1b_name"], "p2_steam": r["t1b_sid"], "p2_team": 1, "p2_cards": _tc(r, "t1b"),
+            "p3_name": r["t2a_name"], "p3_steam": r["t2a_sid"], "p3_team": 2, "p3_cards": _tc(r, "t2a"),
+            "p4_name": r["t2b_name"], "p4_steam": r["t2b_sid"], "p4_team": 2, "p4_cards": _tc(r, "t2b"),
+        })
+
+    # ── 1v1 ──
+    solo_rows = (await db.execute(text("""
+        WITH numbered AS (SELECT id, ROW_NUMBER() OVER (ORDER BY created_at) AS num FROM ranked_series)
+        SELECT s.id, n.num, s.status, s.created_at, s.completed_at,
+               s.p1_series_wins, s.p2_series_wins, s.winner_id,
+               s.player1_id, s.player2_id, s.invalidated_at,
+               p1.display_name AS p1_name, p1.steam_id AS p1_sid,
+               p2.display_name AS p2_name, p2.steam_id AS p2_sid
+          FROM ranked_series s
+          JOIN numbered n ON n.id = s.id
+          JOIN players p1 ON p1.id = s.player1_id
+          JOIN players p2 ON p2.id = s.player2_id
+         ORDER BY s.created_at DESC LIMIT :lim
+    """), {"lim": limit})).mappings().all()
+
+    solo_ids = [r["id"] for r in solo_rows]
+    solo_cards = {}
+    if solo_ids:
+        for cr in (await db.execute(text("""
+            SELECT m.series_id, mc.player_id, mc.card_name
+              FROM matches m JOIN match_cards mc ON mc.match_id = m.id
+             WHERE m.series_id = ANY(:sids)
+             ORDER BY m.created_at, mc.pick_order
+        """), {"sids": solo_ids})).mappings().all():
+            solo_cards.setdefault((cr["series_id"], cr["player_id"]), []).append(cr["card_name"])
+
+    one = []
+    for r in solo_rows:
+        winner = 1 if r["winner_id"] == r["player1_id"] else (2 if r["winner_id"] == r["player2_id"] else 0)
+        status = "cancelled" if r["invalidated_at"] is not None else r["status"]
+        one.append({
+            "ladder": "1v1", "series_number": int(r["num"]), "series_id": str(r["id"]),
+            "status": status, "num_players": 2,
+            "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else "",
+            "score": f"{r['p1_series_wins'] or 0}-{r['p2_series_wins'] or 0}",
+            "winner_team": winner,
+            "incomplete": status not in ("completed", "cancelled"),
+            "dc_name": "", "dc_steam": "",
+            "p1_name": r["p1_name"], "p1_steam": r["p1_sid"], "p1_team": 1,
+            "p1_cards": "|".join(solo_cards.get((r["id"], r["player1_id"]), [])),
+            "p2_name": r["p2_name"], "p2_steam": r["p2_sid"], "p2_team": 2,
+            "p2_cards": "|".join(solo_cards.get((r["id"], r["player2_id"]), [])),
+            "p3_name": "", "p3_steam": "", "p3_team": 0, "p3_cards": "",
+            "p4_name": "", "p4_steam": "", "p4_team": 0, "p4_cards": "",
+        })
+
+    combined = two + one
+    combined.sort(key=lambda x: x["created_at"] or "", reverse=True)
+    return {"series": combined[:limit]}
+
+
+class _AdminReverseTeamSeriesReq(BaseModel):
+    admin_steam_id: str
+    series_id: str
+    reason: str = "admin_reverse"
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/admin/team/reverse-series", tags=["Admin"])
+async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSession = Depends(get_db)):
+    """Reverse a COMPLETED 2v2 series: undo each slot's Glicko rating change, decrement
+    completed_series, reverse the series-completion gold (+ bet payouts), invalidate its
+    matches, and cancel the series. Rating-only reversal (RD/volatility not restored),
+    matching the 1v1 admin/reverse-series. Admin-HMAC gated."""
+    await _require_admin(db, req.admin_steam_id, "reverse_team_series", req.series_id, req.hmac_signature)
+    try:
+        sid = UUID(req.series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+    s = (await db.execute(text("""
+        SELECT status, t1a_id, t1b_id, t2a_id, t2b_id,
+               t1a_rating_change, t1b_rating_change, t2a_rating_change, t2b_rating_change
+          FROM team_series WHERE id = :sid FOR UPDATE
+    """), {"sid": sid})).mappings().first()
+    if s is None:
+        raise HTTPException(404, "Series not found")
+    if s["status"] != "completed":
+        return {"status": "noop", "reason": f"series is '{s['status']}', not completed"}
+
+    slots = [(s["t1a_id"], s["t1a_rating_change"]), (s["t1b_id"], s["t1b_rating_change"]),
+             (s["t2a_id"], s["t2a_rating_change"]), (s["t2b_id"], s["t2b_rating_change"])]
+    for pid, rc in slots:
+        if pid is None:
+            continue
+        await db.execute(text("""
+            UPDATE glicko_ratings_2v2
+               SET rating = rating - :rc,
+                   completed_series = GREATEST(0, completed_series - 1),
+                   updated_at = NOW(), last_calculated = NOW()
+             WHERE player_id = :pid
+        """), {"rc": float(rc or 0), "pid": pid})
+
+    # Reverse series-completion gold (win/loss bonus + bet payouts). Win/loss bonus also
+    # bumped team_gold_earned; bet payouts only gold_earned.
+    for tx in (await db.execute(text("""
+        SELECT player_id, amount, reason FROM gold_transactions
+         WHERE reference_id = :ref
+           AND reason IN ('team_series_win', 'team_series_loss', 'team_bet_payout')
+    """), {"ref": str(sid)})).mappings().all():
+        await db.execute(text(
+            "UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - :amt) WHERE id = :pid"
+        ), {"amt": tx["amount"], "pid": tx["player_id"]})
+        if tx["reason"] in ("team_series_win", "team_series_loss"):
+            await db.execute(text(
+                "UPDATE players SET team_gold_earned = GREATEST(0, COALESCE(team_gold_earned,0) - :amt) WHERE id = :pid"
+            ), {"amt": tx["amount"], "pid": tx["player_id"]})
+        db.add(GoldTransaction(player_id=tx["player_id"], amount=-tx["amount"],
+                               reason="team_series_reversal", reference_id=str(sid)))
+
+    await db.execute(text("""
+        UPDATE team_matches SET invalidated_at = NOW(), invalidation_reason = 'admin_reverse'
+         WHERE series_id = :sid AND invalidated_at IS NULL
+    """), {"sid": sid})
+    await db.execute(text("""
+        UPDATE team_series SET status = 'cancelled', winner_team = NULL,
+               invalidated_at = NOW(), invalidation_reason = :rsn
+         WHERE id = :sid
+    """), {"sid": sid, "rsn": (req.reason or "admin_reverse")[:64]})
+    db.add(AdminAction(admin_steam_id=req.admin_steam_id, action="reverse_team_series",
+                       target_series_id=sid, details={"reason": req.reason}))
+    await db.commit()
+    return {"status": "reversed", "series_id": req.series_id}
 
 
 @app.post("/api/v1/admin/team/rebuild-glicko", tags=["Admin"])
@@ -8379,7 +9557,12 @@ async def team_series_report_dc(
     # paths completed the series with NO ratings — leaving was strictly safer
     # than losing).
     other_team_existing_wins = (s["t1_series_wins"] or 0) if other_team == 1 else (s["t2_series_wins"] or 0)
-    if (other_team_existing_wins or 0) >= 1:
+    # "Clear case" (Sid's rule): auto-forfeit ONLY when the non-DC team was already
+    # up a game AND real play happened in the abandoned game (>=2 points). A break/
+    # restart DC (little or no play) or an even series is NOT auto-decided — it drops
+    # to dc_incomplete below for manual resolution in the mod admin panel, so a 2v2
+    # that breaks and needs a restart never auto-penalizes anyone.
+    if (other_team_existing_wins or 0) >= 1 and total_points >= 2:
         # Record a synthetic forfeit game for history parity.
         await db.execute(
             text("""INSERT INTO team_matches
@@ -8399,68 +9582,125 @@ async def team_series_report_dc(
         return {"status": "completed", "winner_team": other_team,
                 "reason": "dc_leadforfeit", "new_ratings": new_ratings}
 
-    # Award the match if any meaningful play happened (>= 2 total points).
-    # Below that we treat it as a clean restart — no match recorded.
-    if total_points >= 2:
-        # Synthetic team_match row reflecting the forfeit.
-        new_t1_wins = (s["t1_series_wins"] or 0) + (1 if other_team == 1 else 0)
-        new_t2_wins = (s["t2_series_wins"] or 0) + (1 if other_team == 2 else 0)
-        await db.execute(
-            text("""
-                INSERT INTO team_matches
-                    (series_id, t1a_id, t1b_id, t2a_id, t2b_id,
-                     t1_rounds_won, t2_rounds_won, t1_points_total, t2_points_total,
-                     winner_team, dc_player_id, dc_at, ended_at, photon_room_id)
-                VALUES
-                    (:sid, :t1a, :t1b, :t2a, :t2b,
-                     0, 0, :t1p, :t2p,
-                     :wt, :dpid, NOW(), NOW(), 'dc_forfeit')
-            """),
-            {
-                "sid": sid_uuid, "t1a": s["t1a_id"], "t1b": s["t1b_id"],
-                "t2a": s["t2a_id"], "t2b": s["t2b_id"],
-                "t1p": t1_points_total or 0, "t2p": t2_points_total or 0,
-                "wt": other_team, "dpid": dc_pid,
-            },
-        )
-        await db.execute(
-            text("""
-                UPDATE team_series
-                   SET t1_series_wins = :t1w, t2_series_wins = :t2w
-                 WHERE id = :sid
-            """),
-            {"sid": sid_uuid, "t1w": new_t1_wins, "t2w": new_t2_wins},
-        )
-        # If the series is now decided (someone has 2 wins in a BO3),
-        # complete it directly WITH ratings/gold. Otherwise drop into the grace window.
-        if new_t1_wins >= 2 or new_t2_wins >= 2:
-            new_ratings = await _complete_team_series_with_ratings(
-                db, sid_uuid, other_team, "dc_decided", dc_pid=dc_pid,
-            )
-            await db.commit()
-            return {"status": "completed", "winner_team": other_team,
-                    "reason": "dc_decided", "new_ratings": new_ratings}
-
-    # Series isn't decided — start the sticky-team requeue grace.
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=_DC_GRACE_SECONDS)
+    # Not a clear-cut forfeit (non-DC team wasn't already up a game, or too little
+    # was played to count). Per the 2v2 manual-control policy — a game can break and
+    # need a restart, and we never auto-penalize for that — record who left and mark
+    # the series INCOMPLETE for an admin to award/void from the mod's admin panel.
+    # No auto-forfeit, no rating/economy effect. Games reported before the DC stand;
+    # the admin decides the series outcome from the recent-series log.
     await db.execute(
         text("""
             UPDATE team_series
-               SET status = 'dc_paused',
-                   dc_grace_until = :gd,
+               SET status = 'dc_incomplete',
+                   dc_player_id = :dpid,
                    dc_team_remaining = :ot,
-                   dc_player_id = :dpid
-             WHERE id = :sid
+                   invalidation_reason = 'dc_manual_pending'
+             WHERE id = :sid AND status IN ('active', 'dc_paused')
         """),
-        {"sid": sid_uuid, "gd": deadline, "ot": other_team, "dpid": dc_pid},
+        {"sid": sid_uuid, "dpid": dc_pid, "ot": other_team},
     )
     await db.commit()
     return {
-        "status": "dc_paused",
+        "status": "dc_incomplete",
         "dc_team_remaining": other_team,
-        "dc_grace_seconds_remaining": _DC_GRACE_SECONDS,
-        "deadline": deadline.isoformat(),
+        "reason": "awaiting_admin_resolution",
     }
+
+
+# ── 2v2 series continuation (recording-gap fix) ─────────────────────────────
+# When four players keep playing in the same cr_ff room past the first BO3 (which
+# locks at first-to-2), the client had no active series to report to and later games
+# were dropped entirely. The reporter (lowest Steam ID) calls this at game start to
+# open a fresh 'active' series for the SAME four + room, so games 4+ of a sitting
+# record as ranked. Anti-abuse: the four must have a real recent series together
+# (the sitting's series 1) and the caller must be the lowest Steam ID. HMAC over the
+# shared mod secret (canonical below).
+class _TeamContinuationReq(BaseModel):
+    reporter_steam_id: str
+    room_id: str
+    region: str | None = None
+    t1a_steam: str
+    t1b_steam: str
+    t2a_steam: str
+    t2b_steam: str
+    hmac_signature: str | None = None
+
+
+_CONTINUATION_WINDOW_MINUTES = 60  # prior series must have completed this recently
+
+
+@app.post("/api/v1/team/series/continuation", tags=["Team Matches"])
+async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession = Depends(get_db)):
+    canonical = (
+        f"team-continuation:{req.t1a_steam}:{req.t1b_steam}:"
+        f"{req.t2a_steam}:{req.t2b_steam}:{req.room_id}:{req.reporter_steam_id}"
+    )
+    if not _verify_action_sig(canonical, req.hmac_signature):
+        raise HTTPException(403, "Bad continuation signature")
+
+    steams = [req.t1a_steam, req.t1b_steam, req.t2a_steam, req.t2b_steam]
+    if len(set(steams)) != 4:
+        raise HTTPException(400, "Need four distinct players")
+    if req.reporter_steam_id not in steams:
+        raise HTTPException(403, "Reporter not part of the match")
+    numeric = [s for s in steams if s.isdigit()]
+    if numeric and req.reporter_steam_id != min(numeric, key=int):
+        raise HTTPException(403, "Reporter must be the lowest Steam ID")
+
+    rows = (await db.execute(
+        select(Player.id, Player.steam_id).where(Player.steam_id.in_(steams))
+    )).all()
+    id_by_steam = {r.steam_id: r.id for r in rows}
+    if len(id_by_steam) != 4:
+        raise HTTPException(404, "One or more players not registered")
+    ids = list(id_by_steam.values())
+
+    # A live series for this exact four already exists → return it (idempotent: covers
+    # series 1 still in progress, and a double-fire from client retries).
+    live = (await db.execute(text("""
+        SELECT id FROM team_series
+         WHERE status IN ('active', 'dc_paused', 'dc_incomplete')
+           AND t1a_id = ANY(:ids) AND t1b_id = ANY(:ids)
+           AND t2a_id = ANY(:ids) AND t2b_id = ANY(:ids)
+         ORDER BY created_at DESC LIMIT 1
+    """), {"ids": ids})).scalar_one_or_none()
+    if live is not None:
+        return {"series_id": str(live), "status": "existing"}
+
+    # Otherwise require a recent COMPLETED series for the same four (proves this is a
+    # real rematch of an ongoing sitting, not a fabricated pairing).
+    prior = (await db.execute(text("""
+        SELECT completed_at FROM team_series
+         WHERE status = 'completed'
+           AND t1a_id = ANY(:ids) AND t1b_id = ANY(:ids)
+           AND t2a_id = ANY(:ids) AND t2b_id = ANY(:ids)
+         ORDER BY completed_at DESC LIMIT 1
+    """), {"ids": ids})).mappings().first()
+    if prior is None:
+        raise HTTPException(409, "No prior series for these players")
+    if prior["completed_at"] is not None:
+        age_min = (datetime.now(timezone.utc) - prior["completed_at"]).total_seconds() / 60.0
+        if age_min > _CONTINUATION_WINDOW_MINUTES:
+            raise HTTPException(409, "Prior series too old to continue")
+
+    # Preserve the sitting's team assignment; canonicalize within team by Steam ID so
+    # t1a/t1b/t2a/t2b match what the match-report path computes.
+    t1 = sorted([req.t1a_steam, req.t1b_steam])
+    t2 = sorted([req.t2a_steam, req.t2b_steam])
+    new_id = uuid_mod.uuid4()
+    await db.execute(text("""
+        INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
+                                 status, was_auto_balanced, photon_room_id, region, created_at)
+        VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', false, :room, :region, NOW())
+    """), {
+        "sid": new_id,
+        "t1a": id_by_steam[t1[0]], "t1b": id_by_steam[t1[1]],
+        "t2a": id_by_steam[t2[0]], "t2b": id_by_steam[t2[1]],
+        "room": (req.room_id or "")[:64], "region": (req.region or "")[:8] or None,
+    })
+    await db.commit()
+    print(f"[TEAM-CONTINUATION] created {new_id} for {steams} room={req.room_id}")
+    return {"series_id": str(new_id), "status": "created"}
 
 
 @app.post("/api/v1/team/matches", response_model=TeamMatchResponse, tags=["Team Matches"])

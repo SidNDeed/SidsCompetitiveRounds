@@ -147,11 +147,15 @@
   <ItemGroup>
     <CardArtToCopy Include="cards\*.jpg" />
     <CardArtToCopy Include="cards\*.png" />
+    <!-- Custom cosmetic art (512px transparent PNGs) — CustomCosmetics.cs reads
+         these from <plugin-dir>/cosmetics/ at runtime (same pipeline as cards). -->
+    <CosmeticArtToCopy Include="cosmetics\*.png" />
   </ItemGroup>
 
   <Target Name="CopyToPlugins" AfterTargets="Build">
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds" />
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cards" />
+    <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cosmetics" />
     <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(OutputPath)comp-rounds-fonts"
           DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds"
@@ -160,10 +164,14 @@
     <Copy SourceFiles="@(CardArtToCopy)"
           DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\cards"
           SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(CosmeticArtToCopy)"
+          DestinationFolder="$(BepInExDir)\plugins\CompetitiveRounds\cosmetics"
+          SkipUnchangedFiles="true" />
     <Message Text="Copied $(AssemblyName).dll to BepInEx plugins" Importance="high" />
     <Message Text="Copied comp-rounds-fonts bundle to BepInEx plugins" Importance="high"
              Condition="Exists('$(OutputPath)comp-rounds-fonts')" />
     <Message Text="Copied @(CardArtToCopy->Count()) card art files to BepInEx plugins" Importance="high" />
+    <Message Text="Copied @(CosmeticArtToCopy->Count()) cosmetic art files to BepInEx plugins" Importance="high" />
   </Target>
 
 </Project>

@@ -76,6 +76,16 @@ class MatchReport(BaseModel):
     # #50 macro detector: count of 1-second windows whose gameplay-key event
     # rate was superhuman on the reporter's client. Advisory, NOT in HMAC.
     local_macro_suspect_seconds: int | None = Field(None, ge=0, le=86400)
+    # v1.30 item 4 — opponent's per-game combat stats (their cr_gstats Photon
+    # prop snapshot) + the cumulative scoring timeline for the history hover
+    # graph. All advisory; not in HMAC.
+    opp_bullets_fired: int | None = Field(None, ge=0)
+    opp_bullets_hit: int | None = Field(None, ge=0)
+    opp_blocks_activated: int | None = Field(None, ge=0)
+    opp_blocks_successful: int | None = Field(None, ge=0)
+    opp_keys_pressed: int | None = Field(None, ge=0)
+    opp_active_seconds: float | None = Field(None, ge=0, le=86400)
+    point_timeline: str | None = Field(None, max_length=512)
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -271,6 +281,25 @@ class MatchHistoryEntry(BaseModel):
     # didn't have the mod. Display-only.
     player_fps_avg: int | None = None
     opponent_fps_avg: int | None = None
+    # v1.30 item 4 — per-game combat stats, viewer-relative (server maps the
+    # p1/p2 columns by who's asking). None on rows predating migration 111.
+    player_bullets_fired: int | None = None
+    player_bullets_hit: int | None = None
+    player_blocks_activated: int | None = None
+    player_blocks_successful: int | None = None
+    player_keys_pressed: int | None = None
+    player_active_seconds: float | None = None
+    opp_bullets_fired: int | None = None
+    opp_bullets_hit: int | None = None
+    opp_blocks_activated: int | None = None
+    opp_blocks_successful: int | None = None
+    opp_keys_pressed: int | None = None
+    opp_active_seconds: float | None = None
+    # Cumulative scoring timeline "myTotal:oppTotal,..." — already flipped to
+    # the viewer's perspective server-side.
+    point_timeline: str | None = None
+    # Bug batch item 4 — total game length in seconds (0 = unknown/legacy row).
+    duration_seconds: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -335,6 +364,9 @@ class AchievementEntry(BaseModel):
     # to label its grid; without it the client prettifies the raw key and renamed
     # achievements regress to their key name ("regicide" -> "Regicide", bug #44).
     name: str | None = None
+    # Steam-style global unlock rate: percent of all (non-deleted) players who
+    # have this achievement. Cached server-side ~5 min; 0.0 when unknown.
+    global_pct: float = 0.0
 
     model_config = {"from_attributes": True}
 

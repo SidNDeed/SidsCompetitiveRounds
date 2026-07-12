@@ -97,10 +97,32 @@ namespace CompetitiveRounds
 
                 if (shape == "default")
                 {
-                    // Hand the cursor back to ROUNDS/OS — its in-game cursor shows.
-                    _activeSku = ""; _activeTex = null;
-                    Cursor.SetCursor(null, Vector2.zero, CursorMode.Auto);
-                    return;
+                    if (string.IsNullOrEmpty(sku))
+                    {
+                        // No color equipped: hand the cursor back to ROUNDS/OS.
+                        _activeSku = ""; _activeTex = null;
+                        Cursor.SetCursor(null, Vector2.zero, CursorMode.Auto);
+                        return;
+                    }
+                    // July 12 round 4 item 1: ROUNDS' original cursor is the Unity
+                    // PLAYER-SETTINGS default cursor — no SetCursor call exists in
+                    // the decompile, which is why the earlier pass wrongly concluded
+                    // "no texture to recolor" and substituted our arrow. The asset
+                    // is loaded at runtime though: find it, make a readable tinted
+                    // copy, and the ORIGINAL shape renders in the equipped color.
+                    var vanillaTinted = GetTintedVanillaCursor(hex);
+                    if (vanillaTinted != null)
+                    {
+                        _activeSku = "default|" + (sku ?? "");
+                        _activeColor = ParseHex(hex, Color.white);
+                        _activeTex = vanillaTinted;
+                        _activeHotspot = new Vector2(1f, 1f);
+                        Cursor.SetCursor(_activeTex, _activeHotspot, CursorMode.Auto);
+                        return;
+                    }
+                    // Couldn't locate the vanilla texture this session — fall back
+                    // to the drawn arrow so the color still shows SOMEWHERE.
+                    shape = "arrow";
                 }
 
                 Color c = string.IsNullOrEmpty(sku) ? Color.white : ParseHex(hex, Color.white);
@@ -140,6 +162,81 @@ namespace CompetitiveRounds
             var tex = BuildFromMask(solid, c);
             _texCache[key] = tex;
             return tex;
+        }
+
+        // ── Vanilla cursor recolor (round 4 item 1) ────────────────────────
+        // The engine-level default cursor is a texture asset in memory. Find it
+        // once (small texture named like "cursor"), then tint readable copies
+        // per color. The asset usually isn't CPU-readable — blit through a
+        // temporary RenderTexture to copy the pixels out.
+        private static Texture2D _vanillaCursor;
+        private static bool _vanillaSearched;
+
+        private static Texture2D FindVanillaCursor()
+        {
+            if (_vanillaSearched) return _vanillaCursor;
+            _vanillaSearched = true;
+            try
+            {
+                Texture2D best = null;
+                foreach (var t in Resources.FindObjectsOfTypeAll<Texture2D>())
+                {
+                    if (t == null) continue;
+                    string n = (t.name ?? "").ToLowerInvariant();
+                    if (!n.Contains("cursor")) continue;
+                    if (t.width > 128 || t.height > 128) continue;   // cursors are small
+                    // Prefer the shortest matching name ("Cursor" over "CursorGlow" etc.)
+                    if (best == null || t.name.Length < best.name.Length) best = t;
+                }
+                _vanillaCursor = best;
+                Plugin.Log.LogInfo(best != null
+                    ? $"[CURSOR] vanilla cursor texture: '{best.name}' {best.width}x{best.height}"
+                    : "[CURSOR] no vanilla cursor texture found - default shape can't be tinted this session");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CURSOR] vanilla search: {ex.Message}"); }
+            return _vanillaCursor;
+        }
+
+        private static Texture2D GetTintedVanillaCursor(string hex)
+        {
+            string key = "vanilla:" + (string.IsNullOrEmpty(hex) ? "#FFFFFF" : hex);
+            if (_texCache.TryGetValue(key, out var cached) && cached != null) return cached;
+            var src = FindVanillaCursor();
+            if (src == null) return null;
+            try
+            {
+                // Readable copy via RT blit (the asset itself is not CPU-readable).
+                var rt = RenderTexture.GetTemporary(src.width, src.height, 0, RenderTextureFormat.ARGB32);
+                var prev = RenderTexture.active;
+                Graphics.Blit(src, rt);
+                RenderTexture.active = rt;
+                var copy = new Texture2D(src.width, src.height, TextureFormat.RGBA32, false);
+                copy.ReadPixels(new Rect(0, 0, src.width, src.height), 0, 0);
+                RenderTexture.active = prev;
+                RenderTexture.ReleaseTemporary(rt);
+                copy.wrapMode = TextureWrapMode.Clamp;
+                copy.filterMode = FilterMode.Bilinear;
+                copy.hideFlags = HideFlags.HideAndDontSave;
+                // Multiply-tint: the vanilla art is white/grey, so fill pixels take
+                // the color fully while the dark outline and alpha stay intact.
+                Color c = ParseHex(hex, Color.white);
+                var px = copy.GetPixels32();
+                for (int i = 0; i < px.Length; i++)
+                {
+                    px[i].r = (byte)(px[i].r * c.r);
+                    px[i].g = (byte)(px[i].g * c.g);
+                    px[i].b = (byte)(px[i].b * c.b);
+                }
+                copy.SetPixels32(px);
+                copy.Apply();
+                _texCache[key] = copy;
+                return copy;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[CURSOR] vanilla tint failed: {ex.Message}");
+                return null;
+            }
         }
 
         private const int SZ = 32;

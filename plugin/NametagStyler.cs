@@ -259,6 +259,14 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(name)) return name;
             if (sku == null) return name;
+            // Rainbow + gradients aren't tag-pair SKUs — they REPLACE the name with
+            // per-character color tags (see Wrap()). _tagsBySku has no entry for
+            // them, so the shop preview rendered a plain uncolored name for every
+            // gradient item (bug #54) while the equipped render worked fine.
+            if (sku == "nametag_rainbow")
+                return _BuildRainbow(name);
+            if (_GRADIENT_PAIRS.TryGetValue(sku, out var pair))
+                return _BuildGradientLerp(name, pair.start, pair.end);
             if (_tagsBySku.TryGetValue(sku, out var t))
                 return t.open + name + t.close;
             return name;

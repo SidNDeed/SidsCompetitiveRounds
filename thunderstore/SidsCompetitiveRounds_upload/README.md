@@ -7,15 +7,19 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 ## Features
 
 - **Glicko-2 ranked series** — skill-based matchmaking with RD-aware odds, BO3 series, Elo + rating history tracked server-side.
+- **2v2 ranked** — its own Glicko ladder and leaderboard: queue solo into rating-balanced random teams, or open a **custom lobby** and pick teams with 3 friends. Per-player gold/XP payouts and a crown for *both* members of the leading team.
+- **Tournaments** — a weekly same-time bracket that auto-connects your matches when both players are ready, plus long-running async tournaments with a week per round. Sign-ups, reminders, and results run through Discord.
+- **Community character cosmetics** — artist-made **faces and accessories** (including **animated** ones) that equip in ROUNDS' own character editor and render for everyone: in matches, card picks, and menus. Community artists control their own creations — price, limited stock, gifting, even blocking buyers — and submit new art for review **entirely in-game** (512×512 transparent PNG, drop it in a folder and hit Upload).
+- **Hold Tab: live match scoreboard** — every player's current build at a glance mid-game: damage, attack/reload speed, ammo, bullet stats, block cooldown, lifesteal, movement, and full card lists.
 - **Matchmaking queue** — Elo-tiered search with mutual ready-up and optional ranked-only toggle.
-- **In-game leaderboard** — sortable, with player detail panel, rating history line graph, series-based recent form, head-to-head, and achievements.
-- **Match history + card stats** — BO3 series grouping, opponent cards, pass rates, filterable by Ranked / Casual / All.
+- **In-game leaderboard** — sortable, with player detail panel, rating history line graph, head-to-head series history, and achievements — plus a **Compare** view that charts up to 12 players side by side (ratings, accuracy, playtime, achievement grid, and more).
+- **Match history + card stats** — BO3 series grouping, opponent cards, pass rates, per-game Hit% / Block% / keys-per-second for both players, game length, and a scoring-timeline graph on hover.
 - **Tier List Maker** — assign every card an S/A/B/C/D/E/F tier with click-to-cycle. Three independent lists (Casual / Ranked / All) persisted server-side. Click any card to preview the full-color art. Export the whole list as a near-square PNG with real ROUNDS card art + your live `## played` / `##% won` underneath each card. PNG lands in `<ROUNDS>/CompetitiveRoundsTierLists/`.
-- **Gold economy + shop** — earn gold from matches and achievements, spend on titles, Photon-synced cosmetic trails, map color presets, and stackable name styling (bold/italic/color/size/font-style/glow).
-- **Betting** — wager gold on live ranked series with Glicko-expectancy odds; locks at 2 points scored in game 1.
+- **Gold economy + shop** — earn gold from matches and achievements; spend it on titles, Photon-synced trails, map color skins (premium animated ones included), body colors, cursor colors, player aura effects, and stackable name styling (bold/italic/color/size/font-style/glow).
+- **Betting** — wager gold on live ranked series with Glicko-expectancy odds, in-game or from Discord, with custom stake amounts. Locks once game 1 is underway; abandoned series auto-refund.
 - **In-game ↔ Discord chat bridge** — press **T** anywhere in-game to chat, messages round-trip through the Competitive Rounds Discord with ratings and titles attached.
-- **11 achievements** (100g each) with retroactive grants on version bumps.
-- **Anti-cheat** — sub-60s match-pattern auto-flagging, too-many-cards detection, HMAC-signed match reports, and an admin tab for ban / flag review / series reversal.
+- **40 achievements** (100g each, several unlock exclusive titles) — from card-build challenges (5-0 with Barrage, two Glass Cannons...) to marathon streaks (100+ casual wins in a row), with retroactive grants from your existing match history.
+- **Anti-cheat** — sub-60s match-pattern auto-flagging, too-many-cards detection, HMAC-signed match reports, macro detection, and an admin tab for ban / flag review / series reversal.
 - **Auto-update notifications** — the Thunderstore build shows an in-game prompt when a new version is available (use r2modman or the Thunderstore Mod Manager to apply the update).
 - **Maintenance-mode awareness** — server restarts surface as a graceful banner, not a disconnect.
 - **Privacy-first** — first-launch consent prompt, revoke any time, full Delete-my-data path in Settings.

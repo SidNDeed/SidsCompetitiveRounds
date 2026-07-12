@@ -49,6 +49,10 @@ class Player(Base):
     # local_active_seconds — same one-sided pattern as bullets_fired.
     keys_pressed_total = Column(BigInteger, nullable=False, default=0)
     active_seconds_total = Column(Double, nullable=False, default=0)
+    # Win-streak achievement counters (migration 112, v1.30 item 2). Updated on
+    # every valid match submit; both start counting from the 112 deploy.
+    consecutive_sweeps = Column(Integer, nullable=False, default=0)
+    casual_win_streak = Column(Integer, nullable=False, default=0)
     active_title_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_trail_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_color_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
@@ -157,6 +161,24 @@ class Match(Base):
     invalidation_reason = Column(String(64), nullable=True)
     p1_fps_avg = Column(SmallInteger, nullable=True)
     p2_fps_avg = Column(SmallInteger, nullable=True)
+    # Per-game combat stats, BOTH sides (migration 111, v1.30 item 4). Reporter
+    # side comes from their own counters; the other side from the opponent's
+    # cr_gstats Photon prop snapshot. Mapped to p1/p2 at submit (FPS pattern).
+    p1_bullets_fired = Column(Integer, nullable=True)
+    p1_bullets_hit = Column(Integer, nullable=True)
+    p1_blocks_activated = Column(Integer, nullable=True)
+    p1_blocks_successful = Column(Integer, nullable=True)
+    p1_keys_pressed = Column(Integer, nullable=True)
+    p1_active_seconds = Column(Double, nullable=True)
+    p2_bullets_fired = Column(Integer, nullable=True)
+    p2_bullets_hit = Column(Integer, nullable=True)
+    p2_blocks_activated = Column(Integer, nullable=True)
+    p2_blocks_successful = Column(Integer, nullable=True)
+    p2_keys_pressed = Column(Integer, nullable=True)
+    p2_active_seconds = Column(Double, nullable=True)
+    # Cumulative scoring timeline "p1Total:p2Total,..." (total = rounds*2+points)
+    # in match-row p1/p2 orientation — drives the history score-hover graph.
+    point_timeline = Column(String(512), nullable=True)
 
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
@@ -259,6 +281,12 @@ class ShopItem(Base):
     rotation_pool = Column(String(32), nullable=True)
     preview_color = Column(String(16), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    # Artist controls (v1.30, migration 109): community-made cosmetics carry
+    # their creator's steam id; the artist can then set price/stock, gift
+    # copies, and block buyers via the /artist endpoints. NULL = house item.
+    artist_steam_id = Column(String(20), nullable=True)
+    # Max copies in circulation (purchases + gifts). NULL = unlimited.
+    stock_limit = Column(Integer, nullable=True)
 
 
 class PlayerItem(Base):
@@ -691,3 +719,53 @@ class TeamMatchCard(Base):
     card_rarity = Column(String(16), nullable=True)
     pick_order = Column(SmallInteger, nullable=False)
     round_number = Column(SmallInteger, nullable=False)
+
+
+class ArtistUser(Base):
+    """Community artists (v1.30, migration 109). Mirrors admin_users: presence
+    of a row grants the /artist endpoints + the in-game Artist tab. Artists
+    control only items whose shop_items.artist_steam_id matches their row."""
+    __tablename__ = "artist_users"
+
+    steam_id = Column(Text, primary_key=True)
+    display_name = Column(Text, nullable=True)
+    granted_by_steam_id = Column(Text, nullable=True)
+    granted_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    notes = Column(Text, nullable=True)
+
+
+class ArtistItemBlock(Base):
+    """Per-artist purchase blocklist (v1.30). A blocked player cannot BUY any
+    of the artist's items; explicit gifts from the artist still work."""
+    __tablename__ = "artist_item_blocks"
+
+    artist_steam_id = Column(Text, ForeignKey("artist_users.steam_id", ondelete="CASCADE"), primary_key=True)
+    blocked_steam_id = Column(String(20), primary_key=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class ArtistAction(Base):
+    """Audit log for artist mutations (set-price / set-stock / gift / block),
+    mirroring admin_actions."""
+    __tablename__ = "artist_actions"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    artist_steam_id = Column(Text, nullable=False)
+    action = Column(Text, nullable=False)
+    target = Column(Text, nullable=True)
+    detail = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PendingChannelPost(Base):
+    """Bot announce queue (v1.30). Rows are inserted by migrations (or future
+    admin tooling); the Discord bot polls /internal/channel-posts/pending and
+    acks posted_at after each successful send (learning #105 ack pattern)."""
+    __tablename__ = "pending_channel_posts"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    channel_id = Column(Text, nullable=False)
+    content = Column(Text, nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    posted_at = Column(DateTime(timezone=True), nullable=True)

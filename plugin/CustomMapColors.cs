@@ -414,6 +414,25 @@ namespace CompetitiveRounds
 
         public static bool IsCustomSku(string sku) => sku != null && _presets.ContainsKey(sku);
 
+        /// <summary>True for skins that ARE a vanilla ROUNDS art (Sky, Poison, Gold,
+        /// ...) rather than a custom-designed palette — the preset's display name
+        /// matching its own BaseArt is the self-maintaining rule. Non-preset skus
+        /// (mapcolor_default) count as vanilla too. Used by the shop to group the
+        /// vanilla skins together (Sid July 12 item 3).</summary>
+        public static bool IsVanillaStyled(string sku)
+        {
+            if (string.IsNullOrEmpty(sku)) return false;
+            if (!IsCustomSku(sku)) return true;   // default/random = vanilla behavior
+            try
+            {
+                string friendly = FriendlyName(sku);
+                string baseArt = GetBaseArt(sku);
+                return !string.IsNullOrEmpty(friendly) && !string.IsNullOrEmpty(baseArt)
+                    && string.Equals(friendly, baseArt, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
         /// <summary>Human-readable skin name for the Shift toast, e.g. "mapcolor_magma" →
         /// "Magma", "mapcolor_crimson_map" → "Crimson". Title-cases the sku tail.</summary>
         public static string FriendlyName(string sku)

@@ -196,6 +196,271 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[EFFECT] ApplyToPlayer failed: {ex.Message}"); }
         }
 
+        // ── In-shop preview (item 1, v1.30) ─────────────────────────
+        // Mirrors the trail preview UX: the effect's particle aura follows the
+        // mouse cursor while the shop is open. Same ConfigureForSku pipeline as
+        // the real in-match aura, so what you see is what you buy.
+        private static GameObject _previewGO;
+        private static string _previewSku = "";
+
+        public static string PreviewSku => _previewGO != null ? _previewSku : "";
+
+        // July 12 round 2 item 10: TRUE foreground rendering. A world particle
+        // can never out-sort a ScreenSpaceOverlay canvas (the 30500 sortingOrder
+        // attempt was structurally dead), and the menu-fade stopgap read as the
+        // menu "bugging out". So: the preview lives on an isolated free layer, a
+        // dedicated camera (synced to Camera.main every frame) renders ONLY that
+        // layer into a RenderTexture, and a RawImage on a 30050-sortingOrder
+        // overlay canvas composites the texture ABOVE the F5 page. No raycaster
+        // and raycastTarget=false, so every click passes straight through.
+        private static Camera _previewCam;
+        private static RenderTexture _previewRT;
+        private static GameObject _previewCanvasGO;
+        private static int _previewLayer = -1;
+        private static bool _mainMaskAdjusted;
+
+        public static void TogglePreview(string sku)
+        {
+            if (_previewGO != null && _previewSku == sku) { StopPreview(); return; }
+            StopPreview();
+            if (string.IsNullOrEmpty(sku)) return;
+            try
+            {
+                var go = new GameObject("cr_effect_preview");
+                go.hideFlags = HideFlags.HideAndDontSave;
+                var ps = go.AddComponent<ParticleSystem>();
+                ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+                ConfigureForSku(ps, sku);
+                var psr = go.GetComponent<ParticleSystemRenderer>();
+                if (psr != null)
+                {
+                    var mat = BuildMaterialForSku(null, sku);
+                    if (mat != null) psr.material = mat;
+                    psr.renderMode = ParticleSystemRenderMode.Billboard;
+                }
+                go.AddComponent<EffectPreviewFollower>();
+                ps.Play(true);
+                _previewGO = go;
+                _previewSku = sku;
+                SetupForegroundPass(go);
+                Plugin.Log.LogInfo($"[EFFECT] preview started: {sku}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[EFFECT] preview failed: {ex.Message}"); }
+        }
+
+        public static void StopPreview()
+        {
+            if (_previewGO != null)
+            {
+                try { UnityEngine.Object.Destroy(_previewGO); } catch { }
+                _previewGO = null;
+            }
+            _previewSku = "";
+            TeardownForegroundPass();
+            // The RT-probe fallback may have faded the menu — always restore.
+            try { NativeUI.SetMenuFade(false); } catch { }
+        }
+
+        /// <summary>Round 4 item 3 ("preview shows nothing"): one second after the
+        /// foreground pass starts, read a patch of the RenderTexture back and check
+        /// that ANY pixel actually landed. Logs the verdict either way, and when the
+        /// RT is empty falls back to fading the menu so the world-rendered aura is
+        /// visible regardless of why the RT path failed on this machine.</summary>
+        private static IEnumerator ProbeForegroundPass()
+        {
+            yield return new WaitForSecondsRealtime(1.0f);
+            if (_previewGO == null || _previewRT == null || _previewCam == null) yield break;
+            int lit = 0;
+            bool ok = false;
+            try
+            {
+                var prev = RenderTexture.active;
+                RenderTexture.active = _previewRT;
+                int px = Mathf.Min(64, _previewRT.width);
+                var probe = new Texture2D(px, px, TextureFormat.RGBA32, false);
+                // Read around the CURSOR's position — that's where the aura is.
+                var mp = Input.mousePosition;
+                int rx = Mathf.Clamp((int)mp.x - px / 2, 0, _previewRT.width - px);
+                int ry = Mathf.Clamp((int)mp.y - px / 2, 0, _previewRT.height - px);
+                probe.ReadPixels(new Rect(rx, ry, px, px), 0, 0);
+                RenderTexture.active = prev;
+                var cols = probe.GetPixels32();
+                for (int i = 0; i < cols.Length; i++) if (cols[i].a > 8) lit++;
+                UnityEngine.Object.Destroy(probe);
+                ok = true;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[EFFECT-FG] probe failed: {ex.Message}"); }
+            if (!ok || _previewGO == null) yield break;
+            if (lit > 0)
+            {
+                Plugin.Log.LogInfo($"[EFFECT-FG] probe OK - {lit} lit pixels near cursor, foreground pass rendering");
+            }
+            else
+            {
+                Plugin.Log.LogWarning("[EFFECT-FG] probe EMPTY - RT pass rendered nothing; falling back to menu fade "
+                    + $"(cam={( _previewCam != null ? "ok" : "null")} main={(Camera.main != null ? Camera.main.name : "NULL")})");
+                try { NativeUI.SetMenuFade(true); } catch { }
+            }
+        }
+
+        private static int PickFreeLayer()
+        {
+            // Unnamed layers are unused by ROUNDS' curated layer list; take the
+            // highest one so we're far from gameplay layers.
+            for (int i = 31; i >= 8; i--)
+                if (string.IsNullOrEmpty(LayerMask.LayerToName(i))) return i;
+            return -1;
+        }
+
+        private static void SetupForegroundPass(GameObject previewGO)
+        {
+            try
+            {
+                if (_previewLayer < 0) _previewLayer = PickFreeLayer();
+                if (_previewLayer < 0)
+                {
+                    Plugin.Log.LogWarning("[EFFECT] no free layer — preview stays world-rendered (behind menu)");
+                    return;
+                }
+                previewGO.layer = _previewLayer;
+                foreach (var t in previewGO.GetComponentsInChildren<Transform>(true))
+                    t.gameObject.layer = _previewLayer;
+
+                // Keep the preview OUT of the main camera's own pass so it doesn't
+                // ALSO render behind the menu. Restored on teardown.
+                var main = Camera.main;
+                if (main != null && (main.cullingMask & (1 << _previewLayer)) != 0)
+                {
+                    main.cullingMask &= ~(1 << _previewLayer);
+                    _mainMaskAdjusted = true;
+                }
+
+                _previewRT = new RenderTexture(Screen.width, Screen.height, 0, RenderTextureFormat.ARGB32);
+                _previewRT.name = "cr_effect_preview_rt";
+
+                var camGO = new GameObject("cr_effect_preview_cam");
+                camGO.hideFlags = HideFlags.HideAndDontSave;
+                _previewCam = camGO.AddComponent<Camera>();
+                _previewCam.clearFlags = CameraClearFlags.SolidColor;
+                _previewCam.backgroundColor = new Color(0f, 0f, 0f, 0f);
+                _previewCam.cullingMask = 1 << _previewLayer;
+                _previewCam.orthographic = true;
+                _previewCam.targetTexture = _previewRT;
+                _previewCam.allowHDR = false;
+                _previewCam.useOcclusionCulling = false;
+                SyncPreviewCam();
+
+                // Overlay canvas + RawImage, TrailPreview's reflection idiom
+                // (no UI-assembly references, learning #15).
+                _previewCanvasGO = new GameObject("CR_EffectPreviewCanvas");
+                _previewCanvasGO.hideFlags = HideFlags.HideAndDontSave;
+                UnityEngine.Object.DontDestroyOnLoad(_previewCanvasGO);
+                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+                if (UIFactory.tCanvas == null) return;
+                var cv = _previewCanvasGO.AddComponent(UIFactory.tCanvas);
+                var rmProp = UIFactory.tCanvas.GetProperty("renderMode", bf);
+                rmProp?.SetValue(cv, Enum.ToObject(rmProp.PropertyType, 0));   // ScreenSpaceOverlay
+                UIFactory.tCanvas.GetProperty("sortingOrder", bf)?.SetValue(cv, 30050);
+                var imgGO = new GameObject("RT");
+                imgGO.transform.SetParent(_previewCanvasGO.transform, false);
+                var imgRT = imgGO.AddComponent<RectTransform>();
+                imgRT.anchorMin = Vector2.zero; imgRT.anchorMax = Vector2.one;
+                imgRT.offsetMin = Vector2.zero; imgRT.offsetMax = Vector2.zero;
+                var tRaw = FindRawImageType();
+                if (tRaw == null) { Plugin.Log.LogWarning("[EFFECT] RawImage type missing — preview stays world-rendered"); return; }
+                var raw = imgGO.AddComponent(tRaw);
+                tRaw.GetProperty("texture", bf)?.SetValue(raw, _previewRT);
+                tRaw.GetProperty("raycastTarget", bf)?.SetValue(raw, false);
+                Plugin.Log.LogInfo($"[EFFECT-FG] pass up: layer={_previewLayer} rt={_previewRT.width}x{_previewRT.height} "
+                    + $"main={(main != null ? main.name : "NULL")} mainOrtho={(main != null && main.orthographic ? main.orthographicSize.ToString("F1") : "-")}");
+                if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(ProbeForegroundPass());
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[EFFECT-FG] setup failed: {ex.Message} - falling back to menu fade");
+                TeardownForegroundPass();
+                // Put the preview back where the main camera can see it and fade
+                // the menu — degraded but always visible.
+                try
+                {
+                    if (previewGO != null)
+                        foreach (var t in previewGO.GetComponentsInChildren<Transform>(true))
+                            t.gameObject.layer = 0;
+                }
+                catch { }
+                try { NativeUI.SetMenuFade(true); } catch { }
+            }
+        }
+
+        /// <summary>Mirror the main camera every frame so cursor-following world
+        /// positions land on the same screen pixels in the RT pass.</summary>
+        internal static void SyncPreviewCam()
+        {
+            try
+            {
+                var main = Camera.main;
+                if (_previewCam == null || main == null) return;
+                _previewCam.transform.position = main.transform.position;
+                _previewCam.transform.rotation = main.transform.rotation;
+                _previewCam.orthographic = main.orthographic;
+                _previewCam.orthographicSize = main.orthographicSize;
+                _previewCam.fieldOfView = main.fieldOfView;
+                _previewCam.nearClipPlane = main.nearClipPlane;
+                _previewCam.farClipPlane = main.farClipPlane;
+            }
+            catch { }
+        }
+
+        private static void TeardownForegroundPass()
+        {
+            try
+            {
+                if (_mainMaskAdjusted && Camera.main != null && _previewLayer >= 0)
+                    Camera.main.cullingMask |= (1 << _previewLayer);
+                _mainMaskAdjusted = false;
+                if (_previewCam != null) { _previewCam.targetTexture = null; UnityEngine.Object.Destroy(_previewCam.gameObject); _previewCam = null; }
+                if (_previewRT != null) { _previewRT.Release(); UnityEngine.Object.Destroy(_previewRT); _previewRT = null; }
+                if (_previewCanvasGO != null) { UnityEngine.Object.Destroy(_previewCanvasGO); _previewCanvasGO = null; }
+            }
+            catch { }
+        }
+
+        private static Type _tRawImage;
+        private static bool _rawSearched;
+        private static Type FindRawImageType()
+        {
+            if (_rawSearched) return _tRawImage;
+            _rawSearched = true;
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var t = asm.GetType("UnityEngine.UI.RawImage");
+                if (t != null) { _tRawImage = t; break; }
+            }
+            return _tRawImage;
+        }
+
+        /// <summary>Follows the mouse in world space; self-destructs when the F5
+        /// menu closes so a forgotten preview can't leak into gameplay. Also keeps
+        /// the foreground-pass camera mirrored to the main camera (item 10).</summary>
+        private class EffectPreviewFollower : MonoBehaviour
+        {
+            private void Update()
+            {
+                try
+                {
+                    if (!NativeUI.IsOpen) { PlayerEffectCosmetic.StopPreview(); return; }
+                    var cam = Camera.main;
+                    if (cam == null) return;
+                    var mp = Input.mousePosition;
+                    mp.z = Mathf.Abs(cam.transform.position.z) > 0.5f
+                        ? Mathf.Abs(cam.transform.position.z) : 10f;
+                    transform.position = cam.ScreenToWorldPoint(mp);
+                    PlayerEffectCosmetic.SyncPreviewCam();
+                }
+                catch { }
+            }
+        }
+
         // ── Per-sku particle configuration ──────────────────────────
         private static void ConfigureForSku(ParticleSystem ps, string sku)
         {

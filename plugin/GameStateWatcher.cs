@@ -168,6 +168,25 @@ namespace CompetitiveRounds
         private static int lastRemainingRespawns = -1;
         private static bool achFiredShot = false;         // left mouse clicked during match
         private static bool achMoved = false;              // WASD or Space pressed during match
+        private static bool achJumped = false;             // jump keys (W/Space/Up) pressed during match (v1.30 Grounded)
+        // v1.30 "Instinct": true once the player scrolls the card-pick selection
+        // away from the left-most card during any of their picks this match.
+        // Set from Plugin's RPCA_SetCurrentSelected postfix (local picker only).
+        public static bool achLeftmostViolated = false;
+        // v1.30 "Into the Deep End" (July 12 spec): Abyssal Countdown must be
+        // ACTIVATED every round. Plugin's AbyssalCountdown.RPCA_Activate postfix
+        // calls OnAbyssalActivatedLocal for the local player's activations; the
+        // rounds-change branch flushes the per-round flag into the counter.
+        private static int abyssalRoundsActivated = 0;
+        private static bool abyssalActivatedThisRound = false;
+        public static void OnAbyssalActivatedLocal()
+        {
+            if (!abyssalActivatedThisRound)
+            {
+                abyssalActivatedThisRound = true;
+                Plugin.Log.LogInfo("[ACH] Abyssal activated this round");
+            }
+        }
         // Anti-cheat: per-match counts of the LOCAL player's combat inputs. Sent in the match report
         // so the server can flag a reporter who just sat idle the whole match (botting / AFK farming).
         // Counters reset in OnMatchStarted alongside the achievement flags.
@@ -685,16 +704,32 @@ namespace CompetitiveRounds
             }
         }
 
+        // Item 4 (v1.30): opponent per-game combat stats, sniffed from their
+        // cr_gstats Photon prop (same rhythm as FPS — they publish every ~3s
+        // while the match runs, we keep the latest). "fired|hit|blkAct|blkSucc|keys|activeSecs".
+        private const string GSTATS_PROP_KEY = "cr_gstats";
+        public static int OppStatBulletsFired { get; private set; }
+        public static int OppStatBulletsHit { get; private set; }
+        public static int OppStatBlocksActivated { get; private set; }
+        public static int OppStatBlocksSuccessful { get; private set; }
+        public static int OppStatKeysPressed { get; private set; }
+        public static float OppStatActiveSeconds { get; private set; }
+
         private static void BroadcastFps()
         {
             try
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.LocalPlayer == null) return;
-                int avg = LocalAvgFps;
-                if (avg <= 0) return;
                 var props = new Hashtable();
-                props[FPS_PROP_KEY] = avg;
-                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                int avg = LocalAvgFps;
+                if (avg > 0) props[FPS_PROP_KEY] = avg;
+                // Per-game combat stats ride the same publish (item 4) — the
+                // reporter includes the opponent's numbers in the match report
+                // so both sides of the history row can show hit/block/KPS.
+                props[GSTATS_PROP_KEY] =
+                    $"{LocalBulletsFiredThisMatch}|{LocalBulletsHitThisMatch}|{LocalBlocksActivatedThisMatch}|{LocalBlocksSuccessfulThisMatch}|{LocalKeysThisMatch}|{LocalActiveSecondsThisMatch.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}";
+                if (props.Count > 0)
+                    PhotonNetwork.LocalPlayer.SetCustomProperties(props);
             }
             catch { }
         }
@@ -709,6 +744,23 @@ namespace CompetitiveRounds
                 foreach (var p in players)
                 {
                     if (p == null || p.IsLocal || p.CustomProperties == null) continue;
+                    if (p.CustomProperties.ContainsKey(GSTATS_PROP_KEY))
+                    {
+                        try
+                        {
+                            var parts = (p.CustomProperties[GSTATS_PROP_KEY] as string ?? "").Split('|');
+                            if (parts.Length >= 6)
+                            {
+                                OppStatBulletsFired = int.Parse(parts[0]);
+                                OppStatBulletsHit = int.Parse(parts[1]);
+                                OppStatBlocksActivated = int.Parse(parts[2]);
+                                OppStatBlocksSuccessful = int.Parse(parts[3]);
+                                OppStatKeysPressed = int.Parse(parts[4]);
+                                OppStatActiveSeconds = float.Parse(parts[5], System.Globalization.CultureInfo.InvariantCulture);
+                            }
+                        }
+                        catch { }
+                    }
                     if (!p.CustomProperties.ContainsKey(FPS_PROP_KEY)) continue;
                     try { opponentAvgFps = Convert.ToInt32(p.CustomProperties[FPS_PROP_KEY]); }
                     catch { }
@@ -716,6 +768,24 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+        }
+
+        // Item 4: per-game scoring timeline for the history hover graph. Each
+        // entry is cumulative "p1Total:p2Total" where total = rounds*2 + points
+        // (monotonic across round resets). Reporter-side; capped at 64 events.
+        private static readonly List<string> matchPointTimeline = new List<string>();
+        private static void TimelineAppend(int p1r, int p1p, int p2r, int p2p)
+        {
+            if (matchPointTimeline.Count >= 64) return;
+            // pts>=2 only occurs at game end (the winning point lands and the game
+            // stops before the round-conversion reset) — those 2 points are already
+            // counted in the rounds figure, so zero them or the final graph step
+            // double-counts a whole round (same bug as the "6-x" score display).
+            if (p1p >= 2) p1p = 0;
+            if (p2p >= 2) p2p = 0;
+            string entry = $"{p1r * 2 + p1p}:{p2r * 2 + p2p}";
+            if (matchPointTimeline.Count > 0 && matchPointTimeline[matchPointTimeline.Count - 1] == entry) return;
+            matchPointTimeline.Add(entry);
         }
 
         // \u2500\u2500 Room state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -961,24 +1031,37 @@ namespace CompetitiveRounds
             // NetworkRestart during loading). Detect the stall, tell the player
             // what happened, and return to menu cleanly. No match ever started,
             // so no DC/leave penalty applies on either side.
-            if (inRoom && !rankedRoomStallHandled && photonRoomId.StartsWith("ranked_"))
+            if (inRoom && !rankedRoomStallHandled
+                && (photonRoomId.StartsWith("ranked_") || photonRoomId.StartsWith("sct-")))
             {
+                // Tournament rooms get a much longer solo window: the opponent
+                // has a 5-10 min no-show grace server-side, so bailing at 60s
+                // would bounce us out while they're still legitimately loading
+                // in. 6 min covers the grace; after that the server has already
+                // forfeited them and there's nobody to wait for. (item 3)
+                bool isTournamentRoom = photonRoomId.StartsWith("sct-");
+                double bailAfter = isTournamentRoom ? 360 : 60;
+                double warnAfter = isTournamentRoom ? 90 : 25;
                 int pc = 0;
                 try { pc = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { }
                 if (pc >= 2) rankedRoomEverFull = true;
                 if (!rankedRoomEverFull && !isTracking)
                 {
                     double waited = (DateTime.UtcNow - roomJoinTime).TotalSeconds;
-                    if (!rankedRoomStallWarned && waited >= 25)
+                    if (!rankedRoomStallWarned && waited >= warnAfter)
                     {
                         rankedRoomStallWarned = true;
-                        CompetitiveUI.ShowNotification("Opponent hasn't connected yet — hang tight...", new Color(1f, 0.8f, 0.3f), 6f);
+                        CompetitiveUI.ShowNotification(isTournamentRoom
+                            ? "Opponent hasn't connected yet — they have a few minutes of grace. Hang tight..."
+                            : "Opponent hasn't connected yet — hang tight...", new Color(1f, 0.8f, 0.3f), 6f);
                     }
-                    if (waited >= 60)
+                    if (waited >= bailAfter)
                     {
                         rankedRoomStallHandled = true;
                         Plugin.Log.LogWarning($"[QUEUE-STALL] Opponent never joined {photonRoomId} after {(int)waited}s — returning to menu (no match started, no penalty)");
-                        CompetitiveUI.ShowNotification("Opponent failed to join — returning to menu. Requeue when ready.", new Color(1f, 0.5f, 0.4f), 10f);
+                        CompetitiveUI.ShowNotification(isTournamentRoom
+                            ? "Opponent never showed — their no-show forfeit should be recorded. Returning to menu."
+                            : "Opponent failed to join — returning to menu. Requeue when ready.", new Color(1f, 0.5f, 0.4f), 10f);
                         try { NetworkConnectionHandler.instance.NetworkRestart(); }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[QUEUE-STALL] NetworkRestart failed: {ex.Message}"); }
                     }
@@ -1220,6 +1303,18 @@ namespace CompetitiveRounds
         // ranked=false even though Sid's client had ranked ON).
         private static bool _rankedSyncSent;
 
+        /// <summary>Public retry hook for LocalSteamId resolution (v1.30, bug #51).
+        /// IdentifyLocalPlayer historically ran only at plugin init + room joins —
+        /// a client that lost the startup Steamworks race and then sat in menus
+        /// kept LocalSteamId at "unknown" all session, so its presence pings and
+        /// queue-count calls carried no steam id and the player never counted as
+        /// online. The presence loop calls this each tick until resolution.</summary>
+        public static void EnsureIdentityResolved()
+        {
+            if (!string.IsNullOrEmpty(localSteamId) && localSteamId != "unknown") return;
+            IdentifyLocalPlayer();
+        }
+
         private static void IdentifyLocalPlayer()
         {
             try
@@ -1395,6 +1490,7 @@ namespace CompetitiveRounds
                 {
                     p1Points = curP1Points;
                     p2Points = curP2Points;
+                    TimelineAppend(curP1Rounds, curP1Points, curP2Rounds, curP2Points);
                     // v1.22 — report live points to the server during ranked games so betting
                     // locks once 2 points are scored in game 1. Only fires while we're in the
                     // first match of a series (p1Rounds + p2Rounds == 0) to keep traffic low.
@@ -1411,6 +1507,10 @@ namespace CompetitiveRounds
                     p1Rounds = curP1Rounds;
                     p2Rounds = curP2Rounds;
                     currentRound = p1Rounds + p2Rounds + 1;
+                    TimelineAppend(curP1Rounds, curP1Points, curP2Rounds, curP2Points);
+                    // Deep End bookkeeping: a round just completed — bank whether
+                    // Abyssal fired during it, reset for the next round.
+                    if (abyssalActivatedThisRound) { abyssalRoundsActivated++; abyssalActivatedThisRound = false; }
 
                     if (curP1Rounds > lastP1Rounds)
                         Plugin.Log.LogInfo($"[POLL] Round: P1! Rounds: {p1Rounds}-{p2Rounds}");
@@ -1510,6 +1610,15 @@ namespace CompetitiveRounds
                     seriesPreflightSent = false;
                     Plugin.Log.LogInfo("[POLL] Re-armed series preflight at game start (no live series id)");
                 }
+
+                // 2v2 continuation (recording-gap fix): in a cr_ff room with no active
+                // team series — the previous BO3 completed and they kept playing — the
+                // reporter opens a fresh series so games 4+ of the sitting record as
+                // ranked. Also self-heals a lost series-1 id (server returns the live one).
+                if (inCrFfStart && string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId))
+                {
+                    TryRequestContinuationSeries();
+                }
             }
             catch { }
 
@@ -1528,6 +1637,18 @@ namespace CompetitiveRounds
             lastRemainingRespawns = -1;
             achFiredShot = false;
             achMoved = false;
+            achJumped = false;
+            // achLeftmostViolated is deliberately NOT reset here (bug #60).
+            // OnMatchStarted fires at the START OF COMBAT — which is AFTER the
+            // game's initial card-pick phase (GM_ArmsRace.DoStartGame runs a
+            // pick for every player before TimeHandler.StartGame). Resetting
+            // here wiped any "scrolled the selection" violation from those
+            // pre-match picks, so a player could inspect every card on the
+            // first pick and still earn Instinct. The flag resets in
+            // ResetMatchState() (game over / room reset), which always runs
+            // before the next game's pick phase.
+            abyssalRoundsActivated = 0;
+            abyssalActivatedThisRound = false;
             inPickPhase = false;
             pendingRegicideCheck = false;
             LocalShotsThisMatch = 0;
@@ -1586,10 +1707,17 @@ namespace CompetitiveRounds
                     var props = new Hashtable();
                     props[CARD_PROP_KEY] = "";
                     props[FPS_PROP_KEY] = 0;
+                    props[GSTATS_PROP_KEY] = "0|0|0|0|0|0";
                     PhotonNetwork.LocalPlayer.SetCustomProperties(props);
                 }
             }
             catch { }
+
+            // Item 4: fresh per-game scoring timeline + opponent-stat snapshot.
+            matchPointTimeline.Clear();
+            OppStatBulletsFired = 0; OppStatBulletsHit = 0;
+            OppStatBlocksActivated = 0; OppStatBlocksSuccessful = 0;
+            OppStatKeysPressed = 0; OppStatActiveSeconds = 0f;
 
             // Recover pre-match card picks into localCards
             // These were captured by the log listener before tracking started
@@ -1715,9 +1843,12 @@ namespace CompetitiveRounds
 
             // ── Update session W/L tracking ──
             // Build the opponent set: in 1v1 it's just opponentDisplayName; in
-            // 2v2 it's every other player in the room (sans teammate). Tracks
-            // all three opponents in 2v2 so Session Info shows them all rather
-            // than whichever one we latched onto first.
+            // 2v2 it's the two ENEMY-team players. The teammate is recorded
+            // under a "w/ " key so Session Info reads "w/ Stan 2-0" instead of
+            // "vs Stan 2-0" (bug #56 — the old loop added every non-self player
+            // as an opponent, teammate included). Team identity comes from the
+            // t_id custom prop set at queue lock; a player whose prop is missing
+            // falls back to "opponent" (matches the old behavior).
             var oppKeys = new List<string>();
             bool sessionRoomIsCrFf = false;
             try
@@ -1733,7 +1864,16 @@ namespace CompetitiveRounds
                     if (PhotonNetwork.LocalPlayer != null && pp.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber) continue;
                     string nm = pp.NickName;
                     if (string.IsNullOrEmpty(nm)) continue;
-                    oppKeys.Add(nm);
+                    nm = StripRichText(nm);
+                    int ppTeam = -1;
+                    try
+                    {
+                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("t_id"))
+                            ppTeam = System.Convert.ToInt32(pp.CustomProperties["t_id"]);
+                    }
+                    catch { }
+                    bool isTeammate = ppTeam >= 0 && localTeamId >= 0 && ppTeam == localTeamId;
+                    oppKeys.Add(isTeammate ? "w/ " + nm : nm);
                 }
             }
             if (oppKeys.Count == 0)
@@ -2000,7 +2140,18 @@ namespace CompetitiveRounds
                     opponentAvgFps: OpponentAvgFps,
                     localKeysPressed: LocalKeysThisMatch,
                     localActiveSeconds: LocalActiveSecondsThisMatch,
-                    localMacroSuspectSeconds: LocalMacroSuspectSeconds
+                    localMacroSuspectSeconds: LocalMacroSuspectSeconds,
+                    // Item 4 (v1.30): opponent's per-game combat stats (their
+                    // client publishes cr_gstats every ~3s; we ship the latest
+                    // snapshot) + the cumulative scoring timeline for the
+                    // history hover graph.
+                    oppBulletsFired: OppStatBulletsFired,
+                    oppBulletsHit: OppStatBulletsHit,
+                    oppBlocksActivated: OppStatBlocksActivated,
+                    oppBlocksSuccessful: OppStatBlocksSuccessful,
+                    oppKeysPressed: OppStatKeysPressed,
+                    oppActiveSeconds: OppStatActiveSeconds,
+                    pointTimeline: string.Join(",", matchPointTimeline.ToArray())
                 );
             }
 
@@ -2016,6 +2167,56 @@ namespace CompetitiveRounds
         /// lowest Steam ID across the 4 participants. Canonical slot ordering: t1a/t1b/t2a/t2b
         /// where team1 = team-with-localTeamId-0, sorted within each team by Steam ID — same
         /// rule the server applies at lock-time so the 11-field HMAC matches.</summary>
+        private static float lastContinuationRequestTime = -999f;
+
+        /// <summary>Game-start hook for a cr_ff room with no active series: the reporter
+        /// (lowest Steam ID) opens a continuation series so games past the first BO3 record
+        /// as ranked. Best-effort — if the lineup can't be resolved yet it retries next
+        /// game. Team comes from the t_id custom property (set at queue-lock; no spawn
+        /// needed). 8s debounce so an in-flight request isn't re-fired.</summary>
+        private static void TryRequestContinuationSeries()
+        {
+            try
+            {
+                if (UnityEngine.Time.time - lastContinuationRequestTime < 8f) return;
+                if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 4) return;
+
+                var sids = new string[4];
+                var teams = new int[4];
+                for (int i = 0; i < 4; i++)
+                {
+                    var pp = PhotonNetwork.PlayerList[i];
+                    if (pp == null) return;
+                    string sid = ResolvePhotonSteamId(pp);
+                    if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) return;
+                    int team = -1;
+                    if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("t_id"))
+                    { try { team = Convert.ToInt32(pp.CustomProperties["t_id"]); } catch { } }
+                    if (team != 0 && team != 1) return;
+                    sids[i] = sid; teams[i] = team;
+                }
+
+                var team0 = new List<string>();
+                var team1 = new List<string>();
+                for (int i = 0; i < 4; i++) { if (teams[i] == 0) team0.Add(sids[i]); else team1.Add(sids[i]); }
+                if (team0.Count != 2 || team1.Count != 2) return;
+
+                // Reporter election: lowest Steam ID among the four (same as the report path).
+                string lowest = null; long lowestVal = long.MaxValue;
+                foreach (var s in sids) { if (long.TryParse(s, out long v) && v < lowestVal) { lowestVal = v; lowest = s; } }
+                if (lowest != localSteamId) return;  // only the reporter opens it; server is idempotent
+
+                team0.Sort(StringComparer.Ordinal);
+                team1.Sort(StringComparer.Ordinal);
+                string room = PhotonNetwork.CurrentRoom?.Name ?? "";
+                lastContinuationRequestTime = UnityEngine.Time.time;
+                Plugin.Log.LogInfo($"[2v2-CONTINUATION] requesting continuation (t0={team0[0]},{team0[1]} t1={team1[0]},{team1[1]})");
+                ApiClient.RequestContinuationSeries(localSteamId, room, photonRegion,
+                    team0[0], team0[1], team1[0], team1[1]);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-CONTINUATION] resolve error: {ex.Message}"); }
+        }
+
         private static bool TryReportTeamMatch(string reportRoomId, int duration)
         {
             if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 4)
@@ -2289,6 +2490,13 @@ namespace CompetitiveRounds
                     achMoved = true;
                     Plugin.Log.LogInfo("[ACH] Player moved");
                 }
+                // Grounded (v1.30): jump keys only — W/Space/Up all jump in ROUNDS.
+                if (!typingInChat && !achJumped && (Input.GetKey(KeyCode.Space)
+                    || Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow)))
+                {
+                    achJumped = true;
+                    Plugin.Log.LogInfo("[ACH] Player jumped");
+                }
             }
         }
 
@@ -2391,6 +2599,73 @@ namespace CompetitiveRounds
                 {
                     Plugin.Log.LogInfo("[ACH] Evaluating: Immovable Object — PASSED");
                     ApiClient.UnlockAchievement(steamId, "immovable_object");
+                }
+
+                // 12. Grounded (v1.30) — won without ever jumping. Same active-
+                // combat gating as Immovable (learning #28) via the shared
+                // sampler; strictly easier than Immovable but still a real bit.
+                if (localWon && !achJumped)
+                {
+                    Plugin.Log.LogInfo("[ACH] Evaluating: Grounded — PASSED");
+                    ApiClient.UnlockAchievement(steamId, "grounded");
+                }
+
+                // 13. Instinct (v1.30) — won having taken the LEFT-MOST card on
+                // every pick without ever scrolling the selection. Violation flag
+                // is set by the RPCA_SetCurrentSelected postfix; require at least
+                // 3 picks so a 1-pick stomp doesn't hand it out.
+                if (localWon && !achLeftmostViolated && pickCountThisMatch >= 3)
+                {
+                    Plugin.Log.LogInfo($"[ACH] Evaluating: Instinct — PASSED ({pickCountThisMatch} untouched picks)");
+                    ApiClient.UnlockAchievement(steamId, "instinct");
+                }
+
+                // 14. Unkillable (July 12 spec) — the real god-build qualifier is
+                // the GUN STATE at game end, not a card-name proxy: exactly 1 max
+                // ammo, reload cycle <= 1s, Shields Up in the build, and the win.
+                if (localWon && (cardNames.Contains("Shields Up") || cardNames.Contains("ShieldsUp")))
+                {
+                    try
+                    {
+                        var pm = PlayerManager.instance;
+                        Player me = null;
+                        if (pm != null && pm.players != null)
+                            foreach (var p in pm.players)
+                                if (p != null && p.data != null && p.data.view != null && p.data.view.IsMine) { me = p; break; }
+                        var ga = me != null && me.data.weaponHandler != null && me.data.weaponHandler.gun != null
+                            ? me.data.weaponHandler.gun.GetComponentInChildren<GunAmmo>(true) : null;
+                        if (ga != null)
+                        {
+                            float reloadSecs = (ga.reloadTime + ga.reloadTimeAdd) * ga.reloadTimeMultiplier;
+                            Plugin.Log.LogInfo($"[ACH] Unkillable check: maxAmmo={ga.maxAmmo} reload={reloadSecs:F2}s");
+                            if (ga.maxAmmo <= 1 && reloadSecs <= 1.0f)
+                            {
+                                Plugin.Log.LogInfo("[ACH] Evaluating: Unkillable — PASSED");
+                                ApiClient.UnlockAchievement(steamId, "god_build");
+                            }
+                        }
+                    }
+                    catch (Exception gex) { Plugin.Log.LogWarning($"[ACH] Unkillable check failed: {gex.Message}"); }
+                }
+
+                // 15. Into the Deep End (July 12 spec) — Abyssal Countdown as the
+                // FIRST pick, and the ability ACTIVATED in every round of the game.
+                if (localWon)
+                {
+                    string firstPick = preMatchCards.Count > 0 ? preMatchCards[0].CardName
+                                      : (localCards.Count > 0 ? localCards[0].CardName : "");
+                    bool abyssalFirst = firstPick == "Abyssal Countdown" || firstPick == "AbyssalCountdown";
+                    if (abyssalFirst)
+                    {
+                        int roundsActivated = abyssalRoundsActivated + (abyssalActivatedThisRound ? 1 : 0);
+                        int totalRounds = localR + oppR;
+                        Plugin.Log.LogInfo($"[ACH] Deep End check: activated {roundsActivated}/{totalRounds} rounds");
+                        if (totalRounds > 0 && roundsActivated >= totalRounds)
+                        {
+                            Plugin.Log.LogInfo("[ACH] Evaluating: Into the Deep End — PASSED");
+                            ApiClient.UnlockAchievement(steamId, "deep_end");
+                        }
+                    }
                 }
             }
             catch (Exception ex)
@@ -2809,6 +3084,10 @@ namespace CompetitiveRounds
             lastRemainingRespawns = -1;
             achFiredShot = false;
             achMoved = false;
+            achJumped = false;
+            achLeftmostViolated = false;
+            abyssalRoundsActivated = 0;
+            abyssalActivatedThisRound = false;
             inPickPhase = false;
             pendingRegicideCheck = false;
             LocalShotsThisMatch = 0;

@@ -256,6 +256,20 @@ namespace CompetitiveRounds
             // v1.25 average FPS. 0 = no data (row predates v1.25 OR opponent didn't have the mod).
             public int player_fps_avg;
             public int opponent_fps_avg;
+            // v1.30 item 4 — per-game combat stats, viewer-relative (0 = no data:
+            // row predates migration 111 or that side had no mod telemetry).
+            public int player_bullets_fired, player_bullets_hit;
+            public int player_blocks_activated, player_blocks_successful;
+            public int player_keys_pressed;
+            public float player_active_seconds;
+            public int opp_bullets_fired, opp_bullets_hit;
+            public int opp_blocks_activated, opp_blocks_successful;
+            public int opp_keys_pressed;
+            public float opp_active_seconds;
+            // Cumulative scoring timeline "myTotal:oppTotal,..." (viewer-relative).
+            public string point_timeline;
+            // Bug batch item 4 — total game length in seconds (0 = no data).
+            public int duration_seconds;
         }
 
         [Serializable]
@@ -272,6 +286,7 @@ namespace CompetitiveRounds
             public string achievement_key;
             public bool unlocked;
             public string unlocked_at; // ISO date or null
+            public float global_pct;   // % of all players who have it (v1.30, Steam-style)
         }
 
         // Master definition list (mirrored from server)
@@ -293,6 +308,32 @@ namespace CompetitiveRounds
             {"master_rank",         new[]{"Master",              "Reach 2030 rating in ranked (1v1 or 2v2)"}},
             {"team_sweep",          new[]{"Tag Team Sweep",      "Win a 2v2 game 5-0"}},
             {"grand_master",        new[]{"Grand Master",        "Reach 2330 rating in ranked (1v1 or 2v2)"}},
+            // v1.30 expansion (item 5, revised July 12) — mirrors ACHIEVEMENT_DEFS in main.py.
+            {"flawless",            new[]{"Flawless",            "Win five games 5-0 in a row"}},
+            {"bullet_hell",         new[]{"Bullet Hell",         "Win a game 5-0 with Barrage in your build"}},
+            {"spray_and_pray",      new[]{"Spray and Pray",      "Win a game 5-0 with Spray in your build"}},
+            {"demolitionist",       new[]{"Demolitionist",       "Win a game 5-0 with Explosive Bullet in your build"}},
+            {"controlled_burst",    new[]{"Controlled Burst",    "Win a game 5-0 with Burst in your build"}},
+            {"field_medic",         new[]{"Field Medic",         "Win a game 5-0 with Healing Field in your build"}},
+            {"god_build",           new[]{"Unkillable",          "Win with Shields Up, exactly 1 ammo, and a lightning-fast reload"}},
+            {"double_nova",         new[]{"Double Nova",         "Win with two or more Supernovas"}},
+            {"lumberjack",          new[]{"Lumberjack",          "Win with two or more Saws"}},
+            {"pristine_perfection", new[]{"Pristine Perfection", "Win with two or more Pristines"}},
+            {"silent_drill",        new[]{"Silly Drill",         "Win with Sneaky and Drill together"}},
+            {"double_glass",        new[]{"Living on the Edge",  "Win with two Glass Cannons in your build"}},
+            {"sustained_power",     new[]{"Sustained Power",     "Win with Empower and Healing Field together"}},
+            {"deep_end",            new[]{"Into the Deep End",   "Win with Abyssal Countdown as your FIRST pick, activating it every round"}},
+            {"clutch",              new[]{"Clutch",              "Win a game after being down 0-3"}},
+            {"collector",           new[]{"Collector",           "Win with four copies of the same card"}},
+            {"grounded",            new[]{"Grounded",            "Win a game without ever jumping"}},
+            {"instinct",            new[]{"Instinct",            "Win taking only the left-most card on every pick, without ever looking at the others"}},
+            {"rising_star",         new[]{"Rising Star",         "Reach 1700 rating in ranked (1v1 or 2v2)"}},
+            {"on_fire",             new[]{"On Fire",             "Win 25 ranked series in a row"}},
+            {"unstoppable",         new[]{"Unstoppable",         "Win 50 ranked series in a row"}},
+            {"immortal",            new[]{"Immortal",            "Win 100 ranked series in a row"}},
+            {"casual_century",      new[]{"Century Club",        "Win 100 casual games in a row"}},
+            {"casual_conqueror",    new[]{"Casual Conqueror",    "Win 200 casual games in a row"}},
+            {"touch_grass",         new[]{"Touch Grass",         "Win 500 casual games in a row"}},
         };
 
         // Cached data
@@ -323,6 +364,15 @@ namespace CompetitiveRounds
         // every 20 seconds for the same match. Reset implicitly when the
         // match transitions out of "ready" (server stops returning it).
         private static readonly HashSet<string> _heartbeatDispatchedMatches = new HashSet<string>();
+        // match_id -> unscaled time of the last auto-connect dispatch (drives the
+        // 60s re-arm above).
+        private static readonly Dictionary<string, float> _heartbeatDispatchTime = new Dictionary<string, float>();
+
+        // Ticks since the heartbeat loop last refreshed the CURRENT-tournament
+        // snapshot. The pre-start banner (item 3) needs scheduled_start_ts +
+        // my_signup_id fresh even when the Tournaments tab has never been
+        // opened this session — refresh it every 3rd tick (~60s).
+        private static int _hbTournamentCurrentTick;
 
         private static IEnumerator TournamentHeartbeatLoop()
         {
@@ -334,6 +384,11 @@ namespace CompetitiveRounds
                 yield return new WaitForSeconds(20f);
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown") continue;
+                if (++_hbTournamentCurrentTick >= 3)
+                {
+                    _hbTournamentCurrentTick = 0;
+                    try { FetchTournamentCurrent(sid); } catch { }
+                }
                 // Pull fresh active-match state. FetchMyActiveTournamentMatches
                 // has its own 20s throttle so back-to-back calls are safe.
                 FetchMyActiveTournamentMatches(sid);
@@ -366,8 +421,34 @@ namespace CompetitiveRounds
                         if (Plugin.PendingRankedRoom != m.photon_room_name)
                         {
                             _heartbeatDispatchedMatches.Add(m.match_id);
+                            _heartbeatDispatchTime[m.match_id] = Time.unscaledTime;
                             Plugin.SetPendingRoom(m.photon_room_name, m.photon_region);
                             Plugin.Log.LogInfo($"[TOURNAMENT-HB] Dispatch from heartbeat loop: room={m.photon_room_name} region={m.photon_region ?? "default"} match={m.match_id}");
+                        }
+                    }
+                    // Re-dispatch path (item 3 hardening): if we dispatched 60s+
+                    // ago but STILL aren't in the match room (join failed, or the
+                    // lonely-room watchdog bounced us back to the menu when the
+                    // opponent was late), clear the memo so the block above fires
+                    // again next tick. Without this, one failed join burned the
+                    // match's only auto-connect for the whole session.
+                    else if (isSyncReady && _heartbeatDispatchedMatches.Contains(m.match_id))
+                    {
+                        float at;
+                        bool oldEnough = _heartbeatDispatchTime.TryGetValue(m.match_id, out at)
+                            ? (Time.unscaledTime - at) > 60f : true;
+                        bool inTargetRoom = false;
+                        try
+                        {
+                            inTargetRoom = PhotonNetwork.InRoom
+                                && PhotonNetwork.CurrentRoom != null
+                                && PhotonNetwork.CurrentRoom.Name == m.photon_room_name;
+                        }
+                        catch { }
+                        if (oldEnough && !inTargetRoom && Plugin.PendingRankedRoom != m.photon_room_name)
+                        {
+                            _heartbeatDispatchedMatches.Remove(m.match_id);
+                            Plugin.Log.LogInfo($"[TOURNAMENT-HB] Not in match room 60s after dispatch — re-arming auto-connect for {m.match_id}");
                         }
                     }
                 }
@@ -734,6 +815,14 @@ namespace CompetitiveRounds
             public string series_id, bet_on_steam_id, bet_on_name, series_status, series_score;
             public int amount;
             public float odds_multiplier;
+            // v1.30 (bug #53): settlement info so the UI can show what HAPPENED
+            // to a bet — pending / won / lost / refunded. payout == amount is a
+            // refund (learning #107); payout only meaningful when settled.
+            public bool settled;
+            public int payout;
+            // Item 6 polish: the matchup's other player + when the bet was placed.
+            public string vs_name;
+            public string created_at;
         }
 
         public static List<ActiveSeriesEntry> CachedActiveSeries { get; private set; }
@@ -809,6 +898,12 @@ namespace CompetitiveRounds
                             b.bet_on_name    = ExtractJsonString(chunk, "bet_on_name");
                             b.series_status  = ExtractJsonString(chunk, "series_status");
                             b.series_score   = ExtractJsonString(chunk, "series_score");
+                            // settled_at is an ISO string when settled, JSON null while
+                            // pending — a non-empty extract means the bet resolved.
+                            b.settled        = !string.IsNullOrEmpty(ExtractJsonString(chunk, "settled_at"));
+                            b.payout         = ExtractJsonInt(chunk, "payout");
+                            b.vs_name        = ExtractJsonString(chunk, "vs_name");
+                            b.created_at     = ExtractJsonString(chunk, "created_at");
                             if (!string.IsNullOrEmpty(b.series_id)) list.Add(b);
                         }
                     }
@@ -976,6 +1071,12 @@ namespace CompetitiveRounds
             public string rarity;
             public string preview_color;
             public bool owned;
+            // Artist controls (v1.30): community items carry their creator +
+            // optional stock cap so rows can render "by Nix — 3 of 10 left".
+            public string artist_steam_id;
+            public string artist_name;
+            public int stock_limit;   // 0 = unlimited
+            public int stock_sold;    // only populated when stock_limit > 0
         }
 
         public static List<ShopItemData> CachedShopItems { get; private set; }
@@ -1187,6 +1288,10 @@ namespace CompetitiveRounds
                 it.rarity = ExtractJsonString(chunk, "rarity");
                 it.preview_color = ExtractJsonString(chunk, "preview_color");
                 it.owned = ExtractJsonBool(chunk, "owned");
+                it.artist_steam_id = ExtractJsonString(chunk, "artist_steam_id");
+                it.artist_name = ExtractJsonString(chunk, "artist_name");
+                it.stock_limit = ExtractJsonInt(chunk, "stock_limit");
+                it.stock_sold = ExtractJsonInt(chunk, "stock_sold");
                 if (!string.IsNullOrEmpty(it.sku) || !string.IsNullOrEmpty(it.name))
                     list.Add(it);
             }
@@ -1284,6 +1389,368 @@ namespace CompetitiveRounds
                 IsAdmin = admin;
                 Plugin.Log.LogInfo($"[ADMIN] check-status for {steamId}: is_admin={admin}");
                 callback?.Invoke(admin);
+                // Artist status rides the same one-shot init call site — a
+                // separate CheckArtistStatus call everywhere CheckAdminStatus is
+                // invoked would just duplicate wiring.
+                CheckArtistStatus(steamId);
+            }));
+        }
+
+        // ── Artist (v1.30) ────────────────────────────────────
+        // Community cosmetic creators manage their own items: price, stock,
+        // gifting, purchase blocks. Mirrors the admin surface: an artist_users
+        // row server-side gates everything; mutations are HMAC-signed
+        // "artist:{steam_id}:{action}:{args}".
+
+        public static bool IsArtist { get; private set; }
+
+        public class ArtistItemEntry
+        {
+            public string sku, kind, name, rarity, description;
+            public int price, stock_limit, sold, gifted;
+            public int earned;   // lifetime 30% royalty gold from sales (July 12)
+        }
+
+        public class ArtistBlockEntry
+        {
+            public string steam_id, display_name;
+        }
+
+        public static List<ArtistItemEntry> CachedArtistItems { get; private set; } = new List<ArtistItemEntry>();
+        public static List<ArtistBlockEntry> CachedArtistBlocks { get; private set; } = new List<ArtistBlockEntry>();
+
+        public static void CheckArtistStatus(string steamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId)) { IsArtist = false; callback?.Invoke(false); return; }
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/artist/status/{steamId}", (ok, body) =>
+            {
+                bool artist = false;
+                if (ok && !string.IsNullOrEmpty(body))
+                    artist = body.Contains("\"is_artist\":true") || body.Contains("\"is_artist\": true");
+                IsArtist = artist;
+                if (artist) Plugin.Log.LogInfo($"[ARTIST] {steamId} is an artist");
+                callback?.Invoke(artist);
+            }));
+        }
+
+        public static void FetchArtistItems(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/artist/{steamId}/items", (ok, resp) =>
+            {
+                if (!ok) { Plugin.Log.LogWarning($"[ARTIST] items fetch failed: {resp}"); return; }
+                var items = new List<ArtistItemEntry>();
+                var blocks = new List<ArtistBlockEntry>();
+                try
+                {
+                    // Two arrays in one payload: "items":[...], "blocked":[...].
+                    int blockedAt = resp.IndexOf("\"blocked\"", StringComparison.Ordinal);
+                    string itemsPart = blockedAt > 0 ? resp.Substring(0, blockedAt) : resp;
+                    string blocksPart = blockedAt > 0 ? resp.Substring(blockedAt) : "";
+                    var parts = itemsPart.Split(new[] { "\"sku\":" }, StringSplitOptions.None);
+                    for (int i = 1; i < parts.Length; i++)
+                    {
+                        string chunk = "\"sku\":" + parts[i];
+                        var it = new ArtistItemEntry();
+                        it.sku = ExtractJsonString(chunk, "sku");
+                        it.kind = ExtractJsonString(chunk, "kind");
+                        it.name = ExtractJsonString(chunk, "name");
+                        it.description = ExtractJsonString(chunk, "description");
+                        it.rarity = ExtractJsonString(chunk, "rarity");
+                        it.price = ExtractJsonInt(chunk, "price");
+                        it.stock_limit = ExtractJsonInt(chunk, "stock_limit");
+                        it.sold = ExtractJsonInt(chunk, "sold");
+                        it.gifted = ExtractJsonInt(chunk, "gifted");
+                        it.earned = ExtractJsonInt(chunk, "earned");
+                        if (!string.IsNullOrEmpty(it.sku)) items.Add(it);
+                    }
+                    var bparts = blocksPart.Split(new[] { "\"steam_id\":" }, StringSplitOptions.None);
+                    for (int i = 1; i < bparts.Length; i++)
+                    {
+                        string chunk = "\"steam_id\":" + bparts[i];
+                        var b = new ArtistBlockEntry();
+                        b.steam_id = ExtractJsonString(chunk, "steam_id");
+                        b.display_name = ExtractJsonString(chunk, "display_name");
+                        if (!string.IsNullOrEmpty(b.steam_id)) blocks.Add(b);
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[ARTIST] items parse: {ex.Message}"); }
+                CachedArtistItems = items;
+                CachedArtistBlocks = blocks;
+                NativeUI.MarkDirty();
+            }));
+        }
+
+        public static void ArtistSetPrice(string steamId, string sku, int price, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"artist:{steamId}:set-price:{sku}:{price}");
+            string url = $"{baseUrl}/api/v1/artist/set-price?steam_id={Escape(steamId)}&sku={Escape(sku)}&price={price}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ARTIST] set-price {sku}={price}: ok={ok}");
+                if (ok) { FetchArtistItems(steamId); FetchShopItems(steamId); }
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        public static void ArtistSetName(string steamId, string sku, string value, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"artist:{steamId}:set-name:{sku}");
+            string url = $"{baseUrl}/api/v1/artist/set-name?steam_id={Escape(steamId)}&sku={Escape(sku)}&value={UnityWebRequest.EscapeURL(value ?? "")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ARTIST] set-name {sku}: ok={ok}");
+                if (ok) { FetchArtistItems(steamId); FetchShopItems(steamId); }
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        public static void ArtistSetDesc(string steamId, string sku, string value, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"artist:{steamId}:set-desc:{sku}");
+            string url = $"{baseUrl}/api/v1/artist/set-desc?steam_id={Escape(steamId)}&sku={Escape(sku)}&value={UnityWebRequest.EscapeURL(value ?? "")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ARTIST] set-desc {sku}: ok={ok}");
+                if (ok) { FetchArtistItems(steamId); FetchShopItems(steamId); }
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        // Public artist roster — feeds the admin item-assignment picker so
+        // admins never type raw steam ids (July 12 item 3).
+        public static List<ArtistBlockEntry> CachedAllArtists { get; private set; } = new List<ArtistBlockEntry>();
+        public static void FetchArtistsList(Action<bool> callback = null)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/artists", (ok, resp) =>
+            {
+                if (ok)
+                {
+                    var list = new List<ArtistBlockEntry>();
+                    try
+                    {
+                        var parts = resp.Split(new[] { "\"steam_id\":" }, StringSplitOptions.None);
+                        for (int i = 1; i < parts.Length; i++)
+                        {
+                            string chunk = "\"steam_id\":" + parts[i];
+                            var a = new ArtistBlockEntry();
+                            a.steam_id = ExtractJsonString(chunk, "steam_id");
+                            a.display_name = ExtractJsonString(chunk, "display_name");
+                            if (!string.IsNullOrEmpty(a.steam_id)) list.Add(a);
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[ARTIST] roster parse: {ex.Message}"); }
+                    CachedAllArtists = list;
+                }
+                callback?.Invoke(ok);
+            }));
+        }
+
+        // Player search by display name (bug batch item 8). Results carry the
+        // player's CURRENT rating so gift/block targets can't be spoofed by a
+        // name-change imposter — the elo shown beside the name is the tell.
+        public class PlayerSearchResult
+        {
+            public string steam_id;
+            public string display_name;
+            public int rating;
+        }
+        public static void SearchPlayers(string query, Action<bool, List<PlayerSearchResult>> callback)
+        {
+            string url = $"{baseUrl}/api/v1/players/search?q={UnityWebRequest.EscapeURL(query ?? "")}&limit=8";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                var list = new List<PlayerSearchResult>();
+                if (ok)
+                {
+                    try
+                    {
+                        var parts = resp.Split(new[] { "\"steam_id\":" }, StringSplitOptions.None);
+                        for (int i = 1; i < parts.Length; i++)
+                        {
+                            string chunk = "\"steam_id\":" + parts[i];
+                            var r = new PlayerSearchResult();
+                            r.steam_id = ExtractJsonString(chunk, "steam_id");
+                            r.display_name = ExtractJsonString(chunk, "display_name");
+                            r.rating = ExtractJsonInt(chunk, "rating");
+                            if (!string.IsNullOrEmpty(r.steam_id)) list.Add(r);
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[SEARCH] parse: {ex.Message}"); }
+                }
+                callback?.Invoke(ok, list);
+            }));
+        }
+
+        public static void ArtistSetStock(string steamId, string sku, int stock, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"artist:{steamId}:set-stock:{sku}:{stock}");
+            string url = $"{baseUrl}/api/v1/artist/set-stock?steam_id={Escape(steamId)}&sku={Escape(sku)}&stock={stock}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ARTIST] set-stock {sku}={stock}: ok={ok}");
+                if (ok) { FetchArtistItems(steamId); FetchShopItems(steamId); }
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        // ── Cosmetic submissions (July 12 round 3 item 2) ─────────────────
+        public class CosmeticSubmission
+        {
+            public int id;
+            public string name, slot, status, review_note, shop_sku, created_at;
+            public string artist_name, artist_steam_id;   // admin list only
+            public string png_base64;                      // admin list only
+        }
+        public static List<CosmeticSubmission> CachedMySubmissions { get; private set; } = new List<CosmeticSubmission>();
+
+        public static void ArtistSubmitCosmetic(string steamId, string name, string slot, string pngBase64, Action<bool, string> callback = null)
+        {
+            // Signature pins the payload by base64 LENGTH — no name-encoding
+            // ambiguity between client and server canonical strings.
+            string sig = ComputeHmacHex($"artist:{steamId}:submit:{slot}:{pngBase64.Length}");
+            string body = "{\"steam_id\":\"" + Escape(steamId) + "\",\"name\":\"" + JsonEscapeFull(name)
+                        + "\",\"slot\":\"" + slot + "\",\"png_base64\":\"" + pngBase64
+                        + "\",\"sig\":\"" + sig + "\"}";
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/artist/submit-cosmetic", body, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[COSMETIC] submit '{name}' ({slot}, {pngBase64.Length} b64): ok={ok}");
+                if (ok) FetchMySubmissions(steamId);
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        public static void FetchMySubmissions(string steamId, Action<bool> callback = null)
+        {
+            string sig = ComputeHmacHex($"artist:{steamId}:my-submissions");
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/artist/my-submissions?steam_id={Escape(steamId)}&sig={sig}",
+                (ok, resp) =>
+                {
+                    if (ok)
+                    {
+                        var list = new List<CosmeticSubmission>();
+                        try
+                        {
+                            var parts = resp.Split(new[] { "{\"id\":" }, StringSplitOptions.None);
+                            for (int i = 1; i < parts.Length; i++)
+                            {
+                                string chunk = "{\"id\":" + parts[i];
+                                var s = new CosmeticSubmission();
+                                s.id = ExtractJsonInt(chunk, "id");
+                                s.name = ExtractJsonString(chunk, "name");
+                                s.slot = ExtractJsonString(chunk, "slot");
+                                s.status = ExtractJsonString(chunk, "status");
+                                s.review_note = ExtractJsonString(chunk, "review_note");
+                                s.shop_sku = ExtractJsonString(chunk, "shop_sku");
+                                s.created_at = ExtractJsonString(chunk, "created_at");
+                                if (s.id > 0) list.Add(s);
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] my-subs parse: {ex.Message}"); }
+                        CachedMySubmissions = list;
+                        NativeUI.MarkDirty();
+                    }
+                    callback?.Invoke(ok);
+                }));
+        }
+
+        public static void FetchCosmeticSubmissionsAdmin(string adminSteamId, Action<bool, List<CosmeticSubmission>> callback)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:cosmetic-subs:list");
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/admin/cosmetic-submissions?admin_steam_id={Escape(adminSteamId)}&sig={sig}",
+                (ok, resp) =>
+                {
+                    var list = new List<CosmeticSubmission>();
+                    if (ok)
+                    {
+                        try
+                        {
+                            var parts = resp.Split(new[] { "{\"id\":" }, StringSplitOptions.None);
+                            for (int i = 1; i < parts.Length; i++)
+                            {
+                                string chunk = "{\"id\":" + parts[i];
+                                var s = new CosmeticSubmission();
+                                s.id = ExtractJsonInt(chunk, "id");
+                                s.name = ExtractJsonString(chunk, "name");
+                                s.slot = ExtractJsonString(chunk, "slot");
+                                s.artist_steam_id = ExtractJsonString(chunk, "artist_steam_id");
+                                s.artist_name = ExtractJsonString(chunk, "artist_name");
+                                s.created_at = ExtractJsonString(chunk, "created_at");
+                                s.png_base64 = ExtractJsonString(chunk, "png_base64");
+                                if (s.id > 0) list.Add(s);
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] admin-subs parse: {ex.Message}"); }
+                    }
+                    callback?.Invoke(ok, list);
+                }));
+        }
+
+        public static void AdminReviewCosmetic(string adminSteamId, int submissionId, bool approve, string note, Action<bool, string> callback = null)
+        {
+            string action = approve ? "approve" : "deny";
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:cosmetic-review:{submissionId}:{action}");
+            string url = $"{baseUrl}/api/v1/admin/cosmetic-review?admin_steam_id={Escape(adminSteamId)}"
+                       + $"&submission_id={submissionId}&action={action}&note={UnityWebRequest.EscapeURL(note ?? "")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[COSMETIC] review #{submissionId} {action}: ok={ok}");
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        public static void ArtistGift(string steamId, string sku, string targetSteamId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"artist:{steamId}:gift:{sku}:{targetSteamId}");
+            string url = $"{baseUrl}/api/v1/artist/gift?steam_id={Escape(steamId)}&sku={Escape(sku)}&target_steam_id={Escape(targetSteamId)}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ARTIST] gift {sku} -> {targetSteamId}: ok={ok} resp={Trunc120(resp)}");
+                if (ok) FetchArtistItems(steamId);
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        public static void ArtistBlock(string steamId, string targetSteamId, bool block, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"artist:{steamId}:block:{targetSteamId}:{(block ? 1 : 0)}");
+            string url = $"{baseUrl}/api/v1/artist/block?steam_id={Escape(steamId)}&target_steam_id={Escape(targetSteamId)}&block={(block ? "true" : "false")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ARTIST] {(block ? "block" : "unblock")} {targetSteamId}: ok={ok}");
+                if (ok) FetchArtistItems(steamId);
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        private static string Trunc120(string s) =>
+            string.IsNullOrEmpty(s) ? "" : (s.Length > 120 ? s.Substring(0, 120) + "..." : s);
+
+        // ── Admin ↔ artist management (v1.30, item 1) ─────────
+        public static void AdminSetArtist(string adminSteamId, string targetSteamId, bool grant, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:artist-set:{targetSteamId}:{(grant ? 1 : 0)}");
+            string url = $"{baseUrl}/api/v1/admin/artists/set?admin_steam_id={Escape(adminSteamId)}&target_steam_id={Escape(targetSteamId)}&grant={(grant ? "true" : "false")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ADMIN] artist-set {targetSteamId} grant={grant}: ok={ok} resp={Trunc120(resp)}");
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        public static void AdminSetItemArtist(string adminSteamId, string sku, string artistSteamId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:item-artist:{sku}:{artistSteamId ?? ""}");
+            string url = $"{baseUrl}/api/v1/admin/shop/set-artist?admin_steam_id={Escape(adminSteamId)}&sku={Escape(sku)}&artist_steam_id={Escape(artistSteamId ?? "")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ADMIN] item-artist {sku} -> {artistSteamId}: ok={ok} resp={Trunc120(resp)}");
+                if (ok) FetchShopItems(adminSteamId);
+                callback?.Invoke(ok, resp);
             }));
         }
 
@@ -1346,6 +1813,99 @@ namespace CompetitiveRounds
             string sig = ComputeHmacHex($"admin:{adminSteamId}:review_flag:{flagId}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"flag_id\":\"{Escape(flagId)}\",\"review_action\":\"{Escape(action)}\",\"hmac_signature\":\"{sig}\"}}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/review-flag", body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        // ── Admin: recent-series log + 2v2 resolve/reverse (in-mod series management) ──
+        // One flat entry per 1v1/2v2 series. Cards are pipe-joined strings and every
+        // field is scalar, so the manual parser below is straightforward and dodges
+        // JsonUtility's nested-array failure (learning #25).
+        public class AdminSeriesEntry
+        {
+            public string ladder, series_id, status, created_at, completed_at, score;
+            public int series_number, winner_team, num_players;
+            public bool incomplete;
+            public string dc_name, dc_steam;
+            public string p1_name, p1_steam, p1_cards; public int p1_team;
+            public string p2_name, p2_steam, p2_cards; public int p2_team;
+            public string p3_name, p3_steam, p3_cards; public int p3_team;
+            public string p4_name, p4_steam, p4_cards; public int p4_team;
+        }
+        public static List<AdminSeriesEntry> CachedAdminSeries { get; private set; } = new List<AdminSeriesEntry>();
+
+        public static void FetchAdminRecentSeries(string adminSteamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:list_recent_series:");
+            string url = $"{baseUrl}/api/v1/admin/recent-series?admin_steam_id={adminSteamId}&hmac_signature={sig}&limit=40";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                if (!ok) { Plugin.Log.LogWarning($"[ADMIN] recent-series fetch failed: {body}"); callback?.Invoke(false); return; }
+                try { CachedAdminSeries = ParseAdminSeries(body); callback?.Invoke(true); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[ADMIN] recent-series parse: {ex.Message}"); callback?.Invoke(false); }
+            }));
+        }
+
+        /// <summary>Award ('complete', winnerTeam 1/2) or 'void' an incomplete 2v2 series.
+        /// The canonical binds action + winner so a signature can't be replayed to a
+        /// different outcome. Server accepts admin-HMAC as an alternative to the internal key.</summary>
+        public static void AdminResolveTeamSeries(string adminSteamId, string seriesId, string action, int winnerTeam, Action<bool, string> callback = null)
+        {
+            string tgt = $"{seriesId}:{action}:{winnerTeam}";
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:resolve_team_series:{tgt}");
+            string q = $"action={action}&admin_steam_id={adminSteamId}&hmac_signature={sig}";
+            if (action == "complete") q += $"&winner_team={winnerTeam}";
+            string url = $"{baseUrl}/api/v1/admin/team/series/{seriesId}/resolve?{q}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "{}", (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        /// <summary>Reverse a COMPLETED 2v2 series (undo ratings/gold, cancel it).</summary>
+        public static void AdminReverseTeamSeries(string adminSteamId, string seriesId, string reason, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:reverse_team_series:{seriesId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"series_id\":\"{Escape(seriesId)}\",\"reason\":\"{Escape(reason)}\",\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/team/reverse-series", body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        private static List<AdminSeriesEntry> ParseAdminSeries(string body)
+        {
+            var list = new List<AdminSeriesEntry>();
+            if (string.IsNullOrEmpty(body)) return list;
+            int arrKey = body.IndexOf("\"series\"");
+            if (arrKey < 0) return list;
+            int open = body.IndexOf('[', arrKey);
+            if (open < 0) return list;
+            int close = FindMatchingBracket(body, open);
+            if (close < 0) close = body.Length - 1;
+            int i = open + 1;
+            while (i < close)
+            {
+                int objOpen = body.IndexOf('{', i);
+                if (objOpen < 0 || objOpen >= close) break;
+                int objClose = FindMatchingBrace(body, objOpen);
+                if (objClose < 0 || objClose > close) break;
+                string o = body.Substring(objOpen, objClose - objOpen + 1);
+                list.Add(new AdminSeriesEntry
+                {
+                    ladder = ExtractJsonString(o, "ladder"),
+                    series_id = ExtractJsonString(o, "series_id"),
+                    status = ExtractJsonString(o, "status"),
+                    created_at = ExtractJsonString(o, "created_at"),
+                    completed_at = ExtractJsonString(o, "completed_at"),
+                    score = ExtractJsonString(o, "score"),
+                    series_number = ExtractJsonInt(o, "series_number"),
+                    winner_team = ExtractJsonInt(o, "winner_team"),
+                    num_players = ExtractJsonInt(o, "num_players"),
+                    incomplete = ExtractJsonBool(o, "incomplete"),
+                    dc_name = ExtractJsonString(o, "dc_name"),
+                    dc_steam = ExtractJsonString(o, "dc_steam"),
+                    p1_name = ExtractJsonString(o, "p1_name"), p1_steam = ExtractJsonString(o, "p1_steam"), p1_team = ExtractJsonInt(o, "p1_team"), p1_cards = ExtractJsonString(o, "p1_cards"),
+                    p2_name = ExtractJsonString(o, "p2_name"), p2_steam = ExtractJsonString(o, "p2_steam"), p2_team = ExtractJsonInt(o, "p2_team"), p2_cards = ExtractJsonString(o, "p2_cards"),
+                    p3_name = ExtractJsonString(o, "p3_name"), p3_steam = ExtractJsonString(o, "p3_steam"), p3_team = ExtractJsonInt(o, "p3_team"), p3_cards = ExtractJsonString(o, "p3_cards"),
+                    p4_name = ExtractJsonString(o, "p4_name"), p4_steam = ExtractJsonString(o, "p4_steam"), p4_team = ExtractJsonInt(o, "p4_team"), p4_cards = ExtractJsonString(o, "p4_cards"),
+                });
+                i = objClose + 1;
+            }
+            return list;
         }
 
         // ── Bug report admin viewers ─────────────────────────────────────
@@ -1719,7 +2279,15 @@ namespace CompetitiveRounds
             int localKeysPressed = 0, float localActiveSeconds = 0f,
             // v1.29.1 (#50) — count of 1s windows whose gameplay-key rate was
             // superhuman (macro suspicion). Advisory, not in HMAC.
-            int localMacroSuspectSeconds = 0)
+            int localMacroSuspectSeconds = 0,
+            // v1.30 (item 4) — opponent's per-game combat stats (from their
+            // cr_gstats Photon prop) + the cumulative scoring timeline
+            // ("2:0,2:1,4:1,..." — rounds*2+points per event) for the history
+            // hover graph. All advisory, not in HMAC.
+            int oppBulletsFired = 0, int oppBulletsHit = 0,
+            int oppBlocksActivated = 0, int oppBlocksSuccessful = 0,
+            int oppKeysPressed = 0, float oppActiveSeconds = 0f,
+            string pointTimeline = null)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -1759,6 +2327,14 @@ namespace CompetitiveRounds
             sb.Append($"\"local_keys_pressed\":{localKeysPressed},");
             sb.Append($"\"local_active_seconds\":{localActiveSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)},");
             sb.Append($"\"local_macro_suspect_seconds\":{localMacroSuspectSeconds},");
+            // v1.30 item 4 — opponent per-game stats + scoring timeline (advisory).
+            sb.Append($"\"opp_bullets_fired\":{oppBulletsFired},");
+            sb.Append($"\"opp_bullets_hit\":{oppBulletsHit},");
+            sb.Append($"\"opp_blocks_activated\":{oppBlocksActivated},");
+            sb.Append($"\"opp_blocks_successful\":{oppBlocksSuccessful},");
+            sb.Append($"\"opp_keys_pressed\":{oppKeysPressed},");
+            sb.Append($"\"opp_active_seconds\":{oppActiveSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)},");
+            sb.Append($"\"point_timeline\":\"{Escape(pointTimeline ?? "")}\",");
             string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
@@ -2801,6 +3377,20 @@ namespace CompetitiveRounds
             entry.series_gold_gained = ExtractJsonInt(chunk, "series_gold_gained");
             entry.player_fps_avg = ExtractJsonInt(chunk, "player_fps_avg");
             entry.opponent_fps_avg = ExtractJsonInt(chunk, "opponent_fps_avg");
+            entry.player_bullets_fired = ExtractJsonInt(chunk, "player_bullets_fired");
+            entry.player_bullets_hit = ExtractJsonInt(chunk, "player_bullets_hit");
+            entry.player_blocks_activated = ExtractJsonInt(chunk, "player_blocks_activated");
+            entry.player_blocks_successful = ExtractJsonInt(chunk, "player_blocks_successful");
+            entry.player_keys_pressed = ExtractJsonInt(chunk, "player_keys_pressed");
+            entry.player_active_seconds = ExtractJsonFloat(chunk, "player_active_seconds");
+            entry.opp_bullets_fired = ExtractJsonInt(chunk, "opp_bullets_fired");
+            entry.opp_bullets_hit = ExtractJsonInt(chunk, "opp_bullets_hit");
+            entry.opp_blocks_activated = ExtractJsonInt(chunk, "opp_blocks_activated");
+            entry.opp_blocks_successful = ExtractJsonInt(chunk, "opp_blocks_successful");
+            entry.opp_keys_pressed = ExtractJsonInt(chunk, "opp_keys_pressed");
+            entry.opp_active_seconds = ExtractJsonFloat(chunk, "opp_active_seconds");
+            entry.point_timeline = ExtractJsonString(chunk, "point_timeline");
+            entry.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
             return entry;
         }
 
@@ -2838,6 +3428,7 @@ namespace CompetitiveRounds
                 entry.series_gold_gained = ExtractJsonInt(chunk, "series_gold_gained");
                 entry.player_fps_avg = ExtractJsonInt(chunk, "player_fps_avg");
                 entry.opponent_fps_avg = ExtractJsonInt(chunk, "opponent_fps_avg");
+                entry.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
                 entries.Add(entry);
             }
             return entries;
@@ -3483,29 +4074,47 @@ namespace CompetitiveRounds
 
         /// <summary>Always-on presence heartbeat (v1.29). Pings every 60s while the
         /// game runs — with or without the F5 menu — so the server can count mod
-        /// clients online, and keeps CachedOnlineCount fresh for the queue tab.</summary>
+        /// clients online, and keeps CachedOnlineCount fresh for the queue tab.
+        ///
+        /// v1.30 hardening (bug #51):
+        ///  1. Re-resolve the local Steam id each tick — IdentifyLocalPlayer only
+        ///     ran at init + room joins, so a client that lost the startup
+        ///     Steamworks race and sat in menus never pinged (its /queue/count
+        ///     calls carried no steam_id either — observed live in the api log).
+        ///  2. The web request is dispatched fire-and-forget instead of yielded:
+        ///     one exception inside a yielded GetRequest would have killed this
+        ///     loop for the whole session, silently zeroing the player from the
+        ///     online count.</summary>
         public static IEnumerator PresenceLoop()
         {
             yield return new WaitForSeconds(15f);
             while (true)
             {
-                string sid = MatchTracker.LocalSteamId;
-                if (!string.IsNullOrEmpty(sid) && sid != "unknown")
+                try
                 {
-                    yield return GetRequest(
-                        $"{baseUrl}/api/v1/presence/ping?steam_id={Escape(sid)}",
-                        (success, response) =>
-                        {
-                            if (success)
+                    GameStateWatcher.EnsureIdentityResolved();
+                    string sid = MatchTracker.LocalSteamId;
+                    if (!string.IsNullOrEmpty(sid) && sid != "unknown")
+                    {
+                        Plugin.Instance.StartCoroutine(GetRequest(
+                            $"{baseUrl}/api/v1/presence/ping?steam_id={Escape(sid)}",
+                            (success, response) =>
                             {
-                                int on = ExtractJsonInt(response, "online");
-                                if (on != CachedOnlineCount)
+                                if (success)
                                 {
-                                    CachedOnlineCount = on;
-                                    NativeUI.MarkDirty();
+                                    int on = ExtractJsonInt(response, "online");
+                                    if (on != CachedOnlineCount)
+                                    {
+                                        CachedOnlineCount = on;
+                                        NativeUI.MarkDirty();
+                                    }
                                 }
-                            }
-                        });
+                            }));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[PRESENCE] tick failed: {ex.Message}");
                 }
                 yield return new WaitForSeconds(60f);
             }
@@ -4031,6 +4640,36 @@ namespace CompetitiveRounds
                 // parse — the response JSON has them, but the in-helper parse uses
                 // a fixed callback signature. Refresh in a separate parse below.
             });
+        }
+
+        /// <summary>POST /team/series/continuation. Called by the reporter (lowest Steam
+        /// ID) at game start when still in a cr_ff room with 4 players but no active team
+        /// series — i.e. the previous BO3 completed and they kept playing. Opens a fresh
+        /// active series for the same four + room so games 4+ record as ranked (closes the
+        /// recording gap). Sets ActiveTeamSeriesId on success. Idempotent server-side.</summary>
+        public static void RequestContinuationSeries(
+            string reporterSteam, string roomId, string region,
+            string t1a, string t1b, string t2a, string t2b, Action<bool> callback = null)
+        {
+            string canonical = $"team-continuation:{t1a}:{t1b}:{t2a}:{t2b}:{roomId}:{reporterSteam}";
+            string sig = ComputeHmacHex(canonical);
+            string body = $"{{\"reporter_steam_id\":\"{Escape(reporterSteam)}\",\"room_id\":\"{Escape(roomId)}\"," +
+                          $"\"region\":\"{Escape(region ?? "")}\",\"t1a_steam\":\"{Escape(t1a)}\",\"t1b_steam\":\"{Escape(t1b)}\"," +
+                          $"\"t2a_steam\":\"{Escape(t2a)}\",\"t2b_steam\":\"{Escape(t2b)}\",\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/team/series/continuation", body, (ok, resp) =>
+            {
+                if (ok && !string.IsNullOrEmpty(resp))
+                {
+                    string sid = ExtractJsonString(resp, "series_id");
+                    if (!string.IsNullOrEmpty(sid))
+                    {
+                        ActiveTeamSeriesId = sid;
+                        Plugin.Log.LogInfo($"[2v2-CONTINUATION] active series set to {sid} ({ExtractJsonString(resp, "status")})");
+                    }
+                }
+                else Plugin.Log.LogWarning($"[2v2-CONTINUATION] request failed: {resp}");
+                callback?.Invoke(ok);
+            }));
         }
 
         /// <summary>POST /team/series/{id}/report-dc. Called from
@@ -5012,7 +5651,8 @@ namespace CompetitiveRounds
                                 {
                                     achievement_key = key,
                                     unlocked = unlocked,
-                                    unlocked_at = unlockedAt
+                                    unlocked_at = unlockedAt,
+                                    global_pct = ExtractJsonFloat(parts[i], "global_pct")
                                 };
                             }
                             CachedAchievements = dict;
@@ -5652,6 +6292,12 @@ namespace CompetitiveRounds
             public string photon_region;
             public bool my_ready;
             public bool opp_ready;
+            // Seconds until the sync no-show forfeit fires (negative = past the
+            // deadline; heartbeating players are spared). Drives the big
+            // banner countdown (item 3). Snapshot at fetch time — pair with
+            // fetched_at_realtime for a live countdown between polls.
+            public int ready_seconds_left;
+            public float fetched_at_realtime;
         }
         public static List<ActiveTournamentMatch> CachedMyActiveTournamentMatches = new List<ActiveTournamentMatch>();
         private static float _myActiveMatchesRefreshAt;
@@ -5684,6 +6330,8 @@ namespace CompetitiveRounds
                                 photon_region = ExtractString(raw, "photon_region"),
                                 my_ready = ExtractBool(raw, "my_ready"),
                                 opp_ready = ExtractBool(raw, "opp_ready"),
+                                ready_seconds_left = ExtractInt(raw, "ready_seconds_left", -1),
+                                fetched_at_realtime = Time.realtimeSinceStartup,
                             });
                         }
                         CachedMyActiveTournamentMatches = list;
