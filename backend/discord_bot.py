@@ -101,7 +101,13 @@ seen_series = set()
 async def api_get(path):
     try:
         async with http_session.get(f"{API_BASE_URL}/api/v1{path}") as r:
-            return await r.json() if r.status == 200 else None
+            if r.status == 200:
+                return await r.json()
+            # A non-200 used to return None with no trace — consumers like the
+            # leaderboard publisher then skip their tick SILENTLY, so a broken
+            # endpoint reads as "the bot stopped updating" with empty logs.
+            print(f"API GET {path.split('?')[0]} -> HTTP {r.status}")
+            return None
     except Exception as e:
         print(f"API GET error: {e}"); return None
 
@@ -208,6 +214,7 @@ async def on_ready():
     if not sync_roles_periodic.is_running(): sync_roles_periodic.start()
     if not poll_queue_beacon.is_running(): poll_queue_beacon.start()
     if not poll_team_queue_beacon.is_running(): poll_team_queue_beacon.start()
+    if not poll_ovt_queue_beacon.is_running(): poll_ovt_queue_beacon.start()
     if not poll_team_recent_series.is_running(): poll_team_recent_series.start()
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
     if not poll_new_bans.is_running(): poll_new_bans.start()
@@ -734,6 +741,48 @@ async def poll_team_queue_beacon():
             )
     except Exception as e:
         print(f"Team queue beacon error: {e}")
+
+
+# ── 1v2 Queue Beacon ─────────────────────────────────────────────
+# Same channel as the 1v1/2v2 beacons; distinct emoji + "for 1v2" wording.
+# Own fully-guarded loop (learning #129 — never chain outputs onto another
+# loop's tail). Shows the live lobby fill (X/3) so people can see whether
+# joining now completes the trio.
+seen_ovt_queue_joins = {}  # steam_id -> timestamp
+
+@tasks.loop(seconds=15)
+async def poll_ovt_queue_beacon():
+    if not QUEUE_BEACON_CHANNEL_ID:
+        return
+    try:
+        now = datetime.utcnow()
+        expired = [k for k, v in seen_ovt_queue_joins.items() if (now - v).total_seconds() > 300]
+        for k in expired:
+            del seen_ovt_queue_joins[k]
+
+        data = await api_get("/ovt/queue/recent-joins?seconds=20")
+        if not data or not data.get("joins"):
+            return
+        qsize = data.get("queue_size", 0)
+        for j in data["joins"]:
+            sid = j["steam_id"]
+            if sid in seen_ovt_queue_joins:
+                continue
+            seen_ovt_queue_joins[sid] = now
+            name = j["display_name"] or sid
+            rating = j.get("rating", 1500)
+            channel = bot.get_channel(QUEUE_BEACON_CHANNEL_ID)
+            if not channel:
+                try:
+                    channel = await bot.fetch_channel(QUEUE_BEACON_CHANNEL_ID)
+                except:
+                    continue
+            await channel.send(
+                f"⚔️ **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **1v2** — **{qsize}/3** in the lobby!",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+    except Exception as e:
+        print(f"1v2 queue beacon error: {e}")
 
 
 # ── Bug Report Posting ────────────────────────────────────────────
@@ -1369,9 +1418,16 @@ def _build_lb_embed(entries: list, total_players: int, page: int, total_pages: i
     for e in entries[start:end]:
         emoji = rank_emoji(get_rank_name(e["rating"]))
         lines.append(f"`#{e['rank']:>3}` {emoji} **{e['display_name']}** — {e['rating']} ({e['wins']}W/{e['losses']}L)")
+    # Live relative timestamp INSIDE the embed body ("Updated 3 minutes ago",
+    # ticking client-side). The embed's footer timestamp was the only recency
+    # signal before, and a silently-edited days-old message reads as a dead
+    # board ("posts aren't updating") even when every 10-min edit lands.
+    # now(timezone.utc), not utcnow(): .timestamp() on a naive datetime assumes
+    # LOCAL time — correct only while the container happens to run UTC.
+    updated = f"Updated <t:{int(datetime.now(timezone.utc).timestamp())}:R>\n\n"
     embed = discord.Embed(
         title="🏆 Ranked Leaderboard",
-        description="\n".join(lines) if lines else "(no players)",
+        description=updated + ("\n".join(lines) if lines else "(no players)"),
         color=discord.Color.gold(),
         timestamp=datetime.utcnow(),
     )
@@ -1430,29 +1486,90 @@ async def publish_lb(guild):
     ch = guild.get_channel(LEADERBOARD_CHANNEL_ID)
     if not ch:
         try: ch = await bot.fetch_channel(LEADERBOARD_CHANNEL_ID)
-        except Exception: return
+        except Exception as e:
+            print(f"[LB] channel {LEADERBOARD_CHANNEL_ID} unreachable: {e}")
+            return
     if not ch: return
     data = await api_get(f"/leaderboard?limit={LB_TOTAL_FETCH}&min_matches=1")
-    if not data or not data.get("entries"): return
+    if not data or not data.get("entries"):
+        # api_get already logged the status on non-200; this covers empty payloads.
+        print("[LB] no leaderboard data this tick — skipping")
+        return
     entries = data["entries"]
     total_players = data.get("total_players", 0)
     total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
     embed = _build_lb_embed(entries, total_players, 0, total_pages)
     view = LeaderboardPaginator(entries, total_players)
     view._update_buttons()
-    # Fast path: edit the message we already know about.
+    # Fast path: edit the message we already know about. Logged on success too —
+    # a silently-successful loop is indistinguishable from a dead one in the logs
+    # (learning #83), and "is the board actually being edited?" is exactly the
+    # question this bug keeps asking. 6 lines/hour.
+    #
+    # Bottom-anchor: an EDIT never moves a Discord message and never changes its
+    # "posted" date, so a days-old board being edited every 10 minutes still
+    # reads as dead ("posts aren't posting/updating") to anyone scrolled to the
+    # channel bottom. If anything was posted after our board, delete it and
+    # repost at the bottom — in a dedicated board channel this triggers rarely
+    # (restarts, someone chatting), at most once per tick, and pings no one.
     mid = _lb_message_ids.get(ch.id)
     if mid:
         try:
             msg = await ch.fetch_message(mid)
+            if getattr(ch, "last_message_id", None) not in (None, mid):
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                sent = await ch.send(embed=embed, view=view)
+                _lb_message_ids[ch.id] = sent.id
+                print(f"[LB] board was buried (last_message_id={ch.last_message_id}) — reposted at bottom as mid={sent.id}")
+                return
             await msg.edit(embed=embed, view=view)
+            print(f"[LB] edited board mid={mid}")
             return
-        except Exception:
+        except Exception as e:
+            print(f"[LB] fast-path edit of mid={mid} failed ({e}) — rescanning")
             _lb_message_ids.pop(ch.id, None)  # deleted/unreachable — rediscover
-    async for msg in ch.history(limit=25):
+    # Rescan: adopt the NEWEST board message and DELETE any older duplicates.
+    # Restart-era re-anchors and the pre-v1.30 5-message scan left duplicate
+    # boards behind in some channels; whichever one a viewer (or a pin) is
+    # looking at may not be the one we edit — a permanently "stale" board that
+    # no log line ever explained. Sweeping duplicates makes the visible board
+    # unambiguous, and every outcome now logs.
+    keeper = None
+    dupes = 0
+    async for msg in ch.history(limit=50):
         if msg.author == bot.user and msg.embeds and "Ranked Leaderboard" in (msg.embeds[0].title or ""):
-            _lb_message_ids[ch.id] = msg.id
-            await msg.edit(embed=embed, view=view); return
+            if keeper is None:
+                keeper = msg
+            else:
+                try:
+                    await msg.delete()
+                    dupes += 1
+                except Exception as e:
+                    print(f"[LB] couldn't delete duplicate board mid={msg.id}: {e}")
+    if dupes:
+        print(f"[LB] deleted {dupes} duplicate stale board message(s)")
+    if keeper is not None:
+        if getattr(ch, "last_message_id", None) not in (None, keeper.id):
+            # Same bottom-anchor rule as the fast path.
+            try:
+                await keeper.delete()
+            except Exception:
+                pass
+            sent = await ch.send(embed=embed, view=view)
+            _lb_message_ids[ch.id] = sent.id
+            print(f"[LB] re-anchored board was buried — reposted at bottom as mid={sent.id}")
+            return
+        _lb_message_ids[ch.id] = keeper.id
+        try:
+            await keeper.edit(embed=embed, view=view)
+            print(f"[LB] re-anchored to board mid={keeper.id} and edited")
+        except Exception as e:
+            # Leave the id cached; the next tick retries via the fast path.
+            print(f"[LB] re-anchor edit of mid={keeper.id} failed: {e}")
+        return
     sent = await ch.send(embed=embed, view=view)
     _lb_message_ids[ch.id] = sent.id
     print(f"[LB] posted fresh leaderboard message in {ch.id}")

@@ -714,6 +714,67 @@ class Team2v2LeaderboardResponse(BaseModel):
     last_updated: datetime
 
 
+# ── 1v2 (solo vs duo) ────────────────────────────────────────────────
+class OvtMatchReport(BaseModel):
+    """
+    Submitted by the lowest-Steam-ID participant after a 1v2 game ends.
+    HMAC canonical (10 fields, ':' separated) — NEW format, distinct from the
+    1v1 (7) and 2v2 (11) formats which must never change (hard rule #5):
+      solo:duo_a:duo_b:solo_rounds:duo_rounds:is_ranked:reporter:room_id:winner_side:series_id
+    """
+    series_id: str
+    solo: PlayerMatchData
+    duo_a: PlayerMatchData
+    duo_b: PlayerMatchData
+    solo_rounds_won: int = Field(..., ge=0, le=10)
+    duo_rounds_won: int = Field(..., ge=0, le=10)
+    solo_points_total: int = Field(0, ge=0)
+    duo_points_total: int = Field(0, ge=0)
+    winner_side: int = Field(..., ge=1, le=2)  # 1 = solo, 2 = duo
+    photon_room_id: str | None = Field(None, max_length=64)
+    game_version: str | None = Field(None, max_length=32)
+    region: str | None = Field(None, max_length=8)
+    match_duration: int | None = Field(None, ge=0)
+    started_at: datetime | None = None
+    hmac_signature: str | None = Field(None, max_length=128)
+    is_ranked: bool = False  # unscored at launch
+    reported_by_steam_id: str = Field(..., max_length=20)
+    solo_fps: int | None = Field(None, ge=0, le=10000)
+    duo_a_fps: int | None = Field(None, ge=0, le=10000)
+    duo_b_fps: int | None = Field(None, ge=0, le=10000)
+
+
+class OvtMatchResponse(BaseModel):
+    match_id: UUID
+    series_id: UUID
+    series_status: str          # "active" | "completed"
+    series_score: str           # solo-duo, from the reporter's own side perspective
+    winner_side: int
+    message: str = "1v2 match recorded"
+
+
+class Ovt1v2LeaderboardEntry(BaseModel):
+    rank: int
+    steam_id: str
+    display_name: str
+    games_played: int
+    wins: int
+    losses: int
+    win_rate: float
+    solo_games: int
+    duo_games: int
+    level: int = 0
+    title: str | None = None
+    title_color: str | None = None
+
+
+class Ovt1v2LeaderboardResponse(BaseModel):
+    entries: list[Ovt1v2LeaderboardEntry]
+    total_players: int
+    last_updated: datetime
+    is_ranked: bool = False  # tells the client to show "unranked" labeling
+
+
 class TeamStatsResponse(BaseModel):
     """Per-player 2v2 stats. Surfaced on the My Stats tab beside the 1v1 figures."""
     steam_id: str

@@ -103,6 +103,28 @@ namespace CompetitiveRounds
             // July 12 round 3: first community-artist cosmetics (lopidav / Nix).
             new CosmeticDef { Sku = "face_detail_sprout",   DisplayName = "Sprout",        Slot = CharacterItemType.Detail, PngFile = "detail_sprout.png",   Scale = 1.1f, Offset = new Vector2(0f, 0.55f) },
             new CosmeticDef { Sku = "face_detail_earmuffs", DisplayName = "Star Earmuffs", Slot = CharacterItemType.Detail, PngFile = "detail_earmuffs.png", Scale = 1.1f, Offset = new Vector2(0f, 0.20f) },
+            // July 13 batch: house cosmetics round 2 (procedural art), including the
+            // first two ANIMATED items (storm halo / flame crest — 4 frames @ 8fps,
+            // exercising the __fN frame pipeline end to end).
+            new CosmeticDef { Sku = "face_eyes_crazed",          DisplayName = "Crazed Eyes",    Slot = CharacterItemType.Eyes,   PngFile = "eyes_crazed.png",           Scale = 1.35f, Offset = new Vector2(0f, 0.10f) },
+            new CosmeticDef { Sku = "face_eyes_yinyang",         DisplayName = "Yin & Yang",     Slot = CharacterItemType.Eyes,   PngFile = "eyes_yinyang.png",          Scale = 1.35f, Offset = new Vector2(0f, 0.10f) },
+            new CosmeticDef { Sku = "face_detail_devil_horns",   DisplayName = "Devil Horns",    Slot = CharacterItemType.Detail, PngFile = "detail_devil_horns.png",    Scale = 1.1f, Offset = new Vector2(0f, 0.45f) },
+            new CosmeticDef { Sku = "face_detail_alien_antennae",DisplayName = "Alien Antennae", Slot = CharacterItemType.Detail, PngFile = "detail_alien_antennae.png", Scale = 1.1f, Offset = new Vector2(0f, 0.55f) },
+            new CosmeticDef { Sku = "face_detail_storm_halo",    DisplayName = "Storm Halo",     Slot = CharacterItemType.Detail, PngFile = "detail_storm_halo.png",     Scale = 1.2f, Offset = new Vector2(0f, 0.80f), Fps = 8f },
+            new CosmeticDef { Sku = "face_detail_flame_crest",   DisplayName = "Flame Crest",    Slot = CharacterItemType.Detail, PngFile = "detail_flame_crest.png",    Scale = 1.1f, Offset = new Vector2(0f, 0.60f), Fps = 8f },
+            // July 13 round 2: source art preprocessed for the pipeline (painted
+            // checkerboard backdrop keyed out + enclosed holes punched); the
+            // wings wrap the body, hence the oversized scale.
+            new CosmeticDef { Sku = "face_detail_demon_wings",   DisplayName = "Demon Wings",    Slot = CharacterItemType.Detail, PngFile = "detail_demon_wings.png",    Scale = 2.1f, Offset = new Vector2(0f, 0.05f) },
+            // July 13 round 2 (cont.): 7-item house batch, two more animated
+            // (dark aura / energy orbs, 4 frames @ 7fps).
+            new CosmeticDef { Sku = "face_detail_thorn_crown",   DisplayName = "Thorn Crown",      Slot = CharacterItemType.Detail, PngFile = "detail_thorn_crown.png",   Scale = 1.0f, Offset = new Vector2(0f, 0.00f) },
+            new CosmeticDef { Sku = "face_detail_sun_halo",      DisplayName = "Sunburst Halo",    Slot = CharacterItemType.Detail, PngFile = "detail_sun_halo.png",      Scale = 1.1f, Offset = new Vector2(0f, 0.10f) },
+            new CosmeticDef { Sku = "face_detail_knight_helm",   DisplayName = "Knight Great-Helm",Slot = CharacterItemType.Detail, PngFile = "detail_knight_helm.png",   Scale = 1.55f, Offset = new Vector2(0f, 0.05f) },
+            new CosmeticDef { Sku = "face_detail_mini_flags",    DisplayName = "Rally Flags",      Slot = CharacterItemType.Detail, PngFile = "detail_mini_flags.png",    Scale = 1.0f, Offset = new Vector2(0f, 0.15f) },
+            new CosmeticDef { Sku = "face_detail_dark_aura",     DisplayName = "Dark Aura",        Slot = CharacterItemType.Detail, PngFile = "detail_dark_aura.png",     Scale = 1.45f, Offset = new Vector2(0f, 0.05f), Fps = 7f },
+            new CosmeticDef { Sku = "face_detail_energy_orbs",   DisplayName = "Energy Orbs",      Slot = CharacterItemType.Detail, PngFile = "detail_energy_orbs.png",   Scale = 1.0f, Offset = new Vector2(0f, 0.05f), Fps = 7f },
+            new CosmeticDef { Sku = "face_detail_tattered_cape", DisplayName = "Tattered Cape",    Slot = CharacterItemType.Detail, PngFile = "detail_tattered_cape.png", Scale = 1.7f, Offset = new Vector2(0f, -0.10f) },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();
@@ -117,6 +139,18 @@ namespace CompetitiveRounds
             Sprite s;
             return _spriteBySku.TryGetValue(sku, out s) ? s : null;
         }
+
+        // Bug #74: animated items were static in the shop thumbnail. Frames +
+        // fps per sku so NativeUI can cycle the uGUI Image sprite in its Tick.
+        private static readonly Dictionary<string, (Sprite[] frames, float fps)> _shopFramesBySku =
+            new Dictionary<string, (Sprite[], float)>(StringComparer.OrdinalIgnoreCase);
+        public static Sprite[] GetShopFrames(string sku, out float fps)
+        {
+            fps = 0f;
+            if (string.IsNullOrEmpty(sku)) return null;
+            if (_shopFramesBySku.TryGetValue(sku, out var e)) { fps = e.fps; return e.frames; }
+            return null;
+        }
         private static bool initialized;
 
         /// <summary>Build sprites + hidden template GameObjects. Called from
@@ -127,28 +161,64 @@ namespace CompetitiveRounds
         {
             if (initialized) return;
             initialized = true;
-            int built = 0;
-            string dir = "";
             try
             {
                 string dllDir = System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
-                dir = System.IO.Path.Combine(dllDir, "cosmetics");
+                _cosmeticsDir = System.IO.Path.Combine(dllDir, "cosmetics");
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[COSMETIC] plugin dir resolve failed: {ex.Message}");
                 return;
             }
+            int missing = BuildFromDisk();
+#if !THUNDERSTORE
+            // Bug #71 (lopidav): GitHub-release installs only ever receive the DLL —
+            // the auto-updater copies one file — so the cosmetics/ folder never
+            // arrives and EVERY item logs "missing art ... disabled this session"
+            // (his log: "Initialized 0/8"). Items he BOUGHT could never appear in
+            // the character editor. Same self-bootstrap as CardImageLoader: fetch
+            // cosmetics.zip from the LATEST release (the zip is re-attached on
+            // every /ship, so latest-zip always matches or supersedes the
+            // auto-updated DLL's catalog; extra unknown art is harmless — the
+            // catalog drives). Download happens on a worker thread; the template
+            // REBUILD must run on the main thread (GameObject creation), so a
+            // coroutine waits for the worker and re-runs BuildFromDisk.
+            if (missing > 0 && Plugin.Instance != null)
+            {
+                Plugin.Log.LogInfo($"[COSMETIC] {missing} art file(s) missing — fetching cosmetics.zip from the latest release in background.");
+                MaybeStartArtDownload();
+                Plugin.Instance.StartCoroutine(RebuildAfterDownload());
+            }
+#else
+            if (missing > 0)
+                Plugin.Log.LogWarning($"[COSMETIC] {missing} art file(s) missing at {_cosmeticsDir} — reinstall via the mod manager (Thunderstore bundles ship the art).");
+#endif
+        }
+
+        private static string _cosmeticsDir = "";
+
+        /// <summary>Build sprites + templates for every catalog def whose art is on
+        /// disk and which hasn't been built yet. Re-runnable (the #71 bootstrap
+        /// calls it again after the art download); already-built defs are skipped,
+        /// so IDs and existing template references stay stable. Returns how many
+        /// defs are still missing their art.</summary>
+        private static int BuildFromDisk()
+        {
+            int built = 0, missing = 0;
+            string dir = _cosmeticsDir;
 
             for (int i = 0; i < Catalog.Length; i++)
             {
                 var def = Catalog[i];
                 def.Id = CUSTOM_ID_BASE + i;
+                if (def.Template != null) continue;  // built on a previous pass
                 try
                 {
                     string path = System.IO.Path.Combine(dir, def.PngFile);
                     if (!System.IO.File.Exists(path))
                     {
+                        missing++;
                         Plugin.Log.LogWarning($"[COSMETIC] missing art {def.PngFile} — '{def.DisplayName}' disabled this session");
                         continue;
                     }
@@ -180,6 +250,7 @@ namespace CompetitiveRounds
                         var cyc = go.AddComponent<CosmeticFrameCycler>();
                         cyc.frames = frames.ToArray();
                         cyc.fps = def.Fps;
+                        _shopFramesBySku[def.Sku] = (frames.ToArray(), def.Fps);
                         Plugin.Log.LogInfo($"[COSMETIC] '{def.DisplayName}' animated: {frames.Count} frames @ {def.Fps:F0}fps");
                     }
                     // Rendering constants per the reference implementation: the player
@@ -219,8 +290,84 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning($"[COSMETIC] build failed for {def.Sku}: {ex.Message}");
                 }
             }
-            Plugin.Log.LogInfo($"[COSMETIC] Initialized {built}/{Catalog.Length} custom cosmetics (id base {CUSTOM_ID_BASE})");
+            Plugin.Log.LogInfo($"[COSMETIC] Initialized {built}/{Catalog.Length} custom cosmetics this pass (id base {CUSTOM_ID_BASE}, {missing} missing art)");
+            return missing;
         }
+
+#if !THUNDERSTORE
+        // ── Bug #71: cosmetics art self-bootstrap (mirrors CardImageLoader) ──
+        private const string COSMETICS_ZIP_URL =
+            "https://github.com/SidNDeed/SidsCompetitiveRounds/releases/latest/download/cosmetics.zip";
+        private static int _artDownloadStarted;   // 0 = not started; 1 = in flight/done
+        private static volatile bool _artDownloadDone;
+        private static volatile bool _artDownloadOk;
+
+        private static void MaybeStartArtDownload()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _artDownloadStarted, 1) != 0) return;
+            var t = new System.Threading.Thread(ArtDownloadWorker) { IsBackground = true, Name = "CR_CosmeticArtDownload" };
+            t.Start();
+        }
+
+        private static void ArtDownloadWorker()
+        {
+            string tmpZip = null;
+            try
+            {
+                System.IO.Directory.CreateDirectory(_cosmeticsDir);
+                tmpZip = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(_cosmeticsDir), "cosmetics-download.zip");
+                Plugin.Log?.LogInfo($"[COSMETIC] downloading {COSMETICS_ZIP_URL} → {tmpZip}");
+                try { System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12; } catch { }
+                using (var wc = new System.Net.WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "CompetitiveRounds-Mod/" + Plugin.ModVersion);
+                    wc.DownloadFile(COSMETICS_ZIP_URL, tmpZip);
+                }
+                int extracted = 0;
+                using (var fs = System.IO.File.OpenRead(tmpZip))
+                using (var zip = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Read))
+                {
+                    foreach (var entry in zip.Entries)
+                    {
+                        if (string.IsNullOrEmpty(entry.Name)) continue;
+                        if (!entry.Name.ToLowerInvariant().EndsWith(".png")) continue;
+                        string outPath = System.IO.Path.Combine(_cosmeticsDir, entry.Name);
+                        try
+                        {
+                            using (var es = entry.Open())
+                            using (var os = System.IO.File.Create(outPath))
+                                es.CopyTo(os);
+                            extracted++;
+                        }
+                        catch (Exception exEntry)
+                        {
+                            Plugin.Log?.LogWarning($"[COSMETIC] extract failed for {entry.Name}: {exEntry.Message}");
+                        }
+                    }
+                }
+                Plugin.Log?.LogInfo($"[COSMETIC] art bootstrap extracted {extracted} file(s)");
+                _artDownloadOk = extracted > 0;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogWarning($"[COSMETIC] art bootstrap failed: {ex.Message} — items without art stay disabled this session");
+            }
+            finally
+            {
+                try { if (tmpZip != null && System.IO.File.Exists(tmpZip)) System.IO.File.Delete(tmpZip); } catch { }
+                _artDownloadDone = true;
+            }
+        }
+
+        private static System.Collections.IEnumerator RebuildAfterDownload()
+        {
+            while (!_artDownloadDone) yield return new WaitForSeconds(1f);
+            if (!_artDownloadOk) yield break;
+            int stillMissing = BuildFromDisk();   // main thread — safe to create templates
+            Plugin.Log.LogInfo($"[COSMETIC] post-bootstrap rebuild complete ({stillMissing} still missing)");
+            try { NativeUI.MarkDirty(); } catch { }
+        }
+#endif
 
         private static Sprite LoadCosmeticSprite(string path)
         {

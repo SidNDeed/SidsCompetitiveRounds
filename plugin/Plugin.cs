@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.30.1";
+        public const string ModVersion = "1.31.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -119,6 +119,23 @@ namespace CompetitiveRounds
         {
             if (pending2v2Slot >= 0) Log.LogInfo("[2v2] Pending slot cleared");
             pending2v2Slot = -1;
+        }
+
+        // 1v2 slot 0-2 assigned at ovt queue lock: 0 = solo (team 0), 1/2 = duo
+        // (team 1, in the server's duo_a/duo_b order so all three clients agree).
+        // Same lifecycle as Pending2v2Slot: set on ready_join, cleared on queue
+        // leave / poll expiry / series end. Read by the CreatePlayer override.
+        private static int pendingOvtSlot = -1;
+        public static int PendingOvtSlot => pendingOvtSlot;
+        public static void SetPendingOvtSlot(int slot)
+        {
+            pendingOvtSlot = slot;
+            Log.LogInfo($"[1v2] Pending slot set: {slot} ({(slot == 0 ? "solo/team0" : "duo/team1")})");
+        }
+        public static void ClearPendingOvtSlot()
+        {
+            if (pendingOvtSlot >= 0) Log.LogInfo("[1v2] Pending slot cleared");
+            pendingOvtSlot = -1;
         }
 
         private void Awake()
@@ -446,6 +463,13 @@ namespace CompetitiveRounds
                     return;
                 }
                 Plugin.Log.LogWarning($"[QUEUE-JOINER] Timed out waiting for room join after {joinAttempts} attempts (state={state}, target='{targetRoom}'), resetting all queue state");
+                // 1v2: a failed join must dissolve the lock server-side, or the
+                // three 'ready_join' rows + the 'active' series persist as a
+                // husk that re-feeds this dead room on every future Join click.
+                // OvtLeaveQueue also resets the local lock state (status,
+                // lineup, pending slot) that would otherwise leave the tab
+                // showing "Match found! Joining…" over a live Join button.
+                bool wasOvt = (targetRoom ?? "").StartsWith("ovt_") || (pendingRoom ?? "").StartsWith("ovt_");
                 Plugin.ClearPendingRoom();
                 joinInitiated = false;
                 state = JoinState.Idle;
@@ -456,7 +480,15 @@ namespace CompetitiveRounds
                 // We may have set this when state went to LeavingRoom — clear so a
                 // future legitimate leave doesn't mistakenly cancel match-result counting.
                 try { GameStateWatcher.LeavingForRanked = false; } catch { }
-                CompetitiveUI.ShowNotification("Failed to join ranked room — please requeue", new Color(1f, 0.4f, 0.4f), 8f);
+                if (wasOvt)
+                {
+                    try { ApiClient.OvtLeaveQueue(); } catch { }
+                    CompetitiveUI.ShowNotification("Failed to join the 1v2 room — lobby dissolved, please requeue", new Color(1f, 0.4f, 0.4f), 8f);
+                }
+                else
+                {
+                    CompetitiveUI.ShowNotification("Failed to join ranked room — please requeue", new Color(1f, 0.4f, 0.4f), 8f);
+                }
                 return;
             }
 
@@ -580,6 +612,10 @@ namespace CompetitiveRounds
                         // friendly-fire-on so a Harmony patch can read it during
                         // ProjectileCollision and let teammate shots through.
                         bool is2v2 = capturedRoom != null && capturedRoom.StartsWith("team_");
+                        // 1v2: ovt_ rooms hold 3. Review CRITICAL — without this the
+                        // room was created MaxPlayers=2 (the 1v1 default) and the
+                        // third player could never join, so 1v2 could never start.
+                        bool is1v2 = capturedRoom != null && capturedRoom.StartsWith("ovt_");
                         var roomProps = new ExitGames.Client.Photon.Hashtable
                         {
                             { "C2", capturedRoom }
@@ -587,7 +623,7 @@ namespace CompetitiveRounds
                         if (is2v2) roomProps["cr_ff"] = true;
                         var roomOptions = new Photon.Realtime.RoomOptions
                         {
-                            MaxPlayers = (byte)(is2v2 ? 4 : 2),
+                            MaxPlayers = (byte)(is2v2 ? 4 : (is1v2 ? 3 : 2)),
                             IsOpen = true,
                             IsVisible = true,
                             CustomRoomProperties = roomProps,
@@ -638,16 +674,22 @@ namespace CompetitiveRounds
             if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
                 ApiClient.LeaveQueue(steamId);
 
-            // 2v2: bypass ROUNDS' character-select press-any-key gate. Vanilla
-            // PlayerAssigner.Update polls input devices and only fires CreatePlayer
-            // when the user mashes a key — but in 2v2 the character-select widget
-            // container only has 2 child slots, so players assigned to slots 2/3
-            // don't see a prompt and never trigger their local CreatePlayer. Result:
-            // 2 of 4 spawn correctly, the other 2 sit on the menu while the room
-            // sits empty from their perspective. Auto-fire CreatePlayer ourselves
-            // (which routes through PlayerAssigner_CreatePlayer_2v2_Patch and uses
-            // the server-issued slot 0-3).
-            if (Plugin.Pending2v2Slot >= 0)
+            // The 1v2 queue phase ends the moment the room join lands — reset
+            // the status so the tab doesn't keep saying "Match found! Joining…"
+            // after the series (the lock lineup stays cached for the HUD).
+            if (roomName != null && roomName.StartsWith("ovt_"))
+                ApiClient.OvtQueueStatus = "";
+
+            // 2v2 / 1v2: bypass ROUNDS' character-select press-any-key gate.
+            // Vanilla PlayerAssigner.Update polls input devices and only fires
+            // CreatePlayer when the user mashes a key — but the character-select
+            // widget container only has 2 child slots, so players assigned to
+            // slots 2/3 don't see a prompt and never trigger their local
+            // CreatePlayer. Result: 2 of N spawn correctly, the rest sit on the
+            // menu while the room sits empty from their perspective. Auto-fire
+            // CreatePlayer ourselves (which routes through the CreatePlayer
+            // override and uses the server-issued slot).
+            if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0)
                 StartCoroutine(Auto2v2SpawnCoroutine());
         }
 
@@ -660,9 +702,9 @@ namespace CompetitiveRounds
             int tickLogCount = 0;
             while (Time.realtimeSinceStartup < deadline)
             {
-                if (Plugin.Pending2v2Slot < 0)
+                if (Plugin.Pending2v2Slot < 0 && Plugin.PendingOvtSlot < 0)
                 {
-                    Plugin.Log.LogInfo("[2v2] Auto-spawn aborted — Pending2v2Slot cleared mid-wait");
+                    Plugin.Log.LogInfo("[2v2] Auto-spawn aborted — pending slot cleared mid-wait");
                     yield break;
                 }
                 if (!PhotonNetwork.InRoom)
@@ -680,7 +722,7 @@ namespace CompetitiveRounds
                             device = InputManager.ActiveDevices[0];
                     }
                     catch { }
-                    Plugin.Log.LogInfo($"[2v2] Auto-spawning local player (slot={Plugin.Pending2v2Slot}, device={(device != null ? "keyboard" : "null")})");
+                    Plugin.Log.LogInfo($"[2v2] Auto-spawning local player (slot={Diag2v2.PendingSlot()}, device={(device != null ? "keyboard" : "null")})");
                     bool ok = false;
                     try { pa.CreatePlayer(device, false); ok = true; }
                     catch (Exception ex) { Plugin.Log.LogError($"[2v2] Auto-spawn CreatePlayer failed: {ex.Message}"); }
@@ -788,6 +830,16 @@ namespace CompetitiveRounds
             if (ApiClient.IsTeamQueuePolling)
             {
                 try { ApiClient.UpdateTeamQueuePoll(GameStateWatcher.LocalSteamId); }
+                catch { }
+            }
+
+            // Poll 1v2 queue if searching. Must run here (not just from the
+            // F5 tab ticker) — a player who queues and closes the menu would
+            // otherwise never receive ready_join, and their stale row would
+            // strand the other two at 2/3 until the server prunes it.
+            if (ApiClient.IsOvtQueuePolling)
+            {
+                try { ApiClient.UpdateOvtQueuePoll(false); }
                 catch { }
             }
 
@@ -1046,11 +1098,18 @@ namespace CompetitiveRounds
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return;
                 var props = PhotonNetwork.CurrentRoom.CustomProperties;
-                if (props == null || !props.ContainsKey("cr_ff")) return;
-                __instance.playersNeededToStart = 4;
+                string rn = PhotonNetwork.CurrentRoom.Name ?? "";
+                // 1v2 (ovt_) rooms need 3; 2v2 (cr_ff) rooms need 4. Same engine
+                // path — the CharacterSelectionMenu slot-overflow guard below
+                // already tolerates the extra players generically.
+                bool isOvt = rn.StartsWith("ovt_");
+                bool isFf = props != null && props.ContainsKey("cr_ff");
+                if (!isOvt && !isFf) return;
+                int need = isOvt ? 3 : 4;
+                __instance.playersNeededToStart = need;
                 if (PlayerAssigner.instance != null)
-                    PlayerAssigner.instance.maxPlayers = 4;
-                Plugin.Log.LogInfo("[2v2] Forced playersNeededToStart=4 (cr_ff room detected)");
+                    PlayerAssigner.instance.maxPlayers = need;
+                Plugin.Log.LogInfo($"[MODE] Forced playersNeededToStart={need} ({(isOvt ? "ovt_ 1v2" : "cr_ff 2v2")} room)");
             }
             catch (Exception ex) { Plugin.Log.LogError($"[2v2] OnEnable patch error: {ex.Message}"); }
         }
@@ -1174,15 +1233,21 @@ namespace CompetitiveRounds
             }
             _suppressEpisodeStart = -1f;  // in a room (or offline) — episode over
 
-            if (Plugin.Pending2v2Slot < 0) return true;            // not in 2v2 mode
             if (PhotonNetwork.OfflineMode) return true;
             if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return true;
+            // Strict mode-matching: an ovt_ room only honors the ovt slot and a
+            // cr_ff room only honors the 2v2 slot, so a stale pending slot from
+            // the OTHER mode can never mis-map teams.
             var roomProps = PhotonNetwork.CurrentRoom.CustomProperties;
-            if (roomProps == null || !roomProps.ContainsKey("cr_ff")) return true;
+            bool isOvtRoom = (PhotonNetwork.CurrentRoom.Name ?? "").StartsWith("ovt_");
+            bool isFfRoom = roomProps != null && roomProps.ContainsKey("cr_ff");
+            int slot = isOvtRoom ? Plugin.PendingOvtSlot
+                     : isFfRoom ? Plugin.Pending2v2Slot
+                     : -1;
+            if (slot < 0) return true;                              // not a team-mode spawn
             if (__instance.hasCreatedLocalPlayer) return false;     // already done
 
-            int slot = Plugin.Pending2v2Slot;
-            int teamID = slot / 2;        // 0 for slots 0,1; 1 for slots 2,3
+            int teamID = Diag2v2.SlotToTeam(slot);   // 2v2: slot/2 · 1v2: solo=0, duo=1
             int playerID = slot;
 
             try
@@ -1281,7 +1346,7 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] PlayerSkin re-bake failed: {ex.Message}"); }
 
-                Plugin.Log.LogInfo($"[2v2] CreatePlayer override: slot={slot} team={teamID} pid={playerID}");
+                Plugin.Log.LogInfo($"[{(isOvtRoom ? "1v2" : "2v2")}] CreatePlayer override: slot={slot} team={teamID} pid={playerID}");
                 return false;  // skip vanilla
             }
             catch (Exception ex)
@@ -1301,19 +1366,66 @@ namespace CompetitiveRounds
 
     internal static class Diag2v2
     {
+        // "Active" = any multi-player team-mode context: 2v2 (cr_ff room prop /
+        // pending 2v2 slot) OR 1v2 (ovt_ room / pending ovt slot). Every patch
+        // gated here is join/spawn/skin/crown machinery that a 3-player ovt
+        // room needs exactly like a 4-player cr_ff room — vanilla is 2-player-
+        // shaped in all of those places. Mode differences (player count, slot→
+        // team mapping) go through PlayersNeeded()/SlotToTeam() below.
         public static bool IsActive()
         {
-            if (Plugin.Pending2v2Slot >= 0) return true;
+            if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0) return true;
             try
             {
                 if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null)
                 {
                     var p = PhotonNetwork.CurrentRoom.CustomProperties;
                     if (p != null && p.ContainsKey("cr_ff")) return true;
+                    if ((PhotonNetwork.CurrentRoom.Name ?? "").StartsWith("ovt_")) return true;
                 }
             }
             catch { }
             return false;
+        }
+
+        /// <summary>True in the 1v2 context. When in a room, the room's name is
+        /// authoritative (a stale pending slot from the OTHER mode must never
+        /// flip the mapping); outside a room, the pending ovt slot covers the
+        /// pre-join window.</summary>
+        public static bool IsOvt()
+        {
+            try
+            {
+                if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null)
+                    return (PhotonNetwork.CurrentRoom.Name ?? "").StartsWith("ovt_");
+            }
+            catch { }
+            return Plugin.PendingOvtSlot >= 0;
+        }
+
+        /// <summary>Server-issued slot → ROUNDS TeamID. 2v2: slots 0,1 = team 0,
+        /// slots 2,3 = team 1. 1v2: slot 0 = solo = team 0, slots 1,2 = duo =
+        /// team 1 (vanilla two-team scoring carries straight through).</summary>
+        public static int SlotToTeam(int slot)
+        {
+            return IsOvt() ? (slot == 0 ? 0 : 1) : slot / 2;
+        }
+
+        /// <summary>Players required for the mode's game to start: 3 in an ovt_
+        /// room, 4 in a cr_ff room.</summary>
+        public static int PlayersNeeded()
+        {
+            return IsOvt() ? 3 : 4;
+        }
+
+        /// <summary>The local pending slot regardless of mode (-1 when neither
+        /// queue has issued one). 1v2 wins when both are somehow set — the ovt
+        /// slot is always the more recent lock (2v2 slots persist through
+        /// series end only until cleared).</summary>
+        public static int PendingSlot()
+        {
+            if (Plugin.PendingOvtSlot >= 0) return Plugin.PendingOvtSlot;
+            return Plugin.Pending2v2Slot;
         }
 
         public static string ShortStack()
@@ -1397,6 +1509,17 @@ namespace CompetitiveRounds
             // remaining client reports the DC to the server. Server awards the
             // current match to the non-DC team (if total points >= 2) and starts
             // the 5-min sticky-team requeue grace window.
+            //
+            // STRICTLY 2v2: the widened IsActive() also fires this callback in
+            // ovt_ rooms, where ActiveTeamSeriesId can be a STALE id from an
+            // earlier 2v2 sitting (it's only cleared on the reporter's client
+            // at series completion). A rage-quit in a 1v2 game would otherwise
+            // post report-dc against that old 2v2 series — whose membership
+            // checks PASS when the trio overlaps the old roster — applying
+            // real 2v2 Glicko/gold from a 1v2 game's points. 1v2 has no DC
+            // path yet by design (unscored beta; the match report handles the
+            // recorded outcome).
+            if (Diag2v2.IsOvt()) return;
             try
             {
                 if (p == null) return;
@@ -1473,7 +1596,7 @@ namespace CompetitiveRounds
         public void OnConnectedToMaster() { }
         public void OnDisconnected(Photon.Realtime.DisconnectCause cause)
         {
-            if (Plugin.Pending2v2Slot < 0) return;
+            if (Diag2v2.PendingSlot() < 0) return;
             try { Plugin.Log.LogWarning($"[2v2-DIAG] Disconnected: cause={cause} stack={Diag2v2.ShortStack()}"); }
             catch { }
         }
@@ -1485,11 +1608,30 @@ namespace CompetitiveRounds
         public void OnCreatedRoom() { }
         public void OnCreateRoomFailed(short returnCode, string message)
         {
-            if (Plugin.Pending2v2Slot < 0) return;
+            if (Diag2v2.PendingSlot() < 0) return;
             Plugin.Log.LogWarning($"[2v2-DIAG] CreateRoomFailed: code={returnCode} msg={message}");
         }
         public void OnJoinedRoom()
         {
+            // Stale-slot hygiene: a pending team-mode slot only makes sense for
+            // the room it was issued for. Joining any OTHER kind of room means
+            // that pending join was abandoned — without this clear, the stale
+            // slot keeps Diag2v2.IsActive() true in casual/1v1 rooms, which
+            // activates the slot→team skin mapping there (both players would
+            // bake skin 0). The slot is published pre-join, so the MATCHING
+            // room always arrives with it intact and never hits this branch.
+            try
+            {
+                string rn = PhotonNetwork.CurrentRoom?.Name ?? "";
+                var rpj = PhotonNetwork.CurrentRoom?.CustomProperties;
+                bool ffRoom = rpj != null && rpj.ContainsKey("cr_ff");
+                if (Plugin.Pending2v2Slot >= 0 && !ffRoom && !rn.StartsWith("team_"))
+                    Plugin.ClearPending2v2Slot();
+                if (Plugin.PendingOvtSlot >= 0 && !rn.StartsWith("ovt_"))
+                    Plugin.ClearPendingOvtSlot();
+            }
+            catch { }
+
             // Competitive-wide setup runs for any mod-issued ranked room
             // (1v1 ranked / 2v2 / sync tournament). Cosmetic late-prop reapply
             // helps every flow — opponents' custom colors / trails sometimes
@@ -1686,7 +1828,10 @@ namespace CompetitiveRounds
             float deadline = Time.realtimeSinceStartup + 15f;
             while (Time.realtimeSinceStartup < deadline)
             {
-                if (Plugin.Pending2v2Slot < 0) yield break;
+                // 1v2 needs this too: pid 2 (duo_b) overflows the vanilla
+                // 2-slot cardBars array exactly like 2v2's pids 2/3. Extending
+                // to 4 covers both modes (the 4th bar just stays unused in ovt).
+                if (Diag2v2.PendingSlot() < 0) yield break;
                 if (!PhotonNetwork.InRoom) yield break;
                 var cbh = CardBarHandler.instance;
                 if (cbh == null || cbh.cardBars == null || cbh.cardBars.Length < 2)
@@ -1695,8 +1840,9 @@ namespace CompetitiveRounds
                     continue;
                 }
 
-                // Already extended to 4? bail.
-                if (cbh.cardBars.Length >= 4)
+                // Already extended for this mode? bail (3 bars cover 1v2's
+                // pids 0-2; 4 cover 2v2's 0-3).
+                if (cbh.cardBars.Length >= (Diag2v2.IsOvt() ? 3 : 4))
                 {
                     Plugin.Log.LogInfo($"[2v2] CardBars already {cbh.cardBars.Length} — no extension needed");
                     yield break;
@@ -1716,12 +1862,34 @@ namespace CompetitiveRounds
                         yield break;
                     }
 
-                    // Prefab only has 2 — clone each with a vertical offset.
+                    // Prefab only has 2 — clone with a vertical offset.
                     var bar0 = cbh.cardBars[0];
                     var bar1 = cbh.cardBars[1];
                     if (bar0 == null || bar1 == null)
                     {
                         Plugin.Log.LogWarning("[2v2] CardBars: original bar0/bar1 is null, skipping extension");
+                        yield break;
+                    }
+
+                    // The array is indexed by PlayerID at vanilla's AddCard call
+                    // site, so its ORDER must mirror the mode's slot→team map.
+                    // 1v2 (pid 0 = solo/left, pids 1,2 = duo/right): one clone of
+                    // the RIGHT bar — [bar0, bar1, clone1]. The 2v2-shaped order
+                    // would put duo_a's (pid 1) cards in a left-side clone under
+                    // the solo's bar, misreading as "solo + A vs B".
+                    if (Diag2v2.IsOvt())
+                    {
+                        var cloneObj = UnityEngine.Object.Instantiate(bar1.gameObject, bar1.transform.parent);
+                        cloneObj.name = bar1.gameObject.name + "_1v2_duoB";
+                        OffsetBar(cloneObj.transform, new Vector2(0f, -180f));
+                        var cloneCB = cloneObj.GetComponent<CardBar>();
+                        if (cloneCB == null)
+                        {
+                            Plugin.Log.LogWarning("[1v2] CardBars: clone missing CardBar component");
+                            yield break;
+                        }
+                        cbh.cardBars = new CardBar[] { bar0, bar1, cloneCB };
+                        Plugin.Log.LogInfo("[1v2] CardBars: extended to 3 entries [solo_left, duoA_right, duoB_right_low]");
                         yield break;
                     }
 
@@ -1767,21 +1935,22 @@ namespace CompetitiveRounds
             float deadline = Time.realtimeSinceStartup + 30f;
             while (Time.realtimeSinceStartup < deadline)
             {
-                if (Plugin.Pending2v2Slot < 0) yield break;
+                if (Diag2v2.PendingSlot() < 0) yield break;
                 if (!PhotonNetwork.InRoom) yield break;
                 // Vanilla path took over and the game is rolling — exit success.
                 // Without this, the coroutine loops until deadline and emits a
-                // misleading "never reached 4 spawned players" warning even
+                // misleading "never reached N spawned players" warning even
                 // when the match is mid-play.
                 try { if (GameManager.instance != null && GameManager.instance.isPlaying) yield break; } catch { }
+                int need = Diag2v2.PlayersNeeded();   // 3 in ovt_, 4 in cr_ff
                 var gm = GM_ArmsRace.instance;
                 if (gm != null && gm.gameObject.activeInHierarchy && PlayerManager.instance != null)
                 {
                     int counted = 0;
                     foreach (var p in PlayerManager.instance.players) if (p != null) counted++;
-                    if (counted >= 4)
+                    if (counted >= need)
                     {
-                        Plugin.Log.LogInfo($"[2v2] Force-invoking GM_ArmsRace.StartGame (counted={counted})");
+                        Plugin.Log.LogInfo($"[2v2] Force-invoking GM_ArmsRace.StartGame (counted={counted}/{need})");
                         try { gm.StartGame(); }
                         catch (Exception ex) { Plugin.Log.LogError($"[2v2] StartGame invoke failed: {ex.Message}"); }
                         yield break;
@@ -1789,17 +1958,17 @@ namespace CompetitiveRounds
                 }
                 yield return new WaitForSeconds(0.5f);
             }
-            Plugin.Log.LogWarning("[2v2] Force-StartGame timed out — never reached 4 spawned players");
+            Plugin.Log.LogWarning($"[2v2] Force-StartGame timed out — never reached {Diag2v2.PlayersNeeded()} spawned players");
         }
         public void OnJoinRoomFailed(short returnCode, string message)
         {
-            if (Plugin.Pending2v2Slot < 0) return;
+            if (Diag2v2.PendingSlot() < 0) return;
             Plugin.Log.LogWarning($"[2v2-DIAG] JoinRoomFailed: code={returnCode} msg={message}");
         }
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
-            if (Plugin.Pending2v2Slot < 0) return;
+            if (Diag2v2.PendingSlot() < 0) return;
             try { Plugin.Log.LogWarning($"[2v2-DIAG] LeftRoom (Photon callback) stack={Diag2v2.ShortStack()}"); }
             catch { }
         }
@@ -2174,18 +2343,23 @@ namespace CompetitiveRounds
         private static string ColorHex(Color c) =>
             $"#{(int)(c.r * 255):X2}{(int)(c.g * 255):X2}{(int)(c.b * 255):X2}";
 
-        public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID, float xOffset = float.NaN, int pickerActor = -1)
+        public static IEnumerator RetintAfterChildrenSpawn(GameObject visualizer, int pickerTeamID, int pickerID, int pickerActor = -1)
         {
-            // Re-assert the X-offset every frame for the first ~10 frames so vanilla's
-            // child-spawn anchor pass (which fires a few frames after Show) can't snap
-            // the body back to the origin and re-stack it. This is the disappearing /
-            // overlapping body fix — the offset MUST survive vanilla's re-anchor, not
-            // just be set once synchronously in the Postfix (which v1.27 did and lost).
-            bool hasOffset = !float.IsNaN(xOffset);
+            // NO position mutation here — ever. The clone lives under
+            // CardChoiceVisuals' root, which vanilla scales to 33x when shown
+            // (CurveAnimation animates it through arbitrary values), so ANY
+            // localPosition offset gets multiplied by the parent's current scale:
+            // the old (pickerID-1.5)*4 anti-stack spread put picker 0 at world
+            // X=-198 and picker 1 at X=-66 on every solo pick — the "body
+            // missing, cosmetics still show" bug (#58, proven in the 7/12 log:
+            // 34/34 solo picks off-screen). The spread guarded against a
+            // stacking scenario that cannot happen — vanilla destroys
+            // currentSkin on every Show, so only ONE picker body exists at a
+            // time and vanilla's own stage-center placement is correct for it.
+            // Wait for vanilla's child-spawn pass, then only recolor in place.
             for (int i = 0; i < 10; i++)
             {
                 if (visualizer == null) yield break;
-                AssertOffset(visualizer, hasOffset, xOffset);
                 yield return null;
             }
             if (visualizer == null) yield break;
@@ -2308,30 +2482,6 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-BODY] check failed: {ex.Message}"); }
 
-            // v1.30 (#58 "bodies vanish/stack"): vanilla can re-anchor the skin well
-            // after our first 10 frames (card switches, layout passes). Keep holding
-            // the anti-stack X for the remainder of the pick phase (~8s). Cheap — one
-            // localPosition compare per frame; exits the moment the clone is destroyed
-            // (next Show or Hide destroys it, which also ends the pick display).
-            for (int i = 0; i < 480; i++)
-            {
-                if (visualizer == null) yield break;
-                AssertOffset(visualizer, hasOffset, xOffset);
-                yield return null;
-            }
-        }
-
-        private static void AssertOffset(GameObject visualizer, bool hasOffset, float xOffset)
-        {
-            if (!hasOffset) return;
-            try
-            {
-                var rt = visualizer.transform;
-                var lp = rt.localPosition;
-                if (Math.Abs(lp.x - xOffset) > 0.01f)
-                    rt.localPosition = new Vector3(xOffset, lp.y, lp.z);
-            }
-            catch { }
         }
 
         // RGB distance — works for any hue without needing to convert to HSV.
@@ -2392,27 +2542,18 @@ namespace CompetitiveRounds
                         int childCount = skin.transform.childCount;
                         skinDesc = $"name={skin.name} active={skin.activeInHierarchy} layer={skin.layer} children={childCount} localPos=({lp.x:F1},{lp.y:F1},{lp.z:F1}) localScale=({ls.x:F2},{ls.y:F2},{ls.z:F2})";
 
-                        // Re-tint AND re-position the card-pick visualizer in one
-                        // deferred coroutine. The Postfix fires BEFORE children spawn
-                        // (children=0 at this point), and v1.27's synchronous X-offset
-                        // here got clobbered by vanilla's own child-spawn anchor pass a
-                        // few frames later — so bodies re-stacked at the origin and
-                        // disappeared/overlapped ("2 of 4 invisible"). Moving BOTH the
-                        // tint and the offset into RetintAfterChildrenSpawn (which now
-                        // re-asserts the X position for several frames) makes the spread
-                        // survive vanilla's re-anchor. pickerID 0,1,2,3 → X -6,-2,+2,+6.
-                        //
-                        // 2v2 ONLY (bug #29): in a 1v1 ranked room this spread shoved the
-                        // visualizer body to X=-6 (picker 0 = orange) / X=-2 while the face
-                        // applied to the un-shifted CardChoiceVisuals root — so the orange
-                        // player's pick-phase character rendered as a floating face with no
-                        // body, 100% of the time. Vanilla 1v1 centers the single visualizer
-                        // correctly; only 4-picker cr_ff rooms need the anti-stack spread.
+                        // Deferred re-tint + body health-check only. The clone must be
+                        // left at vanilla's stage-center placement: it sits under the
+                        // 33x-scaled CardChoiceVisuals root, so any local offset lands
+                        // at offset*33 world units — the retired 2v2 anti-stack spread
+                        // (v1.27-v1.30.1) was exactly that, parking solo-pick bodies at
+                        // world X=-198/-66, i.e. bug #58's "no body, cosmetics show".
+                        // Only one picker body exists at a time (vanilla destroys
+                        // currentSkin on every Show), so no spread is ever needed.
                         if (Plugin.Instance != null && skin != null)
                         {
-                            float xOffset = Diag2v2.IsActive() ? (pickerID - 1.5f) * 4.0f : float.NaN;
                             Plugin.Instance.StartCoroutine(
-                                CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID, xOffset, pv.Owner.ActorNumber));
+                                CardPickBodyTinter.RetintAfterChildrenSpawn(skin, picker.TeamID, pickerID, pv.Owner.ActorNumber));
                         }
                     }
                     Plugin.Log.LogInfo($"[CARDPICK-DIAG] pickerID={pickerID} actor={pv.Owner.ActorNumber} pid={picker.PlayerID} team={picker.TeamID} isLocal={picker.IsLocal} currentSkin: {skinDesc}");
@@ -2585,9 +2726,24 @@ namespace CompetitiveRounds
                 var props = PhotonNetwork.CurrentRoom.CustomProperties;
                 if (props != null && props.ContainsKey("cr_ff")) return true;
                 string n = PhotonNetwork.CurrentRoom.Name ?? "";
-                return n.StartsWith("ranked_") || n.StartsWith("team_") || n.StartsWith("sct-");
+                return n.StartsWith("ranked_") || n.StartsWith("team_") || n.StartsWith("sct-") || n.StartsWith("ovt_");
             }
             catch { return false; }
+        }
+    }
+
+    /// <summary>Bug #64 — per-game card baseline for the hold-Tab board. Vanilla's
+    /// rematch flow (GM_ArmsRace.IDoRematch → PlayerManager.ResetCharacters →
+    /// Player.FullReset) resets gun/stats/block but never clears data.currentCards,
+    /// so the list accumulates across all games in a room. FullReset firing IS the
+    /// "new game in same room" signal — snapshot the count so TabStatsOverlay can
+    /// render only cards picked since.</summary>
+    [HarmonyPatch(typeof(global::Player), "FullReset")]
+    class Player_FullReset_CardBaseline_Patch
+    {
+        static void Postfix(global::Player __instance)
+        {
+            try { TabStatsOverlay.RecordCardBaseline(__instance); } catch { }
         }
     }
 
@@ -2709,7 +2865,7 @@ namespace CompetitiveRounds
                 if (!isBodyCaller) return;
 
                 int original = team;
-                team = team / 2;
+                team = Diag2v2.SlotToTeam(team);   // 2v2: slot/2 · 1v2: solo=0, duo=1
 
                 if (Time.realtimeSinceStartup - _lastClear > 5f)
                 {
@@ -2772,9 +2928,9 @@ namespace CompetitiveRounds
                 int playerID = (int)pidProp.GetValue(pPlayer);
                 if (playerID < 0 || playerID > 3) yield break;
 
-                // Expected team skin index after our GetPlayerSkinColors(team/2) Prefix:
-                // the baked child should correspond to team = playerID/2 (0 or 1).
-                int expectedTeam = playerID / 2;
+                // Expected team skin index after our GetPlayerSkinColors SlotToTeam
+                // Prefix: the baked child should correspond to the slot's team.
+                int expectedTeam = Diag2v2.SlotToTeam(playerID);
                 // Heuristic for "baked wrong": the child skin GO carries no reliable
                 // team marker, so instead we detect the known failure — a non-team-0
                 // player (playerID >= 2, i.e. team 1) whose body still reads team-0
@@ -3915,15 +4071,45 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[HIT-DIAG] damage={damage.magnitude:F1} weapon='{weaponName}' components=[{weaponComponents}]");
                 }
 
-                // Relaxed filter: count every damage event by the local player on an enemy.
-                // Over-count from DOT/splash is bounded by GameStateWatcher._hitsRemaining
-                // (incremented once per fired projectile via OnLocalBulletFired), so
-                // bullets_hit ≤ bullets_fired always regardless of how many ticks fire.
-                // Once the [HIT-DIAG] logs reveal the real damager components, we can add
-                // a precise ProjectileHit-equivalent filter to drop DOT/splash cleanly.
-                GameStateWatcher.OnLocalBulletHit();
+                // Hit counting moved to ProjectileHit_DirectHitCounter_Patch (bug #69).
+                // The HIT-DIAG data settled the question this postfix was waiting on:
+                // TakeDamage's damagingWeapon is always the GUN (WeaponBase), for DOT
+                // ticks too (damage=1.2 events carried the same weapon), so no filter
+                // HERE can separate direct hits from poison/burn ticks. The relaxed
+                // count let DOT pump bullets_hit up to the _hitsRemaining cap — i.e.
+                // hits == fired == "100% accuracy" for any DOT build (Stan's report).
+                // Direct impacts are counted at ProjectileHit.RPCA_DoHit instead, the
+                // single funnel every real bullet impact passes through and DOT never
+                // does. This postfix still owns HIT-DIAG + the block-debug hit signal.
             }
             catch { }
+        }
+    }
+
+    /// <summary>Bug #69 — precise Hit % numerator. ProjectileHit.RPCA_DoHit is the
+    /// one path every direct bullet impact takes (local, remote, and RPC'd), and
+    /// DOT/explosion/thorns damage never routes through it. Count an unblocked
+    /// impact on an enemy player, owner-side only. The _hitsRemaining budget in
+    /// GameStateWatcher still bounds hits ≤ fired.</summary>
+    [HarmonyPatch(typeof(ProjectileHit), "RPCA_DoHit")]
+    class ProjectileHit_DirectHitCounter_Patch
+    {
+        static void Postfix(ProjectileHit __instance, int viewID, bool wasBlocked)
+        {
+            try
+            {
+                if (wasBlocked) return;               // absorbed — not a hit
+                if (viewID == -1) return;             // terrain/map collider
+                var own = __instance != null ? __instance.ownPlayer : null;
+                if (own == null || own.data == null || own.data.view == null || !own.data.view.IsMine) return;
+                var targetView = PhotonNetwork.GetPhotonView(viewID);
+                if (targetView == null) return;
+                var targetPlayer = targetView.GetComponentInParent<global::Player>();
+                if (targetPlayer == null) return;     // hit a box or other damagable, not a player
+                if (targetPlayer.TeamID == own.TeamID) return;  // self or teammate (2v2)
+                GameStateWatcher.OnLocalBulletHit();
+            }
+            catch { /* never break vanilla's hit path */ }
         }
     }
 
@@ -4447,18 +4633,28 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(GM_ArmsRace), "StartGame")]
     class GMArmsRaceStartGameBlockResetPatch
     {
-        // Each game in a series fires StartGame fresh, right after the
-        // between-games teardown that creates zombie delegates (see
-        // BlockReflect header). Sweep every player's delegate holders —
-        // Block actions, Gun.ShootPojectileAction (zombie Empower.Attack =
-        // the invisible ×2 damage of #25), HealthHandler.reviveAction,
-        // PlayerCollision.collideWithPlayerAction (zombie ShieldCharge) —
-        // and drop only destroyed-target entries. UNGATED: the scrub is pure
+        // Sweep every player's delegate holders — Block actions,
+        // Gun.ShootPojectileAction (zombie Empower.Attack = the invisible ×2
+        // damage of #25), HealthHandler.reviveAction,
+        // PlayerCollision.collideWithPlayerAction (zombie ShieldCharge) — and
+        // drop only destroyed-target entries. UNGATED: the scrub is pure
         // repair and the same vanilla bug exists in casual in-room rematches.
         // ForceReady stays competitive-gated: it changes gameplay (block
         // ready at game start) and that behavior was only ever promised for
         // mod-issued rooms.
-        static void Postfix()
+        //
+        // TWO hooks share this body. GM_ArmsRace.StartGame only fires on FRESH
+        // room assembly — vanilla's rematch flow (GetRematchYesNo→IDoRematch)
+        // calls DoStartGame directly and BYPASSES StartGame, proven in the
+        // 7/12 logs: a 7-game ranked 2v2 sitting logged exactly ONE
+        // [BLOCK-RESET] line. So games 2+ of every sitting were getting no
+        // sweep and no ChildRPC stale-key scrub (the #39/#40 Shield Charge
+        // fix), which is why "block/card effects broken" reports kept coming
+        // from mid-session games. PlayerManager.ResetCharacters is the
+        // rematch-path hook: it fires in IDoRematch right before DoStartGame,
+        // i.e. after the teardown that created the zombies and before the new
+        // game's card Start() calls re-register ChildRPC keys.
+        internal static void RunSweep(string source)
         {
             try
             {
@@ -4480,10 +4676,22 @@ namespace CompetitiveRounds
                     if (blocks != null)
                         foreach (var b in blocks) BlockReflect.ForceReady(b);
                 }
-                Plugin.Log.LogInfo($"[BLOCK-RESET] StartGame v2: scrubbed {dead} zombie delegate entry(ies) across {players} player(s) (competitive={comp})");
+                Plugin.Log.LogInfo($"[BLOCK-RESET] {source}: scrubbed {dead} zombie delegate entry(ies) across {players} player(s) (competitive={comp})");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[BLOCK-RESET] error: {ex.Message}"); }
         }
+
+        static void Postfix() => RunSweep("StartGame v2");
+    }
+
+    /// <summary>Rematch-path half of the block sweep (see RunSweep comment).
+    /// Same-room rematches never fire StartGame; ResetCharacters is the hook
+    /// vanilla's IDoRematch DOES call, in the correct window. The sweep is
+    /// idempotent, so double-firing alongside StartGame on fresh rooms is fine.</summary>
+    [HarmonyPatch(typeof(PlayerManager), "ResetCharacters")]
+    class PlayerManagerResetCharactersBlockResetPatch
+    {
+        static void Postfix() => GMArmsRaceStartGameBlockResetPatch.RunSweep("ResetCharacters (rematch)");
     }
 
     // ── Map color override (v1.22) ─────────────────────────────────────────

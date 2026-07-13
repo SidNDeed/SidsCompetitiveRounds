@@ -357,7 +357,136 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(TournamentHeartbeatLoop());
             // v1.29: always-on presence ping (mod-clients-online counter).
             Plugin.Instance.StartCoroutine(PresenceLoop());
+            // Bug #65: replay match reports that failed in an earlier session.
+            LoadOutbox();
         }
+
+        // ── Match-report outbox (bug #65) ─────────────────────────────
+        // A match report that exhausts its 3 immediate POST attempts is queued here
+        // and re-sent every ~60s until it lands, the server permanently rejects it,
+        // or the retry budget runs out. Stan lost a casual match to a transient DNS
+        // outage ("Cannot resolve destination host" x3 over a few seconds) — the
+        // outage outlived the whole retry window, and the report was dropped
+        // forever. The queue persists to disk so a report that fails right before
+        // quit is re-sent on next launch. Replays are dedup-safe server-side:
+        // matches has UNIQUE (photon_room_id, player1_id, player2_id), team_matches
+        // has the 5-column equivalent, and room ids are per-game suffixed — a
+        // replay of a report that actually landed just errors out and is dropped.
+        private class PendingReport { public string url; public string json; public int attempts; public float nextAt; }
+        private static readonly List<PendingReport> _pendingReports = new List<PendingReport>();
+        private static bool _outboxLoopStarted;
+        private const int OUTBOX_MAX_ATTEMPTS = 20;
+        private const float OUTBOX_RETRY_SECONDS = 60f;
+
+        private static string OutboxPath
+        {
+            get { return Path.Combine(BepInEx.Paths.ConfigPath, "CompetitiveRounds.pending-reports.jsonl"); }
+        }
+
+        public static void EnqueueFailedReport(string url, string json)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(json)) return;
+                _pendingReports.Add(new PendingReport { url = url, json = json, attempts = 0, nextAt = Time.realtimeSinceStartup + 30f });
+                PersistOutbox();
+                EnsureOutboxLoop();
+                Plugin.Log.LogWarning($"[OUTBOX] report queued for retry ({_pendingReports.Count} pending)");
+                CompetitiveUI.ShowNotification("Report failed — will retry in background", new Color(1f, 0.75f, 0.3f), 4f);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] enqueue failed: {ex.Message}"); }
+        }
+
+        private static void PersistOutbox()
+        {
+            try
+            {
+                var sb = new StringBuilder();
+                foreach (var p in _pendingReports)
+                    sb.Append(p.url).Append('\t').Append(p.json.Replace("\n", " ").Replace("\r", " ")).Append('\n');
+                if (sb.Length == 0) { if (File.Exists(OutboxPath)) File.Delete(OutboxPath); }
+                else File.WriteAllText(OutboxPath, sb.ToString());
+            }
+            catch { /* disk persistence is best-effort; in-memory queue still works */ }
+        }
+
+        private static void LoadOutbox()
+        {
+            try
+            {
+                if (!File.Exists(OutboxPath)) return;
+                foreach (var line in File.ReadAllLines(OutboxPath))
+                {
+                    int tab = line.IndexOf('\t');
+                    if (tab <= 0 || tab >= line.Length - 1) continue;
+                    _pendingReports.Add(new PendingReport
+                    {
+                        url = line.Substring(0, tab),
+                        json = line.Substring(tab + 1),
+                        attempts = 0,
+                        nextAt = Time.realtimeSinceStartup + 20f,
+                    });
+                }
+                if (_pendingReports.Count > 0)
+                {
+                    Plugin.Log.LogInfo($"[OUTBOX] loaded {_pendingReports.Count} unsent report(s) from previous session");
+                    EnsureOutboxLoop();
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] load failed: {ex.Message}"); }
+        }
+
+        private static void EnsureOutboxLoop()
+        {
+            if (_outboxLoopStarted || Plugin.Instance == null) return;
+            _outboxLoopStarted = true;
+            Plugin.Instance.StartCoroutine(OutboxLoop());
+        }
+
+        private static IEnumerator OutboxLoop()
+        {
+            while (true)
+            {
+                yield return new WaitForSeconds(10f);
+                if (_pendingReports.Count == 0) continue;
+                float now = Time.realtimeSinceStartup;
+                bool changed = false;
+                for (int i = _pendingReports.Count - 1; i >= 0; i--)
+                {
+                    var p = _pendingReports[i];
+                    if (p.nextAt > now) continue;
+                    p.attempts++;
+                    // Linear-ish backoff, capped at 4x the base interval.
+                    p.nextAt = now + OUTBOX_RETRY_SECONDS * Math.Min(4, p.attempts);
+                    bool done = false, ok = false; string resp = null;
+                    yield return PostRequest(p.url, p.json, (s, r) => { done = true; ok = s; resp = r; });
+                    while (!done) yield return null;
+                    if (ok)
+                    {
+                        Plugin.Log.LogInfo($"[OUTBOX] queued report delivered on retry {p.attempts}");
+                        CompetitiveUI.ShowNotification("Match report delivered", new Color(0.4f, 1f, 0.5f), 4f);
+                        _pendingReports.RemoveAt(i);
+                        changed = true;
+                    }
+                    else
+                    {
+                        // 4xx = the server understood and refused (bad signature, dup,
+                        // validation) — retrying can never succeed. 5xx/transport keep
+                        // retrying until the budget runs out.
+                        bool permanent = resp != null && (resp.Contains("HTTP/1.1 4") || resp.Contains("duplicate key"));
+                        if (permanent || p.attempts >= OUTBOX_MAX_ATTEMPTS)
+                        {
+                            Plugin.Log.LogWarning($"[OUTBOX] dropping report after {p.attempts} attempt(s): {Trunc(resp ?? "(no response)", 160)}");
+                            _pendingReports.RemoveAt(i);
+                            changed = true;
+                        }
+                    }
+                }
+                if (changed || _pendingReports.Count > 0) PersistOutbox();
+            }
+        }
+
+        private static string Trunc(string s, int n) => string.IsNullOrEmpty(s) || s.Length <= n ? s : s.Substring(0, n) + "..";
 
         // Per-match dispatch memo. Mirrors the per-tab one in NativeUI but
         // lives at plugin scope so the loop doesn't re-fire SetPendingRoom
@@ -2450,6 +2579,9 @@ namespace CompetitiveRounds
                     {
                         Plugin.Log.LogError($"Failed to report match: {response}");
                         CompetitiveUI.ShowNotification("Failed to report match", Color.red);
+                        // Bug #65: transient network/DNS outages outlive the 3 immediate
+                        // attempts — queue for background retry instead of losing the game.
+                        EnqueueFailedReport($"{baseUrl}/api/v1/matches", json);
                     }
                 }
             ));
@@ -2567,6 +2699,11 @@ namespace CompetitiveRounds
                             data.entries = entries.ToArray();
                             CachedLeaderboard = data;
                             Plugin.Log.LogInfo($"Leaderboard loaded: {CachedLeaderboard.entries?.Length ?? 0} entries");
+                            // Repaint on every fresh fetch. NativeUI.Tick's auto dirty-flip
+                            // only compares entry COUNT, so a same-size board with new
+                            // ratings never re-rendered (part of the stale-leaderboard-tab
+                            // report) — mark dirty explicitly.
+                            NativeUI.MarkDirty();
                         }
                         catch (Exception ex)
                         {
@@ -4855,6 +4992,9 @@ namespace CompetitiveRounds
                     else
                     {
                         Plugin.Log.LogWarning($"2v2 match report failed: {response}");
+                        // Bug #65 family: don't lose the game to a transient outage.
+                        // team_matches' 5-column unique constraint makes replays safe.
+                        EnqueueFailedReport($"{baseUrl}/api/v1/team/matches", json);
                     }
                 },
                 maxRetries: 3, retryDelay: 2f
@@ -5288,6 +5428,405 @@ namespace CompetitiveRounds
                     }
                 }
             ));
+        }
+
+        // ══ 1v2 (solo vs duo) — queue + leaderboard + report ══════════════
+        // Server is UNSCORED at launch; the client mirrors that with an
+        // "Unranked (beta)" banner. Queue is a consent lobby (no Elo band).
+        public class OvtLeaderboardEntry
+        {
+            public int rank; public string steam_id, display_name;
+            public int games_played, wins, losses, solo_games, duo_games, level;
+            public float win_rate;
+        }
+        public static List<OvtLeaderboardEntry> CachedOvtLeaderboard = null;
+        public static int CachedOvtLeaderboardTotal = 0;
+
+        // Live queue state (drives the 1v2 tab + auto room-join).
+        public static string OvtQueueStatus = "";        // ""/searching/ready_join
+        public static int OvtQueueCount = 0;
+        public static string ActiveOvt1v2SeriesId = null;
+        public static int OvtMySide = 0;                 // 1 solo, 2 duo
+        public static bool OvtSoloExtraPick = false;
+        public static bool IsOvtQueuePolling = false;
+        private static float _ovtLastPollAt = -999f;
+        // Locked lineup (set at ready_join) — the tab renders "Solo vs A + B".
+        public static string OvtLockedSoloName = null;
+        public static List<TeamQueueMember> OvtLockedDuo = null;
+
+        // Who's-in-the-lobby snapshot from /ovt/queue/list (2v2-parity panel).
+        public class OvtQueueListEntry
+        {
+            public string steam_id, display_name, status, region;
+            public int rating_1v1, rating_2v2, preferred_side, side_assigned, wait_seconds;
+            public bool solo_extra_pick;
+        }
+        public static List<OvtQueueListEntry> CachedOvtQueueList = null;
+        private static float _ovtListLastAt = -999f;
+
+        // Last-used join preferences — lets the not_in_queue auto-rejoin (a
+        // server prune after an API gap, e.g. a backend redeploy) restore the
+        // exact queue entry the player asked for.
+        private static int _ovtLastPreferredSide = 0;
+        private static bool _ovtLastSoloExtraPick = false;
+        private static float _ovtLastAutoRejoinAt = -999f;
+
+        public static void OvtJoinQueue(int preferredSide, bool soloExtraPick)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            // The 1v2 queue has NO ready-up consent step (joining IS consent,
+            // learning #127) — so unlike 1v1/2v2, a lock fires whenever a 3rd
+            // player shows up, possibly hours later. Queueing from inside a
+            // live game would let that lock yank the player out mid-match
+            // (DC against them + a free win for their opponent). Block it.
+            // OfflineMode is exempt: PhotonNetwork.InRoom lingers true at the
+            // menu after Sandbox (learning #122).
+            bool inOnlineRoom = false;
+            try { inOnlineRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+            if (inOnlineRoom)
+            {
+                CompetitiveUI.ShowNotification("Finish or leave your current game before joining the 1v2 queue.", new Color(1f, 0.7f, 0.3f), 5f);
+                return;
+            }
+            _ovtLastPreferredSide = preferredSide;
+            _ovtLastSoloExtraPick = soloExtraPick;
+            string name = Escape(MatchTracker.LocalDisplayName ?? "Player");
+            // Region rides along like 2v2's JoinTeamQueue — without it the
+            // server pins every 1v2 room to "us" even for an all-EU trio.
+            string region = "";
+            try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            string body = $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"," +
+                          $"\"preferred_side\":{preferredSide},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}}}";
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ovt/queue/join", body, (ok, resp) =>
+            {
+                if (ok) { IsOvtQueuePolling = true; OvtQueueStatus = "searching"; UpdateOvtQueueList(force: true); NativeUI.MarkDirty(); }
+                else Plugin.Log.LogWarning($"[1v2] join failed: {resp}");
+            }));
+        }
+
+        public static void OvtLeaveQueue()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            IsOvtQueuePolling = false; OvtQueueStatus = ""; OvtQueueCount = 0;
+            OvtLockedSoloName = null; OvtLockedDuo = null;
+            // Leaving the queue abandons any husk lock along with it — the
+            // server dissolves a zero-game lock (canceling the series and
+            // resetting the other two rows), so clear the matching local
+            // state. A mid-series reporter can't reach this (the tab hides
+            // Leave while inside an ovt_ room).
+            ActiveOvt1v2SeriesId = null;
+            Plugin.ClearPendingOvtSlot();
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/ovt/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}", "", (ok, resp) => { UpdateOvtQueueList(force: true); NativeUI.MarkDirty(); }));
+        }
+
+        /// <summary>Throttled queue poll. Ticked from BOTH the plugin-level
+        /// poll loop (so ready_join lands with the F5 menu closed) and the 1v2
+        /// tab ticker — timestamp throttle keeps the double call site at one
+        /// request per 2s. On ready_join: computes our slot, publishes the
+        /// pre-join Photon props, and joins the ovt_ room via the same
+        /// SetPendingRoom path 2v2 uses.</summary>
+        public static void UpdateOvtQueuePoll(bool force)
+        {
+            if (!IsOvtQueuePolling) return;
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            if (!force && Time.unscaledTime - _ovtLastPollAt < 2f) return;
+            _ovtLastPollAt = Time.unscaledTime;
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/queue/poll/{sid}", (ok, resp) =>
+            {
+                if (!ok || string.IsNullOrEmpty(resp)) return;
+                if (!IsOvtQueuePolling) return;   // left/locked while the request was in flight
+                string status = ExtractJsonString(resp, "status") ?? "";
+                OvtQueueStatus = status;
+                OvtQueueCount = ExtractJsonInt(resp, "queue_count");
+                if (status == "ready_join")
+                {
+                    // Consent guard: with no ready-up step, a lock can land
+                    // while the player is mid-game in another mode (queued,
+                    // then went to play something — the join guard blocks
+                    // queueing FROM a room, but a room can be entered after
+                    // queueing). Auto-joining would force-leave that live
+                    // game and record a DC against them. Decline instead:
+                    // leaving the queue dissolves the lock server-side so the
+                    // other two go back to searching immediately.
+                    bool busyInRoom = false;
+                    try { busyInRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+                    if (busyInRoom)
+                    {
+                        Plugin.Log.LogWarning("[1v2] ready_join landed while in another room — declining (leaving 1v2 queue)");
+                        OvtLeaveQueue();
+                        CompetitiveUI.ShowNotification("1v2 match found, but you're in a game — removed from the 1v2 queue.", new Color(1f, 0.7f, 0.3f), 7f);
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    IsOvtQueuePolling = false;
+                    ActiveOvt1v2SeriesId = ExtractJsonString(resp, "series_id");
+                    OvtMySide = ExtractJsonInt(resp, "side_assigned");
+                    OvtSoloExtraPick = ExtractJsonBool(resp, "solo_extra_pick");
+                    string room = ExtractJsonString(resp, "room_name");
+                    string region = ExtractJsonString(resp, "room_region");
+
+                    // Lineup: "solo" is a single object, "duo" an ordered pair
+                    // (the server's duo_a/duo_b columns — identical payload on
+                    // all three clients, so slot agreement needs no sorting).
+                    string soloName = null;
+                    try
+                    {
+                        int sIdx = resp.IndexOf("\"solo\":");
+                        int oStart = sIdx >= 0 ? resp.IndexOf('{', sIdx) : -1;
+                        int oEnd = oStart >= 0 ? FindMatchingBrace(resp, oStart) : -1;
+                        if (oStart >= 0 && oEnd > oStart)
+                            soloName = ExtractJsonString(resp.Substring(oStart, oEnd - oStart + 1), "display_name");
+                    }
+                    catch { }
+                    var duo = ExtractTeamMemberList(resp, "duo");
+                    OvtLockedSoloName = soloName;
+                    OvtLockedDuo = duo;
+
+                    if (!string.IsNullOrEmpty(room))
+                    {
+                        // Slot 0 = solo (team 0); slots 1/2 = duo (team 1) in
+                        // payload order. Read by the CreatePlayer override so
+                        // the 3 players land on the forced 1-vs-2 split instead
+                        // of vanilla's join-order teams.
+                        int slot = 0;
+                        if (OvtMySide != 1)
+                        {
+                            if (duo.Count >= 1 && duo[0].steam_id == sid) slot = 1;
+                            else if (duo.Count >= 2 && duo[1].steam_id == sid) slot = 2;
+                            else
+                            {
+                                slot = 1;
+                                Plugin.Log.LogWarning($"[1v2] my steam id not found in duo payload — defaulting slot 1 (duo={duo.Count})");
+                            }
+                        }
+                        Plugin.SetPendingOvtSlot(slot);
+
+                        // Pre-join Photon props — identical rationale to the
+                        // 2v2 ready_join path: remote clients must have
+                        // p_id/t_id/u_id BEFORE our Instantiate broadcast, and
+                        // the styled NickName + cosmetics before our actor-join
+                        // lands, or their first read caches the wrong values.
+                        try
+                        {
+                            var prejoin = new ExitGames.Client.Photon.Hashtable();
+                            prejoin["p_id"] = slot;
+                            prejoin["t_id"] = slot == 0 ? 0 : 1;
+                            prejoin["u_id"] = sid;
+                            if (PhotonNetwork.LocalPlayer != null)
+                                PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] pre-join SetCustomProperties: {ex.Message}"); }
+                        try { NametagStyler.PublishToPhoton(); } catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] pre-join nametag publish: {ex.Message}"); }
+                        try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] pre-join pcolor publish: {ex.Message}"); }
+                        try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] pre-join trail publish: {ex.Message}"); }
+
+                        Plugin.SetPendingRoom(room, region);
+                        Plugin.Log.LogInfo($"[1v2] All ready! Room: {room} (region: {region ?? "auto"}) series={ActiveOvt1v2SeriesId} side={OvtMySide} slot={slot}");
+                        CompetitiveUI.ShowNotification(OvtMySide == 1
+                            ? "3/3 ready! Joining 1v2 — you are the SOLO..."
+                            : "3/3 ready! Joining 1v2 — you are on the DUO...", Color.green, 5f);
+                        try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
+                    }
+                }
+                else if (status == "not_in_queue" || status == "expired")
+                {
+                    IsOvtQueuePolling = false; OvtQueueStatus = "";
+                    OvtLockedSoloName = null; OvtLockedDuo = null;
+                    Plugin.ClearPendingOvtSlot();
+                    // We believed we were searching but the server dropped our
+                    // row — the ghost-prune fires on every queuer after any
+                    // >75s API gap (backend redeploy, network blip). Silently
+                    // flipping to "Not in queue." strands the player (they
+                    // think they're queued; the menu may even be closed).
+                    // Auto-rejoin once per minute with the same preferences;
+                    // a voluntary Leave can't reach here (it stops polling
+                    // and the in-flight guard drops late responses).
+                    if (status == "not_in_queue"
+                        && Time.unscaledTime - _ovtLastAutoRejoinAt > 60f)
+                    {
+                        _ovtLastAutoRejoinAt = Time.unscaledTime;
+                        Plugin.Log.LogWarning("[1v2] queue row vanished server-side while searching — auto-rejoining");
+                        OvtJoinQueue(_ovtLastPreferredSide, _ovtLastSoloExtraPick);
+                    }
+                }
+                NativeUI.MarkDirty();
+            }));
+        }
+
+        /// <summary>GET /ovt/queue/list — who's in the 1v2 lobby, with the
+        /// context ratings (1v1 + 2v2 elo), side preference, wait time and
+        /// status. Same 2s-throttle ticker pattern as the 2v2 panel
+        /// (learning #62).</summary>
+        public static void UpdateOvtQueueList(bool force = false)
+        {
+            if (!force && Time.unscaledTime - _ovtListLastAt < 2f) return;
+            _ovtListLastAt = Time.unscaledTime;
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/queue/list", (ok, resp) =>
+            {
+                if (!ok || string.IsNullOrEmpty(resp)) return;
+                try
+                {
+                    var list = new List<OvtQueueListEntry>();
+                    int qStart = resp.IndexOf("\"queuers\"");
+                    int arrStart = qStart >= 0 ? resp.IndexOf('[', qStart) : -1;
+                    int arrEnd = arrStart >= 0 ? FindMatchingBracket(resp, arrStart) : -1;
+                    if (arrStart >= 0 && arrEnd > arrStart)
+                    {
+                        string slice = resp.Substring(arrStart + 1, arrEnd - arrStart - 1);
+                        int oIdx = 0;
+                        while (oIdx < slice.Length)
+                        {
+                            int objStart = slice.IndexOf('{', oIdx);
+                            if (objStart < 0) break;
+                            int objEnd = FindMatchingBrace(slice, objStart);
+                            if (objEnd < 0) break;
+                            string obj = slice.Substring(objStart, objEnd - objStart + 1);
+                            list.Add(new OvtQueueListEntry
+                            {
+                                steam_id = ExtractJsonString(obj, "steam_id"),
+                                display_name = ExtractJsonString(obj, "display_name"),
+                                rating_1v1 = ExtractJsonInt(obj, "rating_1v1"),
+                                rating_2v2 = ExtractJsonInt(obj, "rating_2v2"),
+                                preferred_side = ExtractJsonInt(obj, "preferred_side"),
+                                solo_extra_pick = ExtractJsonBool(obj, "solo_extra_pick"),
+                                status = ExtractJsonString(obj, "status"),
+                                side_assigned = ExtractJsonInt(obj, "side_assigned"),
+                                wait_seconds = ExtractJsonInt(obj, "wait_seconds"),
+                                region = ExtractJsonString(obj, "region"),
+                            });
+                            oIdx = objEnd + 1;
+                        }
+                    }
+                    CachedOvtQueueList = list;
+                    NativeUI.MarkDirty();
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[1v2-QUEUE-LIST] parse: {ex.Message}"); }
+            }));
+        }
+
+        /// <summary>POST /ovt/series/continuation — open a fresh 1v2 series when the
+        /// three keep playing past a completed BO3 (recording-gap fix, learning #70).
+        /// Reuses the 2v2 continuation request shape: t1a=solo, t1b=duo_a, t2a=duo_b,
+        /// t2b unused. Reporter is the lowest Steam ID (caller ensures). Sets
+        /// ActiveOvt1v2SeriesId on success.</summary>
+        public static void RequestOvtContinuationSeries(
+            string reporterSteam, string roomId, string region,
+            string soloSteam, string duoASteam, string duoBSteam, Action<bool> callback = null)
+        {
+            // Canonical MUST match the server (ovt_series_continuation): 5 fields.
+            string canonical = $"ovt-continuation:{soloSteam}:{duoASteam}:{duoBSteam}:{roomId}:{reporterSteam}";
+            string sig = ComputeHmacHex(canonical);
+            // Server reads t1a/t1b/t2a (t2b ignored) — send duoB in t2b too, harmless.
+            string body = $"{{\"reporter_steam_id\":\"{Escape(reporterSteam)}\",\"room_id\":\"{Escape(roomId)}\"," +
+                          $"\"region\":\"{Escape(region ?? "")}\",\"t1a_steam\":\"{Escape(soloSteam)}\",\"t1b_steam\":\"{Escape(duoASteam)}\"," +
+                          $"\"t2a_steam\":\"{Escape(duoBSteam)}\",\"t2b_steam\":\"{Escape(duoBSteam)}\",\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/ovt/series/continuation", body, (ok, resp) =>
+            {
+                if (ok && !string.IsNullOrEmpty(resp))
+                {
+                    string sidNew = ExtractJsonString(resp, "series_id");
+                    if (!string.IsNullOrEmpty(sidNew)) { ActiveOvt1v2SeriesId = sidNew; Plugin.Log.LogInfo($"[1v2-CONTINUATION] active series set to {sidNew} ({ExtractJsonString(resp, "status")})"); }
+                }
+                else Plugin.Log.LogWarning($"[1v2-CONTINUATION] request failed: {resp}");
+                callback?.Invoke(ok);
+            }, maxRetries: 2, retryDelay: 2f));
+        }
+
+        public static void FetchOvtLeaderboard(int limit = 200)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/leaderboard?limit={limit}", (ok, resp) =>
+            {
+                if (!ok) return;
+                try
+                {
+                    var entries = new List<OvtLeaderboardEntry>();
+                    var parts = resp.Split(new[] { "\"rank\":" }, StringSplitOptions.None);
+                    for (int i = 1; i < parts.Length; i++)
+                    {
+                        var chunk = parts[i];
+                        int rankVal = 0; try { int comma = chunk.IndexOf(','); rankVal = int.Parse(chunk.Substring(0, comma)); } catch { }
+                        entries.Add(new OvtLeaderboardEntry
+                        {
+                            rank = rankVal,
+                            steam_id = ExtractJsonString(chunk, "steam_id"),
+                            display_name = ExtractJsonString(chunk, "display_name"),
+                            games_played = ExtractJsonInt(chunk, "games_played"),
+                            wins = ExtractJsonInt(chunk, "wins"),
+                            losses = ExtractJsonInt(chunk, "losses"),
+                            win_rate = ExtractJsonFloat(chunk, "win_rate"),
+                            solo_games = ExtractJsonInt(chunk, "solo_games"),
+                            duo_games = ExtractJsonInt(chunk, "duo_games"),
+                            level = ExtractJsonInt(chunk, "level"),
+                        });
+                    }
+                    CachedOvtLeaderboard = entries;
+                    CachedOvtLeaderboardTotal = ExtractJsonInt(resp, "total_players");
+                    NativeUI.MarkDirty();
+                    Plugin.Log.LogInfo($"[1v2-LB] loaded {entries.Count} players");
+                }
+                catch (Exception ex) { Plugin.Log.LogError($"[1v2-LB] parse: {ex.Message}"); }
+            }));
+        }
+
+        /// <summary>Report a finished 1v2 game to /ovt/matches. 10-field HMAC
+        /// canonical (see schemas.py OvtMatchReport). solo = side 1, duo = side 2.
+        /// Reporter is the lowest Steam ID across the three (caller ensures).</summary>
+        public static void ReportOvtMatch(
+            string seriesId, string room, string region, int durationSeconds,
+            string soloSteam, string soloName, List<MatchTracker.CardPickData> soloCards,
+            string duoASteam, string duoAName, List<MatchTracker.CardPickData> duoACards,
+            string duoBSteam, string duoBName, List<MatchTracker.CardPickData> duoBCards,
+            int soloRounds, int duoRounds, int soloPoints, int duoPoints,
+            string reporterSteam, int soloFps, int duoAFps, int duoBFps)
+        {
+            int winnerSide = soloRounds > duoRounds ? 1 : 2;
+            bool isRanked = false;  // unscored at launch
+            var sb = new StringBuilder();
+            sb.Append("{");
+            sb.Append($"\"series_id\":\"{Escape(seriesId)}\",");
+            void appendPlayer(string key, string steam, string nm, List<MatchTracker.CardPickData> cards)
+            {
+                sb.Append($"\"{key}\":{{\"steam_id\":\"{Escape(steam)}\",\"display_name\":\"{Escape(nm)}\",\"cards\":[");
+                AppendCards(sb, cards ?? new List<MatchTracker.CardPickData>());
+                sb.Append("]},");
+            }
+            appendPlayer("solo", soloSteam, soloName, soloCards);
+            appendPlayer("duo_a", duoASteam, duoAName, duoACards);
+            appendPlayer("duo_b", duoBSteam, duoBName, duoBCards);
+            sb.Append($"\"solo_rounds_won\":{soloRounds},\"duo_rounds_won\":{duoRounds},");
+            sb.Append($"\"solo_points_total\":{soloPoints},\"duo_points_total\":{duoPoints},");
+            sb.Append($"\"winner_side\":{winnerSide},");
+            sb.Append($"\"photon_room_id\":\"{Escape(room)}\",\"game_version\":\"v{Application.version}\",");
+            sb.Append($"\"region\":\"{Escape(region)}\",\"match_duration\":{durationSeconds},");
+            sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
+            sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteam)}\",");
+            sb.Append($"\"solo_fps\":{soloFps},\"duo_a_fps\":{duoAFps},\"duo_b_fps\":{duoBFps},");
+            string canonical = $"{soloSteam}:{duoASteam}:{duoBSteam}:{soloRounds}:{duoRounds}:" +
+                               $"{(isRanked ? "true" : "false")}:{reporterSteam}:{room ?? ""}:{winnerSide}:{seriesId}";
+            sb.Append($"\"hmac_signature\":\"{ComputeHmacHex(canonical)}\"");
+            sb.Append("}");
+            string json = sb.ToString();
+            Plugin.Log.LogInfo($"[1v2-REPORT] submitting series={seriesId} winner=side{winnerSide} {soloRounds}-{duoRounds}");
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/ovt/matches", json, (ok, resp) =>
+            {
+                if (ok)
+                {
+                    Plugin.Log.LogInfo($"[1v2] match reported: {resp}");
+                    string sStatus = ExtractJsonString(resp, "series_status");
+                    string sScore = ExtractJsonString(resp, "series_score");
+                    if (sStatus == "completed") { CompetitiveUI.ShowNotification($"1v2 series complete: {sScore}", Color.green, 6f); ActiveOvt1v2SeriesId = null; Plugin.ClearPendingOvtSlot(); }
+                    else if (!string.IsNullOrEmpty(sScore)) CompetitiveUI.ShowNotification($"1v2 series: {sScore}", new Color(0.6f, 0.8f, 1f), 4f);
+                }
+                else
+                {
+                    Plugin.Log.LogWarning($"[1v2] report failed: {resp}");
+                    EnqueueFailedReport($"{baseUrl}/api/v1/ovt/matches", json);  // bug #65 outbox
+                }
+            }, maxRetries: 3, retryDelay: 2f));
         }
 
         // ── Player Blocks (permanent, from leaderboard) ──────────

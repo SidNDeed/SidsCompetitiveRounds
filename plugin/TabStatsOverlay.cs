@@ -185,22 +185,43 @@ namespace CompetitiveRounds
             return FALLBACK[Mathf.Abs(p.TeamID) % FALLBACK.Length];
         }
 
+        // Bug #64: vanilla's rematch reset (Player.FullReset) resets gun/stats/block
+        // but NEVER clears data.currentCards — the list accumulates across every game
+        // in the room until DC. The board must show THIS game's cards, so we snapshot
+        // each player's card count when FullReset fires (rematch = new game) and skip
+        // that many entries when rendering. Baseline missing (fresh room) => skip 0.
+        private static readonly Dictionary<Player, int> cardBaseline = new Dictionary<Player, int>();
+
+        public static void RecordCardBaseline(Player p)
+        {
+            try { if (p != null && p.data != null && p.data.currentCards != null) cardBaseline[p] = p.data.currentCards.Count; }
+            catch { }
+        }
+
+        public static void ClearCardBaselines()
+        {
+            cardBaseline.Clear();
+        }
+
         private static string CardLine(Player p)
         {
             try
             {
                 var cards = p.data.currentCards;
-                if (cards == null || cards.Count == 0) return "<color=#666>no cards</color>";
+                int skip = 0;
+                if (cards != null && cardBaseline.TryGetValue(p, out int b) && b > 0 && b <= cards.Count)
+                    skip = b;
+                if (cards == null || cards.Count - skip <= 0) return "<color=#666>no cards</color>";
                 var sb = new StringBuilder();
                 int shown = 0;
-                for (int i = 0; i < cards.Count && shown < 8; i++)
+                for (int i = skip; i < cards.Count && shown < 8; i++)
                 {
                     if (cards[i] == null) continue;
                     if (shown > 0) sb.Append(", ");
                     sb.Append(Trunc(cards[i].cardName ?? "?", 12));
                     shown++;
                 }
-                if (cards.Count > shown) sb.Append($" <color=#888>+{cards.Count - shown}</color>");
+                if (cards.Count - skip > shown) sb.Append($" <color=#888>+{cards.Count - skip - shown}</color>");
                 return sb.ToString();
             }
             catch { return "-"; }

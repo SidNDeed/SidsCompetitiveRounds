@@ -63,6 +63,10 @@ from schemas import (
     Team2v2LeaderboardEntry,
     Team2v2LeaderboardResponse,
     TeamMatchHistoryEntry,
+    OvtMatchReport,
+    OvtMatchResponse,
+    Ovt1v2LeaderboardEntry,
+    Ovt1v2LeaderboardResponse,
 )
 
 # ── Config from environment ────────────────────────────────────
@@ -893,7 +897,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.30.1"
+LATEST_MOD_VERSION = "1.31.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -6807,11 +6811,15 @@ async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_
     return AchievementListResponse(steam_id=steam_id, achievements=entries)
 
 
-# Steam-style global achievement stats: % of all players who have unlocked
-# each achievement. Denominator = every non-deleted player row (rows are only
-# created by real activity — a match report or a queue join — so this tracks
-# "players who actually played" closely enough). Cached 5 min; single process,
-# so a plain module dict is safe.
+# Steam-style global achievement stats: % of MOD USERS who have unlocked each
+# achievement. Denominator = players with mod_seen_at set (their client has
+# actually run the mod). Counting every player row massively deflated the
+# percentages (bug #66): most rows are modless quickplay opponents auto-created
+# by match reports — 2,847 rows vs ~200 real mod users — and those players get
+# exactly one incidental session, so including them made every percentage read
+# as 0.x% and "not representative at all" (Stan). Numerator joins on the same
+# filter so pct <= 100 by construction. Cached 5 min; single process, so a
+# plain module dict is safe.
 _ach_pct_cache: dict = {"at": 0.0, "pcts": {}}
 
 
@@ -6821,7 +6829,7 @@ async def _achievement_global_pcts(db: AsyncSession) -> dict[str, float]:
         return _ach_pct_cache["pcts"]
     try:
         total = (await db.execute(text(
-            "SELECT COUNT(*) FROM players WHERE deleted_at IS NULL"
+            "SELECT COUNT(*) FROM players WHERE deleted_at IS NULL AND mod_seen_at IS NOT NULL"
         ))).scalar() or 0
         pcts: dict[str, float] = {}
         if total > 0:
@@ -6829,6 +6837,7 @@ async def _achievement_global_pcts(db: AsyncSession) -> dict[str, float]:
                 "SELECT pa.achievement_key, COUNT(DISTINCT pa.player_id) AS n "
                 "FROM player_achievements pa "
                 "JOIN players p ON p.id = pa.player_id AND p.deleted_at IS NULL "
+                "AND p.mod_seen_at IS NOT NULL "
                 "GROUP BY pa.achievement_key"
             ))).mappings().all()
             for r in rows:
@@ -9229,15 +9238,28 @@ async def admin_recent_series(
     team_cards = {}
     if team_ids:
         for cr in (await db.execute(text("""
-            SELECT tm.series_id, tmc.player_id, tmc.card_name
+            SELECT tm.series_id, tmc.player_id, tm.id AS match_id, tmc.card_name
               FROM team_matches tm JOIN team_match_cards tmc ON tmc.match_id = tm.id
              WHERE tm.series_id = ANY(:sids)
              ORDER BY tm.ended_at, tmc.pick_order
         """), {"sids": team_ids})).mappings().all():
-            team_cards.setdefault((cr["series_id"], cr["player_id"]), []).append(cr["card_name"])
+            team_cards.setdefault((cr["series_id"], cr["player_id"]), []).append((cr["match_id"], cr["card_name"]))
 
-    def _tc(r, pre):  # pipe-joined card names for a 2v2 slot
-        return "|".join(team_cards.get((r["id"], r[f"{pre}_id"]), []))
+    def _games_join(entries):
+        # Two-level flat encoding (bug #68): '||' separates GAMES, '|' separates
+        # cards within a game. Stays a flat scalar so JsonUtility parses it
+        # (learning #25 — no nested arrays); the admin tab splits on '||' to
+        # render one line per game instead of the whole series mashed together.
+        games, last_mid = [], object()
+        for mid, name in entries:
+            if mid != last_mid:
+                games.append([])
+                last_mid = mid
+            games[-1].append(name)
+        return "||".join("|".join(g) for g in games)
+
+    def _tc(r, pre):  # per-game card names for a 2v2 slot
+        return _games_join(team_cards.get((r["id"], r[f"{pre}_id"]), []))
 
     # Flat scalar fields only (cards pipe-joined) so the client parses the whole
     # payload with JsonUtility — nested arrays silently fail there (learning #25).
@@ -9277,12 +9299,12 @@ async def admin_recent_series(
     solo_cards = {}
     if solo_ids:
         for cr in (await db.execute(text("""
-            SELECT m.series_id, mc.player_id, mc.card_name
+            SELECT m.series_id, mc.player_id, m.id AS match_id, mc.card_name
               FROM matches m JOIN match_cards mc ON mc.match_id = m.id
              WHERE m.series_id = ANY(:sids)
              ORDER BY m.created_at, mc.pick_order
         """), {"sids": solo_ids})).mappings().all():
-            solo_cards.setdefault((cr["series_id"], cr["player_id"]), []).append(cr["card_name"])
+            solo_cards.setdefault((cr["series_id"], cr["player_id"]), []).append((cr["match_id"], cr["card_name"]))
 
     one = []
     for r in solo_rows:
@@ -9298,9 +9320,9 @@ async def admin_recent_series(
             "incomplete": status not in ("completed", "cancelled"),
             "dc_name": "", "dc_steam": "",
             "p1_name": r["p1_name"], "p1_steam": r["p1_sid"], "p1_team": 1,
-            "p1_cards": "|".join(solo_cards.get((r["id"], r["player1_id"]), [])),
+            "p1_cards": _games_join(solo_cards.get((r["id"], r["player1_id"]), [])),
             "p2_name": r["p2_name"], "p2_steam": r["p2_sid"], "p2_team": 2,
-            "p2_cards": "|".join(solo_cards.get((r["id"], r["player2_id"]), [])),
+            "p2_cards": _games_join(solo_cards.get((r["id"], r["player2_id"]), [])),
             "p3_name": "", "p3_steam": "", "p3_team": 0, "p3_cards": "",
             "p4_name": "", "p4_steam": "", "p4_team": 0, "p4_cards": "",
         })
@@ -9687,7 +9709,12 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     # t1a/t1b/t2a/t2b match what the match-report path computes.
     t1 = sorted([req.t1a_steam, req.t1b_steam])
     t2 = sorted([req.t2a_steam, req.t2b_steam])
-    new_id = uuid_mod.uuid4()
+    # NOTE: module-level `uuid`, NOT `uuid_mod` — that alias only exists as a
+    # function-local import in the queue endpoints. Referencing it here raised
+    # NameError -> 500 on every continuation-create, which silently dropped all
+    # games after the first series of a 2v2 sitting (bug #70). The idempotent
+    # "existing" branch above returns earlier, which is why smoke tests passed.
+    new_id = uuid.uuid4()
     await db.execute(text("""
         INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
                                  status, was_auto_balanced, photon_room_id, region, created_at)
@@ -9701,6 +9728,703 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     await db.commit()
     print(f"[TEAM-CONTINUATION] created {new_id} for {steams} room={req.room_id}")
     return {"series_id": str(new_id), "status": "created"}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 1v2 (solo vs duo) — parallel pipeline, launched UNSCORED (Sid July 13 #2).
+# Mirrors the 2v2 machinery + its hard-won learnings: consent queue skips the
+# Elo band (#127), continuation closes the recording gap from day one (#70/#135
+# — uses module-level `uuid`, never a function-local alias), the completion
+# helper takes FOR UPDATE + re-checks status to survive concurrent DC/report
+# callers (#78), room ids are per-game suffixed so replays dedup. No ratings
+# are applied yet; every match records the full replay surface for a later
+# retroactive Glicko turn-on.
+# ══════════════════════════════════════════════════════════════════════════
+
+OVT_MATCH_XP_BASE   = 500          # a touch under 2v2's 600 (games are shorter)
+OVT_MATCH_WIN_MULT  = 1.5
+OVT_SERIES_WIN_GOLD = 40
+OVT_SERIES_LOSS_GOLD = 20
+OVT_READY_TIMEOUT_SECONDS = 90     # matches team ready window (#51)
+
+
+def _verify_ovt_hmac(report: OvtMatchReport) -> bool:
+    """10-field canonical: solo:duo_a:duo_b:sr:dr:is_ranked:reporter:room:winner_side:series."""
+    if not MATCH_HMAC_SECRET:
+        return True
+    if not report.hmac_signature:
+        print("[OVT-HMAC] no signature provided")
+        return False
+    msg = (
+        f"{report.solo.steam_id}:{report.duo_a.steam_id}:{report.duo_b.steam_id}:"
+        f"{report.solo_rounds_won}:{report.duo_rounds_won}:"
+        f"{str(report.is_ranked).lower()}:{report.reported_by_steam_id}:"
+        f"{report.photon_room_id or ''}:{report.winner_side}:{report.series_id}"
+    )
+    expected = hmac.new(MATCH_HMAC_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    ok = hmac.compare_digest(report.hmac_signature, expected)
+    if not ok:
+        print(f"[OVT-HMAC] mismatch. canonical='{msg}'")
+    return ok
+
+
+class _OvtQueueJoinReq(BaseModel):
+    steam_id: str
+    display_name: str = "Player"
+    region: str | None = None
+    preferred_side: int = 0            # 0 none, 1 solo, 2 duo
+    solo_extra_pick: bool = False
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/ovt/queue/join", tags=["1v2 Queue"])
+async def ovt_queue_join(req: _OvtQueueJoinReq, db: AsyncSession = Depends(get_db)):
+    """Join the 1v2 manual lobby (consent queue — no Elo band). Idempotent per
+    player; re-joining refreshes preferences and the poll timestamp."""
+    _presence_touch(req.steam_id)
+    player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(404, "Player not registered")
+    # Snapshot ratings (1v2 rating if it exists, else 1v1 as fallback ordering hint).
+    g = (await db.execute(text(
+        "SELECT rating, rating_deviation, completed_series FROM glicko_ratings_1v2 WHERE player_id = :pid"
+    ), {"pid": player.id})).mappings().first()
+    rating = g["rating"] if g else 1500.0
+    rd = g["rating_deviation"] if g else 350.0
+    cs = g["completed_series"] if g else 0
+    # fallback_rating is the player's 1v1 elo — the 1v2 pool is all-1500 until
+    # ranked launches, so the 1v1 number is the only meaningful ordering hint.
+    g1 = (await db.execute(text(
+        "SELECT rating FROM glicko_ratings WHERE player_id = :pid"
+    ), {"pid": player.id})).mappings().first()
+    fallback = float(g1["rating"]) if g1 and g1["rating"] is not None else 1500.0
+    side = req.preferred_side if req.preferred_side in (0, 1, 2) else 0
+    await db.execute(text("""
+        INSERT INTO ovt_queue (player_id, steam_id, display_name, rating, rating_deviation,
+                               completed_series, fallback_rating, region, queue_type,
+                               preferred_side, solo_extra_pick, status, joined_at, last_polled)
+        VALUES (:pid, :sid, :dn, :r, :rd, :cs, :fr, :reg, 'manual', :side, :sep, 'searching', NOW(), NOW())
+        ON CONFLICT (player_id) DO UPDATE SET
+            display_name = EXCLUDED.display_name, region = EXCLUDED.region,
+            preferred_side = EXCLUDED.preferred_side, solo_extra_pick = EXCLUDED.solo_extra_pick,
+            last_polled = NOW()
+    """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64], "r": rating,
+           "rd": rd, "cs": cs, "fr": fallback, "reg": (req.region or "")[:8] or None,
+           "side": side, "sep": req.solo_extra_pick})
+    await db.commit()
+    n = (await db.execute(text("SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"))).scalar() or 0
+    return {"status": "ok", "queue_count": int(n), "preferred_side": side}
+
+
+@app.post("/api/v1/ovt/queue/leave", tags=["1v2 Queue"])
+async def ovt_queue_leave(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    """Leave the 1v2 queue. If the leaver was LOCKED into a series that never
+    produced a game, the lock is dissolved: the series is canceled and the
+    other two lobby rows reset to searching. Without this, a no-show/failed
+    join left permanent 'ready_join' husk rows and a forever-'active' series
+    (the leave endpoint used to delete only the leaver's own row). A series
+    with >=1 reported game is left alone — that's a mid-series leave and the
+    match pipeline owns its lifecycle."""
+    me = (await db.execute(text(
+        "SELECT q.player_id, q.status, q.series_id FROM ovt_queue q "
+        "JOIN players p ON p.id = q.player_id WHERE p.steam_id = :sid"
+    ), {"sid": steam_id})).mappings().first()
+    if me is None:
+        return {"status": "ok"}
+    dissolved = False
+    if me["status"] in ("ready_join", "matched") and me["series_id"] is not None:
+        srow = (await db.execute(text(
+            "SELECT s.status,"
+            "       (SELECT COUNT(*) FROM ovt_matches m WHERE m.series_id = s.id) AS games"
+            "  FROM ovt_series s WHERE s.id = :sid FOR UPDATE"
+        ), {"sid": me["series_id"]})).mappings().first()
+        if srow is not None and srow["status"] == "active" and int(srow["games"] or 0) == 0:
+            await db.execute(text(
+                "UPDATE ovt_series SET status='canceled', invalidation_reason='assembly_timeout',"
+                "       invalidated_at=NOW() WHERE id=:sid AND status='active'"
+            ), {"sid": me["series_id"]})
+            await db.execute(text("""
+                UPDATE ovt_queue SET status='searching', series_id=NULL, side_assigned=NULL,
+                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+                 WHERE series_id = :sid AND player_id != :pid
+            """), {"sid": me["series_id"], "pid": me["player_id"]})
+            dissolved = True
+            print(f"[OVT-LOCK] lock dissolved by leave (series {me['series_id']}, leaver {steam_id})")
+    await db.execute(text(
+        "DELETE FROM ovt_queue WHERE player_id = :pid"
+    ), {"pid": me["player_id"]})
+    await db.commit()
+    return {"status": "ok", "lock_dissolved": dissolved}
+
+
+@app.get("/api/v1/ovt/queue/recent-joins", tags=["1v2 Queue"])
+async def ovt_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
+    """Players who joined the 1v2 lobby in the last N seconds. Drives the
+    Discord #ranked-looking-for-people beacon, same as the 1v1 and 2v2
+    queues. `rating` is the 1v1 elo snapshot (fallback_rating) — the 1v2
+    pool is all-1500 until ranked lands, so it's the only meaningful number
+    to show. queue_size counts only FRESH searching rows (same liveness the
+    lock uses) so the beacon never advertises ghost lobbies."""
+    result = await db.execute(text("""
+        SELECT display_name, steam_id, fallback_rating, joined_at
+          FROM ovt_queue
+         WHERE status = 'searching'
+           AND joined_at > NOW() - INTERVAL '1 second' * :secs
+         ORDER BY joined_at DESC
+    """), {"secs": seconds})
+    rows = result.mappings().all()
+    cnt = (await db.execute(text(
+        "SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"
+        "   AND last_polled > NOW() - INTERVAL '75 seconds'"
+    ))).scalar() or 0
+    return {
+        "joins": [
+            {"display_name": r["display_name"], "steam_id": r["steam_id"],
+             "rating": int(round(r["fallback_rating"] or 1500)),
+             "joined_at": r["joined_at"].isoformat() if r["joined_at"] else None}
+            for r in rows
+        ],
+        "queue_size": int(cnt),
+    }
+
+
+@app.get("/api/v1/ovt/queue/list", tags=["1v2 Queue"])
+async def ovt_queue_list(db: AsyncSession = Depends(get_db)):
+    """Snapshot of everyone in the 1v2 lobby — powers the "who's in the lobby"
+    panel on the F5 1v2 tab (same surface the 2v2 tab gets from
+    /team/queue/list). 1v2 is unscored at launch, so the context ratings worth
+    showing are the player's 1v1 and 2v2 elos — the 1v2 pool is all-1500 until
+    ranked lands. Stale searching rows (client crashed/killed, stopped polling)
+    are filtered out so the panel never shows ghosts."""
+    rows = (await db.execute(text("""
+        SELECT q.steam_id, q.display_name, q.preferred_side, q.solo_extra_pick,
+               q.status, q.side_assigned, q.region, q.joined_at,
+               gr.rating AS rating_1v1,
+               g2.rating AS rating_2v2, COALESCE(g2.completed_series, 0) AS cs_2v2
+          FROM ovt_queue q
+          LEFT JOIN glicko_ratings gr ON gr.player_id = q.player_id
+          LEFT JOIN glicko_ratings_2v2 g2 ON g2.player_id = q.player_id
+         WHERE (q.status = 'searching' AND q.last_polled > NOW() - INTERVAL '75 seconds')
+            OR (q.status != 'searching'
+                AND COALESCE(q.matched_at, q.joined_at) > NOW() - INTERVAL '3 hours')
+         ORDER BY q.joined_at ASC
+    """))).mappings().all()
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows:
+        # 2v2 elo only counts once the player has a completed 2v2 series —
+        # a bare default-1500 glicko row is noise, not information.
+        has_2v2 = (r["cs_2v2"] or 0) > 0 and r["rating_2v2"] is not None
+        out.append({
+            "steam_id": r["steam_id"],
+            "display_name": r["display_name"],
+            "rating_1v1": int(round(r["rating_1v1"])) if r["rating_1v1"] is not None else 1500,
+            "rating_2v2": int(round(r["rating_2v2"])) if has_2v2 else 0,
+            "preferred_side": int(r["preferred_side"] or 0),
+            "solo_extra_pick": bool(r["solo_extra_pick"]),
+            "status": r["status"],
+            "side_assigned": int(r["side_assigned"]) if r["side_assigned"] is not None else 0,
+            "wait_seconds": int((now - r["joined_at"]).total_seconds()) if r["joined_at"] else 0,
+            "region": r["region"],
+        })
+    return {"queuers": out, "count": len(out)}
+
+
+@app.get("/api/v1/ovt/queue/poll/{steam_id}", tags=["1v2 Queue"])
+async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """Poll the 1v2 queue. When 3 searching players are present, the lowest
+    Steam ID locks the match: assigns 1 solo + 2 duo (honoring preferences,
+    else join order), creates the series + room, and flips all three to
+    'ready_join'. SELECT FOR UPDATE SKIP LOCKED (#34) prevents duplicate rooms."""
+    _presence_touch(steam_id)
+    me = (await db.execute(text(
+        "SELECT q.*, p.id AS pid FROM ovt_queue q JOIN players p ON p.id = q.player_id "
+        "WHERE q.steam_id = :sid"
+    ), {"sid": steam_id})).mappings().first()
+    if me is None:
+        return {"status": "not_in_queue", "queue_count": 0}
+    await db.execute(text("UPDATE ovt_queue SET last_polled = NOW() WHERE steam_id = :sid"), {"sid": steam_id})
+
+    # Prune ghosts: a crashed/killed client stops polling but its 'searching'
+    # row stays. Clients poll every ~2s; the 75s window survives a backend
+    # rebuild (~30s of connection-refused during /deploy-backend) without the
+    # first poller back mass-evicting every other live queuer. The SKIP LOCKED
+    # sub-select avoids the two-way deadlock two concurrently-recovering
+    # pollers would otherwise hit (each holds its own-row lock from the
+    # last_polled UPDATE while DELETEing the other's row). Ghost rows can't
+    # lock into a series meanwhile — the lock query filters on fresh
+    # last_polled. The second DELETE sweeps ancient locked husks (a 3h-old
+    # lock is dead by any definition; live-series rows are hours younger).
+    await db.execute(text("""
+        DELETE FROM ovt_queue WHERE player_id IN (
+            SELECT player_id FROM ovt_queue
+             WHERE status = 'searching' AND last_polled < NOW() - INTERVAL '75 seconds'
+             FOR UPDATE SKIP LOCKED)
+    """))
+    await db.execute(text("""
+        DELETE FROM ovt_queue WHERE player_id IN (
+            SELECT player_id FROM ovt_queue
+             WHERE status != 'searching' AND matched_at IS NOT NULL
+               AND matched_at < NOW() - INTERVAL '3 hours'
+             FOR UPDATE SKIP LOCKED)
+    """))
+
+    # Already locked → report my slot + lobby.
+    if me["status"] in ("ready_join", "matched") and me["series_id"] is not None:
+        # Self-heal a dead lock (learning #33 family — the state machine must
+        # never re-feed clients a husk): if the series was completed/canceled
+        # elsewhere, reset immediately. The zero-games age check is a LAST
+        # resort at 10 minutes: game 1 of a live series has zero ovt_matches
+        # rows for its whole duration, and a locked player re-clicking Join
+        # mid-game polls this branch — a 2-minute threshold canceled LIVE
+        # series (review-confirmed critical). Abandoned locks are normally
+        # dissolved much earlier by the leave endpoint (watchdog bails and
+        # queue-join failures now call /ovt/queue/leave client-side).
+        srow = (await db.execute(text(
+            "SELECT s.status, s.created_at,"
+            "       (SELECT COUNT(*) FROM ovt_matches m WHERE m.series_id = s.id) AS games"
+            "  FROM ovt_series s WHERE s.id = :sid"
+        ), {"sid": me["series_id"]})).mappings().first()
+        lock_age = ((datetime.now(timezone.utc) - me["matched_at"]).total_seconds()
+                    if me["matched_at"] is not None else 0)
+        dead = (srow is None or srow["status"] != "active"
+                or (int(srow["games"] or 0) == 0 and lock_age > 600))
+        if dead:
+            if srow is not None and srow["status"] == "active":
+                await db.execute(text(
+                    "UPDATE ovt_series SET status='canceled', invalidation_reason='assembly_timeout',"
+                    "       invalidated_at=NOW() WHERE id=:sid AND status='active'"
+                ), {"sid": me["series_id"]})
+            await db.execute(text("""
+                UPDATE ovt_queue SET status='searching', series_id=NULL, side_assigned=NULL,
+                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+                 WHERE series_id = :sid
+            """), {"sid": me["series_id"]})
+            await db.commit()
+            print(f"[OVT-LOCK] dead lock reset (series {me['series_id']}, age {int(lock_age)}s)")
+            n = (await db.execute(text("SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"))).scalar() or 0
+            return {"status": "searching", "queue_count": int(n)}
+        await db.commit()
+        return await _ovt_poll_locked_payload(db, me["series_id"], steam_id)
+
+    # Try to lock. Only the lowest current Steam ID attempts, so the three
+    # clients don't race to create three series. Fresh-poll filter: a row
+    # whose client stopped polling must never lock into a series (its player
+    # would never join the room) — live clients poll every ~2s, so 10s of
+    # silence disqualifies without waiting for the 75s prune.
+    rows = (await db.execute(text("""
+        SELECT player_id, steam_id, display_name, preferred_side, solo_extra_pick,
+               region, rating, rating_deviation, completed_series
+          FROM ovt_queue
+         WHERE status = 'searching'
+           AND last_polled > NOW() - INTERVAL '10 seconds'
+         ORDER BY joined_at
+         FOR UPDATE SKIP LOCKED
+    """))).mappings().all()
+    if len(rows) < 3:
+        await db.commit()
+        return {"status": "searching", "queue_count": len(rows)}
+
+    # Review HIGH: the decider MUST be a member of the lobby it locks. Pick the
+    # lobby (3 earliest joiners) FIRST, then elect the decider from exactly those
+    # three. The old code chose the decider as min Steam ID over ALL searching
+    # rows while locking rows[:3] — when a 4th player with the lowest Steam ID
+    # was waiting, they'd elect themselves, lock a room for the OTHER three, and
+    # strand themselves in a 3-player room as a 4th client (permanent stall).
+    lobby = rows[:3]  # exactly three lock together (earliest by joined_at)
+    lobby_numeric = [r["steam_id"] for r in lobby if r["steam_id"].isdigit()]
+    lowest = min(lobby_numeric, key=int) if lobby_numeric else lobby[0]["steam_id"]
+    if steam_id != lowest:
+        await db.commit()
+        return {"status": "searching", "queue_count": len(rows)}
+    # Assign sides: first player who wants solo (pref 1) takes solo, else the
+    # first by join order; the other two are the duo.
+    solo = next((r for r in lobby if r["preferred_side"] == 1), None) or lobby[0]
+    duo = [r for r in lobby if r["player_id"] != solo["player_id"]]
+    if len(duo) != 2:
+        await db.commit()
+        return {"status": "searching", "queue_count": len(rows)}
+    extra_pick = any(bool(r["solo_extra_pick"]) for r in lobby)
+    region = next((r["region"] for r in lobby if r["region"]), "us")
+    room = f"ovt_{uuid.uuid4().hex[:12]}"
+    series_id = uuid.uuid4()
+    await db.execute(text("""
+        INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
+                                solo_extra_pick, photon_room_id, region, created_at)
+        VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :reg, NOW())
+    """), {"sid": series_id, "solo": solo["player_id"], "da": duo[0]["player_id"],
+           "db": duo[1]["player_id"], "sep": extra_pick, "room": room, "reg": (region or "us")[:8]})
+    for r in lobby:
+        this_side = 1 if r["player_id"] == solo["player_id"] else 2
+        await db.execute(text("""
+            UPDATE ovt_queue SET status='ready_join', series_id=:sid, side_assigned=:side,
+                   room_name=:room, room_region=:reg, matched_at=NOW()
+             WHERE player_id=:pid
+        """), {"sid": series_id, "side": this_side, "room": room, "reg": (region or "us")[:8],
+               "pid": r["player_id"]})
+    await db.commit()
+    print(f"[OVT-LOCK] series {series_id} room {room} solo={solo['steam_id']} extra_pick={extra_pick}")
+    return await _ovt_poll_locked_payload(db, series_id, steam_id)
+
+
+async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str) -> dict:
+    s = (await db.execute(text("""
+        SELECT s.*, ps.steam_id AS solo_sid, ps.display_name AS solo_name,
+               pa.steam_id AS da_sid, pa.display_name AS da_name,
+               pb.steam_id AS db_sid, pb.display_name AS db_name
+          FROM ovt_series s
+          JOIN players ps ON ps.id = s.solo_id
+          JOIN players pa ON pa.id = s.duo_a_id
+          JOIN players pb ON pb.id = s.duo_b_id
+         WHERE s.id = :sid
+    """), {"sid": series_id})).mappings().first()
+    if s is None:
+        return {"status": "searching", "queue_count": 0}
+    my_side = 1 if s["solo_sid"] == steam_id else 2
+    return {
+        "status": "ready_join",
+        "series_id": str(series_id),
+        "side_assigned": my_side,
+        "room_name": s["photon_room_id"],
+        "room_region": s["region"],
+        "solo_extra_pick": bool(s["solo_extra_pick"]),
+        "solo": {"steam_id": s["solo_sid"], "display_name": s["solo_name"]},
+        "duo": [
+            {"steam_id": s["da_sid"], "display_name": s["da_name"]},
+            {"steam_id": s["db_sid"], "display_name": s["db_name"]},
+        ],
+    }
+
+
+@app.post("/api/v1/ovt/series/continuation", tags=["1v2 Matches"])
+async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = Depends(get_db)):
+    """Open a fresh 1v2 series when the three keep playing past a completed
+    BO3 (recording-gap fix, learning #70). Reuses _TeamContinuationReq's shape
+    but only the first three steam fields matter (t1a=solo, t1b=duo_a,
+    t2a=duo_b; t2b ignored). Idempotent."""
+    canonical = (
+        f"ovt-continuation:{req.t1a_steam}:{req.t1b_steam}:"
+        f"{req.t2a_steam}:{req.room_id}:{req.reporter_steam_id}"
+    )
+    if not _verify_action_sig(canonical, req.hmac_signature):
+        raise HTTPException(403, "Bad continuation signature")
+    steams = [req.t1a_steam, req.t1b_steam, req.t2a_steam]
+    if len(set(steams)) != 3:
+        raise HTTPException(400, "Need three distinct players")
+    if req.reporter_steam_id not in steams:
+        raise HTTPException(403, "Reporter not part of the match")
+    numeric = [s for s in steams if s.isdigit()]
+    if numeric and req.reporter_steam_id != min(numeric, key=int):
+        raise HTTPException(403, "Reporter must be the lowest Steam ID")
+    rows = (await db.execute(
+        select(Player.id, Player.steam_id).where(Player.steam_id.in_(steams))
+    )).all()
+    id_by_steam = {r.steam_id: r.id for r in rows}
+    if len(id_by_steam) != 3:
+        raise HTTPException(404, "One or more players not registered")
+    ids = list(id_by_steam.values())
+    live = (await db.execute(text("""
+        SELECT id FROM ovt_series
+         WHERE status IN ('active', 'dc_paused', 'dc_incomplete')
+           AND solo_id = ANY(:ids) AND duo_a_id = ANY(:ids) AND duo_b_id = ANY(:ids)
+         ORDER BY created_at DESC LIMIT 1
+    """), {"ids": ids})).scalar_one_or_none()
+    if live is not None:
+        return {"series_id": str(live), "status": "existing"}
+    # A canceled series counts as a prior too: the trio DID lock together
+    # (that's the consent proof this lookup exists for), and a lock canceled
+    # as assembly_timeout must not 409 the sitting's remaining games — the
+    # match pipeline would silently stop recording (review finding).
+    prior = (await db.execute(text("""
+        SELECT completed_at, created_at, solo_id, duo_a_id, duo_b_id, solo_extra_pick
+          FROM ovt_series
+         WHERE status IN ('completed', 'canceled')
+           AND solo_id = ANY(:ids) AND duo_a_id = ANY(:ids) AND duo_b_id = ANY(:ids)
+         ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 1
+    """), {"ids": ids})).mappings().first()
+    if prior is None:
+        raise HTTPException(409, "No prior series for these players")
+    anchor = prior["completed_at"] or prior["created_at"]
+    if anchor is not None:
+        age_min = (datetime.now(timezone.utc) - anchor).total_seconds() / 60.0
+        if age_min > _CONTINUATION_WINDOW_MINUTES:
+            raise HTTPException(409, "Prior series too old to continue")
+    # Preserve the SAME solo/duo assignment as the prior series (the client keeps
+    # its sides across a sitting; the report path canonicalizes to match).
+    new_id = uuid.uuid4()
+    await db.execute(text("""
+        INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
+                                solo_extra_pick, photon_room_id, region, created_at)
+        VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :region, NOW())
+    """), {"sid": new_id, "solo": prior["solo_id"], "da": prior["duo_a_id"], "db": prior["duo_b_id"],
+           "sep": bool(prior["solo_extra_pick"]), "room": (req.room_id or "")[:64],
+           "region": (req.region or "")[:8] or None})
+    await db.commit()
+    print(f"[OVT-CONTINUATION] created {new_id} for {steams} room={req.room_id}")
+    return {"series_id": str(new_id), "status": "created"}
+
+
+@app.post("/api/v1/ovt/matches", response_model=OvtMatchResponse, tags=["1v2 Matches"])
+async def submit_ovt_match(report: OvtMatchReport, db: AsyncSession = Depends(get_db)):
+    """Record one 1v2 game. Advances the series (first to 2), applies gold+XP
+    (NO rating at launch), stores the full replay surface. Concurrency-safe:
+    the series completion path locks the row and re-checks status (#78)."""
+    if not _verify_ovt_hmac(report):
+        raise HTTPException(403, "Invalid 1v2 match signature")
+    try:
+        series_uuid = UUID(report.series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id format")
+    steams = {report.solo.steam_id, report.duo_a.steam_id, report.duo_b.steam_id}
+    if len(steams) != 3:
+        raise HTTPException(400, "Need three distinct players")
+
+    prows = (await db.execute(
+        select(Player.id, Player.steam_id).where(Player.steam_id.in_(list(steams)))
+    )).all()
+    id_by_steam = {r.steam_id: r.id for r in prows}
+    if len(id_by_steam) != 3:
+        raise HTTPException(404, "One or more players not registered")
+    solo_id = id_by_steam[report.solo.steam_id]
+    duo_a_id = id_by_steam[report.duo_a.steam_id]
+    duo_b_id = id_by_steam[report.duo_b.steam_id]
+
+    # Review MEDIUM: an empty/NULL room bypasses the dedup UNIQUE (Postgres treats
+    # NULLs as distinct), so two reports of a room-less game would both insert and
+    # double-credit. The client always sends a per-game-suffixed room; enforce it.
+    if not (report.photon_room_id or "").strip():
+        raise HTTPException(400, "photon_room_id is required")
+    # Review CONFIRMED: don't trust the client's solo/duo ORDERING — verify the
+    # three reported players are exactly the series' three, and derive solo/duo
+    # from the SERIES row (the authoritative lock-time assignment), not the report.
+    if report.winner_side not in (1, 2):
+        raise HTTPException(400, "winner_side must be 1 or 2")
+    if report.winner_side != (1 if report.solo_rounds_won > report.duo_rounds_won else 2):
+        raise HTTPException(400, "winner_side disagrees with the round score")
+
+    # Lock the series row FIRST (serializes concurrent reports / DC callers, #78).
+    series = (await db.execute(text(
+        "SELECT * FROM ovt_series WHERE id = :sid FOR UPDATE"
+    ), {"sid": series_uuid})).mappings().first()
+    if series is None:
+        raise HTTPException(404, "Series not found")
+    # Verify the three reported players are exactly the series' three (a client
+    # can't swap in a different opponent). Keep the client's solo/duo LABELING
+    # though — it's derived from the actual in-game team sizes (team-of-1 = solo),
+    # which is what the reported rounds correspond to. The series row's own
+    # solo/duo is a queue-time preference that vanilla team assignment may not
+    # preserve, so it's NOT authoritative for round attribution.
+    if {solo_id, duo_a_id, duo_b_id} != {series["solo_id"], series["duo_a_id"], series["duo_b_id"]}:
+        raise HTTPException(403, "Reported players do not match the series")
+
+    # Insert the match (dedup on the room+players unique constraint → replay no-op).
+    match_id = uuid.uuid4()
+    try:
+        await db.execute(text("""
+            INSERT INTO ovt_matches (id, series_id, solo_id, duo_a_id, duo_b_id,
+                solo_rounds_won, duo_rounds_won, solo_points_total, duo_points_total,
+                winner_side, solo_fps_avg, duo_a_fps_avg, duo_b_fps_avg, duration_seconds,
+                photon_room_id, game_version, region, hmac_signature, reported_by,
+                is_ranked, started_at, ended_at)
+            VALUES (:id, :sid, :solo, :da, :db, :sr, :dr, :sp, :dp, :ws,
+                    :sf, :daf, :dbf, :dur, :room, :gv, :reg, :hmac, :rep, false, :started, NOW())
+        """), {"id": match_id, "sid": series_uuid, "solo": solo_id, "da": duo_a_id, "db": duo_b_id,
+               "sr": report.solo_rounds_won, "dr": report.duo_rounds_won,
+               "sp": report.solo_points_total, "dp": report.duo_points_total, "ws": report.winner_side,
+               "sf": report.solo_fps, "daf": report.duo_a_fps, "dbf": report.duo_b_fps,
+               "dur": report.match_duration, "room": (report.photon_room_id or "")[:64] or None,
+               "gv": (report.game_version or "")[:32] or None, "reg": (report.region or "")[:8] or None,
+               "hmac": (report.hmac_signature or "")[:128] or None, "rep": id_by_steam.get(report.reported_by_steam_id),
+               "started": report.started_at})
+    except IntegrityError:
+        await db.rollback()
+        # Already recorded (replay). Return the current series state idempotently.
+        s2 = (await db.execute(text("SELECT * FROM ovt_series WHERE id = :sid"), {"sid": series_uuid})).mappings().first()
+        if s2 is None:
+            raise HTTPException(404, "Series not found")
+        # Reporter-first score (learning #121) — a duo-member reporter must not
+        # see the solo-first order and read a won series as a loss.
+        rep_side_r = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+        score_r = (f"{s2['solo_series_wins']}-{s2['duo_series_wins']}" if rep_side_r == 1
+                   else f"{s2['duo_series_wins']}-{s2['solo_series_wins']}")
+        return OvtMatchResponse(
+            match_id=match_id, series_id=series_uuid, series_status=s2["status"],
+            series_score=score_r, winner_side=report.winner_side, message="Already recorded")
+
+    # Per-game card picks (both duo members + solo).
+    for pmd, pid in ((report.solo, solo_id), (report.duo_a, duo_a_id), (report.duo_b, duo_b_id)):
+        for i, c in enumerate(pmd.cards or []):
+            nm = getattr(c, "card_name", None) or getattr(c, "name", None)
+            if not nm:
+                continue
+            await db.execute(text(
+                "INSERT INTO ovt_match_cards (match_id, player_id, card_name, pick_order) "
+                "VALUES (:m, :p, :c, :o)"
+            ), {"m": match_id, "p": pid, "c": str(nm)[:64], "o": i})
+
+    # Advance the series win tally only if still active (re-check under the lock).
+    if series["status"] != "active":
+        await db.commit()  # keeps the match/card rows we already inserted
+        rep_side2 = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+        score2 = (f"{series['solo_series_wins']}-{series['duo_series_wins']}" if rep_side2 == 1
+                  else f"{series['duo_series_wins']}-{series['solo_series_wins']}")
+        return OvtMatchResponse(
+            match_id=match_id, series_id=series_uuid, series_status=series["status"],
+            series_score=score2, winner_side=report.winner_side, message="Series already resolved")
+
+    solo_wins = series["solo_series_wins"] + (1 if report.winner_side == 1 else 0)
+    duo_wins = series["duo_series_wins"] + (1 if report.winner_side == 2 else 0)
+    series_done = solo_wins >= 2 or duo_wins >= 2
+    winner_side = 1 if solo_wins > duo_wins else 2
+
+    # ── Per-match XP + gold. Review CONFIRMED: use an ATOMIC increment
+    # (total_xp = total_xp + delta) with RETURNING, not a Python-computed
+    # absolute write over a separate SELECT — the latter loses updates if the
+    # same player is credited by two concurrent series completions. NO rating
+    # at launch. Gold conversion (100xp=1g) computed from the returned totals. ──
+    async def _award(pid, won_game: bool):
+        xp = OVT_MATCH_XP_BASE
+        if won_game:
+            xp = int(xp * OVT_MATCH_WIN_MULT)
+        row = (await db.execute(text(
+            "UPDATE players SET total_xp = COALESCE(total_xp,0) + :xp WHERE id = :pid "
+            "RETURNING total_xp AS new_xp, (COALESCE(total_xp,0) - :xp) AS old_xp"
+        ), {"xp": xp, "pid": pid})).mappings().first()
+        new_xp = row["new_xp"] if row else xp
+        old_xp = row["old_xp"] if row else 0
+        gold_delta = max(0, (new_xp // 100) - (old_xp // 100))
+        if gold_delta > 0:
+            await db.execute(text(
+                "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = :pid"
+            ), {"g": gold_delta, "pid": pid})
+            db.add(GoldTransaction(player_id=pid, amount=gold_delta, reason="ovt_xp", reference_id=str(match_id)))
+        return xp, gold_delta
+
+    solo_won_game = report.winner_side == 1
+    sx, sg = await _award(solo_id, solo_won_game)
+    ax, ag = await _award(duo_a_id, not solo_won_game)
+    bx, bg = await _award(duo_b_id, not solo_won_game)
+    await db.execute(text("""
+        UPDATE ovt_series SET
+            solo_series_wins=:sw, duo_series_wins=:dw,
+            solo_xp_earned = solo_xp_earned + :sx, duo_a_xp_earned = duo_a_xp_earned + :ax,
+            duo_b_xp_earned = duo_b_xp_earned + :bx,
+            solo_gold_earned = solo_gold_earned + :sg, duo_a_gold_earned = duo_a_gold_earned + :ag,
+            duo_b_gold_earned = duo_b_gold_earned + :bg
+         WHERE id = :sid
+    """), {"sw": solo_wins, "dw": duo_wins, "sx": sx, "ax": ax, "bx": bx,
+           "sg": sg, "ag": ag, "bg": bg, "sid": series_uuid})
+
+    status = "active"
+    if series_done:
+        status = "completed"
+        # Series-completion gold: +40 winners / +20 losers.
+        for pid, side in ((solo_id, 1), (duo_a_id, 2), (duo_b_id, 2)):
+            bonus = OVT_SERIES_WIN_GOLD if side == winner_side else OVT_SERIES_LOSS_GOLD
+            await db.execute(text(
+                "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = :pid"
+            ), {"g": bonus, "pid": pid})
+            db.add(GoldTransaction(player_id=pid, amount=bonus,
+                                   reason=("ovt_series_win" if side == winner_side else "ovt_series_loss"),
+                                   reference_id=str(series_uuid)))
+            # Accumulate the bonus on this player's own slot column.
+            slot = "solo" if pid == solo_id else ("duo_a" if pid == duo_a_id else "duo_b")
+            await db.execute(text(
+                f"UPDATE ovt_series SET {slot}_gold_earned = {slot}_gold_earned + :g WHERE id = :sid"
+            ), {"g": bonus, "sid": series_uuid})
+        # Bump per-player completed-series / side game counts (rating table rows
+        # created lazily so the future ranked replay has counts to read).
+        for pid, is_solo in ((solo_id, True), (duo_a_id, False), (duo_b_id, False)):
+            await db.execute(text("""
+                INSERT INTO glicko_ratings_1v2 (player_id, completed_series, solo_games, duo_games)
+                VALUES (:pid, 1, :sg, :dg)
+                ON CONFLICT (player_id) DO UPDATE SET
+                    completed_series = glicko_ratings_1v2.completed_series + 1,
+                    solo_games = glicko_ratings_1v2.solo_games + :sg,
+                    duo_games = glicko_ratings_1v2.duo_games + :dg,
+                    updated_at = NOW()
+            """), {"pid": pid, "sg": 1 if is_solo else 0, "dg": 0 if is_solo else 1})
+        await db.execute(text(
+            "UPDATE ovt_series SET status='completed', winner_side=:ws, completed_at=NOW() WHERE id=:sid"
+        ), {"ws": winner_side, "sid": series_uuid})
+        await db.execute(text("DELETE FROM ovt_queue WHERE series_id = :sid"), {"sid": series_uuid})
+
+    await db.commit()
+    # Score from the REPORTER's own side (reporter-first, learning #121).
+    reporter_side = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+    score = f"{solo_wins}-{duo_wins}" if reporter_side == 1 else f"{duo_wins}-{solo_wins}"
+    print(f"[OVT-REPORT] match {match_id} series {series_uuid} {solo_wins}-{duo_wins} status={status}")
+    return OvtMatchResponse(
+        match_id=match_id, series_id=series_uuid, series_status=status,
+        series_score=score, winner_side=report.winner_side)
+
+
+@app.get("/api/v1/ovt/series/active", tags=["1v2 Matches"])
+async def ovt_series_active(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    """The caller's live 1v2 series (for the in-game HUD), if any."""
+    p = (await db.execute(select(Player.id).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if p is None:
+        return {"active": False}
+    s = (await db.execute(text("""
+        SELECT * FROM ovt_series
+         WHERE status = 'active'
+           AND (solo_id = :pid OR duo_a_id = :pid OR duo_b_id = :pid)
+           AND created_at > NOW() - INTERVAL '3 hours'
+         ORDER BY created_at DESC LIMIT 1
+    """), {"pid": p})).mappings().first()
+    if s is None:
+        return {"active": False}
+    return {"active": True, "series_id": str(s["id"]),
+            "solo_wins": s["solo_series_wins"], "duo_wins": s["duo_series_wins"],
+            "solo_extra_pick": bool(s["solo_extra_pick"])}
+
+
+@app.get("/api/v1/ovt/leaderboard", response_model=Ovt1v2LeaderboardResponse, tags=["1v2 Matches"])
+async def ovt_leaderboard(limit: int = 200, db: AsyncSession = Depends(get_db)):
+    """1v2 stats leaderboard. UNSCORED at launch — ranked by games played then
+    win rate (the client shows an 'Unranked (beta)' banner off is_ranked=False).
+    Win rate / games come straight from ovt_matches so nothing needs backfilling
+    when ranked turns on."""
+    rows = (await db.execute(text("""
+        WITH per_player AS (
+            SELECT pid, SUM(played) AS games, SUM(won) AS wins,
+                   SUM(solo_g) AS solo_games, SUM(duo_g) AS duo_games
+            FROM (
+                SELECT solo_id AS pid, 1 AS played,
+                       CASE WHEN winner_side=1 THEN 1 ELSE 0 END AS won, 1 AS solo_g, 0 AS duo_g
+                  FROM ovt_matches WHERE invalidated_at IS NULL
+                UNION ALL
+                SELECT duo_a_id, 1, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, 0, 1
+                  FROM ovt_matches WHERE invalidated_at IS NULL
+                UNION ALL
+                SELECT duo_b_id, 1, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, 0, 1
+                  FROM ovt_matches WHERE invalidated_at IS NULL
+            ) u
+            GROUP BY pid
+        )
+        SELECT pp.pid, p.steam_id, p.display_name, p.total_xp,
+               pp.games, pp.wins, pp.solo_games, pp.duo_games
+          FROM per_player pp JOIN players p ON p.id = pp.pid
+         WHERE p.deleted_at IS NULL
+         ORDER BY pp.games DESC, (pp.wins::float / NULLIF(pp.games,0)) DESC NULLS LAST
+         LIMIT :lim
+    """), {"lim": max(1, min(limit, 500))})).mappings().all()
+    entries = []
+    for i, r in enumerate(rows):
+        games = int(r["games"] or 0)
+        wins = int(r["wins"] or 0)
+        losses = games - wins
+        lvl, _, _ = level_from_xp(r["total_xp"] or 0)
+        entries.append(Ovt1v2LeaderboardEntry(
+            rank=i + 1, steam_id=r["steam_id"], display_name=r["display_name"] or "Player",
+            games_played=games, wins=wins, losses=losses,
+            win_rate=round(100.0 * wins / games, 1) if games else 0.0,
+            solo_games=int(r["solo_games"] or 0), duo_games=int(r["duo_games"] or 0),
+            level=lvl,
+        ))
+    return Ovt1v2LeaderboardResponse(
+        entries=entries, total_players=len(entries),
+        last_updated=datetime.now(timezone.utc), is_ranked=False)
 
 
 @app.post("/api/v1/team/matches", response_model=TeamMatchResponse, tags=["Team Matches"])

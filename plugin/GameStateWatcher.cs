@@ -869,7 +869,8 @@ namespace CompetitiveRounds
                     isModIssued = (rp != null && rp.ContainsKey("cr_ff"))
                                 || rname.StartsWith("ranked_")
                                 || rname.StartsWith("team_")
-                                || rname.StartsWith("sct-");
+                                || rname.StartsWith("sct-")
+                                || rname.StartsWith("ovt_");
                     var pm = PlayerManager.instance;
                     playersSpawned = pm != null && pm.players != null && pm.players.Count >= 1;
                 }
@@ -919,7 +920,8 @@ namespace CompetitiveRounds
                     bool isModIssued = (rp != null && rp.ContainsKey("cr_ff"))
                                     || rname.StartsWith("ranked_")
                                     || rname.StartsWith("team_")
-                                    || rname.StartsWith("sct-");
+                                    || rname.StartsWith("sct-")
+                                || rname.StartsWith("ovt_");
                     if (isModIssued)
                     {
                         matchIsRanked = true;
@@ -1012,6 +1014,15 @@ namespace CompetitiveRounds
                 // report time force-rank a later casual game vs an unrelated
                 // (possibly vanilla) opponent.
                 ApiClient.ActiveRankedSeriesId = null;
+                // Same rule for the 1v2 sitting: leaving the ovt_ room ends it.
+                // Only the reporter's client clears these at series completion;
+                // the other two would otherwise carry a stale series id + slot
+                // to the menu, where the tab reads them as a pending lock.
+                if ((photonRoomId ?? "").StartsWith("ovt_"))
+                {
+                    ApiClient.ActiveOvt1v2SeriesId = null;
+                    try { Plugin.ClearPendingOvtSlot(); } catch { }
+                }
                 // Dump per-match perf-patch hit counts so we can verify in the log
                 // which ported patches actually fired this match (and how often).
                 PerfGate.DumpAndReset();
@@ -1032,19 +1043,27 @@ namespace CompetitiveRounds
             // what happened, and return to menu cleanly. No match ever started,
             // so no DC/leave penalty applies on either side.
             if (inRoom && !rankedRoomStallHandled
-                && (photonRoomId.StartsWith("ranked_") || photonRoomId.StartsWith("sct-")))
+                && (photonRoomId.StartsWith("ranked_") || photonRoomId.StartsWith("sct-")
+                    || photonRoomId.StartsWith("ovt_")))
             {
                 // Tournament rooms get a much longer solo window: the opponent
                 // has a 5-10 min no-show grace server-side, so bailing at 60s
                 // would bounce us out while they're still legitimately loading
                 // in. 6 min covers the grace; after that the server has already
                 // forfeited them and there's nobody to wait for. (item 3)
+                // 1v2 rooms need THREE arrivals and have no server assembly
+                // timeout (the 2v2 spawn-confirm machinery doesn't exist for
+                // ovt), so this watchdog is the only thing standing between a
+                // no-show and two players waiting forever — slightly longer
+                // window since two other clients have to load in.
                 bool isTournamentRoom = photonRoomId.StartsWith("sct-");
-                double bailAfter = isTournamentRoom ? 360 : 60;
-                double warnAfter = isTournamentRoom ? 90 : 25;
+                bool isOvtRoom = photonRoomId.StartsWith("ovt_");
+                double bailAfter = isTournamentRoom ? 360 : (isOvtRoom ? 90 : 60);
+                double warnAfter = isTournamentRoom ? 90 : (isOvtRoom ? 35 : 25);
+                int fullAt = isOvtRoom ? 3 : 2;
                 int pc = 0;
                 try { pc = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { }
-                if (pc >= 2) rankedRoomEverFull = true;
+                if (pc >= fullAt) rankedRoomEverFull = true;
                 if (!rankedRoomEverFull && !isTracking)
                 {
                     double waited = (DateTime.UtcNow - roomJoinTime).TotalSeconds;
@@ -1053,15 +1072,24 @@ namespace CompetitiveRounds
                         rankedRoomStallWarned = true;
                         CompetitiveUI.ShowNotification(isTournamentRoom
                             ? "Opponent hasn't connected yet — they have a few minutes of grace. Hang tight..."
+                            : isOvtRoom
+                            ? "Waiting for all 3 players to connect — hang tight..."
                             : "Opponent hasn't connected yet — hang tight...", new Color(1f, 0.8f, 0.3f), 6f);
                     }
                     if (waited >= bailAfter)
                     {
                         rankedRoomStallHandled = true;
-                        Plugin.Log.LogWarning($"[QUEUE-STALL] Opponent never joined {photonRoomId} after {(int)waited}s — returning to menu (no match started, no penalty)");
+                        Plugin.Log.LogWarning($"[QUEUE-STALL] Room {photonRoomId} never filled ({pc}/{fullAt}) after {(int)waited}s — returning to menu (no match started, no penalty)");
                         CompetitiveUI.ShowNotification(isTournamentRoom
                             ? "Opponent never showed — their no-show forfeit should be recorded. Returning to menu."
+                            : isOvtRoom
+                            ? "1v2 lobby never filled — returning to menu. Requeue when ready."
                             : "Opponent failed to join — returning to menu. Requeue when ready.", new Color(1f, 0.5f, 0.4f), 10f);
+                        // Leaving the ovt queue dissolves the never-filled lock
+                        // server-side (cancels the series, resets the other two
+                        // rows to searching) and clears the local lock state —
+                        // otherwise the husk re-feeds this dead room forever.
+                        if (isOvtRoom) { try { ApiClient.OvtLeaveQueue(); } catch { } }
                         try { NetworkConnectionHandler.instance.NetworkRestart(); }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[QUEUE-STALL] NetworkRestart failed: {ex.Message}"); }
                     }
@@ -1188,6 +1216,15 @@ namespace CompetitiveRounds
             {
                 try
                 {
+                    // Review MEDIUM: this is a 1v1-only leave-% path. In a multi-player
+                    // mod room (2v2 team_ / 1v2 ovt_) it would fire ReportDisconnect
+                    // against whichever single opponentSteamId the poll latched onto —
+                    // a phantom 1v1 leave incident. Those modes have their own DC
+                    // handling; skip the 1v1 path entirely for them.
+                    string rnDc = PhotonNetwork.CurrentRoom?.Name ?? "";
+                    bool multiPlayerMode = rnDc.StartsWith("team_") || rnDc.StartsWith("ovt_");
+                    if (multiPlayerMode) { wasInRoom = inRoom; return; }
+
                     int playerCount = PhotonNetwork.PlayerList?.Length ?? 0;
                     if (playerCount >= 2)
                         opponentWasPresent = true;
@@ -1580,7 +1617,8 @@ namespace CompetitiveRounds
                 bool isModIssued = (rp != null && rp.ContainsKey("cr_ff"))
                                 || rname.StartsWith("ranked_")
                                 || rname.StartsWith("team_")
-                                || rname.StartsWith("sct-");
+                                || rname.StartsWith("sct-")
+                                || rname.StartsWith("ovt_");
                 if (isModIssued)
                 {
                     matchIsRanked = true;
@@ -1618,6 +1656,15 @@ namespace CompetitiveRounds
                 if (inCrFfStart && string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId))
                 {
                     TryRequestContinuationSeries();
+                }
+
+                // 1v2 continuation (recording-gap fix, review CONFIRMED — the endpoint
+                // had no client caller): in an ovt_ room with no active series, the
+                // reporter opens a fresh series so games 2+ of the sitting record.
+                bool inOvtStart = (PhotonNetwork.CurrentRoom?.Name ?? "").StartsWith("ovt_");
+                if (inOvtStart && string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId))
+                {
+                    TryRequestOvtContinuationSeries();
                 }
             }
             catch { }
@@ -1851,6 +1898,11 @@ namespace CompetitiveRounds
             // falls back to "opponent" (matches the old behavior).
             var oppKeys = new List<string>();
             bool sessionRoomIsCrFf = false;
+            // Review HIGH: 1v2 (ovt_) games must NOT pollute the 1v1 session tally,
+            // the 1v1 BO3 "Series: X-Y" HUD, or the 1v1 session ranked W/L — those
+            // are 1v1-ladder surfaces and 1v2 is a separate (unscored) mode with its
+            // own tab. Detect ovt_ and skip the 1v1-specific mutations below.
+            bool sessionRoomIsOvt = (PhotonNetwork.CurrentRoom?.Name ?? "").StartsWith("ovt_");
             try
             {
                 var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
@@ -1879,6 +1931,9 @@ namespace CompetitiveRounds
             if (oppKeys.Count == 0)
                 oppKeys.Add(opponentDisplayName ?? "Unknown");
 
+            // 1v2 games skip the 1v1 session W/L-by-opponent dict + the counters
+            // below (they're 1v1-panel data). The 1v2 tab has its own leaderboard.
+            if (!sessionRoomIsOvt)
             foreach (var oppKey in oppKeys)
             {
                 if (!sessionWLByOpponent.ContainsKey(oppKey))
@@ -1896,7 +1951,7 @@ namespace CompetitiveRounds
                 }
             }
 
-            if (matchIsRanked)
+            if (matchIsRanked && !sessionRoomIsOvt)
             {
                 if (localWon) sessionRankedWins++; else sessionRankedLosses++;
                 // BO3 in-progress: bump the per-series game counter so the HUD
@@ -2027,6 +2082,33 @@ namespace CompetitiveRounds
             // the 2v2 match report instead of 1v1. The reporter (lowest Steam ID across the 4)
             // assembles the canonical t1a/t1b/t2a/t2b ordering by sorting each team's Steam IDs
             // — server canonicalizes the same way at lock, so the 11-field HMAC byte-matches.
+            // ── 1v2 routing (ovt_ rooms, 3 players) ────────────────────
+            // Solo vs duo is read straight from in-game team sizes (the team
+            // with ONE player is the solo), so no external side state is needed.
+            // Handled before the 2v2 route; on success we return.
+            try
+            {
+                string rn1 = PhotonNetwork.CurrentRoom?.Name ?? "";
+                // Review HIGH: ANY ovt_ room bans the 1v1 fallback — the guard must
+                // NOT be gated on PlayerList==3. An ovt_ room that (e.g. after a DC)
+                // has 2 players at report time would otherwise fall through to the
+                // 1v1 ReportMatch path and mint a phantom 1v1 ranked match/series
+                // (#65/#106 class). Only ATTEMPT the 3-player report when full.
+                if (rn1.StartsWith("ovt_") && shouldReport)
+                {
+                    bool sent = false;
+                    if (PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length == 3)
+                        sent = TryReportOvtMatch(reportRoomId, duration);
+                    if (!sent)
+                        Plugin.Log.LogWarning($"[1v2-REPORT-ROUTE] ovt_ room, report not routed (players={PhotonNetwork.PlayerList?.Length ?? -1}) — 1v1 fallback banned");
+                    EvaluateAchievements(localWon);
+                    isTracking = false;
+                    matchIsRanked = false;
+                    return;
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogError($"[1v2] routing error: {ex.Message}"); }
+
             bool routedTeamMatch = false;
             try
             {
@@ -2061,7 +2143,33 @@ namespace CompetitiveRounds
                 // 2v2 opponent pairs, polluting bets and 1v1 history.
                 if (roomIsCrFf || hasSeries)
                 {
-                    Plugin.Log.LogWarning($"[2v2-REPORT-ROUTE] BLOCKING 1v1 fallback in 2v2 context: shouldReport={shouldReport} hasSeries={hasSeries} playerListLen={playerListLen} cr_ff={roomIsCrFf} — match will not be reported");
+                    // Bug #70 self-heal: a reportable 2v2 game ended with no series id —
+                    // the game-start continuation request failed (server error / network
+                    // blip), which used to drop the game entirely. Re-request the
+                    // continuation NOW and submit this game once the series id lands.
+                    // Room + duration are captured; Photon state is still alive during
+                    // the between-games window, so the deferred TryReportTeamMatch can
+                    // resolve all four players. Non-reporters early-return inside
+                    // TryRequestContinuationSeries as usual.
+                    if (shouldReport && roomIsCrFf && !hasSeries && playerListLen == 4)
+                    {
+                        Plugin.Log.LogWarning("[2v2-REPORT-ROUTE] no team series at match end — requesting continuation and deferring report");
+                        string deferredRoom = reportRoomId;
+                        int deferredDuration = duration;
+                        TryRequestContinuationSeries(ok =>
+                        {
+                            if (ok && !string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId))
+                            {
+                                bool sent = TryReportTeamMatch(deferredRoom, deferredDuration);
+                                Plugin.Log.LogInfo($"[2v2-REPORT-ROUTE] deferred report after continuation: sent={sent}");
+                            }
+                            else Plugin.Log.LogWarning("[2v2-REPORT-ROUTE] continuation retry failed — game not recorded");
+                        });
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[2v2-REPORT-ROUTE] BLOCKING 1v1 fallback in 2v2 context: shouldReport={shouldReport} hasSeries={hasSeries} playerListLen={playerListLen} cr_ff={roomIsCrFf} — match will not be reported");
+                    }
                     EvaluateAchievements(localWon);
                     isTracking = false;
                     matchIsRanked = false;
@@ -2174,7 +2282,7 @@ namespace CompetitiveRounds
         /// as ranked. Best-effort — if the lineup can't be resolved yet it retries next
         /// game. Team comes from the t_id custom property (set at queue-lock; no spawn
         /// needed). 8s debounce so an in-flight request isn't re-fired.</summary>
-        private static void TryRequestContinuationSeries()
+        private static void TryRequestContinuationSeries(Action<bool> onDone = null)
         {
             try
             {
@@ -2212,9 +2320,129 @@ namespace CompetitiveRounds
                 lastContinuationRequestTime = UnityEngine.Time.time;
                 Plugin.Log.LogInfo($"[2v2-CONTINUATION] requesting continuation (t0={team0[0]},{team0[1]} t1={team1[0]},{team1[1]})");
                 ApiClient.RequestContinuationSeries(localSteamId, room, photonRegion,
-                    team0[0], team0[1], team1[0], team1[1]);
+                    team0[0], team0[1], team1[0], team1[1], onDone);
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-CONTINUATION] resolve error: {ex.Message}"); }
+        }
+
+        private static float lastOvtContinuationRequestTime = -999f;
+        /// <summary>Open a fresh 1v2 series at game start when the three keep playing
+        /// past a completed BO3. Solo/duo read from in-game team sizes; only the
+        /// reporter (lowest Steam ID) opens it (server is idempotent).</summary>
+        private static void TryRequestOvtContinuationSeries()
+        {
+            try
+            {
+                if (UnityEngine.Time.time - lastOvtContinuationRequestTime < 8f) return;
+                if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 3) return;
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return;
+                var sids = new string[3]; var teams = new int[3];
+                for (int i = 0; i < 3; i++)
+                {
+                    var pp = PhotonNetwork.PlayerList[i]; if (pp == null) return;
+                    string sid = ResolvePhotonSteamId(pp);
+                    if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) return;
+                    int team = -1;
+                    foreach (var po in pm.players)
+                    { if (po == null) continue; var pv = po.GetComponent<PhotonView>(); if (pv == null || pv.Owner == null || pv.Owner.ActorNumber != pp.ActorNumber) continue; team = po.TeamID; break; }
+                    if (team < 0) return;
+                    sids[i] = sid; teams[i] = team;
+                }
+                // Group by team; singleton = solo.
+                var byTeam = new Dictionary<int, List<string>>();
+                for (int i = 0; i < 3; i++) { if (!byTeam.ContainsKey(teams[i])) byTeam[teams[i]] = new List<string>(); byTeam[teams[i]].Add(sids[i]); }
+                if (byTeam.Count != 2) return;
+                string solo = null; var duo = new List<string>();
+                foreach (var kv in byTeam) { if (kv.Value.Count == 1) solo = kv.Value[0]; else duo = kv.Value; }
+                if (solo == null || duo.Count != 2) return;
+                duo.Sort(StringComparer.Ordinal);
+                // Reporter election: lowest Steam ID.
+                string lowest = null; long lowVal = long.MaxValue;
+                foreach (var s in sids) { if (long.TryParse(s, out long v) && v < lowVal) { lowVal = v; lowest = s; } }
+                if (lowest != localSteamId) return;
+                string room = PhotonNetwork.CurrentRoom?.Name ?? "";
+                lastOvtContinuationRequestTime = UnityEngine.Time.time;
+                Plugin.Log.LogInfo($"[1v2-CONTINUATION] requesting (solo={solo} duo={duo[0]},{duo[1]})");
+                ApiClient.RequestOvtContinuationSeries(localSteamId, room, photonRegion, solo, duo[0], duo[1]);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[1v2-CONTINUATION] resolve error: {ex.Message}"); }
+        }
+
+        /// <summary>Report a finished 1v2 game. Solo vs duo is determined purely
+        /// from in-game team SIZES — the team with one Player is the solo, the
+        /// other two are the duo — so no external side state is needed. Reporter
+        /// is the lowest Steam ID of the three; others route correctly but no-op.</summary>
+        private static bool TryReportOvtMatch(string reportRoomId, int duration)
+        {
+            if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 3) return false;
+            var pm = PlayerManager.instance;
+            if (pm == null || pm.players == null) return false;
+            if (string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId))
+            {
+                Plugin.Log.LogWarning("[1v2-REPORT] no active series id — cannot report");
+                return false;
+            }
+            // Resolve each Photon actor → Steam ID + in-game TeamID + cards + fps.
+            var info = new Dictionary<string, (string name, int teamId, List<MatchTracker.CardPickData> cards, int fps)>();
+            foreach (var pp in PhotonNetwork.PlayerList)
+            {
+                if (pp == null) continue;
+                string sid = ResolvePhotonSteamId(pp);
+                if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) { Plugin.Log.LogWarning($"[1v2-REPORT] couldn't resolve actor {pp.ActorNumber}"); return false; }
+                string name = StripRichText(pp.NickName ?? sid); if (string.IsNullOrEmpty(name)) name = sid; if (name.Length > 60) name = name.Substring(0, 60);
+                int teamId = -1;
+                foreach (var po in pm.players)
+                {
+                    if (po == null) continue; var pv = po.GetComponent<PhotonView>();
+                    if (pv == null || pv.Owner == null || pv.Owner.ActorNumber != pp.ActorNumber) continue;
+                    teamId = po.TeamID; break;
+                }
+                var picks = new List<MatchTracker.CardPickData>();
+                if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(CARD_PROP_KEY))
+                {
+                    string raw = pp.CustomProperties[CARD_PROP_KEY]?.ToString() ?? "";
+                    if (!string.IsNullOrEmpty(raw)) { int order = 1; foreach (var nm in raw.Split('|')) { string cn = CardRarityLookup.GetCanonicalName(ToTitleCase(nm.Trim())); if (string.IsNullOrEmpty(cn)) continue; picks.Add(new MatchTracker.CardPickData { CardName = cn, CardRarity = CardRarityLookup.GetRarity(cn), PickOrder = order++, RoundNumber = 1 }); } }
+                }
+                int fps = 0; if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(FPS_PROP_KEY)) { try { fps = Convert.ToInt32(pp.CustomProperties[FPS_PROP_KEY]); } catch { } }
+                if (pp.IsLocal) { if (localCards != null && localCards.Count > 0) picks = new List<MatchTracker.CardPickData>(localCards); int myFps = LocalAvgFps; if (myFps > 0) fps = myFps; }
+                info[sid] = (name, teamId, picks, fps);
+            }
+            if (info.Count != 3) { Plugin.Log.LogWarning($"[1v2-REPORT] resolved {info.Count}/3 players"); return false; }
+
+            // Group by in-game team; the singleton team is the solo.
+            var byTeam = new Dictionary<int, List<string>>();
+            foreach (var kv in info) { if (!byTeam.ContainsKey(kv.Value.teamId)) byTeam[kv.Value.teamId] = new List<string>(); byTeam[kv.Value.teamId].Add(kv.Key); }
+            if (byTeam.Count != 2) { Plugin.Log.LogWarning($"[1v2-REPORT] expected 2 teams, got {byTeam.Count}"); return false; }
+            int soloTeam = -1, duoTeam = -1;
+            foreach (var kv in byTeam) { if (kv.Value.Count == 1) soloTeam = kv.Key; else if (kv.Value.Count == 2) duoTeam = kv.Key; }
+            if (soloTeam < 0 || duoTeam < 0) { Plugin.Log.LogWarning("[1v2-REPORT] not a 1+2 split"); return false; }
+
+            string soloSid = byTeam[soloTeam][0];
+            var duo = byTeam[duoTeam]; duo.Sort(StringComparer.Ordinal);
+            string duoASid = duo[0], duoBSid = duo[1];
+
+            // Reporter election: lowest Steam ID.
+            string lowest = null; long lowVal = long.MaxValue;
+            foreach (var sid in info.Keys) { if (long.TryParse(sid, out long v) && v < lowVal) { lowVal = v; lowest = sid; } }
+            if (lowest == null) lowest = localSteamId;
+            if (lowest != localSteamId) { Plugin.Log.LogInfo($"[1v2-REPORT] reporter is {lowest}, not me — skipping"); return true; }
+
+            // Rounds: solo's team maps to p1Rounds if it's ROUNDS team 0, else p2Rounds.
+            int soloRounds = soloTeam == 0 ? p1Rounds : p2Rounds;
+            int duoRounds  = soloTeam == 0 ? p2Rounds : p1Rounds;
+            int soloPoints = soloTeam == 0 ? p1Points : p2Points;
+            int duoPoints  = soloTeam == 0 ? p2Points : p1Points;
+
+            ApiClient.ReportOvtMatch(
+                ApiClient.ActiveOvt1v2SeriesId, reportRoomId, photonRegion, duration,
+                soloSid, info[soloSid].name, info[soloSid].cards,
+                duoASid, info[duoASid].name, info[duoASid].cards,
+                duoBSid, info[duoBSid].name, info[duoBSid].cards,
+                soloRounds, duoRounds, soloPoints, duoPoints,
+                localSteamId, info[soloSid].fps, info[duoASid].fps, info[duoBSid].fps);
+            Plugin.Log.LogInfo($"[1v2-REPORT] submitted solo={soloSid} duo={duoASid},{duoBSid} {soloRounds}-{duoRounds}");
+            return true;
         }
 
         private static bool TryReportTeamMatch(string reportRoomId, int duration)
@@ -3045,6 +3273,9 @@ namespace CompetitiveRounds
             gameOverReported = false;
             wasGameInProgress = false;
             pcolorRoomApplied = false;
+            // Room over — drop the Tab-board card baselines (bug #64); the Player
+            // objects they key on are destroyed with the room.
+            try { TabStatsOverlay.ClearCardBaselines(); } catch { }
             p1Points = 0; p2Points = 0;
             p1Rounds = 0; p2Rounds = 0;
             lastP1Points = 0; lastP2Points = 0;

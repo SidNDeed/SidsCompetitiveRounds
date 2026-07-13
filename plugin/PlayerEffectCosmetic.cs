@@ -196,270 +196,236 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[EFFECT] ApplyToPlayer failed: {ex.Message}"); }
         }
 
-        // ── In-shop preview (item 1, v1.30) ─────────────────────────
-        // Mirrors the trail preview UX: the effect's particle aura follows the
-        // mouse cursor while the shop is open. Same ConfigureForSku pipeline as
-        // the real in-match aura, so what you see is what you buy.
-        private static GameObject _previewGO;
+        // ── In-shop preview (v1.31 rework — IMGUI simulation) ─────────────
+        // History: the preview started as a world particle (invisible behind the
+        // ScreenSpaceOverlay menu), then an isolated-layer RenderTexture pass
+        // composited over the menu (v1.30) — which rendered EMPTY on real
+        // machines (probe never lit), so its menu-fade fallback fired every
+        // time and read as "the SCR menu goes transparent" (Sid, #67 follow-up).
+        // Final form: no cameras, no layers, no canvases — a small CPU particle
+        // sim drawn with GUI.DrawTexture from CompetitiveUI.DrawUI. IMGUI paints
+        // after every canvas by construction, so it is always above the menu,
+        // needs no fade, and behaves identically on every machine. Parameters
+        // mirror ConfigureForSku 1:1 so the preview still shows what you buy.
         private static string _previewSku = "";
 
-        public static string PreviewSku => _previewGO != null ? _previewSku : "";
+        public static string PreviewSku => _previewSku;
 
-        // July 12 round 2 item 10: TRUE foreground rendering. A world particle
-        // can never out-sort a ScreenSpaceOverlay canvas (the 30500 sortingOrder
-        // attempt was structurally dead), and the menu-fade stopgap read as the
-        // menu "bugging out". So: the preview lives on an isolated free layer, a
-        // dedicated camera (synced to Camera.main every frame) renders ONLY that
-        // layer into a RenderTexture, and a RawImage on a 30050-sortingOrder
-        // overlay canvas composites the texture ABOVE the F5 page. No raycaster
-        // and raycastTarget=false, so every click passes straight through.
-        private static Camera _previewCam;
-        private static RenderTexture _previewRT;
-        private static GameObject _previewCanvasGO;
-        private static int _previewLayer = -1;
-        private static bool _mainMaskAdjusted;
+        private struct PreviewCfg
+        {
+            public float life, speed, size, rate, rise, gravity, orbital, radius;
+            public Color start, start2;      // start2: second color of a random-between pair (void)
+            public Color fadeFrom, fadeTo;   // color-over-lifetime endpoints when fade=true
+            public bool twoStart, fade, rainbow, spin;
+            public string shape;             // dot | heart | clover
+        }
+
+        private static PreviewCfg CfgFor(string sku)
+        {
+            // Defaults mirror ConfigureForSku's defaults.
+            var c = new PreviewCfg
+            {
+                life = 1.2f, speed = 1.0f, size = 0.5f, rate = 14f,
+                rise = 0f, gravity = 0f, orbital = 0f, radius = 1f,
+                start = new Color(1f, 1f, 1f, 0.6f), shape = "dot",
+            };
+            switch (sku)
+            {
+                case "effect_smoke":
+                    c.start = new Color(0.55f, 0.55f, 0.6f, 0.5f);
+                    c.life = 2.2f; c.speed = 0.6f; c.size = 0.9f; c.rate = 10f; c.rise = 0.8f;
+                    c.fade = true; c.fadeFrom = new Color(0.55f, 0.55f, 0.6f); c.fadeTo = new Color(0.7f, 0.7f, 0.75f);
+                    break;
+                case "effect_clover":
+                    c.start = new Color(0.25f, 0.72f, 0.32f, 1f);
+                    c.life = 1.8f; c.speed = 0.9f; c.size = 0.4f; c.rate = 12f;
+                    c.gravity = 0.35f; c.spin = true; c.shape = "clover";
+                    break;
+                case "effect_hearts":
+                    c.start = new Color(0.95f, 0.36f, 0.58f, 1f);
+                    c.life = 1.8f; c.speed = 0.7f; c.size = 0.5f; c.rate = 9f; c.rise = 1.1f;
+                    c.fade = true; c.fadeFrom = new Color(0.95f, 0.36f, 0.58f); c.fadeTo = new Color(1f, 0.55f, 0.72f);
+                    c.shape = "heart";
+                    break;
+                case "effect_bubbles":
+                    c.start = new Color(0.5f, 0.78f, 0.94f, 0.7f);
+                    c.life = 2.0f; c.speed = 0.6f; c.size = 0.45f; c.rate = 11f; c.rise = 1.0f;
+                    break;
+                case "effect_embers":
+                    c.start = new Color(0.94f, 0.47f, 0.16f, 1f);
+                    c.life = 1.4f; c.speed = 1.1f; c.size = 0.25f; c.rate = 22f; c.rise = 1.5f;
+                    c.fade = true; c.fadeFrom = new Color(1f, 0.6f, 0.2f); c.fadeTo = new Color(0.7f, 0.15f, 0.05f);
+                    break;
+                case "effect_sparks":
+                    c.start = new Color(0.96f, 0.88f, 0.29f, 1f);
+                    c.life = 0.7f; c.speed = 2.4f; c.size = 0.18f; c.rate = 30f; c.radius = 0.4f;
+                    c.fade = true; c.fadeFrom = new Color(1f, 0.95f, 0.5f); c.fadeTo = new Color(1f, 0.6f, 0.1f);
+                    break;
+                case "effect_rainbow":
+                    c.start = Color.white;
+                    c.life = 1.6f; c.speed = 0.9f; c.size = 0.4f; c.rate = 24f; c.rise = 0.7f;
+                    c.rainbow = true;
+                    break;
+                case "effect_void":
+                    c.start = new Color(0.6f, 0.36f, 0.88f, 1f); c.start2 = new Color(0.2f, 0.78f, 0.9f, 1f);
+                    c.twoStart = true;
+                    c.life = 2.0f; c.speed = 0.5f; c.size = 0.45f; c.rate = 20f; c.radius = 0.9f; c.orbital = 1.4f;
+                    c.fade = true; c.fadeFrom = new Color(0.6f, 0.36f, 0.88f); c.fadeTo = new Color(0.12f, 0.05f, 0.2f);
+                    break;
+                default:
+                    c.rise = 0.8f;
+                    break;
+            }
+            return c;
+        }
+
+        private struct SimParticle
+        {
+            public Vector2 pos;       // GUI pixels, y-down
+            public Vector2 vel;       // px/s, y-down
+            public float born, life, size, spinSpeed, startLerp;
+        }
+
+        private const int PREVIEW_MAX_PARTICLES = 220;
+        private static readonly List<SimParticle> _simParticles = new List<SimParticle>();
+        private static PreviewCfg _cfg;
+        private static float _emitAcc;
+        private static System.Random _rng = new System.Random();
 
         public static void TogglePreview(string sku)
         {
-            if (_previewGO != null && _previewSku == sku) { StopPreview(); return; }
+            if (!string.IsNullOrEmpty(_previewSku) && _previewSku == sku) { StopPreview(); return; }
             StopPreview();
             if (string.IsNullOrEmpty(sku)) return;
-            try
-            {
-                var go = new GameObject("cr_effect_preview");
-                go.hideFlags = HideFlags.HideAndDontSave;
-                var ps = go.AddComponent<ParticleSystem>();
-                ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
-                ConfigureForSku(ps, sku);
-                var psr = go.GetComponent<ParticleSystemRenderer>();
-                if (psr != null)
-                {
-                    var mat = BuildMaterialForSku(null, sku);
-                    if (mat != null) psr.material = mat;
-                    psr.renderMode = ParticleSystemRenderMode.Billboard;
-                }
-                go.AddComponent<EffectPreviewFollower>();
-                ps.Play(true);
-                _previewGO = go;
-                _previewSku = sku;
-                SetupForegroundPass(go);
-                Plugin.Log.LogInfo($"[EFFECT] preview started: {sku}");
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[EFFECT] preview failed: {ex.Message}"); }
+            _cfg = CfgFor(sku);
+            _previewSku = sku;
+            _emitAcc = 0f;
+            Plugin.Log.LogInfo($"[EFFECT] preview started: {sku} (IMGUI sim)");
         }
 
         public static void StopPreview()
         {
-            if (_previewGO != null)
-            {
-                try { UnityEngine.Object.Destroy(_previewGO); } catch { }
-                _previewGO = null;
-            }
             _previewSku = "";
-            TeardownForegroundPass();
-            // The RT-probe fallback may have faded the menu — always restore.
-            try { NativeUI.SetMenuFade(false); } catch { }
+            _simParticles.Clear();
+            _emitAcc = 0f;
         }
 
-        /// <summary>Round 4 item 3 ("preview shows nothing"): one second after the
-        /// foreground pass starts, read a patch of the RenderTexture back and check
-        /// that ANY pixel actually landed. Logs the verdict either way, and when the
-        /// RT is empty falls back to fading the menu so the world-rendered aura is
-        /// visible regardless of why the RT path failed on this machine.</summary>
-        private static IEnumerator ProbeForegroundPass()
+        /// <summary>Called from CompetitiveUI.DrawUI (OnGUI) every frame. Simulates
+        /// and draws the preview aura around the cursor while the shop preview is
+        /// active. Repaint-only, draw-only (never consumes events), hard-capped.</summary>
+        public static void DrawPreview()
         {
-            yield return new WaitForSecondsRealtime(1.0f);
-            if (_previewGO == null || _previewRT == null || _previewCam == null) yield break;
-            int lit = 0;
-            bool ok = false;
+            if (string.IsNullOrEmpty(_previewSku)) return;
+            if (!NativeUI.IsOpen) { StopPreview(); return; }  // menu closed with preview armed
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+
             try
             {
-                var prev = RenderTexture.active;
-                RenderTexture.active = _previewRT;
-                int px = Mathf.Min(64, _previewRT.width);
-                var probe = new Texture2D(px, px, TextureFormat.RGBA32, false);
-                // Read around the CURSOR's position — that's where the aura is.
-                var mp = Input.mousePosition;
-                int rx = Mathf.Clamp((int)mp.x - px / 2, 0, _previewRT.width - px);
-                int ry = Mathf.Clamp((int)mp.y - px / 2, 0, _previewRT.height - px);
-                probe.ReadPixels(new Rect(rx, ry, px, px), 0, 0);
-                RenderTexture.active = prev;
-                var cols = probe.GetPixels32();
-                for (int i = 0; i < cols.Length; i++) if (cols[i].a > 8) lit++;
-                UnityEngine.Object.Destroy(probe);
-                ok = true;
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[EFFECT-FG] probe failed: {ex.Message}"); }
-            if (!ok || _previewGO == null) yield break;
-            if (lit > 0)
-            {
-                Plugin.Log.LogInfo($"[EFFECT-FG] probe OK - {lit} lit pixels near cursor, foreground pass rendering");
-            }
-            else
-            {
-                Plugin.Log.LogWarning("[EFFECT-FG] probe EMPTY - RT pass rendered nothing; falling back to menu fade "
-                    + $"(cam={( _previewCam != null ? "ok" : "null")} main={(Camera.main != null ? Camera.main.name : "NULL")})");
-                try { NativeUI.SetMenuFade(true); } catch { }
-            }
-        }
+                float dt = Mathf.Clamp(Time.unscaledDeltaTime, 0f, 0.05f);
+                // World→pixel scale chosen so sizes/speeds read like the in-match
+                // aura at ROUNDS' standard ortho size 20 (40 world units of height).
+                float px = Screen.height / 40f;
+                var mouse = Input.mousePosition;
+                var cursor = new Vector2(mouse.x, Screen.height - mouse.y);  // GUI y-down
 
-        private static int PickFreeLayer()
-        {
-            // Unnamed layers are unused by ROUNDS' curated layer list; take the
-            // highest one so we're far from gameplay layers.
-            for (int i = 31; i >= 8; i--)
-                if (string.IsNullOrEmpty(LayerMask.LayerToName(i))) return i;
-            return -1;
-        }
-
-        private static void SetupForegroundPass(GameObject previewGO)
-        {
-            try
-            {
-                if (_previewLayer < 0) _previewLayer = PickFreeLayer();
-                if (_previewLayer < 0)
+                // Emit.
+                _emitAcc += _cfg.rate * dt;
+                int spawn = (int)_emitAcc;
+                _emitAcc -= spawn;
+                for (int i = 0; i < spawn && _simParticles.Count < PREVIEW_MAX_PARTICLES; i++)
                 {
-                    Plugin.Log.LogWarning("[EFFECT] no free layer — preview stays world-rendered (behind menu)");
-                    return;
-                }
-                previewGO.layer = _previewLayer;
-                foreach (var t in previewGO.GetComponentsInChildren<Transform>(true))
-                    t.gameObject.layer = _previewLayer;
-
-                // Keep the preview OUT of the main camera's own pass so it doesn't
-                // ALSO render behind the menu. Restored on teardown.
-                var main = Camera.main;
-                if (main != null && (main.cullingMask & (1 << _previewLayer)) != 0)
-                {
-                    main.cullingMask &= ~(1 << _previewLayer);
-                    _mainMaskAdjusted = true;
+                    double ang = _rng.NextDouble() * Math.PI * 2.0;
+                    float rr = (float)Math.Sqrt(_rng.NextDouble()) * _cfg.radius;
+                    var dir = new Vector2((float)Math.Cos(ang), (float)Math.Sin(ang));
+                    _simParticles.Add(new SimParticle
+                    {
+                        pos = cursor + dir * rr * px,
+                        vel = dir * _cfg.speed * px,
+                        born = Time.unscaledTime,
+                        life = _cfg.life,
+                        size = _cfg.size,
+                        spinSpeed = _cfg.spin ? (float)(_rng.NextDouble() * 6.0 - 3.0) : 0f,
+                        startLerp = _cfg.twoStart ? (float)_rng.NextDouble() : 0f,
+                    });
                 }
 
-                _previewRT = new RenderTexture(Screen.width, Screen.height, 0, RenderTextureFormat.ARGB32);
-                _previewRT.name = "cr_effect_preview_rt";
-
-                var camGO = new GameObject("cr_effect_preview_cam");
-                camGO.hideFlags = HideFlags.HideAndDontSave;
-                _previewCam = camGO.AddComponent<Camera>();
-                _previewCam.clearFlags = CameraClearFlags.SolidColor;
-                _previewCam.backgroundColor = new Color(0f, 0f, 0f, 0f);
-                _previewCam.cullingMask = 1 << _previewLayer;
-                _previewCam.orthographic = true;
-                _previewCam.targetTexture = _previewRT;
-                _previewCam.allowHDR = false;
-                _previewCam.useOcclusionCulling = false;
-                SyncPreviewCam();
-
-                // Overlay canvas + RawImage, TrailPreview's reflection idiom
-                // (no UI-assembly references, learning #15).
-                _previewCanvasGO = new GameObject("CR_EffectPreviewCanvas");
-                _previewCanvasGO.hideFlags = HideFlags.HideAndDontSave;
-                UnityEngine.Object.DontDestroyOnLoad(_previewCanvasGO);
-                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
-                if (UIFactory.tCanvas == null) return;
-                var cv = _previewCanvasGO.AddComponent(UIFactory.tCanvas);
-                var rmProp = UIFactory.tCanvas.GetProperty("renderMode", bf);
-                rmProp?.SetValue(cv, Enum.ToObject(rmProp.PropertyType, 0));   // ScreenSpaceOverlay
-                UIFactory.tCanvas.GetProperty("sortingOrder", bf)?.SetValue(cv, 30050);
-                var imgGO = new GameObject("RT");
-                imgGO.transform.SetParent(_previewCanvasGO.transform, false);
-                var imgRT = imgGO.AddComponent<RectTransform>();
-                imgRT.anchorMin = Vector2.zero; imgRT.anchorMax = Vector2.one;
-                imgRT.offsetMin = Vector2.zero; imgRT.offsetMax = Vector2.zero;
-                var tRaw = FindRawImageType();
-                if (tRaw == null) { Plugin.Log.LogWarning("[EFFECT] RawImage type missing — preview stays world-rendered"); return; }
-                var raw = imgGO.AddComponent(tRaw);
-                tRaw.GetProperty("texture", bf)?.SetValue(raw, _previewRT);
-                tRaw.GetProperty("raycastTarget", bf)?.SetValue(raw, false);
-                Plugin.Log.LogInfo($"[EFFECT-FG] pass up: layer={_previewLayer} rt={_previewRT.width}x{_previewRT.height} "
-                    + $"main={(main != null ? main.name : "NULL")} mainOrtho={(main != null && main.orthographic ? main.orthographicSize.ToString("F1") : "-")}");
-                if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(ProbeForegroundPass());
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning($"[EFFECT-FG] setup failed: {ex.Message} - falling back to menu fade");
-                TeardownForegroundPass();
-                // Put the preview back where the main camera can see it and fade
-                // the menu — degraded but always visible.
-                try
+                // Simulate + draw.
+                var tex = GetTextureForSku(_previewSku);
+                var prevColor = GUI.color;
+                var prevMatrix = GUI.matrix;
+                int prevDepth = GUI.depth;
+                GUI.depth = -1000;  // IMGUI: lower depth paints later = on top
+                for (int i = _simParticles.Count - 1; i >= 0; i--)
                 {
-                    if (previewGO != null)
-                        foreach (var t in previewGO.GetComponentsInChildren<Transform>(true))
-                            t.gameObject.layer = 0;
+                    var p = _simParticles[i];
+                    float age = Time.unscaledTime - p.born;
+                    if (age >= p.life) { _simParticles.RemoveAt(i); continue; }
+                    float t = age / p.life;
+
+                    // Motion: rise (world +y = screen -y), gravity, orbital swirl.
+                    p.vel.y += _cfg.gravity * 9.81f * px * dt;
+                    var v = p.vel + new Vector2(0f, -_cfg.rise * px);
+                    if (_cfg.orbital != 0f)
+                    {
+                        var off = p.pos - cursor;
+                        // Perpendicular (screen y-down: this swirls counter-clockwise on screen).
+                        v += new Vector2(off.y, -off.x) * _cfg.orbital;
+                    }
+                    p.pos += v * dt;
+                    _simParticles[i] = p;
+
+                    // Color over lifetime — same curves as the real system.
+                    Color col;
+                    float alpha;
+                    if (_cfg.rainbow)
+                    {
+                        col = RainbowAt(t);
+                        alpha = 1f - t;
+                    }
+                    else if (_cfg.fade)
+                    {
+                        col = Color.Lerp(_cfg.fadeFrom, _cfg.fadeTo, t);
+                        alpha = t < 0.3f ? Mathf.Lerp(1f, 0.9f, t / 0.3f) : Mathf.Lerp(0.9f, 0f, (t - 0.3f) / 0.7f);
+                        alpha *= _cfg.start.a;
+                    }
+                    else
+                    {
+                        col = _cfg.twoStart ? Color.Lerp(_cfg.start, _cfg.start2, p.startLerp) : _cfg.start;
+                        alpha = _cfg.start.a;
+                    }
+
+                    float d = p.size * 2f * px;  // startSize is a radius-ish scale; billboard quad = 2x
+                    var rect = new Rect(p.pos.x - d / 2f, p.pos.y - d / 2f, d, d);
+                    GUI.color = new Color(col.r, col.g, col.b, alpha);
+                    if (p.spinSpeed != 0f)
+                    {
+                        var m = GUI.matrix;
+                        GUIUtility.RotateAroundPivot(p.spinSpeed * age * Mathf.Rad2Deg, p.pos);
+                        GUI.DrawTexture(rect, tex);
+                        GUI.matrix = m;
+                    }
+                    else GUI.DrawTexture(rect, tex);
                 }
-                catch { }
-                try { NativeUI.SetMenuFade(true); } catch { }
+                GUI.color = prevColor;
+                GUI.matrix = prevMatrix;
+                GUI.depth = prevDepth;
             }
+            catch { /* preview must never break the menu's OnGUI */ }
         }
 
-        /// <summary>Mirror the main camera every frame so cursor-following world
-        /// positions land on the same screen pixels in the RT pass.</summary>
-        internal static void SyncPreviewCam()
+        private static Color RainbowAt(float t)
         {
-            try
+            // Same 6 stops as RainbowOverLifetime.
+            Color[] stops =
             {
-                var main = Camera.main;
-                if (_previewCam == null || main == null) return;
-                _previewCam.transform.position = main.transform.position;
-                _previewCam.transform.rotation = main.transform.rotation;
-                _previewCam.orthographic = main.orthographic;
-                _previewCam.orthographicSize = main.orthographicSize;
-                _previewCam.fieldOfView = main.fieldOfView;
-                _previewCam.nearClipPlane = main.nearClipPlane;
-                _previewCam.farClipPlane = main.farClipPlane;
-            }
-            catch { }
+                new Color(1f, 0.2f, 0.2f), new Color(1f, 0.8f, 0.2f), new Color(0.3f, 1f, 0.3f),
+                new Color(0.2f, 0.8f, 1f), new Color(0.5f, 0.3f, 1f), new Color(1f, 0.3f, 0.9f),
+            };
+            float f = Mathf.Clamp01(t) * (stops.Length - 1);
+            int i = Mathf.Min((int)f, stops.Length - 2);
+            return Color.Lerp(stops[i], stops[i + 1], f - i);
         }
 
-        private static void TeardownForegroundPass()
-        {
-            try
-            {
-                if (_mainMaskAdjusted && Camera.main != null && _previewLayer >= 0)
-                    Camera.main.cullingMask |= (1 << _previewLayer);
-                _mainMaskAdjusted = false;
-                if (_previewCam != null) { _previewCam.targetTexture = null; UnityEngine.Object.Destroy(_previewCam.gameObject); _previewCam = null; }
-                if (_previewRT != null) { _previewRT.Release(); UnityEngine.Object.Destroy(_previewRT); _previewRT = null; }
-                if (_previewCanvasGO != null) { UnityEngine.Object.Destroy(_previewCanvasGO); _previewCanvasGO = null; }
-            }
-            catch { }
-        }
-
-        private static Type _tRawImage;
-        private static bool _rawSearched;
-        private static Type FindRawImageType()
-        {
-            if (_rawSearched) return _tRawImage;
-            _rawSearched = true;
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                var t = asm.GetType("UnityEngine.UI.RawImage");
-                if (t != null) { _tRawImage = t; break; }
-            }
-            return _tRawImage;
-        }
-
-        /// <summary>Follows the mouse in world space; self-destructs when the F5
-        /// menu closes so a forgotten preview can't leak into gameplay. Also keeps
-        /// the foreground-pass camera mirrored to the main camera (item 10).</summary>
-        private class EffectPreviewFollower : MonoBehaviour
-        {
-            private void Update()
-            {
-                try
-                {
-                    if (!NativeUI.IsOpen) { PlayerEffectCosmetic.StopPreview(); return; }
-                    var cam = Camera.main;
-                    if (cam == null) return;
-                    var mp = Input.mousePosition;
-                    mp.z = Mathf.Abs(cam.transform.position.z) > 0.5f
-                        ? Mathf.Abs(cam.transform.position.z) : 10f;
-                    transform.position = cam.ScreenToWorldPoint(mp);
-                    PlayerEffectCosmetic.SyncPreviewCam();
-                }
-                catch { }
-            }
-        }
 
         // ── Per-sku particle configuration ──────────────────────────
         private static void ConfigureForSku(ParticleSystem ps, string sku)
@@ -620,18 +586,29 @@ namespace CompetitiveRounds
             {
                 Material baseMat = FindBaseParticleMaterial(playerRoot);
                 Material mat = baseMat != null ? new Material(baseMat) : null;
-                if (mat == null)
-                {
-                    Shader sh = Shader.Find("Particles/Standard Unlit")
-                                ?? Shader.Find("Legacy Shaders/Particles/Alpha Blended")
-                                ?? Shader.Find("Sprites/Default");
-                    if (sh == null) return null;
-                    mat = new Material(sh);
-                }
+                if (mat == null) return BuildUnlitPreviewMaterial(sku);
                 mat.mainTexture = GetTextureForSku(sku);
                 return mat;
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[EFFECT] material build failed: {ex.Message}"); return null; }
+        }
+
+        /// <summary>Self-contained unlit particle material — renders identically on
+        /// any camera, including the isolated RT preview pass (no scene-lighting
+        /// dependency). Sprites/Default is the always-included last resort (UI uses it).</summary>
+        private static Material BuildUnlitPreviewMaterial(string sku)
+        {
+            try
+            {
+                Shader sh = Shader.Find("Particles/Standard Unlit")
+                            ?? Shader.Find("Legacy Shaders/Particles/Alpha Blended")
+                            ?? Shader.Find("Sprites/Default");
+                if (sh == null) return null;
+                var mat = new Material(sh);
+                mat.mainTexture = GetTextureForSku(sku);
+                return mat;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[EFFECT] unlit material build failed: {ex.Message}"); return null; }
         }
 
         private static Material FindBaseParticleMaterial(Transform playerRoot)

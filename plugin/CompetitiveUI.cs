@@ -106,6 +106,7 @@ namespace CompetitiveRounds
         {
             DrawFPS();
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
+            PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
             DrawNotification();
             DrawMatchStatus();
             DrawInGameChat();
@@ -134,9 +135,20 @@ namespace CompetitiveRounds
             DrawPlayerSearch();
             DrawCosmeticReview();
             DrawTournamentBanner();
-            // Block uGUI clicks to the F5 page behind any open IMGUI modal (lopi #14:
+            // Block clicks to the F5 page behind any open IMGUI modal (lopi #14:
             // clicks on the bug-report form were also hitting F5 buttons underneath).
-            NativeUI.SetClickBlocker(bugModalOpen || logViewerOpen || bugAdminOpen || NativeUI.CustomBetPromptOpen || artistPromptOpen || artistPickerOpen || playerSearchOpen || cosReviewOpen);
+            // TWO independent input paths must be blocked: the uGUI EventSystem
+            // (SetClickBlocker's raycast-absorbing Image) AND the mod's own
+            // ClickHandler poller, which hit-tests Input.GetMouseButtonDown itself
+            // and ignores the uGUI blocker (bug #75 — artist price/stock modal).
+            // Consent modal has its OWN dedicated blocker (EnsureConsentBlocker) so
+            // it isn't in this set; adminPromptOpen was previously missing from the
+            // uGUI list too — added here so both paths cover it.
+            bool anyModal = bugModalOpen || logViewerOpen || bugAdminOpen || NativeUI.CustomBetPromptOpen
+                          || artistPromptOpen || artistPickerOpen || playerSearchOpen || cosReviewOpen
+                          || adminPromptOpen;
+            NativeUI.SetClickBlocker(anyModal);
+            ClickHandler.ModalBlockInput = anyModal || !Plugin.DataConsentAsked;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
         }
@@ -407,6 +419,13 @@ namespace CompetitiveRounds
             public Camera sourceCam;      // null = overlay canvas (corners are screen coords)
             public float widthFrac;       // rendered-text width fraction (learning #90); <=0 = full
             public RectTransform clipRT;  // scroll Viewport (Mask) — rows scrolled out don't hover
+            // Bug #72: the width fraction froze at REGISTRATION time, and on the
+            // first render after open/data-arrival TMP hasn't generated the text
+            // yet — preferredWidth reads tiny/zero and the region registered
+            // nearly unhittable ("hover doesn't work until the page is
+            // refreshed"). Keep the text component and compute the fraction LIVE
+            // at hit-test time, same treatment #61 gave the rect itself.
+            public object sourceTxt;
         }
         private static readonly List<CardHoverRegion> _cardHoverRegions = new List<CardHoverRegion>(40);
         public static void ClearCardHoverRegions()
@@ -422,6 +441,26 @@ namespace CompetitiveRounds
         // reused, not destroyed, so this only happens in teardown races).
         private static readonly Vector3[] _liveCornerBuf = new Vector3[4];
         private static readonly Rect _offscreenRect = new Rect(-99999f, -99999f, 1f, 1f);
+
+        // Bug #72: rendered-text width fraction computed LIVE (see sourceTxt note).
+        private static System.Reflection.PropertyInfo _pPrefWidth;
+        internal static float LiveWidthFrac(object txt, RectTransform rt, float fallback)
+        {
+            try
+            {
+                if (txt == null || rt == null) return fallback;
+                if (_pPrefWidth == null)
+                    _pPrefWidth = txt.GetType().GetProperty("preferredWidth",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (_pPrefWidth == null) return fallback;
+                float localW = rt.rect.width;
+                if (localW <= 0f) return fallback;
+                float pref = (float)_pPrefWidth.GetValue(txt);
+                if (pref <= 0f) return fallback;
+                return Mathf.Clamp01(pref / localW);
+            }
+            catch { return fallback; }
+        }
         internal static Rect LiveRegionRect(RectTransform rt, Camera cam, float frac, RectTransform clip, Rect fallback)
         {
             try
@@ -476,18 +515,20 @@ namespace CompetitiveRounds
             public Camera sourceCam;
             public float widthFrac;
             public RectTransform clipRT;
+            public object sourceTxt;         // bug #72: live width fraction (see CardHoverRegion)
         }
         private static readonly List<ScoreGraphRegion> _scoreGraphRegions = new List<ScoreGraphRegion>(40);
         public static void RegisterScoreGraphRegion(Rect screenRect, string timeline, bool won)
             => RegisterScoreGraphRegion(screenRect, timeline, won, null, null, -1f, null);
         public static void RegisterScoreGraphRegion(Rect screenRect, string timeline, bool won,
                                                     RectTransform sourceRT, Camera sourceCam, float widthFrac,
-                                                    RectTransform clipRT)
+                                                    RectTransform clipRT, object sourceTxt = null)
         {
             if (string.IsNullOrEmpty(timeline)) return;
             _scoreGraphRegions.Add(new ScoreGraphRegion {
                 screenRect = screenRect, timeline = timeline, won = won,
                 sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
+                sourceTxt = sourceTxt,
             });
         }
 
@@ -517,7 +558,9 @@ namespace CompetitiveRounds
             {
                 var reg = _scoreGraphRegions[i];
                 // Bug #61: live rect so scrolling can't desync region from row.
-                Rect rr = LiveRegionRect(reg.sourceRT, reg.sourceCam, reg.widthFrac, reg.clipRT, reg.screenRect);
+                // Bug #72: live width fraction too (frozen frac was ~0 on first render).
+                float liveFrac = LiveWidthFrac(reg.sourceTxt, reg.sourceRT, reg.widthFrac);
+                Rect rr = LiveRegionRect(reg.sourceRT, reg.sourceCam, liveFrac, reg.clipRT, reg.screenRect);
                 if (rr.Contains(mp)) { hit = reg; break; }
             }
             if (hit == null) return;
@@ -540,25 +583,32 @@ namespace CompetitiveRounds
 
             if (_scoreGraphLbl == null)
                 _scoreGraphLbl = new GUIStyle(GUI.skin.label)
-                { fontSize = 12, richText = true, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
+                {
+                    fontSize = 12, richText = true, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft,
+                    // Bug #72 part 2: ROUNDS' IMGUI skin has taller font metrics than
+                    // 12pt suggests — glyphs were clipped top+bottom inside the short
+                    // label rects ("totally unreadable"). Overflow lets glyphs render
+                    // past the rect instead of clipping; rects also got taller.
+                    clipping = TextClipping.Overflow, wordWrap = false,
+                };
 
-            float w = 280f, h = 170f, pad = 30f;
+            float w = 280f, h = 178f, pad = 30f;
             // IMGUI is top-left origin; mousePosition is bottom-left.
             float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
             float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
-            GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 20),
+            GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24),
                 "<color=#CCCCCC>Scoring history</color>  <color=#66DD66>you</color> <color=#888>vs</color> <color=#DD7777>opponent</color>",
                 _scoreGraphLbl);
 
-            Rect plot = new Rect(gx + pad, gy + 26f, w - pad - 10f, h - 26f - 22f);
+            Rect plot = new Rect(gx + pad, gy + 30f, w - pad - 10f, h - 30f - 26f);
             // Gridlines at each full round (2 points).
             for (int v = 0; v <= maxV; v += 2)
             {
                 float y = plot.yMax - plot.height * v / maxV;
                 GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), new Color(1f, 1f, 1f, 0.08f), 1f);
-                GUI.Label(new Rect(gx + 4, y - 9f, pad - 6f, 18f), $"<color=#777>{v / 2}</color>", _scoreGraphLbl);
+                GUI.Label(new Rect(gx + 4, y - 11f, pad - 6f, 22f), $"<color=#777>{v / 2}</color>", _scoreGraphLbl);
             }
             // Polylines.
             for (int i = 1; i < n; i++)
@@ -572,7 +622,7 @@ namespace CompetitiveRounds
                 GuiLine(new Vector2(x0, opY0), new Vector2(x1, opY1), new Color(0.87f, 0.47f, 0.47f, 0.95f), 2f);
                 GuiLine(new Vector2(x0, myY0), new Vector2(x1, myY1), new Color(0.40f, 0.87f, 0.40f, 0.95f), 2f);
             }
-            GUI.Label(new Rect(gx + 8, gy + h - 20f, w - 16, 18f),
+            GUI.Label(new Rect(gx + 8, gy + h - 24f, w - 16, 22f),
                 "<color=#777>rounds on the left - each step is one point scored</color>", _scoreGraphLbl);
         }
         public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent)
@@ -583,7 +633,7 @@ namespace CompetitiveRounds
         public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent,
                                                    string titleOverride, string bodyOverride,
                                                    RectTransform sourceRT, Camera sourceCam, float widthFrac,
-                                                   RectTransform clipRT)
+                                                   RectTransform clipRT, object sourceTxt = null)
         {
             // Need SOMETHING to show — either a legacy comma line or an explicit body.
             if (string.IsNullOrEmpty(fullCardLine) && string.IsNullOrEmpty(bodyOverride)) return;
@@ -591,6 +641,7 @@ namespace CompetitiveRounds
                 screenRect = screenRect, fullCardLine = fullCardLine, isOpponent = isOpponent,
                 titleOverride = titleOverride, bodyOverride = bodyOverride,
                 sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
+                sourceTxt = sourceTxt,
             });
         }
 
@@ -613,7 +664,9 @@ namespace CompetitiveRounds
             {
                 var reg = _cardHoverRegions[i];
                 // Bug #61: live rect so scrolling can't desync region from row.
-                Rect rr = LiveRegionRect(reg.sourceRT, reg.sourceCam, reg.widthFrac, reg.clipRT, reg.screenRect);
+                // Bug #72: live width fraction too (frozen frac was ~0 on first render).
+                float liveFrac = LiveWidthFrac(reg.sourceTxt, reg.sourceRT, reg.widthFrac);
+                Rect rr = LiveRegionRect(reg.sourceRT, reg.sourceCam, liveFrac, reg.clipRT, reg.screenRect);
                 if (rr.Contains(mp))
                 {
                     hit = reg;
