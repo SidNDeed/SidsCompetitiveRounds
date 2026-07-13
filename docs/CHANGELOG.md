@@ -1,5 +1,49 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.31.0-dev — July 12/13 bug batch (#58, #64–#70) + leaderboard freshness
+
+> Server fixes + migrations DEPLOYED 2026-07-13; client changes coded + built (Release green, DLL installed), awaiting release.
+
+### Server (deployed)
+- **Bug #70 — 2v2 series after the first never recorded**: `/team/series/continuation` raised NameError on its create path (function-local `uuid_mod` alias referenced from module scope) → 500 on every rematch-series open; every game after a sitting's first completed series was dropped. One-line fix; the endpoint's idempotent branch had masked it from smoke tests.
+- **Bug #66 — achievement percentages meaningless**: denominator was all 2,847 auto-created player rows; now both sides count mod users only (`mod_seen_at IS NOT NULL`, ~200 players). Untouchable: 0.8% → 11.8%.
+- **Bug #68 — admin series cards mashed together**: per-game encoding (`||` between games, `|` within — still JsonUtility-safe flat scalars).
+- **Discord bot — leaderboard channel staleness**: loop verified ticking (10-min fetches, 200 OK) but successful edits logged nothing and older duplicate board messages could sit stale above the one being edited. Every publish outcome now logs one line; rescans delete duplicate boards and keep exactly one; `api_get` logs non-200 statuses instead of silently returning None.
+- **Schema changes / migrations**:
+  - `115_backfill_july12_lost_matches.sql` — restores the July 12 recording gap: 2 completed 2v2 series (5 matches) with offline-replayed Glicko (Sid +28.4, Stan +46.6, opponents −68.5 ea), gold/XP mirroring the live grant paths, plus game 7 (series-less) and Stan's lost casual vs enoch (bug #65).
+  - `116_more_body_colors_wave3.sql` — 12 new body colors: yellows (Lemon, Mustard, Gold), greens (Forest, Olive, Lime), skin tones (Porcelain, Tan, Sienna, Umber), reds (Scarlet, Maroon).
+
+### July 13 round 4 (1v2 build + cosmetic fixes + bug batch #71-75)
+- **1v2 (solo vs duo) — server complete & deployed + adversarially reviewed, client built (first playtest pending)**. Launches UNSCORED (stats tracked for retroactive ranking). Server (migration 120, all curl-tested): consent queue (no Elo band), 3-player lock assigning 1 solo + 2 duo by preference, match report with gold/XP (no rating) + full replay recording, continuation (recording-gap fix from day one), series-active, unranked leaderboard. Client: `ovt_` rooms are competitive rooms, `playersNeededToStart=3` + MaxPlayers=3, a functional 1v2 tab (queue + side preference + solo-extra-pick toggle + live lobby status + leaderboard), room auto-join on lock, match-end report routing (solo vs duo from in-game team sizes). A 4-dimension adversarial review workflow (16 findings, 12 confirmed) then caught and fixed: the room MaxPlayers=2 blocker (3rd player couldn't join), a queue-lock stranding race, four 1v1-path leaks into ovt_ rooms (report fallback / session tally / BO3 HUD / DC leave-%), the unwired continuation, and server hardening (reporter-first score parity, empty-room dedup bypass, atomic XP, trio validation). **Known #1 in-game gap (documented for playtest):** 1v2 doesn't yet FORCE the 3-player team split — needs the t_id-publish + CreatePlayer override 2v2 has. **FFA deliberately deferred** — its rolling card bar is untested card-removal netcode flagged as the top risk; needs a Sandbox test matrix, not a rushed ship.
+- **Cosmetics**: 8 more (Demon Wings from Sid's AI art + a 7-item procedural batch incl. 2 more animated); six flagged items enlarged; Tattered Cape redrawn front-view; the ship/pack skills now always bundle the art.
+- **Bug #71** — bought cosmetics didn't appear in the editor: GitHub-DLL installs never received the art folder; the mod now self-bootstraps cosmetics.zip from the latest release (mirrors card art) + /ship always attaches it.
+- **Bug #72** — My Stats hover regions dead until refresh (width froze before text layout; now computed live) + score-graph labels clipped (taller rects + overflow).
+- **Bug #73** — shop Artist sub-tab sometimes unclickable: the click de-dupe guard was global; now per-control.
+- **Bug #74** — animated cosmetics static in the shop thumbnail; now cycled at the item's fps.
+- **Bug #75** — artist price/stock popup click-through: the mod's custom click handler polls the mouse directly and bypassed the uGUI blocker; it now respects modal state.
+
+### July 13 round 3 (design lock + AI-art pipeline)
+- **1v2/FFA design locked**: all six open decisions answered (no 1v2 handicap + optional solo extra initial pick as a lobby toggle; unscored launch with full stat recording for retroactive ranked; FFA single-games with explicit UI labeling; 3-or-4 players at launch with everything count-parameterized for 5-6 later; rolling bar FFA-only; separate tabs). FFA player-count feasibility verified against the decompile (spawn-point synthesis is the only hard 5+ blocker). `docs/design-1v2-ffa.md` updated; next pass builds 1v2 end-to-end.
+- **Demon Wings cosmetic** — Sid's first AI-generated piece, processed into pipeline shape (ChatGPT's fake painted checkerboard keyed out via flood-fill + enclosed-hole punch, cropped, 512px real alpha).
+- **Seven more procedural cosmetics** (parallel workflow batch, each visually self-reviewed + final-gated): Thorn Crown, Sunburst Halo, Knight Great-Helm, Rally Flags, Tattered Cape, and two more ANIMATED items — Dark Aura and Energy Orbs (4 frames @ 7fps). All eight round-3 items in migration 119; art ships with the client (34 cosmetic files total).
+
+### July 13 round 2 (Sid's five-item batch)
+- **Leaderboard channel "not posting" (final)**: publishes were landing (proven by the new per-tick logs) but an EDITED Discord message never moves down the channel and keeps its original post date — the board was literally buried under newer messages. The embed now carries a live "Updated X minutes ago" timestamp, and any tick that finds the board non-bottom deletes + reposts it at the channel bottom (deployed; first tick confirmed: "board was buried — reposted at bottom").
+- **Shop UX**: click any row to highlight it (whole-row tint, click again to clear); face-cosmetic art doubled to 80px with taller rows; artist filter tabs upsized 13pt/120×24 → 16pt/150×30.
+- **Six new house cosmetics** (migration 118 + catalog + art): Crazed Eyes, Yin & Yang, Devil Horns, Alien Antennae, and the first two ANIMATED items — Storm Halo and Flame Crest (4 procedural frames @ 8fps through the `__fN` pipeline).
+- **Stan granted admin** (migration 117).
+- **1v2 + FFA groundwork**: full design in `docs/design-1v2-ffa.md` — what reuses from 2v2, the two-team-scoring constraint, the FFA rolling 5-card bar mechanism (deterministic FullReset+reapply at pick-phase barriers, guarded by the delegate sweep), server table shapes, risks ranked, and 6 decisions queued for Sid.
+
+### Client (built, unreleased)
+- **Bug #58 — 2v2 card-pick bodies missing/wrong**: the anti-stack X-spread applied a LOCAL offset under CardChoiceVisuals' 33×-scaled root — solo-pick bodies parked at world X=−198/−66 (proven 34/34 in the 7/12 log). Spread removed entirely (only one body ever exists — vanilla destroys the prior clone per Show); tint/face/body-check kept.
+- **Bug #70 client hardening**: match-end now re-requests the continuation series and defers the report instead of dropping the game when no series id is held.
+- **Bug #65 — report outbox**: match reports that exhaust their immediate retries queue to disk and re-send every ~60s (dup-safe via the server's unique room+players constraints).
+- **Bug #64 — Tab board stale cards**: vanilla's rematch reset never clears `currentCards`; the board now baselines at each `Player.FullReset` and shows only this game's picks. Same investigation found `GM_ArmsRace.StartGame` never fires on same-room rematches — the #92/#103 block-delegate sweep now also runs from `PlayerManager.ResetCharacters` (the hook rematches actually call).
+- **Bug #69 — 100% accuracy**: DOT ticks carry the same weapon object as direct hits and were pumping `bullets_hit` to the cap; hits now count only at `ProjectileHit.RPCA_DoHit` (direct, unblocked, enemy impacts).
+- **Bug #67 — effect preview**: rebuilt as an IMGUI-simulated particle preview (draws above the menu by construction — no cameras/RT/menu fade); parameters mirror each SKU's real aura.
+- **Leaderboard tab freshness**: switching to the tab always refetches, a 30s ticker refreshes while open, and completed fetches now repaint even when the row count is unchanged.
+- **Bug #68 client half**: admin Recent Ranked Series renders one line per game (G1/G2/G3), rows auto-grow.
+
 ## v1.30.1 — RELEASED 2026-07-12 (same-day patch)
 
 - **Bug #62 (lopidav) — cursor click point offset**: ROUNDS' vanilla cursor is a target/crosshair icon (`streamline-icon-cursor-target-1@32x32`) whose hotspot is its CENTER; the tinted default-shape cursor shipped with an arrow-style top-left hotspot, so the actual click landed at the crosshair's top-left corner. Hotspot now = texture center.
