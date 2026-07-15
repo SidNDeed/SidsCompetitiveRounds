@@ -618,10 +618,12 @@ namespace CompetitiveRounds
                 if (_pImgSprite == null && UIFactory.tImage != null)
                     _pImgSprite = UIFactory.tImage.GetProperty("sprite", BindingFlags.Public | BindingFlags.Instance);
                 if (_pImgSprite == null) return;
+                // v1.32 item 8: static-cosmetics mode pins shop thumbnails to frame 1.
+                bool _static = Plugin.AnimatedCosmetics != null && !Plugin.AnimatedCosmetics.Value;
                 foreach (var kv in _animThumbs)
                 {
                     var (frames, fps) = kv.Value;
-                    var spr = frames[(int)(Time.unscaledTime * fps) % frames.Length];
+                    var spr = _static ? frames[0] : frames[(int)(Time.unscaledTime * fps) % frames.Length];
                     _pImgSprite.SetValue(kv.Key, spr);
                 }
             }
@@ -638,10 +640,71 @@ namespace CompetitiveRounds
         private static void MaybeRefreshLeaderboardTab()
         {
             if (currentTab != 1) return;
+            TickPodiumSparkle();
             if (Time.unscaledTime < lbTabRefreshAt) return;
             lbTabRefreshAt = Time.unscaledTime + 30f;
             ApiClient.FetchLeaderboard();
             ApiClient.FetchRecentSeries();
+        }
+
+        // ── Podium title sparkle (v1.32 item 4) ────────────────────────────
+        // The server resolves sku 'title_podium' to "1st Place"/"2nd Place"/
+        // "3rd Place" (gold/silver/bronze). The client adds a per-character
+        // glitter; on the 1v1 leaderboard the glitter ANIMATES by rewriting
+        // only the (at most 3) podium rows' name text on a slow tick — never
+        // a full-board repaint (F5 perf, learning #109). Detection is by exact
+        // title text: the server never issues another title with these names.
+        internal static bool IsPodiumTitle(string t) =>
+            t == "1st Place" || t == "2nd Place" || t == "3rd Place";
+        private static uint _podiumTick = 0;
+        private static float _podiumTickAt = 0f;
+        // Entries: [0]=txtName object, [1]=base name (no title), [2]=title, [3]=color hex
+        private static readonly List<object[]> _podiumLbRows = new List<object[]>();
+        // Dark SDF outline on podium rows' cells so text stays readable over the
+        // gold/silver/bronze tints (Sid: "Stan's elo is hard to read"). Original
+        // materials keyed by label; one outline clone per base material.
+        private static readonly Dictionary<object, Material> _lbOutlineOrig = new Dictionary<object, Material>();
+        private static readonly Dictionary<Material, Material> _lbOutlineCache = new Dictionary<Material, Material>();
+        private static void SetLbRowOutline(LBRow row, bool on)
+        {
+            if (row == null) return;
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtRank,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtLv,     on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtName,   on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtRating, on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtW,      on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtL,      on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtWL,     on, _lbOutlineOrig, _lbOutlineCache);
+            NametagGlowRenderer.ApplyOutlineToLabel(row.txtGold,   on, _lbOutlineOrig, _lbOutlineCache);
+        }
+        internal static string PodiumSparkleSpan(string title, string hex, uint tick)
+        {
+            // Brackets carry the title color too — bare brackets inherit the row's
+            // BASE color (green on the local player's row), which read as a bug
+            // (Sid feedback, v1.32 round 2).
+            var sb = new System.Text.StringBuilder(title.Length * 24 + 40);
+            sb.Append("<b><color=").Append(hex).Append(">[</color>");
+            for (int i = 0; i < title.Length; i++)
+            {
+                bool glint = ((i + (int)tick) % 3) == 0;
+                sb.Append("<color=").Append(glint ? "#FFFFFF" : hex).Append(">")
+                  .Append(title[i]).Append("</color>");
+            }
+            sb.Append("<color=").Append(hex).Append(">]</color></b>");
+            return sb.ToString();
+        }
+        private static void TickPodiumSparkle()
+        {
+            if (_podiumLbRows.Count == 0) return;
+            if (Time.unscaledTime < _podiumTickAt) return;
+            _podiumTickAt = Time.unscaledTime + 0.7f;
+            _podiumTick++;
+            foreach (var r in _podiumLbRows)
+            {
+                if (r == null || r.Length < 4 || r[0] == null) continue;
+                UIFactory.SetText(r[0],
+                    $"{(string)r[1]} {PodiumSparkleSpan((string)r[2], (string)r[3], _podiumTick)}");
+            }
         }
 
         // Pulled out of RefreshTeamTab so the queue lists keep updating while
@@ -1011,7 +1074,7 @@ namespace CompetitiveRounds
                 for(int i=0;i<ovtLbRows.Count;i++)
                 {
                     var comp=ovtLbRows[i] as Component;if(comp==null)continue;
-                    if(i<lb.Count){var e=lb[i];comp.gameObject.SetActive(true);UIFactory.SetText(ovtLbRows[i],$"<color=#FFD94D>#{e.rank}</color>  <b>{e.display_name}</b>  {e.games_played}g  <color=#66DD66>{e.win_rate:F0}%</color>  <color=#888>(solo {e.solo_games} / duo {e.duo_games})</color>");}
+                    if(i<lb.Count){var e=lb[i];comp.gameObject.SetActive(true);string _orc=e.rank==1?"#FFD700":e.rank==2?"#C0C0C0":e.rank==3?"#CD7F32":"#FFD94D";UIFactory.SetText(ovtLbRows[i],$"<color={_orc}>#{e.rank}</color>  <b>{e.display_name}</b>  {e.games_played}g  <color=#66DD66>{e.win_rate:F0}%</color>  <color=#888>(solo {e.solo_games} / duo {e.duo_games})</color>");}
                     else comp.gameObject.SetActive(false);
                 }
                 if(txtOvtLbHeader!=null)UIFactory.SetText(txtOvtLbHeader,lb.Count==0?"No 1v2 games played yet — be the first!":"");
@@ -1753,7 +1816,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static GameObject BuildAchievementsTab(Transform parent){var panel=new GameObject("Achievements");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddVLG(panel,spacing:6,padL:20,padR:20,padT:10);UIFactory.AddLE(panel,flexH:1);UIFactory.CreateText("AchH",panel.transform,"Achievements",22f,C_GOLD,UIFactory.AlignTopCenter,sizeDelta:new Vector2(600,30));var countRow=new GameObject("AchCnt");countRow.transform.SetParent(panel.transform,false);countRow.AddComponent<RectTransform>();UIFactory.AddLE(countRow,prefH:22);txtAchCount=UIFactory.CreateText("AC",countRow.transform,"",15f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(400,22));var sv=UIFactory.CreateScrollView("AchSV",panel.transform,spacing:4);UIFactory.AddLE(sv.scrollGO,flexH:1);achRows.Clear();foreach(var kvp in ApiClient.AchievementDefs){var row=new AchRow();string key=kvp.Key;string[]def=kvp.Value;row.root=new GameObject($"ach_{key}");row.root.transform.SetParent(sv.content.transform,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:10,padL:8,padR:8,padT:6,padB:6,forceExpandH:true);UIFactory.AddLE(row.root,prefH:50);if(UIFactory.tImage!=null){var img=row.root.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,C_PANEL);}row.txtIcon=UIFactory.CreateText("ic",row.root.transform,"",24f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(36,40));var infoCol=new GameObject("Info");infoCol.transform.SetParent(row.root.transform,false);infoCol.AddComponent<RectTransform>();UIFactory.AddVLG(infoCol,spacing:1);UIFactory.AddLE(infoCol,flexW:1);row.txtName=UIFactory.CreateText("nm",infoCol.transform,def[0],17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,22));row.txtDesc=UIFactory.CreateText("ds",infoCol.transform,def[1],14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,20));row.txtDate=UIFactory.CreateText("dt",row.root.transform,"",13f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(180,40));row.root.SetActive(true);achRows.Add(row);}return panel;}
 
         private static object txtAchCount;
-        private static void RefreshAchievements(){var ach=ApiClient.CachedAchievements;int unlocked=0,total=ApiClient.AchievementDefs.Count;int i=0;foreach(var kvp in ApiClient.AchievementDefs){if(i>=achRows.Count)break;var row=achRows[i];bool got=ach!=null&&ach.ContainsKey(kvp.Key)&&ach[kvp.Key].unlocked;if(got)unlocked++;UIFactory.SetText(row.txtIcon,got?"[X]":"[ ]");UIFactory.SetColor(row.txtIcon,got?C_GOLD:new Color(0.3f,0.3f,0.35f));UIFactory.SetColor(row.txtName,got?C_WHITE:C_DIM);/* Steam-style global unlock rate (v1.30): "% of players have this" beside the description. Served per-entry by /achievements/{id}; 0 = server hasn't computed yet (pre-deploy) - omit rather than show a lying 0.0%. */{float gp=ach!=null&&ach.ContainsKey(kvp.Key)?ach[kvp.Key].global_pct:0f;string ds=kvp.Value[1];if(gp>0f)ds+=$"  <color=#66AACC>{gp:F1}% of players have this</color>";UIFactory.SetText(row.txtDesc,ds);}UIFactory.SetColor(row.txtDesc,got?C_LABEL:new Color(0.4f,0.4f,0.45f));string dt="";if(got&&ach!=null&&ach.ContainsKey(kvp.Key)){string ua=ach[kvp.Key].unlocked_at;if(!string.IsNullOrEmpty(ua)&&ua!="null"){try{dt=DateTime.Parse(ua).ToString("M/d/yyyy");}catch{}}}/* Append "+100g" gold-awarded tag inline with the date so users see the per-trophy reward without opening the gold ledger. Per-achievement gold is uniform (ACHIEVEMENT_GOLD on the server, currently 100). */if(got&&!string.IsNullOrEmpty(dt))dt=$"{dt}  <color=#FFD94D>+100g</color>";UIFactory.SetText(row.txtDate,dt);UIFactory.SetColor(row.txtDate,got?C_GREEN:C_DIM);i++;}UIFactory.SetText(txtAchCount,$"{unlocked} / {total} unlocked");UIFactory.SetColor(txtAchCount,unlocked==total?C_GOLD:C_LABEL);}
+        private static void RefreshAchievements(){var ach=ApiClient.CachedAchievements;int unlocked=0,total=ApiClient.AchievementDefs.Count;int i=0;foreach(var kvp in ApiClient.AchievementDefs){if(i>=achRows.Count)break;var row=achRows[i];bool got=ach!=null&&ach.ContainsKey(kvp.Key)&&ach[kvp.Key].unlocked;if(got)unlocked++;UIFactory.SetText(row.txtIcon,got?"[X]":"[ ]");UIFactory.SetColor(row.txtIcon,got?C_GOLD:new Color(0.3f,0.3f,0.35f));UIFactory.SetColor(row.txtName,got?C_WHITE:C_DIM);/* Steam-style global unlock rate (v1.30): "% of players have this" beside the description. Served per-entry by /achievements/{id}; 0 = server hasn't computed yet (pre-deploy) - omit rather than show a lying 0.0%. */{float gp=ach!=null&&ach.ContainsKey(kvp.Key)?ach[kvp.Key].global_pct:0f;string ds=kvp.Value[1];if(gp>0f)ds+=$"  <color=#66AACC>{gp:F1}% of players have this</color>";UIFactory.SetText(row.txtDesc,ds);}UIFactory.SetColor(row.txtDesc,got?C_LABEL:new Color(0.4f,0.4f,0.45f));string dt="";if(got&&ach!=null&&ach.ContainsKey(kvp.Key)){string ua=ach[kvp.Key].unlocked_at;if(!string.IsNullOrEmpty(ua)&&ua!="null"){try{dt=DateTime.Parse(ua).ToString("M/d/yyyy");}catch{}}}/* Append gold-awarded tag inline with the date so users see the per-trophy reward without opening the gold ledger. Mirrors the server's ACHIEVEMENT_GOLD (100) + ACHIEVEMENT_GOLD_OVERRIDES (slayers pay 1000, v1.32 item 2). */if(got&&!string.IsNullOrEmpty(dt)){int _ag=(kvp.Key=="regicide"||kvp.Key=="stan_slayer")?1000:100;dt=$"{dt}  <color=#FFD94D>+{_ag}g</color>";}UIFactory.SetText(row.txtDate,dt);UIFactory.SetColor(row.txtDate,got?C_GREEN:C_DIM);i++;}UIFactory.SetText(txtAchCount,$"{unlocked} / {total} unlocked");UIFactory.SetColor(txtAchCount,unlocked==total?C_GOLD:C_LABEL);}
 
         // -- Artist Tab (v1.30) ----------------------------------
         // Community artists manage their OWN cosmetics: price, stock cap,
@@ -2700,7 +2763,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static readonly List<object> shopArtistBtnTexts = new List<object>();
         private static readonly List<string> shopArtistBtnNames = new List<string>();
         private const string SHOP_HOUSE_ARTIST = "House";
-        // Shop category filter: 0=All, 1=Titles, 2=Trails, 3=Map Colors, 4=Name Styles.
+        // Shop category filter: 0=All, then categories ordered "cooler and more
+        // affordable first" (v1.32 item 9): Cosmetics, Name Styles, Maps, Titles.
         // Clicking a tab narrows the scroll view to that category so users don't have to
         // scroll through 90+ items to find one kind. Each tab has a description shown
         // under the tab bar so the category's purpose is discoverable.
@@ -2709,18 +2773,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object[] shopTabTexts;
         private static object txtShopCategoryDesc;
         // Index order MUST match the filter switch in RefreshShop:
-        // 0 All, 1 Titles, 2 Trails, 3 Maps, 4 Name Styles, 5 Body Color, 6 Cursor, 7 Effects, 8 Cosmetics, 9 Other.
-        private static readonly string[] SHOP_TAB_NAMES = { "All", "Titles", "Trails", "Maps", "Name Styles", "Body Color", "Cursor", "Effects", "Cosmetics", "Other" };
+        // 0 All, 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other.
+        private static readonly string[] SHOP_TAB_NAMES = { "All", "Cosmetics", "Name Styles", "Maps", "Titles", "Trails", "Body Color", "Cursor", "Effects", "Other" };
         private static readonly string[] SHOP_TAB_DESCS = {
             "All cosmetics - everything available, grouped by category.",
+            "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
+            "Bold, italic, underline, strikethrough, and color/size modifiers applied to your player nametag in lobbies and matches. Visible to every player, modded or not.",
+            "Map color schemes. Equip as many as you like and cycle between your owned colors with Left Shift in-game.",
             "Flair text shown next to your name on the leaderboard, match history, and in chat.",
             "A glowing trail that follows your character body during combat. Only visible to modded players; the shop preview shows it following your cursor.",
-            "Map color schemes. Equip as many as you like and cycle between your owned colors with Left Shift in-game.",
-            "Bold, italic, underline, strikethrough, and color/size modifiers applied to your player nametag in lobbies and matches. Visible to every player, modded or not.",
             "Override the default orange/blue team color with a tint of your choice. Only visible to modded players. Premium tiers (Prismatic, Chrome) animate during combat.",
             "Mouse-cursor color tint (local-only). Pick the cursor SHAPE — arrow, dot, crosshair, circle — in Settings; the tint colors whichever shape you choose.",
             "In-combat particle aura around your character. Only visible to modded players.",
-            "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
             "Utility unlocks (e.g. hide your gold total on the leaderboard).",
         };
         private static List<GameObject> shopRowPool = new List<GameObject>();
@@ -3343,118 +3407,36 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // Apply tab filter: keep only items matching the active category. Tab 0=All
             // keeps every list; any other tab keeps ONLY its own list so the render loop
             // skips the rest and their section headers hide via the if(count>0) gate.
-            // 1 Titles, 2 Trails, 3 Maps, 4 Name Styles, 5 Body Color, 6 Cursor, 7 Effects, 8 Cosmetics, 9 Other.
+            // 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other.
             if (shopCategoryFilter != 0)
             {
-                if (shopCategoryFilter != 1) titles.Clear();
-                if (shopCategoryFilter != 2) trails.Clear();
+                if (shopCategoryFilter != 1) faces.Clear();
+                if (shopCategoryFilter != 2) nametags.Clear();
                 if (shopCategoryFilter != 3) colors.Clear();
-                if (shopCategoryFilter != 4) nametags.Clear();
-                if (shopCategoryFilter != 5) pcolors.Clear();
-                if (shopCategoryFilter != 6) cursors.Clear();
-                if (shopCategoryFilter != 7) effects.Clear();
-                if (shopCategoryFilter != 8) faces.Clear();
+                if (shopCategoryFilter != 4) titles.Clear();
+                if (shopCategoryFilter != 5) trails.Clear();
+                if (shopCategoryFilter != 6) pcolors.Clear();
+                if (shopCategoryFilter != 7) cursors.Clear();
+                if (shopCategoryFilter != 8) effects.Clear();
                 if (shopCategoryFilter != 9) others.Clear();
             }
 
+            sorted.AddRange(faces);
+            sorted.AddRange(nametags);
+            sorted.AddRange(colors);
             sorted.AddRange(titles);
             sorted.AddRange(trails);
-            sorted.AddRange(colors);
-            sorted.AddRange(nametags);
             sorted.AddRange(pcolors);
             sorted.AddRange(cursors);
             sorted.AddRange(effects);
-            sorted.AddRange(faces);
             sorted.AddRange(others);
 
             // Slot ordering inside the container (VLG renders in sibling order):
             //   [Titles header][title rows...][Trails header][trail rows...][Colors header][color rows...]
             int sibling = 0;
-            if (titles.Count > 0 && shopTitlesHeader != null)
-            {
-                shopTitlesHeader.SetActive(true);
-                shopTitlesHeader.transform.SetSiblingIndex(sibling++);
-            }
-            else if (shopTitlesHeader != null) shopTitlesHeader.SetActive(false);
+            // Render order matches the tab order (v1.32 item 9):
+            // Cosmetics, Name Styles, Maps, Titles, Trails, Body Color, Cursor, Effects, Other.
             int rowIdx = 0;
-            for (int i = 0; i < titles.Count && rowIdx < shopRows.Count; i++, rowIdx++)
-            {
-                ApplyShopRow(shopRows[rowIdx], titles[i], balance, s);
-                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
-            }
-
-            if (trails.Count > 0 && shopTrailsHeader != null)
-            {
-                shopTrailsHeader.SetActive(true);
-                shopTrailsHeader.transform.SetSiblingIndex(sibling++);
-            }
-            else if (shopTrailsHeader != null) shopTrailsHeader.SetActive(false);
-            for (int i = 0; i < trails.Count && rowIdx < shopRows.Count; i++, rowIdx++)
-            {
-                ApplyShopRow(shopRows[rowIdx], trails[i], balance, s);
-                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
-            }
-
-            if (colors.Count > 0 && shopColorsHeader != null)
-            {
-                shopColorsHeader.SetActive(true);
-                shopColorsHeader.transform.SetSiblingIndex(sibling++);
-            }
-            else if (shopColorsHeader != null) shopColorsHeader.SetActive(false);
-            for (int i = 0; i < colors.Count && rowIdx < shopRows.Count; i++, rowIdx++)
-            {
-                ApplyShopRow(shopRows[rowIdx], colors[i], balance, s);
-                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
-            }
-
-            if (nametags.Count > 0 && shopNametagsHeader != null)
-            {
-                shopNametagsHeader.SetActive(true);
-                shopNametagsHeader.transform.SetSiblingIndex(sibling++);
-            }
-            else if (shopNametagsHeader != null) shopNametagsHeader.SetActive(false);
-            for (int i = 0; i < nametags.Count && rowIdx < shopRows.Count; i++, rowIdx++)
-            {
-                ApplyShopRow(shopRows[rowIdx], nametags[i], balance, s);
-                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
-            }
-
-            if (pcolors.Count > 0 && shopPColorsHeader != null)
-            {
-                shopPColorsHeader.SetActive(true);
-                shopPColorsHeader.transform.SetSiblingIndex(sibling++);
-            }
-            else if (shopPColorsHeader != null) shopPColorsHeader.SetActive(false);
-            for (int i = 0; i < pcolors.Count && rowIdx < shopRows.Count; i++, rowIdx++)
-            {
-                ApplyShopRow(shopRows[rowIdx], pcolors[i], balance, s);
-                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
-            }
-
-            if (cursors.Count > 0 && shopCursorHeader != null)
-            {
-                shopCursorHeader.SetActive(true);
-                shopCursorHeader.transform.SetSiblingIndex(sibling++);
-            }
-            else if (shopCursorHeader != null) shopCursorHeader.SetActive(false);
-            for (int i = 0; i < cursors.Count && rowIdx < shopRows.Count; i++, rowIdx++)
-            {
-                ApplyShopRow(shopRows[rowIdx], cursors[i], balance, s);
-                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
-            }
-
-            if (effects.Count > 0 && shopEffectsHeader != null)
-            {
-                shopEffectsHeader.SetActive(true);
-                shopEffectsHeader.transform.SetSiblingIndex(sibling++);
-            }
-            else if (shopEffectsHeader != null) shopEffectsHeader.SetActive(false);
-            for (int i = 0; i < effects.Count && rowIdx < shopRows.Count; i++, rowIdx++)
-            {
-                ApplyShopRow(shopRows[rowIdx], effects[i], balance, s);
-                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
-            }
-
             if (faces.Count > 0 && shopFacesHeader != null)
             {
                 shopFacesHeader.SetActive(true);
@@ -3496,6 +3478,90 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             for (int i = 0; i < facesShown.Count && rowIdx < shopRows.Count; i++, rowIdx++)
             {
                 ApplyShopRow(shopRows[rowIdx], facesShown[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (nametags.Count > 0 && shopNametagsHeader != null)
+            {
+                shopNametagsHeader.SetActive(true);
+                shopNametagsHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopNametagsHeader != null) shopNametagsHeader.SetActive(false);
+            for (int i = 0; i < nametags.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], nametags[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (colors.Count > 0 && shopColorsHeader != null)
+            {
+                shopColorsHeader.SetActive(true);
+                shopColorsHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopColorsHeader != null) shopColorsHeader.SetActive(false);
+            for (int i = 0; i < colors.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], colors[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (titles.Count > 0 && shopTitlesHeader != null)
+            {
+                shopTitlesHeader.SetActive(true);
+                shopTitlesHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopTitlesHeader != null) shopTitlesHeader.SetActive(false);
+            for (int i = 0; i < titles.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], titles[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (trails.Count > 0 && shopTrailsHeader != null)
+            {
+                shopTrailsHeader.SetActive(true);
+                shopTrailsHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopTrailsHeader != null) shopTrailsHeader.SetActive(false);
+            for (int i = 0; i < trails.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], trails[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (pcolors.Count > 0 && shopPColorsHeader != null)
+            {
+                shopPColorsHeader.SetActive(true);
+                shopPColorsHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopPColorsHeader != null) shopPColorsHeader.SetActive(false);
+            for (int i = 0; i < pcolors.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], pcolors[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (cursors.Count > 0 && shopCursorHeader != null)
+            {
+                shopCursorHeader.SetActive(true);
+                shopCursorHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopCursorHeader != null) shopCursorHeader.SetActive(false);
+            for (int i = 0; i < cursors.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], cursors[i], balance, s);
+                shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
+            }
+
+            if (effects.Count > 0 && shopEffectsHeader != null)
+            {
+                shopEffectsHeader.SetActive(true);
+                shopEffectsHeader.transform.SetSiblingIndex(sibling++);
+            }
+            else if (shopEffectsHeader != null) shopEffectsHeader.SetActive(false);
+            for (int i = 0; i < effects.Count && rowIdx < shopRows.Count; i++, rowIdx++)
+            {
+                ApplyShopRow(shopRows[rowIdx], effects[i], balance, s);
                 shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
             }
 
@@ -3791,6 +3857,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object txtConsentStatus, txtDeleteStatus;
         private static GameObject consentToggleBtn, deleteBtn, confirmDeleteBtn, cancelDelBtn, notifToggleBtn;
         private static GameObject fpsToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn;
+        // v1.32 items 7+8 toggle rows.
+        private static GameObject screenShakeToggleBtn, mapLightingToggleBtn, mapShadowsToggleBtn, animCosToggleBtn;
+        private static object screenShakeToggleTxt, mapLightingToggleTxt, mapShadowsToggleTxt, animCosToggleTxt;
         private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt;
         // v1.26.8 perf-pass toggles. Master + 7 per-patch flags; renders in a
         // collapsible section at the bottom of the Settings panel.
@@ -3979,6 +4048,64 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     dirty = true;
                 });
             inputOverlayToggleTxt = UIFactory.GetButtonText(inputOverlayToggleBtn);
+
+            // -- Screen shake (v1.32 item 7) --
+            UIFactory.CreateText("SShakeL", dispBox.transform,
+                "Camera screen shake on shots/hits/deaths. Off = a perfectly steady camera (local only).",
+                13f, C_DIM, sizeDelta: new Vector2(700, 20));
+            screenShakeToggleBtn = SettingsButton(dispBox.transform, "SShake", "",
+                C_WHITE, C_BTN, new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Screen shake toggled");
+                    Plugin.ScreenShakeEnabled.Value = !Plugin.ScreenShakeEnabled.Value;
+                    dirty = true;
+                });
+            screenShakeToggleTxt = UIFactory.GetButtonText(screenShakeToggleBtn);
+
+            // -- Map lighting (v1.32 item 7) --
+            UIFactory.CreateText("SLightL", dispBox.transform,
+                "Map lighting: the per-frame lightmap render. Off = flat full-bright scene, skips the whole pass for extra FPS.",
+                13f, C_DIM, sizeDelta: new Vector2(700, 20));
+            mapLightingToggleBtn = SettingsButton(dispBox.transform, "SLight", "",
+                C_WHITE, C_BTN, new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Map lighting toggled");
+                    Plugin.MapLightingEnabled.Value = !Plugin.MapLightingEnabled.Value;
+                    try { MapPhysicalColorPatch.RenderPerfSettings.Apply(); MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop(); } catch { }
+                    dirty = true;
+                });
+            mapLightingToggleTxt = UIFactory.GetButtonText(mapLightingToggleBtn);
+
+            // -- Map shadows (v1.32 item 7) --
+            UIFactory.CreateText("SShadL", dispBox.transform,
+                "Soft shadow beams cast by map lighting. Off = skips the shadow render pass (lighting stays) for extra FPS.",
+                13f, C_DIM, sizeDelta: new Vector2(700, 20));
+            mapShadowsToggleBtn = SettingsButton(dispBox.transform, "SShad", "",
+                C_WHITE, C_BTN, new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Map shadows toggled");
+                    Plugin.MapShadowsEnabled.Value = !Plugin.MapShadowsEnabled.Value;
+                    try { MapPhysicalColorPatch.RenderPerfSettings.Apply(); MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop(); } catch { }
+                    dirty = true;
+                });
+            mapShadowsToggleTxt = UIFactory.GetButtonText(mapShadowsToggleBtn);
+
+            // -- Animated cosmetics (v1.32 item 8) --
+            UIFactory.CreateText("SAnimCosL", dispBox.transform,
+                "Animated cosmetics: prismatic/chrome body colors, prism trail, map-skin shimmer, animated faces. Off = all freeze to a static frame instantly.",
+                13f, C_DIM, sizeDelta: new Vector2(700, 34));
+            animCosToggleBtn = SettingsButton(dispBox.transform, "SAnimCos", "",
+                C_WHITE, C_BTN, new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Animated cosmetics toggled");
+                    Plugin.AnimatedCosmetics.Value = !Plugin.AnimatedCosmetics.Value;
+                    dirty = true;
+                });
+            animCosToggleTxt = UIFactory.GetButtonText(animCosToggleBtn);
 
             // ── Performance toggles (v1.26.8) ──
             // Collapsible — header is the click-to-expand line. Each row maps
@@ -4224,6 +4351,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.ShowInputOverlay.Value
                         ? "Input overlay: <color=#88FF88>ON</color>"
                         : "Input overlay: <color=#FF9966>OFF</color>");
+            // v1.32 items 7+8 labels.
+            if (screenShakeToggleTxt != null && Plugin.ScreenShakeEnabled != null)
+                UIFactory.SetText(screenShakeToggleTxt,
+                    Plugin.ScreenShakeEnabled.Value
+                        ? "Screen shake: <color=#88FF88>ON</color>"
+                        : "Screen shake: <color=#FF9966>OFF</color>");
+            if (mapLightingToggleTxt != null && Plugin.MapLightingEnabled != null)
+                UIFactory.SetText(mapLightingToggleTxt,
+                    Plugin.MapLightingEnabled.Value
+                        ? "Map lighting: <color=#88FF88>ON</color>"
+                        : "Map lighting: <color=#FF9966>OFF</color>");
+            if (mapShadowsToggleTxt != null && Plugin.MapShadowsEnabled != null)
+                UIFactory.SetText(mapShadowsToggleTxt,
+                    Plugin.MapShadowsEnabled.Value
+                        ? "Map shadows: <color=#88FF88>ON</color>"
+                        : "Map shadows: <color=#FF9966>OFF</color>");
+            if (animCosToggleTxt != null && Plugin.AnimatedCosmetics != null)
+                UIFactory.SetText(animCosToggleTxt,
+                    Plugin.AnimatedCosmetics.Value
+                        ? "Animated cosmetics: <color=#88FF88>ON</color>"
+                        : "Animated cosmetics: <color=#FF9966>OFF</color> (static)");
 
             // ── Perf section labels (v1.26.8) ──
             if (_perfSectionHeaderTxt != null)
@@ -4509,12 +4657,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             string nm = Trunc(m?.opponent_name ?? "", nameMax);
             if (m == null || string.IsNullOrEmpty(m.opponent_title)) return nm;
             string col = string.IsNullOrEmpty(m.opponent_title_color) ? "#CCCCCC" : m.opponent_title_color;
+            if (IsPodiumTitle(m.opponent_title))
+                return $"{nm} {PodiumSparkleSpan(m.opponent_title, col, 0)}";
             return $"{nm} <b><color={col}>[{m.opponent_title}]</color></b>";
         }
 
         private static void RefreshSession(){int games=GameStateWatcher.SessionMatchCount;bool inRoom=GameStateWatcher.IsInRoom;string oppSteamId=GameStateWatcher.OpponentSteamId;string oppName=GameStateWatcher.OpponentDisplayName;var history=ApiClient.CachedMatchHistory;/* Show opponent lifetime record when in room */if(inRoom&&!string.IsNullOrEmpty(oppSteamId)&&!oppSteamId.StartsWith("photon_")&&history!=null){int ltW=0,ltL=0;string lastPlayed="";foreach(var m in history){if(m.opponent_steam_id==oppSteamId){if(m.won)ltW++;else ltL++;if(string.IsNullOrEmpty(lastPlayed)){try{lastPlayed=DateTime.Parse(m.ended_at).ToString("M/d/yyyy");}catch{}}}}if(ltW+ltL>0){string col=ltW>ltL?"#00FF00":ltW<ltL?"#FF6666":"#AAAAAA";UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  <color={col}>{ltW}W-{ltL}L lifetime</color>  (last: {lastPlayed})");}else{UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  First time playing!");}UIFactory.SetColor(txtSessionOppLifetime,new Color(0.6f,0.75f,1f));}else if(inRoom&&!string.IsNullOrEmpty(oppName)&&oppName!="Opponent"){UIFactory.SetText(txtSessionOppLifetime,$"  In room with {oppName}");UIFactory.SetColor(txtSessionOppLifetime,C_DIM);}else{UIFactory.SetText(txtSessionOppLifetime,"");}if(games<=0){UIFactory.SetText(txtSessionSum,inRoom?"In game - no results yet":"No games this session");UIFactory.SetColor(txtSessionSum,C_DIM);UIFactory.SetText(txtSessionSplit,"");UIFactory.SetText(txtSessionSweeps,"");return;}int mins=(int)(DateTime.UtcNow-GameStateWatcher.SessionStartTime).TotalMinutes;string time=mins>=60?$"{mins/60}h {mins%60}m":$"{mins}m";int rw=GameStateWatcher.SessionRankedWins,rl=GameStateWatcher.SessionRankedLosses,cw=GameStateWatcher.SessionCasualWins,cl=GameStateWatcher.SessionCasualLosses;int t2w=GameStateWatcher.SessionTeamSeriesWins,t2l=GameStateWatcher.SessionTeamSeriesLosses;int sesSweepG=0,sesSweepT=0;if(history!=null){var sesStart=GameStateWatcher.SessionStartTime;foreach(var m in history){DateTime mTime=DateTime.UtcNow;try{if(!string.IsNullOrEmpty(m.ended_at))mTime=DateTime.Parse(m.ended_at).ToUniversalTime();}catch{}if(mTime<sesStart)continue;if(m.won&&m.opponent_rounds_won==0)sesSweepG++;if(!m.won&&m.player_rounds_won==0)sesSweepT++;}}UIFactory.SetText(txtSessionSum,$"{games} games    {rw+cw}W - {rl+cl}L    {time}");UIFactory.SetColor(txtSessionSum,C_WHITE);string splitLine="";var splitParts=new List<string>();if(rw+rl>0)splitParts.Add($"<color=#FFD94D>Ranked:</color> {rw}W/{rl}L");if(t2w+t2l>0)splitParts.Add($"<color=#FFB347>2v2:</color> {t2w}W/{t2l}L");if(cw+cl>0)splitParts.Add($"Casual: {cw}W/{cl}L");if(splitParts.Count>0)splitLine="  "+string.Join("    ",splitParts.ToArray());UIFactory.SetText(txtSessionSplit,splitLine);if(sesSweepG+sesSweepT>0)UIFactory.SetText(txtSessionSweeps,$"  Sweeps: <color=#00FF00>5-0 x{sesSweepG}</color>  <color=#FF6666>0-5 x{sesSweepT}</color>");else UIFactory.SetText(txtSessionSweeps,"");var wl=GameStateWatcher.SessionWLByOpponent;var st=GameStateWatcher.SessionTimeByOpponent;int idx=0;if(wl!=null)foreach(var kvp in wl){int[]a=kvp.Value;if(a==null||a.Length<4)continue;int ow=a[0]+a[2],ol=a[1]+a[3];/* 2v2 teammates are keyed "w/ Name" (bug #56) - render as-is, no "vs" */string line=kvp.Key.StartsWith("w/ ")?$"  {kvp.Key}:  {ow}W-{ol}L":$"  vs {kvp.Key}:  {ow}W-{ol}L";if(a[0]+a[1]>0&&a[2]+a[3]>0)line+=$"  (R:{a[0]}-{a[1]} C:{a[2]}-{a[3]})";if(st!=null&&st.ContainsKey(kvp.Key)){int m=(int)st[kvp.Key];line+=m>=60?$"   {m/60}h {m%60}m":$"   {m}m";}while(sessionOppTexts.Count<=idx)sessionOppTexts.Add(UIFactory.CreateText($"so{sessionOppTexts.Count}",sessionOppContainer.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22)));UIFactory.SetText(sessionOppTexts[idx],line);UIFactory.SetColor(sessionOppTexts[idx],ow>ol?C_GREEN:ow<ol?C_RED:C_DIM);var go=(sessionOppTexts[idx]as Component)?.gameObject;if(go)go.SetActive(true);idx++;}for(int i=idx;i<sessionOppTexts.Count;i++){var go=(sessionOppTexts[i]as Component)?.gameObject;if(go)go.SetActive(false);}}
 
-        private static void RefreshLeaderboard(){string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,20);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):new Color(0.15f,0.15f,0.2f,0.01f));row.root.SetActive(true);}UIFactory.SetText(txtLBCount,$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?$"Rank: <b><color={(string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color)}>{ps.rank_name}</color></b>   ":"";string detail=$"\n{_rkLine}Rating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked: {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
+        private static void RefreshLeaderboard(){_podiumLbRows.Clear();string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,20);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){_podiumLbRows.Add(new object[]{row.txtName,_lbName,e.title,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(e.title,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;/* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetText(txtLBCount,$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?$"Rank: <b><color={(string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color)}>{ps.rank_name}</color></b>   ":"";string detail=$"\n{_rkLine}Rating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked: {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
  * earlier client-side iteration over CachedMatchHistory which was
  * limited to the viewer's most-recent 500 matches and silently dropped
  * H2H rows for older opponents. */if(selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=ps.h2h_ranked_wins,h2hL=ps.h2h_ranked_losses,h2hCW=ps.h2h_casual_wins,h2hCL=ps.h2h_casual_losses,h2hSW=ps.h2h_series_wins,h2hSL=ps.h2h_series_losses;int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+=$"\n<b>vs You:</b> <color={h2hColor}>{h2hAll}W - {h2hAllL}L ({h2hAll+h2hAllL} games)</color>\n";if(h2hSW+h2hSL>0)detail+=$"  Ranked Series: {h2hSW}W / {h2hSL}L\n";if(h2hCW+h2hCL>0)detail+=$"  Casual: {h2hCW}W / {h2hCL}L\n";}}/* Mod version this player was last seen running (X-Mod-Version
@@ -7203,13 +7353,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var hdrBox = UIFactory.CreatePanel("THdr", left.transform, C_PANEL);
             UIFactory.AddVLG(hdrBox, spacing: 2, padL: 10, padR: 10, padT: 6, padB: 6);
             UIFactory.AddLE(hdrBox, flexH: 0);
-            txtTState = UIFactory.CreateText("TS", hdrBox.transform, "Loading...", 22f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(380, 28));
+            // v1.32 item 5: state/when/instructions bumped 2pt — the block read too small.
+            txtTState = UIFactory.CreateText("TS", hdrBox.transform, "Loading...", 24f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 32));
             UIFactory.SetBold(txtTState, true);
-            txtTWhen = UIFactory.CreateText("TW", hdrBox.transform, "", 15f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(380, 22));
+            txtTWhen = UIFactory.CreateText("TW", hdrBox.transform, "", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 26));
             UIFactory.SetWordWrap(txtTWhen, true);
             txtTInstructions = UIFactory.CreateText("TI", hdrBox.transform,
                 _SYNC_INSTRUCTIONS,
-                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(400, 560));
+                14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 560));
             UIFactory.SetWordWrap(txtTInstructions, true);
             // Zero out the baked LayoutElement prefH so the TMP text's own ILayoutElement
             // (which reports actual rendered height) drives the parent panel size. Without
@@ -9204,12 +9355,19 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 var e = lb[i];
                 bool me = e.steam_id == MatchTracker.LocalSteamId;
                 UIFactory.SetText(row.txtRank, $"#{e.rank}");
+                // v1.32 item 1: podium rank numbers read gold/silver/bronze here too.
+                UIFactory.SetColor(row.txtRank,
+                    e.rank == 1 ? new Color(1f, 0.84f, 0f) :
+                    e.rank == 2 ? new Color(0.75f, 0.75f, 0.75f) :
+                    e.rank == 3 ? new Color(0.8f, 0.5f, 0.2f) : C_GOLD);
                 // Title goes AFTER the name in [brackets] (matches 1v1 lb).
                 string nameDisplay = Trunc(e.display_name, 14);
                 if (!string.IsNullOrEmpty(e.title))
                 {
                     string col = string.IsNullOrEmpty(e.title_color) ? "#FFD94D" : e.title_color;
-                    nameDisplay = $"{nameDisplay} <color={col}>[{Trunc(e.title, 12)}]</color>";
+                    nameDisplay = IsPodiumTitle(e.title)
+                        ? $"{nameDisplay} {PodiumSparkleSpan(e.title, col, 0)}"
+                        : $"{nameDisplay} <color={col}>[{Trunc(e.title, 12)}]</color>";
                 }
                 UIFactory.SetText(row.txtName, nameDisplay);
                 UIFactory.SetColor(row.txtName, me ? C_GREEN : C_WHITE);

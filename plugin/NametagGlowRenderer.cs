@@ -354,6 +354,74 @@ namespace CompetitiveRounds
             catch { return false; }
         }
 
+        /// <summary>Clone a TMP SDF material with a thin dark outline — used by the
+        /// leaderboard to keep podium-row text readable over the gold/silver/bronze
+        /// row tints (v1.32 round 2, Sid: "Stan's elo is hard to read"). Face
+        /// properties are inherited from the base so rich-text vertex colors render
+        /// unchanged; only the rim is added.</summary>
+        public static Material BuildDarkOutlineMaterial(Material baseMat)
+        {
+            if (baseMat == null) return null;
+            try
+            {
+                var clone = new Material(baseMat);
+                clone.name = baseMat.name + " + podium-outline";
+                clone.hideFlags = HideFlags.HideAndDontSave;
+                try { clone.DisableKeyword("UNDERLAY_ON"); } catch { }
+                try { clone.DisableKeyword("GLOW_ON"); } catch { }
+                if (clone.HasProperty("_OutlineColor"))    clone.SetColor("_OutlineColor", new Color(0f, 0f, 0f, 0.9f));
+                if (clone.HasProperty("_OutlineWidth"))    clone.SetFloat("_OutlineWidth", 0.18f);
+                if (clone.HasProperty("_OutlineSoftness")) clone.SetFloat("_OutlineSoftness", 0.1f);
+                return clone;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[GLOW] BuildDarkOutlineMaterial failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>Toggle the dark readability outline on a TMP label. Same shape as
+        /// ApplyGlowToLabel: the caller owns the original-material store (keyed by
+        /// label) and the clone cache (keyed by base material — leaderboard cells all
+        /// share one Gravity SDF material, so one clone serves every cell).</summary>
+        public static bool ApplyOutlineToLabel(object tmpLabel, bool on,
+            Dictionary<object, Material> originalMaterialStore,
+            Dictionary<Material, Material> outlineMaterialCache)
+        {
+            if (tmpLabel == null) return false;
+            if (!TryBindReflection()) return false;
+            try
+            {
+                Material current = _pFontSharedMaterial.GetValue(tmpLabel) as Material;
+                if (originalMaterialStore != null && !originalMaterialStore.ContainsKey(tmpLabel) && current != null)
+                    originalMaterialStore[tmpLabel] = current;
+                Material originalMat = (originalMaterialStore != null && originalMaterialStore.TryGetValue(tmpLabel, out var om)) ? om : current;
+                Material targetMat;
+                if (!on)
+                {
+                    targetMat = originalMat;
+                }
+                else
+                {
+                    if (originalMat == null) return false;
+                    if (outlineMaterialCache == null || !outlineMaterialCache.TryGetValue(originalMat, out targetMat) || targetMat == null)
+                    {
+                        targetMat = BuildDarkOutlineMaterial(originalMat);
+                        if (outlineMaterialCache != null && targetMat != null) outlineMaterialCache[originalMat] = targetMat;
+                    }
+                }
+                if (targetMat == null || ReferenceEquals(current, targetMat)) return false;
+                if (_pFontMaterial != null) _pFontMaterial.SetValue(tmpLabel, targetMat);
+                else _pFontSharedMaterial.SetValue(tmpLabel, targetMat);
+                try { _mSetMaterialDirty?.Invoke(tmpLabel, null); } catch { }
+                try { _mSetVerticesDirty?.Invoke(tmpLabel, null); } catch { }
+                try { _mUpdateMaterial?.Invoke(tmpLabel, null); } catch { }
+                return true;
+            }
+            catch { return false; }
+        }
+
         private void RestoreLabel(Component comp)
         {
             if (comp == null) return;

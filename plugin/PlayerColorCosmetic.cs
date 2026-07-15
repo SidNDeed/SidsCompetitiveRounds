@@ -498,7 +498,10 @@ namespace CompetitiveRounds
             var wait = new WaitForSeconds(1f / 30f);
             while (animByActor.Count > 0)
             {
-                float now = Time.time;
+                // v1.32 item 8: static-cosmetics mode freezes the animation clock —
+                // prismatic/chrome render a stable representative hue instantly (and
+                // resume from live time the moment the setting flips back on).
+                float now = (Plugin.AnimatedCosmetics != null && !Plugin.AnimatedCosmetics.Value) ? 0f : Time.time;
                 foreach (var kv in animByActor)
                 {
                     var st = kv.Value;

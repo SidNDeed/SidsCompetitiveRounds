@@ -85,6 +85,14 @@ namespace CompetitiveRounds
             private void Update()
             {
                 if (frames == null || frames.Length < 2 || sr == null || fps <= 0f) return;
+                // v1.32 item 8: static-cosmetics mode pins every animated face item to
+                // frame 1. One check covers all clones (in-match body, pick visualizer,
+                // menu portraits) because vanilla clones this component onto each.
+                if (Plugin.AnimatedCosmetics != null && !Plugin.AnimatedCosmetics.Value)
+                {
+                    if (sr.sprite != frames[0]) sr.sprite = frames[0];
+                    return;
+                }
                 sr.sprite = frames[(int)(Time.unscaledTime * fps) % frames.Length];
             }
         }

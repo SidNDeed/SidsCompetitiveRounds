@@ -21,7 +21,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.31.0";
+        public const string ModVersion = "1.32.0";
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -40,6 +40,13 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowBlockDebug;
         internal static ConfigEntry<bool> ShowPlayerColors;
         internal static ConfigEntry<bool> ShowInputOverlay;
+        // v1.32 items 7+8 — standalone accessibility/FPS toggles. Deliberately
+        // NOT under the Performance master switch: these are user preferences
+        // that should survive a perf-master flip (map note, settings tab).
+        internal static ConfigEntry<bool> ScreenShakeEnabled;
+        internal static ConfigEntry<bool> MapLightingEnabled;
+        internal static ConfigEntry<bool> MapShadowsEnabled;
+        internal static ConfigEntry<bool> AnimatedCosmetics;
         // Performance pass — master + 7 per-patch flags so users can disable
         // any individual port without giving up the rest. Mirrors the
         // granularity the original "Performance Improvements" mod offered.
@@ -237,6 +244,27 @@ namespace CompetitiveRounds
                 "UI", "ShowInputOverlay",
                 false,
                 "Show a bottom-left WASD + Space + L/R-click input visualizer during matches. Keys glow red when pressed."
+            );
+
+            ScreenShakeEnabled = Config.Bind(
+                "UI", "ScreenShakeEnabled",
+                true,
+                "Camera screen shake on hits/deaths/shots. Turn OFF to disable all shake (local only — opponents still see theirs)."
+            );
+            MapLightingEnabled = Config.Bind(
+                "UI", "MapLightingEnabled",
+                true,
+                "The map lighting pass (SFSS). Turn OFF for a flat, full-bright scene — skips the whole per-frame lightmap render for extra FPS."
+            );
+            MapShadowsEnabled = Config.Bind(
+                "UI", "MapShadowsEnabled",
+                true,
+                "Soft shadow beams cast by map lighting. Turn OFF to skip the shadow render pass (lighting stays) for extra FPS."
+            );
+            AnimatedCosmetics = Config.Bind(
+                "UI", "AnimatedCosmetics",
+                true,
+                "Animated cosmetics (prismatic/chrome body colors, prism trail hue cycle, map-skin sparkle shimmer, animated face items). Turn OFF to freeze them all to a static frame instantly."
             );
 
             PerfOptimizations = Config.Bind(
@@ -4901,6 +4929,11 @@ namespace CompetitiveRounds
         static void Postfix(Map __instance)
         {
             LastMapStartTime = Time.time;
+            // v1.32 item 7: lighting/shadow disable settings survive scene reloads —
+            // fresh SFRenderer instances spawn with vanilla state every map load.
+            // Field flips are transition-safe (not particle mutations), so this
+            // does NOT need the MapTransitionGuardSec defer.
+            RenderPerfSettings.Apply();
             // Use whatever sku is currently live after the cycle (ArtHandlerNextArtPatch sets
             // MapColorState.CurrentSku on every cycle advance). Fall back to the legacy single
             // field when the cycle hasn't run yet (fresh map load before any Shift press).
@@ -4917,12 +4950,17 @@ namespace CompetitiveRounds
                 RestoreBackdropQuads();
                 RestoreLighting();
                 _twinkleSystems.Clear();
+                // v1.32 round 2: runs LAST so a lighting-off flat backdrop wins over
+                // the RestoreVanillaSky above (which would otherwise restore the raw
+                // dark sky). No-op when lighting is on and never toggled off.
+                RenderPerfSettings.ApplyBackdrop();
                 return;
             }
             // Defer past the transition before touching particles (see MapTransitionGuardSec).
             // Hosted on the persistent Plugin object, NOT the Map — the Map can be destroyed
             // mid-transition, which would kill a Map-hosted coroutine before it applies.
             ScheduleDeferredTints(sku);
+            RenderPerfSettings.ApplyBackdrop();
         }
 
         // Schedule the wall/atmosphere particle tint to run AFTER the MapTransition window.
@@ -5253,6 +5291,12 @@ namespace CompetitiveRounds
             {
                 yield return wait;
                 if (_twinkleSystems.Count == 0) continue;
+                // v1.32 item 8: static-cosmetics mode — stop re-rolling the glint.
+                // The tick=0 emission gradient already gives a stable two-tone
+                // pattern, so skipping here freezes the shimmer in place. Gate the
+                // BODY, not the loop start: the loop is while(true) and started at
+                // most once per session, so a start-site gate would never re-arm.
+                if (Plugin.AnimatedCosmetics != null && !Plugin.AnimatedCosmetics.Value) continue;
                 _twinkleTick++;
                 for (int i = 0; i < _twinkleSystems.Count; i++)
                 {
@@ -5355,6 +5399,129 @@ namespace CompetitiveRounds
                     }
             }
             catch { }
+        }
+
+        // ── v1.32 item 7: FPS settings — map lighting / shadows kill-switches ──
+        // Mechanics (full-game decompile SFRenderer.cs, on the 'LightCamera'):
+        //  • Shadows off (_shadows=false) skips the WHOLE shadow pass — CullPolys +
+        //    a second lightmap RT + per-light shadow meshes. Big win, scene stays
+        //    fully lit and correctly colored. This is the safe perf toggle.
+        //  • Lighting off (enabled=false) stops OnPreRender, so no lightmap is built.
+        //    We set the SFSS shader globals to white so scene SPRITES (players,
+        //    walls) render full-bright and clearly. BUT the map's SKY COLOR *is* the
+        //    lighting: the scene composites as sprites × lightmap, and the backdrop
+        //    sprite art (ArtHandler.m_background) is a fixed DARK texture that the
+        //    lightmap normally brightens/tints into the per-map sky (learning #117).
+        //    White light on a dark backdrop = dark → the constant "dark purple"
+        //    Sid saw regardless of map (v1.32 round 2). There is NO way to recover
+        //    the coloured sky without the lighting, so lighting-off deliberately
+        //    paints m_background a flat neutral slate (ApplyBackdrop) — a clean
+        //    minimal backdrop that reads as an intentional perf/accessibility mode.
+        // Vanilla state cached per instance id; re-applied every Map.Start / NextArt
+        // because scene reloads spawn fresh renderers.
+        internal static class RenderPerfSettings
+        {
+            private static readonly Dictionary<int, bool> _vanillaShadows = new Dictionary<int, bool>();
+            private static readonly Dictionary<int, bool> _vanillaEnabled = new Dictionary<int, bool>();
+            // Flat backdrop shown while lighting is disabled (matches the mod's UI
+            // panel slate so it looks deliberate). Kept opaque; per-sprite vanilla
+            // alpha is preserved at paint time.
+            private static readonly Color FLAT_BACKDROP = new Color(0.09f, 0.10f, 0.13f, 1f);
+            private static bool _flatBackdropActive = false;
+
+            // Renderer enable + shadow flags + shader globals. Safe to run early in
+            // the Map.Start postfix (field flips, not particle mutation — no
+            // MapTransitionGuardSec needed). Does NOT touch the backdrop; that must
+            // run LAST (ApplyBackdrop) so the postfix's own RestoreVanillaSky for
+            // default maps can't undo it.
+            internal static void Apply()
+            {
+                try
+                {
+                    bool light = Plugin.MapLightingEnabled == null || Plugin.MapLightingEnabled.Value;
+                    bool shadow = Plugin.MapShadowsEnabled == null || Plugin.MapShadowsEnabled.Value;
+                    foreach (var rend in UnityEngine.Object.FindObjectsOfType<SFRenderer>())
+                    {
+                        if (rend == null) continue;
+                        int id = rend.GetInstanceID();
+                        if (!_vanillaShadows.ContainsKey(id)) _vanillaShadows[id] = rend._shadows;
+                        if (!_vanillaEnabled.ContainsKey(id)) _vanillaEnabled[id] = rend.enabled;
+                        rend._shadows = shadow ? _vanillaShadows[id] : false;
+                        rend.enabled = light ? _vanillaEnabled[id] : false;
+                    }
+                    if (!light)
+                    {
+                        // A disabled SFRenderer never runs OnPostRender, so the SFSS
+                        // shader globals keep pointing at the previous scene's released
+                        // lightmap RTs. Pin them to vanilla's OnPostRender identity
+                        // (white ambient/exposure/lightmaps) so scene sprites stay
+                        // full-bright and stable.
+                        Shader.SetGlobalColor("_SFAmbientLight", Color.white);
+                        Shader.SetGlobalFloat("_SFExposure", 1f);
+                        Shader.SetGlobalTexture("_SFLightMap", Texture2D.whiteTexture);
+                        Shader.SetGlobalTexture("_SFLightMapWithShadows", Texture2D.whiteTexture);
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[RENDERPERF] apply failed: {ex.Message}"); }
+            }
+
+            // Backdrop paint/restore. Runs LAST in the Map.Start postfix (after the
+            // default-map RestoreVanillaSky) and on a mid-match settings toggle.
+            internal static void ApplyBackdrop()
+            {
+                try
+                {
+                    bool light = Plugin.MapLightingEnabled == null || Plugin.MapLightingEnabled.Value;
+                    if (!light)
+                    {
+                        PaintFlatBackdrop();
+                        _flatBackdropActive = true;
+                    }
+                    else if (_flatBackdropActive)
+                    {
+                        // Lighting came back on — bring the real sky back. Restore the
+                        // vanilla backdrop, then re-tint if a custom map skin is active
+                        // (its sky is a direct sprite tint, independent of lighting).
+                        RestoreVanillaSky();
+                        var sku = MapColorState.CurrentSku;
+                        if (!string.IsNullOrEmpty(sku) && CustomMapColors.IsCustomSku(sku))
+                            TintArtBackground(sku);
+                        _flatBackdropActive = false;
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[RENDERPERF] backdrop failed: {ex.Message}"); }
+            }
+
+            // Paint ArtHandler.m_background a flat neutral slate. Captures true vanilla
+            // into the SAME caches the skin-tint pass uses (_vanillaSkyColors for
+            // sprites, GetCachedVanillaColor for particles), so RestoreVanillaSky
+            // brings the real sky back and the skin-tint pass reads correct vanilla.
+            private static void PaintFlatBackdrop()
+            {
+                var ah = ArtHandler.instance;
+                var bgGO = ah != null ? ah.m_background : null;
+                if (bgGO == null) return;
+                foreach (var sr in bgGO.GetComponentsInChildren<SpriteRenderer>(true))
+                {
+                    if (sr == null) continue;
+                    int id = sr.GetInstanceID();
+                    if (!_vanillaSkyColors.TryGetValue(id, out var vanilla))
+                    {
+                        vanilla = sr.color;
+                        _vanillaSkyColors[id] = vanilla;
+                    }
+                    sr.color = new Color(FLAT_BACKDROP.r, FLAT_BACKDROP.g, FLAT_BACKDROP.b, vanilla.a);
+                }
+                foreach (var ps in bgGO.GetComponentsInChildren<ParticleSystem>(true))
+                {
+                    if (ps == null) continue;
+                    Color vanilla = GetCachedVanillaColor(ps);
+                    Color flat = new Color(FLAT_BACKDROP.r, FLAT_BACKDROP.g, FLAT_BACKDROP.b, vanilla.a);
+                    var main = ps.main;
+                    main.startColor = new ParticleSystem.MinMaxGradient(flat);
+                    RetintLiveParticles(ps, flat);
+                }
+            }
         }
 
         // Per-map backdrop quads: any renderer wide enough to cover the play
@@ -5683,6 +5850,9 @@ namespace CompetitiveRounds
                     // makes Shift visibly swap the background on the same frame.
                     MapPhysicalColorPatch.ApplyCameraBackground(sku);
                     MapPhysicalColorPatch.ApplyLighting(sku);
+                    // v1.32 item 7: lighting/shadow disable settings re-assert after
+                    // the skin's own lighting pass touched the renderers.
+                    MapPhysicalColorPatch.RenderPerfSettings.Apply();
                     // Instant/sharp swap (v1.26.10): ROUNDS fades the post-process volume in
                     // gradually, which reads as the map "sliding" into the next skin on Shift.
                     // Force the volume to full weight on the same frame so the new ColorGrading

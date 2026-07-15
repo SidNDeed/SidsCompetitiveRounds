@@ -2848,7 +2848,7 @@ namespace CompetitiveRounds
                     ApiClient.UnlockAchievement(steamId, "instinct");
                 }
 
-                // 14. Unkillable (July 12 spec) — the real god-build qualifier is
+                // 14. God Build (July 12 spec; renamed from Unkillable, v1.32) — the real god-build qualifier is
                 // the GUN STATE at game end, not a card-name proxy: exactly 1 max
                 // ammo, reload cycle <= 1s, Shields Up in the build, and the win.
                 if (localWon && (cardNames.Contains("Shields Up") || cardNames.Contains("ShieldsUp")))
@@ -2865,15 +2865,15 @@ namespace CompetitiveRounds
                         if (ga != null)
                         {
                             float reloadSecs = (ga.reloadTime + ga.reloadTimeAdd) * ga.reloadTimeMultiplier;
-                            Plugin.Log.LogInfo($"[ACH] Unkillable check: maxAmmo={ga.maxAmmo} reload={reloadSecs:F2}s");
+                            Plugin.Log.LogInfo($"[ACH] God Build check: maxAmmo={ga.maxAmmo} reload={reloadSecs:F2}s");
                             if (ga.maxAmmo <= 1 && reloadSecs <= 1.0f)
                             {
-                                Plugin.Log.LogInfo("[ACH] Evaluating: Unkillable — PASSED");
+                                Plugin.Log.LogInfo("[ACH] Evaluating: God Build — PASSED");
                                 ApiClient.UnlockAchievement(steamId, "god_build");
                             }
                         }
                     }
-                    catch (Exception gex) { Plugin.Log.LogWarning($"[ACH] Unkillable check failed: {gex.Message}"); }
+                    catch (Exception gex) { Plugin.Log.LogWarning($"[ACH] God Build check failed: {gex.Message}"); }
                 }
 
                 // 15. Into the Deep End (July 12 spec) — Abyssal Countdown as the

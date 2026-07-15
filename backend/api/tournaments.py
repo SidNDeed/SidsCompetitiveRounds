@@ -12,6 +12,7 @@ the series completes in main.py's match handler, it calls
 advance_tournament_match(series_id) — see the hook instructions at the
 bottom of this file for where that wires into main.py.
 """
+import json
 import os
 import random
 import uuid
@@ -83,6 +84,23 @@ ASYNC_CADENCE_DAYS = 42  # legacy — kept for any external reference; supersede
 # the cron spawns the next one. 2 days = bracket recap window so players
 # can review results before the new signup wave starts.
 ASYNC_POST_COMPLETION_DAYS = 2
+
+# ── Discord feed (v1.32) ──────────────────────────────────────────
+# Signup / leave / quorum / pushback / vote-moved-start events post to the
+# tournament feed channel via the pending_channel_posts bus (the bot polls
+# GET /internal/channel-posts/pending and acks after each send — learning
+# #105 durable delivery, survives bot restarts). All timestamps rendered as
+# Discord-native <t:unix:F> so every reader sees their local time.
+TOURNAMENT_FEED_CHANNEL_ID = int(os.getenv("TOURNAMENT_FEED_CHANNEL", "1224180565129822258"))
+
+
+def _kind_label(kind: Optional[str]) -> str:
+    return "Asynchronous" if kind == "async" else "Synchronized"
+
+
+def _dts(dt: Optional[datetime]) -> str:
+    """Discord-native absolute timestamp (<t:unix:F>) for a datetime."""
+    return f"<t:{int(dt.timestamp())}:F>" if dt else "TBD"
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -189,6 +207,61 @@ async def _get_signup_for(db: AsyncSession, tournament_id: uuid.UUID, player_id:
              TournamentSignup.player_id == player_id)
     )
     return (await db.execute(q)).scalar_one_or_none()
+
+
+async def _queue_channel_post(db: AsyncSession, content: str) -> None:
+    """Queue a Discord post on the pending_channel_posts bus (v1.32). Rides
+    the CALLER's session/transaction so the post commits (or rolls back)
+    together with the event it announces. Never raises — a feed failure must
+    not break a signup."""
+    try:
+        await db.execute(text(
+            "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:c, :t)"
+        ), {"c": str(TOURNAMENT_FEED_CHANNEL_ID), "t": content[:1900]})
+    except Exception as e:
+        print(f"[TOURNAMENT] channel post queue failed: {e}")
+
+
+async def _confirmed_count(db: AsyncSession, tournament_id: uuid.UUID) -> int:
+    """Count of confirmed (non-speculative) signups. Autoflush makes pending
+    in-session signup/speculation mutations visible to this query."""
+    return (await db.execute(
+        select(func.count()).select_from(TournamentSignup).where(and_(
+            TournamentSignup.tournament_id == tournament_id,
+            TournamentSignup.is_speculative == False,  # noqa: E712
+        ))
+    )).scalar() or 0
+
+
+async def _confirmed_mentions(db: AsyncSession, tournament_id: uuid.UUID) -> str:
+    """'<@id> <@id> ...' for every confirmed signup. discord_id is gated at
+    signup time so it's effectively always present; missing ones are skipped."""
+    rows = (await db.execute(
+        select(Player.discord_id)
+        .join(TournamentSignup, TournamentSignup.player_id == Player.id)
+        .where(and_(
+            TournamentSignup.tournament_id == tournament_id,
+            TournamentSignup.is_speculative == False,  # noqa: E712
+        ))
+    )).scalars().all()
+    return " ".join(f"<@{d}>" for d in rows if d)
+
+
+def _signup_count_line(t: Tournament, confirmed: int) -> str:
+    """The shared '( n / max ) players have entered ...' feed line. Async
+    tournaments start the moment signups close, so they get the signup-close
+    time instead of a start time."""
+    line = (f"( {confirmed} / {t.max_players} ) players have entered the "
+            f"{_kind_label(t.kind)} tournament. "
+            f"{t.min_players} players required to start. ")
+    if t.kind == "async":
+        line += f"Signups close {_dts(t.lock_at)}."
+    else:
+        # Locked tournaments have a vote-resolved scheduled_start_ts that can
+        # differ from the pre-vote default — announce the time players will
+        # actually play at (adversarial review fix).
+        line += f"Current start time is {_dts(t.scheduled_start_ts or t.default_start_ts)}."
+    return line
 
 
 def _bracket_tag(side: Optional[str]) -> str:
@@ -424,6 +497,38 @@ async def lock_tournament(db: AsyncSession, t: Tournament) -> None:
         print(f"[TOURNAMENT] {t.id} only {len(signups)}/{t.min_players} "
               f"confirmed signups — pushing lock_at to {t.lock_at.isoformat()} "
               f"(kind={t.kind}). Status stays voting.")
+        # Discord feed (v1.32): the pushback keeps status='voting' so the
+        # bot's status-diff never sees it — this post is the ONLY signal
+        # signed-up players get that the date moved.
+        try:
+            mentions = await _confirmed_mentions(db, t.id)
+            if t.kind == "async":
+                when_sentence = f"New signup close is {_dts(t.lock_at)}."
+            else:
+                when_sentence = f"New start time is {_dts(t.default_start_ts)}."
+            prefix = f"{mentions} — the" if mentions else "The"
+            await _queue_channel_post(
+                db,
+                f"{prefix} {_kind_label(t.kind)} tournament has been pushed "
+                f"back due to lack of players ( {len(signups)} / "
+                f"{t.min_players} required). {when_sentence}")
+        except Exception as e:
+            print(f"[TOURNAMENT] pushback feed post failed: {e}")
+        # Adversarial review fix: the availability-check notices are deduped by
+        # UNIQUE(tournament_id, player_id, notice_type), so a pushed-back
+        # tournament re-entering the 24-96h window a week later would never
+        # re-ask anyone. The date moved — every prior availability answer is
+        # stale — so drop the old notices (sent and unsent alike) and let the
+        # tick re-queue fresh ones for the new date.
+        try:
+            await db.execute(
+                text("DELETE FROM tournament_notices "
+                     "WHERE tournament_id = :tid "
+                     "AND notice_type = 'availability_check'"),
+                {"tid": t.id},
+            )
+        except Exception as e:
+            print(f"[TOURNAMENT] pushback notice reset failed: {e}")
         return
 
     # Prize tier
@@ -473,6 +578,21 @@ async def lock_tournament(db: AsyncSession, t: Tournament) -> None:
         t.scheduled_start_ts = random.choice(top_slots)
     else:
         t.scheduled_start_ts = t.default_start_ts
+
+    # Discord feed (v1.32): the winning voted slot moved the start away from
+    # the default. Sync only — async overwrites scheduled_start_ts to `now`
+    # below (it starts the moment signups close), so a vote-moved notice
+    # would announce a time that never happens.
+    if t.kind != "async" and t.scheduled_start_ts != t.default_start_ts:
+        try:
+            mentions = await _confirmed_mentions(db, t.id)
+            prefix = f"{mentions} — the" if mentions else "The"
+            await _queue_channel_post(
+                db,
+                f"{prefix} {_kind_label(t.kind)} tournament start time was "
+                f"moved by player vote to {_dts(t.scheduled_start_ts)}.")
+        except Exception as e:
+            print(f"[TOURNAMENT] vote-moved feed post failed: {e}")
 
     # Snapshot Elo per signup.
     eq = text("""
@@ -1036,6 +1156,48 @@ async def _ensure_next_tournament(db: AsyncSession) -> None:
     print(f"[TOURNAMENT-CRON] Created async tournament, signups until {async_lock_at.isoformat()}")
 
 
+async def _queue_availability_notices(db: AsyncSession) -> None:
+    """(v1.32) Queue one 'availability_check' DM notice per confirmed signup
+    when a voting tournament that already has quorum is 24-96h from the
+    moment that matters (sync: default start time; async: signup close).
+    Durable ack delivery (learning #105): rows land in tournament_notices,
+    the bot polls GET /internal/tournament-notices?unnotified=true and acks
+    after the DM lands. The UNIQUE (tournament_id, player_id, notice_type)
+    + ON CONFLICT DO NOTHING makes every 30s re-tick a no-op. Guards: never
+    queued under 24h out (too late to be actionable — a player who never got
+    one because signups filled late just gets the existing lock DM), never
+    for tournaments outside 'voting', never under quorum."""
+    now = datetime.now(timezone.utc)
+    ts = (await db.execute(
+        select(Tournament).where(Tournament.status == "voting")
+    )).scalars().all()
+    for t in ts:
+        anchor = t.lock_at if t.kind == "async" else t.default_start_ts
+        if anchor is None:
+            continue
+        hours_until = (anchor - now).total_seconds() / 3600.0
+        if not (24.0 <= hours_until <= 96.0):
+            continue
+        confirmed = await _confirmed_count(db, t.id)
+        if confirmed < t.min_players:
+            continue
+        payload = json.dumps({
+            "kind": t.kind,
+            "start_ts": int(t.default_start_ts.timestamp()) if t.default_start_ts else None,
+            "lock_ts": int(t.lock_at.timestamp()) if t.lock_at else None,
+            # Tournaments carry no name column — a human label rides instead.
+            "label": f"{_kind_label(t.kind)} tournament",
+            "tournament_id": str(t.id),
+        })
+        await db.execute(text(
+            "INSERT INTO tournament_notices (tournament_id, player_id, notice_type, payload) "
+            "SELECT ts.tournament_id, ts.player_id, 'availability_check', :payload "
+            "  FROM tournament_signups ts "
+            " WHERE ts.tournament_id = :tid AND ts.is_speculative = FALSE "
+            "ON CONFLICT (tournament_id, player_id, notice_type) DO NOTHING"
+        ), {"payload": payload, "tid": t.id})
+
+
 async def tournament_tick() -> None:
     """Background driver. Runs every 30s from main.py lifespan. Handles:
       - Auto-create the next weekly tournament if none is queued
@@ -1043,6 +1205,7 @@ async def tournament_tick() -> None:
       - locked -> running when scheduled_start_ts <= now
       - running: activate newly-ready matches, apply no-show forfeits,
         close out when final+TP are done
+      - queue availability-check DM notices for viable voting tournaments
 
     Per-tournament isolation (Review #2): each tournament's state mutation
     runs inside its own session so one broken row can't discard every
@@ -1068,6 +1231,10 @@ async def tournament_tick() -> None:
 
             # Cron create
             await _safe("ensure-next", _ensure_next_tournament)
+
+            # Availability-check DM notices (v1.32) — own unit so a failure
+            # here can't block lifecycle transitions below.
+            await _safe("avail-notices", _queue_availability_notices)
 
             # Voting -> locked (one session per tournament)
             async with async_session() as db:
@@ -1273,6 +1440,7 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: Asy
     if existing:
         return await _build_current_response(db, t, player)
     penalty = await _recompute_player_penalty(db, player.id)
+    prev_confirmed = await _confirmed_count(db, tournament_id)
     db.add(TournamentSignup(
         tournament_id=tournament_id,
         player_id=player.id,
@@ -1282,6 +1450,22 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: Asy
     ))
     await db.flush()
     await _recompute_speculation(db, tournament_id)
+    await db.flush()
+    # Discord feed (v1.32): progress line on every signup; when this signup
+    # is the one that reaches quorum, ping every confirmed entrant. Both
+    # posts ride the signup's transaction — no orphan announcements.
+    try:
+        confirmed = await _confirmed_count(db, tournament_id)
+        await _queue_channel_post(db, _signup_count_line(t, confirmed))
+        if prev_confirmed < t.min_players <= confirmed:
+            mentions = await _confirmed_mentions(db, tournament_id)
+            when = t.lock_at if t.kind == "async" else t.default_start_ts
+            await _queue_channel_post(
+                db,
+                f"{mentions} — enough players have joined! The "
+                f"{_kind_label(t.kind)} tournament will start {_dts(when)}.")
+    except Exception as e:
+        print(f"[TOURNAMENT] signup feed post failed: {e}")
     await db.commit()
     return await _build_current_response(db, t, player)
 
@@ -1315,6 +1499,18 @@ async def unsignup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: A
         # signup into their slot OR collapse their matches into byes for
         # their opponents so the bracket still resolves.
         await _handle_leaving_signup(db, tournament_id, existing.id)
+    await db.flush()
+    # Discord feed (v1.32): departure + updated progress line. In the locked
+    # branch the count can stay flat (a speculative got promoted) — the line
+    # is accurate either way.
+    try:
+        confirmed = await _confirmed_count(db, tournament_id)
+        await _queue_channel_post(
+            db,
+            f"A player left the {_kind_label(t.kind)} tournament — "
+            + _signup_count_line(t, confirmed))
+    except Exception as e:
+        print(f"[TOURNAMENT] unsignup feed post failed: {e}")
     await db.commit()
     return await _build_current_response(db, t, player)
 

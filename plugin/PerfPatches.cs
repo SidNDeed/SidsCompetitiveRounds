@@ -484,4 +484,40 @@ namespace CompetitiveRounds
     //      pool members and corrupts the pool (PrefabPool.Release NREs).
     // Vanilla's pooling already solves the accumulation problem this patch
     // existed for on the old game. Nothing to port — delete.
+
+    // ── v1.32 item 7: disable screen shake ─────────────────────────────────
+    // Vanilla routes every shake impulse (gun fire, hits, deaths, landings, UI
+    // pops — including cross-client RPCA_AllGameFeel replication) through the
+    // GameFeeler fan-out; Screenshaker is THE camera-shake receiver (decompile
+    // -Module-.cs:29411, spring/damper integrator). Prefix-return-false on both
+    // receive methods = no impulse ever enters the spring, and the Update
+    // integrator is inert at rest — zero visual residue, purely local.
+    // Standalone gate (Plugin.ScreenShakeEnabled), deliberately NOT under the
+    // perf master: this is an accessibility preference, not a perf patch.
+    // NOTE (learning #83): verify "Failed to patch" is absent from the startup
+    // log on first launch — a renamed method would fail silently otherwise.
+    [HarmonyPatch(typeof(Screenshaker))]
+    internal static class ScreenshakerDisablePatch
+    {
+        private static bool ShakeOff =>
+            Plugin.ScreenShakeEnabled != null && !Plugin.ScreenShakeEnabled.Value;
+
+        [HarmonyPrefix]
+        [HarmonyPatch("OnGameFeel")]
+        static bool PreOnGameFeel()
+        {
+            if (!ShakeOff) return true;
+            PerfGate.Hit("ScreenShakeBlocked");
+            return false;
+        }
+
+        [HarmonyPrefix]
+        [HarmonyPatch("OnUIGameFeel")]
+        static bool PreOnUIGameFeel()
+        {
+            if (!ShakeOff) return true;
+            PerfGate.Hit("ScreenShakeBlocked");
+            return false;
+        }
+    }
 }

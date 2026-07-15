@@ -367,6 +367,11 @@ class AchievementEntry(BaseModel):
     # Steam-style global unlock rate: percent of all (non-deleted) players who
     # have this achievement. Cached server-side ~5 min; 0.0 when unknown.
     global_pct: float = 0.0
+    # Gold paid on unlock (v1.32). Server truth from _achievement_gold() — the
+    # slayer achievements pay 1000, everything else the uniform 100. The client
+    # currently hardcodes "+100g" (NativeUI.RefreshAchievements); this field
+    # lets it render the per-key amount instead.
+    gold: int = 100
 
     model_config = {"from_attributes": True}
 

@@ -1,6 +1,9 @@
 FROM python:3.11-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
-RUN pip install --no-cache-dir discord.py aiohttp
+# Writable matplotlib config/cache dir — without it every import warns and
+# retries slow font-cache builds in the read-only home.
+ENV MPLCONFIGDIR=/tmp
+RUN pip install --no-cache-dir discord.py aiohttp matplotlib
 COPY discord_bot.py .
 CMD ["python", "discord_bot.py"]

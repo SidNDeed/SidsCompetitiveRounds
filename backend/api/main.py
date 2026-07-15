@@ -180,19 +180,128 @@ async def _rank_info(db: AsyncSession, rating: float | None) -> tuple[str, str]:
 
 
 def _display_title_sync(colors: dict, sku: str | None, name: str | None,
-                        color: str | None, rating: float | None) -> tuple[str | None, str | None]:
+                        color: str | None, rating: float | None,
+                        podium_pos: int | None = None) -> tuple[str | None, str | None]:
     """Resolve the DISPLAYED title text/color for a player row. The dynamic
     'Current Rank' title renders as the player's live rank tier + tier color;
+    the dynamic 'Podium' title renders as 1st/2nd/3rd Place (gold/silver/
+    bronze) — or disappears entirely (None, None) when the holder is no
+    longer on the leaderboard podium (podium_pos=None, intended UX);
     every other title passes through unchanged."""
     if sku == TITLE_RANK_SKU:
         rn = _rank_name_for(rating)
         return rn, colors.get(rn) or _rank_fallback_color(rn)
+    if sku == TITLE_PODIUM_SKU:
+        return PODIUM_TITLES.get(podium_pos, (None, None))
     return name, color
 
 
 # Colors for the achievement-gated slayer titles (also stamped on the shop
 # items by migration 102; kept here for the dynamic-title override path).
 TITLE_RANK_SKU = "title_rank"
+
+# Dynamic 'Podium' title (v1.32): equippable by anyone who has EVER held a
+# leaderboard top-3 spot (granted on podium entry, never revoked — render-time
+# resolution hides it while off the podium). Seeded by migration 123.
+TITLE_PODIUM_SKU = "title_podium"
+PODIUM_TITLES = {
+    1: ("1st Place", "#FFD700"),   # gold
+    2: ("2nd Place", "#C0C0C0"),   # silver
+    3: ("3rd Place", "#CD7F32"),   # bronze
+}
+
+# 60s in-process cache over the VISIBLE leaderboard's top 3 — the same CTEs +
+# filters as GET /leaderboard AS ACTUALLY CONSUMED: every real caller (F5
+# client, bot /lb, bot channel board) passes min_matches=1, so the podium
+# filter is >= 1 counted entry (adversarial review: a >= 5 filter here made
+# the sparkling title / x3 XP attach to a player DISPLAYED at #4 whenever a
+# 1-4-match player held a top-3 rating). deleted_at IS NULL, ORDER BY rating
+# DESC. Shared by the 'title_podium' dynamic title and the Top-3 x3 match XP
+# multiplier. Keys/values are str(player_id) so UUIDs from text() queries and
+# ORM lookups compare equal.
+_podium_cache: dict = {"at": 0.0, "ids": [], "map": {}}
+
+_PODIUM_QUERY = """
+    WITH series_stats AS (
+        SELECT sub.player_id, COUNT(*) AS total
+        FROM (
+            SELECT rs.player1_id AS player_id FROM ranked_series rs WHERE rs.status = 'completed'
+            UNION ALL
+            SELECT rs.player2_id AS player_id FROM ranked_series rs WHERE rs.status = 'completed'
+        ) sub GROUP BY sub.player_id
+    ),
+    legacy_stats AS (
+        SELECT p.id AS player_id, COUNT(m.id) AS total
+        FROM players p
+        LEFT JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id)
+            AND m.is_ranked = true AND m.series_id IS NULL
+        GROUP BY p.id
+    ),
+    combined AS (
+        SELECT p.id AS player_id,
+               COALESCE(ss.total, 0) + COALESCE(ls.total, 0) AS total
+        FROM players p
+        LEFT JOIN series_stats ss ON ss.player_id = p.id
+        LEFT JOIN legacy_stats ls ON ls.player_id = p.id
+    )
+    SELECT p.id
+    FROM glicko_ratings gr
+    JOIN players p ON p.id = gr.player_id
+    LEFT JOIN combined c ON c.player_id = p.id
+    WHERE COALESCE(c.total, 0) >= 1
+      AND p.deleted_at IS NULL
+    ORDER BY gr.rating DESC
+    LIMIT 3
+"""
+
+
+async def _grant_podium_titles(player_ids: list) -> None:
+    """Idempotently grant the podium title item to the current top 3. Runs in
+    its OWN session so it can commit without touching the caller's transaction
+    (the cache refresh fires from arbitrary request contexts, including the
+    match-submit path). Grant only, never revoke — falling off the podium is
+    handled at render time by _display_title_sync."""
+    if not player_ids:
+        return
+    try:
+        from database import async_session
+        async with async_session() as gdb:
+            res = await gdb.execute(text(
+                "INSERT INTO player_items (player_id, item_id, purchase_price) "
+                "SELECT p.id, si.id, 0 "
+                "FROM players p "
+                "JOIN shop_items si ON si.sku = :sku "
+                "WHERE p.id::text = ANY(:pids) "
+                "ON CONFLICT (player_id, item_id) DO NOTHING"
+            ), {"sku": TITLE_PODIUM_SKU, "pids": list(player_ids)})
+            await gdb.commit()
+            if res.rowcount:
+                print(f"[PODIUM] granted {TITLE_PODIUM_SKU} to {res.rowcount} new podium holder(s)")
+    except Exception as ex:
+        print(f"[PODIUM] title grant failed: {ex}")
+
+
+async def _podium_player_ids(db: AsyncSession) -> list:
+    """Ordered [1st, 2nd, 3rd] player ids (as strings) per the visible
+    leaderboard. 60s TTL; failures serve the stale copy and never raise."""
+    now = time.monotonic()
+    if now - _podium_cache["at"] > 60:
+        try:
+            rows = (await db.execute(text(_PODIUM_QUERY))).scalars().all()
+            ids = [str(r) for r in rows]
+            _podium_cache["ids"] = ids
+            _podium_cache["map"] = {pid: i + 1 for i, pid in enumerate(ids)}
+            await _grant_podium_titles(ids)
+        except Exception as ex:
+            print(f"[PODIUM] cache refresh failed: {ex}")
+        _podium_cache["at"] = now
+    return _podium_cache["ids"]
+
+
+async def _podium_map(db: AsyncSession) -> dict:
+    """{str(player_id): 1|2|3} for the current leaderboard podium."""
+    await _podium_player_ids(db)
+    return _podium_cache["map"]
 
 
 # ── Presence (mod clients online, v1.29) ───────────────────────
@@ -846,7 +955,8 @@ async def calculate_match_xp(
     Win: 1.5x multiplier
     Sweep (5-0): +100 flat bonus
     Ranked: 1.5x multiplier (bumped from 1.2x — ranked should feel meaningfully more rewarding)
-    Beat top-5 player: +150 flat bonus
+    Beat a podium (leaderboard top-3) player: 3x multiplier (v1.32)
+    Beat top-5 player (non-podium): +150 flat bonus
     """
     base_xp = 250
     bonuses = []
@@ -860,6 +970,22 @@ async def calculate_match_xp(
         multiplier *= 1.5
         bonuses.append("Ranked x1.5")
 
+    # Top-3 podium multiplier (v1.32): beating a current podium holder — the
+    # VISIBLE leaderboard's top 3 (>=5 series, deleted_at IS NULL), not the
+    # raw glicko top-N — triples the match XP. Cached 60s in _podium_map.
+    # Swallow-style like the top-5 check below: a podium query failure must
+    # never break match submission.
+    podium_hit = False
+    if won and opponent_id:
+        try:
+            pmap = await _podium_map(db)
+            if str(opponent_id) in pmap:
+                multiplier *= 3.0
+                bonuses.append("Top 3 x3")
+                podium_hit = True
+        except Exception:
+            pass
+
     xp = int(base_xp * multiplier)
 
     # Sweep bonus
@@ -867,8 +993,9 @@ async def calculate_match_xp(
         xp += 100
         bonuses.append("Sweep +100")
 
-    # Top-5 bonus (check if opponent is in top 5 by rating)
-    if won and opponent_id:
+    # Top-5 bonus (check if opponent is in top 5 by rating). Skipped when the
+    # podium x3 already fired — podium is a subset of top-5, don't double-pay.
+    if won and opponent_id and not podium_hit:
         try:
             top5_query = text("""
                 SELECT player_id FROM glicko_ratings
@@ -897,7 +1024,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.31.0"
+LATEST_MOD_VERSION = "1.32.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1862,6 +1989,7 @@ async def get_leaderboard(
         )
         SELECT
             ROW_NUMBER() OVER (ORDER BY gr.rating DESC) AS rank,
+            p.id::text AS player_id,
             p.steam_id,
             p.display_name,
             ROUND(gr.rating::numeric, 0) AS rating,
@@ -1892,13 +2020,23 @@ async def get_leaderboard(
     rows = result.mappings().all()
 
     _colors = await _rank_colors(db)
+    # Podium map is fetched once per request, and only when some row actually
+    # wears the dynamic podium title (the 60s cache makes it cheap anyway).
+    _pmap = await _podium_map(db) if any(
+        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
     entries = []
     for row in rows:
         _title, _title_color = _display_title_sync(
-            _colors, row["title_sku"], row["title"], row["title_color"], float(row["rating"]))
+            _colors, row["title_sku"], row["title"], row["title_color"], float(row["rating"]),
+            podium_pos=_pmap.get(row["player_id"]))
         _rank = _rank_name_for(float(row["rating"]))
         entries.append(LeaderboardEntry(
-            rank=row["rank"] + offset,
+            # ROW_NUMBER() is evaluated over the whole filtered set BEFORE
+            # LIMIT/OFFSET slice it, so row["rank"] is already absolute —
+            # adding offset double-counted and made /lb page 2 start at #201
+            # (Sid's screenshot, v1.32 round 2). Nobody depended on the bug:
+            # the game client always fetches offset=0 and pages locally.
+            rank=row["rank"],
             steam_id=row["steam_id"],
             display_name=row["display_name"],
             rating=int(row["rating"]),
@@ -2171,6 +2309,14 @@ async def get_player_stats(
             if row[1] == TITLE_RANK_SKU:
                 active_title_name, active_title_color = await _rank_info(
                     db, glicko.rating if glicko else None)
+            # Dynamic 'Podium' title (v1.32): 1st/2nd/3rd Place while the
+            # player holds a leaderboard top-3 spot; disappears (None) when
+            # off the podium. The sku still travels in active_title_sku so
+            # the shop's equip-state match keeps working (#48).
+            elif row[1] == TITLE_PODIUM_SKU:
+                _ppos = (await _podium_map(db)).get(str(player.id))
+                active_title_name, active_title_color = PODIUM_TITLES.get(
+                    _ppos, (None, None))
         elif kind == "trail":
             active_trail_sku, active_trail_color, active_trail_price = row[1], row[2], row[3] or 0
         elif kind == "color":
@@ -2565,6 +2711,36 @@ async def get_player_stats(
     )
 
 
+@app.get("/api/v1/players/{steam_id}/rating-history", tags=["Players"])
+async def get_player_rating_history(
+    steam_id: str,
+    limit: int = Query(500, ge=1, le=2000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lean rating-history feed (v1.32) — exactly the recent_rating_history
+    shape from the full /players/{steam_id} response, standalone. The full
+    stats endpoint runs ~15 queries (streak walks, card aggregates, ...);
+    the Discord bot's compare graphs only need this slice. Public read, same
+    trust level as the stats endpoint."""
+    row = (await db.execute(
+        select(Player.id, Player.display_name).where(Player.steam_id == steam_id)
+    )).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    pid, display_name = row
+    history_result = await db.execute(
+        select(RatingHistory)
+        .where(RatingHistory.player_id == pid)
+        .order_by(RatingHistory.period_end.asc())
+        .limit(limit)
+    )
+    history = [
+        {"rating": round(h.rating), "rd": round(h.rating_deviation), "date": h.period_end.isoformat()}
+        for h in history_result.scalars().all()
+    ]
+    return {"steam_id": steam_id, "display_name": display_name, "history": history}
+
+
 # ── Routes: Match History ──────────────────────────────────────
 
 @app.get("/api/v1/players/{steam_id}/matches", response_model=list[MatchHistoryEntry], tags=["Players"])
@@ -2658,6 +2834,9 @@ async def get_player_matches(
     # the raw shop-item name "Current Rank" leaked into history rows and the
     # client rendered a literal "[Current Rank]".
     _colors = await _rank_colors(db)
+    # Podium map only when some opponent wears the dynamic podium title.
+    _pmap = await _podium_map(db) if any(
+        r["opp_title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
 
     entries = []
     for row in rows:
@@ -2702,7 +2881,8 @@ async def get_player_matches(
 
         _opp_title, _opp_title_color = _display_title_sync(
             _colors, row["opp_title_sku"], row["opp_title"], row["opp_title_color"],
-            float(row["opp_rating"]) if row["opp_rating"] is not None else None)
+            float(row["opp_rating"]) if row["opp_rating"] is not None else None,
+            podium_pos=_pmap.get(str(row["opp_id"])))
 
         entries.append(MatchHistoryEntry(
             match_id=row["match_id"],
@@ -4270,7 +4450,8 @@ async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | No
             else:
                 return {"rating": None, "title": None, "title_color": None}
             r = await db.execute(text(
-                f"SELECT gr.rating, si.name AS title, si.preview_color AS title_color, si.sku AS title_sku "
+                f"SELECT gr.rating, p.id::text AS player_id, "
+                f"si.name AS title, si.preview_color AS title_color, si.sku AS title_sku "
                 f"FROM glicko_ratings gr "
                 f"JOIN players p ON p.id = gr.player_id "
                 f"LEFT JOIN shop_items si ON si.id = p.active_title_id "
@@ -4279,9 +4460,12 @@ async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | No
             row = r.mappings().first()
             if row is None:
                 return {"rating": None, "title": None, "title_color": None}
+            _ppos = None
+            if row["title_sku"] == TITLE_PODIUM_SKU:
+                _ppos = (await _podium_map(db)).get(row["player_id"])
             _title, _tcolor = _display_title_sync(
                 await _rank_colors(db), row["title_sku"], row["title"],
-                row["title_color"], row["rating"])
+                row["title_color"], row["rating"], podium_pos=_ppos)
             return {
                 "rating": int(round(row["rating"])) if row["rating"] is not None else None,
                 "title": _title,
@@ -4418,7 +4602,8 @@ async def get_recent_chat(
     rows = (await db.execute(
         text(
             "SELECT cm.id, cm.source, cm.steam_id, cm.discord_id, cm.display_name, cm.message, cm.created_at, "
-            "       ROUND(gr.rating)::int AS rating, si.name AS title, si.preview_color AS title_color, si.sku AS title_sku "
+            "       ROUND(gr.rating)::int AS rating, p.id::text AS player_id, "
+            "       si.name AS title, si.preview_color AS title_color, si.sku AS title_sku "
             "FROM chat_messages cm "
             "LEFT JOIN players p ON "
             "   (cm.steam_id IS NOT NULL AND p.steam_id = cm.steam_id) OR "
@@ -4435,10 +4620,14 @@ async def get_recent_chat(
     # (so the LAST key must be a string value — keep "timestamp" last, and the
     # numeric "id" strictly in the middle or scrollback drops every entry).
     _colors = await _rank_colors(db)
+    # Podium map only when some chatter wears the dynamic podium title.
+    _pmap = await _podium_map(db) if any(
+        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
     entries = []
     for r in rows:
         _title, _tcolor = _display_title_sync(
-            _colors, r["title_sku"], r["title"], r["title_color"], r["rating"])
+            _colors, r["title_sku"], r["title"], r["title_color"], r["rating"],
+            podium_pos=_pmap.get(r["player_id"]))
         entries.append({
             "source": r["source"],
             "id": r["id"],
@@ -4572,6 +4761,23 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
                     select(PlayerItem.item_id).where(PlayerItem.player_id == p.id)
                 )).all()
             }
+
+    # Achievement-gated items (slayer/podium titles, rotation_pool =
+    # 'achievement') stay hidden from everyone EXCEPT their owners — an owned
+    # one is appended so the shop tab can render its Set Active button
+    # (v1.32; before this, granted rows sat in player_items with no equip
+    # surface). The purchase endpoint still 403s the pool, so surfacing them
+    # can't leak a buy path.
+    rows = list(rows)
+    if steam_id:
+        ach_q = select(ShopItem).where(ShopItem.rotation_pool == "achievement")
+        if not _is_shop_owner(steam_id):
+            if not owned_ids:
+                ach_q = None
+            else:
+                ach_q = ach_q.where(ShopItem.id.in_(owned_ids))
+        if ach_q is not None:
+            rows.extend((await db.execute(ach_q.order_by(ShopItem.price))).scalars().all())
 
     # Artist annotations (v1.30): display name per artist steam id, plus a
     # sold-count per stock-limited item so the shop can render "3 of 10 left"
@@ -6471,6 +6677,92 @@ async def ack_channel_post(
     return {"status": "acked", "id": post_id}
 
 
+@app.get("/api/v1/internal/tournament-notices", tags=["Internal"])
+async def internal_tournament_notices(
+    unnotified: bool = Query(True),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-poll endpoint (v1.32): tournament DM notices (availability checks
+    24-96h before a viable tournament's start/lock). Joined to the player +
+    tournament so the bot needs zero extra lookups. Durable ack pattern
+    (learning #105) — ack via POST /internal/tournament-notices/ack after the
+    DM lands (or is permanently undeliverable); transient failures don't ack
+    so the next tick retries. Rows are queued by tournament_tick."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    where = "tn.notified_at IS NULL" if unnotified else "TRUE"
+    rows = (await db.execute(text(f"""
+        SELECT tn.id                  AS notice_id,
+               tn.tournament_id::text AS tournament_id,
+               tn.notice_type,
+               tn.payload,
+               tn.created_at,
+               p.steam_id,
+               p.discord_id,
+               p.display_name,
+               t.kind,
+               t.status,
+               t.min_players,
+               t.scheduled_start_ts,
+               t.default_start_ts,
+               t.lock_at
+          FROM tournament_notices tn
+          JOIN players p ON p.id = tn.player_id
+          JOIN tournaments t ON t.id = tn.tournament_id
+         WHERE {where}
+      ORDER BY tn.created_at ASC
+         LIMIT 20"""))).mappings().all()
+    return {
+        "notices": [
+            {
+                "notice_id": str(r["notice_id"]),
+                "tournament_id": r["tournament_id"],
+                "notice_type": r["notice_type"],
+                "payload": r["payload"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "steam_id": r["steam_id"],
+                "discord_id": r["discord_id"],
+                "display_name": r["display_name"],
+                "kind": r["kind"],
+                "status": r["status"],
+                "min_players": r["min_players"],
+                "scheduled_start_ts": r["scheduled_start_ts"].isoformat() if r["scheduled_start_ts"] else None,
+                "default_start_ts": r["default_start_ts"].isoformat() if r["default_start_ts"] else None,
+                "lock_at": r["lock_at"].isoformat() if r["lock_at"] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+class _TournamentNoticeAck(BaseModel):
+    notice_ids: list[str]
+
+
+@app.post("/api/v1/internal/tournament-notices/ack", tags=["Internal"])
+async def ack_tournament_notices(
+    body: _TournamentNoticeAck,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only (v1.32): mark tournament notices delivered so the unnotified
+    poll stops returning them (mirror of the bug-report events ack)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    ids = [i for i in body.notice_ids[:200] if i]
+    if not ids:
+        return {"acked": 0}
+    res = await db.execute(text(
+        "UPDATE tournament_notices SET notified_at = NOW() "
+        "WHERE id::text = ANY(:ids) AND notified_at IS NULL"
+    ), {"ids": ids})
+    await db.commit()
+    return {"acked": res.rowcount or 0}
+
+
 # ── Routes: Privacy ──────────────────────────────────────────
 
 @app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
@@ -6549,6 +6841,26 @@ async def delete_player_data(steam_id: str, sig: str = Query(...), db: AsyncSess
 # v1.22.6 — achievements are rare events and 25g felt token; 100g actually buys something.
 ACHIEVEMENT_GOLD = 100
 
+# Per-key payout overrides (v1.32): the slayer achievements are community-boss
+# bounties and pay 10x the uniform reward. Existing earners were topped up by
+# migration 123. Every payout site must go through _achievement_gold().
+ACHIEVEMENT_GOLD_OVERRIDES = {"regicide": 1000, "stan_slayer": 1000}
+
+# The only achievements the game client is allowed to unlock through
+# POST /achievements/unlock — the exact set GameStateWatcher self-reports
+# (client-side detection: gun state, input tracking, round events). Every
+# other key is granted server-side and the endpoint 403s it.
+CLIENT_UNLOCK_KEYS = {
+    "untouchable", "silent_assassin", "total_mayhem", "fragile_perfection",
+    "no_escape", "rise_from_the_ashes", "the_comeback_kid", "stacked_deck",
+    "pacifist", "immovable_object", "grounded", "instinct",
+    "god_build", "deep_end",
+}
+
+
+def _achievement_gold(key: str) -> int:
+    return ACHIEVEMENT_GOLD_OVERRIDES.get(key, ACHIEVEMENT_GOLD)
+
 ACHIEVEMENT_DEFS = {
     "untouchable":          {"name": "Untouchable",         "desc": "Win a game without taking any damage"},
     "silent_assassin":      {"name": "Silent Assassin",     "desc": "5-0 someone with Sneaky"},
@@ -6579,8 +6891,10 @@ ACHIEVEMENT_DEFS = {
     # Build achievements:
     # god_build detection is CLIENT-side (July 12 item 2): it checks the real
     # gun stats at game end — max ammo 1 + reload <= 1s + Shields Up — not a
-    # card-list proxy.
-    "god_build":            {"name": "Unkillable",          "desc": "Win with Shields Up, exactly 1 ammo, and a lightning-fast reload"},
+    # card-list proxy. Display renamed Unkillable -> God Build (v1.32); key
+    # stays 'god_build' so existing PlayerAchievement rows keep working (same
+    # pattern as the regicide rename above).
+    "god_build":            {"name": "God Build",           "desc": "Win with Shields Up, exactly 1 ammo, and a lightning-fast reload"},
     "double_nova":          {"name": "Double Nova",         "desc": "Win with two or more Supernovas"},
     "lumberjack":           {"name": "Lumberjack",          "desc": "Win with two or more Saws"},
     "pristine_perfection":  {"name": "Pristine Perfection", "desc": "Win with two or more Pristines"},
@@ -6750,12 +7064,13 @@ async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key
     if existing.scalar_one_or_none():
         return False
     db.add(PlayerAchievement(player_id=player_id, achievement_key=achievement_key))
+    gold_amt = _achievement_gold(achievement_key)
     await db.execute(
         text("UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id = :pid"),
-        {"g": ACHIEVEMENT_GOLD, "pid": player_id},
+        {"g": gold_amt, "pid": player_id},
     )
     db.add(GoldTransaction(
-        player_id=player_id, amount=ACHIEVEMENT_GOLD,
+        player_id=player_id, amount=gold_amt,
         reason="achievement", reference_id=achievement_key,
     ))
     # Achievement-gated titles (Sid Slayer / Stan Slayer) become equippable
@@ -6787,7 +7102,8 @@ async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_
         entries = [
             AchievementEntry(achievement_key=k, unlocked=False,
                              name=ACHIEVEMENT_DEFS[k].get("name"),
-                             global_pct=pct.get(k, 0.0))
+                             global_pct=pct.get(k, 0.0),
+                             gold=_achievement_gold(k))
             for k in ACHIEVEMENT_DEFS
         ]
         return AchievementListResponse(steam_id=steam_id, achievements=entries)
@@ -6807,6 +7123,8 @@ async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_
             # "Sid Slayer") label correctly in the Compare grid (#44).
             name=ACHIEVEMENT_DEFS[key].get("name"),
             global_pct=pct.get(key, 0.0),
+            # Per-key gold (v1.32) — slayers pay 1000, the rest 100.
+            gold=_achievement_gold(key),
         ))
     return AchievementListResponse(steam_id=steam_id, achievements=entries)
 
@@ -6855,6 +7173,14 @@ async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = D
     """Unlock an achievement for a player. Idempotent — re-unlocking is a no-op."""
     if req.achievement_key not in ACHIEVEMENT_DEFS:
         raise HTTPException(status_code=400, detail=f"Unknown achievement: {req.achievement_key}")
+    # Only CLIENT-detected achievements may come through this endpoint — the
+    # exact set GameStateWatcher reports. Everything else (slayers, rating
+    # thresholds, streaks, combos) is granted server-side, and accepting them
+    # here would let a crafted HMAC self-award them (adversarial review: the
+    # v1.32 slayer 1000g override 10x'd that hole).
+    if req.achievement_key not in CLIENT_UNLOCK_KEYS:
+        raise HTTPException(status_code=403,
+                            detail="This achievement is granted server-side")
 
     player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
     player = player.scalar_one_or_none()
@@ -6902,11 +7228,11 @@ async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = D
     gold_ok = _verify_action_sig(f"achievement:{req.steam_id}:{req.achievement_key}", req.hmac_signature)
     gold_awarded = 0
     if gold_ok:
-        gold_awarded = ACHIEVEMENT_GOLD
-        player.gold_earned = (player.gold_earned or 0) + ACHIEVEMENT_GOLD
+        gold_awarded = _achievement_gold(req.achievement_key)
+        player.gold_earned = (player.gold_earned or 0) + gold_awarded
         db.add(GoldTransaction(
             player_id=player.id,
-            amount=ACHIEVEMENT_GOLD,
+            amount=gold_awarded,
             reason="achievement",
             reference_id=req.achievement_key,
         ))
@@ -7744,18 +8070,19 @@ async def admin_grant_achievement(req: _AdminGrantAchReq, db: AsyncSession = Dep
     if existing is not None:
         return {"status": "already_unlocked"}
     db.add(PlayerAchievement(player_id=target.id, achievement_key=req.achievement_key))
-    target.gold_earned = (target.gold_earned or 0) + ACHIEVEMENT_GOLD
+    gold_amt = _achievement_gold(req.achievement_key)
+    target.gold_earned = (target.gold_earned or 0) + gold_amt
     db.add(GoldTransaction(
-        player_id=target.id, amount=ACHIEVEMENT_GOLD,
+        player_id=target.id, amount=gold_amt,
         reason="achievement", reference_id=req.achievement_key,
     ))
     db.add(AdminAction(
         admin_steam_id=req.admin_steam_id, action="grant_achievement",
         target_steam_id=req.target_steam_id,
-        details={"achievement_key": req.achievement_key, "gold_awarded": ACHIEVEMENT_GOLD},
+        details={"achievement_key": req.achievement_key, "gold_awarded": gold_amt},
     ))
     await db.commit()
-    return {"status": "granted", "achievement_key": req.achievement_key, "gold_awarded": ACHIEVEMENT_GOLD}
+    return {"status": "granted", "achievement_key": req.achievement_key, "gold_awarded": gold_amt}
 
 
 class _AdminReverseSeriesReq(BaseModel):
@@ -11315,6 +11642,10 @@ async def team_all_series_paged(
     rows = (await db.execute(series_q, {"lim": page_size, "off": page * page_size})).mappings().all()
 
     _colors = await _rank_colors(db)
+    # Podium map only when some slot wears the dynamic podium title.
+    _pmap = await _podium_map(db) if any(
+        r[f"{pfx}_title_sku"] == TITLE_PODIUM_SKU
+        for r in rows for pfx in ("t1a", "t1b", "t2a", "t2b")) else {}
     out_series = []
     for r in rows:
         # Per-series matches.
@@ -11360,7 +11691,8 @@ async def team_all_series_paged(
             # Dynamic 'Current Rank' title resolves against the 1v1 rating (#48).
             _t, _tc = _display_title_sync(
                 _colors, r[f"{prefix}_title_sku"], r[f"{prefix}_title"], r[f"{prefix}_title_color"],
-                float(r[f"{prefix}_rating_1v1"]) if r[f"{prefix}_rating_1v1"] is not None else None)
+                float(r[f"{prefix}_rating_1v1"]) if r[f"{prefix}_rating_1v1"] is not None else None,
+                podium_pos=_pmap.get(str(r[f"{prefix}_id"])))
             return {
                 "steam_id": r[f"{prefix}_sid"], "name": r[f"{prefix}_name"],
                 "title": _t, "title_color": _tc,
@@ -11450,6 +11782,7 @@ async def team_leaderboard(
              GROUP BY tp.player_id
         )
         SELECT
+            p.id::text AS player_id,
             p.steam_id,
             p.display_name,
             ROUND(g2.rating::numeric, 0) AS rating,
@@ -11481,12 +11814,16 @@ async def team_leaderboard(
     """)
     rows = (await db.execute(q, {"min_series": min_series, "limit": limit})).mappings().all()
     _colors = await _rank_colors(db)
+    # Podium map only when some row wears the dynamic podium title.
+    _pmap = await _podium_map(db) if any(
+        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
     entries = []
     for idx, r in enumerate(rows, start=1):
         # Dynamic 'Current Rank' title (#48) — resolves against the 1v1 ladder.
         _t, _tc = _display_title_sync(
             _colors, r["title_sku"], r["title"], r["title_color"],
-            float(r["rating_1v1"]) if r["rating_1v1"] is not None else None)
+            float(r["rating_1v1"]) if r["rating_1v1"] is not None else None,
+            podium_pos=_pmap.get(r["player_id"]))
         entries.append(Team2v2LeaderboardEntry(
             rank=idx,
             steam_id=r["steam_id"],

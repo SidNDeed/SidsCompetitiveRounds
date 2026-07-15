@@ -769,3 +769,22 @@ class PendingChannelPost(Base):
     sort_order = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     posted_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class TournamentNotice(Base):
+    """Durable tournament DM queue (v1.32, migration 124). One row per
+    (tournament, player, notice_type) — e.g. the 'availability_check' DM
+    queued by tournament_tick 24-96h before a viable tournament starts.
+    The bot polls GET /internal/tournament-notices?unnotified=true and acks
+    notified_at after the DM lands (learning #105 ack pattern)."""
+    __tablename__ = "tournament_notices"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tournament_id = Column(UUID(as_uuid=True), ForeignKey("tournaments.id", ondelete="CASCADE"), nullable=False)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    notice_type = Column(String(32), nullable=False)
+    payload = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    notified_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (UniqueConstraint("tournament_id", "player_id", "notice_type"),)

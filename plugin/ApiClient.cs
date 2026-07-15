@@ -315,7 +315,7 @@ namespace CompetitiveRounds
             {"demolitionist",       new[]{"Demolitionist",       "Win a game 5-0 with Explosive Bullet in your build"}},
             {"controlled_burst",    new[]{"Controlled Burst",    "Win a game 5-0 with Burst in your build"}},
             {"field_medic",         new[]{"Field Medic",         "Win a game 5-0 with Healing Field in your build"}},
-            {"god_build",           new[]{"Unkillable",          "Win with Shields Up, exactly 1 ammo, and a lightning-fast reload"}},
+            {"god_build",           new[]{"God Build",           "Win with Shields Up, exactly 1 ammo, and a lightning-fast reload"}},
             {"double_nova",         new[]{"Double Nova",         "Win with two or more Supernovas"}},
             {"lumberjack",          new[]{"Lumberjack",          "Win with two or more Saws"}},
             {"pristine_perfection", new[]{"Pristine Perfection", "Win with two or more Pristines"}},
@@ -2493,8 +2493,11 @@ namespace CompetitiveRounds
                         string xpLine = $"+{xpGained} XP";
                         var bonusParts = new List<string>();
                         if (response.Contains("Win x")) bonusParts.Add("Win x1.5");
-                        if (response.Contains("Ranked x")) bonusParts.Add("Ranked x1.2");
+                        if (response.Contains("Ranked x")) bonusParts.Add("Ranked x1.5");
                         if (response.Contains("Sweep")) bonusParts.Add("Sweep +100");
+                        // v1.32 item 3: beating a current top-3 leaderboard player
+                        // triples match XP; top-4/5 keeps the flat +150.
+                        if (response.Contains("Top 3")) bonusParts.Add("Top 3 x3");
                         if (response.Contains("Top 5")) bonusParts.Add("Top 5 +150");
 
                         if (bonusParts.Count > 0)

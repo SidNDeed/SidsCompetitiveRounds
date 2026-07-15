@@ -2,10 +2,25 @@
 Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
-import os, asyncio, aiohttp, discord, json
+import os, asyncio, aiohttp, discord, json, io, threading
+from typing import Literal
 from discord import app_commands
 from discord.ext import commands, tasks
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+# Chart rendering (/compare) — Agg backend (headless container, must be set
+# BEFORE pyplot is imported). Guarded so the bot still boots on an image built
+# before matplotlib landed in Dockerfile.bot; chart commands then reply with a
+# friendly error instead of the whole bot crash-looping.
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    _MPL_AVAILABLE = True
+except Exception as _mpl_ex:
+    _MPL_AVAILABLE = False
+    print(f"[CHART] matplotlib unavailable ({_mpl_ex}) — chart commands disabled")
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 API_BASE_URL = os.getenv("API_BASE_URL", "http://api:8000")
@@ -42,6 +57,9 @@ GAMBLER_SIGNUP_MARKER = "scr-gambler-signup-v1"
 # Bug reports auto-post here when players file via the F5 menu. ID gets a
 # safe default so an unset env var doesn't crash the bot — 0 disables.
 BUG_REPORTS_CHANNEL_ID = int(os.getenv("BUG_REPORTS_CHANNEL", "1501643180049960970"))
+# Tournament board channel (#scr-tournaments) — one living message with the
+# current sync + async tournament state, refreshed every 2 minutes.
+SCR_TOURNAMENTS_CHANNEL = int(os.getenv("SCR_TOURNAMENTS_CHANNEL", "1158182455065452574"))
 
 # Tournament trophy role names (set via env if they exist in the guild).
 # Multi-win tracking uses an "(x2)" suffix variant of each role: a player with 1 win
@@ -231,6 +249,8 @@ async def on_ready():
     if not grant_booster_gold.is_running(): grant_booster_gold.start()
     if not poll_channel_posts.is_running(): poll_channel_posts.start()
     if not publish_lb_loop.is_running(): publish_lb_loop.start()
+    if not poll_tournament_notices.is_running(): poll_tournament_notices.start()
+    if not publish_tournament_board.is_running(): publish_tournament_board.start()
     # Chat bridge: subscribe to the WS firehose so we can forward in-game
     # messages to the Discord channel. Discord -> in-game goes the other way
     # via on_message below. The poll_chat_catchup task above is a belt-and-
@@ -524,14 +544,19 @@ async def cmd_link(ctx, code: str = None):
         rank = await update_member_role(ctx.author, data["rating"])
         await ctx.send(f"{rank_emoji(rank)} Rank: **{rank}** ({data['rating']:.0f})")
 
-@bot.hybrid_command(name="rank", description="Check ranked stats for yourself or another player")
+@bot.hybrid_command(name="rank", description="Ranked stats: rating, tier, streaks, leaderboard position")
 @app_commands.describe(member="Player to look up (defaults to yourself)")
 async def cmd_rank(ctx, member: discord.Member = None):
+    """RANKED-ONLY view (v1.32 rework): rating/RD/peak + tier, ranked series
+    record + best/current streak, lb position, leave rate, sweeps. Casual and
+    general clutter lives in /stats."""
     target = member or ctx.author
     link = await api_get(f"/players/by-discord/{target.id}")
     if not link:
         await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {target.display_name} not linked."); return
-    s = await api_get(f"/players/{link['steam_id']}")
+    steam_id = link["steam_id"]
+    await _maybe_defer(ctx)
+    s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
     rank = get_rank_name(s["rating"])
     peak = s.get("peak_rating", s["rating"])
@@ -545,14 +570,19 @@ async def cmd_rank(ctx, member: discord.Member = None):
     # Ranked series
     rw, rl = s.get("ranked_series_wins", 0), s.get("ranked_series_losses", 0)
     total = rw + rl
-    wl = f"{rw/rl:.2f}" if rl > 0 else f"{rw}:0"
     wr = f"{rw/total*100:.1f}%" if total > 0 else "—"
-    series_lines = f"**{rw}**W / **{rl}**L  ({wr})\nW/L Ratio: **{wl}**"
+    series_lines = f"**{rw}**W / **{rl}**L  ({wr})"
     br = s.get("best_ranked_streak", 0)
     if br > 0: series_lines += f"\nBest Streak: **{br}W** 🔥"
     embed.add_field(name="🏆  Ranked Series", value=series_lines, inline=True)
 
-    # Sweeps
+    # Current ranked streak — not a server field; recompute from recent match
+    # history exactly like the client's CalcStreak (NativeUI.cs:6681):
+    # newest-first consecutive same-result among ranked entries.
+    cur = await _current_streak(steam_id, ranked=True)
+    embed.add_field(name="📈  Current Streak", value=(streak_str(cur) or "—"), inline=True)
+
+    # Sweeps (ranked 5-0s)
     sg, st = s.get("sweeps_given", 0), s.get("sweeps_taken", 0)
     sweep_lines = f"5-0 Given: **{sg}** 🧹\n0-5 Taken: **{st}**"
     embed.add_field(name="💨  Sweeps", value=sweep_lines, inline=True)
@@ -564,7 +594,7 @@ async def cmd_rank(ctx, member: discord.Member = None):
         pct = f"{dc/rt_total*100:.1f}%" if rt_total > 0 else "—"
         embed.add_field(name="🚪  Leave Rate", value=f"**{dc}** / {rt_total} ({pct})", inline=True)
 
-    pos = await get_lb_position(link["steam_id"])
+    pos = await get_lb_position(steam_id)
     embed.set_footer(text=f"Leaderboard: #{pos}  •  Steam: {s['steam_id']}")
     await ctx.send(embed=embed)
 
@@ -575,90 +605,961 @@ async def get_lb_position(steam_id):
         if e["steam_id"] == steam_id: return str(e["rank"])
     return "Unranked"
 
-@bot.hybrid_command(name="stats", description="View overall & casual stats")
+
+async def _maybe_defer(ctx):
+    """Defer a hybrid invocation (typing indicator for !prefix, deferred
+    response for slash). Commands below stack 2-4 API calls — a slash
+    interaction hard-fails past 3s without this."""
+    try:
+        await ctx.defer()
+    except Exception:
+        pass  # already deferred / prefix edge — never block the command
+
+
+def _calc_streak(entries, ranked=None):
+    """Mirror the client's CalcStreak (NativeUI.cs:6681): walk a newest-first
+    match list, count consecutive same-result games. +N = win streak,
+    -N = loss streak. ranked=True filters to ranked entries, False to casual,
+    None counts all modes."""
+    if not isinstance(entries, list) or not entries:
+        return 0
+    if ranked is not None:
+        entries = [m for m in entries if isinstance(m, dict) and bool(m.get("is_ranked")) == ranked]
+    if not entries:
+        return 0
+    first = bool(entries[0].get("won"))
+    c = 0
+    for m in entries:
+        if bool(m.get("won")) == first:
+            c += 1
+        else:
+            break
+    return c if first else -c
+
+
+async def _current_streak(steam_id, ranked=None):
+    """Current win/loss streak from the 50 most recent matches (the /matches
+    endpoint returns newest-first — ORDER BY m.ended_at DESC, main.py:2652)."""
+    hist = await api_get(f"/players/{steam_id}/matches?limit=50")
+    return _calc_streak(hist, ranked)
+
+
+def _top_cards_lines(s, limit=5):
+    """Top-cards lines from /players/{steam}. top_cards is a list of dicts
+    ({card_name, times_picked, ...} — main.py:2086); tolerate the legacy
+    parallel-list shape too."""
+    lines = []
+    for c in (s.get("top_cards") or [])[:limit]:
+        if isinstance(c, dict) and c.get("card_name"):
+            lines.append(f"**{c['card_name']}** ({c.get('times_picked', 0)}x)")
+    if not lines:
+        names = s.get("top_card_names") or []
+        picks = s.get("top_card_picks") or []
+        for i in range(min(limit, len(names))):
+            p = f" ({picks[i]}x)" if i < len(picks) else ""
+            lines.append(f"**{names[i]}**{p}")
+    return lines
+
+
+def _hit_block_str(s):
+    """Lifetime hit% / block% from the raw counters on /players/{steam}."""
+    parts = []
+    bf, bh = s.get("bullets_fired", 0) or 0, s.get("bullets_hit", 0) or 0
+    ba, bs = s.get("blocks_activated", 0) or 0, s.get("blocks_successful", 0) or 0
+    if bf > 0:
+        parts.append(f"Hit: **{bh / bf * 100:.1f}%**")
+    if ba > 0:
+        parts.append(f"Block: **{bs / ba * 100:.1f}%**")
+    return "  ·  ".join(parts)
+
+@bot.hybrid_command(name="stats", description="General stats: record, casual, level, gold, accuracy, cards")
 @app_commands.describe(member="Player to look up (defaults to yourself)")
 async def cmd_stats(ctx, member: discord.Member = None):
+    """GENERAL view (v1.32 rework): all-modes record, casual record + best
+    casual streak, level/XP, gold (hidden when the player toggled hide_gold),
+    hit%/block%, top cards, 2v2 line, avg FPS. Ranked detail lives in /rank."""
     target = member or ctx.author
     link = await api_get(f"/players/by-discord/{target.id}")
     if not link:
         await ctx.send("❌ Not linked." if target == ctx.author else f"❌ {target.display_name} not linked."); return
-    s = await api_get(f"/players/{link['steam_id']}")
+    steam_id = link["steam_id"]
+    await _maybe_defer(ctx)
+    s = await api_get(f"/players/{steam_id}")
     if not s: await ctx.send("❌ Could not fetch stats."); return
     embed = discord.Embed(title=f"📋  {s['display_name']}  —  Overall Stats", color=discord.Color.blue())
     embed.set_thumbnail(url=target.display_avatar.url)
 
-    # Overall record
+    # Overall record — every mode combined.
     tw, tl = s.get("wins", 0), s.get("losses", 0)
     tt = s.get("total_matches", 0)
     twr = f"{tw/tt*100:.1f}%" if tt > 0 else "—"
     embed.add_field(name="📊  Total Record", value=f"**{tt}** matches  —  **{tw}**W / **{tl}**L  ({twr})", inline=False)
 
-    # Casual record (from API)
+    # Casual record + best casual streak.
     cw, cl = s.get("casual_wins", 0), s.get("casual_losses", 0)
     ct = cw + cl
     cwr = f"{cw/ct*100:.1f}%" if ct > 0 else "—"
     casual_str = f"**{cw}**W / **{cl}**L  ({cwr})" if ct > 0 else "—"
+    bc = s.get("best_casual_streak", 0)
+    if bc > 0:
+        casual_str += f"\nBest Streak: **{bc}W**"
     embed.add_field(name="🎮  Casual", value=casual_str, inline=True)
 
-    # Ranked series
-    rw, rl = s.get("ranked_series_wins", 0), s.get("ranked_series_losses", 0)
-    rt = rw + rl
-    ranked_str = f"**{rw}**W / **{rl}**L" if rt > 0 else "—"
-    embed.add_field(name="⚔️  Ranked Series", value=ranked_str, inline=True)
-
-    # Sweeps
-    sg, st = s.get("sweeps_given", 0), s.get("sweeps_taken", 0)
-    if sg + st > 0:
-        embed.add_field(name="💨  Sweeps", value=f"5-0: **{sg}** 🧹  ·  0-5: **{st}**", inline=True)
-
-    # Leave rate
-    dc = s.get("ranked_dc_count", 0)
-    if dc > 0:
-        rt_dc_total = rt + dc
-        pct = f"{dc/rt_dc_total*100:.1f}%" if rt_dc_total > 0 else "—"
-        embed.add_field(name="🚪  Leave Rate", value=f"**{dc}** / {rt_dc_total} ({pct})", inline=True)
-
-    embed.add_field(name="\u200b", value="\u200b", inline=False)
-
     # Level & XP
-    embed.add_field(name="⭐  Level", value=f"**{s.get('level', 0)}**", inline=True)
-    embed.add_field(name="✨  XP", value=f"**{s.get('total_xp', 0):,}**", inline=True)
+    embed.add_field(name="⭐  Level", value=f"**{s.get('level', 0)}**  ·  {s.get('total_xp', 0):,} XP", inline=True)
 
-    # Streaks
-    br = s.get("best_ranked_streak", 0)
-    bc = s.get("best_casual_streak", 0)
-    streaks = []
-    if br > 0: streaks.append(f"Ranked: **{br}W** 🔥")
-    if bc > 0: streaks.append(f"Casual: **{bc}W**")
-    if streaks:
-        embed.add_field(name="📈  Best Streaks", value="  ·  ".join(streaks), inline=True)
+    # Gold — respect the player's hide_gold toggle (same rule as the in-game
+    # leaderboard): if they hid it there, the bot doesn't out it here.
+    if not s.get("hide_gold"):
+        net_gold = (s.get("gold_earned", 0) or 0) - (s.get("gold_spent", 0) or 0)
+        embed.add_field(name="💰  Gold", value=f"**{net_gold:,}**g", inline=True)
+
+    # Lifetime accuracy (hit%) + block success.
+    acc = _hit_block_str(s)
+    if acc:
+        embed.add_field(name="🎯  Accuracy", value=acc, inline=True)
+
+    # 2v2 line — only when the player actually has a 2v2 rating.
+    if (s.get("team_rating") or 0) > 0:
+        team = await api_get(f"/team/players/{steam_id}/team-stats")
+        if team and (team.get("rating") or 0) > 0:
+            embed.add_field(
+                name="👥  2v2",
+                value=f"**{team['rating']:.0f}**  ·  {team.get('series_wins', 0)}W / {team.get('series_losses', 0)}L series",
+                inline=True,
+            )
+
+    # Avg FPS (from per-match telemetry).
+    if (s.get("avg_fps") or 0) > 0:
+        embed.add_field(name="🖥️  Avg FPS", value=f"**{s['avg_fps']}**", inline=True)
 
     # Top cards
-    top = s.get("top_card_names", [])
-    picks = s.get("top_card_picks", [])
-    if top:
-        cards_lines = "\n".join(f"**{top[i]}** ({picks[i]}x)" for i in range(min(5, len(top))) if i < len(picks))
-        embed.add_field(name="🃏  Top Cards", value=cards_lines, inline=False)
+    cards_lines = _top_cards_lines(s, limit=5)
+    if cards_lines:
+        embed.add_field(name="🃏  Top Cards", value="\n".join(cards_lines), inline=False)
 
     embed.set_footer(text=f"Steam: {s['steam_id']}")
     await ctx.send(embed=embed)
 
-@bot.hybrid_command(name="lb", description="Show the ranked leaderboard")
+def _lb_line(e, rank=None):
+    """One short leaderboard row. Kept terse — a 50-row page must fit inside
+    Discord's 6000-chars-across-all-embeds message budget.
+
+    rank: pass the POSITION-derived rank (offset + index + 1) instead of
+    trusting e["rank"] on offset pages. The server's GET /leaderboard does
+    `rank=row["rank"] + offset` (main.py:2034) on top of a SQL ROW_NUMBER()
+    that Postgres evaluates BEFORE LIMIT/OFFSET — i.e. ROW_NUMBER is already
+    absolute, so the entry rank arrives double-offset whenever offset > 0
+    (offset 100 page rendered as #201+, Sid's /lb 2 report). Position-derived
+    ranks are correct regardless; None falls back to e["rank"] (fine at
+    offset 0, where the server's +offset adds nothing)."""
+    if rank is None:
+        rank = e["rank"]
+    emoji = rank_emoji(get_rank_name(e["rating"]))
+    name = str(e["display_name"])[:24]
+    return f"`#{rank:>3}` {emoji} **{name}** — {e['rating']} ({e['wins']}W/{e['losses']}L)"
+
+
+def _split_lb_descriptions(lines, first_header=""):
+    """Split leaderboard rows into up to 3 embed descriptions. Discord caps a
+    single embed description at 4096 chars and the TOTAL across all embeds in
+    one message at 6000 — a worst-case page can exceed both, so we chunk at a
+    safe per-embed budget and truncate with an '…and N more' tail when even
+    the whole message budget runs out. At 50 rows/page (v1.32.1) a typical
+    page is ~3.1k chars = one embed; this stays as the safety net."""
+    PER_EMBED = 3900   # under the 4096 hard cap
+    TOTAL = 5700       # under the 6000 hard cap (leaves room for title/footer)
+    MAX_EMBEDS = 3
+    if not lines:
+        return [(first_header + "(no players)")]
+    chunks, cur, total_chars = [], first_header, len(first_header)
+    truncated_from = None
+    for i, ln in enumerate(lines):
+        need = len(ln) + 1
+        if total_chars + need > TOTAL:
+            truncated_from = i
+            break
+        if len(cur) + need > PER_EMBED:
+            if len(chunks) >= MAX_EMBEDS - 1:
+                truncated_from = i
+                break
+            chunks.append(cur.rstrip("\n"))
+            cur = ""
+        cur += ln + "\n"
+        total_chars += need
+    if truncated_from is not None:
+        cur += f"…and {len(lines) - truncated_from} more"
+    if cur.strip():
+        chunks.append(cur.rstrip("\n"))
+    if not chunks:
+        chunks = [(first_header + "(no players)").strip()]
+    return chunks
+
+
+@bot.hybrid_command(name="lb", description="Show the ranked leaderboard (50 per page)")
 @app_commands.describe(page="Page number (default: 1)")
 async def cmd_leaderboard(ctx, page: int = 1):
-    per_page = 20  # match the #scr-leaderboard channel board (was 10; Sid 07-11 item 8)
+    # 50/page (Sid, v1.32.1): 100 real rows (rank + emoji + bold names +
+    # ratings + W/L) blew the splitter's 5700-char whole-message budget around
+    # row ~66 and the tail truncated — the "cuts off at #67" report. 50 rows
+    # fit comfortably (worst case ~3.1k chars) while still usually being one
+    # embed; the splitter stays as a safety net.
+    per_page = 50  # match the #scr-leaderboard channel board (LB_PAGE_SIZE)
     page = max(1, page)
     offset = (page - 1) * per_page
     data = await api_get(f"/leaderboard?limit={per_page}&offset={offset}&min_matches=1")
     if not data or not data.get("entries"): await ctx.send("❌ No data."); return
-    lines = []
-    for e in data["entries"]:
-        emoji = rank_emoji(get_rank_name(e["rating"]))
-        lines.append(f"`#{e['rank']:>2}` {emoji} **{e['display_name']}** — {e['rating']} ({e['wins']}W/{e['losses']}L)")
+    # Rank is derived from offset + position, NOT from entry["rank"] — the
+    # server double-adds offset to an already-absolute ROW_NUMBER (see
+    # _lb_line docstring), which made /lb 2 start at #201 instead of #101.
+    # Position math gives page 2 @ offset 50 → first rank 51. Always correct.
+    lines = [_lb_line(e, rank=offset + i + 1) for i, e in enumerate(data["entries"])]
     total = data.get("total_players", 0)
     total_pages = max(1, (total + per_page - 1) // per_page)
-    embed = discord.Embed(title="🏆 Competitive ROUNDS Leaderboard", description="\n".join(lines), color=discord.Color.gold())
-    embed.set_footer(text=f"Page {page}/{total_pages} • {total} ranked players" + (f" • /lb {page+1} for next page" if page < total_pages else ""))
+    # 50 rows can still exceed one embed's 4096-char description in the worst
+    # case — split across up to 3 embeds in ONE message.
+    descs = _split_lb_descriptions(lines)
+    embeds = []
+    for ci, desc in enumerate(descs):
+        em = discord.Embed(
+            title="🏆 Competitive ROUNDS Leaderboard" if ci == 0 else None,
+            description=desc,
+            color=discord.Color.gold(),
+        )
+        if ci == len(descs) - 1:
+            em.set_footer(text=f"Page {page}/{total_pages} • {total} ranked players"
+                          + (f" • /lb {page+1} for next page" if page < total_pages else ""))
+        embeds.append(em)
+    await ctx.send(embeds=embeds)
+
+
+# ── Stats commands: /compare, /graph, /mystats, /cards ───────────────────
+# /compare (v1.32.1 rework, per Sid) is a HEAD-TO-HEAD between exactly two
+# players: overall record between them + their recent mutual games with the
+# cards each picked. /graph carries ALL the in-game Compare-tab charts as
+# matplotlib PNGs — elo history line, grouped/simple bars, top-cards hbars,
+# region pies — for 2-4 players. /mystats is the F5 "My Stats" page as one
+# embed. /cards mirrors the Card Stats tab (per-player with a member arg,
+# community-wide without).
+
+_COMPARE_COLORS = ["#5865F2", "#ED4245", "#57F287", "#FEE75C"]  # blurple/red/green/yellow
+
+# pyplot's global figure state is NOT thread-safe — two /compare invocations
+# racing inside asyncio.to_thread can cross their figures (adversarial review).
+# One render at a time; charts take ~100ms so serialization is invisible.
+_mpl_render_lock = threading.Lock()
+
+
+def _render_rating_history_png(series):
+    """Render the overlay rating-history line chart to a PNG BytesIO.
+    series = [{"name": str, "points": [(datetime, rating), ...]}], each list
+    oldest-first. Runs inside asyncio.to_thread — matplotlib is CPU-bound and
+    must never block the event loop (heartbeat/WS would starve)."""
+    with _mpl_render_lock:
+        return _render_rating_history_png_locked(series)
+
+
+def _render_rating_history_png_locked(series):
+    bg = "#2b2d31"  # Discord embed grey — the chart reads as part of the embed
+    fig, ax = plt.subplots(figsize=(10, 5.5), dpi=110)
+    try:
+        fig.patch.set_facecolor(bg)
+        ax.set_facecolor(bg)
+        for i, sr in enumerate(series):
+            xs = [p[0] for p in sr["points"]]
+            ys = [p[1] for p in sr["points"]]
+            ax.plot(xs, ys, color=_COMPARE_COLORS[i % len(_COMPARE_COLORS)],
+                    linewidth=2.2, marker="o", markersize=2.5, label=str(sr["name"])[:24])
+        ax.set_title("Ranked Rating History", color="#ffffff", fontsize=14, pad=12)
+        ax.tick_params(colors="#b5bac1", labelsize=9)
+        for spine in ax.spines.values():
+            spine.set_color("#4a4d55")
+        ax.grid(True, color="#4a4d55", linewidth=0.6, alpha=0.5)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+        fig.autofmt_xdate()
+        ax.legend(facecolor="#232428", edgecolor="#4a4d55", labelcolor="#dbdee1", fontsize=9)
+        fig.tight_layout()
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", facecolor=bg)
+        buf.seek(0)
+        return buf
+    finally:
+        plt.close(fig)
+
+
+async def _fetch_rating_history(steam_id):
+    """History points for one player, newest endpoint first: the lean
+    /rating-history endpoint (v1.32 server contract), falling back to the
+    heavy /players/{steam} recent_rating_history when it isn't there yet.
+    Returns (history_list, stats_or_none) — stats is reused for rating/peak."""
+    hist = None
+    lean = await api_get(f"/players/{steam_id}/rating-history?limit=500")
+    if isinstance(lean, dict):
+        hist = lean.get("history")
+    stats = await api_get(f"/players/{steam_id}")
+    if hist is None and isinstance(stats, dict):
+        hist = stats.get("recent_rating_history") or []
+    return (hist or []), stats
+
+
+def _history_to_points(hist):
+    """[{rating, rd, date}] -> sorted [(datetime, rating)], with the client's
+    synthetic 1500 baseline prepended one day before the first snapshot
+    (ApiClient.cs:3187 convention) so lines start from the shared origin."""
+    pts = []
+    for h in hist:
+        if not isinstance(h, dict):
+            continue
+        try:
+            d = datetime.fromisoformat(str(h.get("date")).replace("Z", "+00:00"))
+            r = float(h.get("rating"))
+        except Exception:
+            continue
+        pts.append((d, r))
+    pts.sort(key=lambda x: x[0])
+    if pts and pts[0][1] != 1500.0:
+        pts.insert(0, (pts[0][0] - timedelta(days=1), 1500.0))
+    return pts
+
+
+# Wider palette for pie slices / >4-color needs (first 4 = _COMPARE_COLORS so
+# player colors stay consistent across chart kinds).
+_PIE_COLORS = ["#5865F2", "#ED4245", "#57F287", "#FEE75C", "#EB459E",
+               "#3BA55D", "#FAA61A", "#00B0F4", "#9B59B6", "#95A5A6"]
+
+_CHART_BG = "#2b2d31"      # Discord embed grey — charts read as part of the embed
+_CHART_FG = "#dbdee1"
+_CHART_MUTED = "#b5bac1"
+_CHART_GRID = "#4a4d55"
+
+
+def _pct(n, d):
+    """Safe percentage — 0.0 on a zero/None denominator (hit% for a player
+    with no recorded shots must render as 0, not ZeroDivisionError)."""
+    n, d = (n or 0), (d or 0)
+    return (n / d * 100.0) if d else 0.0
+
+
+def _style_axes(ax):
+    ax.set_facecolor(_CHART_BG)
+    ax.tick_params(colors=_CHART_MUTED, labelsize=9)
+    for spine in ax.spines.values():
+        spine.set_color(_CHART_GRID)
+
+
+def _render_bar_chart_png(title, player_names, groups, ylabel=None, value_fmt="{:.0f}"):
+    """THE generic bar renderer for /graph (one function, not 15 bespoke ones).
+    groups = [(series_label, [value_per_player])]. One group → simple bars in
+    per-player colors, no legend; 2+ groups → grouped bars in per-series
+    colors + legend. Values are annotated above each bar with value_fmt.
+    Runs inside the render lock — pyplot global state is not thread-safe."""
+    with _mpl_render_lock:
+        fig, ax = plt.subplots(figsize=(10, 5.5), dpi=110)
+        try:
+            fig.patch.set_facecolor(_CHART_BG)
+            _style_axes(ax)
+            n = len(player_names)
+            g = max(1, len(groups))
+            width = 0.8 / g
+            peak = 0.0
+            for gi, (label, vals) in enumerate(groups):
+                xs = [x - 0.4 + width * (gi + 0.5) for x in range(n)]
+                if g == 1:
+                    colors = [_COMPARE_COLORS[i % len(_COMPARE_COLORS)] for i in range(n)]
+                    bars = ax.bar(xs, vals, width=width * 0.9, color=colors)
+                else:
+                    bars = ax.bar(xs, vals, width=width * 0.9,
+                                  color=_COMPARE_COLORS[gi % len(_COMPARE_COLORS)], label=label)
+                for b, v in zip(bars, vals):
+                    peak = max(peak, float(v))
+                    ax.text(b.get_x() + b.get_width() / 2, b.get_height(),
+                            value_fmt.format(v), ha="center", va="bottom",
+                            color=_CHART_FG, fontsize=9)
+            ax.set_xticks(range(n))
+            ax.set_xticklabels([str(nm)[:16] for nm in player_names],
+                               color=_CHART_FG, fontsize=10)
+            # Headroom so the value annotations never clip on the tallest bar;
+            # floor of 1 keeps an all-zero chart from degenerating.
+            ax.set_ylim(0, max(peak * 1.18, 1.0))
+            if ylabel:
+                ax.set_ylabel(ylabel, color=_CHART_MUTED, fontsize=10)
+            ax.set_title(title, color="#ffffff", fontsize=14, pad=12)
+            ax.grid(True, axis="y", color=_CHART_GRID, linewidth=0.6, alpha=0.5)
+            ax.set_axisbelow(True)
+            if g > 1:
+                ax.legend(facecolor="#232428", edgecolor=_CHART_GRID,
+                          labelcolor=_CHART_FG, fontsize=9)
+            fig.tight_layout()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", facecolor=_CHART_BG)
+            buf.seek(0)
+            return buf
+        finally:
+            plt.close(fig)
+
+
+def _render_top_cards_png(players):
+    """Per-player horizontal bar of top-card pick counts, WR% on each bar.
+    players = [{"name": str, "cards": [(card_name, times_picked, wr_pct)]}]."""
+    with _mpl_render_lock:
+        n = len(players)
+        fig, axes = plt.subplots(1, n, figsize=(max(5.2 * n, 7), 5.6), dpi=110, squeeze=False)
+        try:
+            fig.patch.set_facecolor(_CHART_BG)
+            for i, p in enumerate(players):
+                ax = axes[0][i]
+                _style_axes(ax)
+                cards = p["cards"]
+                # barh plots bottom-up; reverse so the top pick sits on top.
+                names = [str(c[0])[:18] for c in cards][::-1]
+                picks = [c[1] for c in cards][::-1]
+                wrs = [c[2] for c in cards][::-1]
+                bars = ax.barh(range(len(names)), picks,
+                               color=_COMPARE_COLORS[i % len(_COMPARE_COLORS)])
+                ax.set_yticks(range(len(names)))
+                ax.set_yticklabels(names, color=_CHART_FG, fontsize=9)
+                for b, wr in zip(bars, wrs):
+                    ax.text(b.get_width(), b.get_y() + b.get_height() / 2,
+                            f" {wr:.0f}% WR", va="center", color=_CHART_FG, fontsize=8)
+                ax.set_title(str(p["name"])[:20], color="#ffffff", fontsize=12)
+                ax.margins(x=0.25)  # room for the WR labels past the bar tips
+                ax.grid(True, axis="x", color=_CHART_GRID, linewidth=0.6, alpha=0.5)
+                ax.set_axisbelow(True)
+            fig.suptitle("Top Cards — bar = picks, label = win rate",
+                         color="#ffffff", fontsize=14)
+            fig.tight_layout(rect=(0, 0, 1, 0.94))
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", facecolor=_CHART_BG)
+            buf.seek(0)
+            return buf
+        finally:
+            plt.close(fig)
+
+
+def _render_region_pies_png(players):
+    """Side-by-side region pies, one per player.
+    players = [{"name": str, "labels": [str], "values": [int]}]."""
+    with _mpl_render_lock:
+        n = len(players)
+        fig, axes = plt.subplots(1, n, figsize=(max(5.0 * n, 7), 5.2), dpi=110, squeeze=False)
+        try:
+            fig.patch.set_facecolor(_CHART_BG)
+            for i, p in enumerate(players):
+                ax = axes[0][i]
+                ax.set_facecolor(_CHART_BG)
+                ax.pie(p["values"], labels=p["labels"], autopct="%1.0f%%",
+                       colors=_PIE_COLORS[:len(p["values"])],
+                       textprops={"color": _CHART_FG, "fontsize": 9},
+                       wedgeprops={"edgecolor": _CHART_BG, "linewidth": 1.0})
+                ax.set_title(str(p["name"])[:20], color="#ffffff", fontsize=12)
+            fig.suptitle("Region Time — matches per Photon region",
+                         color="#ffffff", fontsize=14)
+            fig.tight_layout(rect=(0, 0, 1, 0.94))
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", facecolor=_CHART_BG)
+            buf.seek(0)
+            return buf
+        finally:
+            plt.close(fig)
+
+
+# ── /graph metric table ───────────────────────────────────────────────────
+# Every bar-style Compare-tab metric, mapped to /players/{steam_id} fields
+# (all verified against backend/api/schemas.py PlayerStatsResponse — learning
+# #46: never guess schema fields).
+#   title/ylabel/fmt: chart cosmetics.
+#   series: [(label, fn(stats)->float)] — 1 series = simple bar, 2 = grouped.
+#   need:   raw response fields whose ALL-falsy state means "no data recorded"
+#           for that player (rendered as 0 + called out in the footnote).
+#           Empty = a zero is a real zero (e.g. 0 achievements).
+_GRAPH_BAR_METRICS = {
+    "hit-block": {
+        "title": "Hit % vs Block %", "ylabel": "%", "fmt": "{:.1f}",
+        "series": [("Hit %", lambda s: _pct(s.get("bullets_hit"), s.get("bullets_fired"))),
+                   ("Block %", lambda s: _pct(s.get("blocks_successful"), s.get("blocks_activated")))],
+        "need": ["bullets_fired", "blocks_activated"],
+    },
+    "cards-per-game": {
+        "title": "Avg Cards per Game", "ylabel": "cards", "fmt": "{:.2f}",
+        "series": [("Cards/game", lambda s: float(s.get("avg_cards_per_game") or 0))],
+        "need": ["avg_cards_per_game"],
+    },
+    "fps": {
+        "title": "Average FPS", "ylabel": "FPS", "fmt": "{:.0f}",
+        "series": [("Avg FPS", lambda s: float(s.get("avg_fps") or 0))],
+        "need": ["avg_fps"],
+    },
+    "peak-elo": {
+        "title": "Peak Elo", "ylabel": "Elo", "fmt": "{:.0f}",
+        "series": [("Peak", lambda s: float(s.get("peak_rating") or 0))],
+        "need": [],
+    },
+    "xp": {
+        "title": "Total XP", "ylabel": "XP", "fmt": "{:,.0f}",
+        "series": [("Total XP", lambda s: float(s.get("total_xp") or 0))],
+        "need": [],
+    },
+    "achievements": {
+        "title": "Achievements Unlocked", "ylabel": "unlocked", "fmt": "{:.0f}",
+        "series": [("Achievements", lambda s: float(s.get("achievements_unlocked") or 0))],
+        "need": [],
+    },
+    "streaks": {
+        "title": "Best Win Streaks", "ylabel": "wins", "fmt": "{:.0f}",
+        "series": [("Ranked", lambda s: float(s.get("best_ranked_streak") or 0)),
+                   ("Casual", lambda s: float(s.get("best_casual_streak") or 0))],
+        "need": [],
+    },
+    "sweeps": {
+        "title": "5-0 Sweeps", "ylabel": "sweeps", "fmt": "{:.0f}",
+        "series": [("Given", lambda s: float(s.get("sweeps_given") or 0)),
+                   ("Taken", lambda s: float(s.get("sweeps_taken") or 0))],
+        "need": [],
+    },
+    "bets": {
+        "title": "Betting Record", "ylabel": "bets", "fmt": "{:.0f}",
+        "series": [("Won", lambda s: float(s.get("bets_won") or 0)),
+                   ("Lost", lambda s: float(s.get("bets_lost") or 0))],
+        "need": [],
+    },
+    "keys-per-sec": {
+        "title": "Avg Keys per Second", "ylabel": "keys/s", "fmt": "{:.2f}",
+        "series": [("Keys/s", lambda s: float(s.get("avg_keys_per_sec") or 0))],
+        "need": ["avg_keys_per_sec"],
+    },
+    "keys-per-game": {
+        "title": "Avg Keys per Game", "ylabel": "keys", "fmt": "{:,.0f}",
+        "series": [("Keys/game", lambda s: float(s.get("avg_keys_per_game") or 0))],
+        "need": ["avg_keys_per_game"],
+    },
+    "game-length": {
+        "title": "Avg Game Length", "ylabel": "minutes", "fmt": "{:.1f}",
+        "series": [("Minutes", lambda s: (s.get("avg_game_seconds") or 0) / 60.0)],
+        "need": ["avg_game_seconds"],
+    },
+    "2v2": {
+        "title": "2v2 Rating", "ylabel": "Elo", "fmt": "{:.0f}",
+        "series": [("2v2 rating", lambda s: float(s.get("team_rating") or 0))],
+        "need": [],  # zero-rated players are DROPPED (special-cased), not zeroed
+    },
+}
+
+_GraphMetric = Literal["elo", "hit-block", "cards-per-game", "fps", "peak-elo",
+                       "xp", "achievements", "streaks", "sweeps", "bets",
+                       "keys-per-sec", "keys-per-game", "game-length", "2v2",
+                       "top-cards", "region"]
+
+
+def _cards_str(cards, cap=8):
+    """Join a match row's cards_picked/opponent_cards_picked (list of
+    {card_name, pick_order, ...} dicts) into 'Card, Card, Card +N more' in
+    pick order. '—' when the row has no card data (pre-card-tracking games)."""
+    names = []
+    for c in sorted([c for c in (cards or []) if isinstance(c, dict)],
+                    key=lambda c: c.get("pick_order") or 0):
+        nm = c.get("card_name")
+        if nm:
+            names.append(str(nm))
+    if not names:
+        return "—"
+    out = ", ".join(names[:cap])
+    if len(names) > cap:
+        out += f" +{len(names) - cap} more"
+    return out
+
+
+def _match_date_str(m):
+    try:
+        d = datetime.fromisoformat(str(m.get("ended_at")).replace("Z", "+00:00"))
+        return d.strftime("%b %d")
+    except Exception:
+        return "?"
+
+
+@bot.hybrid_command(name="compare",
+                    description="Head-to-head between two players: record, recent games, cards picked")
+@app_commands.describe(player1="First player (record shown from their perspective)",
+                       player2="Second player")
+async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
+    """v1.32.1 rework (Sid): head-to-head, not a rating graph — the graphs all
+    moved to /graph. Shows the pair's lifetime record (server-computed H2H)
+    plus their recent mutual games with the cards each player picked."""
+    if player1.id == player2.id:
+        await ctx.send("❌ Pick two different players.")
+        return
+    await _maybe_defer(ctx)
+    link_a = await api_get(f"/players/by-discord/{player1.id}")
+    if not link_a:
+        await ctx.send(f"❌ {player1.display_name} not linked. They need `/link` first.")
+        return
+    link_b = await api_get(f"/players/by-discord/{player2.id}")
+    if not link_b:
+        await ctx.send(f"❌ {player2.display_name} not linked. They need `/link` first.")
+        return
+    steam_a, steam_b = link_a["steam_id"], link_b["steam_id"]
+    name_a = link_a.get("display_name") or player1.display_name
+    name_b = link_b.get("display_name") or player2.display_name
+
+    # H2H orientation (verified in main.py:2529-2574): h2h_*_wins count games
+    # where winner_id == the VIEWER (?viewer_steam_id). We view B's profile AS
+    # A, so every h2h_*_wins below is an A win — matching the "A vs B" title.
+    stats_b = await api_get(f"/players/{steam_b}?viewer_steam_id={steam_a}")
+    if not stats_b:
+        await ctx.send("❌ Could not fetch stats.")
+        return
+    rw, rl = stats_b.get("h2h_ranked_wins", 0), stats_b.get("h2h_ranked_losses", 0)
+    cw, cl = stats_b.get("h2h_casual_wins", 0), stats_b.get("h2h_casual_losses", 0)
+    sw, sl = stats_b.get("h2h_series_wins", 0), stats_b.get("h2h_series_losses", 0)
+    tw, tl = rw + cw, rl + cl
+
+    # A's match history, filtered to games against B. Rows are viewer(A)-
+    # relative (won / player_rounds_won / cards_picked are all A's side) and
+    # newest-first (ORDER BY ended_at DESC, main.py:2652).
+    hist = await api_get(f"/players/{steam_a}/matches?limit=2000")
+    games = [m for m in (hist or [])
+             if isinstance(m, dict) and m.get("opponent_steam_id") == steam_b]
+
+    if tw + tl == 0 and sw + sl == 0 and not games:
+        await ctx.send(f"**{name_a}** and **{name_b}** haven't played each other yet.")
+        return
+
+    embed = discord.Embed(title=f"⚔️ {name_a} vs {name_b}", color=0xE67E22)
+    rec_val = (f"**{tw}W – {tl}L** for {name_a}\n"
+               f"Ranked: **{rw}–{rl}**  ·  Casual: **{cw}–{cl}**\n"
+               f"Completed series (BO3): **{sw}–{sl}**")
+    embed.add_field(name="📊  Overall head-to-head", value=rec_val[:1024], inline=False)
+
+    # Recent mutual games — one field per game (field values have their own
+    # 1024 cap; cards would blow a single shared field). Budget-guard the
+    # whole embed under Discord's 6000-char message total.
+    budget = 4800
+    shown = 0
+    for m in games[:6]:
+        wl = "✅ W" if m.get("won") else "❌ L"
+        score = f"{m.get('player_rounds_won', 0)}-{m.get('opponent_rounds_won', 0)}"
+        tag = "Ranked" if m.get("is_ranked") else "Casual"
+        fname = f"{_match_date_str(m)} — {wl} {score} · {tag}"
+        fval = (f"{name_a[:14]}: {_cards_str(m.get('cards_picked'))} | "
+                f"{name_b[:14]}: {_cards_str(m.get('opponent_cards_picked'))}")[:1024]
+        if len(fname) + len(fval) > budget:
+            break
+        budget -= len(fname) + len(fval)
+        embed.add_field(name=fname[:256], value=fval, inline=False)
+        shown += 1
+    if games and shown == 0:
+        embed.add_field(name="Recent games", value="(too much card data to show)", inline=False)
+    elif not games:
+        # H2H counters exist but the games predate A's 2000-row history window.
+        embed.add_field(name="Recent games",
+                        value=f"No games between them in {name_a}'s recent history window.",
+                        inline=False)
+    embed.set_footer(text=f"Last {shown} of {len(games)} recent games shown • record is lifetime"
+                     if games else "Record is lifetime")
+    await ctx.send(embed=embed)
+
+
+@bot.hybrid_command(name="graph",
+                    description="Chart a Compare-tab metric for 2-4 players (elo history, hit/block %, top cards, ...)")
+@app_commands.describe(player1="First player", player2="Second player",
+                       metric="Which Compare-tab metric to chart (default: elo history)",
+                       player3="Optional third player", player4="Optional fourth player")
+async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
+                    metric: _GraphMetric = "elo",
+                    player3: discord.Member = None, player4: discord.Member = None):
+    """All the in-game Compare-tab graphs as PNGs: 'elo' = the rating-history
+    overlay line chart (the old /compare); everything else maps to a
+    /players/{steam} stats field (see _GRAPH_BAR_METRICS) plus the two
+    specials — 'top-cards' (per-player hbar) and 'region' (per-player pie)."""
+    if not _MPL_AVAILABLE:
+        await ctx.send("❌ Chart rendering isn't available on this bot build — redeploy with matplotlib installed.")
+        return
+    members, seen_ids = [], set()
+    for m in (player1, player2, player3, player4):
+        if m is not None and m.id not in seen_ids:
+            seen_ids.add(m.id)
+            members.append(m)
+    if len(members) < 2:
+        await ctx.send("❌ Pick at least two different players.")
+        return
+    await _maybe_defer(ctx)
+    resolved, not_linked = [], []
+    for m in members:
+        link = await api_get(f"/players/by-discord/{m.id}")
+        if not link:
+            not_linked.append(m.display_name)
+            continue
+        resolved.append((m, link["steam_id"], link.get("display_name") or m.display_name))
+    if not_linked:
+        await ctx.send("❌ Not linked: " + ", ".join(not_linked) + ". They need `/link` first.")
+        return
+
+    # ── elo: the rating-history overlay line chart (moved from old /compare) ──
+    if metric == "elo":
+        players = []
+        for m, sid, nm in resolved:
+            hist, stats = await _fetch_rating_history(sid)
+            players.append({
+                "name": (stats or {}).get("display_name") or nm,
+                "points": _history_to_points(hist),
+                "rating": (stats or {}).get("rating"),
+                "peak": (stats or {}).get("peak_rating"),
+            })
+        drawable = [p for p in players if len(p["points"]) >= 2]
+        if not drawable:
+            await ctx.send("❌ None of those players have ranked rating history to plot yet.")
+            return
+        buf = await asyncio.to_thread(_render_rating_history_png, drawable)
+        file = discord.File(buf, filename="graph.png")
+        embed = discord.Embed(title="Ranked Rating History", color=0x5865F2)
+        for p in players:
+            if p["rating"] is not None:
+                val = f"**{p['rating']:.0f}** Elo · Peak **{(p['peak'] or p['rating']):.0f}**"
+                if len(p["points"]) < 2:
+                    val += " · (no history — not plotted)"
+            else:
+                val = "(no data)"
+            embed.add_field(name=str(p["name"])[:256], value=val, inline=True)
+        embed.set_image(url="attachment://graph.png")
+        await ctx.send(embed=embed, file=file)
+        return
+
+    # Every other metric reads the full stats payload once per player.
+    stats_list = []   # (name, stats_dict)
+    fetch_failed = []
+    for m, sid, nm in resolved:
+        s = await api_get(f"/players/{sid}")
+        if not isinstance(s, dict):
+            fetch_failed.append(nm)
+            s = {}
+        stats_list.append((s.get("display_name") or nm, s))
+    if len(fetch_failed) == len(stats_list):
+        await ctx.send("❌ Could not fetch stats for any of those players.")
+        return
+
+    footnotes = []
+    if fetch_failed:
+        footnotes.append("stats unavailable: " + ", ".join(fetch_failed))
+
+    # ── top-cards: per-player horizontal bars ──
+    if metric == "top-cards":
+        chart_players, no_cards = [], []
+        for nm, s in stats_list:
+            cards = [(c.get("card_name", "?"), int(c.get("times_picked") or 0),
+                      float(c.get("win_rate") or 0) * 100)  # server win_rate is 0-1
+                     for c in (s.get("top_cards") or []) if isinstance(c, dict)][:8]
+            if cards:
+                chart_players.append({"name": nm, "cards": cards})
+            else:
+                no_cards.append(nm)
+        if not chart_players:
+            await ctx.send("❌ No card data for any of those players.")
+            return
+        if no_cards:
+            footnotes.append("no card data: " + ", ".join(no_cards))
+        buf = await asyncio.to_thread(_render_top_cards_png, chart_players)
+        embed = discord.Embed(title="🃏 Top Cards", color=0x5865F2)
+
+    # ── region: per-player pie charts ──
+    elif metric == "region":
+        chart_players, no_regions = [], []
+        for nm, s in stats_list:
+            # Server field is region_breakdown = [{region, matches}]
+            # (schemas.py:184); region_names/region_matches are the CLIENT's
+            # parsed mirror of it, not wire fields.
+            rows = sorted([r for r in (s.get("region_breakdown") or [])
+                           if isinstance(r, dict) and (r.get("matches") or 0) > 0],
+                          key=lambda r: r.get("matches") or 0, reverse=True)
+            if not rows:
+                no_regions.append(nm)
+                continue
+            top, rest = rows[:7], rows[7:]
+            labels = [str(r.get("region", "?")) for r in top]
+            values = [int(r.get("matches") or 0) for r in top]
+            if rest:
+                labels.append("other")
+                values.append(sum(int(r.get("matches") or 0) for r in rest))
+            chart_players.append({"name": nm, "labels": labels, "values": values})
+        if not chart_players:
+            await ctx.send("❌ No region data for any of those players.")
+            return
+        if no_regions:
+            footnotes.append("no region data: " + ", ".join(no_regions))
+        buf = await asyncio.to_thread(_render_region_pies_png, chart_players)
+        embed = discord.Embed(title="🌍 Region Time", color=0x5865F2)
+
+    # ── everything else: the generic (grouped) bar chart ──
+    else:
+        spec = _GRAPH_BAR_METRICS.get(metric)
+        if spec is None:  # unreachable via the Literal, defensive for !prefix edge
+            await ctx.send("❌ Unknown metric.")
+            return
+        rows = stats_list
+        if metric == "2v2":
+            # Players without a completed 2v2 series have team_rating 0 — omit
+            # them from the chart (a 0-Elo bar reads as terrible, not absent).
+            dropped = [nm for nm, s in rows if (s.get("team_rating") or 0) <= 0]
+            rows = [(nm, s) for nm, s in rows if (s.get("team_rating") or 0) > 0]
+            if not rows:
+                await ctx.send("❌ None of those players have a 2v2 rating yet (no completed 2v2 series).")
+                return
+            if dropped:
+                footnotes.append("no 2v2 rating (omitted): " + ", ".join(dropped))
+        elif spec["need"]:
+            missing = [nm for nm, s in rows
+                       if not any(s.get(k) for k in spec["need"])]
+            if missing:
+                footnotes.append("no data recorded (shown as 0): " + ", ".join(missing))
+        names = [nm for nm, _ in rows]
+        groups = [(label, [fn(s) for _, s in rows]) for label, fn in spec["series"]]
+        buf = await asyncio.to_thread(_render_bar_chart_png, spec["title"], names,
+                                      groups, spec["ylabel"], spec["fmt"])
+        embed = discord.Embed(title=f"📊 {spec['title']}", color=0x5865F2)
+
+    file = discord.File(buf, filename="graph.png")
+    embed.set_image(url="attachment://graph.png")
+    if footnotes:
+        embed.set_footer(text=(" • ".join(footnotes))[:2048])
+    await ctx.send(embed=embed, file=file)
+
+
+@bot.hybrid_command(name="mystats", description="Full My Stats page — everything the F5 menu shows")
+@app_commands.describe(member="Player to look up (defaults to yourself)")
+async def cmd_mystats(ctx, member: discord.Member = None):
+    """The F5 'My Stats' page as one embed: rating box, level/XP, all records
+    + current streaks, accuracy, sweeps, best streaks, top cards, net gold,
+    2v2 line. /stats stays the lean general view; this is the full dump."""
+    target = member or ctx.author
+    link = await api_get(f"/players/by-discord/{target.id}")
+    if not link:
+        await ctx.send("❌ Not linked. Use `/link` first." if target == ctx.author else f"❌ {target.display_name} not linked."); return
+    steam_id = link["steam_id"]
+    await _maybe_defer(ctx)
+    s = await api_get(f"/players/{steam_id}")
+    if not s: await ctx.send("❌ Could not fetch stats."); return
+    hist = await api_get(f"/players/{steam_id}/matches?limit=50")
+    rank = s.get("rank_name") or get_rank_name(s["rating"])
+    embed = discord.Embed(title=f"{rank_emoji(rank)}  {s['display_name']}  —  My Stats", color=0x9B59B6)
+    embed.set_thumbnail(url=target.display_avatar.url)
+
+    # Rating box
+    peak = s.get("peak_rating", s["rating"])
+    embed.add_field(
+        name="📊  Rating",
+        value=(f"**{s['rating']:.0f}** Elo  ·  Peak: **{peak:.0f}**  ·  RD: {s['rating_deviation']:.0f}\n"
+               f"Rank: **{rank}**"),
+        inline=False,
+    )
+
+    # Level / XP box
+    embed.add_field(
+        name="⭐  Level",
+        value=(f"**{s.get('level', 0)}**  ·  {s.get('total_xp', 0):,} XP total\n"
+               f"{s.get('xp_into_level', 0):,} / {s.get('xp_for_next_level', 0):,} into next level"),
+        inline=False,
+    )
+
+    # Records box — total + ranked + casual, with live streaks from history.
+    tw, tl, tt = s.get("wins", 0), s.get("losses", 0), s.get("total_matches", 0)
+    twr = f"{tw/tt*100:.1f}%" if tt > 0 else "—"
+    rw, rl = s.get("ranked_series_wins", 0), s.get("ranked_series_losses", 0)
+    rt = rw + rl
+    rwr = f"{rw/rt*100:.1f}%" if rt > 0 else "—"
+    cw, cl = s.get("casual_wins", 0), s.get("casual_losses", 0)
+    ct = cw + cl
+    cwr = f"{cw/ct*100:.1f}%" if ct > 0 else "—"
+    r_streak = streak_str(_calc_streak(hist, ranked=True))
+    c_streak = streak_str(_calc_streak(hist, ranked=False))
+    rec_lines = [
+        f"Total: **{tt}** — **{tw}**W / **{tl}**L ({twr})",
+        f"Ranked series: **{rw}**W / **{rl}**L ({rwr})" + (f"  ·  {r_streak}" if r_streak else ""),
+        f"Casual: **{cw}**W / **{cl}**L ({cwr})" + (f"  ·  {c_streak}" if c_streak else ""),
+    ]
+    embed.add_field(name="⚔️  Records", value="\n".join(rec_lines), inline=False)
+
+    # Accuracy
+    acc = _hit_block_str(s)
+    if acc:
+        embed.add_field(name="🎯  Accuracy", value=acc, inline=True)
+
+    # Sweeps
+    sg, st_ = s.get("sweeps_given", 0), s.get("sweeps_taken", 0)
+    embed.add_field(name="💨  Sweeps", value=f"5-0 Given: **{sg}** 🧹  ·  0-5 Taken: **{st_}**", inline=True)
+
+    # Best streaks
+    br, bcs = s.get("best_ranked_streak", 0), s.get("best_casual_streak", 0)
+    streaks = []
+    if br > 0: streaks.append(f"Ranked: **{br}W** 🔥")
+    if bcs > 0: streaks.append(f"Casual: **{bcs}W**")
+    if streaks:
+        embed.add_field(name="📈  Best Streaks", value="  ·  ".join(streaks), inline=True)
+
+    # Net gold — respect hide_gold.
+    if not s.get("hide_gold"):
+        net_gold = (s.get("gold_earned", 0) or 0) - (s.get("gold_spent", 0) or 0)
+        embed.add_field(name="💰  Net Gold", value=f"**{net_gold:,}**g", inline=True)
+
+    # 2v2 line
+    if (s.get("team_rating") or 0) > 0:
+        team = await api_get(f"/team/players/{steam_id}/team-stats")
+        if team and (team.get("rating") or 0) > 0:
+            t_streak = streak_str(team.get("current_streak", 0))
+            embed.add_field(
+                name="👥  2v2",
+                value=(f"**{team['rating']:.0f}**  ·  {team.get('series_wins', 0)}W / "
+                       f"{team.get('series_losses', 0)}L series"
+                       + (f"  ·  {t_streak}" if t_streak else "")),
+                inline=True,
+            )
+
+    # Top cards
+    cards_lines = _top_cards_lines(s, limit=5)
+    if cards_lines:
+        embed.add_field(name="🃏  Top Cards", value="\n".join(cards_lines), inline=False)
+
+    embed.set_footer(text=f"Steam: {s['steam_id']}")
+    await ctx.send(embed=embed)
+
+
+@bot.hybrid_command(name="cards", description="Card stats — a player's (with member) or community-wide")
+@app_commands.describe(member="Player to look up (omit for community-wide stats)",
+                       filter="Which matches to count (default: all)")
+async def cmd_cards(ctx, member: discord.Member = None,
+                    filter: Literal["ranked", "casual", "all"] = "all"):
+    """Mirror of the in-game Card Stats tab (GET /api/v1/cards). With a member
+    the table is that player's picks; without one it's community-wide (the
+    tab itself always passes the local steam_id — the community view is
+    bot-only)."""
+    q = "/cards?limit=15&sort_by=times_picked&min_picks=1"
+    scope = "Community"
+    if member is not None:
+        link = await api_get(f"/players/by-discord/{member.id}")
+        if not link:
+            await ctx.send(f"❌ {member.display_name} not linked.")
+            return
+        q += f"&steam_id={link['steam_id']}"
+        scope = member.display_name
+    if filter in ("ranked", "casual"):
+        q += f"&is_ranked={'true' if filter == 'ranked' else 'false'}"
+    await _maybe_defer(ctx)
+    data = await api_get(q)
+    if not isinstance(data, list) or not data:
+        await ctx.send("❌ No card data for that selection.")
+        return
+    lines = []
+    for c in data:
+        if not isinstance(c, dict):
+            continue
+        wr = float(c.get("win_rate") or 0) * 100  # server win_rate is 0-1
+        ln = f"**{c.get('card_name', '?')}** — {c.get('times_picked', 0)} picks · {wr:.0f}% WR"
+        if (c.get("times_offered") or 0) > 0:
+            ln += f" · {float(c.get('pass_rate') or 0) * 100:.0f}% passed"
+        lines.append(ln)
+    embed = discord.Embed(
+        title=f"🃏 Card Stats — {scope} ({filter})",
+        description="\n".join(lines)[:4000],
+        color=discord.Color.teal(),
+    )
+    embed.set_footer(text="picks = times taken • WR = win rate of matches where it was picked • passed = offered but skipped")
     await ctx.send(embed=embed)
 
 # ── Queue Beacon (15s) ───────────────────────────────────────────
@@ -1405,19 +2306,27 @@ _booster_nudged = set()
 @grant_booster_gold.before_loop
 async def before_booster(): await bot.wait_until_ready()
 
-LB_PAGE_SIZE = 20
-LB_TOTAL_FETCH = 100  # we cache this many; pages of 20 ⇒ up to 5 pages
+# 50/page (Sid, v1.32.1): 100-row pages truncated around row ~66 — real rows
+# overflow the splitter's whole-message budget. Same size as /lb.
+LB_PAGE_SIZE = 50
+# Cache the server max (le=500) so the paginator's Next button covers the
+# WHOLE board (the ranked population outgrew 100 in v1.29 — a 100-row cache
+# silently hid everyone past #100). One fetch per 10-min tick either way.
+LB_TOTAL_FETCH = 500
 
 
-def _build_lb_embed(entries: list, total_players: int, page: int, total_pages: int) -> discord.Embed:
-    """Render one page of the auto-posted leaderboard. Pure function so the
+def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: int) -> list:
+    """Render one page of the auto-posted leaderboard as a LIST of embeds
+    (a worst-case 50-row page can exceed a single embed's 4096-char
+    description; up to 3 embeds travel in one message). Pure function so the
     paginator view + initial post share the rendering."""
-    lines = []
     start = page * LB_PAGE_SIZE
     end = min(start + LB_PAGE_SIZE, len(entries))
-    for e in entries[start:end]:
-        emoji = rank_emoji(get_rank_name(e["rating"]))
-        lines.append(f"`#{e['rank']:>3}` {emoji} **{e['display_name']}** — {e['rating']} ({e['wins']}W/{e['losses']}L)")
+    # Rank from list position (entries are one offset-0 fetch, so position
+    # IS the rank) — entry["rank"] is double-offset on offset pages server-side
+    # (see _lb_line docstring); deriving locally keeps this correct even if
+    # the fetch ever grows an offset.
+    lines = [_lb_line(e, rank=start + i + 1) for i, e in enumerate(entries[start:end])]
     # Live relative timestamp INSIDE the embed body ("Updated 3 minutes ago",
     # ticking client-side). The embed's footer timestamp was the only recency
     # signal before, and a silently-edited days-old message reads as a dead
@@ -1425,14 +2334,21 @@ def _build_lb_embed(entries: list, total_players: int, page: int, total_pages: i
     # now(timezone.utc), not utcnow(): .timestamp() on a naive datetime assumes
     # LOCAL time — correct only while the container happens to run UTC.
     updated = f"Updated <t:{int(datetime.now(timezone.utc).timestamp())}:R>\n\n"
-    embed = discord.Embed(
-        title="🏆 Ranked Leaderboard",
-        description=updated + ("\n".join(lines) if lines else "(no players)"),
-        color=discord.Color.gold(),
-        timestamp=datetime.utcnow(),
-    )
-    embed.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} ranked players • Auto-updated")
-    return embed
+    descs = _split_lb_descriptions(lines, first_header=updated)
+    embeds = []
+    for ci, desc in enumerate(descs):
+        em = discord.Embed(
+            # Title on the FIRST embed only — publish_lb's duplicate rescan
+            # identifies the board by this title on embeds[0].
+            title="🏆 Ranked Leaderboard" if ci == 0 else None,
+            description=desc,
+            color=discord.Color.gold(),
+            timestamp=datetime.utcnow() if ci == len(descs) - 1 else None,
+        )
+        if ci == len(descs) - 1:
+            em.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} ranked players • Auto-updated")
+        embeds.append(em)
+    return embeds
 
 
 class LeaderboardPaginator(discord.ui.View):
@@ -1461,7 +2377,7 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = max(0, self.page - 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embed=_build_lb_embed(self.entries, self.total_players, self.page, self.total_pages),
+            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages),
             view=self,
         )
 
@@ -1470,7 +2386,7 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = min(self.total_pages - 1, self.page + 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embed=_build_lb_embed(self.entries, self.total_players, self.page, self.total_pages),
+            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages),
             view=self,
         )
 
@@ -1498,7 +2414,7 @@ async def publish_lb(guild):
     entries = data["entries"]
     total_players = data.get("total_players", 0)
     total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
-    embed = _build_lb_embed(entries, total_players, 0, total_pages)
+    embeds = _build_lb_embeds(entries, total_players, 0, total_pages)
     view = LeaderboardPaginator(entries, total_players)
     view._update_buttons()
     # Fast path: edit the message we already know about. Logged on success too —
@@ -1521,11 +2437,11 @@ async def publish_lb(guild):
                     await msg.delete()
                 except Exception:
                     pass
-                sent = await ch.send(embed=embed, view=view)
+                sent = await ch.send(embeds=embeds, view=view)
                 _lb_message_ids[ch.id] = sent.id
                 print(f"[LB] board was buried (last_message_id={ch.last_message_id}) — reposted at bottom as mid={sent.id}")
                 return
-            await msg.edit(embed=embed, view=view)
+            await msg.edit(embeds=embeds, view=view)
             print(f"[LB] edited board mid={mid}")
             return
         except Exception as e:
@@ -1558,19 +2474,19 @@ async def publish_lb(guild):
                 await keeper.delete()
             except Exception:
                 pass
-            sent = await ch.send(embed=embed, view=view)
+            sent = await ch.send(embeds=embeds, view=view)
             _lb_message_ids[ch.id] = sent.id
             print(f"[LB] re-anchored board was buried — reposted at bottom as mid={sent.id}")
             return
         _lb_message_ids[ch.id] = keeper.id
         try:
-            await keeper.edit(embed=embed, view=view)
+            await keeper.edit(embeds=embeds, view=view)
             print(f"[LB] re-anchored to board mid={keeper.id} and edited")
         except Exception as e:
             # Leave the id cached; the next tick retries via the fast path.
             print(f"[LB] re-anchor edit of mid={keeper.id} failed: {e}")
         return
-    sent = await ch.send(embed=embed, view=view)
+    sent = await ch.send(embeds=embeds, view=view)
     _lb_message_ids[ch.id] = sent.id
     print(f"[LB] posted fresh leaderboard message in {ch.id}")
 
@@ -1660,7 +2576,13 @@ async def poll_channel_posts():
             if ch is None:
                 print(f"[CHANNEL-POST] channel {p['channel_id']} not found — leaving post {p['id']} queued")
                 return  # bail — order matters, don't skip ahead
-            await ch.send(p["content"][:2000])
+            # Explicit allowed_mentions: server-queued posts (tournament
+            # signup/leave/pushback etc.) carry <@id> mentions that MUST ping
+            # the user — but never let queued content ping @everyone/roles.
+            await ch.send(
+                p["content"][:2000],
+                allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False),
+            )
             await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
             print(f"[CHANNEL-POST] posted {p['id']} to {p['channel_id']}")
         except discord.Forbidden:
@@ -2353,6 +3275,528 @@ async def nag_pending_async_matches():
             await asyncio.sleep(0.2)
     if nagged:
         print(f"[TOURNAMENT-NAG] Sent {nagged} pending-match reminders")
+
+
+# ── Tournament availability-check DMs (v1.32) ─────────────────────────────
+# The server queues availability_check notices (tournament_notices table) for
+# signed-up players; this loop DMs each one a Yes/No prompt. Ack-after-
+# delivery (learning #105): only successfully-DMed or permanently-
+# undeliverable notices get acked, so a bot restart can't swallow one.
+#
+# The Yes/No buttons must survive bot restarts, so they are handled by the
+# raw on_interaction listener below (matched by custom_id prefix "tavail:"),
+# NOT by live View callbacks — a View object dies with the process, the
+# custom_id in the message does not.
+
+_tavail_seen_notice_ids = set()  # process-lifetime re-ack guard
+
+
+def _unix_ts(v):
+    """Coerce an epoch int/float, numeric string, or ISO-8601 string to unix
+    seconds. None on anything unparseable — callers render '(time TBD)'."""
+    if v is None:
+        return None
+    try:
+        if isinstance(v, (int, float)):
+            return int(v)
+        s = str(v).strip()
+        if not s:
+            return None
+        if s.replace(".", "", 1).isdigit():
+            return int(float(s))
+        return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return None
+
+
+def _tavail_view(tournament_id, steam_id):
+    """Buttons carry all state in the custom_id — no live callbacks, so the
+    prompt keeps working after any number of bot restarts."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.success, label="Yes, I'm in",
+                                    custom_id=f"tavail:{tournament_id}:{steam_id}:yes"))
+    view.add_item(discord.ui.Button(style=discord.ButtonStyle.danger, label="No, remove me",
+                                    custom_id=f"tavail:{tournament_id}:{steam_id}:no"))
+    return view
+
+
+def _tavail_embed(kind, start_unix, lock_unix):
+    if kind == "async":
+        lock_str = f"<t:{lock_unix}:F>" if lock_unix else "(time TBD)"
+        desc = (f"Signups close {lock_str}.\n\n"
+                "Async matches are NOT played at a fixed time — each match has a "
+                "7-day deadline and you schedule each game with your opponent "
+                "whenever suits you both (use `/dm-opponent` to coordinate). "
+                "No specific availability is required.")
+        return discord.Embed(title="🌀 Async tournament — availability check", description=desc, color=0x5865F2)
+    start_str = f"<t:{start_unix}:F>" if start_unix else "(time TBD)"
+    # Wording contract (learning #130): "have ROUNDS open", never "be in the tab".
+    desc = (f"Start time: {start_str}\n\n"
+            "All matches are played back-to-back in one sitting starting then. "
+            "You only need ROUNDS open at the main menu at the start time — "
+            "the mod auto-connects you to each match.")
+    return discord.Embed(title="🏆 Synchronized tournament — availability check", description=desc, color=0xFAA61A)
+
+
+async def _ack_tournament_notices(notice_ids):
+    if not notice_ids or http_session is None or not API_SECRET_KEY:
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/tournament-notices/ack",
+            json={"notice_ids": list(notice_ids)},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[TAVAIL] ack failed: {resp.status} {(await resp.text())[:120]}")
+    except Exception as ex:
+        print(f"[TAVAIL] ack error: {ex}")
+
+
+@tasks.loop(seconds=30)
+async def poll_tournament_notices():
+    """Own fully-guarded loop (learning #129 — never chained onto
+    poll_tournaments' tail)."""
+    try:
+        data = await api_get("/internal/tournament-notices?unnotified=true")
+        if not data or not data.get("notices"):
+            return
+        to_ack = []
+        for n in data["notices"]:
+            if not isinstance(n, dict):
+                continue
+            # Server serializes the pk as "notice_id" (main.py tournament-notices
+            # endpoint); tolerate "id" too in case the shape ever changes.
+            nid = n.get("notice_id") or n.get("id")
+            if nid is None:
+                continue
+            if nid in _tavail_seen_notice_ids:
+                # Handled this process-lifetime — earlier ack must have failed;
+                # re-ack, don't re-DM.
+                to_ack.append(nid)
+                continue
+            if (n.get("notice_type") or "") != "availability_check":
+                # Unknown notice type — nothing this bot build can send; ack so
+                # it doesn't come back every 30s forever.
+                _tavail_seen_notice_ids.add(nid)
+                to_ack.append(nid)
+                continue
+            did = n.get("discord_id")
+            tid = n.get("tournament_id")
+            steam = n.get("steam_id")
+            if not did or not tid or not steam:
+                # Unlinked player / malformed row — permanently undeliverable.
+                _tavail_seen_notice_ids.add(nid)
+                to_ack.append(nid)
+                continue
+            # payload is a JSON string per the contract; tolerate a dict too.
+            payload = {}
+            raw = n.get("payload")
+            try:
+                if isinstance(raw, str) and raw:
+                    payload = json.loads(raw)
+                elif isinstance(raw, dict):
+                    payload = raw
+            except Exception:
+                payload = {}
+            kind = (n.get("kind") or payload.get("kind") or "sync").lower()
+            start_unix = (_unix_ts(payload.get("start_ts"))
+                          or _unix_ts(n.get("scheduled_start_ts"))
+                          or _unix_ts(n.get("default_start_ts")))
+            lock_unix = _unix_ts(payload.get("lock_ts")) or _unix_ts(n.get("lock_at"))
+            if kind == "async":
+                content = "Are you still in for the **Async tournament**?"
+            else:
+                content = "Are you still available to play in the **Synchronized tournament**?"
+            embed = _tavail_embed(kind, start_unix, lock_unix)
+            view = _tavail_view(tid, steam)
+            # Resolve + DM. Transient resolution failure → no ack (retried).
+            try:
+                user = bot.get_user(int(did)) or await bot.fetch_user(int(did))
+            except discord.NotFound:
+                _tavail_seen_notice_ids.add(nid)
+                to_ack.append(nid)
+                continue
+            except Exception as ex:
+                print(f"[TAVAIL] fetch_user({did}) failed: {ex}")
+                continue
+            if user is None:
+                continue
+            try:
+                await user.send(content=content, embed=embed, view=view)
+                print(f"[TAVAIL] availability check ({kind}) → {user} for tournament {str(tid)[:8]}")
+                _tavail_seen_notice_ids.add(nid)
+                to_ack.append(nid)
+            except discord.Forbidden:
+                # DMs closed — permanently undeliverable; ack.
+                print(f"[TAVAIL] {did} has DMs closed — acking")
+                _tavail_seen_notice_ids.add(nid)
+                to_ack.append(nid)
+            except Exception as ex:
+                # Transient (rate limit / gateway blip) — no ack, retried next poll.
+                print(f"[TAVAIL] DM to {did} failed: {ex}")
+            await asyncio.sleep(0.15)
+        if len(_tavail_seen_notice_ids) > 2000:
+            _tavail_seen_notice_ids.clear()
+        await _ack_tournament_notices(to_ack)
+    except Exception as ex:
+        print(f"poll_tournament_notices error: {ex}")
+
+
+@poll_tournament_notices.before_loop
+async def before_tournament_notices():
+    await bot.wait_until_ready()
+
+
+async def _tournament_unsignup(tournament_id, steam_id):
+    """POST the same public unsignup endpoint the game client uses
+    (tournaments.py:1289; TournamentSignupRequest = {steam_id}). JSON body —
+    api_post sends query params, wrong for this endpoint. Returns (ok, detail)."""
+    if http_session is None:
+        return False, "backend unreachable"
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/tournaments/{tournament_id}/unsignup",
+            json={"steam_id": str(steam_id)},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status == 200:
+                return True, ""
+            txt = await resp.text()
+            try:
+                detail = json.loads(txt).get("detail") or txt
+            except Exception:
+                detail = txt
+            return False, str(detail)[:300]
+    except Exception as ex:
+        return False, f"request failed: {ex}"
+
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    """Raw component listener for the availability-check Yes/No buttons.
+    Deliberately NOT a View callback: the DM can be answered days later,
+    across any number of bot restarts — only the custom_id persists. All
+    other component interactions (live bets, paginator) are handled by their
+    own Views and fall through the prefix check untouched."""
+    try:
+        if interaction.type != discord.InteractionType.component:
+            return
+        cid = (interaction.data or {}).get("custom_id", "")
+        if not cid.startswith("tavail:"):
+            return
+        parts = cid.split(":")
+        if len(parts) != 4:
+            await interaction.response.send_message("⚠️ Unrecognized button.", ephemeral=True)
+            return
+        _, tournament_id, steam_id, answer = parts
+        if answer == "yes":
+            # Acknowledge within 3s by editing the prompt in place.
+            await interaction.response.edit_message(content="Confirmed — see you there! ✅", view=None)
+            print(f"[TAVAIL] {interaction.user} confirmed for tournament {tournament_id[:8]}")
+            return
+        # "no": the unsignup POST can take a moment — defer first (must ack
+        # the interaction within 3s), then edit/follow-up.
+        await interaction.response.defer()
+        ok, detail = await _tournament_unsignup(tournament_id, steam_id)
+        if ok:
+            print(f"[TAVAIL] {interaction.user} withdrew from tournament {tournament_id[:8]}")
+            try:
+                await interaction.message.edit(content="You've been removed from the tournament. ✅", view=None)
+            except Exception:
+                await interaction.followup.send("You've been removed from the tournament. ✅")
+        else:
+            # e.g. tournament already running — leave the buttons so they can
+            # see the prompt; surface the server's reason.
+            await interaction.followup.send(f"❌ Couldn't remove you: {detail}")
+    except Exception as ex:
+        print(f"[TAVAIL] interaction error: {ex}")
+
+
+# ── Tournament board in #scr-tournaments (v1.32) ──────────────────────────
+# ONE living message with up to two embeds (sync + async), mirroring the
+# in-game Tournaments tab pages. Living-board pattern per learning #140:
+# remembered message id, fast-path edit, bottom-anchor delete+repost when
+# buried, duplicate rescan by embed title, live `Updated <t:R>` in the body.
+# Fed from _watch_cache (poll_tournaments refreshes it every 30s); falls back
+# to a direct /internal/watch fetch when the cache is cold (e.g. right after
+# a restart, before poll_tournaments' first tick).
+
+_tournament_board_ids: dict = {}  # channel_id -> message_id
+
+_BRACKET_SIDE_LABEL = {"W": "WB", "L": "LB", "GF": "Grand Final", "GF_RESET": "GF Reset", "TP": "3rd Place"}
+_BRACKET_SIDE_ORDER = {"W": 0, "L": 1, "GF": 2, "GF_RESET": 3, "TP": 4}
+
+
+def _bracket_progress_lines(t, max_lines=28):
+    """Per-round match lines for a running tournament. The watch payload has
+    names + winner + status; per-match series SCORES aren't in it today —
+    render 'Alice 2-1 Bob' when a p1_score/p2_score pair is present
+    (defensive .get), else fall back to 'Alice def. Bob' / 'Alice vs Bob'."""
+    out = []
+    matches = t.get("matches") or []
+
+    def keyf(m):
+        return (_BRACKET_SIDE_ORDER.get(m.get("bracket_side"), 9),
+                m.get("round") or 0, m.get("slot_idx") or 0)
+
+    for m in sorted([m for m in matches if isinstance(m, dict)], key=keyf):
+        side_raw = m.get("bracket_side")
+        side = _BRACKET_SIDE_LABEL.get(side_raw, side_raw or "?")
+        hdr = f"{side} R{m.get('round')}" if side_raw in ("W", "L") else side
+        p1 = m.get("p1_name") or "TBD"
+        p2 = m.get("p2_name") or "TBD"
+        st = m.get("status")
+        s1, s2 = m.get("p1_score"), m.get("p2_score")
+        if st in ("completed", "forfeit", "double_forfeit", "bye_auto"):
+            win_id = m.get("winner_signup_id")
+            if win_id and win_id == m.get("p1_signup_id"):
+                w, l, ws, ls = p1, p2, s1, s2
+            elif win_id and win_id == m.get("p2_signup_id"):
+                w, l, ws, ls = p2, p1, s2, s1
+            else:
+                w = l = ws = ls = None
+            if w is None:
+                body = f"{p1} vs {p2} — {st.replace('_', ' ')}"
+            elif ws is not None and ls is not None:
+                body = f"**{w}** {ws}-{ls} {l}"
+            elif st == "bye_auto":
+                body = f"**{w}** — bye"
+            elif st in ("forfeit", "double_forfeit"):
+                body = f"**{w}** def. {l} (forfeit)"
+            else:
+                body = f"**{w}** def. {l}"
+        elif st == "active":
+            body = f"{p1} vs {p2} — 🎮 in progress"
+        elif st == "ready":
+            body = f"{p1} vs {p2} — ⏳ waiting to start"
+        else:
+            if p1 == "TBD" and p2 == "TBD":
+                continue  # fully-unresolved future match — noise
+            body = f"{p1} vs {p2} — upcoming"
+        out.append(f"`{hdr}` {body}")
+    if len(out) > max_lines:
+        out = out[:max_lines] + [f"…and {len(out) - max_lines} more matches"]
+    return out
+
+
+# "How it works" blurb per tournament kind (Sid: board postings must explain
+# sync vs async). Rendered as an embed FIELD on every board embed — field
+# values have their own 1024-char cap and don't eat the description's 2600
+# budget, so live status always stays on top. They DO count against the
+# 6000-char whole-message total, which is why the description cap below is
+# 2600 and not 2900.
+_TOURNEY_HOW_IT_WORKS = {
+    "sync": (
+        "Weekly bracket played in ONE sitting. Sign up in-game "
+        "(F5 → Tournaments), vote on the start time, then just have ROUNDS "
+        "open at the main menu when it starts — the mod auto-connects you to "
+        "each match. Miss your ready window and you forfeit that match."
+    ),
+    "async": (
+        "No fixed play time. Sign up in-game (F5 → Tournaments); when signups "
+        "close the bracket starts and each match gets a 7-DAY deadline — you "
+        "schedule each game with your opponent whenever suits you both "
+        "(use `/dm-opponent`). No specific availability needed."
+    ),
+}
+
+
+def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
+    """One embed per tournament kind, mirroring the in-game Sync/Async page."""
+    kind_label = "Sync" if kind == "sync" else "Async"
+    emoji = "🏆" if kind == "sync" else "🌀"
+    title = f"{emoji} {kind_label} Tournament"
+    updated = f"Updated <t:{int(datetime.now(timezone.utc).timestamp())}:R>\n\n"
+    if not t:
+        em = discord.Embed(
+            title=title,
+            description=updated + f"No active {kind_label.lower()} tournament — next one is created automatically.",
+            color=0x36393F,
+        )
+        em.add_field(name="ℹ️ How it works", value=_TOURNEY_HOW_IT_WORKS[kind], inline=False)
+        return em
+    status = t.get("status") or "?"
+    all_signups = [s for s in (t.get("signups") or []) if isinstance(s, dict)]
+    signups = [s for s in all_signups if not s.get("is_speculative")]
+    spec_count = len(all_signups) - len(signups)
+    lines = []
+    if status == "voting":
+        lines.append("**Status: Signups open**")
+        min_p = t.get("min_players") or 8
+        max_p = t.get("max_players") or 16
+        lines.append(f"Signed up: **{len(signups)}** (min {min_p}, max {max_p})"
+                     + (f" · +{spec_count} waitlist" if spec_count else ""))
+        if kind == "sync":
+            lines.append(f"Default start: {_fmt_pt(t.get('scheduled_start_ts') or t.get('default_start_ts'))}")
+            lines.append(f"Signups + time voting close: {_fmt_pt(t.get('lock_at'))}")
+            lines.append("_Start-time voting is open in-game (F5 → Tournaments)._")
+        else:
+            lines.append(f"Signups close: {_fmt_pt(t.get('lock_at'))} — the bracket starts then; "
+                         f"each match has a 7-day deadline.")
+    elif status == "locked":
+        lines.append(f"**Status: Locked** — starts {_fmt_pt(t.get('scheduled_start_ts'))}")
+        lines.append(f"Players: **{len(signups)}**")
+    elif status == "running":
+        lines.append("**Status: Running**")
+        lines.extend(_bracket_progress_lines(t))
+    elif status == "completed":
+        lines.append("**Status: Completed**")
+        name_for = {s.get("signup_id"): s.get("display_name") for s in all_signups}
+        podium = [("🥇", name_for.get(t.get("winner_signup_id"))),
+                  ("🥈", name_for.get(t.get("runner_up_signup_id"))),
+                  ("🥉", name_for.get(t.get("third_place_signup_id")))]
+        for medal, nm in podium:
+            if nm:
+                lines.append(f"{medal} **{nm}**" if medal == "🥇" else f"{medal} {nm}")
+    else:
+        lines.append(f"**Status: {status}**")
+    # Roster (skip on completed — the podium tells the story). Seeds when
+    # locked/running (the watch payload doesn't carry them today — defensive
+    # .get so they appear the moment the server adds them), ready ✓ likewise.
+    if status in ("voting", "locked", "running") and signups:
+        roster = []
+        for s in signups:
+            nm = s.get("display_name") or "?"
+            bits = ""
+            if status != "voting" and s.get("seed"):
+                bits += f" (seed {s['seed']})"
+            if s.get("ready"):
+                bits += " ✓"
+            if s.get("forfeited"):
+                bits += " ✗ forfeited"
+            roster.append(f"• {nm}{bits}")
+        shown = roster[:24]
+        if len(roster) > 24:
+            shown.append(f"…and {len(roster) - 24} more")
+        lines.append("")
+        lines.append("**Players**")
+        lines.extend(shown)
+    desc = updated + "\n".join(lines)
+    # Two embeds share ONE message's 6000-char total budget (Discord counts
+    # across all embeds, fields included), so each description gets 2600 —
+    # not the 4096 single-embed cap. 2×2600 desc + 2×(~290-char "How it
+    # works" field + name) + titles ≈ 5.8k, safely under 6000; at 2900 the
+    # fields would have pushed a worst-case edit over the cap and the board
+    # would silently freeze on a 400.
+    if len(desc) > 2600:
+        desc = desc[:2580] + "\n…"
+    color = {"voting": 0x3BA55D, "locked": 0xFAA61A,
+             "running": 0x5865F2, "completed": 0x9B59B6}.get(status, 0x36393F)
+    em = discord.Embed(title=title, description=desc, color=color)
+    em.add_field(name="ℹ️ How it works", value=_TOURNEY_HOW_IT_WORKS[kind], inline=False)
+    return em
+
+
+async def _publish_tournament_board():
+    if not SCR_TOURNAMENTS_CHANNEL:
+        return
+    ch = bot.get_channel(SCR_TOURNAMENTS_CHANNEL)
+    if not ch:
+        try:
+            ch = await bot.fetch_channel(SCR_TOURNAMENTS_CHANNEL)
+        except Exception as e:
+            print(f"[TBOARD] channel {SCR_TOURNAMENTS_CHANNEL} unreachable: {e}")
+            return
+    tournaments = (_watch_cache or {}).get("tournaments") or []
+    if not tournaments and http_session is not None and API_SECRET_KEY:
+        # Cold cache (fresh restart, before poll_tournaments' first tick) is
+        # indistinguishable from "no tournaments" — fetch directly to be sure.
+        try:
+            async with http_session.get(
+                f"{API_BASE_URL}/api/v1/tournaments/internal/watch",
+                headers={"X-Internal-Key": API_SECRET_KEY},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    tournaments = (await resp.json()).get("tournaments") or []
+        except Exception as e:
+            print(f"[TBOARD] direct watch fetch failed: {e}")
+
+    def pick(kind):
+        # At most one active tournament per kind exists; prefer it, else show
+        # the most recent completed one (watch keeps them 24h).
+        active = [t for t in tournaments
+                  if t.get("kind") == kind and t.get("status") in ("voting", "locked", "running")]
+        if active:
+            return active[0]
+        done = [t for t in tournaments if t.get("kind") == kind and t.get("status") == "completed"]
+        return done[-1] if done else None
+
+    embeds = [
+        _build_tournament_board_embed(pick("sync"), "sync"),
+        _build_tournament_board_embed(pick("async"), "async"),
+    ]
+    # Living-message management — same shape as publish_lb.
+    mid = _tournament_board_ids.get(ch.id)
+    if mid:
+        try:
+            msg = await ch.fetch_message(mid)
+            if getattr(ch, "last_message_id", None) not in (None, mid):
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                sent = await ch.send(embeds=embeds)
+                _tournament_board_ids[ch.id] = sent.id
+                print(f"[TBOARD] board was buried — reposted at bottom as mid={sent.id}")
+                return
+            await msg.edit(embeds=embeds)
+            print(f"[TBOARD] edited board mid={mid}")
+            return
+        except Exception as e:
+            print(f"[TBOARD] fast-path edit of mid={mid} failed ({e}) — rescanning")
+            _tournament_board_ids.pop(ch.id, None)
+    # Rescan: adopt the newest board message, delete older duplicates.
+    keeper = None
+    dupes = 0
+    async for msg in ch.history(limit=50):
+        if msg.author == bot.user and msg.embeds and (msg.embeds[0].title or "").endswith("Tournament"):
+            if keeper is None:
+                keeper = msg
+            else:
+                try:
+                    await msg.delete()
+                    dupes += 1
+                except Exception as e:
+                    print(f"[TBOARD] couldn't delete duplicate board mid={msg.id}: {e}")
+    if dupes:
+        print(f"[TBOARD] deleted {dupes} duplicate board message(s)")
+    if keeper is not None:
+        if getattr(ch, "last_message_id", None) not in (None, keeper.id):
+            try:
+                await keeper.delete()
+            except Exception:
+                pass
+            sent = await ch.send(embeds=embeds)
+            _tournament_board_ids[ch.id] = sent.id
+            print(f"[TBOARD] re-anchored board was buried — reposted at bottom as mid={sent.id}")
+            return
+        _tournament_board_ids[ch.id] = keeper.id
+        try:
+            await keeper.edit(embeds=embeds)
+            print(f"[TBOARD] re-anchored to board mid={keeper.id} and edited")
+        except Exception as e:
+            print(f"[TBOARD] re-anchor edit of mid={keeper.id} failed: {e}")
+        return
+    sent = await ch.send(embeds=embeds)
+    _tournament_board_ids[ch.id] = sent.id
+    print(f"[TBOARD] posted fresh tournament board in {ch.id}")
+
+
+@tasks.loop(seconds=120)
+async def publish_tournament_board():
+    """Own fully-guarded loop (learning #129) — one bad tick never kills it."""
+    try:
+        await _publish_tournament_board()
+    except Exception as e:
+        print(f"[TBOARD] publish error: {e}")
+
+
+@publish_tournament_board.before_loop
+async def before_tournament_board():
+    await bot.wait_until_ready()
 
 
 # ── Live Ranked Games + Discord betting ─────────────────────────────

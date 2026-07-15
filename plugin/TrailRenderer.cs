@@ -450,8 +450,12 @@ namespace CompetitiveRounds
         void Update()
         {
             if (Target == null) return;
-            t += Time.deltaTime * 0.6f;  // one full hue cycle every ~1.7s
-            if (t > 1f) t -= 1f;
+            // v1.32 item 8: static-cosmetics mode freezes the hue where it is.
+            if (Plugin.AnimatedCosmetics == null || Plugin.AnimatedCosmetics.Value)
+            {
+                t += Time.deltaTime * 0.6f;  // one full hue cycle every ~1.7s
+                if (t > 1f) t -= 1f;
+            }
             var col = Color.HSVToRGB(t, 0.85f, 1.0f);
             Target.startColor = col;
             Target.endColor = new Color(col.r, col.g, col.b, 0f);
@@ -751,8 +755,8 @@ namespace CompetitiveRounds
             Vector2 cursor = Input.mousePosition;
 
             // Cycle prismatic hue every frame so the next-spawned dot uses elapsed-time hue
-            // (not just spawn-rate hue).
-            if (cyclePrismatic)
+            // (not just spawn-rate hue). v1.32 item 8: frozen in static-cosmetics mode.
+            if (cyclePrismatic && (Plugin.AnimatedCosmetics == null || Plugin.AnimatedCosmetics.Value))
             {
                 prismT += Time.unscaledDeltaTime * 0.6f;
                 if (prismT > 1f) prismT -= 1f;
