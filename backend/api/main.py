@@ -326,6 +326,39 @@ def _presence_online_count() -> int:
     return len(_presence_seen)
 
 
+def _presence_online_ids() -> list[str]:
+    """Currently-online steam_ids (prunes stale entries as a side effect)."""
+    _presence_online_count()
+    return list(_presence_seen.keys())
+
+
+# Throttle for persisting presence to players.last_seen: the ping arrives every
+# ~60s per client, but a DB write every 5 min per player is plenty for the
+# Home tab's "recently online" list. steam_id -> monotonic seconds of last stamp.
+# Swept periodically — the endpoint is unauthenticated, so without a prune a
+# unique-steam_id flood grows this dict for the life of the process.
+_presence_db_stamped: dict[str, float] = {}
+PRESENCE_DB_STAMP_SEC = 300
+_presence_db_swept_at = 0.0
+
+
+def _presence_db_stamp_ok(steam_id: str) -> bool:
+    """Check + stamp the last_seen write throttle; sweeps stale entries at most
+    once a minute. An active client re-stamps every 5 min, so its entry never
+    ages past the 2x cutoff; flood entries fall out within ~10 minutes."""
+    global _presence_db_swept_at
+    now = time.monotonic()
+    if now - _presence_db_swept_at > 60:
+        _presence_db_swept_at = now
+        cutoff = now - 2 * PRESENCE_DB_STAMP_SEC
+        for sid in [s for s, at in _presence_db_stamped.items() if at < cutoff]:
+            _presence_db_stamped.pop(sid, None)
+    if now - _presence_db_stamped.get(steam_id, 0.0) <= PRESENCE_DB_STAMP_SEC:
+        return False
+    _presence_db_stamped[steam_id] = now
+    return True
+
+
 def _series_pair_filter(pid_a, pid_b):
     """Order-independent ranked_series player-pair predicate."""
     return or_(
@@ -1024,7 +1057,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.32.0"
+LATEST_MOD_VERSION = "1.32.1"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -2668,6 +2701,7 @@ async def get_player_stats(
         active_cursor_color_hex=active_cursor_color_hex,
         active_player_effect_sku=active_player_effect_sku,
         hide_gold=bool(player.hide_gold),
+        appear_offline=bool(player.appear_offline),
         active_nametag_skus=active_nametag_skus,
         last_match=stats["last_match"],
         recent_rating_history=history,
@@ -2739,6 +2773,134 @@ async def get_player_rating_history(
         for h in history_result.scalars().all()
     ]
     return {"steam_id": steam_id, "display_name": display_name, "history": history}
+
+
+@app.get("/api/v1/players/{steam_id}/vs/{opponent_steam_id}/top-cards", tags=["Players"])
+async def get_h2h_top_cards(
+    steam_id: str,
+    opponent_steam_id: str,
+    limit: int = Query(8, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """Top cards each player picked in games against the other (v1.33, feeds
+    the bot's /compare). One aggregate over match_cards restricted to the
+    pair's mutual, non-invalidated matches; per-card win counts are wins in
+    THOSE mutual games. Public read."""
+    a = (await db.execute(
+        select(Player.id, Player.display_name).where(Player.steam_id == steam_id)
+    )).first()
+    b = (await db.execute(
+        select(Player.id, Player.display_name).where(Player.steam_id == opponent_steam_id)
+    )).first()
+    if a is None or b is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    rows = (await db.execute(text("""
+        SELECT mc.player_id::text AS pid, mc.card_name,
+               COUNT(*) AS picks,
+               SUM(CASE WHEN m.winner_id = mc.player_id THEN 1 ELSE 0 END) AS wins
+        FROM match_cards mc
+        JOIN matches m ON m.id = mc.match_id
+        WHERE ((m.player1_id = :a AND m.player2_id = :b)
+            OR (m.player1_id = :b AND m.player2_id = :a))
+          AND m.invalidated_at IS NULL
+          AND (mc.player_id = :a OR mc.player_id = :b)
+        GROUP BY mc.player_id, mc.card_name
+        ORDER BY picks DESC
+    """), {"a": a.id, "b": b.id})).mappings().all()
+
+    def _top(pid) -> list[dict]:
+        pid_s = str(pid)
+        return [
+            {"card_name": r["card_name"], "picks": int(r["picks"]), "wins": int(r["wins"])}
+            for r in rows if r["pid"] == pid_s
+        ][:limit]
+
+    return {
+        "player_steam_id": steam_id,
+        "opponent_steam_id": opponent_steam_id,
+        "player_cards": _top(a.id),
+        "opponent_cards": _top(b.id),
+    }
+
+
+@app.get("/api/v1/players/{steam_id}/rating-preview", tags=["Players"])
+async def get_rating_preview(
+    steam_id: str,
+    opponent_steam_id: str = Query(..., max_length=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hypothetical Glicko-2 rating change if this player wins/loses a ranked
+    SERIES against the opponent (v1.33, feeds the FAQ bot's 'how much elo'
+    answer). Mirrors the series-completion math exactly: one rating period,
+    single-opponent list, GLICKO2_TAU. Public read — ratings are public."""
+    q = text("""
+        SELECT p.steam_id, p.display_name,
+               COALESCE(gr.rating, 1500)           AS rating,
+               COALESCE(gr.rating_deviation, 350)  AS rd,
+               COALESCE(gr.volatility, 0.06)       AS vol
+        FROM players p
+        LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+        WHERE p.steam_id = :sid AND p.deleted_at IS NULL
+    """)
+    a = (await db.execute(q, {"sid": steam_id})).mappings().first()
+    b = (await db.execute(q, {"sid": opponent_steam_id})).mappings().first()
+    if a is None or b is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    a_win, _, _ = calculate_new_rating(a["rating"], a["rd"], a["vol"],
+                                       [(b["rating"], b["rd"], 1.0)], GLICKO2_TAU)
+    a_loss, _, _ = calculate_new_rating(a["rating"], a["rd"], a["vol"],
+                                        [(b["rating"], b["rd"], 0.0)], GLICKO2_TAU)
+    b_win, _, _ = calculate_new_rating(b["rating"], b["rd"], b["vol"],
+                                       [(a["rating"], a["rd"], 1.0)], GLICKO2_TAU)
+    b_loss, _, _ = calculate_new_rating(b["rating"], b["rd"], b["vol"],
+                                        [(a["rating"], a["rd"], 0.0)], GLICKO2_TAU)
+    win_prob = _glicko_expectancy(a["rating"], a["rd"], b["rating"], b["rd"])
+
+    return {
+        "player": {
+            "steam_id": a["steam_id"], "display_name": a["display_name"],
+            "rating": round(a["rating"], 1),
+            "win_delta": round(a_win - a["rating"], 1),
+            "loss_delta": round(a_loss - a["rating"], 1),
+        },
+        "opponent": {
+            "steam_id": b["steam_id"], "display_name": b["display_name"],
+            "rating": round(b["rating"], 1),
+            "win_delta": round(b_win - b["rating"], 1),
+            "loss_delta": round(b_loss - b["rating"], 1),
+        },
+        "win_probability": round(win_prob, 3),
+    }
+
+
+@app.get("/api/v1/players/{steam_id}/matches/summary", tags=["Players"])
+async def get_player_matches_summary(steam_id: str, db: AsyncSession = Depends(get_db)):
+    """Totals for the My Stats history pager (v1.33 lazy loading): the client
+    now loads history in chunks but still shows the full page count. Mirrors
+    get_player_matches' WHERE exactly (1v1 feed: both orientations, team_
+    rooms excluded). ranked_groups matches the client's GroupBySeries units:
+    one group per distinct series + one per legacy series-less ranked match."""
+    result = await db.execute(select(Player).where(Player.steam_id == steam_id))
+    player = result.scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+    row = (await db.execute(text("""
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE COALESCE(m.is_ranked, false)) AS ranked_matches,
+               COUNT(*) FILTER (WHERE NOT COALESCE(m.is_ranked, false)) AS casual_matches,
+               COUNT(DISTINCT m.series_id) FILTER
+                   (WHERE COALESCE(m.is_ranked, false) AND m.series_id IS NOT NULL)
+                 + COUNT(*) FILTER
+                   (WHERE COALESCE(m.is_ranked, false) AND m.series_id IS NULL) AS ranked_groups
+        FROM matches m
+        WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+          AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
+    """), {"pid": player.id})).mappings().first()
+    return {"total": int(row["total"]), "ranked_matches": int(row["ranked_matches"]),
+            "casual_matches": int(row["casual_matches"]),
+            "ranked_groups": int(row["ranked_groups"])}
 
 
 # ── Routes: Match History ──────────────────────────────────────
@@ -3378,12 +3540,144 @@ async def queue_count(steam_id: str | None = Query(None), db: AsyncSession = Dep
 
 
 @app.get("/api/v1/presence/ping", tags=["Queue"])
-async def presence_ping(steam_id: str = Query(..., max_length=20)):
+async def presence_ping(steam_id: str = Query(..., max_length=20),
+                        db: AsyncSession = Depends(get_db)):
     """Presence heartbeat (v1.29). The mod's always-on loop calls this every
     ~60s while the game is running; the response carries the current online
-    count for the queue tab's 'N online' readout. In-memory only."""
+    count for the queue tab's 'N online' readout. Since v1.33 the ping also
+    stamps players.last_seen (throttled to one write per 5 min per player)
+    so the Home tab's 'recently online' list stays fresh."""
     _presence_touch(steam_id)
+    if _presence_db_stamp_ok(steam_id):
+        try:
+            await db.execute(text(
+                "UPDATE players SET last_seen = NOW() "
+                "WHERE steam_id = :sid AND deleted_at IS NULL"
+            ), {"sid": steam_id})
+            await db.commit()
+        except Exception as ex:
+            print(f"[PRESENCE] last_seen stamp failed for {steam_id}: {ex}")
     return {"online": _presence_online_count()}
+
+
+@app.get("/api/v1/presence/online", tags=["Queue"])
+async def presence_online(db: AsyncSession = Depends(get_db)):
+    """Who's online right now + recently online, for the Home tab (v1.33).
+
+    'online' = mod clients seen by the presence ping in the last 3 minutes;
+    'recent' = mod users (mod_seen_at set) whose last_seen is within 48h but
+    who aren't in the online set. Players with appear_offline=true are
+    excluded from BOTH lists (the anonymous count still includes them).
+    Entries carry the player's displayed title (dynamic rank/podium titles
+    resolved live, same as the leaderboard). Key order is load-bearing for
+    the mod's manual parser: display_name first, minutes_ago last."""
+    online_ids = _presence_online_ids()
+    online_count = len(online_ids)
+
+    online_rows = []
+    if online_ids:
+        online_rows = (await db.execute(text("""
+            SELECT p.display_name, p.steam_id, p.id::text AS player_id,
+                   COALESCE(gr.rating, 1500) AS rating,
+                   si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,
+                   0 AS minutes_ago
+            FROM players p
+            LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+            LEFT JOIN shop_items si ON si.id = p.active_title_id
+            WHERE p.steam_id = ANY(:sids)
+              AND p.deleted_at IS NULL
+              AND p.appear_offline = FALSE
+            ORDER BY rating DESC
+            LIMIT 40
+        """), {"sids": online_ids})).mappings().all()
+
+    recent_rows = (await db.execute(text("""
+        SELECT p.display_name, p.steam_id, p.id::text AS player_id,
+               COALESCE(gr.rating, 1500) AS rating,
+               si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,
+               GREATEST(0, EXTRACT(EPOCH FROM (NOW() - p.last_seen)) / 60)::int AS minutes_ago
+        FROM players p
+        LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+        LEFT JOIN shop_items si ON si.id = p.active_title_id
+        WHERE p.last_seen > NOW() - INTERVAL '48 hours'
+          AND p.mod_seen_at IS NOT NULL
+          AND p.deleted_at IS NULL
+          AND p.appear_offline = FALSE
+          AND NOT (p.steam_id = ANY(:sids))
+        ORDER BY p.last_seen DESC
+        LIMIT 15
+    """), {"sids": online_ids or [""]})).mappings().all()
+
+    _colors = await _rank_colors(db)
+    _pmap = await _podium_map(db) if any(
+        r["title_sku"] == TITLE_PODIUM_SKU for r in list(online_rows) + list(recent_rows)) else {}
+
+    def _entry(r) -> dict:
+        _title, _tcolor = _display_title_sync(
+            _colors, r["title_sku"], r["title"], r["title_color"], float(r["rating"]),
+            podium_pos=_pmap.get(r["player_id"]))
+        return {"display_name": r["display_name"], "steam_id": r["steam_id"],
+                "rating": int(r["rating"]), "title": _title or "",
+                "title_color": _tcolor or "", "minutes_ago": int(r["minutes_ago"])}
+
+    return {
+        "online_count": online_count,
+        "online": [_entry(r) for r in online_rows],
+        "recent": [_entry(r) for r in recent_rows],
+    }
+
+
+@app.post("/api/v1/internal/release-posts", tags=["Internal"])
+async def push_release_posts(payload: dict, request: Request,
+                             db: AsyncSession = Depends(get_db)):
+    """Bot-only (X-Internal-Key): mirror messages from the #scr-releases
+    Discord channel into release_posts (migration 127) so the Home tab can
+    show update notes as they're POSTED, not just when the client updates.
+    Upsert by discord_message_id — edits re-push and overwrite content."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or request.headers.get("X-Internal-Key", "") != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    posts = payload.get("posts") or []
+    stored = 0
+    for p in posts[:50]:
+        mid = str(p.get("discord_message_id") or "")[:24]
+        content = (p.get("content") or "").strip()[:4000]
+        if not mid or not content:
+            continue
+        try:
+            posted_at = datetime.fromisoformat(str(p.get("posted_at")).replace("Z", "+00:00"))
+        except Exception:
+            posted_at = datetime.now(timezone.utc)
+        await db.execute(text("""
+            INSERT INTO release_posts (discord_message_id, author, content, posted_at)
+            VALUES (:mid, :author, :content, :posted_at)
+            ON CONFLICT (discord_message_id)
+            DO UPDATE SET content = EXCLUDED.content, author = EXCLUDED.author
+        """), {"mid": mid, "author": (p.get("author") or "")[:64],
+               "content": content, "posted_at": posted_at})
+        stored += 1
+    await db.commit()
+    return {"status": "ok", "stored": stored}
+
+
+@app.get("/api/v1/releases/recent", tags=["Players"])
+async def get_recent_releases(limit: int = Query(3, ge=1, le=10),
+                              db: AsyncSession = Depends(get_db)):
+    """Newest #scr-releases posts for the Home tab (v1.33). Key order is
+    load-bearing for the mod's manual parser: author first, posted_at last."""
+    rows = (await db.execute(text("""
+        SELECT author, content, posted_at
+        FROM release_posts
+        ORDER BY posted_at DESC
+        LIMIT :lim
+    """), {"lim": limit})).mappings().all()
+    return {
+        "posts": [
+            {"author": r["author"], "content": r["content"],
+             "posted_at": r["posted_at"].isoformat()}
+            for r in rows
+        ]
+    }
 
 
 class RankRoleColorPush(BaseModel):
@@ -4822,6 +5116,34 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
     }
 
 
+@app.get("/api/v1/shop/newest", tags=["Shop"])
+async def newest_shop_items(limit: int = Query(6, ge=1, le=20),
+                            db: AsyncSession = Depends(get_db)):
+    """Most recently added shop items, for the Home tab's 'newest cosmetics'
+    panel (v1.33). Excludes achievement-pool items and not-for-sale-yet
+    artist items (stock_limit = -1). Key order is load-bearing for the mod's
+    manual parser: sku first, artist_name last within each entry."""
+    rows = (await db.execute(text("""
+        SELECT si.sku, si.kind, si.name, si.rarity, si.price, si.preview_color,
+               COALESCE(ap.display_name, '') AS artist_name
+        FROM shop_items si
+        LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
+        WHERE si.rotation_pool IS NULL
+          AND COALESCE(si.stock_limit, 0) >= 0
+        ORDER BY si.created_at DESC
+        LIMIT :lim
+    """), {"lim": limit})).mappings().all()
+    return {
+        "items": [
+            {"sku": r["sku"], "kind": r["kind"], "name": r["name"],
+             "rarity": r["rarity"], "price": r["price"],
+             "preview_color": r["preview_color"] or "",
+             "artist_name": r["artist_name"] or ""}
+            for r in rows
+        ]
+    }
+
+
 @app.get("/api/v1/players/{steam_id}/inventory", tags=["Shop"])
 async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
     """Titles + trails the player has purchased."""
@@ -5064,6 +5386,35 @@ async def set_hide_gold(
     player.hide_gold = bool(on)
     await db.commit()
     return {"status": "set", "hide_gold": player.hide_gold}
+
+
+@app.post("/api/v1/players/{steam_id}/appear-offline", tags=["Players"])
+async def set_appear_offline(
+    steam_id: str,
+    on: bool = Query(..., description="True to hide from online/recently-online lists"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle the appear-offline privacy setting (Home tab lists, v1.33).
+    Free setting — no ownership gate. HMAC signs 'appear_offline:{steam_id}:{1|0}'.
+    The anonymous online count still includes the player."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"appear_offline:{steam_id}:{1 if on else 0}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    player.appear_offline = bool(on)
+    await db.commit()
+    return {"status": "set", "appear_offline": player.appear_offline}
 
 
 @app.post("/api/v1/players/{steam_id}/color-toggle", tags=["Shop"])

@@ -158,6 +158,13 @@
     <CosmeticArtToCopy Include="cosmetics\*.png" />
   </ItemGroup>
 
+  <!-- Home-tab logo: EMBEDDED in the DLL (not a loose file) because the
+       auto-updater ships the DLL alone — a beside-the-DLL asset would vanish
+       for auto-updated installs. NativeUI resolves it by manifest-name suffix. -->
+  <ItemGroup>
+    <EmbeddedResource Include="assets\logo.png" />
+  </ItemGroup>
+
   <Target Name="CopyToPlugins" AfterTargets="Build">
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds" />
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cards" />

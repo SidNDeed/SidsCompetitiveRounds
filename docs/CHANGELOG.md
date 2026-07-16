@@ -1,5 +1,39 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.32.1 — RELEASED 2026-07-16 — Home tab, FAQ helper bot, /compare pages
+
+**Headline: a new Home landing tab + a FAQ auto-responder bot.** The F5 menu now opens on a Home splash page (logo, live #scr-releases notes, newest cosmetics with real art, an online/recently-online players list, plus the Discord Link + chat moved here). A Discord + in-game FAQ bot auto-answers ~30 common questions server-wide. /compare gained First/Prev/Next/Last pages and a head-to-head top-cards section. My Stats history now lazy-loads. Card Stats + Achievements became My Stats sub-tabs, and the "T stops opening chat" bug got its real fix.
+
+### Feedback round (Sid's 9 items, July 16)
+- **Home layout**: chat swapped into the wide right column under Latest Releases and grew 160→240px (it was a cramped corner box); Newest Cosmetics took the old chat slot in the left column.
+- **Latest Releases now reads the #scr-releases channel**, not GitHub: the bot mirrors every post (its own GitHub announcements AND manual posts, edits included, last-10 backfill at startup) into a new `release_posts` table (migration `127`); the Home tab reads `GET /releases/recent` and falls back to GitHub only when the mirror is empty/unreachable. Posts render up to 2500 chars each in the scrollable panel.
+- **New Home logo** (crown character art, embedded in the DLL).
+- **Card Stats + Achievements are now My Stats sub-tabs** — standard centered sub-tab bar under the main tabs, same as Multiplayer's; main bar shrinks to 8 groups.
+- **Chat-T root fix**: the "T stops opening chat" guard checked `isActiveAndEnabled` on the selected input field — ROUNDS never clears the EventSystem selection, so touching any input field killed T for the session. The check is now `isFocused` (true only while a caret is actually consuming keystrokes).
+- **Players block**: entries now show the player's displayed title (dynamic rank/podium titles resolved live, like the leaderboard) beside name + elo; last-seen is coarse by design — "recently online" under an hour, flat hours after.
+- **My Stats history lazy-loads** (item 8): 400-row head chunk on open instead of 2000, next chunk auto-fetched as the pager nears the end of what's loaded; the pager still shows the FULL page count via new `GET /players/{id}/matches/summary` (exact ranked-group + casual totals). Session Info's "vs Name lifetime" now uses the server's H2H (whole matches table) so old opponents are still recognized regardless of the loaded window.
+- **Newest Cosmetics now shows the art** (follow-up): the block grew (300px, taking flex space from the Players list) and renders real cosmetic thumbnails — animated frames included, cycled by the same ticker as the shop (gate widened from shop-only to shop+Home). Kinds with no shipped PNG (titles/trails/colors/nametags) show a `preview_color` swatch.
+
+---
+
+### Client (mod)
+- **New Home tab** — the F5 menu's landing page (leads the tab bar; the menu opens here on first build each session). Big logo up top (embedded in the DLL so auto-updated installs get it too), latest 3 GitHub release notes, newest shop cosmetics, and a live **online / recently-online players** list (15s refresh while the tab is open).
+- **Discord Link panel and the T-chat panel moved from My Stats to Home** — My Stats keeps rating/XP/records/session; Home is the social hub. `/link` instructions updated to match.
+- **Appear offline** — new Settings toggle (server-synced) that hides you from the Home tab's online/recently-online lists. The anonymous online count still includes you.
+
+### Server (to deploy — migration `126` FIRST, then API+bot)
+- `GET /presence/online` — online (presence dict joined to names/ratings) + recently-online (last_seen within 48h, mod users only), both filtered by the new `players.appear_offline` column; presence pings now stamp `players.last_seen` (throttled to one write / 5 min / player).
+- `POST /players/{id}/appear-offline` — HMAC-signed toggle (`appear_offline:{id}:{1|0}`), no ownership gate; `appear_offline` added to the stats response.
+- `GET /shop/newest` — most recent shop items (excludes achievement-pool and not-for-sale artist items) for the Home tab.
+- `GET /players/{a}/vs/{b}/top-cards` — per-player top cards over the pair's mutual matches (feeds /compare).
+- `GET /players/{id}/rating-preview?opponent_steam_id=` — hypothetical Glicko-2 win/loss deltas + win probability (feeds the FAQ bot's elo calculator).
+- Migration `126_appear_offline_and_home.sql` — `players.appear_offline` + `last_seen` index.
+
+### Discord bot
+- **FAQ auto-responder** — answers ~30 common questions (install, ranked rules, modpack code, economy, betting, tournaments, artist program, rank thresholds, achievements, …) with two-layer matching (keyword regexes + fuzzy match on canonical phrasings, so rephrased questions still land). Answers in the channel where asked; questions asked in the in-game chat bridge are answered in-game (ASCII-safe short form) AND mirrored to the bridge channel. Cooldowns: one answer per topic per channel per 3 min, one per user per 20s. Dynamic answers: top player (live leaderboard), "how much elo vs @player" (live Glicko preview), rank-role table generated from the live threshold list. `/faq [question]` lists topics or answers on demand (no cooldown).
+- **/compare pagination** — First/Prev/Next/Last buttons page through ALL mutual games (5/page, 15-min timeout, buttons grey out after). Previously hard-capped at 6 games with no buttons.
+- **/compare top cards** — new "Most-picked cards vs each other" section: each player's 6 most-picked cards across every mutual game (server aggregate, covers games beyond the history window).
+
 ## v1.32.0 — RELEASED 2026-07-14
 
 **Headline: the July 14 feature batch** — podium presence everywhere (top-3 leaderboard highlights + a dynamic sparkling 1st/2nd/3rd Place title + 3x XP for beating a podium holder), 1000g slayer achievements with back-pay, tournament Discord feeds + availability-check DMs with Yes/No buttons, four new FPS/accessibility settings, a reordered shop, and a big Discord bot expansion (reworked /rank + /stats, /mystats, /cards, /graph charts, head-to-head /compare, 50-row leaderboard, live tournament board).

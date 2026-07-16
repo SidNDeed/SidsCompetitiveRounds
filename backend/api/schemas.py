@@ -152,6 +152,9 @@ class PlayerStatsResponse(BaseModel):
     # Hide-gold utility: true when this player has the toggle on (gold masked on
     # the leaderboard). The client uses this to render the Other-tab toggle state.
     hide_gold: bool = False
+    # Appear-offline toggle: true when this player is hidden from the Home tab's
+    # online/recently-online lists. Renders the Settings-tab toggle state.
+    appear_offline: bool = False
     # Multi-equip map colors (v1.23+). The client cycles through this ordered list with
     # Left Shift in-game. Empty list → no equipped map colors → ArtHandler.NextArt falls
     # through to ROUNDS' vanilla random rotation. active_color_sku above is kept for

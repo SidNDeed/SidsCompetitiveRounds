@@ -133,6 +133,11 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_detail_dark_aura",     DisplayName = "Dark Aura",        Slot = CharacterItemType.Detail, PngFile = "detail_dark_aura.png",     Scale = 1.45f, Offset = new Vector2(0f, 0.05f), Fps = 7f },
             new CosmeticDef { Sku = "face_detail_energy_orbs",   DisplayName = "Energy Orbs",      Slot = CharacterItemType.Detail, PngFile = "detail_energy_orbs.png",   Scale = 1.0f, Offset = new Vector2(0f, 0.05f), Fps = 7f },
             new CosmeticDef { Sku = "face_detail_tattered_cape", DisplayName = "Tattered Cape",    Slot = CharacterItemType.Detail, PngFile = "detail_tattered_cape.png", Scale = 1.7f, Offset = new Vector2(0f, -0.10f) },
+            // July 15: Nix's animated crown — 13 frames @ 3.6fps (twinkling lights +
+            // pulsing star; ~3.6s loop — slowed from 9fps per Sid, a calmer flash).
+            // Widest animated set so far; exercises the __fN loader past 4 frames.
+            // Wide arch, so it sits high like the other crowns.
+            new CosmeticDef { Sku = "face_detail_party_crown",   DisplayName = "Party Crown",      Slot = CharacterItemType.Detail, PngFile = "detail_party_crown.png",   Scale = 1.2f, Offset = new Vector2(0f, 0.55f), Fps = 3.6f },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

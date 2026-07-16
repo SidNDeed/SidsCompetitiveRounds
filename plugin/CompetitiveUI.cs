@@ -2357,11 +2357,6 @@ namespace CompetitiveRounds
                 if (current == null) return false;
                 var selected = s_eventSystemSelectedProp?.GetValue(current) as GameObject;
                 if (selected == null) return false;
-                // The selected GameObject can linger after its InputField has been hidden — closing
-                // the other chat doesn't always clear EventSystem.currentSelectedGameObject. So
-                // also require the GO to be active in the hierarchy AND the InputField component
-                // to be enabled. Without these checks, T chat stays blocked indefinitely after
-                // pressing Enter once.
                 if (!selected.activeInHierarchy) return false;
                 foreach (var co in selected.GetComponents<Component>())
                 {
@@ -2369,11 +2364,25 @@ namespace CompetitiveRounds
                     string n = co.GetType().Name;
                     if (n != "InputField" && n != "TMP_InputField" && !n.EndsWith("InputField"))
                         continue;
-                    // Behaviour.isActiveAndEnabled covers both the GO and the component being on.
+                    // v1.33 root fix (Sid's item 5, "chat sometimes disables itself"):
+                    // the old check used isActiveAndEnabled, but a field stays SELECTED
+                    // + enabled long after the user stops typing (ROUNDS never clears
+                    // EventSystem.currentSelectedGameObject) — so T went permanently
+                    // dead after touching any input field. isFocused is the signal
+                    // that actually means "this field is consuming keystrokes": true
+                    // only while the caret is live. Both InputField and TMP_InputField
+                    // expose it; unknown InputField-ish types fall back to the old
+                    // conservative isActiveAndEnabled check.
+                    var focProp = co.GetType().GetProperty("isFocused",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    if (focProp != null)
+                    {
+                        if ((bool)focProp.GetValue(co)) return true;
+                        continue;
+                    }
                     var isAEProp = co.GetType().GetProperty("isActiveAndEnabled",
                         System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                    bool live = isAEProp != null && (bool)isAEProp.GetValue(co);
-                    if (live) return true;
+                    if (isAEProp != null && (bool)isAEProp.GetValue(co)) return true;
                 }
                 return false;
             }

@@ -150,7 +150,7 @@ async def _handle_ticket_dm(message):
             "💬 To add to one of your bug reports, DM me like:\n"
             "`#12 it still happens after relaunching`\n"
             "(use your report number — shown when you submit, and in the F5 bug list). "
-            "Your Discord must be linked in-game first: F5 → My Stats → Get Link Code, then `!link YOUR_CODE` here."
+            "Your Discord must be linked in-game first: F5 → Home tab → Get Link Code, then `!link YOUR_CODE` here."
         )
         return
     num = int(m.group(1))
@@ -177,7 +177,7 @@ async def _handle_ticket_dm(message):
             elif status == 403:
                 await message.channel.send(
                     f"❌ Bug report **#{num}** isn't linked to your account (or it isn't yours). "
-                    "Make sure your Discord is linked in-game: F5 → My Stats → Get Link Code, then `!link YOUR_CODE` here."
+                    "Make sure your Discord is linked in-game: F5 → Home tab → Get Link Code, then `!link YOUR_CODE` here."
                 )
             elif status == 404:
                 await message.channel.send(f"❌ I couldn't find bug report **#{num}** — double-check the number.")
@@ -261,6 +261,8 @@ async def on_ready():
     # One-shot backfill — resolve Discord usernames for any player that was
     # linked before the discord_username column existed.
     asyncio.create_task(backfill_discord_usernames())
+    # One-shot mirror of the last few #scr-releases posts (v1.33 Home tab).
+    asyncio.create_task(backfill_release_posts())
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
 
 
@@ -306,8 +308,985 @@ async def backfill_discord_usernames():
     print(f"[BACKFILL] Resolved {resolved}/{len(ids)} Discord usernames")
 
 
+# ══ FAQ auto-responder (v1.33) ═══════════════════════════════════════════
+# Answers common questions automatically, in Discord AND in the in-game chat
+# bridge. Matching is two-layer: tolerant keyword regexes (strong signal),
+# then difflib fuzzy match against canonical example questions (catches
+# rephrasings). Cooldowns keep it from spamming: one answer per topic per
+# channel per 3 min, one answer per user per 20s.
+import re as _faq_re
+import time as _faq_time
+import difflib as _faq_difflib
+
+FAQ_INFO_CHANNEL = "<#1159243585309384805>"       # #ranked-information
+FAQ_INSTALL_CHANNEL = "<#1491701002267791401>"    # #scr-competitive-rounds-how-to-install
+FAQ_MODPACK_CODE = "019f642f-9c88-f5f7-5199-41b4b7d30ebf"
+FAQ_THUNDERSTORE_URL = "https://thunderstore.io/c/rounds/p/Team_Sid/SidsCompetitiveRounds/"
+FAQ_HELPER_NAME = "SCR Helper"
+
+_FAQ_KEY_COOLDOWN = 180.0   # same topic, same channel/scope
+_FAQ_USER_COOLDOWN = 20.0   # any topic, same asker
+_faq_key_at: dict = {}
+_faq_user_at: dict = {}
+
+
+def _faq_rate_ok(scope, key, user_key) -> bool:
+    """Check + stamp both cooldowns atomically (synchronous, no awaits)."""
+    now = _faq_time.monotonic()
+    if now - _faq_key_at.get((scope, key), 0.0) < _FAQ_KEY_COOLDOWN:
+        return False
+    if user_key is not None and now - _faq_user_at.get(user_key, 0.0) < _FAQ_USER_COOLDOWN:
+        return False
+    _faq_key_at[(scope, key)] = now
+    if user_key is not None:
+        _faq_user_at[user_key] = now
+    return True
+
+
+def _faq_norm(text: str) -> str:
+    """Lowercase, strip mention/emoji tokens and curly quotes, collapse spaces."""
+    t = (text or "").lower()
+    t = _faq_re.sub(r"<[@#:][^>]{0,40}>", " ", t)   # <@id> <#id> <:emoji:id>
+    t = t.replace("’", "'").replace("‘", "'")
+    t = _faq_re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+_FAQ_QUESTION_RE = _faq_re.compile(
+    r"(\?|^(how|what|whats|what's|where|when|who|whos|who's|why|can|could|does|do|is|are|any|which|help)\b"
+    r"|\b(how do i|how to|what is|where is|can i|does the|is there|anyone know))")
+
+
+def _faq_question_like(norm: str) -> bool:
+    return bool(_FAQ_QUESTION_RE.search(norm))
+
+
+def _faq_plainify(text: str, cap: int = 420) -> str:
+    """Discord-markdown answer -> ASCII-safe in-game chat text. ROUNDS' SDF
+    font renders em-dash/bullets/multiplication-sign as squares (learning
+    #47), and channel mentions are meaningless in-game."""
+    t = _faq_re.sub(r"<#\d+>", "the Discord server", text)
+    t = _faq_re.sub(r"<@!?\d+>", "them", t)
+    t = t.replace("**", "").replace("__", "").replace("`", "")
+    for bad, good in (("—", "-"), ("–", "-"), ("×", "x"), ("•", "-"),
+                      ("→", "->"), ("’", "'"), ("“", '"'), ("”", '"'),
+                      ("·", "-"), ("✅", ""), ("❌", "")):
+        t = t.replace(bad, good)
+    t = "".join(ch if ord(ch) < 128 else " " for ch in t)
+    t = _faq_re.sub(r"[ \t]+", " ", t)
+    t = _faq_re.sub(r"\n{2,}", "  ", t).replace("\n", "  ").strip()
+    if len(t) > cap:
+        t = t[:cap - 3].rstrip() + "..."
+    return t
+
+
+def _rank_roles_faq_answer() -> str:
+    lines = "\n".join(f"• {name}" for _, name in RANK_ROLES)
+    return ("Discord rank roles track your live 1v1 rating (synced every ~30 min, "
+            "needs a linked account — ask me *how do I link my account*). "
+            "Everyone starts at **1500**.\n" + lines)
+
+
+_FAQ_ACHIEVEMENTS_TEXT = (
+    "**40 achievements**, each a one-time challenge paying **100g** "
+    "(the two *Slayer* trophies pay **1000g**; some unlock exclusive titles). "
+    "Track your progress in-game: **F5 → Achievements**.\n"
+    "• **Untouchable** — win a game without taking damage\n"
+    "• **Pacifist** — win a game without firing a shot\n"
+    "• **Immovable Object** — win without moving or jumping\n"
+    "• **Grounded** — win without ever jumping\n"
+    "• **Instinct** — win taking only the left-most card on every pick\n"
+    "• **Silent Assassin / Total Mayhem / Fragile Perfection / No Escape** — 5-0 someone with Sneaky / Mayhem / Glass Cannon / Chase\n"
+    "• **Rise from the Ashes** — win 5-0 with Phoenix without losing a life\n"
+    "• **Bullet Hell / Spray and Pray / Demolitionist / Controlled Burst / Field Medic** — win 5-0 with Barrage / Spray / Explosive Bullet / Burst / Healing Field in your build\n"
+    "• **The Comeback Kid** — win after being down 0-4 · **Clutch** — win from 0-3\n"
+    "• **Stacked Deck** — 5 copies of one card · **Collector** — 4 copies\n"
+    "• **Double Nova / Lumberjack / Pristine Perfection / Living on the Edge** — win with two+ Supernovas / Saws / Pristines / Glass Cannons\n"
+    "• **Silly Drill** — win with Sneaky + Drill · **Sustained Power** — win with Empower + Healing Field\n"
+    "• **God Build** — win with Shields Up, exactly 1 ammo, and a lightning-fast reload\n"
+    "• **Into the Deep End** — win with Abyssal Countdown as your FIRST pick, activating it every round\n"
+    "• **Flawless** — five 5-0 wins in a row\n"
+    "• **Rising Star / Master / Grand Master** — reach 1700 / 2030 / 2330 rating (1v1 or 2v2)\n"
+    "• **Tag Team Sweep** — win a 2v2 game 5-0\n"
+    "• **On Fire / Unstoppable / Immortal** — win 25 / 50 / 100 ranked series in a row\n"
+    "• **Century Club / Casual Conqueror / Touch Grass** — win 100 / 200 / 500 casual games in a row\n"
+    "• **Sid Slayer / Stan Slayer** — beat Sid / Stan in a ranked series (**1000g**)"
+)
+
+
+async def _faq_top_player(message):
+    """Dynamic: read the live leaderboard and name the top player(s)."""
+    data = await api_get("/leaderboard?limit=3&min_matches=1")
+    entries = (data or {}).get("entries") or []
+    if not entries:
+        return "Couldn't reach the leaderboard right now — try `/lb` in a minute."
+    top = entries[0]
+    line = (f"Right now the top-rated player is **{top['display_name']}** at "
+            f"**{top['rating']}** ({top['wins']}W/{top['losses']}L).")
+    if len(entries) >= 3:
+        line += (f"\nPodium: 🥇 {entries[0]['display_name']} ({entries[0]['rating']}) · "
+                 f"🥈 {entries[1]['display_name']} ({entries[1]['rating']}) · "
+                 f"🥉 {entries[2]['display_name']} ({entries[2]['rating']})")
+    line += "\nFull board: `/lb`, the #scr-leaderboard channel, or F5 → Leaderboard in-game."
+    return line
+
+
+async def _faq_elo_delta(message):
+    """Dynamic: Glicko preview between the asker and a mentioned player (or
+    between the first two mentioned players). Mentions are taken from the
+    message CONTENT in text order — Message.mentions is unordered and also
+    includes the replied-to author on ping-replies, which would silently
+    compute the wrong pair."""
+    if message is None:
+        return None
+    by_id = {str(m.id): m for m in message.mentions}
+    mentions, seen_ids = [], set()
+    for mid in _faq_re.findall(r"<@!?(\d+)>", message.content or ""):
+        m = by_id.get(mid)
+        if m is None or m.bot or m.id in seen_ids:
+            continue
+        seen_ids.add(m.id)
+        mentions.append(m)
+    if not mentions:
+        return ("Mention the opponent and I'll calculate it, e.g. "
+                "*how much elo would I gain against @player?* "
+                "(both accounts need to be linked — `/link`).")
+    if len(mentions) >= 2:
+        user_a, user_b = mentions[0], mentions[1]
+    else:
+        user_a, user_b = message.author, mentions[0]
+    link_a = await api_get(f"/players/by-discord/{user_a.id}")
+    if not link_a:
+        return f"❌ {user_a.display_name} isn't linked yet — they need `/link` first."
+    link_b = await api_get(f"/players/by-discord/{user_b.id}")
+    if not link_b:
+        return f"❌ {user_b.display_name} isn't linked yet — they need `/link` first."
+    prev = await api_get(f"/players/{link_a['steam_id']}/rating-preview"
+                         f"?opponent_steam_id={link_b['steam_id']}")
+    if not prev:
+        return "Couldn't compute that right now — try again in a minute."
+    pa, pb = prev["player"], prev["opponent"]
+    prob = prev.get("win_probability", 0.5)
+    return (f"**{pa['display_name']}** ({pa['rating']:.0f}) vs **{pb['display_name']}** ({pb['rating']:.0f}) — "
+            f"if {pa['display_name']} wins the ranked series: **+{pa['win_delta']:.1f}**, "
+            f"if they lose: **{pa['loss_delta']:.1f}**.\n"
+            f"{pb['display_name']}'s side: win **+{pb['win_delta']:.1f}** / loss **{pb['loss_delta']:.1f}**. "
+            f"Win probability for {pa['display_name']}: **{prob * 100:.0f}%**.\n"
+            f"*(Glicko-2 — ratings move per completed BO3 series, and swings shrink "
+            f"as your rating settles.)*"
+)
+
+
+# Entry fields: key, title (embed title), patterns (tolerant regexes over the
+# normalized message — a hit is a strong signal), examples (canonical question
+# phrasings for the fuzzy layer), answer (markdown str) OR handler (async,
+# returns markdown str/None), short (optional explicit in-game text; default
+# is _faq_plainify(answer)), require_question (default True — fuzzy/regex only
+# fires on question-shaped messages; False for statement-shaped complaints),
+# discord_only (default False — True when the answer needs Discord features
+# like mentions). ORDER MATTERS: first regex hit wins, so specific entries
+# sit above general ones.
+FAQ_ENTRIES = [
+    {
+        "key": "elo_delta",
+        "title": "Elo gain/loss calculator",
+        "patterns": [
+            r"how (much|many) (elo|rating|points?).{0,40}(gain|lose|get|win|drop)",
+            r"(gain|lose|win|get|drop).{0,25}(elo|rating|points?).{0,30}(against|vs|playing|if i (beat|play|lose))",
+            r"(elo|rating).{0,20}(gain|lose|change).{0,30}(against|vs)",
+        ],
+        "examples": ["how much elo will i gain if i play against @player",
+                     "how much rating do i lose against @player"],
+        "handler": _faq_elo_delta,
+        "discord_only": True,
+    },
+    {
+        "key": "top_player",
+        "title": "Who's the top player?",
+        "patterns": [
+            r"who('?s| is|s)\b.{0,20}(best|top|highest|number ?(one|1)|#? ?1)",
+            r"(best|top|highest.rated) player",
+            r"who'?s?\b.{0,25}rank(ed)? ?(1|one|first)\b",
+        ],
+        "examples": ["who is the best player", "who is the top player here"],
+        "handler": _faq_top_player,
+    },
+    {
+        "key": "modpack_code",
+        "title": "Modpack code",
+        "patterns": [
+            r"mod ?pack.{0,20}code",
+            r"(what|is there|where|got a?).{0,25}mod ?pack",
+            r"(r2modman|thunderstore).{0,20}(profile|code)",
+            r"profile code",
+        ],
+        "examples": ["what is the modpack code", "is there a modpack code"],
+        "answer": (f"Yes — modpack code: `{FAQ_MODPACK_CODE}`\n"
+                   "In **r2modman** (or the Thunderstore app): **Profiles → Import new profile → "
+                   "Import profile using code**, paste the code, and it builds the exact profile for you. "
+                   "Then **launch ROUNDS through the mod manager**, not plain Steam."),
+        "short": ("Modpack code: " + FAQ_MODPACK_CODE + " - in r2modman: Profiles -> Import new "
+                  "profile -> Import using code, then launch ROUNDS through the mod manager."),
+    },
+    {
+        "key": "mods_not_working",
+        "title": "Mods not working — checklist",
+        "patterns": [
+            r"(mod|mods|scr|bepinex|plugin).{0,40}(not|isn'?t|aren'?t|won'?t|wont|stopped|broken|doesn'?t|dont|don'?t).{0,20}(work|load|show|start|open|run)",
+            r"help.{0,20}(my )?mods?\b",
+            r"mod (is )?disabled",
+            r"f5 (does nothing|not work|doesn'?t work|wont work|won'?t work)",
+        ],
+        "examples": ["help, my mods aren't working", "the mod won't load", "mod not working"],
+        "require_question": False,
+        "answer": ("Quick checklist:\n"
+                   "1. **ROUNDS version** — SCR needs the **current** ROUNDS (v1.1.2) on the **default** Steam branch. "
+                   "The `old-rounds-for-mods` beta branch is for every *other* ROUNDS mod — SCR won't run there "
+                   "(and other mods won't run on current ROUNDS).\n"
+                   "2. **No other mods** — SCR disables itself if it detects any other BepInEx plugin. "
+                   "Use a clean r2modman profile with only SCR.\n"
+                   "3. **Thunderstore installs must launch through the mod manager**, not plain Steam.\n"
+                   "4. Restart ROUNDS and press **F5** — if the menu opens, you're good.\n"
+                   "5. Still broken? Reinstall with `CompetitiveRoundsInstaller.exe` from the #releases pins, "
+                   "and file a bug report (**F5 → Settings → Report a Bug**, tick *attach log*).\n"
+                   f"Full install walkthrough: {FAQ_INSTALL_CHANNEL}"),
+    },
+    {
+        "key": "vanilla_lobbies",
+        "title": "Vanilla lobbies & normal matchmaking",
+        "patterns": [
+            r"(vanilla|normal|regular|unmodded|casual).{0,30}(lobby|lobbies|lobbys|matchmaking|quick ?match)",
+            r"(does|is).{0,15}(normal|regular|vanilla).{0,15}matchmaking.{0,15}(work|still)",
+            r"play with.{0,25}(friends|people|players).{0,20}without.{0,15}mod",
+            r"(still )?play.{0,15}(against|with).{0,15}(vanilla|unmodded|normal) players?",
+        ],
+        "examples": ["can i still play in vanilla lobbies", "does normal matchmaking still work"],
+        "answer": ("**Yes.** Normal Photon matchmaking and vanilla lobbies work exactly as before with the mod "
+                   "installed — Sid was given permission by Landfall to publish the mod with normal matchmaking "
+                   "enabled, as long as it doesn't change gameplay or inhibit unmodded players.\n"
+                   "Games against vanilla (unmodded) players simply record as **casual** — they can never be ranked."),
+    },
+    {
+        "key": "other_mods",
+        "title": "Compatibility with other mods",
+        "patterns": [
+            r"(work|compatible|compatibility|use|run).{0,25}other mods",
+            r"other mods.{0,25}(work|compatible|allowed|ok)",
+            r"can i (use|run|add|install).{0,20}(another|other|more) mods?",
+            r"(willow|pykess|unbound|moddingutils).{0,20}(work|compatible)",
+        ],
+        "examples": ["does the mod work with other mods", "can i use other mods with this"],
+        "answer": ("**No** — there are no compatible mods, and all other mods are blacklisted. SCR is a competitive "
+                   "mod: it **disables itself at launch** if it detects any other BepInEx plugin, to keep matches fair.\n"
+                   "Use a clean r2modman profile with only SCR. (Other ROUNDS mods target the `old-rounds-for-mods` "
+                   "beta branch anyway, so they wouldn't run alongside SCR's current-version requirement.)"),
+    },
+    {
+        # Sits ABOVE the ranked/2v2 cluster: "how does 2v2 betting work" must
+        # land here, not on how_2v2's looser '2v2 ... work' pattern.
+        "key": "gambling",
+        "title": "How betting works",
+        "patterns": [
+            r"how.{0,25}(gambling|betting|bets?|gamble|wager).{0,15}(work|works)",
+            r"(explain|what is).{0,15}(the )?(gambling|betting|bets? system)",
+            r"how (do|can) i (bet|gamble|wager)",
+        ],
+        "examples": ["how does the gambling system work", "how do i bet on games"],
+        "answer": ("You bet **gold** on other players' **live ranked series**:\n"
+                   "• **In-game**: F5 → Leaderboard tab → the live-series panel. **Discord**: the live-bet buttons "
+                   "the bot posts in the bets channel (needs a linked account — `/link`).\n"
+                   "• Stake **1–2000g**, one bet per series, and you can't bet on your own match.\n"
+                   "• **Odds** come from Glicko win-probability: 1.01×–3.0× payout. The cap shrinks when either "
+                   "player's rating is still uncertain (no farming fresh accounts), and bets under 1.10× are "
+                   "rejected as no-profit.\n"
+                   "• Bets **lock** once game 1 reaches 2 points (3 in private rooms) or any game is decided.\n"
+                   "• Payout = stake × odds. If a series never finishes, stakes **auto-refund** (~1 hour).\n"
+                   "• Want a ping when betting opens? Grab the **Gambler** role — react 🎲 on the signup message "
+                   "in the bets channel."),
+    },
+    {
+        "key": "game_not_counted",
+        "title": "Why didn't my game count as ranked?",
+        "patterns": [
+            r"(game|match|series|win).{0,30}(didn'?t|didnt|not|never|no).{0,15}(count|record|show|track|register)",
+            r"missing (game|match|elo|rating|series)",
+            r"(didn'?t|didnt|not) (get|gain|lose) (any )?(elo|rating)",
+            r"why.{0,15}(casual|unranked).{0,25}(instead|not ranked)",
+        ],
+        "examples": ["why didn't my game count as ranked", "my match didn't record"],
+        "require_question": False,
+        "answer": ("A match records as **ranked** only when **both** players have the mod running **and** ranked "
+                   "enabled (F5 → Ranked tab). Everything else records as casual — still tracked, no rating change.\n"
+                   "• Games vs vanilla players can never be ranked.\n"
+                   "• Queue matches are always ranked (queueing is consent).\n"
+                   "• Ranked is a **best-of-3 series** — rating applies when the series **completes**, not per game.\n"
+                   "• Interrupted series (crash/DC) **resume where they left off** — just rematch the same player, "
+                   "up to 7 days later.\n"
+                   "If a game is genuinely missing, file a bug report: F5 → Settings → Report a Bug (attach log)."),
+    },
+    {
+        "key": "ranked_explained",
+        "title": "How ranked works",
+        "patterns": [
+            r"how (does|do) (the )?(ranked|rating|elo( system)?|ranking|glicko|series) (system )?work",
+            r"(explain|what is) (ranked|the ranked system|elo|the elo system|glicko)",
+            r"what.{0,10}(bo3|best of (3|three))",
+        ],
+        "examples": ["how does ranked work", "explain the ranked system",
+                     "how does the elo system work"],
+        "answer": ("• Ranked plays as a **best-of-3 series** vs the same opponent — first to 2 game wins. Your "
+                   "**Glicko-2** rating updates when the series completes (that's elo with an uncertainty value: "
+                   "new/returning players swing harder, established ratings move less).\n"
+                   "• Both players need the mod + ranked enabled; queue matches are always ranked.\n"
+                   "• Interrupted series resume on rematch, up to 7 days.\n"
+                   "• Leaving mid-series counts as a DC on your leave %, which is visible on the leaderboard.\n"
+                   "• Your rating drives the **rank roles on the Discord sidebar** (Beginner → Intermediate → "
+                   "Advanced → Master → Grand Master) — ask me *what are the elo requirements for each rank* for "
+                   "the full table.\n"
+                   f"More detail: {FAQ_INFO_CHANNEL}"),
+    },
+    {
+        "key": "turn_off_ranked",
+        "title": "Playing casual only",
+        "patterns": [
+            r"(turn|switch|toggle).{0,10}(off|disable).{0,10}ranked",
+            r"ranked off\b",
+            r"play (only )?casuals? only",
+            r"(disable|opt out of) ranked",
+        ],
+        "examples": ["how do i turn ranked off", "can i play casual only"],
+        "answer": ("F5 → Ranked tab → the **Enable/Disable** button. With ranked off, your games record as casual "
+                   "(stats tracked, no rating change) — and none of your opponents' games vs you can be ranked "
+                   "either, since ranked needs **both** players opted in."),
+    },
+    {
+        "key": "how_2v2",
+        "title": "How 2v2 works",
+        "patterns": [
+            r"how.{0,25}(play|do|start|queue|join).{0,10}2 ?v ?2",
+            r"2 ?v ?2.{0,20}(work|works|queue|ranked|rating)",
+            r"(team|duo) (ranked|queue)",
+        ],
+        "examples": ["how do i play 2v2s", "how does 2v2 ranked work"],
+        "answer": ("**F5 → Multiplayer → 2v2.** Two queues:\n"
+                   "• **Search Random** — solo/duo queue, teams auto-balanced by rating.\n"
+                   "• **Find Custom Lobby** — you pick your team: grab 3 friends, everyone joins the lobby queue, "
+                   "it locks as soon as 4 are in (no rating filter — playing with your friends is the point).\n"
+                   "2v2 has its **own Glicko rating and leaderboard**, plus its own gold/XP (600 XP base per game, "
+                   "~900 on a win; 50g series win / 25g loss). Series are BO3 like 1v1; the crown renders on both "
+                   "members of the leading team.\n"
+                   "Known issues: the big recording bugs were fixed in v1.31 — if a series looks unrecorded, "
+                   "file a bug report (F5 → Settings → Report a Bug) so it can be chased down."),
+    },
+    {
+        "key": "play_ranked",
+        "title": "How to play ranked",
+        "patterns": [
+            r"how.{0,30}\b(play|start|queue|join|get into)\b.{0,15}ranked",
+            r"how.{0,20}(play|join|start).{0,20}(here|competitive|comp|scr)",
+            r"where.{0,20}(ranked )?queue",
+        ],
+        "examples": ["how do i play ranked here", "how do I queue for ranked"],
+        "answer": (f"Start here: {FAQ_INFO_CHANNEL} — then install the mod: {FAQ_INSTALL_CHANNEL}\n"
+                   "The short version:\n"
+                   "1. Install **Sid's Competitive Rounds** (installer from the #releases pins, or Thunderstore).\n"
+                   "2. Launch ROUNDS, accept the consent prompt, press **F5** → Ranked tab → **Search Ranked**.\n"
+                   "3. When a match is found you have 90s to click **Ready** — the mod auto-connects both players.\n"
+                   "Private-room games between two modded, ranked-enabled players also count as ranked."),
+        "short": ("Install the mod (see the how-to-install channel on Discord), then in ROUNDS press F5 -> "
+                  "Ranked tab -> Search Ranked. When matched, click Ready within 90s and it auto-connects."),
+    },
+    {
+        "key": "modes_1v2_ffa",
+        "title": "1v2 and FFA",
+        "patterns": [
+            r"\b1 ?v ?2\b",
+            r"(what|how).{0,15}(is|about|play).{0,10}(ffa|free ?for ?all)",
+            r"solo (vs|versus|against) duo",
+        ],
+        "examples": ["what is 1v2", "how do i play 1v2", "when is ffa coming"],
+        "answer": ("• **1v2** (solo vs duo) is live as an **unranked beta** — queue from **F5 → Multiplayer → 1v2**. "
+                   "One player fights a team of two; stats are tracked so games can be rated retroactively once "
+                   "the mode graduates.\n"
+                   "• **FFA** (4-player free-for-all) is **in design** — the Multiplayer → FFA tab shows the current "
+                   "plan, but it isn't playable yet."),
+    },
+    {
+        "key": "tournaments",
+        "title": "How tournaments work",
+        "patterns": [
+            r"how.{0,20}tournaments?.{0,15}work",
+            r"(next|when|upcoming).{0,20}tournament",
+            r"(sign ?up|join|enter).{0,20}tournament",
+            r"tournament.{0,20}(sign ?up|signups?|join|enter|schedule)",
+        ],
+        "examples": ["how do tournaments work", "how do i sign up for the tournament"],
+        "answer": ("Two kinds, both signed up from **F5 → Tournaments**:\n"
+                   "• **Sync** (runs weekly): played in one sitting. Sign up, vote on a start time, and at that time "
+                   "just **have ROUNDS open** — the mod auto-connects every bracket match for you. No tab-sitting.\n"
+                   "• **Async** (~every 6 weeks): one week per round with a 7-day deadline per match — you schedule "
+                   "each match with your opponent on Discord whenever suits you both.\n"
+                   "You'll get an availability-check DM 1–4 days before a start (link your account with `/link` "
+                   "to receive it). Live status board: the #scr-tournaments channel. Winners get Discord trophy "
+                   "roles + gold."),
+    },
+    {
+        "key": "more_gold",
+        "title": "Getting more gold",
+        "patterns": [
+            r"how (do|can) (i|you) (get|earn|make|farm).{0,10}(more )?gold",
+            r"(need|want).{0,10}more gold",
+            r"(earn|farm|grind).{0,10}gold (fast|quick)",
+        ],
+        "examples": ["how do i get more gold", "fastest way to earn gold"],
+        "answer": ("Best gold sources:\n"
+                   "• **Boost the Discord server** — 2000g/month, auto-granted (link your account).\n"
+                   "• **Play 2v2s** — 50g per series win (25g even on a loss) on top of match XP.\n"
+                   "• **Earn achievements** — 100g each, the Sid/Stan Slayer trophies pay 1000g.\n"
+                   "• **Win tournaments** — trophy payouts.\n"
+                   "• **Make and sell cosmetics** — artists earn a 30% royalty on every sale "
+                   "(ask me *how do I become an artist*).\n"
+                   "• Plus the steady drip: every 100 XP = 1g, series bonuses, level-up rewards "
+                   "(+100g every 5 levels, +500g per 5 past level 50), and smart bets."),
+    },
+    {
+        "key": "xp_gold",
+        "title": "XP & gold system",
+        "patterns": [
+            r"how.{0,20}(xp|gold|economy|level(ing|s)?).{0,20}(work|works|system)",
+            r"(explain|what is).{0,20}(the )?(xp|gold|economy|level)",
+            r"how (much|many) xp",
+        ],
+        "examples": ["how does the xp gold system work", "explain the economy"],
+        "answer": ("**XP per game** (multipliers stack):\n"
+                   "• Base **250 XP** · win **×1.5** · ranked **×1.5**\n"
+                   "• Beat a current **top-3 (podium)** player: **×3** · beat a top-5 player: **+150**\n"
+                   "• 5-0 sweep: **+100**\n"
+                   "• 2v2: base **600** (~900 on a win) · 1v2: base **500**\n"
+                   "**Gold**:\n"
+                   "• Every **100 XP = 1 gold**, automatic.\n"
+                   "• Series bonuses: 1v1 BO3 winner **+10g** (+2 on a 2-0 sweep) · 2v2 **50g/25g** win/loss · "
+                   "1v2 **40g/20g**.\n"
+                   "• Levels: **+100g** every 5 levels (to 50), **+500g** per 5 levels after (max 100).\n"
+                   "• Achievements **100g** (Slayers **1000g**) · Boosters **2000g/month** · bets pay stake × odds."),
+    },
+    {
+        "key": "artist",
+        "title": "Making cosmetics / becoming an artist",
+        "patterns": [
+            r"(make|create|submit|upload|add).{0,20}(a )?cosmetics?",
+            r"(become|be) an? artist",
+            r"how.{0,25}(cosmetics?|skins?|faces?).{0,20}(made|submit|created|into the (game|shop))",
+            r"my (art|drawing|design).{0,25}(game|mod|shop)",
+        ],
+        "examples": ["how do i make cosmetics", "how do i become an artist"],
+        "answer": ("**DM Sid** with some art you'd like to upload — that's the whole application.\n"
+                   "Format: **512×512 PNG** with real transparency, drawn for a character slot (eyes, mouth, or "
+                   "detail/accessory).\n"
+                   "**Animated cosmetics**: export each frame as its own PNG — `myitem.png` is frame 1, then "
+                   "`myitem__f2.png`, `myitem__f3.png`, … Existing items run 4–13 frames at ~7–10 fps.\n"
+                   "Approved artists get the in-game **Artist tab** (F5): upload cosmetics directly, set price and "
+                   "stock, gift copies — and earn a **30% royalty** on every sale."),
+    },
+    {
+        "key": "bug_report",
+        "title": "Filing a bug report",
+        "patterns": [
+            r"(submit|file|report|make|send).{0,15}(a )?bug",
+            r"bug report",
+            r"report.{0,15}(a )?(bug|issue|glitch|problem)",
+            r"where.{0,20}report.{0,15}(bugs?|issues?)",
+        ],
+        "examples": ["how do i submit a bug report", "where do i report bugs"],
+        "answer": ("**F5 → Settings → Report a Bug.** Describe what happened and **tick the \"attach log\" box** — "
+                   "the log is what makes bugs fixable. Up to 10 reports/day.\n"
+                   "If your Discord is linked (`/link`), you get a DM whenever your report gets a response. "
+                   "Reports are triaged regularly and fixes are called out in #releases notes.\n"
+                   "If the game is in a state a report can't capture, ping @Sid in #bug-reports with a screenshot."),
+    },
+    {
+        "key": "rank_roles",
+        "title": "Elo requirements for rank roles",
+        "patterns": [
+            r"(elo|rating).{0,30}(requirement|threshold|needed|need|for).{0,20}(each )?(rank|role|tier)",
+            r"what (elo|rating).{0,20}(is|for|do you need).{0,20}(master|grand ?master|advanced|intermediate|beginner)",
+            r"(rank|discord) roles?.{0,15}(elo|rating|requirement|threshold)",
+            r"how.{0,15}(get|earn).{0,20}(master|grand ?master|advanced) role",
+        ],
+        "examples": ["what are the elo requirements for each discord rank role",
+                     "what rating do i need for master"],
+        "answer": _rank_roles_faq_answer(),
+    },
+    {
+        "key": "thunderstore",
+        "title": "Thunderstore page",
+        "patterns": [
+            r"thunderstore",
+            r"r2modman.{0,25}(download|install|get|find)",
+            r"mod manager.{0,20}(install|download|find)",
+        ],
+        "examples": ["can i get the mod on thunderstore", "is it on thunderstore"],
+        "answer": (f"Yes: {FAQ_THUNDERSTORE_URL}\n"
+                   "Install it through r2modman or the Thunderstore app (BepInEx comes along automatically) and "
+                   "**launch ROUNDS through the mod manager**. Updates come from the manager — the Thunderstore "
+                   "build doesn't self-update.\n"
+                   f"Or import the ready-made profile — ask me *what's the modpack code*."),
+    },
+    {
+        "key": "achievements",
+        "title": "Achievements",
+        "patterns": [
+            r"(what|list|which|show).{0,15}(are )?(the )?achievements",
+            r"achievements?.{0,20}(list|are there|exist|available)",
+            r"how.{0,15}(do )?achievements.{0,10}work",
+        ],
+        "examples": ["what are the achievements", "list the achievements"],
+        "answer": _FAQ_ACHIEVEMENTS_TEXT,
+        "short": ("40 achievements, each paying 100g (the Sid/Stan Slayer trophies pay 1000g; some unlock "
+                  "exclusive titles). Full list + your progress: F5 -> Achievements."),
+    },
+    {
+        "key": "link_account",
+        "title": "Linking your account",
+        "patterns": [
+            r"how.{0,20}link.{0,25}(account|discord|steam)",
+            r"link my (account|discord|steam)",
+            r"(connect|sync).{0,20}(discord|steam|account)",
+            r"link code",
+        ],
+        "examples": ["how do i link my account", "how do i connect discord to the mod"],
+        "answer": ("1. In ROUNDS, press **F5** and find the **Discord Link** panel → click **Get Link Code**.\n"
+                   "2. Type `!link YOURCODE` (or use `/link`) here in the Discord server. Codes last 10 minutes.\n"
+                   "Linking gets you: your **rank role**, Discord **bet buttons**, **bug-report DMs**, tournament "
+                   "reminder DMs, and **server-booster gold** (2000g/month)."),
+    },
+    {
+        "key": "install",
+        "title": "Installing the mod",
+        "patterns": [
+            r"how.{0,20}(install|download|get|set ?up).{0,25}(the )?(mod|scr|competitive)",
+            r"where.{0,20}(download|get).{0,20}(the )?mod",
+        ],
+        "examples": ["how do i install the mod", "where do i download this"],
+        "answer": (f"Full walkthrough: {FAQ_INSTALL_CHANNEL}\n"
+                   "**Option A — installer (recommended):** grab `CompetitiveRoundsInstaller.exe` from the pinned "
+                   "post in #releases, close ROUNDS, run it. It finds your Steam install and sets up everything. "
+                   "This version self-updates.\n"
+                   f"**Option B — Thunderstore:** install *SidsCompetitiveRounds* via r2modman "
+                   f"(modpack code: `{FAQ_MODPACK_CODE}`) and **launch through the mod manager**.\n"
+                   "**Requirements:** ROUNDS v1.1.2 on Steam (default branch), Windows, and **no other mods**.\n"
+                   "Then press **F5** in-game — that's the competitive hub."),
+    },
+    {
+        "key": "rounds_version",
+        "title": "Which ROUNDS version?",
+        "patterns": [
+            r"(what|which).{0,15}version.{0,20}(of )?rounds",
+            r"old.?rounds.?for.?mods",
+            r"(beta|branch).{0,20}(rounds|steam).{0,15}(mod|scr)",
+        ],
+        "examples": ["what version of rounds do i need", "do i need old rounds for mods"],
+        "answer": ("**SCR runs on the current ROUNDS (v1.1.2), default Steam branch** — no beta needed.\n"
+                   "The `old-rounds-for-mods` Steam beta branch is for every **other** ROUNDS mod (they target the "
+                   "old game version). SCR and those mods can't run together — pick one:\n"
+                   "• SCR → default branch, no other plugins.\n"
+                   "• Other mods → `old-rounds-for-mods` branch, without SCR.\n"
+                   "(Steam → ROUNDS → Properties → Betas to switch.)"),
+    },
+    {
+        "key": "disconnect",
+        "title": "Disconnects & leavers",
+        "patterns": [
+            r"(what happens?|happens?).{0,25}(disconnect|dc\b|rage ?quit|leaver?|leaves)",
+            r"opponent.{0,15}(left|dc'?d|dc\b|disconnected|quit)",
+            r"rage ?quit",
+            r"(dc|disconnect|leave).{0,20}(penalty|count|percent)",
+        ],
+        "examples": ["what happens if someone disconnects", "my opponent rage quit"],
+        "require_question": False,
+        "answer": ("• A mid-series leave counts as a **DC on the leaver's record** — leave % is visible on the "
+                   "leaderboard. Occasional crashes won't tank it; rage-quits will.\n"
+                   "• The series isn't lost: **rematch the same player and it resumes** where it left off, up to "
+                   "7 days later.\n"
+                   "• If a series never finishes, any bets on it auto-refund (~1 hour).\n"
+                   "• Game crashed mid-match? Relaunch and rejoin your opponent — the series picks back up."),
+    },
+    {
+        "key": "open_menu",
+        "title": "Opening the competitive menu",
+        "patterns": [
+            r"(open|show|access).{0,20}(competitive |mod )?(menu|overlay|hub)",
+            r"what (does|is) f ?5",
+            r"where.{0,20}(my )?(stats|leaderboard|shop).{0,10}in ?.?game",
+        ],
+        "examples": ["how do i open the competitive menu", "where do i see my stats in game"],
+        "answer": ("**F5** toggles the competitive menu in ROUNDS — queue, stats, leaderboard, shop, achievements, "
+                   "tournaments, settings, everything. **T** opens the in-game chat; **Esc** closes the menu.\n"
+                   "If F5 does nothing: restart ROUNDS; if it keeps happening, file a bug report."),
+    },
+    {
+        "key": "chat",
+        "title": "In-game chat",
+        "patterns": [
+            r"(in ?.?game|t) ?chat",
+            r"how.{0,20}chat.{0,20}(work|in ?game)",
+            r"(mute|block).{0,20}(chat|someone|player|him|her|them)",
+        ],
+        "examples": ["how does the in-game chat work", "how do i mute someone in chat"],
+        "answer": ("Press **T** in-game to chat. Messages bridge both ways with the in-game-chat channel on this "
+                   "Discord, so in-game and Discord folks see each other.\n"
+                   "Moderation is local: `/mute name`, `/unmute name`, `/muted` (list) — typed in the in-game chat box."),
+    },
+    {
+        "key": "platforms",
+        "title": "Platform support",
+        "patterns": [
+            r"(work|play|run).{0,15}on.{0,10}(mac|linux|steam ?deck|proton)",
+            r"(mac|linux|steam ?deck|proton).{0,15}(support|work)",
+        ],
+        "examples": ["does it work on steam deck", "mac support?"],
+        "answer": ("Officially **Windows only** (ROUNDS on Steam, current version). Mac isn't supported. "
+                   "Linux/Steam Deck via Proton is untested and unsupported — if you get it running, neat, but "
+                   "you're on your own."),
+    },
+    {
+        "key": "booster",
+        "title": "Server booster perks",
+        "patterns": [
+            r"(boost|booster).{0,25}(perk|get|reward|gold|benefit)",
+            r"(what|anything).{0,15}(for|from).{0,15}boost(ing)?",
+            r"server boost",
+        ],
+        "examples": ["what do boosters get", "booster perks?"],
+        "answer": ("Server boosters get **2000 gold/month**, granted automatically (one grant per member per month). "
+                   "Your Discord needs to be linked (`/link`) so the gold has somewhere to land."),
+    },
+    {
+        "key": "titles",
+        "title": "Titles",
+        "patterns": [
+            r"(get|earn|equip|unlock).{0,15}titles?",
+            r"what (are|is).{0,10}titles?",
+            r"titles?.{0,15}(work|list|available)",
+        ],
+        "examples": ["how do i get titles", "what are titles"],
+        "answer": ("Titles render next to your name (leaderboard, chat, match history). Sources:\n"
+                   "• **Shop** (F5 → Shop → Titles) — bought with gold, equip there too.\n"
+                   "• **Achievements** — exclusive ones like *Sid Slayer* / *Stan Slayer*.\n"
+                   "• **Dynamic titles**: *Current Rank* always shows your live tier; *Podium* shows 1st/2nd/3rd "
+                   "Place (in gold/silver/bronze) while you hold a leaderboard top-3 spot — it's auto-granted when "
+                   "you get there."),
+    },
+    {
+        "key": "leaderboard_where",
+        "title": "Where's the leaderboard?",
+        "patterns": [
+            r"(where|how).{0,20}(see|view|check|find).{0,20}(the )?(leaderboard|rankings?|standings)",
+            r"leaderboard.{0,10}(link|channel|where)",
+        ],
+        "examples": ["where can i see the leaderboard"],
+        "answer": ("• In-game: **F5 → Leaderboard** (with live series + betting panel).\n"
+                   "• Discord: the **#scr-leaderboard** channel (living board, updates every 10 min) or `/lb`.\n"
+                   "Boards need 1+ recorded match to show a player."),
+    },
+    {
+        "key": "what_is_scr",
+        "title": "What is this mod?",
+        "patterns": [
+            r"(what|who).{0,15}(is|made|created|runs).{0,15}(scr|this mod|competitive rounds|sid'?s)",
+            r"what.{0,10}(does )?(the|this) mod (do|add)",
+        ],
+        "examples": ["what is this mod", "who made this mod"],
+        "answer": ("**Sid's Competitive Rounds** — a full competitive layer for ROUNDS, built and run by **Sid**: "
+                   "ranked BO3 series with Glicko-2 ratings, matchmaking queues (1v1, 2v2, 1v2 beta), tournaments, "
+                   "a leaderboard, betting, an XP/gold economy with a cosmetics shop, achievements, and this "
+                   "Discord integration. It doesn't change gameplay — vanilla ROUNDS, plus everything around it.\n"
+                   f"Get started: {FAQ_INFO_CHANNEL}"),
+    },
+    {
+        "key": "get_better",
+        "title": "Getting better",
+        "patterns": [
+            r"how.{0,20}(get|be(come)?|git).{0,10}(better|gud|good)",
+            r"how.{0,15}(do|can) i improve",
+            r"(any )?tips.{0,20}(for )?(improv|better|new|beginner)",
+        ],
+        "examples": ["how can i get better", "any tips for improving"],
+        "answer": ("1. **Fix your setup first** — FPS drops and monitor refresh issues cost more games than bad "
+                   "card picks. Check the perf toggles in F5 → Settings and make sure ROUNDS runs at your "
+                   "monitor's refresh rate.\n"
+                   "2. **Play a lot of good players** — queue ranked and don't dodge high elo. Losses against "
+                   "better players teach faster than wins against worse ones.\n"
+                   "3. **Play outside your comfort zone** — learn everything there is to know about cards, "
+                   "blocking, and angling shots. Force yourself onto builds you'd normally pass on; every card "
+                   "you understand is a matchup you stop losing to."),
+    },
+]
+
+for _e in FAQ_ENTRIES:
+    _e["compiled"] = [_faq_re.compile(p) for p in _e["patterns"]]
+    _e["examples_norm"] = [_faq_norm(x) for x in _e.get("examples", [])]
+
+
+def _faq_find_match(content: str):
+    """Return the best FAQ entry for a message, or None. Regex layer first
+    (ordered, first hit wins), then fuzzy vs canonical examples."""
+    norm = _faq_norm(content)
+    if not (8 <= len(norm) <= 400):
+        return None
+    question_like = _faq_question_like(norm)
+    for e in FAQ_ENTRIES:
+        if not question_like and e.get("require_question", True):
+            continue
+        for rx in e["compiled"]:
+            if rx.search(norm):
+                return e
+    if question_like:
+        best, best_ratio = None, 0.0
+        for e in FAQ_ENTRIES:
+            for ex in e["examples_norm"]:
+                r = _faq_difflib.SequenceMatcher(None, norm, ex).ratio()
+                if r > best_ratio:
+                    best, best_ratio = e, r
+        if best is not None and best_ratio >= 0.78:
+            return best
+    return None
+
+
+async def _faq_resolve_answer(entry, message=None):
+    """Static text or dynamic handler result. None means 'no answer' (handler
+    declined, e.g. in-game context for a Discord-only entry)."""
+    handler = entry.get("handler")
+    if handler is None:
+        return entry.get("answer")
+    try:
+        return await handler(message)
+    except Exception as ex:
+        print(f"[FAQ] handler {entry['key']} failed: {ex}")
+        return None
+
+
+def _faq_embed(entry, answer_text: str) -> discord.Embed:
+    embed = discord.Embed(title=f"💡 {entry.get('title', 'FAQ')}",
+                          description=answer_text[:4096], color=0x5865F2)
+    embed.set_footer(text="Automated answer • if this missed the mark, just ask again in your own words")
+    return embed
+
+
+async def _post_ingame_chat(text_msg: str) -> bool:
+    """Send a line into the in-game chat as the helper bot (via /chat/post —
+    same path the Discord relay uses; broadcasts to all connected mod clients
+    and persists to scrollback)."""
+    if http_session is None or not API_SECRET_KEY:
+        return False
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/chat/post",
+            json={
+                "discord_id": str(bot.user.id) if bot.user else "0",
+                "display_name": FAQ_HELPER_NAME,
+                "message": text_msg[:490],
+            },
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            return resp.status == 200
+    except Exception as e:
+        print(f"[FAQ] in-game post failed: {e}")
+        return False
+
+
+def _faq_short_text(entry, answer_text: str) -> str:
+    return entry.get("short") or _faq_plainify(answer_text)
+
+
+async def _maybe_answer_faq_discord(message: discord.Message) -> None:
+    """FAQ pass for guild messages. Called from on_message AFTER the chat
+    relay so an in-game audience sees the question before the answer."""
+    content = (message.content or "").strip()
+    if not content or content.startswith(("!", "/", ".")):
+        return
+    if message.guild is None:
+        return  # DMs are the bug-report follow-up flow
+    entry = _faq_find_match(content)
+    if entry is None:
+        return
+    if not _faq_rate_ok(message.channel.id, entry["key"], message.author.id):
+        return
+    answer = await _faq_resolve_answer(entry, message)
+    if not answer:
+        return
+    try:
+        await message.reply(embed=_faq_embed(entry, answer), mention_author=False)
+        print(f"[FAQ] answered '{entry['key']}' for {message.author.name} in #{getattr(message.channel, 'name', message.channel.id)}")
+    except Exception as ex:
+        print(f"[FAQ] discord reply failed: {ex}")
+        return
+    # Question asked in the chat-bridge channel: the question was relayed
+    # in-game, so deliver a short ASCII answer there too.
+    if CHAT_CHANNEL_ID and message.channel.id == CHAT_CHANNEL_ID:
+        await _post_ingame_chat(_faq_short_text(entry, answer))
+
+
+async def _maybe_answer_faq_ingame(data: dict) -> None:
+    """FAQ pass for live in-game chat messages (WS stream only — the catchup
+    replay path never calls this, so old messages can't trigger answers)."""
+    content = (data.get("message") or "").strip()
+    if not content:
+        return
+    # Freshness guard: never answer anything older than 2 minutes even if it
+    # somehow arrives on the live stream.
+    ts = data.get("timestamp")
+    if ts:
+        try:
+            age = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(str(ts).replace("Z", "+00:00"))).total_seconds()
+            if age > 120:
+                return
+        except Exception:
+            pass
+    entry = _faq_find_match(content)
+    if entry is None or entry.get("discord_only"):
+        return
+    user_key = f"ig:{data.get('steam_id') or data.get('display_name') or ''}"
+    if not _faq_rate_ok("ingame", entry["key"], user_key):
+        return
+    answer = await _faq_resolve_answer(entry, None)
+    if not answer:
+        return
+    sent = await _post_ingame_chat(_faq_short_text(entry, answer))
+    if sent:
+        print(f"[FAQ] answered '{entry['key']}' in-game for {data.get('display_name')}")
+    # Mirror the full answer into the Discord bridge channel so both sides of
+    # the conversation see it (the in-game question itself was just relayed).
+    if CHAT_CHANNEL_ID:
+        try:
+            channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
+            if channel is not None:
+                asker = discord.utils.escape_markdown(data.get("display_name") or "player")
+                await channel.send(content=f"-# answering **{asker}** (in-game):",
+                                   embed=_faq_embed(entry, answer))
+        except Exception as ex:
+            print(f"[FAQ] discord mirror failed: {ex}")
+
+
+# ── #scr-releases mirror (v1.33) ──────────────────────────────────────────
+# Every message in the releases channel (bot-posted GitHub announcements AND
+# manual posts) is pushed to the server's release_posts table so the in-game
+# Home tab shows update notes as they're posted. Upsert by message id, so the
+# startup backfill and edit re-pushes are safe to repeat.
+
+async def _push_release_posts(msgs) -> None:
+    if http_session is None or not API_SECRET_KEY:
+        return
+    posts = []
+    for m in msgs:
+        content = (m.content or "").strip()
+        if not content:
+            continue  # embed/attachment-only posts have nothing to mirror
+        posts.append({
+            "discord_message_id": str(m.id),
+            "author": getattr(m.author, "display_name", None) or m.author.name,
+            "content": content[:4000],
+            "posted_at": m.created_at.isoformat(),
+        })
+    if not posts:
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/release-posts",
+            json={"posts": posts},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[RELEASES] mirror push status={resp.status}")
+    except Exception as e:
+        print(f"[RELEASES] mirror push failed: {e}")
+
+
+async def backfill_release_posts():
+    """On startup, mirror the last 10 releases-channel messages so the Home
+    tab has content immediately after this feature deploys (and so edits made
+    while the bot was down get picked up)."""
+    if not RELEASES_CHANNEL_ID:
+        return
+    try:
+        channel = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
+        if channel is None:
+            return
+        msgs = [m async for m in channel.history(limit=10)]
+        await _push_release_posts(msgs)
+        print(f"[RELEASES] backfilled {len(msgs)} channel messages to release_posts")
+    except Exception as e:
+        print(f"[RELEASES] backfill failed: {e}")
+
+
+@bot.event
+async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
+    """Edits to releases-channel posts re-push so the Home tab shows the
+    corrected text (upsert by message id server-side)."""
+    if not RELEASES_CHANNEL_ID or payload.channel_id != RELEASES_CHANNEL_ID:
+        return
+    try:
+        channel = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
+        msg = await channel.fetch_message(payload.message_id)
+        await _push_release_posts([msg])
+    except Exception as e:
+        print(f"[RELEASES] edit re-push failed: {e}")
+
+
+async def _faq_discord_task(message: discord.Message) -> None:
+    """Task wrapper: keeps FAQ latency out of on_message's command dispatch."""
+    try:
+        await _maybe_answer_faq_discord(message)
+    except Exception as ex:
+        print(f"[FAQ] discord handler error: {ex}")
+
+
+async def _faq_ingame_task(data: dict) -> None:
+    """Task wrapper: keeps FAQ API lookups out of the chat WS receive loop —
+    a stalled API call inside the async-for body would starve the WS
+    heartbeat and drop the whole in-game<->Discord bridge."""
+    try:
+        await _maybe_answer_faq_ingame(data)
+    except Exception as ex:
+        print(f"[FAQ] ingame handler error: {ex}")
+
+
+@bot.hybrid_command(name="faq", description="Look up an FAQ answer (or list all topics)")
+@app_commands.describe(topic="Your question, or leave empty to list topics")
+async def cmd_faq(ctx, *, topic: str = ""):
+    """Manual FAQ trigger — same matcher as the auto-responder, no cooldowns.
+    Handy for mods pointing someone at an answer."""
+    if not topic.strip():
+        lines = "\n".join(f"• **{e.get('title')}**" for e in FAQ_ENTRIES)
+        embed = discord.Embed(title="💡 FAQ topics",
+                              description=("Ask any of these in your own words (I answer automatically), "
+                                           "or `/faq <question>`:\n" + lines)[:4096],
+                              color=0x5865F2)
+        await ctx.send(embed=embed)
+        return
+    entry = _faq_find_match(topic) or _faq_find_match(topic + "?")
+    if entry is None:
+        await ctx.send("No FAQ matches that — try `/faq` for the topic list.")
+        return
+    answer = await _faq_resolve_answer(entry, ctx.message if ctx.message else None)
+    if not answer:
+        await ctx.send("Couldn't build that answer right now.")
+        return
+    await ctx.send(embed=_faq_embed(entry, answer))
+
+
 @bot.event
 async def on_message(message: discord.Message):
+    # Releases-channel mirror (v1.33) — BEFORE the bot early-return, because
+    # the channel's GitHub announcements are posted by this bot itself.
+    if RELEASES_CHANNEL_ID and message.channel and getattr(message.channel, "id", 0) == RELEASES_CHANNEL_ID:
+        try:
+            await _push_release_posts([message])
+        except Exception as ex:
+            print(f"[RELEASES] on_message mirror failed: {ex}")
     # Must not block command dispatch.
     if message.author.bot:
         await bot.process_commands(message)
@@ -341,6 +1320,15 @@ async def on_message(message: discord.Message):
         except Exception as ex:
             print(f"[TICKET-DM] handler error: {ex}")
         return
+    # FAQ auto-responder (v1.33) — after the chat relay so in-game viewers see
+    # the question before the answer. Spawned as a task so a slow API lookup
+    # (dynamic answers hit /leaderboard, /rating-preview) can never delay
+    # command dispatch; the match + cooldown stamp run synchronously inside
+    # the task before its first await, so duplicates can't double-answer.
+    try:
+        asyncio.create_task(_faq_discord_task(message))
+    except Exception as ex:
+        print(f"[FAQ] discord task spawn error: {ex}")
     await bot.process_commands(message)
 
 
@@ -513,6 +1501,14 @@ async def chat_ws_listener():
                     if src != "ingame":
                         continue  # Discord originals already live there
                     await _forward_ingame_to_discord(data)
+                    # FAQ auto-responder (v1.33) — live stream only, so the
+                    # catchup replay can never answer stale questions. Spawned
+                    # as a task so its API lookups never block this receive
+                    # loop (heartbeat starvation would drop the bridge).
+                    try:
+                        asyncio.create_task(_faq_ingame_task(data))
+                    except Exception as ex:
+                        print(f"[FAQ] ingame task spawn error: {ex}")
         except Exception as e:
             print(f"[CHAT] WS dropped: {e} (reconnect in {backoff}s)")
             await asyncio.sleep(backoff)
@@ -526,7 +1522,7 @@ async def on_close():
 @app_commands.describe(code="6-character code from the in-game Competitive menu")
 async def cmd_link(ctx, code: str = None):
     if not code:
-        await ctx.send("**How to link:**\n1. Open ROUNDS → Competitive menu → My Stats\n2. Click **Get Link Code**\n3. Type `!link YOUR_CODE` here"); return
+        await ctx.send("**How to link:**\n1. Open ROUNDS → press F5 → Home tab (Discord Link panel)\n2. Click **Get Link Code**\n3. Type `!link YOUR_CODE` here"); return
     # Send Discord username alongside the ID so the in-game UI can display "Linked as @foo"
     # instead of raw ID. Prefer global_name (new display-name system), fall back to legacy name.
     discord_username = getattr(ctx.author, "global_name", None) or ctx.author.name
@@ -1176,6 +2172,106 @@ def _match_date_str(m):
         return "?"
 
 
+COMPARE_PAGE_SIZE = 5
+
+
+class ComparePaginator(discord.ui.View):
+    """First/Prev/Next/Last pager over a pair's mutual games (v1.33 — /compare
+    previously hard-capped at 6 games with no buttons at all). Caches the
+    filtered games list so page flips never re-hit the API. 15-min timeout,
+    after which the buttons grey out so the message doesn't look live."""
+
+    def __init__(self, name_a: str, name_b: str, rec_val: str,
+                 cards_val: str | None, games: list):
+        super().__init__(timeout=900)
+        self.name_a, self.name_b = name_a, name_b
+        self.rec_val, self.cards_val = rec_val, cards_val
+        self.games = games
+        self.page = 0
+        self.total_pages = max(1, (len(games) + COMPARE_PAGE_SIZE - 1) // COMPARE_PAGE_SIZE)
+        self.message = None
+        self._update_buttons()
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(title=f"⚔️ {self.name_a} vs {self.name_b}", color=0xE67E22)
+        embed.add_field(name="📊  Overall head-to-head", value=self.rec_val[:1024], inline=False)
+        if self.cards_val:
+            embed.add_field(name="🃏  Most-picked cards vs each other",
+                            value=self.cards_val[:1024], inline=False)
+        # One field per game (field values carry their own 1024 cap; cards
+        # would blow a single shared field). Budget-guard the whole embed
+        # under Discord's 6000-char message total.
+        start = self.page * COMPARE_PAGE_SIZE
+        budget = 4200
+        shown = 0
+        for m in self.games[start:start + COMPARE_PAGE_SIZE]:
+            wl = "✅ W" if m.get("won") else "❌ L"
+            score = f"{m.get('player_rounds_won', 0)}-{m.get('opponent_rounds_won', 0)}"
+            tag = "Ranked" if m.get("is_ranked") else "Casual"
+            fname = f"{_match_date_str(m)} — {wl} {score} · {tag}"
+            fval = (f"{self.name_a[:14]}: {_cards_str(m.get('cards_picked'))} | "
+                    f"{self.name_b[:14]}: {_cards_str(m.get('opponent_cards_picked'))}")[:1024]
+            if len(fname) + len(fval) > budget:
+                break
+            budget -= len(fname) + len(fval)
+            embed.add_field(name=fname[:256], value=fval, inline=False)
+            shown += 1
+        if self.games and shown == 0:
+            embed.add_field(name="Recent games", value="(too much card data to show)", inline=False)
+        embed.set_footer(text=f"Page {self.page + 1}/{self.total_pages} • "
+                              f"{len(self.games)} recent mutual games • record is lifetime")
+        return embed
+
+    def _update_buttons(self):
+        at_first = self.page <= 0
+        at_last = self.page >= self.total_pages - 1
+        self.btn_first.disabled = at_first
+        self.btn_prev.disabled = at_first
+        self.btn_next.disabled = at_last
+        self.btn_last.disabled = at_last
+
+    async def _flip(self, interaction: discord.Interaction, page: int):
+        self.page = max(0, min(self.total_pages - 1, page))
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="⏮ First", style=discord.ButtonStyle.secondary)
+    async def btn_first(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._flip(interaction, 0)
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def btn_prev(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._flip(interaction, self.page - 1)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def btn_next(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._flip(interaction, self.page + 1)
+
+    @discord.ui.button(label="Last ⏭", style=discord.ButtonStyle.secondary)
+    async def btn_last(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._flip(interaction, self.total_pages - 1)
+
+    async def on_timeout(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        # Slash-invoked sends return a webhook-bound message whose .edit dies
+        # with 401 once the interaction token expires (~15 min) — i.e. exactly
+        # when on_timeout fires. Route the edit through the bot token via a
+        # partial message instead; fall back to the direct edit for contexts
+        # without a resolvable channel.
+        try:
+            if self.message is None:
+                return
+            ch = getattr(self.message, "channel", None)
+            if ch is not None and hasattr(ch, "get_partial_message"):
+                await ch.get_partial_message(self.message.id).edit(view=self)
+            else:
+                await self.message.edit(view=self)
+        except Exception:
+            pass
+
+
 @bot.hybrid_command(name="compare",
                     description="Head-to-head between two players: record, recent games, cards picked")
 @app_commands.describe(player1="First player (record shown from their perspective)",
@@ -1223,39 +2319,36 @@ async def cmd_compare(ctx, player1: discord.Member, player2: discord.Member):
         await ctx.send(f"**{name_a}** and **{name_b}** haven't played each other yet.")
         return
 
-    embed = discord.Embed(title=f"⚔️ {name_a} vs {name_b}", color=0xE67E22)
     rec_val = (f"**{tw}W – {tl}L** for {name_a}\n"
                f"Ranked: **{rw}–{rl}**  ·  Casual: **{cw}–{cl}**\n"
                f"Completed series (BO3): **{sw}–{sl}**")
-    embed.add_field(name="📊  Overall head-to-head", value=rec_val[:1024], inline=False)
 
-    # Recent mutual games — one field per game (field values have their own
-    # 1024 cap; cards would blow a single shared field). Budget-guard the
-    # whole embed under Discord's 6000-char message total.
-    budget = 4800
-    shown = 0
-    for m in games[:6]:
-        wl = "✅ W" if m.get("won") else "❌ L"
-        score = f"{m.get('player_rounds_won', 0)}-{m.get('opponent_rounds_won', 0)}"
-        tag = "Ranked" if m.get("is_ranked") else "Casual"
-        fname = f"{_match_date_str(m)} — {wl} {score} · {tag}"
-        fval = (f"{name_a[:14]}: {_cards_str(m.get('cards_picked'))} | "
-                f"{name_b[:14]}: {_cards_str(m.get('opponent_cards_picked'))}")[:1024]
-        if len(fname) + len(fval) > budget:
-            break
-        budget -= len(fname) + len(fval)
-        embed.add_field(name=fname[:256], value=fval, inline=False)
-        shown += 1
-    if games and shown == 0:
-        embed.add_field(name="Recent games", value="(too much card data to show)", inline=False)
-    elif not games:
+    # Lifetime top cards each picked against the other (v1.33 — server-side
+    # aggregate over match_cards, so it covers games beyond the history window).
+    cards_val = None
+    h2h_cards = await api_get(f"/players/{steam_a}/vs/{steam_b}/top-cards?limit=6")
+    if h2h_cards and (h2h_cards.get("player_cards") or h2h_cards.get("opponent_cards")):
+        def _fmt_top(cl):
+            return ", ".join(f"{c['card_name']} ×{c['picks']}" for c in (cl or [])[:6]) or "—"
+        cards_val = (f"**{name_a[:14]}:** {_fmt_top(h2h_cards.get('player_cards'))}\n"
+                     f"**{name_b[:14]}:** {_fmt_top(h2h_cards.get('opponent_cards'))}")
+
+    if games:
+        view = ComparePaginator(name_a, name_b, rec_val, cards_val, games)
+        msg = await ctx.send(embed=view.build_embed(), view=view)
+        view.message = msg
+    else:
         # H2H counters exist but the games predate A's 2000-row history window.
+        embed = discord.Embed(title=f"⚔️ {name_a} vs {name_b}", color=0xE67E22)
+        embed.add_field(name="📊  Overall head-to-head", value=rec_val[:1024], inline=False)
+        if cards_val:
+            embed.add_field(name="🃏  Most-picked cards vs each other",
+                            value=cards_val[:1024], inline=False)
         embed.add_field(name="Recent games",
                         value=f"No games between them in {name_a}'s recent history window.",
                         inline=False)
-    embed.set_footer(text=f"Last {shown} of {len(games)} recent games shown • record is lifetime"
-                     if games else "Record is lifetime")
-    await ctx.send(embed=embed)
+        embed.set_footer(text="Record is lifetime")
+        await ctx.send(embed=embed)
 
 
 @bot.hybrid_command(name="graph",
@@ -2291,7 +3384,7 @@ async def grant_booster_gold():
                             await member.send(
                                 "💜 You're boosting the server — boosters get **2000 gold/month** "
                                 "in Competitive ROUNDS! Link your account to claim it: in-game "
-                                "F5 → My Stats → Get Link Code, then `!link YOUR_CODE` here."
+                                "F5 → Home tab → Get Link Code, then `!link YOUR_CODE` here."
                             )
                         except Exception:
                             pass

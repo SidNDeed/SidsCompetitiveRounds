@@ -38,6 +38,10 @@ class Player(Base):
     # player's gold from everyone. Unlocked by purchasing sku 'util_hide_gold',
     # toggled via /hide-gold. The player still sees their own real balance.
     hide_gold = Column(Boolean, nullable=False, default=False)
+    # Appear-offline privacy toggle (migration 126): when true, the player is
+    # excluded from the Home tab's online / recently-online lists. The
+    # anonymous online COUNT still includes them (it carries no identity).
+    appear_offline = Column(Boolean, nullable=False, default=False)
     # Lifetime gun accuracy + block success counters (migration 038).
     # Accumulated from each submitted non-invalidated match's local_* fields on the reporter.
     bullets_fired = Column(BigInteger, nullable=False, default=0)
