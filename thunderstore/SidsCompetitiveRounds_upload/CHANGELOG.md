@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.32.1 — RELEASED 2026-07-16
+
+**Headline: a new Home landing tab + a FAQ auto-responder bot.**
+
+### Home tab
+The F5 menu now opens on a **Home** splash page:
+- **Latest Releases** — reads the #scr-releases channel live, so you see update notes the moment they're posted.
+- **Newest Cosmetics** — with real art thumbnails, animated frames included.
+- **Players** — who's online now and recently online, with titles and ratings. Hide yourself via **Settings → Appear offline**.
+- The **Discord Link** panel and **chat** moved here from My Stats.
+
+### Discord FAQ bot
+A new bot auto-answers common questions (how to play ranked, the modpack code, gambling, the economy, tournaments, becoming an artist, rank thresholds, and more) — in Discord server-wide AND in the in-game chat bridge. Ask in your own words. `/faq` lists every topic; it also does a live "how much elo vs @player" calculation and names the current top player.
+
+### /compare
+- **First / Prev / Next / Last** buttons page through every mutual game.
+- New **head-to-head top cards** section — each player's most-picked cards against the other.
+
+### My Stats
+- **History lazy-loads** so the page opens fast; pages fill in as you scroll, full page count still shown.
+- **Card Stats** and **Achievements** are now sub-tabs under My Stats.
+
+### Fixes
+- **Chat T-key** no longer disables itself after you use the in-game text chat (proper root-cause fix).
+
 ## v1.32.0 — RELEASED 2026-07-14
 
 **Headline: the July 14 feature batch** — podium presence everywhere (top-3 leaderboard highlights + a dynamic sparkling 1st/2nd/3rd Place title + 3x XP for beating a podium holder), 1000g slayer achievements with back-pay, tournament Discord feeds + availability-check DMs with Yes/No buttons, four new FPS/accessibility settings, a reordered shop, and a big Discord bot expansion (reworked /rank + /stats, /mystats, /cards, /graph charts, head-to-head /compare, 50-row leaderboard, live tournament board).
