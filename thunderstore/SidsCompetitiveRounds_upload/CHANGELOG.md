@@ -1,3 +1,85 @@
+## v1.33.0 — RELEASED 2026-07-17 — July 17 mega-batch (rounds 1-3)
+
+### Round 3 (Sid's 10 items + first 1v2 forensics)
+
+### Client (mod)
+- **My Stats casual record fixed (item 8)**: the Record block recomputed casual W/L (and sweeps) by scanning the locally cached history — which v1.32.1's lazy loading truncated to the head 400 matches, so lifetime losses "vanished". Both lines now use the server's lifetime fields (`casual_wins/losses`, `sweeps_given/taken`); current-streak calcs stay window-based by design.
+- **Hit % undercount fixed (bug #77, Stan)**: the round-winning kill blow was dropped from `bullets_hit` — vanilla processes the lethal hit → round over → pick phase (flipping our phase flag) all before the counter's Postfix ran, so the pick-phase guard ate exactly one hit per round won, matching Stan's manual counts. Guard removed for hits (nothing can be fired during pick anyway); budget-exhausted drops now log `[HIT-DROP]`.
+- **2v2 tab scroll bounce fixed (bug #76, Sid)**: the leaderboard's inner ScrollRect consumed wheel events even with nothing to scroll (elastic bounce), starving the tab's outer scroll. The inner scroll now disables itself while its content fits its viewport (wheel bubbles to the tab scroll) and re-enables when the board genuinely needs it.
+- **1v2 phantom series plugged**: both 1v1 series-preflight sites now exclude `ovt_` rooms — the July 17 first live 1v2 session spawned six phantom 1v1 `ranked_series` rows pairing arbitrary trio members (the one 1v1 path the #146/#149 gate sweep missed).
+- **Admin Steam ID (item 10)**: leaderboard click-a-player detail shows the player's Steam ID to admins only, click-to-copy (first `systemCopyBuffer` use).
+- **Twins! (item 3)** added to the client achievement list.
+
+### Server (to deploy — no new migration required beyond 133)
+- **Twins! achievement (item 3)**: granted server-side to BOTH players when a game ends with identical 5-card multisets (duplicates counted; names normalized). 100g standard. Migration `133` backfills it retroactively from `match_cards` (same pattern as 113).
+- **Sync lock timing (item 9)**: `LOCK_OFFSET_HOURS` 6 → 48 — the winning time is now decided **2 days before the default start**, and only slots ≥ ~24h after the decision can win, so every player gets at least a day's notice of the final time. Availability-check DMs re-anchored to 24-96h **before lock** (they must be answerable before the time is decided); the sync availability embed now names the lock moment and points at the vote; pushback derives the next lock from the new default (a late tick can't erode the offset); tournament creation requires lock ≥ 72h out (sometimes skipping to the Saturday after next).
+- **1v2 janitor**: ovt husk queue rows and zero-game dead locks were only cleaned by poll-driven paths — with no 1v2 pollers, the July 17 leftovers dangled for 9+ hours. The periodic queue-cleanup loop now sweeps them (30-min windows, wide per learning #150 so a live game 1 can't be hit).
+
+### Round 2 (Sid's 4 items)
+
+### Client (mod)
+- **Custom cosmetics now shade with the scene (item 1)**: our face items rendered with Unity's default unlit sprite material while everything else in ROUNDS multiplies through the SFSS lightmap — so they sat at raw PNG brightness against a lighting-darkened scene (Galaxyice's cat "too bright, green eyes invisible"). Templates now adopt the vanilla item material (lazily borrowed from a vanilla face item; startup log verifies `shader=Sprites/SFSoftShadow`), so custom items darken/tint exactly like vanilla ones on every map skin, vanilla art, and the lighting-off perf mode.
+- **Tournament tab layout (item 2)**: the "Default start / Signups close" line no longer paints over the instructions (its LayoutElement now sizes to the wrapped text), and the 8 time slots render in two columns of 4. Prizes moved out of the static text into a live block. Instruction text refreshed: "have ROUNDS open" (not "keep this tab open"), couple-of-hours expectation, break/Play Now explanation, 5/10-min show-up windows, dropped the stale "cancelled under 8".
+- **Between-matches UX (item 2)**: my-match panel shows the break countdown + a **Play Now (skip break)** button; a slim in-game banner shows "Next match vs X in M:SS" during breaks.
+- **Tab scoreboard styled names fixed (item 4)**: rainbow/gradient nametags write per-char rich-text into Photon NickName; the Tab overlay truncated that markup mid-tag (broken literal tag, zero real characters). It now strips styling via `NametagStyler.Clean` before the 16-char truncation — full name, team-tint preserved.
+
+### Server (to deploy — migration `132`, then API+bot)
+- **Prizes scale with players (item 2)**: base = 8 players at DOUBLE the old 16-player tier (1st 1000g/5000xp, 2nd 600g/3000xp, 3rd 120g/150xp), growing linearly to 2x base at 16. Confirmed count snapshotted at lock (`tournaments.prize_player_count`); `_prize_amounts()` is the single source of truth — /current and /internal/watch carry computed numbers to the client and bot. Sync and async both.
+- **Between-rounds breaks (item 2)**: sync matches after round 1 enter `status='scheduled'` with a 7-min `scheduled_ready_at`; the no-show clock only starts when the match flips to `ready` (break can never forfeit anyone). New `POST /tournaments/{id}/matches/{mid}/play-now` — both players pressing it skips the break (row-locked against the simultaneous-press race). Round-flow facts, verified: round 2 otherwise activates the instant both prereq matches resolve; previously the only gap was the 30s tick.
+- Migration `132` — `prize_player_count`, `scheduled_ready_at`, `early_ok_signup_ids`.
+- Migration `130` reworked per Sid's call (was: silently seed default-time votes): now DMs existing voteless sync signups via `pending_dms` telling them to pick their times or be removed at lock, including the couple-of-hours heads-up.
+
+### Discord bot
+- **Break DM (item 2)**: when a next-round match schedules, both players get "Next up: vs X (round N). Starts <t:..:R>" with the live Discord countdown + the Play Now instructions.
+- **Prize displays are dynamic**: completion announcement and the tournament board embed use server-computed amounts; the board shows "Every signup past 8 grows the pot — 16 players doubles it!" during voting. Lock DM now says to plan for a couple of hours + mentions the skippable breaks. FAQ tournaments entry updated (agreement lock, prize scaling, ~2 hours).
+
+### Adversarial review pass (round 2 — 4 finder angles, per-finding verify, 28 agents)
+Confirmed and fixed before anything shipped:
+- **Queue/casual games during a break would have counted as tournament games** — the series row exists 7+ min before play and `_find_current_active_series` matched tournament series in ANY room, so two opponents passing the break in the 1v1 queue would advance the bracket off warmup games. Sync tournament series now only bind in their designated `sct-` room (async unchanged — any private lobby is its design), and queue join 409s while you have a sync match scheduled/ready.
+- **Players in a break read as "eliminated"** (and a bracket-reset GF read the LB champ as CHAMPION early) — `_compute_progress_labels` didn't know the `scheduled` state.
+- **/dm-opponent and /opp-online failed during the break** — exactly when the break DM tells players to coordinate Play Now.
+- **Bye-seeded top players' first match got a break** — a bye-fed W R2 at tournament start now goes straight to ready; the break only applies downstream of an actually-played match.
+- **Two-column slot labels overflowed their 158px cells** once tallies became public — labels drop the tz suffix (named in the row above), tallies compact to "(N)", wrap off, and fully-empty rows collapse.
+- **"best time: N/8" could count votes on dead slots** — the /current tally now filters to future slots like the lock does.
+- **"Prizes at 0 players"** on the board pre-signups — display floored at 8.
+- Old-client signup 400 now tells the player to update the mod; lock DM grace wording matches the real 5/10-min windows.
+
+### Round 1 (Sid's 7 items)
+
+### Client (mod)
+- **T-chat popup fixed (item 7)**: every line now renders at its measured wrapped height — no more clipped letters on the bottom row, and long messages show up to 3 wrapped lines ending in an explicit `... [see F5]` indicator instead of silently cutting mid-sentence. The backdrop grows to match.
+- **Artist tab sales log (item 1)**: new scrollable "Sales log" section — every purchase and gift of your items, newest first, with buyer, price paid, and your 30% cut per sale.
+- **Home tab cosmetics showcase (item 4)**: art doubled 38→76px, text 14→17pt, rows now scroll, and the list covers the last TWO cosmetic-update days (dates named in the caption and per row).
+- **Sync tournament voting is now mandatory (item 3)**: the time slots are pickable before signup and at least one is required to sign up (the vote rides the signup request); the header shows live "best time: N/8 agreed" progress. Save Votes still adjusts an existing signup.
+- **Sprout uses lopidav's original art (item 5)** — byte-for-byte his file, replacing the recreation that shipped with v1.30.
+- **Two Galaxyice cosmetics (item 6)**: Rounds Cat (static head-rider) and Star Spin — the first community-artist animated item (6-frame orbit, ~1s per lap).
+
+### Server (to deploy — migrations `128`-`131`, then API+bot)
+- **Chat flood control (item 7)**: WS chat now enforces 5 messages / 10s per sender plus an identical-message filter (20s window). Silent drops, checked before any DB work.
+- `GET /artist/{id}/sales` — per-purchase log (buyer, price, per-sale royalty, date), newest first.
+- `GET /shop/newest?batches=N` — restricts the newest-cosmetics list to the N most recent update days; entries now carry an `added` date.
+- **Sync tournament lock rework (item 3)**: signup requires ≥1 valid time-slot vote (recorded in the same transaction); the lock now requires `min_players` (8) votes agreeing on ONE slot — otherwise the whole tournament pushes back a week (feed post says why); when it locks, the agreed slot becomes the start time and every signup that didn't vote for it is removed, no penalty, with a feed post naming them. Force-start (everyone votes "now") bypasses the gate.
+- **`pending_dms` queue (migration `129`)** — generic one-off bot DM queue with the durable ack pattern; seeded with a DM to lopidav about the Sprout art fix.
+- Migration `128_galaxyice_cosmetics.sql` — Galaxyice artist role + both shop rows (born out-of-stock until the artist opens sales).
+
+### Discord bot
+- **New FAQ entries (item 2)**: hosting & netcode ("is orange the host", "is it peer to peer", "does hosting matter" — ROUNDS runs through Photon relays, no host advantage) and a dedicated blocking-tips entry; "how does the comp mod work" now routes to the what-is-this-mod answer.
+- **`pending_dms` drain loop** — own fully-guarded 60s loop; DMs the linked player, acks delivered/undeliverable; unparseable discord_ids flag undeliverable instead of poisoning the LIMIT-20 window.
+
+### Adversarial review pass (8-angle, pre-ship)
+The self-review on this batch surfaced and fixed, before anything shipped:
+- **Past slots could win the vote** — the earliest offered slots are already past at lock time (lock is default-6h, slots span default-24h..+18h); a popular past slot would have set the start time in the past, started the tournament within 30s, and mass no-show-forfeited the field. Lock tally now only counts slots ≥30 min in the future; signup/Save-Votes reject past slots; the client is only offered future slots.
+- **Pushback stranded every vote** — the +7d pushback regenerated all 8 slots while votes stayed pinned to the old timestamps, so carried signups could never re-aggregate (perpetual pushback) or got kicked wholesale next lock. Votes now translate +7d with the grid, and the pushback post says so.
+- **Legacy signups would have been kicked at the first post-deploy lock** — anyone signed up under optional voting has zero vote rows. Migration `130` seeds them with the default start time (the time they implicitly agreed to).
+- **Tallies were hidden pre-vote** — the old anti-snoop gate starved exactly the pre-signup players who now need to see which time is winning. Tallies are public during voting.
+- **Save Votes could self-kick** — clearing every checkbox deleted all votes and earned a silent kick at lock; the shared validate+replace helper (one write path for signup AND /time-vote) rejects empty sets, past slots, and duplicate slots (which previously 500'd on the PK).
+- **Re-signup silently dropped votes** — an already-signed-up client re-posting signup got a 200 while its slot picks were discarded; votes on the request are now recorded.
+- **Kicked players now get a direct DM** (via `pending_dms`) — they're exactly the cohort not watching the tab; a channel post alone would never reach them.
+- **Chat flood gate re-keyed to the connection** — keying by the client-supplied steam_id was spoofable per message; the dup filter now skips short lines ("gg" after each game is legit) and the bucket sweep is time-gated.
+- **Stale client vote-state reset** — checkbox picks are index-based; when the offered slots change (pushback/new week) frozen local edits now reset instead of silently retargeting onto different datetimes.
+- **Artist-item batch dates** — migration `131` adds `shop_items.released_at`, stamped when an artist first opens sales, so born-out-of-stock items land in the Home showcase under the day they became buyable (the Galaxyice debut would otherwise have aged out before ever appearing).
+- Perf: chat overlay layout scratch buffer (no per-OnGUI allocation), animated-thumbnail ticker skips ~94% of redundant reflection sets, chat-gate prune is time-gated.
+
 # Changelog
 
 ## v1.32.1 — RELEASED 2026-07-16
