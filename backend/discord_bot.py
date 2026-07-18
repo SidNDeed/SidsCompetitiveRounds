@@ -251,6 +251,7 @@ async def on_ready():
     if not publish_lb_loop.is_running(): publish_lb_loop.start()
     if not poll_tournament_notices.is_running(): poll_tournament_notices.start()
     if not publish_tournament_board.is_running(): publish_tournament_board.start()
+    if not poll_pending_dms.is_running(): poll_pending_dms.start()
     # Chat bridge: subscribe to the WS firehose so we can forward in-game
     # messages to the Discord channel. Discord -> in-game goes the other way
     # via on_message below. The poll_chat_catchup task above is a belt-and-
@@ -722,13 +723,16 @@ FAQ_ENTRIES = [
         ],
         "examples": ["how do tournaments work", "how do i sign up for the tournament"],
         "answer": ("Two kinds, both signed up from **F5 → Tournaments**:\n"
-                   "• **Sync** (runs weekly): played in one sitting. Sign up, vote on a start time, and at that time "
-                   "just **have ROUNDS open** — the mod auto-connects every bracket match for you. No tab-sitting.\n"
+                   "• **Sync** (runs weekly): played in one sitting (~2 hours). When you sign up you pick every "
+                   "start time you can make; it locks once **8+ players agree on one time** and at that time you "
+                   "just **have ROUNDS open** — the mod auto-connects every bracket match, with a short "
+                   "skippable breather between your matches.\n"
                    "• **Async** (~every 6 weeks): one week per round with a 7-day deadline per match — you schedule "
                    "each match with your opponent on Discord whenever suits you both.\n"
-                   "You'll get an availability-check DM 1–4 days before a start (link your account with `/link` "
-                   "to receive it). Live status board: the #scr-tournaments channel. Winners get Discord trophy "
-                   "roles + gold."),
+                   "**Prizes scale with signups**: at 8 players 1st gets 1000g/5000xp, growing to double at 16. "
+                   "The final sync time locks in **2 days before the default start** (so you always get 24h+ "
+                   "notice), and you'll get an availability-check DM 1-4 days before that lock (link your "
+                   "account with `/link` to receive it). Live status board: the #scr-tournaments channel."),
     },
     {
         "key": "more_gold",
@@ -990,18 +994,57 @@ FAQ_ENTRIES = [
                    "Boards need 1+ recorded match to show a player."),
     },
     {
+        "key": "hosting",
+        "title": "Hosting & netcode",
+        "patterns": [
+            r"(is|does).{0,12}orange.{0,15}host",
+            r"peer.{0,3}to.{0,3}peer|\bp2p\b",
+            r"who('?s| is|s)?\b.{0,12}(the )?host(ing)?\b",
+            r"(matter|advantage|difference).{0,20}\bhost",
+            r"host.{0,15}(matter|advantage)",
+        ],
+        "examples": ["is orange the host", "is the game peer to peer",
+                     "does it matter who hosts", "is there a host advantage"],
+        "answer": ("ROUNDS is **not peer-to-peer** — every online game runs through Photon's relay servers "
+                   "in your region, so nobody's PC is 'hosting' the match.\n"
+                   "• **Orange** is just the first player slot in the room (usually whoever's client created "
+                   "it). That client is the *master client* and coordinates room-level stuff like map sync, "
+                   "but it doesn't run the game for the other player.\n"
+                   "• **No host advantage** — each client simulates its own character and bullets and relays "
+                   "them. What matters is each player's ping to the Photon region, not who created the room."),
+    },
+    {
         "key": "what_is_scr",
         "title": "What is this mod?",
         "patterns": [
             r"(what|who).{0,15}(is|made|created|runs).{0,15}(scr|this mod|competitive rounds|sid'?s)",
             r"what.{0,10}(does )?(the|this) mod (do|add)",
+            r"how('?s| does| do)?.{0,12}(comp(etitive)?|scr|ranked|this|the) ?mod.{0,10}work",
         ],
-        "examples": ["what is this mod", "who made this mod"],
+        "examples": ["what is this mod", "who made this mod", "how does the comp mod work"],
         "answer": ("**Sid's Competitive Rounds** — a full competitive layer for ROUNDS, built and run by **Sid**: "
                    "ranked BO3 series with Glicko-2 ratings, matchmaking queues (1v1, 2v2, 1v2 beta), tournaments, "
                    "a leaderboard, betting, an XP/gold economy with a cosmetics shop, achievements, and this "
                    "Discord integration. It doesn't change gameplay — vanilla ROUNDS, plus everything around it.\n"
                    f"Get started: {FAQ_INFO_CHANNEL}"),
+    },
+    {
+        "key": "blocking",
+        "title": "Blocking better",
+        "patterns": [
+            r"(learn|get better|improve|git gud|better).{0,20}block",
+            r"block(ing)?.{0,15}(tips|better|guide|timing)",
+            r"how.{0,20}block (better|well|good)",
+        ],
+        "examples": ["how can i learn to block better", "any tips for blocking"],
+        "answer": ("1. **React to the bullet, not the trigger** — block just before the shot reaches you, "
+                   "not when they fire. Whiffed panic blocks are the #1 leak: every miss leaves you exposed "
+                   "for the whole cooldown.\n"
+                   "2. **Watch their gun, not your own player** — reloads and burst patterns telegraph when "
+                   "the next shot comes, and that's your blocking window.\n"
+                   "3. **Drill it deliberately** — play some casual games where you only allow yourself "
+                   "on-reaction blocks, and pick block-effect cards (Shield Charge, Empower) so a good block "
+                   "wins you the trade instead of just surviving it."),
     },
     {
         "key": "get_better",
@@ -3948,6 +3991,7 @@ from datetime import timedelta as _td
 
 _tournament_state = {}          # tournament_id -> last seen status
 _notified_match_ready = set()   # match_ids we've already DM'd "match ready" for
+_notified_match_scheduled = set()  # match_ids we've already DM'd the break/next-opponent notice for
 _notified_completed = set()     # tournament_ids we've already paid trophies for
 _notified_deadline_warn = set() # match_ids we've already DM'd a 24h-deadline warning for (async only)
 _notified_prestart = set()      # tournament_ids we've sent the T-15min "get in ROUNDS" reminder for (item 3)
@@ -4131,8 +4175,11 @@ async def poll_tournaments():
                     continue
                 body = (f"Tournament locked — you're in! It starts **{scheduled}**.\n"
                         f"**All you need to do: have ROUNDS open (main menu) at that time.** "
-                        f"The mod connects you to your opponent automatically each round. "
-                        f"If ROUNDS isn't running within 5 minutes of your match, you forfeit that match.")
+                        f"The mod connects you to your opponent automatically each round, with a "
+                        f"short breather between your matches (skippable when both players press "
+                        f"Play Now). Plan to be around for **a couple of hours** — double-elim "
+                        f"BO3s take a while. If ROUNDS isn't running when a match of yours starts "
+                        f"(5-10 min grace), you forfeit that match.")
                 sv = s.get("mod_version")
                 if latest_ver and sv and sv != latest_ver:
                     body += (f"\n⚠️ **Your mod is v{sv}, latest is v{latest_ver}.** "
@@ -4162,9 +4209,31 @@ async def poll_tournaments():
         # locked -> running -> channel announce
         if prev == "locked" and status == "running":
             await _announce_in_channel("**Tournament started.** Round 1 is live.")
-        # Any state: DM players whose match just became ready
+        # Any state: DM players whose match just became scheduled/ready
         if status == "running":
             for m in t.get("matches", []):
+                # Break state (item 2, July 17 round 2): sync rounds 2+ sit in
+                # 'scheduled' for a ~7 min breather. DM both players who's
+                # next + a live Discord countdown, and how to skip the break.
+                if m.get("status") == "scheduled" and kind != "async":
+                    mid_s = m["match_id"]
+                    if mid_s not in _notified_match_scheduled:
+                        _notified_match_scheduled.add(mid_s)
+                        sr_unix = _unix_ts(m.get("scheduled_ready_at"))
+                        when = f"<t:{sr_unix}:R>" if sr_unix else "in a few minutes"
+                        rd = m.get("round") or "?"
+                        sp1d = m.get("p1_discord_id"); sp2d = m.get("p2_discord_id")
+                        sp1n = m.get("p1_name") or "opponent"
+                        sp2n = m.get("p2_name") or "opponent"
+                        await _dm_user(sp1d,
+                                       f"🕐 **Next up: vs {sp2n}** (round {rd}). Your match starts {when} — "
+                                       f"short breather, no rush. Want to play right away? You BOTH press "
+                                       f"**Play Now** in F5 → Tournaments and it starts immediately.")
+                        await _dm_user(sp2d,
+                                       f"🕐 **Next up: vs {sp1n}** (round {rd}). Your match starts {when} — "
+                                       f"short breather, no rush. Want to play right away? You BOTH press "
+                                       f"**Play Now** in F5 → Tournaments and it starts immediately.")
+                    continue
                 if m.get("status") != "ready":
                     continue
                 mid = m["match_id"]
@@ -4232,13 +4301,23 @@ async def poll_tournaments():
             winner = name_for.get(t.get("winner_signup_id"), "?")
             runner = name_for.get(t.get("runner_up_signup_id"), "?")
             third = name_for.get(t.get("third_place_signup_id"), "?")
-            tier = t.get("prize_tier") or "none"
-            prize_txt = {
-                "full": "500g / 300g / 60g + trophy roles",
-                "sixty": "300g / 180g / 36g + trophy roles",
-                "thirty": "150g / 90g / 18g + trophy roles",
-                "none": "(cancelled)",
-            }.get(tier, tier)
+            # Prize numbers come computed from the server (/internal/watch,
+            # single source of truth — prizes scale with locked player count);
+            # legacy tier text only as a fallback for a stale API.
+            pg = t.get("prize_gold") or []
+            px = t.get("prize_xp") or []
+            pp = t.get("prize_players") or 0
+            if len(pg) == 3 and len(px) == 3:
+                prize_txt = (f"{pg[0]}g/{px[0]}xp · {pg[1]}g/{px[1]}xp · {pg[2]}g/{px[2]}xp "
+                             f"at {pp} players + trophy roles")
+            else:
+                tier = t.get("prize_tier") or "none"
+                prize_txt = {
+                    "full": "500g / 300g / 60g + trophy roles",
+                    "sixty": "300g / 180g / 36g + trophy roles",
+                    "thirty": "150g / 90g / 18g + trophy roles",
+                    "none": "(cancelled)",
+                }.get(tier, tier)
             await _announce_in_channel(
                 f"**Tournament complete.**  1st: **{winner}** · 2nd: {runner} · 3rd: {third}  ({prize_txt})"
             )
@@ -4264,7 +4343,9 @@ def _find_active_opponent_discord_id(caller_discord_id):
         if t.get("status") not in ("locked", "running"):
             continue
         for m in t.get("matches", []):
-            if m.get("status") not in ("ready", "active", "pending"):
+            # 'scheduled' included (July 17 round 2): the break window is
+            # exactly when players use /dm-opponent to coordinate Play Now.
+            if m.get("status") not in ("ready", "active", "pending", "scheduled"):
                 continue
             p1d = str(m.get("p1_discord_id") or "")
             p2d = str(m.get("p2_discord_id") or "")
@@ -4423,11 +4504,19 @@ def _tavail_embed(kind, start_unix, lock_unix):
                 "No specific availability is required.")
         return discord.Embed(title="🌀 Async tournament — availability check", description=desc, color=0x5865F2)
     start_str = f"<t:{start_unix}:F>" if start_unix else "(time TBD)"
-    # Wording contract (learning #130): "have ROUNDS open", never "be in the tab".
-    desc = (f"Start time: {start_str}\n\n"
-            "All matches are played back-to-back in one sitting starting then. "
-            "You only need ROUNDS open at the main menu at the start time — "
-            "the mod auto-connects you to each match.")
+    lock_str = f"<t:{lock_unix}:F>" if lock_unix else "(time TBD)"
+    # Wording contract (learning #130): "have ROUNDS open", never "be in the
+    # tab". July 17 round 3: the DEFAULT time shown is provisional — the
+    # final time is vote-decided at lock (>= 24h before play), so say so and
+    # point at the vote.
+    desc = (f"Default start: {start_str}\n"
+            f"⏰ The FINAL time locks in {lock_str} — it'll be whichever voted "
+            f"slot 8+ players agree on, always at least a day before play. "
+            f"Make sure your available times are picked in F5 → Tournaments!\n\n"
+            "All matches are played back-to-back in one sitting (~2 hours, "
+            "short skippable breaks between your matches). You only need "
+            "ROUNDS open at the main menu at the start time — the mod "
+            "auto-connects you to each match.")
     return discord.Embed(title="🏆 Synchronized tournament — availability check", description=desc, color=0xFAA61A)
 
 
@@ -4539,6 +4628,103 @@ async def poll_tournament_notices():
 
 @poll_tournament_notices.before_loop
 async def before_tournament_notices():
+    await bot.wait_until_ready()
+
+
+# ── Generic one-off DM queue (pending_dms, migration 129) ──────────────────
+# Rows are inserted by migrations/admin SQL; this loop DMs the linked player.
+# Durable ack pattern (learning #105); the server serializes the pk as
+# "dm_id" and this reads the same key (learning #152).
+_pdm_seen_ids: set = set()
+
+
+async def _ack_pending_dms(dm_ids, undeliverable=False):
+    if not dm_ids or http_session is None or not API_SECRET_KEY:
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/pending-dms/ack",
+            json={"dm_ids": list(dm_ids), "undeliverable": bool(undeliverable)},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[PDM] ack failed: {resp.status} {(await resp.text())[:120]}")
+    except Exception as ex:
+        print(f"[PDM] ack error: {ex}")
+
+
+@tasks.loop(seconds=60)
+async def poll_pending_dms():
+    """Own fully-guarded loop (learning #129)."""
+    try:
+        data = await api_get("/internal/pending-dms")
+        if not data or not data.get("dms"):
+            return
+        delivered, dead = [], []
+        for d in data["dms"]:
+            if not isinstance(d, dict):
+                continue
+            did_key = d.get("dm_id")
+            if did_key is None:
+                continue
+            if did_key in _pdm_seen_ids:
+                # Handled this process-lifetime — earlier ack must have
+                # failed; re-ack, don't re-DM.
+                delivered.append(did_key)
+                continue
+            discord_id = d.get("discord_id")
+            content = (d.get("content") or "").strip()
+            if not discord_id or not content:
+                # Unlinked player / empty row — permanently undeliverable.
+                _pdm_seen_ids.add(did_key)
+                dead.append(did_key)
+                continue
+            # Unparseable discord_id = permanently undeliverable — without
+            # this, one bad row at the head of the created_at ASC LIMIT 20
+            # window would starve the whole queue forever (the poll would
+            # refetch it every 60s and never ack).
+            try:
+                did_int = int(discord_id)
+            except (TypeError, ValueError):
+                print(f"[PDM] bad discord_id {discord_id!r} — flagging undeliverable")
+                _pdm_seen_ids.add(did_key)
+                dead.append(did_key)
+                continue
+            try:
+                user = bot.get_user(did_int) or await bot.fetch_user(did_int)
+            except discord.NotFound:
+                _pdm_seen_ids.add(did_key)
+                dead.append(did_key)
+                continue
+            except Exception as ex:
+                print(f"[PDM] fetch_user({discord_id}) failed: {ex}")
+                continue
+            if user is None:
+                continue
+            try:
+                await user.send(content[:2000])
+                print(f"[PDM] dm {did_key} → {user} ({d.get('display_name') or d.get('steam_id')})")
+                _pdm_seen_ids.add(did_key)
+                delivered.append(did_key)
+            except discord.Forbidden:
+                print(f"[PDM] {discord_id} has DMs closed — flagging undeliverable")
+                _pdm_seen_ids.add(did_key)
+                dead.append(did_key)
+            except Exception as ex:
+                # Transient (rate limit / gateway blip) — no ack, retried next poll.
+                print(f"[PDM] DM to {discord_id} failed: {ex}")
+            await asyncio.sleep(0.15)
+        if len(_pdm_seen_ids) > 2000:
+            _pdm_seen_ids.clear()
+        await _ack_pending_dms(delivered, undeliverable=False)
+        await _ack_pending_dms(dead, undeliverable=True)
+    except Exception as ex:
+        print(f"poll_pending_dms error: {ex}")
+
+
+@poll_pending_dms.before_loop
+async def before_pending_dms():
     await bot.wait_until_ready()
 
 
@@ -4745,6 +4931,18 @@ def _build_tournament_board_embed(t, kind: str) -> discord.Embed:
                 lines.append(f"{medal} **{nm}**" if medal == "🥇" else f"{medal} {nm}")
     else:
         lines.append(f"**Status: {status}**")
+    # Prize line (item 2, July 17 round 2): prizes scale with player count —
+    # server-computed numbers, plus the growth hook while signups are open.
+    _pg = t.get("prize_gold") or []
+    _px = t.get("prize_xp") or []
+    # Amounts are already floored at the 8-player base server-side; floor the
+    # DISPLAYED count too so early voting never reads "Prizes at 2 players".
+    _pp = max(8, t.get("prize_players") or 0)
+    if status in ("voting", "locked", "running") and len(_pg) == 3 and len(_px) == 3:
+        lines.append(f"💰 **Prizes at {_pp} players:** "
+                     f"🥇 {_pg[0]}g/{_px[0]}xp · 🥈 {_pg[1]}g/{_px[1]}xp · 🥉 {_pg[2]}g/{_px[2]}xp")
+        if status == "voting":
+            lines.append("Every signup past 8 grows the pot — 16 players doubles it!")
     # Roster (skip on completed — the podium tells the story). Seeds when
     # locked/running (the watch payload doesn't carry them today — defensive
     # .get so they appear the moment the server adds them), ready ✓ likewise.

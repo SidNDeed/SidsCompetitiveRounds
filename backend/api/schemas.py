@@ -502,6 +502,10 @@ class TournamentSignupRequest(BaseModel):
     steam_id: str
     display_name: str | None = None
     region: str | None = None  # Photon region the client is currently on
+    # Sync signups must state which offered start slots they can make (>= 1);
+    # recorded as the player's time votes in the same transaction. Ignored
+    # for async tournaments and by unsignup (which shares this schema).
+    slot_ts: list[datetime] = []
 
 
 class TournamentTimeVoteRequest(BaseModel):
@@ -571,6 +575,16 @@ class TournamentCurrentResponse(BaseModel):
     ended_at: datetime | None
     min_players: int
     max_players: int
+    # Prizes scale with confirmed player count (July 17 round 2): live count
+    # while voting, locked snapshot afterward. Flat ints — the mod's manual
+    # parser reads scalars.
+    prize_players: int = 0
+    prize_gold_1: int = 0
+    prize_gold_2: int = 0
+    prize_gold_3: int = 0
+    prize_xp_1: int = 0
+    prize_xp_2: int = 0
+    prize_xp_3: int = 0
     signups: list[TournamentSignupEntry]
     matches: list[TournamentMatchEntry]
     my_signup_id: UUID | None
@@ -580,7 +594,7 @@ class TournamentCurrentResponse(BaseModel):
     my_penalty_pct: float
     my_discord_linked: bool
     time_slot_options: list[datetime]
-    # Tallies only filled when caller has voted; otherwise empty.
+    # Tallies are public during voting (mandatory-vote coordination).
     time_slot_tallies: list[TournamentTimeSlotTally]
     force_vote_count: int
     photon_region: str | None = None

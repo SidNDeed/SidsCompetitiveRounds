@@ -335,6 +335,8 @@ namespace CompetitiveRounds
             {"casual_century",      new[]{"Century Club",        "Win 100 casual games in a row"}},
             {"casual_conqueror",    new[]{"Casual Conqueror",    "Win 200 casual games in a row"}},
             {"touch_grass",         new[]{"Touch Grass",         "Win 500 casual games in a row"}},
+            // July 17 round 3 (Sid item 3): server-granted to BOTH players.
+            {"twins",               new[]{"Twins!",              "Finish a game with the exact same 5 cards (and copies) as your opponent"}},
         };
 
         // Cached data
@@ -1623,6 +1625,52 @@ namespace CompetitiveRounds
                 catch (Exception ex) { Plugin.Log.LogWarning($"[ARTIST] items parse: {ex.Message}"); }
                 CachedArtistItems = items;
                 CachedArtistBlocks = blocks;
+                NativeUI.MarkDirty();
+            }));
+        }
+
+        // Per-purchase sales log for the Artist tab: who bought what, at what
+        // price, and the artist's cut of each sale.
+        public class ArtistSaleEntry
+        {
+            public string item, buyer, when;
+            public int price, earned;
+        }
+
+        public static List<ArtistSaleEntry> CachedArtistSales { get; private set; } = new List<ArtistSaleEntry>();
+
+        public static void FetchArtistSales(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/artist/{steamId}/sales?limit=50", (ok, resp) =>
+            {
+                if (!ok) { Plugin.Log.LogWarning($"[ARTIST] sales fetch failed: {resp}"); return; }
+                var sales = new List<ArtistSaleEntry>();
+                try
+                {
+                    // Buyer names are user-authored free text — slice the array
+                    // string-aware (learning #156), never Split on a key token.
+                    int arrKey = resp.IndexOf("\"sales\"", StringComparison.Ordinal);
+                    int arrOpen = arrKey >= 0 ? resp.IndexOf('[', arrKey) : -1;
+                    int arrClose = arrOpen >= 0 ? FindMatchingBracketStringAware(resp, arrOpen) : -1;
+                    if (arrOpen >= 0 && arrClose > arrOpen)
+                    {
+                        foreach (string chunk in SliceTopLevelObjects(
+                            resp.Substring(arrOpen + 1, arrClose - arrOpen - 1)))
+                        {
+                            var s = new ArtistSaleEntry();
+                            s.item = ExtractJsonString(chunk, "item");
+                            s.buyer = ExtractJsonString(chunk, "buyer");
+                            s.when = ExtractJsonString(chunk, "when");
+                            s.price = ExtractJsonInt(chunk, "price");
+                            s.earned = ExtractJsonInt(chunk, "earned");
+                            if (!string.IsNullOrEmpty(s.item)) sales.Add(s);
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[ARTIST] sales parse: {ex.Message}"); }
+                CachedArtistSales = sales;
                 NativeUI.MarkDirty();
             }));
         }
@@ -4435,15 +4483,17 @@ namespace CompetitiveRounds
             public int price;
             public string previewColor;
             public string artistName;
+            public string added;   // "Jul 12" — the cosmetic-update day (batch)
         }
 
         public static List<NewestCosmeticEntry> CachedNewestCosmetics;
 
         /// <summary>GET /shop/newest — the most recently added shop items for the
-        /// Home tab's "newest cosmetics" panel.</summary>
+        /// Home tab's "newest cosmetics" panel. batches=2 restricts the list to
+        /// the last two cosmetic-update days (item 4).</summary>
         public static void FetchNewestCosmetics()
         {
-            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/shop/newest?limit=6", (ok, resp) =>
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/shop/newest?limit=12&batches=2", (ok, resp) =>
             {
                 if (!ok || string.IsNullOrEmpty(resp)) return;
                 try
@@ -4465,6 +4515,7 @@ namespace CompetitiveRounds
                             price = ExtractJsonInt(chunk, "price"),
                             previewColor = ExtractJsonString(chunk, "preview_color"),
                             artistName = ExtractJsonString(chunk, "artist_name"),
+                            added = ExtractJsonString(chunk, "added"),
                         };
                         if (!string.IsNullOrEmpty(e.sku)) list.Add(e);
                     }
@@ -6835,6 +6886,11 @@ namespace CompetitiveRounds
             public string ended_at;
             public int min_players;
             public int max_players;
+            // Prizes scale with confirmed player count (July 17 round 2):
+            // server-computed, live during voting, locked snapshot after.
+            public int prize_players;
+            public int prize_gold_1, prize_gold_2, prize_gold_3;
+            public int prize_xp_1, prize_xp_2, prize_xp_3;
             public string my_signup_id;
             public bool my_ready;
             public float my_penalty_pct;
@@ -6946,6 +7002,13 @@ namespace CompetitiveRounds
             t.ended_at = ExtractString(json, "ended_at");
             t.min_players = ExtractInt(json, "min_players", 8);
             t.max_players = ExtractInt(json, "max_players", 16);
+            t.prize_players = ExtractInt(json, "prize_players", 0);
+            t.prize_gold_1 = ExtractInt(json, "prize_gold_1", 0);
+            t.prize_gold_2 = ExtractInt(json, "prize_gold_2", 0);
+            t.prize_gold_3 = ExtractInt(json, "prize_gold_3", 0);
+            t.prize_xp_1 = ExtractInt(json, "prize_xp_1", 0);
+            t.prize_xp_2 = ExtractInt(json, "prize_xp_2", 0);
+            t.prize_xp_3 = ExtractInt(json, "prize_xp_3", 0);
             t.my_signup_id = ExtractString(json, "my_signup_id");
             t.my_ready = ExtractBool(json, "my_ready");
             t.my_penalty_pct = ExtractFloat(json, "my_penalty_pct");
@@ -7125,16 +7188,29 @@ namespace CompetitiveRounds
             return list.ToArray();
         }
 
-        public static void TournamentSignup(string tournamentId, string steamId, string displayName)
+        public static void TournamentSignup(string tournamentId, string steamId, string displayName, string[] slotIsos = null)
         {
             // Include the client's current Photon region so the server can pick the
             // tournament's canonical region at lock time (mode of all signups'
             // regions). Auto-connect then pins every match to that region.
             string region = "";
             try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
-            string body = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{Escape(displayName ?? steamId)}\",\"region\":\"{Escape(region)}\"}}";
+            // Item 3: sync signups carry the player's time votes (>= 1 slot
+            // required server-side; the UI enforces it before calling).
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{\"steam_id\":\"").Append(Escape(steamId))
+              .Append("\",\"display_name\":\"").Append(Escape(displayName ?? steamId))
+              .Append("\",\"region\":\"").Append(Escape(region))
+              .Append("\",\"slot_ts\":[");
+            if (slotIsos != null)
+                for (int i = 0; i < slotIsos.Length; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append('"').Append(Escape(slotIsos[i])).Append('"');
+                }
+            sb.Append("]}");
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/tournaments/{tournamentId}/signup", body,
+                $"{baseUrl}/api/v1/tournaments/{tournamentId}/signup", sb.ToString(),
                 (s, r) =>
                 {
                     if (s) { FetchTournamentCurrent(steamId, force: true); CompetitiveUI.ShowNotification("Signed up for tournament", new Color(0.4f, 1f, 0.5f)); }
@@ -7183,6 +7259,27 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/tournaments/{tournamentId}/ready", body,
                 (s, r) => { if (s) FetchTournamentCurrent(steamId, force: true); }));
+        }
+
+        // Skip the between-rounds break (July 17 round 2): the match starts
+        // immediately once BOTH players have pressed Play Now.
+        public static void TournamentPlayNow(string tournamentId, string matchId, string steamId)
+        {
+            string body = $"{{\"steam_id\":\"{Escape(steamId)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/tournaments/{tournamentId}/matches/{matchId}/play-now", body,
+                (s, r) =>
+                {
+                    if (s)
+                    {
+                        CompetitiveUI.ShowNotification("Play Now sent - starts when your opponent presses it too", new Color(0.5f, 0.9f, 1f));
+                        // Refresh both surfaces so the button state + countdown update.
+                        _myActiveMatchesRefreshAt = 0f;
+                        FetchMyActiveTournamentMatches(steamId);
+                        FetchTournamentCurrent(steamId, force: true);
+                    }
+                    else CompetitiveUI.ShowNotification(ExtractErrorDetail(r) ?? "Play Now failed", new Color(1f, 0.5f, 0.4f));
+                }));
         }
 
         private static string ExtractErrorDetail(string response)
@@ -7294,6 +7391,12 @@ namespace CompetitiveRounds
             // banner countdown (item 3). Snapshot at fetch time — pair with
             // fetched_at_realtime for a live countdown between polls.
             public int ready_seconds_left;
+            // Break state (July 17 round 2): sync rounds 2+ sit in
+            // status='scheduled' — countdown to auto-ready, plus who has
+            // pressed Play Now (both = the break skips).
+            public int scheduled_seconds_left;
+            public bool my_early_ok;
+            public bool opp_early_ok;
             public float fetched_at_realtime;
         }
         public static List<ActiveTournamentMatch> CachedMyActiveTournamentMatches = new List<ActiveTournamentMatch>();
@@ -7328,6 +7431,9 @@ namespace CompetitiveRounds
                                 my_ready = ExtractBool(raw, "my_ready"),
                                 opp_ready = ExtractBool(raw, "opp_ready"),
                                 ready_seconds_left = ExtractInt(raw, "ready_seconds_left", -1),
+                                scheduled_seconds_left = ExtractInt(raw, "scheduled_seconds_left", -1),
+                                my_early_ok = ExtractBool(raw, "my_early_ok"),
+                                opp_early_ok = ExtractBool(raw, "opp_early_ok"),
                                 fetched_at_realtime = Time.realtimeSinceStartup,
                             });
                         }

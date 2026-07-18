@@ -367,9 +367,16 @@ def _series_pair_filter(pid_a, pid_b):
     )
 
 
-async def _find_current_active_series(db, pid_a, pid_b):
+async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
     """The pair's CURRENT in-progress series, shared by every find-or-create
     site (match report, queue ready/poll, preflight) so they can't diverge.
+
+    room_id (when known) gates SYNC tournament series to their designated
+    sct- room: the between-rounds break (July 17 round 2) gives the pair a
+    designed idle window, and without the gate a queue or casual game they
+    play to pass it would bind to the tournament series and advance the
+    bracket off warmup games. Async tournament series bind in any room —
+    playing anywhere IS their design.
 
     'Current' means status='active' AND any of:
       - created within SERIES_REUSE_WINDOW_MIN (fresh series), or
@@ -417,9 +424,18 @@ async def _find_current_active_series(db, pid_a, pid_b):
             ),
         )
         .order_by(RankedSeries.created_at.desc())
-        .limit(1)
+        .limit(3)
     )
-    return (await db.execute(q)).scalar_one_or_none()
+    candidates = (await db.execute(q)).scalars().all()
+    for s in candidates:
+        if s.is_tournament and s.tournament_id is not None and room_id:
+            kind = (await db.execute(
+                text("SELECT kind FROM tournaments WHERE id = :tid"),
+                {"tid": s.tournament_id})).scalar_one_or_none()
+            if kind == "sync" and not str(room_id).startswith("sct-"):
+                continue
+        return s
+    return None
 
 
 # ── Application setup ──────────────────────────────────────────
@@ -565,6 +581,34 @@ async def queue_cleanup_loop():
                 for r in timeout_rows:
                     partner = f", matched_with={r[3]}" if r[3] else ""
                     print(f"[QUEUE-CLEANUP] Absolute timeout (>30min in queue): {r[1]} status={r[2]}{partner}")
+                # 1v2 orphan sweep (July 17 round 3): the ovt cleanup paths
+                # (ghost prune, husk sweep, dead-lock reset) all lived inside
+                # ovt_queue_poll — with ZERO 1v2 pollers nothing ever ran, so
+                # the July 17 session left ready_join husk rows + a 0-game
+                # 'active' ovt series dangling for 9+ hours. Windows are
+                # deliberately WIDE (learning #150: a timeout heuristic must
+                # never be able to hit a live game 1 — the fine-grained
+                # cleanup stays in the poll paths; this is the janitor for
+                # the nobody-is-polling case only).
+                husk_result = await db.execute(
+                    text("""DELETE FROM ovt_queue
+                        WHERE last_polled < NOW() - INTERVAL '30 minutes'
+                        RETURNING steam_id, status"""))
+                for r in husk_result.fetchall():
+                    print(f"[OVT-CLEANUP] Husk row swept: {r[0]} status={r[1]}")
+                dead_result = await db.execute(
+                    text("""UPDATE ovt_series s
+                        SET status = 'cancelled'
+                        WHERE s.status = 'active'
+                          AND s.created_at < NOW() - INTERVAL '30 minutes'
+                          AND NOT EXISTS (SELECT 1 FROM ovt_matches m
+                                          WHERE m.series_id = s.id)
+                          AND NOT EXISTS (SELECT 1 FROM ovt_queue q
+                                          WHERE q.series_id = s.id
+                                            AND q.last_polled >= NOW() - INTERVAL '15 minutes')
+                        RETURNING s.id"""))
+                for r in dead_result.fetchall():
+                    print(f"[OVT-CLEANUP] Zero-game dead lock cancelled: series {r[0]}")
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] Error: {e}")
@@ -1057,7 +1101,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.32.1"
+LATEST_MOD_VERSION = "1.33.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1398,7 +1442,7 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         # config, or a deliberate mid-series toggle) must not void the series'
         # remaining games; that both mis-records real ranked games AND would
         # let a losing player dodge a live BO3 by toggling ranked off.
-        _live_series = await _find_current_active_series(db, p1.id, p2.id)
+        _live_series = await _find_current_active_series(db, p1.id, p2.id, room_id=report.photon_room_id)
         if _live_series is not None:
             print(f"[MATCH] kept ranked despite disabled flag: live series {_live_series.id} "
                   f"is the sitting's consent record (room={report.photon_room_id})")
@@ -1645,6 +1689,10 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         report.player1.cards if p1_won else report.player2.cards,
         winner_rounds, loser_rounds, winner_is_p1=p1_won,
     )
+    # Twins! (July 17 round 3): both players finished with the exact same
+    # 5-card multiset. Cross-player -> server-side (learning #4); granted to
+    # BOTH ids from the reporter's payload.
+    await _check_twins_achievement(db, report, p1.id, p2.id)
 
     # Win-streak counters (July 12 item 2, migration 112). Flawless = five 5-0
     # WINS in a row (any non-sweep game, or any loss, resets); casual streaks
@@ -1693,8 +1741,9 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
 
     if report.is_ranked:
         # Find the pair's CURRENT active series via the shared helper
-        # (activity-based recency + tournament-aware — see its docstring).
-        series = await _find_current_active_series(db, p1.id, p2.id)
+        # (activity-based recency + tournament-aware — see its docstring;
+        # room_id keeps sync tournament series bound to their sct- room).
+        series = await _find_current_active_series(db, p1.id, p2.id, room_id=report.photon_room_id)
 
         series_was_new = False
         if not series:
@@ -3458,6 +3507,26 @@ async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
     if not player.ranked_enabled:
         player.ranked_enabled = True
 
+    # July 17 round 2: a scheduled/ready SYNC tournament match blocks queue
+    # join. The between-rounds break is ~7 min, a queue BO3 is longer, and
+    # the tournament auto-connect would yank the player out mid-game
+    # (learning #150 family: never fire a lock into a player already in
+    # another game — the same rule pointed the other way).
+    _tmatch = (await db.execute(text("""
+        SELECT m.id
+        FROM tournament_matches m
+        JOIN tournaments t ON t.id = m.tournament_id
+        JOIN tournament_signups s
+          ON (s.id = m.p1_signup_id OR s.id = m.p2_signup_id)
+        WHERE t.status = 'running' AND t.kind = 'sync'
+          AND m.status IN ('scheduled', 'ready')
+          AND s.player_id = :pid
+        LIMIT 1"""), {"pid": player.id})).first()
+    if _tmatch:
+        raise HTTPException(
+            status_code=409,
+            detail="Your tournament match is up next - play it first (F5 -> Tournaments)")
+
     # Get their current rating
     rating_result = await db.execute(
         select(GlickoRating).where(GlickoRating.player_id == player.id)
@@ -3905,7 +3974,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             # series, so the row was born at first match report (already 1-0 →
             # permanently bet-locked, bug #36) and the client never got a
             # series_id for live-points.
-            series = await _find_current_active_series(db, my_pid, opp["player_id"])
+            series = await _find_current_active_series(db, my_pid, opp["player_id"], room_id=room_name)
             if series is None:
                 series = RankedSeries(
                     player1_id=my_pid, player2_id=opp["player_id"],
@@ -3930,7 +3999,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
         # Room already set (by /ready endpoint) but we see it on poll
         if room_name:
-            series = await _find_current_active_series(db, my_pid, opp["player_id"])
+            series = await _find_current_active_series(db, my_pid, opp["player_id"], room_id=room_name)
             sid_str = str(series.id) if series is not None else None
             await db.commit()
             return QueuePollResponse(
@@ -4125,7 +4194,7 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
         # match report's p1/p2 ordering matches our ordering or not. Skip if a row
         # already exists (e.g., re-ready after a brief disconnect) — shared helper,
         # activity-based recency so an interrupted BO3 resumes instead of forking.
-        existing_series = await _find_current_active_series(db, player.id, opp["player_id"])
+        existing_series = await _find_current_active_series(db, player.id, opp["player_id"], room_id=room_name)
         if existing_series is None:
             existing_series = RankedSeries(
                 player1_id=player.id,
@@ -4729,6 +4798,56 @@ def _claim_chat_nonce(steam_id: str, nonce: str) -> bool:
     return True
 
 
+# Chat flood control (item 7): per-CONNECTION sliding window + repeated-
+# message filter. Keyed by the WebSocket connection identity, NOT the
+# payload's steam_id — steam_id is client-supplied and a spammer could
+# rotate it per message, while a new connection costs a full WS handshake.
+# Silent drops, same convention as the ban gate — legit players rarely hit
+# 5 msgs/10s, and spammers get no feedback loop to tune against. In-memory
+# is fine: the compose override pins uvicorn to a single worker (#125).
+import time as _time_mod
+_CHAT_RATE_WINDOW = 10.0   # seconds
+_CHAT_RATE_MAX = 5         # messages per window per connection
+_CHAT_DUP_WINDOW = 20.0    # identical message from same connection inside this = drop
+_CHAT_DUP_MIN_LEN = 9      # dup filter skips short lines ("gg", "lol", "one more?")
+_CHAT_PRUNE_EVERY = 60.0   # bucket sweep cadence (time-gated, never per-message)
+_chat_rate: dict = {}      # conn key -> deque of monotonic send times
+_chat_last_msg: dict = {}  # conn key -> (normalized message, monotonic)
+_chat_last_prune = 0.0
+
+
+def _chat_spam_ok(conn_key: int, message: str) -> bool:
+    """True if this message passes the flood/duplicate gate (and is recorded)."""
+    global _chat_last_prune
+    now = _time_mod.monotonic()
+    dq = _chat_rate.get(conn_key)
+    if dq is None:
+        dq = collections_mod.deque()
+        _chat_rate[conn_key] = dq
+    while dq and now - dq[0] > _CHAT_RATE_WINDOW:
+        dq.popleft()
+    if len(dq) >= _CHAT_RATE_MAX:
+        return False
+    # Repeat filter only for longer lines: identical SHORT messages repeat
+    # legitimately ("gg" after each game of a BO3); ads/copy-paste spam is
+    # long, and rapid short-message floods die on the rate window above.
+    norm = " ".join(message.lower().split())
+    if len(norm) >= _CHAT_DUP_MIN_LEN:
+        last = _chat_last_msg.get(conn_key)
+        if last is not None and last[0] == norm and now - last[1] < _CHAT_DUP_WINDOW:
+            return False
+    dq.append(now)
+    _chat_last_msg[conn_key] = (norm, now)
+    # Time-gated sweep (never per-message — a size-triggered scan would run
+    # on every send once the dict crosses its threshold).
+    if now - _chat_last_prune > _CHAT_PRUNE_EVERY:
+        _chat_last_prune = now
+        for k in [k for k, v in _chat_rate.items() if not v or now - v[-1] > 300]:
+            _chat_rate.pop(k, None)
+            _chat_last_msg.pop(k, None)
+    return True
+
+
 async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | None = None) -> dict:
     """Look up Glicko rating + active title (for the 'Name [Title] (rating)' render).
     Returns {'rating': int|None, 'title': str|None, 'title_color': str|None}."""
@@ -4804,6 +4923,12 @@ async def ws_chat(ws: WebSocket):
             client_msg_id = str(data.get("client_msg_id", ""))[:64]
             if client_msg_id and not _claim_chat_nonce(steam_id, client_msg_id):
                 print(f"[CHAT] dropped resend (nonce {client_msg_id[:12]}) from {display_name}")
+                continue
+            # Flood/duplicate gate (item 7) — keyed by the connection (id(ws))
+            # so a spoofed steam_id can't dodge it, and before the ban lookup
+            # so spam bursts never turn into DB load.
+            if not _chat_spam_ok(id(ws), message):
+                print(f"[CHAT] rate-limited {display_name} ({steam_id})")
                 continue
             # Banned players can't chat. Silently drop — telling them they're banned would
             # encourage griefing on alts. The mod's queue-join 409 is the primary signal.
@@ -5117,27 +5242,42 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
 
 
 @app.get("/api/v1/shop/newest", tags=["Shop"])
-async def newest_shop_items(limit: int = Query(6, ge=1, le=20),
+async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
+                            batches: int = Query(0, ge=0, le=4),
                             db: AsyncSession = Depends(get_db)):
     """Most recently added shop items, for the Home tab's 'newest cosmetics'
     panel (v1.33). Excludes achievement-pool items and not-for-sale-yet
-    artist items (stock_limit = -1). Key order is load-bearing for the mod's
-    manual parser: sku first, artist_name last within each entry."""
+    artist items (stock_limit = -1). batches > 0 restricts the result to the
+    N most recent cosmetic-update days (items ship in batches; grouping by
+    created_at::date recovers the batch) — the Home tab shows the last two.
+    Key order is load-bearing for the mod's manual parser: sku first,
+    artist_name last within each entry."""
+    # "When it shipped" = released_at when the item was stock-gated at birth
+    # (artist items open sales later; migration 131), else created_at.
     rows = (await db.execute(text("""
         SELECT si.sku, si.kind, si.name, si.rarity, si.price, si.preview_color,
+               to_char(COALESCE(si.released_at, si.created_at), 'Mon FMDD') AS added,
                COALESCE(ap.display_name, '') AS artist_name
         FROM shop_items si
         LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
         WHERE si.rotation_pool IS NULL
           AND COALESCE(si.stock_limit, 0) >= 0
-        ORDER BY si.created_at DESC
+          AND (:batches = 0 OR COALESCE(si.released_at, si.created_at)::date IN (
+                SELECT d FROM (
+                    SELECT DISTINCT COALESCE(released_at, created_at)::date AS d
+                    FROM shop_items
+                    WHERE rotation_pool IS NULL AND COALESCE(stock_limit, 0) >= 0
+                    ORDER BY d DESC LIMIT :batches
+                ) recent_days))
+        ORDER BY COALESCE(si.released_at, si.created_at) DESC
         LIMIT :lim
-    """), {"lim": limit})).mappings().all()
+    """), {"lim": limit, "batches": batches})).mappings().all()
     return {
         "items": [
             {"sku": r["sku"], "kind": r["kind"], "name": r["name"],
              "rarity": r["rarity"], "price": r["price"],
              "preview_color": r["preview_color"] or "",
+             "added": r["added"] or "",
              "artist_name": r["artist_name"] or ""}
             for r in rows
         ]
@@ -5999,7 +6139,7 @@ async def series_preflight(
     # activity-based recency so an interrupted BO3 resumes when the pair
     # reconnects, and tournament series are always reused). A stale abandoned
     # 'active' row is still excluded, so a fresh sit-down starts fresh.
-    existing = await _find_current_active_series(db, p1.id, p2.id)
+    existing = await _find_current_active_series(db, p1.id, p2.id, room_id=room_id)
     if existing is not None:
         print(f"[PREFLIGHT-DIAG] reuse: existing active series {existing.id} for {p1_steam_id} vs {p2_steam_id} "
               f"(score {existing.p1_series_wins}-{existing.p2_series_wins})")
@@ -6544,6 +6684,47 @@ async def artist_items(steam_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+@app.get("/api/v1/artist/{steam_id}/sales", tags=["Artist"])
+async def artist_sales(
+    steam_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-purchase log for the Artist tab: who bought what, at what price, and
+    the artist's cut of each sale. Gifts show as price 0 / earned 0. The cut is
+    recomputed the same way purchase_item paid it (floor(price * 0.30), no
+    royalty on gifts or self-buys) rather than joined from gold_transactions —
+    the royalty tx doesn't record the buyer, so there's no per-row linkage.
+    Assumption: every artist-attributed sale postdates the royalty feature
+    (true — royalties shipped in migration 112, the first artist items in 114)
+    and the rate stays 0.30; if the rate ever changes, historical rows here
+    will show the NEW rate, not what was actually paid."""
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    rows = (await db.execute(text(
+        "SELECT si.name AS item_name, "
+        "       COALESCE(p.display_name, p.steam_id) AS buyer, "
+        "       COALESCE(pi.purchase_price, 0) AS price, "
+        "       CASE WHEN COALESCE(pi.purchase_price, 0) > 0 AND p.steam_id <> :sid "
+        "            THEN FLOOR(pi.purchase_price * 0.30)::int ELSE 0 END AS earned, "
+        "       to_char(pi.purchased_at, 'Mon FMDD') AS bought "
+        "FROM player_items pi "
+        "JOIN shop_items si ON si.id = pi.item_id "
+        "JOIN players p ON p.id = pi.player_id "
+        "WHERE si.artist_steam_id = :sid "
+        "ORDER BY pi.purchased_at DESC LIMIT :lim"
+    ), {"sid": steam_id, "lim": limit})).mappings().all()
+    return {
+        "sales": [
+            {
+                "item": r["item_name"], "buyer": r["buyer"],
+                "price": int(r["price"]), "earned": int(r["earned"]),
+                "when": r["bought"] or "",
+            } for r in rows
+        ],
+    }
+
+
 @app.post("/api/v1/artist/set-price", tags=["Artist"])
 async def artist_set_price(
     steam_id: str = Query(...),
@@ -6817,6 +6998,11 @@ async def artist_set_stock(
     item = await _artist_own_item(db, steam_id, sku)
     old = getattr(item, "stock_limit", None) or 0
     item.stock_limit = stock if stock > 0 else None
+    # First open from the born-out-of-stock state: stamp released_at so the
+    # Home tab's "newest cosmetics" batches group by when the item actually
+    # became buyable, not the (possibly much older) migration date.
+    if old == -1 and getattr(item, "released_at", None) is None:
+        item.released_at = datetime.now(timezone.utc)
     await _artist_audit(db, steam_id, "set-stock", sku, f"{old} -> {stock}")
     await db.commit()
     print(f"[ARTIST] {steam_id} set stock of {sku}: {old} -> {stock}")
@@ -7114,6 +7300,70 @@ async def ack_tournament_notices(
     return {"acked": res.rowcount or 0}
 
 
+@app.get("/api/v1/internal/pending-dms", tags=["Internal"])
+async def internal_pending_dms(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-poll endpoint: generic one-off DM queue (pending_dms, migration
+    129). Rows are inserted by migrations/admin SQL; the bot DMs the linked
+    player and acks. Durable ack pattern (learning #105): delivered_at NULL
+    and not undeliverable = pending; transient send failures don't ack so the
+    next tick retries. Serializes the pk as "dm_id" — the bot reads the same
+    key (learning #152)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    rows = (await db.execute(text("""
+        SELECT d.id AS dm_id, d.steam_id, d.content, d.created_at,
+               p.discord_id, p.display_name
+          FROM pending_dms d
+          LEFT JOIN players p ON p.steam_id = d.steam_id
+         WHERE d.delivered_at IS NULL AND NOT d.undeliverable
+      ORDER BY d.created_at ASC
+         LIMIT 20"""))).mappings().all()
+    return {
+        "dms": [
+            {
+                "dm_id": str(r["dm_id"]),
+                "steam_id": r["steam_id"],
+                "discord_id": r["discord_id"],
+                "display_name": r["display_name"] or "",
+                "content": r["content"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+class _PendingDmAck(BaseModel):
+    dm_ids: list[str]
+    undeliverable: bool = False
+
+
+@app.post("/api/v1/internal/pending-dms/ack", tags=["Internal"])
+async def ack_pending_dms(
+    body: _PendingDmAck,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only: mark pending DMs delivered (or permanently undeliverable —
+    unlinked player / DMs closed) so the poll stops returning them."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    ids = [i for i in body.dm_ids[:200] if i]
+    if not ids:
+        return {"acked": 0}
+    res = await db.execute(text(
+        "UPDATE pending_dms SET delivered_at = NOW(), undeliverable = :und "
+        "WHERE id::text = ANY(:ids) AND delivered_at IS NULL"
+    ), {"ids": ids, "und": bool(body.undeliverable)})
+    await db.commit()
+    return {"acked": res.rowcount or 0}
+
+
 # ── Routes: Privacy ──────────────────────────────────────────
 
 @app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
@@ -7272,6 +7522,10 @@ ACHIEVEMENT_DEFS = {
     # Client-detected (input / pick tracking):
     "grounded":             {"name": "Grounded",            "desc": "Win a game without ever jumping"},
     "instinct":             {"name": "Instinct",            "desc": "Win taking only the left-most card on every pick, without ever looking at the others"},
+    # July 17 round 3 (Sid item 3). Server-side, granted to BOTH players:
+    # identical 5-card multisets (duplicates counted) at game end. No win
+    # requirement — the mirror itself is the achievement.
+    "twins":                {"name": "Twins!",              "desc": "Finish a game with the exact same 5 cards (and copies) as your opponent"},
 }
 
 # Master rank threshold — applies to both 1v1 and 2v2 Glicko rating.
@@ -7383,6 +7637,36 @@ async def _check_match_achievements(db: AsyncSession, report, winner_id,
             print(f"[ACHIEVEMENT] match-combo grants for {winner_id}: {keys}")
     except Exception as e:
         print(f"[ACHIEVEMENT] match-combo check failed: {e}")
+
+
+async def _check_twins_achievement(db: AsyncSession, report, p1_id, p2_id) -> None:
+    """Twins! (July 17 round 3): both players finished the game with the
+    exact same 5-card multiset (duplicate copies counted). Granted to BOTH
+    players — cross-player detection belongs server-side (learning #4), and
+    the reporter's payload carries both card lists. Card names normalize via
+    _norm_card (the two clients can carry display vs GameObject spellings,
+    learning #19). An opponent with no shared cards (no mod / cr_cards drop)
+    yields an empty list and fails the exactly-5 gate naturally. Never
+    raises."""
+    try:
+        def multiset(cards):
+            counts: dict[str, int] = {}
+            for c in cards or []:
+                n = _norm_card(getattr(c, "card_name", None))
+                if not n:
+                    continue
+                counts[n] = counts.get(n, 0) + 1
+            return counts
+        m1 = multiset(report.player1.cards)
+        m2 = multiset(report.player2.cards)
+        if sum(m1.values()) != 5 or sum(m2.values()) != 5 or m1 != m2:
+            return
+        await _grant_achievement_inline(db, p1_id, "twins")
+        await _grant_achievement_inline(db, p2_id, "twins")
+        print(f"[ACHIEVEMENT] Twins! granted to {p1_id} + {p2_id} "
+              f"(build: {sorted(m1.items())})")
+    except Exception as e:
+        print(f"[ACHIEVEMENT] twins check failed: {e}")
 
 
 async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:

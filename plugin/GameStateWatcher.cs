@@ -248,8 +248,23 @@ namespace CompetitiveRounds
 
         public static void OnLocalBulletHit()
         {
-            if (!isTracking || inPickPhase) return;
-            if (_hitsRemaining <= 0) return;  // more damage events than projectiles (splash/DOT) — skip
+            // Bug #77 (Stan's manual count: hits understated by ~1 per round
+            // won): NO inPickPhase gate here. The round-ending kill blow runs
+            // vanilla's RPCA_DoHit body -> death -> round over -> "PICK
+            // PHASE" logged (which flips inPickPhase=true via the log hook)
+            // BEFORE our Postfix executes — so the old gate silently dropped
+            // exactly the kill shot of every round. A real bullet impact is a
+            // hit regardless of phase; nothing can be FIRED during the pick
+            // phase anyway (the fired-side gate stays), so this can't inflate.
+            if (!isTracking) return;
+            if (_hitsRemaining <= 0)
+            {
+                // Budget exhausted = more counted impacts than trigger pulls
+                // (splash/echo artifacts). Log it (throttled by rarity) so a
+                // residual #77-style undercount is diagnosable from logs.
+                Plugin.Log.LogInfo($"[HIT-DROP] budget exhausted (fired={LocalBulletsFiredThisMatch} hit={LocalBulletsHitThisMatch})");
+                return;
+            }
             _hitsRemaining--;
             LocalBulletsHitThisMatch++;
             if (!_loggedFirstHit) { _loggedFirstHit = true; Plugin.Log.LogInfo("[STATS] first bullet-hit this match"); }
@@ -1129,13 +1144,19 @@ namespace CompetitiveRounds
                 string rNameEager = "";
                 try { rNameEager = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
                 // 2v2 rooms (cr_ff / team_) keep their own team_series pipeline —
-                // never 1v1-preflight there. ranked_* / sct-* rooms ARE allowed
-                // now (v1.28.3, #36): series 1 already has ActiveRankedSeriesId
-                // from the queue/tournament flow (so the id-empty gate above
-                // skips them), but REMATCH series in the same room need this
+                // never 1v1-preflight there. Same for 1v2 (ovt_) rooms: the
+                // ovt series exists from the queue lock, and a 1v1 preflight
+                // here spawned phantom ranked_series rows pairing arbitrary
+                // trio members (proven in the July 17 first live 1v2 session:
+                // six phantom series — the one 1v1 path #146/#149 didn't
+                // gate). ranked_* / sct-* rooms ARE allowed (v1.28.3, #36):
+                // series 1 already has ActiveRankedSeriesId from the
+                // queue/tournament flow (so the id-empty gate above skips
+                // them), but REMATCH series in the same room need this
                 // preflight to exist before game 1 ends or they're born
                 // bet-locked. Server side is idempotent find-or-create.
-                bool is2v2Eager = inCrFfEager || rNameEager.StartsWith("team_");
+                bool is2v2Eager = inCrFfEager || rNameEager.StartsWith("team_")
+                    || rNameEager.StartsWith("ovt_");
                 if (!is2v2Eager)
                 {
                     seriesPreflightSent = true;
@@ -1197,7 +1218,11 @@ namespace CompetitiveRounds
                         // ranked_series here pollutes the live-bets panel + 1v1 stats
                         // with phantom rows for arbitrary opponent pairs (whichever
                         // opponentSteamId the poll happened to latch onto first).
-                        if (matchIsRanked && !inCrFf && !seriesPreflightSent
+                        // Same for 1v2 (ovt_) rooms — six phantom series in the
+                        // July 17 first live session came through this site.
+                        bool inOvtRoom = false;
+                        try { inOvtRoom = (PhotonNetwork.CurrentRoom?.Name ?? "").StartsWith("ovt_"); } catch { }
+                        if (matchIsRanked && !inCrFf && !inOvtRoom && !seriesPreflightSent
                             && string.IsNullOrEmpty(ApiClient.ActiveRankedSeriesId)
                             && !string.IsNullOrEmpty(localSteamId)
                             && !string.IsNullOrEmpty(opponentSteamId)

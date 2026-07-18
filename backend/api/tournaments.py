@@ -57,19 +57,50 @@ router = APIRouter(prefix="/api/v1/tournaments", tags=["Tournaments"])
 
 READY_STALE_SECONDS = 60          # ready_at older than this = not ready
 MATCH_READY_GRACE_SECONDS = 300   # 5 min to ready up at match start
+# July 17 round 2 (item 2): 7-min breather between a player's sync matches
+# (rounds 2+). The match sits in status='scheduled' with the room already
+# provisioned; both players pressing Play Now skips the break.
+MATCH_BREAK_SECONDS = 420
 FORCE_START_WINDOW_MINUTES = 30   # all force votes within this window
-VOTE_SLOT_INTERVAL_HOURS = 6      # 8 slots within ±24h of default_start
-PRIZE_GOLD = {"full": (500, 300, 60), "sixty": (300, 180, 36), "thirty": (150, 90, 18), "none": (0, 0, 0)}
-PRIZE_XP = {"full": (2500, 1500, 75), "sixty": (1500, 900, 45), "thirty": (750, 450, 23), "none": (0, 0, 0)}
+# Minimum notice between the lock deciding the winning slot and that slot
+# actually arriving (July 17 round 3, Sid item 9): players must be able to
+# answer the availability DM after the time is KNOWN. With lock_at =
+# default-48h and the slot grid spanning default-24h..+18h, every eligible
+# slot is 24-66h after lock.
+MIN_SLOT_NOTICE_HOURS = 24
+# Prizes scale with confirmed player count (July 17 round 2, item 2): the
+# BASE below is the 8-player payout (double the old 16-player full tier),
+# growing linearly to 2x base at 16 players. Same for sync and async.
+# _prize_amounts(n) is the single source of truth — the client and bot get
+# the computed numbers via /current and /internal/watch, never a local copy.
+PRIZE_BASE_GOLD = (1000, 600, 120)   # (1st, 2nd, 3rd) at 8 players
+PRIZE_BASE_XP = (5000, 3000, 150)
 GLICKO2_DEFAULT_RATING = 1500.0
+
+
+def _prize_amounts(n: Optional[int]) -> tuple:
+    """(gold_tuple, xp_tuple) for a tournament with n confirmed players.
+    Clamped to the 8..16 player band: below 8 a tournament can't lock, and
+    16 is max_players."""
+    f = max(8, min(16, int(n or 8))) / 8.0
+    gold = tuple(int(round(b * f)) for b in PRIZE_BASE_GOLD)
+    xp = tuple(int(round(b * f)) for b in PRIZE_BASE_XP)
+    return gold, xp
 
 # Weekly scheduling. Default slot = Saturday 12:00 America/Los_Angeles.
 # PT_ZONE handles PST/PDT automatically via zoneinfo so the 12:00 local time
-# stays stable across DST. lock_at = default - 6h, so voting closes 6h before start.
+# stays stable across DST. lock_at = default - 48h (July 17 round 3, Sid
+# item 9 — was 6h): the lock DECIDES the winning slot, and with the grid
+# spanning default-24h..+18h every eligible slot lands 24-66h after lock,
+# so players always get >= a day's notice of the final time and can answer
+# the availability DM meaningfully.
 PT_ZONE = ZoneInfo("America/Los_Angeles")
 TOURNAMENT_WEEKDAY = 5   # Saturday (Monday=0, Sunday=6)
 TOURNAMENT_HOUR_PT = 12  # 12:00 PT
-LOCK_OFFSET_HOURS = 6    # lock_at = default - 6h
+LOCK_OFFSET_HOURS = 48   # lock_at = default - 48h (>= 24h notice of any slot)
+# Voting must have a real window before the (now much earlier) lock: the
+# cron only schedules a tournament whose lock is at least this far out.
+MIN_VOTING_WINDOW_HOURS = 72
 
 # Async tournament knobs (Phase 2).
 ASYNC_SIGNUP_DAYS = 7            # signups open for 7 days before lock
@@ -129,6 +160,36 @@ def _offered_time_slots(default_start_ts: datetime) -> List[datetime]:
     for offset_h in (-24, -18, -12, -6, 0, 6, 12, 18):
         slots.append(default_start_ts + timedelta(hours=offset_h))
     return slots
+
+
+async def _replace_time_votes(db: AsyncSession, t: Tournament, player_id, slots) -> None:
+    """Validate + replace-set a player's time votes. The ONE write path for
+    tournament_time_votes (signup AND /time-vote) so the two can't drift.
+    Rules: at least one slot (voting is mandatory — an empty set would get
+    the player silently kicked at lock), slots must be offered AND still in
+    the future (with lock_at = default-48h all offered slots are post-lock
+    during normal voting; the future filter is defense-in-depth for late
+    ticks and clock skew). Deduped — a repeated slot in the request would
+    violate the PK."""
+    now = datetime.now(timezone.utc)
+    slots = list(slots or [])
+    if not slots:
+        # The parenthetical is for pre-update clients (their signup carries
+        # no slots at all — they can't see the time picker until they update).
+        raise HTTPException(
+            status_code=400,
+            detail="Pick at least one start time you can make "
+                   "(no time picker? update the mod: launch ROUNDS, quit, launch again)")
+    offered = {s for s in _offered_time_slots(t.default_start_ts) if s > now}
+    bad = [s for s in slots if s not in offered]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"Invalid or past slot(s): {bad}")
+    await db.execute(delete(TournamentTimeVote).where(and_(
+        TournamentTimeVote.tournament_id == t.id,
+        TournamentTimeVote.player_id == player_id)))
+    for slot in set(slots):
+        db.add(TournamentTimeVote(
+            tournament_id=t.id, player_id=player_id, slot_ts=slot))
 
 
 async def _recompute_player_penalty(db: AsyncSession, player_id: uuid.UUID) -> float:
@@ -281,9 +342,12 @@ def _compute_progress_labels(tournament: Tournament, all_matches: list) -> dict:
     labels: dict[uuid.UUID, str] = {}
     for sid, matches in by_sig.items():
         matches.sort(key=lambda m: m.round)
-        # Pending / ready / active match the player still has to play.
+        # Pending / scheduled / ready / active match the player still has to
+        # play ('scheduled' = the between-rounds break — without it here, a
+        # player in a break would read "eliminated", and the LB champ would
+        # read CHAMPION while the GF bracket-reset sat unplayed).
         next_m = next((m for m in matches
-                       if m.status in ("ready", "active", "pending")
+                       if m.status in ("ready", "active", "pending", "scheduled")
                        and m.winner_signup_id is None), None)
         if next_m is not None:
             labels[sid] = f"{_bracket_tag(next_m.bracket_side)} R{next_m.round}"
@@ -422,22 +486,35 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
             TournamentForceVote.player_id == caller_player.id,
         ))
         my_force_at = (await db.execute(fq)).scalar_one_or_none()
-        # Tallies only after caller has voted (prevents snooping pre-vote).
-        if my_votes:
-            tq = text("""
-                SELECT slot_ts, COUNT(*) AS votes
-                FROM tournament_time_votes
-                WHERE tournament_id = :tid
-                GROUP BY slot_ts ORDER BY slot_ts
-            """)
-            tallies = [TournamentTimeSlotTally(slot_ts=r.slot_ts, votes=r.votes)
-                       for r in (await db.execute(tq, {"tid": t.id})).all()]
+        # Tallies are public (item 3): voting is mandatory at signup and the
+        # lock needs min_players agreeing on ONE slot, so a pre-signup player
+        # must see which slot is winning to coordinate. (The old
+        # "only after the caller has voted" anti-snoop gate predates
+        # mandatory voting and starved exactly the audience that needs the
+        # data most.)
+        # Future slots only — the lock's agreement tally ignores past slots,
+        # so counting them here would show "best time: N/8" progress that
+        # can never actually lock (client topTally scans ALL tallies).
+        tq = text("""
+            SELECT slot_ts, COUNT(*) AS votes
+            FROM tournament_time_votes
+            WHERE tournament_id = :tid AND slot_ts > :now
+            GROUP BY slot_ts ORDER BY slot_ts
+        """)
+        tallies = [TournamentTimeSlotTally(slot_ts=r.slot_ts, votes=r.votes)
+                   for r in (await db.execute(tq, {"tid": t.id, "now": datetime.now(timezone.utc)})).all()]
 
     # Force vote count
     fvc = (await db.execute(
         select(func.count()).select_from(TournamentForceVote).where(
             TournamentForceVote.tournament_id == t.id)
     )).scalar_one()
+
+    # Prizes scale with player count (item 2): live confirmed count while
+    # voting, the locked snapshot afterward. Flat fields — the mod parses
+    # this response by hand.
+    _n_conf = sum(1 for s in signups if not s.is_speculative)
+    _pg, _px = _prize_amounts(t.prize_player_count or _n_conf)
 
     return TournamentCurrentResponse(
         tournament_id=t.id, status=t.status, kind=t.kind,
@@ -446,11 +523,18 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
         lock_at=t.lock_at, voting_closes_at=t.voting_closes_at,
         started_at=t.started_at, ended_at=t.ended_at,
         min_players=t.min_players, max_players=t.max_players,
+        prize_players=int(t.prize_player_count or _n_conf),
+        prize_gold_1=_pg[0], prize_gold_2=_pg[1], prize_gold_3=_pg[2],
+        prize_xp_1=_px[0], prize_xp_2=_px[1], prize_xp_3=_px[2],
         signups=signups, matches=matches,
         my_signup_id=my_signup_id, my_votes=my_votes,
         my_force_vote_at=my_force_at, my_ready=my_ready,
         my_penalty_pct=my_penalty, my_discord_linked=my_discord,
-        time_slot_options=_offered_time_slots(t.default_start_ts),
+        # Only still-future slots are offered (item 3). With lock_at =
+        # default-48h every slot is post-lock during normal voting; the
+        # filter stays as defense-in-depth for late ticks / long pushbacks.
+        time_slot_options=[s for s in _offered_time_slots(t.default_start_ts)
+                           if s > datetime.now(timezone.utc)],
         time_slot_tallies=tallies, force_vote_count=fvc,
         photon_region=t.photon_region,
     )
@@ -458,12 +542,16 @@ async def _build_current_response(db: AsyncSession, t: Tournament, caller_player
 
 # ── Lifecycle ─────────────────────────────────────────────────────
 
-async def lock_tournament(db: AsyncSession, t: Tournament) -> None:
-    """Transition voting -> locked. Picks scheduled_start_ts from top-voted slot
-    (random among ties), snapshots Elo for seeding, generates bracket. If
-    signup count < min_players, push lock_at + start back by a week instead
-    of cancelling — gives the community another full signup window to
-    rally rather than skipping the cadence outright."""
+async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) -> None:
+    """Transition voting -> locked. For sync tournaments the lock requires
+    min_players votes agreeing on a SINGLE offered slot (item 3 — voting is
+    mandatory at signup); that slot becomes scheduled_start_ts and signups
+    that didn't vote for it are removed ("kick people that don't match the
+    agreed time"). If signups or slot agreement fall short, push lock_at +
+    start back by a week instead of cancelling — gives the community another
+    full signup window to rally rather than skipping the cadence outright.
+    force=True (force-start path: every signup force-voted "start now")
+    skips the agreement gate and the kick pass."""
     now = datetime.now(timezone.utc)
 
     # Confirmed signups only (is_speculative=False).
@@ -473,29 +561,87 @@ async def lock_tournament(db: AsyncSession, t: Tournament) -> None:
     ))
     signups = (await db.execute(q)).scalars().all()
 
+    pushback_reason = None
     if len(signups) < t.min_players:
+        pushback_reason = (f"not enough players ({len(signups)} of "
+                           f"{t.min_players} required signed up)")
+
+    # Item 3 (sync): at least min_players must agree on ONE slot. Votes are
+    # tallied across every signup — speculatives included, since they promote
+    # into slots freed by the kick pass below.
+    winning_slot = None
+    if t.kind == "sync" and not force and pushback_reason is None:
+        # Only slots giving real notice can win (Sid item 9): players must be
+        # able to see the decided time and answer the availability DM, so the
+        # winning slot must be ~MIN_SLOT_NOTICE_HOURS after the DECISION
+        # (now). The -1h slack exists because the earliest grid slot is
+        # exactly lock+24h and the tick fires seconds after lock_at — a
+        # strict 24h bar would disqualify it every single week. A tick >1h
+        # late pushes back instead (notice couldn't be given). A past-slot
+        # win would also insta-start + mass-forfeit; this bar covers that
+        # a fortiori.
+        min_start = now + timedelta(hours=MIN_SLOT_NOTICE_HOURS - 1)
+        tallies = (await db.execute(text("""
+            SELECT v.slot_ts, COUNT(*) AS votes
+            FROM tournament_time_votes v
+            JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
+                                      AND ts.player_id = v.player_id
+            WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
+            GROUP BY v.slot_ts ORDER BY votes DESC
+        """), {"tid": t.id, "min_start": min_start})).all()
+        agree_count = 0
+        if tallies:
+            top_votes = int(tallies[0].votes)
+            top_slots = [r.slot_ts for r in tallies if int(r.votes) == top_votes]
+            agree_count = top_votes
+            if top_votes >= t.min_players:
+                winning_slot = random.choice(top_slots)
+        if winning_slot is None:
+            pushback_reason = (f"no upcoming start time reached {t.min_players} "
+                               f"votes (the best slot had {agree_count})")
+
+    if pushback_reason is not None:
         # Pushback path. Status stays "voting" so the cron re-enters this
         # function next week. lock_at, voting_closes_at, default_start_ts
         # all advance by 7 days. For async tournaments default_start_ts
         # equals lock_at (they begin the moment signups close); for sync,
         # default_start_ts is a separate scheduled time we also push.
         push = timedelta(days=7)
-        t.lock_at = now + push
-        t.voting_closes_at = t.lock_at
         if t.kind == "async":
+            t.lock_at = now + push
             t.default_start_ts = t.lock_at
         else:
-            # Sync: keep the same time-of-day, slide the date by 7 days.
+            # Sync: keep the same time-of-day, slide the date by 7 days, and
+            # DERIVE lock_at from the new default (July 17 round 3): the old
+            # `now + 7d` only preserved the lock offset when the tick fired
+            # exactly on time — a late tick silently eroded the notice
+            # guarantee for the whole next cycle.
             t.default_start_ts = t.default_start_ts + push
-        # Wipe any tallied votes whose slot_ts is now in the past so the
-        # next lock attempt isn't biased toward a stale slot.
-        await db.execute(
-            text("DELETE FROM tournament_time_votes "
-                 "WHERE tournament_id = :tid AND slot_ts <= :now"),
-            {"tid": t.id, "now": now},
-        )
-        print(f"[TOURNAMENT] {t.id} only {len(signups)}/{t.min_players} "
-              f"confirmed signups — pushing lock_at to {t.lock_at.isoformat()} "
+            t.lock_at = t.default_start_ts - timedelta(hours=LOCK_OFFSET_HOURS)
+        t.voting_closes_at = t.lock_at
+        # Carry every existing vote forward one week (sync): the offered slot
+        # grid is defined relative to default_start_ts, which just moved +7d,
+        # so translating votes by the same delta preserves each player's
+        # relative availability ("Saturday noon works" -> next Saturday
+        # noon). Without this, all existing votes point at slots that no
+        # longer exist and the next lock either pushes back forever or KICKS
+        # every carried signup for "not matching the agreed time".
+        if t.kind == "sync":
+            await db.execute(
+                text("UPDATE tournament_time_votes "
+                     "SET slot_ts = slot_ts + interval '7 days' "
+                     "WHERE tournament_id = :tid"),
+                {"tid": t.id},
+            )
+        else:
+            # Async has no time voting; drop anything stale defensively.
+            await db.execute(
+                text("DELETE FROM tournament_time_votes "
+                     "WHERE tournament_id = :tid AND slot_ts <= :now"),
+                {"tid": t.id, "now": now},
+            )
+        print(f"[TOURNAMENT] {t.id} pushback ({pushback_reason}) — "
+              f"pushing lock_at to {t.lock_at.isoformat()} "
               f"(kind={t.kind}). Status stays voting.")
         # Discord feed (v1.32): the pushback keeps status='voting' so the
         # bot's status-diff never sees it — this post is the ONLY signal
@@ -507,11 +653,13 @@ async def lock_tournament(db: AsyncSession, t: Tournament) -> None:
             else:
                 when_sentence = f"New start time is {_dts(t.default_start_ts)}."
             prefix = f"{mentions} — the" if mentions else "The"
+            carried = (" Your time votes carried over to the same times next "
+                       "week — update them in the F5 tab if that no longer "
+                       "works for you." if t.kind == "sync" else "")
             await _queue_channel_post(
                 db,
                 f"{prefix} {_kind_label(t.kind)} tournament has been pushed "
-                f"back due to lack of players ( {len(signups)} / "
-                f"{t.min_players} required). {when_sentence}")
+                f"back: {pushback_reason}. {when_sentence}{carried}")
         except Exception as e:
             print(f"[TOURNAMENT] pushback feed post failed: {e}")
         # Adversarial review fix: the availability-check notices are deduped by
@@ -531,8 +679,73 @@ async def lock_tournament(db: AsyncSession, t: Tournament) -> None:
             print(f"[TOURNAMENT] pushback notice reset failed: {e}")
         return
 
-    # Prize tier
+    # Item 3 (sync, non-force): lock in the agreed slot, then remove every
+    # signup — confirmed AND speculative — that didn't vote for it. All
+    # winning-slot voters survive (>= min_players by the gate above), and
+    # _recompute_speculation promotes speculative voters into freed slots.
+    if t.kind == "sync" and not force and winning_slot is not None:
+        t.scheduled_start_ts = winning_slot
+        voter_ids = set(r[0] for r in (await db.execute(text(
+            "SELECT player_id FROM tournament_time_votes "
+            "WHERE tournament_id = :tid AND slot_ts = :slot"),
+            {"tid": t.id, "slot": winning_slot})).all())
+        all_signups = (await db.execute(select(TournamentSignup).where(
+            TournamentSignup.tournament_id == t.id))).scalars().all()
+        kicked = [s for s in all_signups if s.player_id not in voter_ids]
+        if kicked:
+            kicked_ids = [s.player_id for s in kicked]
+            kicked_rows = (await db.execute(
+                select(Player.steam_id, Player.display_name)
+                .where(Player.id.in_(kicked_ids))
+            )).all()
+            kicked_names = [r.display_name for r in kicked_rows]
+            await db.execute(delete(TournamentSignup).where(and_(
+                TournamentSignup.tournament_id == t.id,
+                TournamentSignup.player_id.in_(kicked_ids))))
+            await db.execute(delete(TournamentTimeVote).where(and_(
+                TournamentTimeVote.tournament_id == t.id,
+                TournamentTimeVote.player_id.in_(kicked_ids))))
+            await db.execute(delete(TournamentForceVote).where(and_(
+                TournamentForceVote.tournament_id == t.id,
+                TournamentForceVote.player_id.in_(kicked_ids))))
+            await _recompute_speculation(db, t.id)
+            await db.flush()
+            print(f"[TOURNAMENT] {t.id} removed {len(kicked)} signup(s) not "
+                  f"matching the agreed slot {winning_slot.isoformat()}: "
+                  f"{kicked_names}")
+            # DM each kicked player directly (pending_dms queue) — they're
+            # exactly the cohort NOT watching the tab at the agreed time,
+            # so a channel post alone would never reach them.
+            try:
+                for kr in kicked_rows:
+                    await db.execute(text(
+                        "INSERT INTO pending_dms (steam_id, content) "
+                        "VALUES (:sid, :c)"
+                    ), {"sid": kr.steam_id, "c": (
+                        f"The Synchronized tournament locked for "
+                        f"{_dts(winning_slot)} — a time you didn't mark as "
+                        f"available — so your signup was removed. No "
+                        f"penalty. Sign up again next week!")})
+            except Exception as e:
+                print(f"[TOURNAMENT] kick DMs failed: {e}")
+            try:
+                await _queue_channel_post(
+                    db,
+                    f"The {_kind_label(t.kind)} tournament locked for "
+                    f"{_dts(winning_slot)} — removed {len(kicked)} signup(s) "
+                    f"that couldn't make the agreed time: "
+                    f"{', '.join(n or 'unknown' for n in kicked_names)}. "
+                    f"No penalty; sign up again next week!")
+            except Exception as e:
+                print(f"[TOURNAMENT] kick feed post failed: {e}")
+        # Reload the confirmed set — kicks + promotions changed it.
+        signups = (await db.execute(q)).scalars().all()
+
+    # Prizes scale with the locked player count (item 2). prize_tier is kept
+    # populated for legacy readers, but _pay_prizes and every display surface
+    # now use _prize_amounts(prize_player_count).
     n = len(signups)
+    t.prize_player_count = n
     if n >= 16:
         t.prize_tier = "full"
     elif n >= 12:
@@ -563,21 +776,24 @@ async def lock_tournament(db: AsyncSession, t: Tournament) -> None:
         # forfeit but the bracket stays consistent. (Review #9)
         t.photon_region = "us"
 
-    # Pick scheduled_start_ts from vote tallies (highest count wins, random tiebreak).
-    tq = text("""
-        SELECT slot_ts, COUNT(*) AS votes
-        FROM tournament_time_votes
-        WHERE tournament_id = :tid
-        GROUP BY slot_ts ORDER BY votes DESC
-    """)
-    tallies = (await db.execute(tq, {"tid": t.id})).all()
-    offered = _offered_time_slots(t.default_start_ts)
-    if tallies:
-        top_votes = tallies[0].votes
-        top_slots = [r.slot_ts for r in tallies if r.votes == top_votes]
-        t.scheduled_start_ts = random.choice(top_slots)
-    else:
-        t.scheduled_start_ts = t.default_start_ts
+    # Pick scheduled_start_ts from vote tallies (highest count wins, random
+    # tiebreak). The sync non-force path already set it via the agreement
+    # gate above; this legacy pick now only covers async and force-start
+    # locks (where the winning slot is irrelevant — force overrides to now).
+    if winning_slot is None:
+        tq = text("""
+            SELECT slot_ts, COUNT(*) AS votes
+            FROM tournament_time_votes
+            WHERE tournament_id = :tid
+            GROUP BY slot_ts ORDER BY votes DESC
+        """)
+        tallies = (await db.execute(tq, {"tid": t.id})).all()
+        if tallies:
+            top_votes = tallies[0].votes
+            top_slots = [r.slot_ts for r in tallies if r.votes == top_votes]
+            t.scheduled_start_ts = random.choice(top_slots)
+        else:
+            t.scheduled_start_ts = t.default_start_ts
 
     # Discord feed (v1.32): the winning voted slot moved the start away from
     # the default. Sync only — async overwrites scheduled_start_ts to `now`
@@ -685,12 +901,37 @@ async def start_tournament(db: AsyncSession, t: Tournament) -> None:
     await _activate_ready_matches(db, t.id)
 
 
+async def _flip_scheduled_matches(db: AsyncSession, tournament_id: uuid.UUID) -> None:
+    """Promote 'scheduled' (break) matches to 'ready' once the break elapses
+    OR both players pressed Play Now (early_ok_signup_ids). The ready-up
+    clock starts here — 10 min for rounds 2+ — and the no-show sweep only
+    watches 'ready', so the break itself can never forfeit anyone."""
+    now = datetime.now(timezone.utc)
+    rows = (await db.execute(select(TournamentMatch).where(and_(
+        TournamentMatch.tournament_id == tournament_id,
+        TournamentMatch.status == "scheduled",
+    )))).scalars().all()
+    for m in rows:
+        early = set(m.early_ok_signup_ids or [])
+        both_early = (m.p1_signup_id is not None and m.p2_signup_id is not None
+                      and m.p1_signup_id in early and m.p2_signup_id in early)
+        if not both_early and m.scheduled_ready_at and m.scheduled_ready_at > now:
+            continue
+        m.status = "ready"
+        m.ready_deadline_at = now + timedelta(seconds=MATCH_READY_GRACE_SECONDS * 2)
+
+
 async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) -> None:
     """Find pending matches whose prereqs are all resolved, populate p1/p2
     from upstream winners (or losers, for TP/LB), create ranked_series, flip
-    status to 'ready'. For async tournaments, also sets deadline_at."""
+    status to 'ready' (or 'scheduled' for sync rounds 2+ — the break state).
+    For async tournaments, also sets deadline_at."""
     now = datetime.now(timezone.utc)
     t = await _get_tournament(db, tournament_id)
+    # Overdue breaks flip in the same transaction that resolves new matches,
+    # so a report landing right at break-end promotes without waiting for
+    # the 30s tick.
+    await _flip_scheduled_matches(db, tournament_id)
     q = select(TournamentMatch).where(and_(
         TournamentMatch.tournament_id == tournament_id,
         TournamentMatch.status == "pending",
@@ -710,10 +951,17 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
 
     for m in pending:
         prereq_ids = list(m.prereq_match_ids or [])
+        # Break eligibility (item 2): only matches downstream of a PLAYED
+        # match get the breather. A bye-fed W R2 at tournament start (top
+        # seed's first real match) must start immediately — nobody just
+        # played, and the announced start time is the contract.
+        came_from_play = False
         if prereq_ids:
             prereqs = [by_id[pid] for pid in prereq_ids if pid in by_id]
             if any(p.winner_signup_id is None for p in prereqs):
                 continue
+            came_from_play = any(
+                p.status in ("completed", "forfeit", "double_forfeit") for p in prereqs)
             roles = list(m.prereq_roles or [])
             # Resolve each prereq's contribution by its role tag, falling back
             # to the legacy bracket_side defaults when prereq_roles is empty
@@ -792,7 +1040,6 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         )
         db.add(series)
         m.series_id = series.id
-        m.status = "ready"
         # Server-issued Photon room name. Both clients pull this from
         # /api/v1/tournaments/current rather than deriving it from match.id
         # locally — kills the dual-derivation race that could land them
@@ -801,15 +1048,22 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         # so older clients that still derive client-side won't see a
         # mismatch (they'll arrive at the same room name).
         m.photon_room_name = "sct-" + str(m.id).replace("-", "")[:12]
-        # Sync: ready-up window — 5 min for round 1 (players were just told the
-        # start time), 10 min for later rounds (a finalist may have stepped away
-        # while the other semi finishes; the bot's match-ready DM covers the
-        # recall). Async: 7-day match deadline. The tick enforces both via
-        # _apply_no_show_forfeits + the async deadline path.
+        # Sync matches downstream of a played match: don't go straight to
+        # 'ready' — give both players a breather (item 2). The match sits in
+        # 'scheduled' with the room provisioned; _flip_scheduled_matches
+        # promotes it to 'ready' when the break elapses, or immediately once
+        # BOTH players press Play Now (early_ok_signup_ids). Start-wave
+        # matches (round 1, bye-fed round 2) have no break — players were
+        # just told the start time. Async: 7-day match deadline, unchanged.
         if t.kind == "async":
+            m.status = "ready"
             m.deadline_at = now + timedelta(days=ASYNC_MATCH_DEADLINE_DAYS)
             m.ready_deadline_at = m.deadline_at
+        elif came_from_play:
+            m.status = "scheduled"
+            m.scheduled_ready_at = now + timedelta(seconds=MATCH_BREAK_SECONDS)
         else:
+            m.status = "ready"
             grace = MATCH_READY_GRACE_SECONDS * (2 if (m.round or 1) > 1 else 1)
             m.ready_deadline_at = now + timedelta(seconds=grace)
 
@@ -1026,10 +1280,18 @@ async def _maybe_complete_tournament(db: AsyncSession, t: Tournament) -> None:
 
 async def _pay_prizes(db: AsyncSession, t: Tournament) -> None:
     """Award gold + XP to 1st/2nd/3rd signups. Discord trophy roles are granted
-    by the bot watching for new completed tournament rows (separate task #26)."""
-    tier = t.prize_tier or "none"
-    golds = PRIZE_GOLD.get(tier, (0, 0, 0))
-    xps = PRIZE_XP.get(tier, (0, 0, 0))
+    by the bot watching for new completed tournament rows (separate task #26).
+    Amounts scale with the confirmed player count snapshotted at lock
+    (prize_player_count); legacy rows without it fall back to counting the
+    surviving signups."""
+    n = t.prize_player_count
+    if not n:
+        n = (await db.execute(
+            select(func.count()).select_from(TournamentSignup).where(and_(
+                TournamentSignup.tournament_id == t.id,
+                TournamentSignup.is_speculative == False))  # noqa: E712
+        )).scalar_one()
+    golds, xps = _prize_amounts(n)
 
     async def do_grant(signup_id: Optional[uuid.UUID], rank_idx: int) -> None:
         if not signup_id:
@@ -1059,12 +1321,14 @@ async def _pay_prizes(db: AsyncSession, t: Tournament) -> None:
 
 def _next_default_start(now_utc: datetime) -> datetime:
     """Compute the next Saturday 12:00 America/Los_Angeles strictly after now_utc.
-    Uses a minimum lead time of 48h so we never schedule a tournament less
-    than 2 days out — gives voting/signups a real window even when cron fires
-    the first time on a Saturday morning. (Review #13)
-    Returns a UTC-normalized datetime so storage is timezone-agnostic."""
+    Minimum lead = LOCK_OFFSET_HOURS + MIN_VOTING_WINDOW_HOURS: lock_at is
+    default - LOCK_OFFSET_HOURS, and the voting window before that lock must
+    be real — with the old flat 48h lead and a 48h lock offset, a mid-week
+    cron firing could have produced a ~0h voting window and a guaranteed
+    weekly pushback loop. Sometimes this skips to the Saturday after next;
+    that's the intended cost. Returns a UTC-normalized datetime."""
     now_pt = now_utc.astimezone(PT_ZONE)
-    min_lead = now_pt + timedelta(hours=48)
+    min_lead = now_pt + timedelta(hours=LOCK_OFFSET_HOURS + MIN_VOTING_WINDOW_HOURS)
     days_ahead = (TOURNAMENT_WEEKDAY - now_pt.weekday()) % 7
     candidate = now_pt.replace(hour=TOURNAMENT_HOUR_PT, minute=0, second=0, microsecond=0)
     candidate = candidate + timedelta(days=days_ahead)
@@ -1158,21 +1422,25 @@ async def _ensure_next_tournament(db: AsyncSession) -> None:
 
 async def _queue_availability_notices(db: AsyncSession) -> None:
     """(v1.32) Queue one 'availability_check' DM notice per confirmed signup
-    when a voting tournament that already has quorum is 24-96h from the
-    moment that matters (sync: default start time; async: signup close).
-    Durable ack delivery (learning #105): rows land in tournament_notices,
-    the bot polls GET /internal/tournament-notices?unnotified=true and acks
-    after the DM lands. The UNIQUE (tournament_id, player_id, notice_type)
-    + ON CONFLICT DO NOTHING makes every 30s re-tick a no-op. Guards: never
-    queued under 24h out (too late to be actionable — a player who never got
-    one because signups filled late just gets the existing lock DM), never
-    for tournaments outside 'voting', never under quorum."""
+    when a voting tournament that already has quorum is 24-96h from LOCK
+    (both kinds — July 17 round 3): the lock is the moment that matters now.
+    For sync it DECIDES the winning time and kicks non-matching voters, so
+    the availability answer must arrive before it; keying off the default
+    start (the old behavior) would have sent DMs after lock under the 48h
+    offset. Durable ack delivery (learning #105): rows land in
+    tournament_notices, the bot polls GET /internal/tournament-notices
+    ?unnotified=true and acks after the DM lands. The UNIQUE (tournament_id,
+    player_id, notice_type) + ON CONFLICT DO NOTHING makes every 30s re-tick
+    a no-op. Guards: never queued under 24h out (too late to be actionable —
+    a player who never got one because signups filled late just gets the
+    existing lock DM), never for tournaments outside 'voting', never under
+    quorum."""
     now = datetime.now(timezone.utc)
     ts = (await db.execute(
         select(Tournament).where(Tournament.status == "voting")
     )).scalars().all()
     for t in ts:
-        anchor = t.lock_at if t.kind == "async" else t.default_start_ts
+        anchor = t.lock_at
         if anchor is None:
             continue
         hours_until = (anchor - now).total_seconds() / 3600.0
@@ -1346,8 +1614,9 @@ async def _check_and_trigger_force_start(db: AsyncSession, t: Tournament) -> boo
     votes = [fv[pid] for pid in signup_player_ids]
     if (max(votes) - min(votes)).total_seconds() > FORCE_START_WINDOW_MINUTES * 60:
         return False
-    # Trigger immediate lock + start.
-    await lock_tournament(db, t)
+    # Trigger immediate lock + start. force=True: everyone here force-voted
+    # "start now", so the slot-agreement gate and kick pass don't apply.
+    await lock_tournament(db, t, force=True)
     if t.status == "locked":
         t.scheduled_start_ts = datetime.now(timezone.utc)
         await start_tournament(db, t)
@@ -1436,9 +1705,24 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: Asy
     # discord state, so the client gate clears on its own when linkage is set.
     if not player.discord_id:
         raise HTTPException(status_code=400, detail="Discord account must be linked before signup")
+    # Item 3: sync signups must state which offered start times they can make.
+    # Voting is part of signing up now — the lock requires min_players votes
+    # on a single slot, and signups that can't make the winning time are
+    # removed at lock. _replace_time_votes validates (non-empty, offered,
+    # still-future) and writes in one place, shared with /time-vote.
+    slots = list(req.slot_ts or [])
     existing = await _get_signup_for(db, tournament_id, player.id)
     if existing:
+        # Idempotent re-signup — but if the request carries slots, record
+        # them (a stale client re-posting signup means "update my times");
+        # silently dropping them while returning 200 would strand the
+        # player on votes they believe they replaced.
+        if t.kind == "sync" and slots:
+            await _replace_time_votes(db, t, player.id, slots)
+            await db.commit()
         return await _build_current_response(db, t, player)
+    if t.kind == "sync":
+        await _replace_time_votes(db, t, player.id, slots)
     penalty = await _recompute_player_penalty(db, player.id)
     prev_confirmed = await _confirmed_count(db, tournament_id)
     db.add(TournamentSignup(
@@ -1584,17 +1868,10 @@ async def time_vote(tournament_id: uuid.UUID, req: TournamentTimeVoteRequest, db
     player = await _get_player_by_steam(db, req.steam_id)
     if not await _get_signup_for(db, tournament_id, player.id):
         raise HTTPException(status_code=400, detail="Must sign up to vote")
-    offered = set(_offered_time_slots(t.default_start_ts))
-    bad = [s for s in req.slot_ts if s not in offered]
-    if bad:
-        raise HTTPException(status_code=400, detail=f"Invalid slot(s): {bad}")
-    # Replace the player's votes.
-    await db.execute(delete(TournamentTimeVote).where(and_(
-        TournamentTimeVote.tournament_id == tournament_id,
-        TournamentTimeVote.player_id == player.id)))
-    for slot in req.slot_ts:
-        db.add(TournamentTimeVote(
-            tournament_id=tournament_id, player_id=player.id, slot_ts=slot))
+    # Shared validate+replace path (item 3): non-empty, offered, still-future.
+    # An empty replace-set is rejected — clearing every vote would get the
+    # player silently kicked at lock.
+    await _replace_time_votes(db, t, player.id, req.slot_ts)
     await db.commit()
     return await _build_current_response(db, t, player)
 
@@ -1629,6 +1906,45 @@ async def ready(tournament_id: uuid.UUID, req: TournamentReadyRequest, db: Async
     if not sig:
         raise HTTPException(status_code=404, detail="Not signed up")
     sig.ready_at = datetime.now(timezone.utc)
+    await db.commit()
+    return await _build_current_response(db, t, player)
+
+
+@router.post("/{tournament_id}/matches/{match_id}/play-now", response_model=TournamentCurrentResponse)
+async def play_now(
+    tournament_id: uuid.UUID,
+    match_id: uuid.UUID,
+    req: TournamentReadyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Skip the between-rounds break (item 2): a participant presses Play Now;
+    once BOTH participants have, _flip_scheduled_matches promotes the match to
+    'ready' immediately. Idempotent — pressing again or after the flip is a
+    no-op. Row-locked: two simultaneous presses must not lose an append
+    (learning #78 family)."""
+    t = await _get_tournament(db, tournament_id)
+    player = await _get_player_by_steam(db, req.steam_id)
+    sig = await _get_signup_for(db, tournament_id, player.id)
+    if not sig:
+        raise HTTPException(status_code=404, detail="Not signed up")
+    m = (await db.execute(
+        select(TournamentMatch).where(and_(
+            TournamentMatch.id == match_id,
+            TournamentMatch.tournament_id == tournament_id,
+        )).with_for_update()
+    )).scalar_one_or_none()
+    if m is None:
+        raise HTTPException(status_code=404, detail="Match not found")
+    if sig.id not in (m.p1_signup_id, m.p2_signup_id):
+        raise HTTPException(status_code=403, detail="Not your match")
+    if m.status == "scheduled":
+        early = list(m.early_ok_signup_ids or [])
+        if sig.id not in early:
+            early.append(sig.id)
+            m.early_ok_signup_ids = early
+        # Pressing Play Now proves presence — counts as a ready heartbeat too.
+        sig.ready_at = datetime.now(timezone.utc)
+        await _flip_scheduled_matches(db, tournament_id)
     await db.commit()
     return await _build_current_response(db, t, player)
 
@@ -1680,7 +1996,7 @@ async def internal_watch(
     cutoff = now - timedelta(hours=24)
     tq = text("""
         SELECT id, kind, status, default_start_ts, scheduled_start_ts,
-               lock_at, started_at, ended_at, prize_tier,
+               lock_at, started_at, ended_at, prize_tier, prize_player_count,
                winner_signup_id, runner_up_signup_id, third_place_signup_id
         FROM tournaments
         WHERE status IN ('voting', 'locked', 'running')
@@ -1704,6 +2020,7 @@ async def internal_watch(
             SELECT m.id AS match_id, m.round, m.bracket_side, m.slot_idx, m.status,
                    m.p1_signup_id, m.p2_signup_id, m.winner_signup_id,
                    m.ready_deadline_at, m.deadline_at, m.started_at, m.ended_at,
+                   m.scheduled_ready_at,
                    p1.display_name AS p1_name, p1.discord_id AS p1_discord_id,
                    p2.display_name AS p2_name, p2.discord_id AS p2_discord_id
             FROM tournament_matches m
@@ -1715,6 +2032,11 @@ async def internal_watch(
             ORDER BY m.round, m.bracket_side, m.slot_idx
         """)
         matches = [dict(r._mapping) for r in (await db.execute(mq, {"tid": t.id})).all()]
+        # Prize numbers (item 2): computed here, single source of truth —
+        # the bot never carries its own copy of the formula. Pre-lock the
+        # basis is the live confirmed count; post-lock it's the snapshot.
+        _n_confirmed = sum(1 for s in signups if not s["is_speculative"])
+        _pg, _px = _prize_amounts(t.prize_player_count or _n_confirmed)
         result.append({
             "tournament_id": str(t.id),
             "kind": t.kind, "status": t.status,
@@ -1724,6 +2046,9 @@ async def internal_watch(
             "started_at": t.started_at.isoformat() if t.started_at else None,
             "ended_at": t.ended_at.isoformat() if t.ended_at else None,
             "prize_tier": t.prize_tier,
+            "prize_players": int(t.prize_player_count or _n_confirmed),
+            "prize_gold": list(_pg),
+            "prize_xp": list(_px),
             "winner_signup_id": str(t.winner_signup_id) if t.winner_signup_id else None,
             "runner_up_signup_id": str(t.runner_up_signup_id) if t.runner_up_signup_id else None,
             "third_place_signup_id": str(t.third_place_signup_id) if t.third_place_signup_id else None,
@@ -1755,6 +2080,7 @@ async def internal_watch(
                 "p1_discord_id": m["p1_discord_id"], "p2_discord_id": m["p2_discord_id"],
                 "ready_deadline_at": m["ready_deadline_at"].isoformat() if m["ready_deadline_at"] else None,
                 "deadline_at": m["deadline_at"].isoformat() if m["deadline_at"] else None,
+                "scheduled_ready_at": m["scheduled_ready_at"].isoformat() if m["scheduled_ready_at"] else None,
                 "started_at": m["started_at"].isoformat() if m["started_at"] else None,
                 "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
             } for m in matches],
@@ -1782,6 +2108,8 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
     q = text("""
         SELECT m.id AS match_id, m.status, m.bracket_side, m.round,
                m.photon_room_name, m.ready_deadline_at,
+               m.scheduled_ready_at, m.early_ok_signup_ids,
+               m.p1_signup_id, m.p2_signup_id,
                t.id AS tournament_id, t.kind, t.photon_region,
                p1.steam_id AS p1_steam_id, p1.display_name AS p1_name,
                p2.steam_id AS p2_steam_id, p2.display_name AS p2_name,
@@ -1793,7 +2121,7 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
         LEFT JOIN tournament_signups s2 ON s2.id = m.p2_signup_id
         LEFT JOIN players p2 ON p2.id = s2.player_id
         WHERE t.status = 'running'
-          AND m.status IN ('ready', 'active')
+          AND m.status IN ('ready', 'active', 'scheduled')
           AND (p1.id = :pid OR p2.id = :pid)
         ORDER BY m.round
     """)
@@ -1814,6 +2142,14 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
         secs_left = -1
         if r.kind == "sync" and r.ready_deadline_at is not None:
             secs_left = int((r.ready_deadline_at - now).total_seconds())
+        # Break state (item 2): countdown to auto-ready + who has already
+        # pressed Play Now.
+        sched_left = -1
+        if r.status == "scheduled" and r.scheduled_ready_at is not None:
+            sched_left = max(0, int((r.scheduled_ready_at - now).total_seconds()))
+        early = set(r.early_ok_signup_ids or [])
+        my_sig = r.p1_signup_id if is_p1 else r.p2_signup_id
+        opp_sig = r.p2_signup_id if is_p1 else r.p1_signup_id
         result.append({
             "tournament_id": str(r.tournament_id),
             "kind": r.kind,
@@ -1828,6 +2164,9 @@ async def my_active_matches(steam_id: str, db: AsyncSession = Depends(get_db)):
             "my_ready": my_ready is not None and my_ready >= ready_cutoff,
             "opp_ready": opp_ready is not None and opp_ready >= ready_cutoff,
             "ready_seconds_left": secs_left,
+            "scheduled_seconds_left": sched_left,
+            "my_early_ok": my_sig is not None and my_sig in early,
+            "opp_early_ok": opp_sig is not None and opp_sig in early,
         })
     return {"matches": result}
 

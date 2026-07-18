@@ -467,6 +467,8 @@ namespace CompetitiveRounds
         private static GameObject h2hPager, h2hPrev, h2hNext; private static object txtH2hPage;
         private static string lbSort="rating";private static bool lbSortDesc=true;private static object[] lbSortTexts;private static GameObject[] lbSortBtns;
         private static int lbPage=0;private static object txtLBPage;private static GameObject lbPrev,lbNext,lbBlockBtn,lbBlockRow;private static object lbBlockTxt;
+        // July 17 round 3 (Sid item 10): admin-only click-to-copy Steam ID row.
+        private static object txtLBSteamId;
         private static GameObject lbGraphPanel;
         private static object txtRecentSeries;
         private static int recentSeriesPage=0;private static object txtSeriesPage;private static GameObject seriesPrev,seriesNext;
@@ -605,11 +607,17 @@ namespace CompetitiveRounds
         private static readonly Dictionary<object, (Sprite[] frames, float fps)> _animThumbs =
             new Dictionary<object, (Sprite[], float)>();
         private static PropertyInfo _pImgSprite;
+        // Last frame index actually assigned per Image — at 3.6-6 fps the frame
+        // only changes every 10+ rendered frames, so skipping same-index sets
+        // avoids ~94% of the per-frame reflection SetValue + Canvas dirtying
+        // (the Home pool doubled to 12 rows in item 4, making this worth it).
+        private static readonly Dictionary<object, int> _animThumbLastIdx = new Dictionary<object, int>();
         public static void TrackAnimatedThumb(object img, Sprite[] frames, float fps)
         {
             if (img == null) return;
-            if (frames == null || frames.Length < 2 || fps <= 0f) { _animThumbs.Remove(img); return; }
+            if (frames == null || frames.Length < 2 || fps <= 0f) { _animThumbs.Remove(img); _animThumbLastIdx.Remove(img); return; }
             _animThumbs[img] = (frames, fps);
+            _animThumbLastIdx.Remove(img);  // force a fresh set on the next tick
         }
         private static void TickAnimatedThumbnails()
         {
@@ -626,8 +634,11 @@ namespace CompetitiveRounds
                 foreach (var kv in _animThumbs)
                 {
                     var (frames, fps) = kv.Value;
-                    var spr = _static ? frames[0] : frames[(int)(Time.unscaledTime * fps) % frames.Length];
-                    _pImgSprite.SetValue(kv.Key, spr);
+                    int idx = _static ? 0 : (int)(Time.unscaledTime * fps) % frames.Length;
+                    int last;
+                    if (_animThumbLastIdx.TryGetValue(kv.Key, out last) && last == idx) continue;
+                    _pImgSprite.SetValue(kv.Key, frames[idx]);
+                    _animThumbLastIdx[kv.Key] = idx;
                 }
             }
             catch { }
@@ -1143,7 +1154,7 @@ namespace CompetitiveRounds
                 if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
             }
         }
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+3f;ApiClient.FetchOvtLeaderboard();ApiClient.UpdateOvtQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+3f;ApiClient.FetchOvtLeaderboard();ApiClient.UpdateOvtQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -1155,21 +1166,24 @@ namespace CompetitiveRounds
         // kinds with no shipped PNG) + a two-line text cell.
         private class HomeCosRow{public GameObject root;public GameObject artGO;public object artImg;public object txt;}
         private static readonly List<HomeCosRow> homeCosRows=new List<HomeCosRow>();
-        private const int HOME_COS_ROWS=6;
+        // Item 4: pool covers the last TWO cosmetic-update batches (server
+        // caps at 12); the rows live in a scroll so overflow is reachable.
+        private const int HOME_COS_ROWS=12;
         private static HomeCosRow CreateHomeCosRow(Transform parent,int idx)
         {
             var r=new HomeCosRow();
             r.root=new GameObject($"hcos{idx}");r.root.transform.SetParent(parent,false);r.root.AddComponent<RectTransform>();
-            UIFactory.AddHLG(r.root,spacing:8,padL:2,padR:2,forceExpandH:true);UIFactory.AddLE(r.root,prefH:40,minH:40,flexH:0);
+            UIFactory.AddHLG(r.root,spacing:8,padL:2,padR:2,forceExpandH:true);UIFactory.AddLE(r.root,prefH:80,minH:80,flexH:0);
             r.artGO=new GameObject("art");r.artGO.transform.SetParent(r.root.transform,false);r.artGO.AddComponent<RectTransform>();
-            UIFactory.AddLE(r.artGO,prefW:38,minW:38,prefH:38,flexW:0,flexH:0);
+            // Item 4: art doubled 38 -> 76, text 14 -> 17.
+            UIFactory.AddLE(r.artGO,prefW:76,minW:76,prefH:76,flexW:0,flexH:0);
             if(UIFactory.tImage!=null)
             {
                 r.artImg=r.artGO.AddComponent(UIFactory.tImage);
                 try{UIFactory.tImage.GetProperty("preserveAspect",BindingFlags.Public|BindingFlags.Instance)?.SetValue(r.artImg,true);}catch{}
                 try{UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(r.artImg,false);}catch{}
             }
-            r.txt=UIFactory.CreateText("t",r.root.transform,"",14f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(330,38));
+            r.txt=UIFactory.CreateText("t",r.root.transform,"",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(310,76));
             UIFactory.SetWordWrap(r.txt,false);
             r.root.SetActive(false);
             return r;
@@ -1245,11 +1259,14 @@ namespace CompetitiveRounds
              * so it's taller and eats flex space the Players box used to take
              * (Sid feedback). prefH 300 vs the old 170; Players (onBox flexH:1)
              * shrinks to whatever's left. */
-            var cosBox=UIFactory.CreatePanel("HCos",left.transform,C_PANEL);UIFactory.AddVLG(cosBox,spacing:3,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(cosBox,prefH:300,minH:250,flexH:0);
-            UIFactory.CreateText("HCosH",cosBox.transform,"Newest Cosmetics",19f,new Color(0.85f,0.6f,1f),sizeDelta:new Vector2(380,28));
-            txtHomeCosmetics=UIFactory.CreateText("HCosT",cosBox.transform,"<color=#888><i>Loading...</i></color>",13f,C_DIM,UIFactory.AlignTopLeft,sizeDelta:new Vector2(380,18));
-            var cosRowsGO=new GameObject("HCosRows");cosRowsGO.transform.SetParent(cosBox.transform,false);cosRowsGO.AddComponent<RectTransform>();UIFactory.AddVLG(cosRowsGO,spacing:2);UIFactory.AddLE(cosRowsGO,flexH:1);
-            homeCosRows.Clear();for(int i=0;i<HOME_COS_ROWS;i++)homeCosRows.Add(CreateHomeCosRow(cosRowsGO.transform,i));
+            /* Item 4: bigger art (76px) + bigger text + the last TWO update
+             * batches, so the rows now live in a ScrollView (learning #63:
+             * rows carry fixed prefH:80, the scroll itself takes the flex). */
+            var cosBox=UIFactory.CreatePanel("HCos",left.transform,C_PANEL);UIFactory.AddVLG(cosBox,spacing:3,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(cosBox,prefH:340,minH:280,flexH:0);
+            UIFactory.CreateText("HCosH",cosBox.transform,"Newest Cosmetics",22f,new Color(0.85f,0.6f,1f),sizeDelta:new Vector2(380,30));
+            txtHomeCosmetics=UIFactory.CreateText("HCosT",cosBox.transform,"<color=#888><i>Loading...</i></color>",15f,C_DIM,UIFactory.AlignTopLeft,sizeDelta:new Vector2(380,22));
+            var cosSV=UIFactory.CreateScrollView("HCosSV",cosBox.transform,spacing:2);UIFactory.AddLE(cosSV.scrollGO,flexH:1);
+            homeCosRows.Clear();for(int i=0;i<HOME_COS_ROWS;i++)homeCosRows.Add(CreateHomeCosRow(cosSV.content.transform,i));
             var right=new GameObject("HRight");right.transform.SetParent(cols.transform,false);right.AddComponent<RectTransform>();UIFactory.AddVLG(right,spacing:4);UIFactory.AddLE(right,flexW:1,flexH:1);
             var relBox=UIFactory.CreatePanel("HRel",right.transform,C_PANEL);UIFactory.AddVLG(relBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(relBox,flexH:1);
             UIFactory.CreateText("HRelH",relBox.transform,"Latest Releases",19f,C_GOLD,sizeDelta:new Vector2(400,28));
@@ -1323,11 +1340,24 @@ namespace CompetitiveRounds
             /* Newest cosmetics — art thumbnails (animated where available). */
             {
                 var cos=ApiClient.CachedNewestCosmetics;
+                // Item 4: the list covers the last two update batches — name
+                // both dates in the caption so the split is legible.
+                string cosCaption="<color=#888><i>Grab them in the Shop tab.</i></color>";
+                if(cos!=null&&cos.Count>0)
+                {
+                    var batchDates=new List<string>();
+                    foreach(var cc in cos)
+                        if(!string.IsNullOrEmpty(cc.added)&&!batchDates.Contains(cc.added))batchDates.Add(cc.added);
+                    if(batchDates.Count>=2)
+                        cosCaption=$"<color=#888><i>Updates of {batchDates[0]} & {batchDates[1]} - grab them in the Shop tab.</i></color>";
+                    else if(batchDates.Count==1)
+                        cosCaption=$"<color=#888><i>Update of {batchDates[0]} - grab them in the Shop tab.</i></color>";
+                }
                 if(txtHomeCosmetics!=null)
                     UIFactory.SetText(txtHomeCosmetics,
                         cos==null?"<color=#888><i>Loading...</i></color>":
                         cos.Count==0?"<color=#888><i>None yet.</i></color>":
-                        "<color=#888><i>Grab them in the Shop tab.</i></color>");
+                        cosCaption);
                 for(int i=0;i<homeCosRows.Count;i++)
                 {
                     var row=homeCosRows[i];
@@ -1336,9 +1366,10 @@ namespace CompetitiveRounds
                     string col=!string.IsNullOrEmpty(c.previewColor)&&c.previewColor.StartsWith("#")?c.previewColor:"#FFFFFF";
                     string kind=(c.kind??"").Replace('_',' ');
                     string artistLine=!string.IsNullOrEmpty(c.artistName)?$"  <color=#888>by {HomeSan(c.artistName)}</color>":"";
+                    string addedTag=!string.IsNullOrEmpty(c.added)?$"  <color=#666>{c.added}</color>":"";
                     UIFactory.SetText(row.txt,
                         $"<color={col}>{HomeSan(c.name)}</color>  <color=#FFD94D>{c.price}g</color>\n"
-                        +$"<color=#8FA3B8>({HomeSan(kind)}, {HomeSan(c.rarity)})</color>{artistLine}");
+                        +$"<color=#8FA3B8>({HomeSan(kind)}, {HomeSan(c.rarity)})</color>{artistLine}{addedTag}");
                     if(row.artImg!=null)
                     {
                         var pSprite=UIFactory.tImage.GetProperty("sprite",BindingFlags.Public|BindingFlags.Instance);
@@ -1435,7 +1466,15 @@ txtLBAch=UIFactory.CreateText("LBDAch",lbDetailSV.content.transform,"",16f,C_DIM
    the 340 px-wide text box and the scroll content sizes correctly. */
 UIFactory.SetWordWrap(txtLBDetail, true);
 UIFactory.CreateText("LBDScrollHint",right.transform,"<color=#777><i>scroll for full history — hover + mouse wheel</i></color>",11f,C_DIM,UIFactory.AlignMidCenter,sizeDelta:new Vector2(340,15));
-lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.transform,false);lbBlockRow.AddComponent<RectTransform>();UIFactory.AddHLG(lbBlockRow,spacing:0);UIFactory.AddLE(lbBlockRow,prefH:28,minH:28,flexH:0);lbBlockBtn=UIFactory.CreateButton("LBBlock",lbBlockRow.transform,"Block from Ranked",14f,C_WHITE,new Color(0.5f,0.15f,0.15f,0.9f),()=>{if(string.IsNullOrEmpty(selectedSteamId)||selectedSteamId==MatchTracker.LocalSteamId)return;string myId=MatchTracker.LocalSteamId;if(ApiClient.IsPlayerBlocked(selectedSteamId))ApiClient.UnblockPlayer(myId,selectedSteamId);else ApiClient.BlockPlayer(myId,selectedSteamId);},sizeDelta:new Vector2(160,24));var lbBlockSpacer=new GameObject("S");lbBlockSpacer.transform.SetParent(lbBlockRow.transform,false);lbBlockSpacer.AddComponent<RectTransform>();UIFactory.AddLE(lbBlockSpacer,flexW:1);lbBlockBtn.SetActive(true);lbBlockRow.SetActive(false);lbBlockTxt=UIFactory.GetButtonText(lbBlockBtn);return panel;}
+lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.transform,false);lbBlockRow.AddComponent<RectTransform>();UIFactory.AddHLG(lbBlockRow,spacing:0);UIFactory.AddLE(lbBlockRow,prefH:28,minH:28,flexH:0);lbBlockBtn=UIFactory.CreateButton("LBBlock",lbBlockRow.transform,"Block from Ranked",14f,C_WHITE,new Color(0.5f,0.15f,0.15f,0.9f),()=>{if(string.IsNullOrEmpty(selectedSteamId)||selectedSteamId==MatchTracker.LocalSteamId)return;string myId=MatchTracker.LocalSteamId;if(ApiClient.IsPlayerBlocked(selectedSteamId))ApiClient.UnblockPlayer(myId,selectedSteamId);else ApiClient.BlockPlayer(myId,selectedSteamId);},sizeDelta:new Vector2(160,24));var lbBlockSpacer=new GameObject("S");lbBlockSpacer.transform.SetParent(lbBlockRow.transform,false);lbBlockSpacer.AddComponent<RectTransform>();UIFactory.AddLE(lbBlockSpacer,flexW:1);lbBlockBtn.SetActive(true);lbBlockRow.SetActive(false);lbBlockTxt=UIFactory.GetButtonText(lbBlockBtn);
+        /* July 17 round 3 (Sid item 10): admin-only Steam ID row, click-to-
+         * copy (first systemCopyBuffer use in the mod — plain IMGUIModule
+         * API, no reflection needed). Visibility handled in RefreshLeaderboard
+         * (IsAdmin resolves async — late-resolution pattern, see tab-bar). */
+        txtLBSteamId=UIFactory.CreateText("LBSid",right.transform,"",13f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(340,18),raycastTarget:true);
+        {var sidComp=txtLBSteamId as Component;if(sidComp!=null){var sch=sidComp.gameObject.AddComponent<ClickHandler>();sch.onClick=()=>{if(ClickGuard.Claim(sidComp.gameObject)&&!string.IsNullOrEmpty(selectedSteamId)){GUIUtility.systemCopyBuffer=selectedSteamId;CompetitiveUI.ShowNotification("Steam ID copied to clipboard",new Color(0.6f,0.9f,1f));}};}}
+        ((Component)txtLBSteamId).gameObject.SetActive(false);
+        return panel;}
 
         private static LBRow CreateLBRow(Transform parent,string name,int rowIndex){var row=new LBRow();row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:0,forceExpandH:true);UIFactory.AddLE(row.root,prefH:28);/* Round 4 item 4: no centering spacers — rows align flush with the header. */row.hlWrap=new GameObject("W");row.hlWrap.transform.SetParent(row.root.transform,false);row.hlWrap.AddComponent<RectTransform>();UIFactory.AddHLG(row.hlWrap,spacing:2,forceExpandH:true);if(UIFactory.tImage!=null){var img=row.hlWrap.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,new Color(0.15f,0.15f,0.2f,0.01f));UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,true);}row.txtRank=UIFactory.CreateText("r",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[0],25));row.txtLv=UIFactory.CreateText("l",row.hlWrap.transform,"",15f,C_BLUE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[1],25));row.txtName=UIFactory.CreateText("n",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(LB_COL_W[2],25));row.txtRating=UIFactory.CreateText("rt",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[3],25));UIFactory.SetBold(row.txtRating,true);row.txtW=UIFactory.CreateText("w",row.hlWrap.transform,"",15f,C_GREEN,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[4],25));row.txtL=UIFactory.CreateText("ls",row.hlWrap.transform,"",15f,C_RED,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[5],25));row.txtWL=UIFactory.CreateText("wl",row.hlWrap.transform,"",15f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[6],25));row.txtGold=UIFactory.CreateText("gd",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[7],25));UIFactory.SetBold(row.txtGold,true);int idx=rowIndex;var ch=row.root.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()&&idx>=0&&idx<lbRows.Count&&!string.IsNullOrEmpty(lbRows[idx].steamId)){string sid=lbRows[idx].steamId;h2hSeriesPage=0;if(selectedSteamId==sid){selectedSteamId="";selectedStats=null;selectedViewHistory=null;}else{selectedSteamId=sid;selectedStats=null;selectedViewHistory=null;ApiClient.FetchPlayerStatsForView(sid,(d)=>{selectedStats=d;dirty=true;});ApiClient.FetchAchievementsForView(sid);ApiClient.FetchPlayerTournaments(sid);ApiClient.FetchMatchHistoryForView(sid,(h)=>{if(selectedSteamId==sid){selectedViewHistory=h;dirty=true;}});}dirty=true;}};row.root.SetActive(false);return row;}
 
@@ -2079,7 +2118,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static readonly List<ArtistRow> artistRows = new List<ArtistRow>();
         private static readonly List<ArtistBlockRow> artistBlockRows = new List<ArtistBlockRow>();
         private static GameObject artistItemsContainer, artistBlocksContainer;
-        private static object txtArtistStatus, txtArtistSubs;
+        private static object txtArtistStatus, txtArtistSubs, txtArtistSales;
 
         private static GameObject BuildArtistTab(Transform parent)
         {
@@ -2101,6 +2140,25 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var sv = UIFactory.CreateScrollView("ArtSV", panel.transform, spacing: 4);
             UIFactory.AddLE(sv.scrollGO, flexH: 1);
             artistItemsContainer = sv.content;
+
+            // Item 1: per-purchase sales log — who bought what, at what price,
+            // and the artist's cut. Single wrapped text block inside a fixed
+            // scroll (same shape as the F5 chat log: LE prefH zeroed so TMP's
+            // rendered height drives the scroll content).
+            UIFactory.CreateText("ArtSalesH", panel.transform,
+                "<color=#7FE8C3>Sales log</color>  <color=#888>(every purchase and gift of your items, newest first)</color>",
+                16f, C_WHITE, UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 24));
+            var ssv = UIFactory.CreateScrollView("ArtSalesSV", panel.transform, spacing: 0);
+            UIFactory.AddLE(ssv.scrollGO, prefH: 150, minH: 100, flexH: 0);
+            txtArtistSales = UIFactory.CreateText("ArtSales", ssv.content.transform,
+                "<color=#888><i>No sales yet.</i></color>", 13f, C_WHITE,
+                UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 24));
+            UIFactory.SetWordWrap(txtArtistSales, true);
+            {
+                var salesLE = (txtArtistSales as Component)?.gameObject.GetComponent(UIFactory.tLE);
+                if (salesLE != null)
+                    UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(salesLE, -1f);
+            }
 
             var blkHdr = UIFactory.CreateText("ArtBH", panel.transform,
                 "<color=#FF9988>Blocked buyers</color>  <color=#888>(can't purchase your items; gifts still work)</color>",
@@ -2329,6 +2387,29 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         ssb.Append($"  {s.name} <color=#888>({s.slot})</color>  {st}\n");
                     }
                     UIFactory.SetText(txtArtistSubs, ssb.ToString().TrimEnd('\n'));
+                }
+            }
+
+            // Item 1: per-purchase sales log. Buyer names are user-authored —
+            // sanitize before splicing into rich text.
+            if (txtArtistSales != null)
+            {
+                var sales = ApiClient.CachedArtistSales;
+                if (sales == null || sales.Count == 0)
+                    UIFactory.SetText(txtArtistSales, "<color=#888><i>No sales yet.</i></color>");
+                else
+                {
+                    var slb = new System.Text.StringBuilder();
+                    foreach (var s in sales)
+                    {
+                        string item = HomeSan(s.item);
+                        string buyer = HomeSan(s.buyer);
+                        if (s.price <= 0)
+                            slb.Append($"<color=#888>{s.when}</color>  <b>{buyer}</b> received <color=#C8A2FF>{item}</color>  <color=#888>(gift)</color>\n");
+                        else
+                            slb.Append($"<color=#888>{s.when}</color>  <b>{buyer}</b> bought <color=#C8A2FF>{item}</color> for <color=#FFD94D>{s.price}g</color>  <color=#7FE8C3>+{s.earned}g to you</color>\n");
+                    }
+                    UIFactory.SetText(txtArtistSales, slb.ToString().TrimEnd('\n'));
                 }
             }
 
@@ -4761,7 +4842,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         defaulted to steam_id during the get_or_create_player initial creation). User reported
         "all of my names are showing up as the steam id instead of the name in the top left". */
         if(txtTopLeftName!=null){string nm=!string.IsNullOrEmpty(s.display_name)&&s.display_name!=s.steam_id?s.display_name:(MatchTracker.LocalDisplayName??s.display_name??"");UIFactory.SetText(txtTopLeftName,nm);}
-        UIFactory.SetText(txtRating,$"{s.rating:F0}");UIFactory.SetText(txtRD,$"RD: {s.rating_deviation:F0}    Peak: {s.peak_rating:F0}");UIFactory.SetText(txtLevel,$"Level {s.level}");if(s.level<100&&s.xp_for_next_level>0){UIFactory.SetText(txtXPProg,$"{s.xp_into_level}/{s.xp_for_next_level} XP");UIFactory.SetFill(xpFill,(float)s.xp_into_level/s.xp_for_next_level);}else{UIFactory.SetText(txtXPProg,"MAX");UIFactory.SetFill(xpFill,1f);}UIFactory.SetText(txtTotalXP,$"{s.total_xp:N0} XP");var history=ApiClient.CachedMatchHistory;var sR=history?.FindAll(m=>m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();var sC=history?.FindAll(m=>!m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();int cW=0,cL=0,sweepG=0,sweepT=0;foreach(var m in sC){if(m.won)cW++;else cL++;}if(history!=null)foreach(var m in history){if(m.won&&m.opponent_rounds_won==0)sweepG++;if(!m.won&&m.player_rounds_won==0)sweepT++;}int rW=s.ranked_series_wins,rL=s.ranked_series_losses;UIFactory.SetText(txtRankedRec,rW+rL>0?$"<color=#FFD94D>Ranked:</color> {rW}W / {rL}L ({(rL>0?$"{(float)rW/rL:F1}":$"{rW}:0")})":"<color=#FFD94D>Ranked:</color> -");if(sR.Count>0){int st=CalcStreak(sR);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtRankedStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_ranked_streak>0?$"  Best: {s.best_ranked_streak}W":""));}else UIFactory.SetText(txtRankedStrk,"");/* 2v2 line — shows the parallel Glicko / W-L / streak. Hidden when no 2v2 series played, since the row otherwise reads as a confusing 0-0/1500 default. */{var t2=ApiClient.CachedTeamStats;if(t2!=null&&(t2.series_wins+t2.series_losses)>0){string ratio=t2.series_losses>0?$"{(float)t2.series_wins/t2.series_losses:F1}":t2.series_wins>0?$"{t2.series_wins}:0":"0:0";UIFactory.SetText(txtTeam2v2Rec,$"<color=#FFB347>2v2:</color> {t2.series_wins}W / {t2.series_losses}L ({ratio})  <color=#888>Rating:</color> {t2.rating:F0}  <color=#888>Peak:</color> {t2.peak_rating:F0}");int st2=t2.current_streak;if(st2!=0){string c2=st2>0?"#00FF00":"#FF6666";UIFactory.SetText(txtTeam2v2Strk,$"  <color={c2}>Streak: {(st2>0?$"{st2}W":$"{-st2}L")}</color>");}else UIFactory.SetText(txtTeam2v2Strk,"");}else{UIFactory.SetText(txtTeam2v2Rec,"<color=#FFB347>2v2:</color> -");UIFactory.SetText(txtTeam2v2Strk,"");}}UIFactory.SetText(txtCasualRec,sC.Count>0?$"Casual: {cW}W / {cL}L ({(cL>0?$"{(float)cW/cL:F1}":cW>0?$"{cW}:0":"")})":"Casual: -");if(sC.Count>0){int st=CalcStreak(sC);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtCasualStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_casual_streak>0?$"  Best: {s.best_casual_streak}W":""));}else UIFactory.SetText(txtCasualStrk,"");UIFactory.SetText(txtSweeps,$"Sweeps: <color=#00FF00>5-0 x{sweepG}</color>  <color=#FF6666>0-5 x{sweepT}</color>");UIFactory.SetText(txtTotalRec,$"Total: {s.total_matches} ({s.wins}W / {s.losses}L)  <color=#FFD94D>Gold: {(s.gold_earned - s.gold_spent)}</color>");/* Hit% / Block% lifetime - one-sided totals (only the reporter-side's client has these
+        UIFactory.SetText(txtRating,$"{s.rating:F0}");UIFactory.SetText(txtRD,$"RD: {s.rating_deviation:F0}    Peak: {s.peak_rating:F0}");UIFactory.SetText(txtLevel,$"Level {s.level}");if(s.level<100&&s.xp_for_next_level>0){UIFactory.SetText(txtXPProg,$"{s.xp_into_level}/{s.xp_for_next_level} XP");UIFactory.SetFill(xpFill,(float)s.xp_into_level/s.xp_for_next_level);}else{UIFactory.SetText(txtXPProg,"MAX");UIFactory.SetFill(xpFill,1f);}UIFactory.SetText(txtTotalXP,$"{s.total_xp:N0} XP");var history=ApiClient.CachedMatchHistory;var sR=history?.FindAll(m=>m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();var sC=history?.FindAll(m=>!m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();
+/* Casual W/L + sweeps come from the SERVER stats, not a local history scan:
+ * since the v1.32.1 lazy history load the cache only holds the head ~400
+ * matches, so scanning it understated lifetime numbers (Sid: "casual losses
+ * gone" — his 28 lifetime losses had 1 inside the window). sR/sC stay for
+ * the CURRENT-streak calcs, which are inherently recent. */
+int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_taken;int rW=s.ranked_series_wins,rL=s.ranked_series_losses;UIFactory.SetText(txtRankedRec,rW+rL>0?$"<color=#FFD94D>Ranked:</color> {rW}W / {rL}L ({(rL>0?$"{(float)rW/rL:F1}":$"{rW}:0")})":"<color=#FFD94D>Ranked:</color> -");if(sR.Count>0){int st=CalcStreak(sR);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtRankedStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_ranked_streak>0?$"  Best: {s.best_ranked_streak}W":""));}else UIFactory.SetText(txtRankedStrk,"");/* 2v2 line — shows the parallel Glicko / W-L / streak. Hidden when no 2v2 series played, since the row otherwise reads as a confusing 0-0/1500 default. */{var t2=ApiClient.CachedTeamStats;if(t2!=null&&(t2.series_wins+t2.series_losses)>0){string ratio=t2.series_losses>0?$"{(float)t2.series_wins/t2.series_losses:F1}":t2.series_wins>0?$"{t2.series_wins}:0":"0:0";UIFactory.SetText(txtTeam2v2Rec,$"<color=#FFB347>2v2:</color> {t2.series_wins}W / {t2.series_losses}L ({ratio})  <color=#888>Rating:</color> {t2.rating:F0}  <color=#888>Peak:</color> {t2.peak_rating:F0}");int st2=t2.current_streak;if(st2!=0){string c2=st2>0?"#00FF00":"#FF6666";UIFactory.SetText(txtTeam2v2Strk,$"  <color={c2}>Streak: {(st2>0?$"{st2}W":$"{-st2}L")}</color>");}else UIFactory.SetText(txtTeam2v2Strk,"");}else{UIFactory.SetText(txtTeam2v2Rec,"<color=#FFB347>2v2:</color> -");UIFactory.SetText(txtTeam2v2Strk,"");}}UIFactory.SetText(txtCasualRec,cW+cL>0?$"Casual: {cW}W / {cL}L ({(cL>0?$"{(float)cW/cL:F1}":cW>0?$"{cW}:0":"")})":"Casual: -");if(sC.Count>0){int st=CalcStreak(sC);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtCasualStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_casual_streak>0?$"  Best: {s.best_casual_streak}W":""));}else UIFactory.SetText(txtCasualStrk,"");UIFactory.SetText(txtSweeps,$"Sweeps: <color=#00FF00>5-0 x{sweepG}</color>  <color=#FF6666>0-5 x{sweepT}</color>");UIFactory.SetText(txtTotalRec,$"Total: {s.total_matches} ({s.wins}W / {s.losses}L)  <color=#FFD94D>Gold: {(s.gold_earned - s.gold_spent)}</color>");/* Hit% / Block% lifetime - one-sided totals (only the reporter-side's client has these
  * counters). Split across two lines in the 44px-tall txtAccuracy field because the
  * combined string overflows 340px at 15pt and TMP wordwrap clips the second line
  * when the field is only 22px tall. Newline gives TMP a proper 2-line render. */
@@ -4945,7 +5032,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
  * header on their last mod-only API call). Helps testers tell at a
  * glance who's on a build that has a given fix. */if(!string.IsNullOrEmpty(ps.mod_version)){string mvCol=ps.mod_version==Plugin.ModVersion?"#88FF88":"#FFD94D";detail+=$"\n<color=#888>Mod:</color> <color={mvCol}>v{ps.mod_version}</color>\n";}else{detail+=$"\n<color=#888>Mod: <i>not detected</i></color>\n";}/* Top cards with win rates */if(ps.top_card_names!=null&&ps.top_card_names.Count>0){detail+="\n<color=#99AAEE>Top Cards:</color>\n";for(int ci=0;ci<ps.top_card_names.Count&&ci<8;ci++){string picks=ps.top_card_picks.Count>ci?$" ({ps.top_card_picks[ci]}x)":"";float wr=ps.top_card_win_rates!=null&&ps.top_card_win_rates.Count>ci?ps.top_card_win_rates[ci]*100f:0f;string wrCol=wr>=55?"#00FF00":wr<=45?"#FF6666":"#AAAAAA";detail+=$"  {ps.top_card_names[ci]}{picks}  <color={wrCol}>{wr:F0}%</color>\n";}}/* Tournament placements + recent results for the viewed player. Trophy counts stay inline (compact), recent list is capped to 4 rows so the detail doesn't grow off-screen. */if(ApiClient.CachedPlayerTournaments.TryGetValue(selectedSteamId,out var _tHist)&&_tHist!=null&&(_tHist.participant_count>0)){detail+="\n<color=#FFD94D>Tournaments:</color> ";detail+=$"<color=#FFE580>1stx{_tHist.winner_count}</color>  <color=#C8C8C8>2ndx{_tHist.runner_up_count}</color>  <color=#D4894A>3rdx{_tHist.third_place_count}</color>  <color=#888>(played {_tHist.participant_count})</color>\n";if(_tHist.recent!=null&&_tHist.recent.Length>0){int shown=0;foreach(var te in _tHist.recent){if(shown>=4)break;string dt=te.ended_at;try{if(!string.IsNullOrEmpty(dt))dt=TimeZoneInfo.ConvertTimeFromUtc(DateTime.Parse(te.ended_at,null,System.Globalization.DateTimeStyles.RoundtripKind).ToUniversalTime(),_ResolveTz()).ToString("M/d/yy");}catch{}string placeTxt=te.placed_rank==1?"<color=#FFE580>1st</color>":te.placed_rank==2?"<color=#C8C8C8>2nd</color>":te.placed_rank==3?"<color=#D4894A>3rd</color>":$"<color=#888>-</color>";detail+=$"  {dt}  {placeTxt}  <color=#888>({te.signup_count}p)</color>\n";shown++;}}}/* Composition (item 10 + July 12 item 5): main text = stats + Series-vs-You
  * (so the pager GameObject right after it lands directly under the series
- * list); achievements render in their own element BELOW the pager. */string _histPart;string _seriesPart=BuildViewHistoryText(out _histPart);UIFactory.SetText(txtLBDetail,detail+_seriesPart);UIFactory.SetText(txtLBDetailB,_histPart);UIFactory.SetText(txtLBAch,GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Unblock from Ranked":"Block from Ranked");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}}else{UIFactory.SetText(txtLBPlayerName,"Click a player");UIFactory.SetText(txtLBDetail,"");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBAch,"");BuildFormGraph(null,null);if(lbBlockRow!=null)lbBlockRow.SetActive(false);if(h2hPager!=null)h2hPager.SetActive(false);}}
+ * list); achievements render in their own element BELOW the pager. */string _histPart;string _seriesPart=BuildViewHistoryText(out _histPart);UIFactory.SetText(txtLBDetail,detail+_seriesPart);UIFactory.SetText(txtLBDetailB,_histPart);UIFactory.SetText(txtLBAch,GetAchievementText());/* Rating line graph - use elo history if available, fall back to form */BuildFormGraph(ps.rating_history,ps.recent_form);/* Block row - always show but hide button for self to prevent layout shift */if(lbBlockRow!=null){lbBlockRow.SetActive(true);bool notSelf=selectedSteamId!=MatchTracker.LocalSteamId;lbBlockBtn.SetActive(notSelf);if(notSelf&&lbBlockTxt!=null){bool blocked=ApiClient.IsPlayerBlocked(selectedSteamId);UIFactory.SetText(lbBlockTxt,blocked?"Unblock from Ranked":"Block from Ranked");UIFactory.SetImageColor(lbBlockBtn,blocked?new Color(0.15f,0.3f,0.15f,0.9f):new Color(0.5f,0.15f,0.15f,0.9f));}}
+/* Admin-only Steam ID (Sid item 10) - IsAdmin resolves async, so gate here
+ * in the refresh (late-resolution pattern), not at build time. */if(txtLBSteamId!=null){var _sidGO=((Component)txtLBSteamId).gameObject;bool showSid=ApiClient.IsAdmin&&!string.IsNullOrEmpty(selectedSteamId);if(_sidGO.activeSelf!=showSid)_sidGO.SetActive(showSid);if(showSid)UIFactory.SetText(txtLBSteamId,$"<color=#888>Steam ID:</color> <color=#9AD0FF>{selectedSteamId}</color> <color=#666>(click to copy)</color>");}}else{UIFactory.SetText(txtLBPlayerName,"Click a player");UIFactory.SetText(txtLBDetail,"");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBAch,"");BuildFormGraph(null,null);if(lbBlockRow!=null)lbBlockRow.SetActive(false);if(txtLBSteamId!=null)((Component)txtLBSteamId).gameObject.SetActive(false);if(h2hPager!=null)h2hPager.SetActive(false);}}
 
         private static void BuildFormGraph(List<float> ratingHistory, List<string> form)
         {
@@ -7537,6 +7626,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object txtTState, txtTWhen, txtTInstructions, txtTPenalty, txtTForceCount, txtTMyMatch, txtTDiscordGate, txtTMyHistory, txtTRoomCode, txtTTzNow;
         private static GameObject txtTSignupBtn, txtTUnsignupBtn, txtTReadyBtn, txtTForceBtn, txtTTzButton, txtTDateFmtButton, txtTReconnectBtn, tSubTabSyncBtn, tSubTabAsyncBtn;
         private static GameObject tTimeVoteRow, tSignupList, tBracketList, tMyMatchPanel, tHistoryList, tVoteBoxPanel;
+        // Item 3: mandatory time voting — slots are pickable BEFORE signup (the
+        // vote rides the signup request); Save Votes only applies once signed up.
+        private static GameObject tVoteSaveBtn;
+        private static object txtTVoteHdr;
+        // July 17 round 2: live prize block (scales with signups) + the
+        // between-rounds Play Now button.
+        private static object txtTPrizes;
+        private static GameObject tPlayNowBtn;
         private static List<GameObject> tHistoryRowPool = new List<GameObject>();
         private static List<object> tHistoryRowTexts = new List<object>();
         // Match IDs we've already set PendingRankedRoom for, so the 10s refresh loop
@@ -7632,6 +7729,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetBold(txtTState, true);
             txtTWhen = UIFactory.CreateText("TW", hdrBox.transform, "", 17f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 26));
             UIFactory.SetWordWrap(txtTWhen, true);
+            // Item 2 (July 17 round 2): the when-line word-wraps to 2 lines in
+            // the voting phase ("Default start ... Signups close ...") but the
+            // baked LayoutElement only allotted its one-line 26px — the second
+            // line painted straight over the instructions block (screenshot-
+            // verified overlap). Same prefH-zeroing as txtTInstructions below.
+            { var wle = (txtTWhen as Component)?.gameObject.GetComponent(UIFactory.tLE);
+              if (wle != null) UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(wle, -1f); }
             txtTInstructions = UIFactory.CreateText("TI", hdrBox.transform,
                 _SYNC_INSTRUCTIONS,
                 14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 560));
@@ -7643,6 +7747,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // Same pattern the chat log uses (see RefreshMyStats for the precedent).
             { var le = (txtTInstructions as Component)?.gameObject.GetComponent(UIFactory.tLE);
               if (le != null) UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, -1f); }
+            // Item 2: prizes moved out of the static instructions into a live
+            // block — amounts scale with the confirmed signup count, so the
+            // text is rebuilt every refresh (RefreshTournaments).
+            txtTPrizes = UIFactory.CreateText("TPrz", hdrBox.transform, "",
+                14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 90));
+            UIFactory.SetWordWrap(txtTPrizes, true);
+            { var ple = (txtTPrizes as Component)?.gameObject.GetComponent(UIFactory.tLE);
+              if (ple != null) UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(ple, -1f); }
 
             // Timezone selector - tap to cycle through presets.
             var tzRow = new GameObject("TZRow"); tzRow.transform.SetParent(left.transform, false);
@@ -7665,8 +7777,22 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 {
                     var id = MatchTracker.LocalSteamId;
                     var t = ApiClient.CachedTournament;
-                    if (t != null && !string.IsNullOrEmpty(t.tournament_id) && !string.IsNullOrEmpty(id) && id != "unknown")
-                        ApiClient.TournamentSignup(t.tournament_id, id, MatchTracker.LocalDisplayName);
+                    if (t == null || string.IsNullOrEmpty(t.tournament_id) || string.IsNullOrEmpty(id) || id == "unknown") return;
+                    // Item 3: sync signups must pick >= 1 start time — the vote
+                    // rides the signup request (server enforces it too).
+                    if (ApiClient.TournamentKind != "async")
+                    {
+                        var selected = new List<string>();
+                        for (int i = 0; i < tSlotChecked.Count && i < (t.time_slot_options?.Length ?? 0); i++)
+                            if (tSlotChecked[i]) selected.Add(t.time_slot_options[i]);
+                        if (selected.Count == 0)
+                        {
+                            CompetitiveUI.ShowNotification("Pick at least one start time below first", new Color(1f, 0.75f, 0.35f));
+                            return;
+                        }
+                        ApiClient.TournamentSignup(t.tournament_id, id, MatchTracker.LocalDisplayName, selected.ToArray());
+                    }
+                    else ApiClient.TournamentSignup(t.tournament_id, id, MatchTracker.LocalDisplayName);
                 }, sizeDelta: new Vector2(220, 28));
             txtTUnsignupBtn = UIFactory.CreateButton("TUns", sRow.transform, "Leave Signup", 15f, C_WHITE, new Color(0.50f, 0.20f, 0.20f, 0.95f),
                 () =>
@@ -7689,33 +7815,42 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var voteBox = tVoteBoxPanel;
             UIFactory.AddVLG(voteBox, spacing: 2, padL: 10, padR: 10, padT: 6, padB: 6);
             UIFactory.AddLE(voteBox, flexH: 0);
-            UIFactory.CreateText("TVH", voteBox.transform, "Vote on Start Time (multi-select)", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(380, 22));
+            txtTVoteHdr = UIFactory.CreateText("TVH", voteBox.transform, "Pick Your Start Times (multi-select)", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
             tTimeVoteRow = new GameObject("TVR"); tTimeVoteRow.transform.SetParent(voteBox.transform, false);
             tTimeVoteRow.AddComponent<RectTransform>(); UIFactory.AddVLG(tTimeVoteRow, spacing: 2);
-            // 8 slot toggle rows, each: [ box ] label (votes: N)
-            for (int i = 0; i < 8; i++)
+            // Item 2 (July 17 round 2): 8 slots in TWO columns of 4 — half the
+            // vertical space of the old single-column list. Each slot is its
+            // own cell GameObject (toggle + label) so the refresh code's
+            // per-slot show/hide (transform.parent) can't hide a row-mate.
+            for (int r = 0; r < 4; r++)
             {
-                int idx = i;
-                var row = new GameObject($"Slot{i}"); row.transform.SetParent(tTimeVoteRow.transform, false);
-                row.AddComponent<RectTransform>(); UIFactory.AddHLG(row, spacing: 6, forceExpandH: true);
+                var row = new GameObject($"SlotRow{r}"); row.transform.SetParent(tTimeVoteRow.transform, false);
+                row.AddComponent<RectTransform>(); UIFactory.AddHLG(row, spacing: 10, forceExpandH: true);
                 UIFactory.AddLE(row, prefH: 24, flexH: 0);
-                var box = UIFactory.CreateButton($"Tog{i}", row.transform, "[ ]", 14f, C_WHITE, C_BTN, () =>
+                for (int c = 0; c < 2; c++)
                 {
-                    if (tSlotChecked.Count > idx) {
-                        tSlotChecked[idx] = !tSlotChecked[idx];
-                        _tVoteLocalEdited = true;   // freeze server-sync until Save is pressed
-                        dirty = true;
-                    }
-                }, sizeDelta: new Vector2(36, 22));
-                tSlotToggles.Add(box);
-                var lbl = UIFactory.CreateText($"Lbl{i}", row.transform, "", 14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(320, 22));
-                tSlotLabels.Add(lbl);
-                tSlotChecked.Add(false);
+                    int idx = r * 2 + c;
+                    var cell = new GameObject($"Slot{idx}"); cell.transform.SetParent(row.transform, false);
+                    cell.AddComponent<RectTransform>(); UIFactory.AddHLG(cell, spacing: 5, forceExpandH: true);
+                    UIFactory.AddLE(cell, prefW: 200, minW: 180, flexW: 0, flexH: 0);
+                    var box = UIFactory.CreateButton($"Tog{idx}", cell.transform, "[ ]", 14f, C_WHITE, C_BTN, () =>
+                    {
+                        if (tSlotChecked.Count > idx) {
+                            tSlotChecked[idx] = !tSlotChecked[idx];
+                            _tVoteLocalEdited = true;   // freeze server-sync until Save is pressed
+                            dirty = true;
+                        }
+                    }, sizeDelta: new Vector2(36, 22));
+                    tSlotToggles.Add(box);
+                    var lbl = UIFactory.CreateText($"Lbl{idx}", cell.transform, "", 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(158, 22));
+                    tSlotLabels.Add(lbl);
+                    tSlotChecked.Add(false);
+                }
             }
             var submitRow = new GameObject("TVSub"); submitRow.transform.SetParent(voteBox.transform, false);
             submitRow.AddComponent<RectTransform>(); UIFactory.AddHLG(submitRow, spacing: 6);
             UIFactory.AddLE(submitRow, prefH: 28, flexH: 0);
-            UIFactory.CreateButton("TVSubmit", submitRow.transform, "Save Votes", 15f, C_WHITE, new Color(0.22f, 0.38f, 0.65f, 0.95f), () =>
+            tVoteSaveBtn = UIFactory.CreateButton("TVSubmit", submitRow.transform, "Save Votes", 15f, C_WHITE, new Color(0.22f, 0.38f, 0.65f, 0.95f), () =>
             {
                 var t = ApiClient.CachedTournament;
                 if (t == null || string.IsNullOrEmpty(t.tournament_id)) return;
@@ -7754,6 +7889,24 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (t != null && !string.IsNullOrEmpty(t.tournament_id))
                     ApiClient.TournamentReady(t.tournament_id, MatchTracker.LocalSteamId);
             }, sizeDelta: new Vector2(200, 26));
+            // Item 2 (July 17 round 2): skip the between-rounds break — the
+            // match starts the moment BOTH players press this.
+            tPlayNowBtn = UIFactory.CreateButton("TPlayNow", matchBtnRow.transform, "Play Now (skip break)", 15f, C_WHITE, new Color(0.55f, 0.40f, 0.15f, 0.95f), () =>
+            {
+                var t = ApiClient.CachedTournament;
+                if (t == null || string.IsNullOrEmpty(t.tournament_id) || t.matches == null) return;
+                foreach (var m in t.matches)
+                {
+                    if (m.status == "scheduled" &&
+                        (m.p1_signup_id == t.my_signup_id || m.p2_signup_id == t.my_signup_id) &&
+                        !string.IsNullOrEmpty(m.match_id))
+                    {
+                        ApiClient.TournamentPlayNow(t.tournament_id, m.match_id, MatchTracker.LocalSteamId);
+                        break;
+                    }
+                }
+            }, sizeDelta: new Vector2(190, 26));
+            tPlayNowBtn.SetActive(false);
             // Reconnect button - clears the per-match dispatch memo so SetPendingRoom fires
             // again on the next refresh tick. Useful when auto-connect failed silently and
             // the player has already been moved back to the main menu.
@@ -7987,7 +8140,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // dependent ToString would emit "Пт Кві 24" for Ukrainian users and
         // render as squares in-game. We bypass the OS culture entirely.
         private static readonly System.Globalization.CultureInfo _INV = System.Globalization.CultureInfo.InvariantCulture;
-        private static string _FmtSlot(string iso)
+        private static string _FmtSlot(string iso, bool includeTz = true)
         {
             if (string.IsNullOrEmpty(iso)) return "(TBD)";
             try
@@ -8003,7 +8156,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     case "EU":  formatted = local.ToString("ddd dd/MM HH:mm", _INV); break;
                     default:    formatted = local.ToString("yyyy-MM-dd HH:mm", _INV); break;
                 }
-                return formatted + "  " + _TzLabel();
+                // includeTz=false for the two-column slot cells (item 2): the
+                // tz is already named in the "Times in:" row directly above,
+                // and the 158px cell can't fit "Sat 07/18 12:00 PM Local (5)".
+                return includeTz ? formatted + "  " + _TzLabel() : formatted;
             }
             catch { return iso; }
         }
@@ -8438,6 +8594,28 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 UIFactory.SetText(txtTInstructions, isAsync ? _ASYNC_INSTRUCTIONS : _SYNC_INSTRUCTIONS);
             }
+            // Live prize block (item 2): amounts scale with confirmed signups —
+            // server-computed (single source of truth), growth spelled out so
+            // every extra signup visibly raises the pot.
+            if (txtTPrizes != null)
+            {
+                if (t.prize_gold_1 > 0)
+                {
+                    int pp = Math.Max(8, t.prize_players);
+                    string growth = t.status == "voting"
+                        ? (t.prize_players < 16
+                            ? $"\n  <color=#7FE8C3>Every signup past 8 grows the pot - 16 players doubles it! (now: {t.prize_players})</color>"
+                            : "\n  <color=#7FE8C3>Max pot - 16 players!</color>")
+                        : "";
+                    UIFactory.SetText(txtTPrizes,
+                        $"<b><color=#FFD94D>PRIZES</color></b> <color=#888>(at {pp} players{(t.status == "voting" ? ", live" : "")})</color>\n"
+                        + $"  * <color=#FFE580>1st</color> - {t.prize_gold_1}g / {t.prize_xp_1} XP / Winner role\n"
+                        + $"  * <color=#C8C8C8>2nd</color> - {t.prize_gold_2}g / {t.prize_xp_2} XP / Runner Up role\n"
+                        + $"  * <color=#D4894A>3rd</color> - {t.prize_gold_3}g / {t.prize_xp_3} XP / 3rd Place role (loser of LB final)"
+                        + growth);
+                }
+                else UIFactory.SetText(txtTPrizes, "");
+            }
             if (tSubTabSyncBtn != null) { UIFactory.SetImageColor(tSubTabSyncBtn, isAsync ? C_TAB : C_TABACT); UIFactory.SetColor(UIFactory.GetButtonText(tSubTabSyncBtn), isAsync ? C_LABEL : C_WHITE); UIFactory.SetBold(UIFactory.GetButtonText(tSubTabSyncBtn), !isAsync); }
             if (tSubTabAsyncBtn != null) { UIFactory.SetImageColor(tSubTabAsyncBtn, isAsync ? C_TABACT : C_TAB); UIFactory.SetColor(UIFactory.GetButtonText(tSubTabAsyncBtn), isAsync ? C_WHITE : C_LABEL); UIFactory.SetBold(UIFactory.GetButtonText(tSubTabAsyncBtn), isAsync); }
             // Show the current time in the selected tz so players can verify their pick is
@@ -8472,18 +8650,35 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
             // Async skips voting entirely - there's no scheduled_start_ts delay,
             // lock triggers immediate start. Hide the whole vote panel (not just
-            // the slot rows) so the "Vote on Start Time" header disappears too.
+            // the slot rows) so the "Pick Your Start Times" header disappears too.
             if (tVoteBoxPanel != null) tVoteBoxPanel.SetActive(!isAsync);
-            // Time-vote UI: visible during voting when signed up.
-            bool voteVisible = !isAsync && t.status == "voting" && signedUp;
+            // Item 3: time-vote UI is visible during voting even BEFORE signup —
+            // picking times is now a prerequisite of signing up (the vote rides
+            // the signup request). Save Votes stays signup-gated below.
+            bool voteVisible = !isAsync && t.status == "voting";
             // (Previously force-enabled the vote row parent here, which was
             // re-showing the whole box for async. Removed - tVoteBoxPanel above
             // controls visibility.)
             int slots = t.time_slot_options?.Length ?? 0;
+            // Offered slots changed (pushback / new week / slots aging out):
+            // drop frozen local edits so the index-based checkboxes re-sync
+            // from server truth instead of silently pointing at new times.
+            string slotSig = string.Join("|", t.time_slot_options ?? Array.Empty<string>());
+            if (slotSig != _tVoteSlotSig) { _tVoteSlotSig = slotSig; _tVoteLocalEdited = false; }
             var myVotes = new HashSet<string>(t.my_votes ?? Array.Empty<string>());
             var tallies = new Dictionary<string, int>();
             if (t.time_slot_tallies != null)
                 foreach (var tv in t.time_slot_tallies) tallies[tv.slot_ts] = tv.votes;
+            // Agreement progress: the lock needs min_players votes on ONE slot.
+            if (txtTVoteHdr != null)
+            {
+                int topTally = 0;
+                foreach (var kv in tallies) if (kv.Value > topTally) topTally = kv.Value;
+                UIFactory.SetText(txtTVoteHdr, t.status == "voting"
+                    ? $"Pick Your Start Times <color=#888>(multi-select, required to sign up)</color>  " +
+                      $"<color=#7FE8C3>best time: {topTally}/{t.min_players} agreed</color>"
+                    : "Pick Your Start Times (multi-select)");
+            }
 
             for (int i = 0; i < tSlotToggles.Count; i++)
             {
@@ -8500,9 +8695,29 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 else if (!_tVoteLocalEdited) tSlotChecked[i] = alreadyVoted;
                 UIFactory.SetText(UIFactory.GetButtonText(tSlotToggles[i]), tSlotChecked[i] ? "[X]" : "[ ]");
                 int votes; tallies.TryGetValue(iso, out votes);
-                string tallyTxt = myVotes.Count > 0 ? $"  <color=#888>({votes} {(votes == 1 ? "vote" : "votes")})</color>" : "";
-                UIFactory.SetText(tSlotLabels[i], $"{_FmtSlot(iso)}{tallyTxt}");
+                // Compact "(N)" + tz-less label + no wrap: the two-column cell
+                // is 158px — the old "(5 votes)" + " Local" suffix wrapped over
+                // the row below (review find; learning #70 family).
+                string tallyTxt = votes > 0 ? $" <color=#7FE8C3>({votes})</color>" : "";
+                UIFactory.SetWordWrap(tSlotLabels[i], false);
+                UIFactory.SetText(tSlotLabels[i], $"{_FmtSlot(iso, includeTz: false)}{tallyTxt}");
             }
+            // Collapse fully-empty slot rows (future-filtered options can leave
+            // fewer than 8 slots; a row whose both cells are hidden would
+            // otherwise keep its fixed 24px and read as a gap).
+            for (int r = 0; r * 2 < tSlotToggles.Count; r++)
+            {
+                var rowGO = tSlotToggles[r * 2].transform.parent.parent != null
+                    ? tSlotToggles[r * 2].transform.parent.parent.gameObject : null;
+                if (rowGO == null || rowGO == tTimeVoteRow) continue;
+                bool anyCell = false;
+                for (int c = 0; c < 2 && r * 2 + c < tSlotToggles.Count; c++)
+                    if (tSlotToggles[r * 2 + c].transform.parent.gameObject.activeSelf) { anyCell = true; break; }
+                rowGO.SetActive(anyCell);
+            }
+            // Save Votes only applies to an existing signup (pre-signup picks
+            // ride the signup request instead).
+            if (tVoteSaveBtn != null) tVoteSaveBtn.SetActive(voteVisible && signedUp);
             // Force-start only surfaces once the minimum player count is met (min_players, default 8).
             // Before that the button is pointless - the server rejects force-start with <8 signups anyway,
             // and hiding it removes the "why doesn't this work?" confusion early in the voting window.
@@ -8512,12 +8727,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     if (!_s.is_speculative) confirmedSignups++;
             // Force-start is a sync-only concept - async tournaments start
             // immediately when signups close, so there's nothing to force.
-            bool forceStartAvailable = !isAsync && voteVisible && confirmedSignups >= t.min_players;
+            bool forceStartAvailable = !isAsync && voteVisible && signedUp && confirmedSignups >= t.min_players;
             UIFactory.SetText(txtTForceCount,
                 t.status == "voting"
                     ? (forceStartAvailable
                         ? $"Force-start votes: {t.force_vote_count}/{confirmedSignups}"
-                        : $"Force-start unlocks at {t.min_players} signups ({confirmedSignups}/{t.min_players})")
+                        : !signedUp
+                            ? "Sign up to unlock force-start"
+                            : $"Force-start unlocks at {t.min_players} signups ({confirmedSignups}/{t.min_players})")
                     : "");
             if (txtTForceBtn != null) txtTForceBtn.SetActive(forceStartAvailable);
 
@@ -8531,10 +8748,46 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // match_id we've already dispatched to avoid setting the pending room on
             // every 10s refresh.
             bool showMyMatch = false;
+            bool showPlayNow = false;
+            bool inBreak = false;
             string myMatchLine = "";
             string myRoomCode = "";
             if (t.status == "running" && signedUp && t.matches != null)
             {
+                // Break state (July 17 round 2): a 'scheduled' match of mine
+                // shows a countdown + the Play Now button instead of the
+                // ready-up flow. Countdown comes from my-active-matches
+                // (scheduled_seconds_left snapshot + fetch time).
+                foreach (var m in t.matches)
+                {
+                    if (m.status != "scheduled") continue;
+                    if (m.p1_signup_id != t.my_signup_id && m.p2_signup_id != t.my_signup_id) continue;
+                    string opp2 = (m.p1_signup_id == t.my_signup_id) ? m.p2_display_name : m.p1_display_name;
+                    string cdown = "";
+                    bool iPressed = false, oppPressed = false;
+                    var live = ApiClient.CachedMyActiveTournamentMatches;
+                    if (live != null)
+                        foreach (var am in live)
+                            if (am.match_id == m.match_id)
+                            {
+                                iPressed = am.my_early_ok; oppPressed = am.opp_early_ok;
+                                if (am.scheduled_seconds_left >= 0)
+                                {
+                                    float left = am.scheduled_seconds_left - (Time.realtimeSinceStartup - am.fetched_at_realtime);
+                                    if (left < 0) left = 0;
+                                    cdown = $" starts in <color=#FFDE88>{(int)(left / 60)}:{(int)(left % 60):00}</color>";
+                                }
+                                break;
+                            }
+                    string earlyState = iPressed
+                        ? (oppPressed ? "" : "  <color=#7FE8C3>(Play Now sent - waiting on opponent)</color>")
+                        : "  <color=#888>(both press Play Now to skip the break)</color>";
+                    myMatchLine = $"Next match (R{m.round}{(m.bracket_side == "TP" ? " 3rd Place" : "")}): vs <color=#FFDE88>{opp2 ?? "?"}</color> -{cdown}{earlyState}";
+                    showMyMatch = true;
+                    inBreak = true;
+                    showPlayNow = !iPressed;
+                    break;
+                }
                 foreach (var m in t.matches)
                 {
                     if (m.status != "ready" && m.status != "active") continue;
@@ -8587,7 +8840,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 : $"  <color=#AABBEE>[{t.photon_region.ToUpper()}]</color>";
             UIFactory.SetText(txtTRoomCode, string.IsNullOrEmpty(myRoomCode) ? ""
                 : $"Room code: <color=#C0E0FF>{myRoomCode}</color>{regionBadge}  <color=#888>(if auto-connect fails, Reconnect or join via Private Lobby)</color>");
-            if (txtTReconnectBtn != null) txtTReconnectBtn.SetActive(showMyMatch);
+            if (txtTReconnectBtn != null) txtTReconnectBtn.SetActive(showMyMatch && !inBreak);
+            if (tPlayNowBtn != null) tPlayNowBtn.SetActive(showPlayNow);
+            if (txtTReadyBtn != null) txtTReadyBtn.SetActive(showMyMatch && !inBreak);
             if (tMyMatchPanel != null) tMyMatchPanel.SetActive(showMyMatch);
 
             // Signups list (right column). Seed numbers are only shown once the
@@ -8861,32 +9116,33 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         }
 
         private static bool _tVoteLocalEdited = false;
+        // Signature of the server's offered slot set. When it changes (weekly
+        // pushback, new tournament), local checkbox edits are stale — the
+        // checked state is INDEX-based, so keeping it would silently retarget
+        // picks onto different datetimes (and freeze server re-sync forever,
+        // since Save Votes is the only other reset).
+        private static string _tVoteSlotSig = "";
 
         private const string _SYNC_INSTRUCTIONS =
             "<b><color=#FFD94D>HOW IT WORKS (Sync)</color></b>\n" +
-            "  1. Sign up (Discord must be linked)\n" +
-            "  2. Vote on start time if you want\n" +
-            "  3. Keep this tab open at start time\n" +
+            "  1. Pick every start time you can make, then sign up (Discord must be linked)\n" +
+            "  2. It locks when <b>8+ players agree on one time</b> - decided <b>2 days before</b> the default start, so you always get 24h+ notice; players who can't make the winning time are removed (no penalty)\n" +
+            "  3. <b>Have ROUNDS open at start time</b> (main menu is fine - no tab-sitting needed)\n" +
             "  4. Mod <b>auto-connects you to your opponent</b> - no queue, no invites\n" +
-            "  5. Play BO3, bracket advances automatically\n" +
+            "  5. Play BO3, bracket advances automatically - <b>plan for a couple of hours total</b>\n" +
             "\n" +
-            "<b><color=#FFD94D>READY-UP</color></b>\n" +
-            "  * Press <b>Ready Up</b> within 5 min of your match starting or forfeit\n" +
-            "  * Tab open = heartbeat keeps you ready; don't alt-tab for long\n" +
+            "<b><color=#FFD94D>BETWEEN MATCHES</color></b>\n" +
+            "  * ~7 min breather before each of your matches after round 1\n" +
+            "  * Both players press <b>Play Now</b> to skip the break and start early\n" +
+            "  * Show up within 5 min of round 1 / 10 min of later matches or forfeit\n" +
             "  * Bracket hidden until start (no scouting your first opponent)\n" +
             "\n" +
             "<b><color=#FFD94D>FORMAT</color></b>\n" +
             "  * <b>Double-elim</b> BO3 (first to 2) - losing once drops you to the losers bracket\n" +
-            "  * Matches run in parallel: you play your next match the moment your opponent is ready\n" +
+            "  * Matches run in parallel: your next match schedules the moment its players are known\n" +
             "  * Top seeds get byes when fewer than 16 sign up\n" +
             "  * Grand Final: WB champ vs LB champ (bracket reset if LB wins first BO3)\n" +
             "  * All matches count toward ranked Elo\n" +
-            "\n" +
-            "<b><color=#FFD94D>PRIZES</color></b> (16-player full tier)\n" +
-            "  * <color=#FFE580>1st</color> - 500g / 2500 XP / Winner role\n" +
-            "  * <color=#C8C8C8>2nd</color> - 300g / 1500 XP / Runner Up role\n" +
-            "  * <color=#D4894A>3rd</color> - 60g / 75 XP / 3rd Place role (loser of LB final)\n" +
-            "  * Scaled 60% at 12-15p, 30% at 8-11p, cancelled under 8\n" +
             "\n" +
             "<b><color=#FFD94D>PENALTY %</color></b>\n" +
             "  * Grows when you sign up but no-show at match time\n" +
@@ -8916,16 +9172,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             "  * Grand Final: WB champ vs LB champ (bracket reset if LB wins first BO3)\n" +
             "  * All matches count toward ranked Elo\n" +
             "\n" +
-            "<b><color=#FFD94D>PRIZES</color></b>\n" +
-            "  * Same scaled tier as sync - 1st / 2nd / 3rd get gold + XP + trophy roles\n" +
-            "  * 3rd place = loser of LB final\n" +
-            "\n" +
             "<b><color=#FFD94D>PENALTY %</color></b>\n" +
             "  * Grows when you sign up but forfeit a match by missing the 7-day deadline";
 
         // ── 2v2 tab ───────────────────────────────────────────────
         private static object txtTeamHeader, txtTeamStatus, txtTeamMembers, txtTeamLBHeader;
         private static GameObject teamSearchBtn, teamSearchCustomBtn, teamLeaveBtn, teamReadyBtn, teamLBContainer;
+        // Bug #76: inner-ScrollRect handle for the nested-scroll wheel fix.
+        private static Component teamLBScrollRect;
         private static List<TeamLBRow> teamLBRows = new List<TeamLBRow>();
         private class TeamLBRow { public GameObject root; public object txtRank, txtName, txtRating, txtWL, txtWR, txtMate, txtGold, txtXp; }
         // 2v2 leaderboard column widths — shared by header + rows so sort
@@ -9216,6 +9470,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var lbScroll = UIFactory.CreateScrollView("TLBSV", lbCol.transform, spacing: 1);
             UIFactory.AddLE(lbScroll.scrollGO, flexH: 1);
             teamLBContainer = lbScroll.content;
+            // Bug #76: keep the ScrollRect handle so the refresh can disable
+            // it while the content fits (nested-scroll wheel capture fix).
+            teamLBScrollRect = lbScroll.scrollGO.GetComponent(UIFactory.tScrollRect);
             for (int i = 0; i < 100; i++) teamLBRows.Add(CreateTeamLBRow(teamLBContainer.transform, $"tlb{i}"));
 
             // Right: recent 2v2 series — paginated 3/page.
@@ -9659,6 +9916,29 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 UIFactory.SetText(row.txtXp,   $"{e.team_xp_earned}");
                 row.root.SetActive(true);
             }
+            /* Bug #76: the leaderboard's INNER ScrollRect captured mouse-wheel
+             * events even when its content fit its viewport (nothing to
+             * scroll), so wheeling over it elastic-bounced in place and the
+             * TAB's outer scroll never received the event — panels below the
+             * fold were unreachable ("doesn't quite scroll, bounces back to
+             * the top"). Disable the inner ScrollRect while content fits: a
+             * disabled Behaviour doesn't handle OnScroll, so the wheel
+             * bubbles up to the outer tab scroll. Re-enables automatically
+             * once enough rows exist to genuinely need inner scrolling. */
+            try
+            {
+                var srBeh = teamLBScrollRect as Behaviour;
+                if (srBeh != null)
+                {
+                    float viewH = 0f;
+                    var srRT = srBeh.transform as RectTransform;
+                    if (srRT != null) viewH = srRT.rect.height;
+                    int shownRows = Math.Min(lb.Count, teamLBRows.Count);
+                    bool needsScroll = viewH > 1f && shownRows * 23f > viewH;
+                    if (srBeh.enabled != needsScroll) srBeh.enabled = needsScroll;
+                }
+            }
+            catch { }
             if (lb.Count == 0)
                 UIFactory.SetText(txtTeamLBHeader, "<b>2v2 Leaderboard</b>  <color=#888>— no completed series yet</color>");
             else

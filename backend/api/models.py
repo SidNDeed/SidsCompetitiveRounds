@@ -291,6 +291,10 @@ class ShopItem(Base):
     artist_steam_id = Column(String(20), nullable=True)
     # Max copies in circulation (purchases + gifts). NULL = unlimited.
     stock_limit = Column(Integer, nullable=True)
+    # When the item actually became buyable (stamped on the first stock open
+    # from the born-out-of-stock -1 state; migration 131). NULL = never
+    # gated — readers COALESCE to created_at.
+    released_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class PlayerItem(Base):
@@ -524,6 +528,9 @@ class Tournament(Base):
     min_players = Column(SmallInteger, nullable=False, default=8)
     max_players = Column(SmallInteger, nullable=False, default=16)
     prize_tier = Column(String(8), nullable=True)
+    # Confirmed player count snapshotted at lock (migration 132): prizes now
+    # scale with this via _prize_amounts; prize_tier kept for legacy readers.
+    prize_player_count = Column(SmallInteger, nullable=True)
     winner_signup_id = Column(UUID(as_uuid=True), nullable=True)
     runner_up_signup_id = Column(UUID(as_uuid=True), nullable=True)
     third_place_signup_id = Column(UUID(as_uuid=True), nullable=True)
@@ -571,6 +578,11 @@ class TournamentMatch(Base):
     ready_deadline_at = Column(DateTime(timezone=True), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     ended_at = Column(DateTime(timezone=True), nullable=True)
+    # Between-rounds break (migration 132): sync rounds 2+ sit in
+    # status='scheduled' until this time, then flip to 'ready'. Both players
+    # in early_ok_signup_ids = skip the break immediately.
+    scheduled_ready_at = Column(DateTime(timezone=True), nullable=True)
+    early_ok_signup_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
     # Server-issued Photon room name (e.g., "sct-a1b2c3d4e5f6"). Set when
     # the match transitions to 'ready' so both clients receive the same
     # canonical name from the API rather than deriving it locally.

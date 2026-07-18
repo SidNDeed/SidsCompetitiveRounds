@@ -138,6 +138,14 @@ namespace CompetitiveRounds
             // Widest animated set so far; exercises the __fN loader past 4 frames.
             // Wide arch, so it sits high like the other crowns.
             new CosmeticDef { Sku = "face_detail_party_crown",   DisplayName = "Party Crown",      Slot = CharacterItemType.Detail, PngFile = "detail_party_crown.png",   Scale = 1.2f, Offset = new Vector2(0f, 0.55f), Fps = 3.6f },
+            // July 17: Galaxyice's first two (new community artist). Both are
+            // the artist's own 512px spec exports used VERBATIM — the canvas
+            // composition IS the placement (cat drawn in the top half so it
+            // rides above the head; the star's canvas position per frame is
+            // the orbit animation, 6fps ~= 1s per lap) — so scale 1, no
+            // offset. Players can still drag-adjust like any face item.
+            new CosmeticDef { Sku = "face_detail_rounds_cat",    DisplayName = "Rounds Cat",       Slot = CharacterItemType.Detail, PngFile = "detail_rounds_cat.png",    Scale = 1.0f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_star_spin",     DisplayName = "Star Spin",        Slot = CharacterItemType.Detail, PngFile = "detail_star_spin.png",     Scale = 1.0f, Offset = Vector2.zero, Fps = 6f },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();
@@ -258,6 +266,16 @@ namespace CompetitiveRounds
                     var go = new GameObject(TEMPLATE_PREFIX + def.Sku, typeof(SpriteRenderer), typeof(CharacterItem));
                     var sr = go.GetComponent<SpriteRenderer>();
                     sr.sprite = sprite;
+                    // Item 1 (July 17 round 2): a runtime SpriteRenderer defaults to
+                    // unlit Sprites/Default, but the whole ROUNDS scene — vanilla
+                    // face items included — renders through the SFSS-lit shader and
+                    // is multiplied DOWN by the scene lightmap (< 1 nearly
+                    // everywhere). Unlit, our art rendered at raw PNG brightness
+                    // against a darkened scene ("cat too bright, green eyes gone").
+                    // Adopt the vanilla item material so we shade with the body.
+                    // May still be null this early — EnsureVanillaItemMaterial()
+                    // backfills all templates once the loader exists.
+                    if (_vanillaItemMat != null) sr.sharedMaterial = _vanillaItemMat;
                     if (frames.Count >= 2)
                     {
                         var cyc = go.AddComponent<CosmeticFrameCycler>();
@@ -398,10 +416,42 @@ namespace CompetitiveRounds
             catch { return null; }
         }
 
+        // Item 1: the SFSS-lit material borrowed from a vanilla face item, so
+        // custom cosmetics get the exact lightmap multiply vanilla items get
+        // (SpawnItem clones never copy material, so fixing the template fixes
+        // every consumer — in-match body, pick visualizer, menu portraits).
+        private static Material _vanillaItemMat;
+
+        internal static void EnsureVanillaItemMaterial()
+        {
+            if (_vanillaItemMat != null) return;
+            try
+            {
+                var loader = CharacterCreatorItemLoader.instance;
+                if (loader == null || loader.eyes == null || loader.eyes.Length == 0) return;
+                var vsr = loader.eyes[0].GetComponent<SpriteRenderer>();
+                if (vsr == null || vsr.sharedMaterial == null) return;
+                _vanillaItemMat = vsr.sharedMaterial;
+                // Learning #91 discipline: prove the borrowed asset is what we
+                // think — this should log shader=Sprites/SFSoftShadow.
+                Plugin.Log.LogInfo($"[COSMETIC] adopting vanilla item material, shader={_vanillaItemMat.shader?.name}");
+                foreach (var def in Catalog)
+                {
+                    var tsr = def.Template != null ? def.Template.GetComponent<SpriteRenderer>() : null;
+                    if (tsr != null) tsr.sharedMaterial = _vanillaItemMat;
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] material adopt failed: {ex.Message}"); }
+        }
+
         /// <summary>Resolver for custom IDs. Null for unknown IDs — same contract
         /// as vanilla's out-of-range fallback (slot renders empty).</summary>
         public static CharacterItem GetItem(int itemID, CharacterItemType itemType)
         {
+            // Loader.instance is guaranteed alive here (we're called from its
+            // own GetItem via the Harmony prefix) — safe point to adopt the
+            // vanilla material for every template.
+            EnsureVanillaItemMaterial();
             if (byId.TryGetValue(itemID, out var def) && def.Slot == itemType && def.Template != null)
                 return def.Template;
             return null;
@@ -496,6 +546,9 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Character editor is open -> the item loader exists; adopt the
+                // vanilla SFSS-lit material for our templates (item 1).
+                CustomCosmetics.EnsureVanillaItemMaterial();
                 var owned = CustomCosmetics.OwnedItemsFor(target);
                 if (owned.Count == 0) return;
                 var creator = __instance.GetComponent<CharacterCreator>();

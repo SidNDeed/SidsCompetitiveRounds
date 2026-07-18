@@ -170,16 +170,37 @@ namespace CompetitiveRounds
             try
             {
                 ApiClient.ActiveTournamentMatch ready = null;
+                ApiClient.ActiveTournamentMatch scheduled = null;
                 var list = ApiClient.CachedMyActiveTournamentMatches;
                 if (list != null)
                     foreach (var m in list)
-                        if (m != null && m.kind == "sync" && m.status == "ready") { ready = m; break; }
+                    {
+                        if (m == null || m.kind != "sync") continue;
+                        if (m.status == "ready") { ready = m; break; }
+                        if (m.status == "scheduled" && scheduled == null) scheduled = m;
+                    }
 
                 string text = null;
                 Color bg = Color.black;
                 float barH = 44f;
 
-                if (ready != null)
+                // Break state (July 17 round 2): slim countdown to the next
+                // match — informational, no urgency (the break can't forfeit).
+                if (ready == null && scheduled != null)
+                {
+                    int bsecs = -1;
+                    if (scheduled.scheduled_seconds_left >= 0)
+                        bsecs = Mathf.Max(0, scheduled.scheduled_seconds_left - (int)(Time.realtimeSinceStartup - scheduled.fetched_at_realtime));
+                    string bclock = bsecs >= 0 ? $" in {bsecs / 60}:{bsecs % 60:00}" : " soon";
+                    string bopp = scheduled.opponent_display_name ?? "opponent";
+                    string early = scheduled.my_early_ok
+                        ? " (Play Now sent - waiting on them)"
+                        : " (both press Play Now in F5 to start early)";
+                    text = $"Next tournament match vs {bopp}{bclock}{early}";
+                    bg = new Color(0.12f, 0.25f, 0.45f, 0.85f);
+                    barH = 26f;
+                }
+                else if (ready != null)
                 {
                     bool inRoom = false, inTargetRoom = false;
                     try
@@ -1304,6 +1325,61 @@ namespace CompetitiveRounds
         // consent modal.
         private static GUIStyle ingameChatStyle;
 
+        // Item 7: lines were drawn into a fixed 20px rect, which clipped
+        // descenders on the bottom row and silently cut wrapped messages after
+        // the first visual line. Each entry now gets its measured wrapped
+        // height, capped at CHAT_MAX_WRAP_LINES with an explicit indicator.
+        private const int CHAT_MAX_WRAP_LINES = 3;
+        private const string CHAT_CUT_SUFFIX = " ... [see F5]";
+        private struct ChatLineLayout { public string Disp; public float H; }
+        private static readonly Dictionary<string, ChatLineLayout> chatLayoutCache =
+            new Dictionary<string, ChatLineLayout>();
+        private static ChatLineLayout[] _chatLayoutScratch = new ChatLineLayout[8];
+
+        private static ChatLineLayout MeasureChatLine(string line, float w)
+        {
+            ChatLineLayout cached;
+            if (chatLayoutCache.TryGetValue(line, out cached)) return cached;
+            if (chatLayoutCache.Count > 256) chatLayoutCache.Clear();
+
+            float maxH = ingameChatStyle.lineHeight * CHAT_MAX_WRAP_LINES + 4f;
+            var layout = new ChatLineLayout { Disp = line };
+            layout.H = ingameChatStyle.CalcHeight(new GUIContent(line), w);
+            if (layout.H > maxH)
+            {
+                // Too tall even at 3 wrapped lines: trim until it fits with the
+                // indicator appended. Never cut before the last rich-text tag
+                // (name/title markup lives at the head; only the plain message
+                // tail is trimmable — user-typed <> are converted to parens
+                // upstream by NativeUI.Escape, so '>' only appears in our own
+                // markup), and binary-search so the once-per-entry cost stays
+                // trivial.
+                int minCut = line.LastIndexOf('>') + 1;
+                if (minCut < 1) minCut = 1;
+                if (minCut >= line.Length - 1)
+                {
+                    // Nothing trimmable after the markup (markup-final line):
+                    // keep the full measured height rather than appending a
+                    // false truncation indicator to an uncut line.
+                    chatLayoutCache[line] = layout;
+                    return layout;
+                }
+                int lo = Math.Min(minCut + 1, line.Length), hi = line.Length, best = lo;
+                while (lo <= hi)
+                {
+                    int mid = (lo + hi) / 2;
+                    string candidate = line.Substring(0, mid).TrimEnd() + CHAT_CUT_SUFFIX;
+                    if (ingameChatStyle.CalcHeight(new GUIContent(candidate), w) <= maxH)
+                    { best = mid; lo = mid + 1; }
+                    else hi = mid - 1;
+                }
+                layout.Disp = line.Substring(0, best).TrimEnd() + CHAT_CUT_SUFFIX;
+                layout.H = ingameChatStyle.CalcHeight(new GUIContent(layout.Disp), w);
+            }
+            chatLayoutCache[line] = layout;
+            return layout;
+        }
+
         private static void DrawInGameChat()
         {
             if (Plugin.ShowIngameChat != null && !Plugin.ShowIngameChat.Value) return;
@@ -1339,9 +1415,25 @@ namespace CompetitiveRounds
             if (visibleCount == 0) return;
 
             // Anchor bottom-left, grow upward (newest at the bottom, older above).
-            float w = 440, lineH = 20, padding = 6;
+            float w = 440, padding = 6, lineGap = 2;
             float x = 12;
-            float panelH = visibleCount * lineH + padding * 2;
+
+            // Measure every visible line first so the backdrop matches the
+            // true stacked height (wrapped lines are taller than one row).
+            // Scratch buffer reused across frames — OnGUI runs multiple times
+            // per rendered frame, so a fresh array here would be steady GC
+            // pressure in the in-match hot path.
+            if (_chatLayoutScratch.Length < entries.Length)
+                _chatLayoutScratch = new ChatLineLayout[entries.Length];
+            var layouts = _chatLayoutScratch;
+            float totalH = 0f;
+            for (int i = 0; i < entries.Length; i++)
+            {
+                if (alphas[i] <= 0.02f) continue;
+                layouts[i] = MeasureChatLine(entries[i].Line, w);
+                totalH += layouts[i].H + lineGap;
+            }
+            float panelH = totalH - lineGap + padding * 2;
             float yBottom = Screen.height - 90;   // above FPS/ping overlay, clear of HUD
             float yTop = yBottom - panelH;
 
@@ -1349,18 +1441,21 @@ namespace CompetitiveRounds
                 Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
                 new Color(0, 0, 0, 0.55f * maxAlpha), 0, 0);
 
-            // Render newest-at-bottom. entries[last] is newest.
-            int visIdx = 0;
+            // Render newest-at-bottom. entries[last] is newest. The y cursor
+            // walks upward by each line's own measured height, so every row —
+            // including the bottom one — gets its full rect (no clipped
+            // descenders).
+            float yCursor = yBottom - padding;
             for (int i = entries.Length - 1; i >= 0; i--)
             {
                 float a = alphas[i];
                 if (a <= 0.02f) continue;
                 var prev = GUI.contentColor;
                 GUI.contentColor = new Color(1f, 1f, 1f, a);
-                float lineY = yBottom - padding - (visIdx + 1) * lineH;
-                GUI.Label(new Rect(x, lineY, w, lineH), entries[i].Line, ingameChatStyle);
+                yCursor -= layouts[i].H;
+                GUI.Label(new Rect(x, yCursor, w, layouts[i].H), layouts[i].Disp, ingameChatStyle);
                 GUI.contentColor = prev;
-                visIdx++;
+                yCursor -= lineGap;
             }
         }
 

@@ -167,8 +167,13 @@ namespace CompetitiveRounds
         {
             try
             {
+                // NickName carries the styled nametag (per-char rich-text tags
+                // for rainbow/gradient SKUs). This IMGUI surface truncates to
+                // 16 chars and team-tints via GUI.contentColor, so markup here
+                // renders as literal broken tags AND eats the whole name
+                // budget — strip to the plain name.
                 var nick = p.data.view?.Owner?.NickName;
-                if (!string.IsNullOrEmpty(nick)) return nick;
+                if (!string.IsNullOrEmpty(nick)) return NametagStyler.Clean(nick);
             }
             catch { }
             return $"Player {p.PlayerID + 1}";
