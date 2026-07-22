@@ -54,6 +54,11 @@ GAMBLER_EMOJI = "🎲"
 # Marker stashed in the signup embed footer so the bot re-finds its own message
 # after a restart instead of posting duplicates.
 GAMBLER_SIGNUP_MARKER = "scr-gambler-signup-v1"
+# ── LFP role ping (July 21): the in-game "LFP Ping" button queues a row in
+# lfp_pings; poll_lfp_pings drains it into the queue-beacon channel with a
+# ping to this role. Resolved by NAME at runtime — a missing role degrades to
+# non-pinging plain text (gambler pattern); override via env on rename.
+LFP_ROLE_NAME = os.getenv("LFP_ROLE", "Ranked Looking For Player")
 # Bug reports auto-post here when players file via the F5 menu. ID gets a
 # safe default so an unset env var doesn't crash the bot — 0 disables.
 BUG_REPORTS_CHANNEL_ID = int(os.getenv("BUG_REPORTS_CHANNEL", "1501643180049960970"))
@@ -252,6 +257,7 @@ async def on_ready():
     if not poll_tournament_notices.is_running(): poll_tournament_notices.start()
     if not publish_tournament_board.is_running(): publish_tournament_board.start()
     if not poll_pending_dms.is_running(): poll_pending_dms.start()
+    if not poll_lfp_pings.is_running(): poll_lfp_pings.start()
     # Chat bridge: subscribe to the WS firehose so we can forward in-game
     # messages to the Discord channel. Discord -> in-game goes the other way
     # via on_message below. The poll_chat_catchup task above is a belt-and-
@@ -622,7 +628,7 @@ FAQ_ENTRIES = [
                    "• Queue matches are always ranked (queueing is consent).\n"
                    "• Ranked is a **best-of-3 series** — rating applies when the series **completes**, not per game.\n"
                    "• Interrupted series (crash/DC) **resume where they left off** — just rematch the same player, "
-                   "up to 7 days later.\n"
+                   "no matter how much later. Unfinished series never expire.\n"
                    "If a game is genuinely missing, file a bug report: F5 → Settings → Report a Bug (attach log)."),
     },
     {
@@ -639,7 +645,7 @@ FAQ_ENTRIES = [
                    "**Glicko-2** rating updates when the series completes (that's elo with an uncertainty value: "
                    "new/returning players swing harder, established ratings move less).\n"
                    "• Both players need the mod + ranked enabled; queue matches are always ranked.\n"
-                   "• Interrupted series resume on rematch, up to 7 days.\n"
+                   "• Interrupted series resume on rematch — they never expire, so leaving can't save your rating.\n"
                    "• Leaving mid-series counts as a DC on your leave %, which is visible on the leaderboard.\n"
                    "• Your rating drives the **rank roles on the Discord sidebar** (Beginner → Intermediate → "
                    "Advanced → Master → Grand Master) — ask me *what are the elo requirements for each rank* for "
@@ -674,8 +680,8 @@ FAQ_ENTRIES = [
                    "• **Find Custom Lobby** — you pick your team: grab 3 friends, everyone joins the lobby queue, "
                    "it locks as soon as 4 are in (no rating filter — playing with your friends is the point).\n"
                    "2v2 has its **own Glicko rating and leaderboard**, plus its own gold/XP (600 XP base per game, "
-                   "~900 on a win; 50g series win / 25g loss). Series are BO3 like 1v1; the crown renders on both "
-                   "members of the leading team.\n"
+                   "~900 on a win; 50g series win / 25g loss — both scaled up to ×3 by the opposing team's rank "
+                   "tier). Series are BO3 like 1v1; the crown renders on both members of the leading team.\n"
                    "Known issues: the big recording bugs were fixed in v1.31 — if a series looks unrecorded, "
                    "file a bug report (F5 → Settings → Report a Bug) so it can be chased down."),
     },
@@ -745,7 +751,10 @@ FAQ_ENTRIES = [
         "examples": ["how do i get more gold", "fastest way to earn gold"],
         "answer": ("Best gold sources:\n"
                    "• **Boost the Discord server** — 2000g/month, auto-granted (link your account).\n"
-                   "• **Play 2v2s** — 50g per series win (25g even on a loss) on top of match XP.\n"
+                   "• **Play 2v2s** — 50g per series win (25g even on a loss, both scaled by the opposing "
+                   "team's tier) on top of match XP.\n"
+                   "• **Play up in ranked** — gold and XP scale by your opponent's tier (up to ×3 vs a "
+                   "Grand Master), win or lose; series wins pay 10-30g and even series losses pay 5-15g.\n"
                    "• **Earn achievements** — 100g each, the Sid/Stan Slayer trophies pay 1000g.\n"
                    "• **Win tournaments** — trophy payouts.\n"
                    "• **Make and sell cosmetics** — artists earn a 30% royalty on every sale "
@@ -764,13 +773,15 @@ FAQ_ENTRIES = [
         "examples": ["how does the xp gold system work", "explain the economy"],
         "answer": ("**XP per game** (multipliers stack):\n"
                    "• Base **250 XP** · win **×1.5** · ranked **×1.5**\n"
-                   "• Beat a current **top-3 (podium)** player: **×3** · beat a top-5 player: **+150**\n"
+                   "• Ranked games also scale by your **opponent's rank tier**, win or lose: "
+                   "Beginner ×1 · Intermediate ×1.5 · Advanced ×2 · Master ×2.5 · Grand Master ×3\n"
                    "• 5-0 sweep: **+100**\n"
-                   "• 2v2: base **600** (~900 on a win) · 1v2: base **500**\n"
+                   "• 2v2: base **600** (~900 on a win), scaled by the opposing team's average tier · 1v2: base **500**\n"
                    "**Gold**:\n"
-                   "• Every **100 XP = 1 gold**, automatic.\n"
-                   "• Series bonuses: 1v1 BO3 winner **+10g** (+2 on a 2-0 sweep) · 2v2 **50g/25g** win/loss · "
-                   "1v2 **40g/20g**.\n"
+                   "• Every **100 XP = 1 gold**, automatic — so the tier multiplier boosts gold too.\n"
+                   "• Series bonuses: 1v1 BO3 winner **10-30g** by opponent tier, **doubled again** if they're a "
+                   "current top-3 player (+2 on a 2-0 sweep) · the **loser** now gets **5-15g** by opponent tier · "
+                   "2v2 **50g/25g** win/loss × the opposing team's tier · 1v2 **40g/20g**.\n"
                    "• Levels: **+100g** every 5 levels (to 50), **+500g** per 5 levels after (max 100).\n"
                    "• Achievements **100g** (Slayers **1000g**) · Boosters **2000g/month** · bets pay stake × odds."),
     },
@@ -910,8 +921,8 @@ FAQ_ENTRIES = [
         "require_question": False,
         "answer": ("• A mid-series leave counts as a **DC on the leaver's record** — leave % is visible on the "
                    "leaderboard. Occasional crashes won't tank it; rage-quits will.\n"
-                   "• The series isn't lost: **rematch the same player and it resumes** where it left off, up to "
-                   "7 days later.\n"
+                   "• The series isn't lost: **rematch the same player and it resumes** where it left off, no "
+                   "matter how much later — unfinished series never expire.\n"
                    "• If a series never finishes, any bets on it auto-refund (~1 hour).\n"
                    "• Game crashed mid-match? Relaunch and rejoin your opponent — the series picks back up."),
     },
@@ -4179,7 +4190,7 @@ async def poll_tournaments():
                         f"short breather between your matches (skippable when both players press "
                         f"Play Now). Plan to be around for **a couple of hours** — double-elim "
                         f"BO3s take a while. If ROUNDS isn't running when a match of yours starts "
-                        f"(5-10 min grace), you forfeit that match.")
+                        f"(10 min grace), you forfeit that match.")
                 sv = s.get("mod_version")
                 if latest_ver and sv and sv != latest_ver:
                     body += (f"\n⚠️ **Your mod is v{sv}, latest is v{latest_ver}.** "
@@ -4721,6 +4732,126 @@ async def poll_pending_dms():
         await _ack_pending_dms(dead, undeliverable=True)
     except Exception as ex:
         print(f"poll_pending_dms error: {ex}")
+
+
+# ── LFP role pings (lfp_pings, July 21) ─────────────────────────────────────
+# The in-game "LFP Ping" button POSTs /lfp-ping; this loop posts the queued
+# rows to the queue-beacon channel with a ping to the LFP role. Durable ack
+# pattern (learning #105); the server serializes the pk as "ping_id" and a
+# precomputed "expires_unix" — this reads the exact same keys (learning
+# #152). Own fully-guarded loop (learning #129): one bad row / one Discord
+# hiccup can never kill the loop or another output.
+_lfp_seen_ids: set = set()
+
+
+async def _ack_lfp_pings(ping_ids, undeliverable=False):
+    if not ping_ids or http_session is None or not API_SECRET_KEY:
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/lfp-pings/ack",
+            json={"ping_ids": list(ping_ids), "undeliverable": bool(undeliverable)},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                print(f"[LFP] ack failed: {resp.status} {(await resp.text())[:120]}")
+    except Exception as ex:
+        print(f"[LFP] ack error: {ex}")
+
+
+@tasks.loop(seconds=30)
+async def poll_lfp_pings():
+    """Own fully-guarded loop (learning #129)."""
+    try:
+        if not QUEUE_BEACON_CHANNEL_ID:
+            return
+        data = await api_get("/internal/lfp-pings")
+        if not data or not data.get("pings"):
+            return
+        posted, dead = [], []
+        channel = None
+        for ping in data["pings"]:
+            if not isinstance(ping, dict):
+                continue
+            ping_id = ping.get("ping_id")
+            if ping_id is None:
+                continue
+            if ping_id in _lfp_seen_ids:
+                # Handled this process-lifetime — an earlier ack must have
+                # failed; re-ack, don't re-post.
+                posted.append(ping_id)
+                continue
+            discord_id = ping.get("discord_id")
+            if not discord_id:
+                # Unlinked player (the POST gate normally blocks this) —
+                # permanently undeliverable so the LIMIT-20 window can't starve.
+                _lfp_seen_ids.add(ping_id)
+                dead.append(ping_id)
+                continue
+            if channel is None:
+                channel = bot.get_channel(QUEUE_BEACON_CHANNEL_ID)
+                if not channel:
+                    try:
+                        channel = await bot.fetch_channel(QUEUE_BEACON_CHANNEL_ID)
+                    except Exception as ex:
+                        # Channel unavailable — leave everything queued; the
+                        # server's expires_at filter self-heals stale rows.
+                        print(f"[LFP] channel {QUEUE_BEACON_CHANNEL_ID} unavailable: {ex}")
+                        break
+            role = discord.utils.get(channel.guild.roles, name=LFP_ROLE_NAME) if channel.guild else None
+            mention = role.mention if role else f"@{LFP_ROLE_NAME}"
+            display_name = ping.get("display_name") or ping.get("steam_id") or "Player"
+            message = (ping.get("message") or "").strip()
+            expires_unix = int(ping.get("expires_unix") or 0)
+            content = (f"{mention} \N{LEFT-POINTING MAGNIFYING GLASS} "
+                       f"**{discord.utils.escape_markdown(str(display_name))}** "
+                       f"(<@{discord_id}>) is looking for a ranked match!")
+            if message:
+                content += f"\n> {discord.utils.escape_markdown(message)}"
+            content += f"\nExpires <t:{expires_unix}:R>"
+            try:
+                # allowed_mentions is the real anti-injection gate: ONLY the
+                # LFP role pings; the requester's <@id> renders clickable
+                # without pinging; injected mention text in the message is
+                # inert. suppress_embeds keeps any link-shaped text that
+                # survives the server-side sanitizer from unfurling a rich
+                # embed under the trusted bot account.
+                await channel.send(
+                    content[:2000],
+                    suppress_embeds=True,
+                    allowed_mentions=discord.AllowedMentions(
+                        everyone=False, roles=[role] if role else False, users=False),
+                )
+                _lfp_seen_ids.add(ping_id)
+                posted.append(ping_id)
+                print(f"[LFP] posted ping {ping_id} for {display_name}")
+            except discord.Forbidden:
+                # No send permission — log and leave queued (retried next
+                # tick; expires_at filter self-heals).
+                print(f"[LFP] Forbidden posting ping {ping_id} to {QUEUE_BEACON_CHANNEL_ID} — leaving queued")
+            except Exception as ex:
+                # Transient (rate limit / gateway blip) — no ack, retried.
+                print(f"[LFP] post failed for ping {ping_id}: {ex}")
+            await asyncio.sleep(0.2)
+        if len(_lfp_seen_ids) > 2000:
+            # Overflow prune must RETAIN this tick's ids: an unconditional
+            # clear() drops posted-but-unacked ids, so if the ack below then
+            # fails the server re-serves them next tick and they'd re-post as
+            # duplicate role pings. Every re-servable id is in this tick's
+            # posted/dead lists (a prior-tick failed ack is re-served and
+            # re-appended to posted above), so intersecting bounds the set
+            # without evicting anything at risk.
+            _lfp_seen_ids.intersection_update(set(posted) | set(dead))
+        await _ack_lfp_pings(posted, undeliverable=False)
+        await _ack_lfp_pings(dead, undeliverable=True)
+    except Exception as ex:
+        print(f"poll_lfp_pings error: {ex}")
+
+
+@poll_lfp_pings.before_loop
+async def before_lfp_pings():
+    await bot.wait_until_ready()
 
 
 @poll_pending_dms.before_loop

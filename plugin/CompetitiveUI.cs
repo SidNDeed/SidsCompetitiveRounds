@@ -30,7 +30,7 @@ namespace CompetitiveRounds
 
         public static void ToggleOverlay() => NativeUI.Toggle();
 
-        public static void ShowNotification(string text, Color color, float duration = 3f)
+        public static void ShowNotification(string text, Color color, float duration = 5f)
         {
             if (!Plugin.ShowNotifications.Value) return;
             notifText = text;
@@ -38,7 +38,7 @@ namespace CompetitiveRounds
             notifTimer = duration;
         }
 
-        public static void QueueNotification(string text, Color color, float duration = 3f)
+        public static void QueueNotification(string text, Color color, float duration = 5f)
         {
             if (!Plugin.ShowNotifications.Value) return;
             notifQueue.Add(new QueuedNotif { text = text, color = color, dur = duration });
@@ -127,9 +127,11 @@ namespace CompetitiveRounds
             // DrawMatchFoundStuckOverlay();  // intentionally not called — kept for reference
             DrawCardHoverTooltip();
             DrawScoreHoverGraph();
+            DrawFpsHoverGraph();
             DrawCompareSearch();
             DrawMapColorToast();
             DrawCustomBetPrompt();
+            DrawLfpPrompt();
             DrawArtistInput();
             DrawArtistPicker();
             DrawPlayerSearch();
@@ -146,7 +148,7 @@ namespace CompetitiveRounds
             // uGUI list too — added here so both paths cover it.
             bool anyModal = bugModalOpen || logViewerOpen || bugAdminOpen || NativeUI.CustomBetPromptOpen
                           || artistPromptOpen || artistPickerOpen || playerSearchOpen || cosReviewOpen
-                          || adminPromptOpen;
+                          || adminPromptOpen || NativeUI.LfpPromptOpen;
             NativeUI.SetClickBlocker(anyModal);
             ClickHandler.ModalBlockInput = anyModal || !Plugin.DataConsentAsked;
             // Consent modal drawn LAST so it paints on top of everything.
@@ -372,6 +374,64 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        // ── LFP Discord ping prompt (July 21 item 8) ──────────────────────
+        // Message box + expiry picker. The LfpPromptOpen flag is in BOTH the
+        // anyModal set (uGUI + ClickHandler blocking, learning #141) and the
+        // DrawChatInput guard (typing 't' must not open chat).
+        private static GUIStyle lfpFieldStyle, lfpTitleStyle;
+        private const string LFP_MSG_CTRL = "LfpMsgField";
+        private static void DrawLfpPrompt()
+        {
+            if (!NativeUI.LfpPromptOpen) return;
+            try
+            {
+                var ev = Event.current;
+                if (ev != null && ev.type == EventType.KeyDown)
+                {
+                    if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter)
+                    { ev.Use(); NativeUI.SubmitLfpPing(); return; }
+                    if (ev.keyCode == KeyCode.Escape)
+                    { ev.Use(); NativeUI.CancelLfpPing(); return; }
+                }
+                if (lfpFieldStyle == null)
+                    lfpFieldStyle = new GUIStyle(GUI.skin.textField) { fontSize = 15, alignment = TextAnchor.MiddleLeft };
+                if (lfpTitleStyle == null)
+                    lfpTitleStyle = new GUIStyle(GUI.skin.label) { fontSize = 14, alignment = TextAnchor.MiddleCenter, richText = true, fontStyle = FontStyle.Bold, clipping = TextClipping.Overflow };
+                float w = 520f, h = 208f;
+                float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+                GUI.color = new Color(0f, 0f, 0f, 0.55f);
+                GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
+                GUI.color = new Color(0.10f, 0.11f, 0.14f, 0.98f);
+                GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
+                GUI.color = Color.white;
+                GUI.Label(new Rect(x, y + 6f, w, 22f),
+                    "<color=#FFD94D>Ranked Looking For Player</color> - Discord ping", lfpTitleStyle);
+                GUI.Label(new Rect(x, y + 28f, w, 18f),
+                    "<color=#8899AA>Pings the Ranked Looking For Player role (max 1 per hour). Optional message:</color>", lfpTitleStyle);
+                GUI.SetNextControlName(LFP_MSG_CTRL);
+                string next = GUI.TextField(new Rect(x + 20f, y + 52f, w - 40f, 30f), NativeUI.LfpMessageText ?? "", 200, lfpFieldStyle);
+                NativeUI.LfpMessageText = next;
+                GUI.FocusControl(LFP_MSG_CTRL);
+                GUI.Label(new Rect(x, y + 90f, w, 18f),
+                    "<color=#8899AA>How long are you searching? (shown to players as an expiry)</color>", lfpTitleStyle);
+                float bw = 70f, bx = x + (w - (bw * 4 + 24f)) / 2f;
+                for (int i = 0; i < 4; i++)
+                {
+                    bool sel = NativeUI.LfpExpiryIdx == i;
+                    GUI.color = sel ? new Color(0.35f, 0.55f, 0.85f, 1f) : new Color(0.22f, 0.24f, 0.30f, 1f);
+                    GUI.DrawTexture(new Rect(bx + i * (bw + 8f), y + 112f, bw, 26f), Texture2D.whiteTexture);
+                    GUI.color = Color.white;
+                    if (GUI.Button(new Rect(bx + i * (bw + 8f), y + 112f, bw, 26f), NativeUI.LfpExpiryLabels[i], lfpTitleStyle))
+                        NativeUI.LfpExpiryIdx = i;
+                }
+                if (GUI.Button(new Rect(x + 60f, y + 156f, 180f, 32f), "Send ping"))
+                    NativeUI.SubmitLfpPing();
+                if (GUI.Button(new Rect(x + w - 240f, y + 156f, 180f, 32f), "Cancel"))
+                    NativeUI.CancelLfpPing();
+            }
+            catch { }
+        }
+
         // IMGUI search field for the Compare tab's player picker. The native UI does
         // all text entry via IMGUI (no TMP InputField reflection), so this field is
         // drawn EXACTLY over the native placeholder label (NativeUI reports its real
@@ -453,6 +513,7 @@ namespace CompetitiveRounds
         {
             _cardHoverRegions.Clear();
             _scoreGraphRegions.Clear();
+            _fpsGraphRegions.Clear();
         }
 
         // Bug #61: recompute a region's screen rect from its source element every
@@ -645,6 +706,130 @@ namespace CompetitiveRounds
             }
             GUI.Label(new Rect(gx + 8, gy + h - 24f, w - 16, 22f),
                 "<color=#777>rounds on the left - each step is one point scored</color>", _scoreGraphLbl);
+        }
+
+        // ── FPS / Ping hover graphs (July 21 item 2 · July 22 item 3) ────────
+        // FillRow registers the FPS text and the Ping text as SEPARATE regions —
+        // hovering FPS pops only the FPS chart, hovering Ping pops only the ping
+        // chart, each using the full popup so both get plenty of room. `isPing`
+        // just picks the axis units/gridlines. Colors match the row tags
+        // (blue #99B3E6 = you, red-ish #E69988 = opponent). You-series samples
+        // at 5s (fps) / 3s (ping); opponent at 3s — a shared time axis aligns
+        // them so a genuine network hiccup shows on both lines together.
+        public struct FpsGraphRegion
+        {
+            public Rect screenRect;
+            public string mySeries;
+            public string oppSeries;
+            public bool isPing;
+            public RectTransform sourceRT;
+            public Camera sourceCam;
+            public float widthFrac;
+            public RectTransform clipRT;
+            public object sourceTxt;
+        }
+        private static readonly List<FpsGraphRegion> _fpsGraphRegions = new List<FpsGraphRegion>(60);
+        public static void RegisterFpsGraphRegion(Rect screenRect, string mySeries, string oppSeries, bool isPing,
+                                                  RectTransform sourceRT, Camera sourceCam, float widthFrac,
+                                                  RectTransform clipRT, object sourceTxt = null)
+        {
+            if (string.IsNullOrEmpty(mySeries) && string.IsNullOrEmpty(oppSeries)) return;
+            _fpsGraphRegions.Add(new FpsGraphRegion {
+                screenRect = screenRect, mySeries = mySeries ?? "", oppSeries = oppSeries ?? "", isPing = isPing,
+                sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
+                sourceTxt = sourceTxt,
+            });
+        }
+
+        private static int[] ParseFpsSeries(string csv)
+        {
+            if (string.IsNullOrEmpty(csv)) return null;
+            var parts = csv.Split(',');
+            var vals = new List<int>(parts.Length);
+            foreach (var s in parts) { int v; if (int.TryParse(s, out v) && v > 0) vals.Add(v); }
+            return vals.Count >= 2 ? vals.ToArray() : null;
+        }
+
+        private static void DrawFpsHoverGraph()
+        {
+            if (!NativeUI.IsOpen || NativeUI.CurrentTab != 0) return;
+            if (_fpsGraphRegions.Count == 0) return;
+            Vector2 mp = Input.mousePosition;
+            FpsGraphRegion? hit = null;
+            for (int i = _fpsGraphRegions.Count - 1; i >= 0; i--)
+            {
+                var reg = _fpsGraphRegions[i];
+                float liveFrac = LiveWidthFrac(reg.sourceTxt, reg.sourceRT, reg.widthFrac);
+                Rect rr = LiveRegionRect(reg.sourceRT, reg.sourceCam, liveFrac, reg.clipRT, reg.screenRect);
+                if (rr.Contains(mp)) { hit = reg; break; }
+            }
+            if (hit == null) return;
+
+            bool isPing = hit.Value.isPing;
+            // "you" series cadence: fps buckets are 5s, ping/opp samples are 3s.
+            float myStep = isPing ? 3f : 5f;
+            var mine = ParseFpsSeries(hit.Value.mySeries);
+            var opp = ParseFpsSeries(hit.Value.oppSeries);
+            if (mine == null && opp == null) return;
+
+            if (_scoreGraphLbl == null)
+                _scoreGraphLbl = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 12, richText = true, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft,
+                    clipping = TextClipping.Overflow, wordWrap = false,
+                };
+
+            // One big chart per hover (July 22): the whole popup is the plot, so
+            // a 600-vs-30 FPS gap or a big latency spike still reads clearly.
+            float w = 360f, h = 230f, pad = 44f;
+            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
+            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
+            string title = isPing ? "Latency (ms)" : "FPS";
+            GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24),
+                $"<color=#CCCCCC>{title} over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>",
+                _scoreGraphLbl);
+
+            float maxT = 1f;
+            if (mine != null) maxT = Mathf.Max(maxT, (mine.Length - 1) * myStep);
+            if (opp != null) maxT = Mathf.Max(maxT, (opp.Length - 1) * 3f);
+
+            // Auto-scaled Y so a huge FPS ceiling or a latency spike both fit,
+            // with a small headroom margin so the peak isn't glued to the top.
+            int maxV = isPing ? 60 : 90;
+            if (mine != null) foreach (var v in mine) if (v > maxV) maxV = v;
+            if (opp != null) foreach (var v in opp) if (v > maxV) maxV = v;
+            maxV = Mathf.CeilToInt(maxV * 1.08f);
+
+            Rect plot = new Rect(gx + pad, gy + 34f, w - pad - 12f, h - 34f - 14f);
+
+            // Adaptive gridlines: a "nice" step that yields ~4-6 lines across the
+            // current range — so a 30-FPS chart and a 600-FPS chart both read.
+            int[] steps = { 10, 20, 25, 30, 50, 60, 100, 120, 150, 200, 250, 300, 500, 600, 1000 };
+            int gstep = steps[steps.Length - 1];
+            foreach (int s in steps) { if (maxV / s <= 6) { gstep = s; break; } }
+            for (int gl = gstep; gl <= maxV; gl += gstep)
+            {
+                float y = plot.yMax - plot.height * gl / maxV;
+                GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), new Color(1f, 1f, 1f, 0.08f), 1f);
+                GUI.Label(new Rect(gx + 2, y - 11f, pad - 6f, 22f), $"<color=#777>{gl}</color>", _scoreGraphLbl);
+            }
+
+            System.Action<int[], float, Color> drawSeries = (vals, step, col) =>
+            {
+                if (vals == null) return;
+                for (int i = 1; i < vals.Length; i++)
+                {
+                    float x0 = plot.xMin + plot.width * ((i - 1) * step / maxT);
+                    float x1 = plot.xMin + plot.width * (i * step / maxT);
+                    float y0 = plot.yMax - plot.height * Mathf.Min(vals[i - 1], maxV) / maxV;
+                    float y1 = plot.yMax - plot.height * Mathf.Min(vals[i], maxV) / maxV;
+                    GuiLine(new Vector2(x0, y0), new Vector2(x1, y1), col, 2f);
+                }
+            };
+            drawSeries(opp, 3f, new Color(0.90f, 0.60f, 0.53f, 0.95f));
+            drawSeries(mine, myStep, new Color(0.60f, 0.70f, 0.90f, 0.95f));
         }
         public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent)
             => RegisterCardHoverRegion(screenRect, fullCardLine, isOpponent, null, null, null, null, -1f, null);
@@ -1486,6 +1671,7 @@ namespace CompetitiveRounds
             "sustained_power", "deep_end", "clutch", "collector",
             "grounded", "instinct", "rising_star", "on_fire", "unstoppable",
             "immortal", "casual_century", "casual_conqueror", "touch_grass",
+            "twins",   // July 21: was missing — admin grant couldn't select it
         };
 
         public static void OpenAdminPrompt(string mode)
@@ -2512,6 +2698,9 @@ namespace CompetitiveRounds
             // "the", "tree", etc. (lopi: typing "t" in Compare search opened chat).
             if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused
                 || NativeUI.CustomBetPromptOpen
+                // July 21 item 8: the LFP message box takes typed text — 't'
+                // there must not open chat.
+                || NativeUI.LfpPromptOpen
                 // July 12 round 2 item 4: the artist input / roster picker / player
                 // search modals all take typed text — 't' there must not open chat.
                 || ArtistPromptOpen) return;
@@ -2779,8 +2968,11 @@ namespace CompetitiveRounds
                 notifText = n.text; notifColor = n.color; notifTimer = n.dur;
             }
             if (notifTimer <= 0f) return;
-            notifTimer -= Time.deltaTime;
-            float alpha = Mathf.Clamp01(notifTimer);
+            // OnGUI runs 2+ times per frame (Layout + Repaint + one per input event);
+            // only tick the timer on Repaint or toasts live at half nominal duration or less.
+            if (Event.current.type == EventType.Repaint)
+                notifTimer -= Time.unscaledDeltaTime;
+            float alpha = Mathf.Clamp01(notifTimer / 0.75f);
 
             if (notifStyle == null)
             {
@@ -2788,6 +2980,10 @@ namespace CompetitiveRounds
                 notifStyle.fontSize = 16;
                 notifStyle.fontStyle = FontStyle.Bold;
                 notifStyle.alignment = TextAnchor.MiddleCenter;
+                notifStyle.wordWrap = true;
+                // ROUNDS' IMGUI skin has taller font metrics than nominal point size;
+                // Clip halves the top/bottom lines of any wrapped message.
+                notifStyle.clipping = TextClipping.Overflow;
             }
 
             var color = new Color(notifColor.r, notifColor.g, notifColor.b, alpha);
@@ -2796,11 +2992,13 @@ namespace CompetitiveRounds
 
             float width = 500;
             float x = (Screen.width - width) / 2f;
-            float y = Screen.height - 80;
+            // Size to rendered content (multi-line grows upward from the same baseline).
+            float h = Mathf.Clamp(notifStyle.CalcHeight(new GUIContent(notifText), width), 24f, 120f);
+            float y = Screen.height - 80 - (h - 24f);
 
             var bgTex = Texture2D.whiteTexture;
-            GUI.DrawTexture(new Rect(x, y - 2, width, 28), bgTex, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, alpha * 0.5f), 0, 0);
-            GUI.Label(new Rect(x, y, width, 24), notifText, notifStyle);
+            GUI.DrawTexture(new Rect(x, y - 6, width, h + 12), bgTex, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, alpha * 0.5f), 0, 0);
+            GUI.Label(new Rect(x, y, width, h), notifText, notifStyle);
             GUI.contentColor = origColor;
         }
 

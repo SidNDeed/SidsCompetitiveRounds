@@ -18,6 +18,11 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, PostProcessProfile> _profileCache =
             new Dictionary<string, PostProcessProfile>(StringComparer.OrdinalIgnoreCase);
 
+        // Clones deep-copy each art's ChromaticAberration settings object, so the
+        // CA toggle (ChromaticAberrationSetting.Apply) must sweep them too — a
+        // clone built before a toggle flip would otherwise keep the old state.
+        internal static IEnumerable<PostProcessProfile> CachedClones => _profileCache.Values;
+
         // SKU → preset. Each preset has:
         //   BaseArt       — vanilla ROUNDS art applied first for particle backdrop + base profile
         //   MapBlockColor — PRIMARY wall color. Tints half the OutOfBounds wall particle systems

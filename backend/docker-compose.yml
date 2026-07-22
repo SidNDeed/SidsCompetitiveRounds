@@ -54,6 +54,14 @@ services:
       GLICKO2_DEFAULT_RATING: ${GLICKO2_DEFAULT_RATING}
       GLICKO2_DEFAULT_RD: ${GLICKO2_DEFAULT_RD}
       GLICKO2_DEFAULT_VOLATILITY: ${GLICKO2_DEFAULT_VOLATILITY}
+      # Steam Web API key for /auth/steam ticket verification (July 21).
+      # Empty default so the container starts with .env unchanged — unset =
+      # pipeline no-op mode (tokens issued unverified, nothing enforced).
+      STEAM_WEB_API_KEY: ${STEAM_WEB_API_KEY:-}
+      # Master soak switch: unset/empty = session enforcement is LOG-ONLY even
+      # with the key set. Set STEAM_AUTH_ENFORCE=1 in .env once the logs show
+      # ticket verification succeeding broadly, then restart the api container.
+      STEAM_AUTH_ENFORCE: ${STEAM_AUTH_ENFORCE:-}
     volumes:
       # Bind-mount bug-report logs to the host so they survive container
       # rebuilds. Without this, every `docker compose up -d --build api`

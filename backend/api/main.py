@@ -12,15 +12,17 @@ import math
 import os
 import random
 import re as _re
+import secrets
 import string
 import time
+import urllib.request as _urlreq
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import uuid
 from uuid import UUID
 
 import json as _json
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -91,10 +93,12 @@ GLICKO2_PERIOD_HOURS = int(os.getenv("GLICKO2_PERIOD_HOURS", "168"))
 # outside the window), so the reconnect spawned a parallel series and the old
 # one lingered 'active' with its bets stuck until the stale-prune refunded them.
 SERIES_REUSE_WINDOW_MIN = int(os.getenv("SERIES_REUSE_WINDOW_MIN", "25"))
-# Cross-session resume window: an undecided mid-BO3 (1-0 / 0-1 / 1-1) stays
-# the pair's "current" series for this many days, so a series interrupted one
-# night RESUMES at its real score the next time the pair plays (bug #43).
-SERIES_RESUME_WINDOW_DAYS = int(os.getenv("SERIES_RESUME_WINDOW_DAYS", "7"))
+# Cross-session resume (July 20 item 4): an undecided mid-BO3 (1-0 / 0-1 /
+# 1-1) stays the pair's "current" series FOREVER — no expiry. A time-capped
+# window (7 days until July 2026) let a losing player abandon a series and
+# bank the elo by simply waiting it out; unfinished series now reattach on
+# the pair's next game no matter how much later (migration 1NN resurrected
+# the previously-expired rows).
 
 
 # ── Rank tiers (v1.29) ─────────────────────────────────────────
@@ -146,6 +150,31 @@ def _rank_name_for(rating: float | None) -> str:
         if r >= threshold:
             return name
     return "Beginner"
+
+
+# ── Opponent-tier reward multipliers (July 20 item 6) ──────────
+# RANKED ONLY: gold AND XP scale by the OPPONENT's base tier, win or lose —
+# playing up should always feel rewarded. Base-tier thresholds only
+# (sub-tiers share the base multiplier). Replaces the old "Top 3 x3" XP
+# multiplier + "Top 5 +150" flat bonus; the top-3 signal lives on as a
+# series-reward doubling (see the series-completion block in submit_match).
+TIER_MULTIPLIERS = [
+    (2330, 3.0, "Grand Master"),
+    (2030, 2.5, "Master"),
+    (1780, 2.0, "Advanced"),
+    (1580, 1.5, "Intermediate"),
+    (0,    1.0, "Beginner"),
+]
+
+
+def _tier_mult_for(rating: float | None) -> tuple[float, str]:
+    """(multiplier, base-tier label) for an opponent's rating. Unknown/None
+    rating → 1500 → Beginner x1.0."""
+    r = rating if rating is not None else 1500.0
+    for threshold, mult, label in TIER_MULTIPLIERS:
+        if r >= threshold:
+            return mult, label
+    return 1.0, "Beginner"
 
 
 def _rank_fallback_color(name: str) -> str:
@@ -332,6 +361,18 @@ def _presence_online_ids() -> list[str]:
     return list(_presence_seen.keys())
 
 
+def _presence_is_online(steam_id: str | None) -> bool:
+    """True iff this steam_id's MOD CLIENT is running right now (presence ping
+    within the TTL). The only uncontaminated liveness signal: players.last_seen
+    is stamped by the OPPONENT's report and mod_seen_at is a set-once stamp, so
+    neither can distinguish 'registered once' from 'mod loaded in this room'
+    (bug #78). Process-memory — single-worker uvicorn is load-bearing (#125)."""
+    if not steam_id:
+        return False
+    at = _presence_seen.get(steam_id)
+    return at is not None and (time.monotonic() - at) <= PRESENCE_TTL_SEC
+
+
 # Throttle for persisting presence to players.last_seen: the ping arrives every
 # ~60s per client, but a DB write every 5 min per player is plenty for the
 # Home tab's "recently online" list. steam_id -> monotonic seconds of last stamp.
@@ -383,12 +424,11 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
       - has a match that ENDED within the window (an in-flight BO3 stays
         current however long ago it was created — fixes DC+reconnect spawning
         a parallel series while the 1-1 original sat in limbo, bug #33/#35), or
-      - is an UNDECIDED mid-BO3 (>=1 match played, nobody at 2 wins) whose
-        last activity is within SERIES_RESUME_WINDOW_DAYS — cross-SESSION
-        resumption (bug #43: Stan/G1ow_Hunter's 0-1 from 6/26 should resume
-        on 6/29, not spawn a parallel fresh series). Pairs with the prune
-        change that keeps stalled mid-BO3 series 'active' (bets refunded at
-        60 min, row abandoned only after the resume window lapses), or
+      - is an UNDECIDED mid-BO3 (>=1 match played, nobody at 2 wins) —
+        cross-SESSION resumption with NO time limit (July 20 item 4; was 7
+        days, which let leavers wait out the window and bank the elo). Pairs
+        with the prune change that keeps stalled mid-BO3 series 'active'
+        forever (bets refunded at 60 min, row never expiry-abandoned), or
       - is a tournament series (created at lock/activation, potentially days
         before the players actually meet — must always be reused, never
         shadowed by a fresh auto-created row).
@@ -396,15 +436,15 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
     Newest-first so a recent normal series still wins over an old tournament
     row when both exist (learning #52: newest = current match context)."""
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=SERIES_REUSE_WINDOW_MIN)
-    resume_cutoff = datetime.now(timezone.utc) - timedelta(days=SERIES_RESUME_WINDOW_DAYS)
     recent_match_exists = (
         select(Match.id)
         .where(Match.series_id == RankedSeries.id, Match.ended_at >= cutoff)
         .exists()
     )
-    resumable_match_exists = (
+    # Un-windowed: any played match makes an undecided series resumable forever.
+    has_any_match = (
         select(Match.id)
-        .where(Match.series_id == RankedSeries.id, Match.ended_at >= resume_cutoff)
+        .where(Match.series_id == RankedSeries.id)
         .exists()
     )
     q = (
@@ -419,7 +459,7 @@ async def _find_current_active_series(db, pid_a, pid_b, room_id=None):
                 and_(
                     RankedSeries.p1_series_wins < 2,
                     RankedSeries.p2_series_wins < 2,
-                    resumable_match_exists,
+                    has_any_match,
                 ),
             ),
         )
@@ -645,6 +685,14 @@ app.include_router(tournaments_router)
 MIN_MOD_VERSION = "1.28.2"  # Enforced floor: <1.28.2 clients get 426 → auto-update on relaunch.
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
+# First client build with the fixed hit/block counting semantics (July 21:
+# direct hits counted at the bullet-impact funnel, block spec reworked).
+# Migration 135 zeroed every lifetime hit/block counter; only reporters at
+# >= this version feed the lifetime totals — old clients keep reporting
+# old-semantics numbers for weeks after ship and would repollute the reset
+# counters. They keep working otherwise (per-match columns still store).
+STATS_CLEAN_MIN_VERSION = "1.34.0"
+
 # Per-request mod version captured from the X-Mod-Version header by the
 # version-gate middleware. Read by _mark_mod_seen so we can stamp
 # players.mod_version without threading the request object through every
@@ -703,6 +751,7 @@ _RL_SENSITIVE_PREFIXES = (
     "/api/v1/report-disconnect", "/api/v1/bets", "/api/v1/team-bets",
     "/api/v1/shop/purchase", "/api/v1/queue/join", "/api/v1/team/queue/join",
     "/api/v1/players/block", "/api/v1/players/unblock", "/api/v1/mod/toggle-ranked",
+    "/api/v1/auth/steam",  # token minting — throttle floods (July 21)
 )
 _RL_MAX_BODY = 16 * 1024 * 1024   # 16 MB hard cap (log clamp is 12 MB)
 _RL_LAST_PRUNE = [0.0]
@@ -994,20 +1043,22 @@ def total_level_rewards_through(level: int) -> int:
     return sum(level_reward_for(n) for n in range(1, level + 1))
 
 
-async def _maybe_grant_level_rewards(db, player, old_xp: int, match_or_series_ref: str):
+async def _maybe_grant_level_rewards(db, player, old_xp: int, match_or_series_ref: str) -> int:
     """If player crossed any 5x level boundary going from old_xp to current
     player.total_xp, grant the level-reward gold + audit row. Idempotent
     because reference_id is unique per match/series; re-reports of the
-    same match would re-grant — guard at the caller if needed."""
+    same match would re-grant — guard at the caller if needed.
+    Returns the gold granted (0 if none) so callers can show it in the
+    reporter's gold breakdown (July 20 item 6 — ding gold was invisible)."""
     if not player or player.total_xp is None:
-        return
+        return 0
     new_level, _, _ = level_from_xp(player.total_xp)
     old_level, _, _ = level_from_xp(old_xp)
     if new_level <= old_level:
-        return
+        return 0
     total_reward = sum(level_reward_for(lvl) for lvl in range(old_level + 1, new_level + 1))
     if total_reward <= 0:
-        return
+        return 0
     player.gold_earned = (player.gold_earned or 0) + total_reward
     db.add(GoldTransaction(
         player_id=player.id,
@@ -1015,6 +1066,7 @@ async def _maybe_grant_level_rewards(db, player, old_xp: int, match_or_series_re
         reason="level_reward",
         reference_id=match_or_series_ref,
     ))
+    return total_reward
 
 
 async def calculate_match_xp(
@@ -1024,6 +1076,7 @@ async def calculate_match_xp(
     loser_rounds: int,
     opponent_id,
     db: AsyncSession,
+    opponent_rating: float | None = None,
 ) -> tuple[int, list[str]]:
     """
     Calculate XP earned for a match. Returns (xp_amount, list_of_bonus_descriptions).
@@ -1032,8 +1085,11 @@ async def calculate_match_xp(
     Win: 1.5x multiplier
     Sweep (5-0): +100 flat bonus
     Ranked: 1.5x multiplier (bumped from 1.2x — ranked should feel meaningfully more rewarding)
-    Beat a podium (leaderboard top-3) player: 3x multiplier (v1.32)
-    Beat top-5 player (non-podium): +150 flat bonus
+    Opponent tier (RANKED only, win OR lose): x1.0 Beginner → x3.0 Grand
+    Master (July 20 item 6 — replaces the v1.32 "Top 3 x3" / "Top 5 +150"
+    win-only bonuses; the top-3 signal now doubles the SERIES reward instead).
+    Per-match gold is derived from XP (100xp = 1g crossings), so the tier
+    multiplier flows into gold automatically — "both gold and XP" per spec.
     """
     base_xp = 250
     bonuses = []
@@ -1046,22 +1102,12 @@ async def calculate_match_xp(
     if is_ranked:
         multiplier *= 1.5
         bonuses.append("Ranked x1.5")
-
-    # Top-3 podium multiplier (v1.32): beating a current podium holder — the
-    # VISIBLE leaderboard's top 3 (>=5 series, deleted_at IS NULL), not the
-    # raw glicko top-N — triples the match XP. Cached 60s in _podium_map.
-    # Swallow-style like the top-5 check below: a podium query failure must
-    # never break match submission.
-    podium_hit = False
-    if won and opponent_id:
-        try:
-            pmap = await _podium_map(db)
-            if str(opponent_id) in pmap:
-                multiplier *= 3.0
-                bonuses.append("Top 3 x3")
-                podium_hit = True
-        except Exception:
-            pass
+        # Opponent-tier multiplier — applies win AND loss (playing up is
+        # rewarded regardless of result).
+        tier_mult, tier_label = _tier_mult_for(opponent_rating)
+        if tier_mult > 1.0:
+            multiplier *= tier_mult
+            bonuses.append(f"{tier_label} opp x{tier_mult:g}")
 
     xp = int(base_xp * multiplier)
 
@@ -1069,22 +1115,6 @@ async def calculate_match_xp(
     if won and loser_rounds == 0:
         xp += 100
         bonuses.append("Sweep +100")
-
-    # Top-5 bonus (check if opponent is in top 5 by rating). Skipped when the
-    # podium x3 already fired — podium is a subset of top-5, don't double-pay.
-    if won and opponent_id and not podium_hit:
-        try:
-            top5_query = text("""
-                SELECT player_id FROM glicko_ratings
-                WHERE rating_deviation < 200
-                ORDER BY rating DESC LIMIT 5
-            """)
-            top5 = (await db.execute(top5_query)).scalars().all()
-            if opponent_id in top5:
-                xp += 150
-                bonuses.append("Top 5 opponent +150")
-        except Exception:
-            pass
 
     return xp, bonuses
 
@@ -1101,7 +1131,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.33.0"
+LATEST_MOD_VERSION = "1.34.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1232,12 +1262,41 @@ async def _reverse_match_gold_xp(db: AsyncSession, m: Match) -> None:
         if player is not None:
             player.gold_earned = max(0, (player.gold_earned or 0) - tx.amount)
     # Roll back XP. p1_xp_gained / p2_xp_gained were stored at insert time.
+    # July 20: also reverse level-ding gold for the boundaries the rollback
+    # UN-CROSSES — _maybe_grant_level_rewards has no cross-match idempotency,
+    # so leaving the ding gold while rolling XP below the boundary fabricated
+    # +100g/+500g per invalidation cycle (the boundary re-pays on the next
+    # crossing). Delta-aware, NOT a blanket level_reward reversal: if the
+    # player remains above the boundary after rollback, the ding stays paid
+    # and never re-grants, so reversing it would under-pay.
     p1_obj = (await db.execute(select(Player).where(Player.id == m.player1_id))).scalar_one_or_none()
     p2_obj = (await db.execute(select(Player).where(Player.id == m.player2_id))).scalar_one_or_none()
-    if p1_obj is not None and m.p1_xp_gained:
-        p1_obj.total_xp = max(0, (p1_obj.total_xp or 0) - m.p1_xp_gained)
-    if p2_obj is not None and m.p2_xp_gained:
-        p2_obj.total_xp = max(0, (p2_obj.total_xp or 0) - m.p2_xp_gained)
+    for player_obj, xp_gained in ((p1_obj, m.p1_xp_gained), (p2_obj, m.p2_xp_gained)):
+        if player_obj is None or not xp_gained:
+            continue
+        pre_level, _, _ = level_from_xp(player_obj.total_xp or 0)
+        player_obj.total_xp = max(0, (player_obj.total_xp or 0) - xp_gained)
+        post_level, _, _ = level_from_xp(player_obj.total_xp)
+        if post_level >= pre_level:
+            continue
+        uncrossed = sum(level_reward_for(lvl) for lvl in range(post_level + 1, pre_level + 1))
+        if uncrossed <= 0:
+            continue
+        granted = (await db.execute(
+            select(func.coalesce(func.sum(GoldTransaction.amount), 0)).where(
+                GoldTransaction.player_id == player_obj.id,
+                GoldTransaction.reference_id == str(m.id),
+                GoldTransaction.reason == "level_reward",
+            )
+        )).scalar() or 0
+        claw = min(uncrossed, int(granted))
+        if claw <= 0:
+            continue
+        db.add(GoldTransaction(
+            player_id=player_obj.id, amount=-claw,
+            reason="reversal", reference_id=str(m.id),
+        ))
+        player_obj.gold_earned = max(0, (player_obj.gold_earned or 0) - claw)
 
 
 async def _check_anti_cheat(
@@ -1378,14 +1437,188 @@ async def _check_anti_cheat(
     return {"flags": flags, "invalidate": invalidate}
 
 
+def _median(vals) -> float:
+    """Median of a numeric list; 0.0 for an empty list."""
+    s = sorted(vals)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    return float(s[mid]) if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+async def _check_fps_lag_flags(
+    db: AsyncSession, match: Match, report: MatchReport, p1: Player, p2: Player,
+) -> None:
+    """FPS/lag exploit telemetry heuristics (July 21). ALL flags are ADVISORY
+    (auto_invalidated=False, learnings #58/#106 — every auto-invalidate class
+    eventually produced false positives). Evaluates BOTH sides where data
+    exists; the caller wraps this in try/except so telemetry can never break
+    a match submit (learning #46's cost). Per-player baselines (median over
+    recent matches) keep consistently-low-FPS machines and consistently-bad
+    internet from ever flagging — only DEVIATION from a player's own normal
+    flags (the #58 guardrail)."""
+    sides = [
+        (p1, match.p1_fps_timeline, match.p1_fps_avg,
+         match.p1_freeze_count, match.p1_freeze_focused_count, match.p1_freeze_total_sec,
+         match.p1_recv_gap_count, match.p1_hb_gap_count, match.p1_recv_gap_max_ms),
+        (p2, match.p2_fps_timeline, match.p2_fps_avg,
+         match.p2_freeze_count, match.p2_freeze_focused_count, match.p2_freeze_total_sec,
+         match.p2_recv_gap_count, match.p2_hb_gap_count, match.p2_recv_gap_max_ms),
+    ]
+    for player_obj, tl, fps_avg, fz_count, fz_focused, fz_total, recv_gaps, hb_gaps, recv_gap_max in sides:
+        try:
+            # a. fps_dip_pattern — a high-baseline machine repeatedly dropping
+            # only sometimes (the "cap FPS during shots" tell). Median >= 90
+            # AND >= 2 buckets below max(30, 0.35 x median).
+            if tl:
+                try:
+                    buckets = [int(x) for x in tl.split(",") if x.strip()]
+                except Exception:
+                    buckets = []
+                if buckets:
+                    med = _median(buckets)
+                    if med >= 90:
+                        dip_floor = max(30.0, 0.35 * med)
+                        dips = [b for b in buckets if b < dip_floor]
+                        if len(dips) >= 2:
+                            db.add(FlaggedMatch(
+                                match_id=match.id, series_id=None,
+                                player_steam_ids=[p1.steam_id, p2.steam_id],
+                                flag_reason="fps_dip_pattern",
+                                flag_details={
+                                    "steam_id": player_obj.steam_id,
+                                    "median": med,
+                                    "dip_buckets": len(dips),
+                                    "dip_values": dips[:20],
+                                },
+                                auto_invalidated=False,
+                            ))
+
+            # b. low_fps_outlier — this match's side fps is BOTH absolutely low
+            # (< 60) and less than half the player's own median reporter-side
+            # fps over their last 20 fps-bearing matches (>= 5 data points
+            # required). Consistently-low players never flag — their median
+            # is low too.
+            if fps_avg is not None and fps_avg < 60:
+                base_rows = (await db.execute(text("""
+                    SELECT CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg
+                                ELSE m.p2_fps_avg END AS f
+                      FROM matches m
+                     WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+                       AND m.reported_by = :pid AND m.id != :mid
+                       AND CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg
+                                ELSE m.p2_fps_avg END > 0
+                     ORDER BY m.ended_at DESC LIMIT 20
+                """), {"pid": player_obj.id, "mid": match.id})).scalars().all()
+                base_vals = [int(v) for v in base_rows]
+                if len(base_vals) >= 5:
+                    base_med = _median(base_vals)
+                    if base_med > 0 and fps_avg < 0.5 * base_med:
+                        db.add(FlaggedMatch(
+                            match_id=match.id, series_id=None,
+                            player_steam_ids=[p1.steam_id, p2.steam_id],
+                            flag_reason="low_fps_outlier",
+                            flag_details={
+                                "steam_id": player_obj.steam_id,
+                                "fps_avg": int(fps_avg),
+                                "baseline_median": base_med,
+                                "baseline_points": len(base_vals),
+                            },
+                            auto_invalidated=False,
+                        ))
+
+            # c. freeze_events — repeated FOCUSED freezes (a title-bar-drag
+            # stall resumes focused; alt-tab stalls resume unfocused and only
+            # count in the unfocused-inclusive total).
+            if (fz_focused or 0) >= 3 or ((fz_total or 0) >= 5 and (fz_focused or 0) >= 1):
+                db.add(FlaggedMatch(
+                    match_id=match.id, series_id=None,
+                    player_steam_ids=[p1.steam_id, p2.steam_id],
+                    flag_reason="freeze_events",
+                    flag_details={
+                        "steam_id": player_obj.steam_id,
+                        "freeze_count": int(fz_count or 0),
+                        "freeze_focused_count": int(fz_focused or 0),
+                        "freeze_total_sec": float(fz_total or 0),
+                    },
+                    auto_invalidated=False,
+                ))
+
+            # d. ping_gap_cluster — socket-silence gaps (deliberate NIC cuts)
+            # or opponent-observed heartbeat gaps. EACH signal carries its OWN
+            # #58-style baseline guardrail (>= 2 + 2 x the player's median
+            # over their last 20 matches bearing that signal) — consistently-
+            # bad-internet players have a high baseline everywhere and must
+            # never flag. The hb signal is the VICTIM's observation (a cheater
+            # can't suppress the opponent's client), so it must be able to
+            # flag on its own — it never rides on the self-reported recv
+            # count. Baseline queries only run for the signal(s) that met the
+            # raw threshold, so hb-only entries don't pay for a recv query.
+            if (recv_gaps or 0) >= 3 or (hb_gaps or 0) >= 2:
+                recv_flag = False
+                hb_flag = False
+                gap_med = None
+                hb_med = None
+                if (recv_gaps or 0) >= 3:
+                    gap_rows = (await db.execute(text("""
+                        SELECT CASE WHEN m.player1_id = :pid THEN m.p1_recv_gap_count
+                                    ELSE m.p2_recv_gap_count END AS g
+                          FROM matches m
+                         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+                           AND m.id != :mid
+                           AND CASE WHEN m.player1_id = :pid THEN m.p1_recv_gap_count
+                                    ELSE m.p2_recv_gap_count END IS NOT NULL
+                         ORDER BY m.ended_at DESC LIMIT 20
+                    """), {"pid": player_obj.id, "mid": match.id})).scalars().all()
+                    gap_med = _median([int(v) for v in gap_rows])
+                    recv_flag = (recv_gaps or 0) >= 2 + 2 * gap_med
+                if (hb_gaps or 0) >= 2:
+                    hb_rows = (await db.execute(text("""
+                        SELECT CASE WHEN m.player1_id = :pid THEN m.p1_hb_gap_count
+                                    ELSE m.p2_hb_gap_count END AS g
+                          FROM matches m
+                         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+                           AND m.id != :mid
+                           AND CASE WHEN m.player1_id = :pid THEN m.p1_hb_gap_count
+                                    ELSE m.p2_hb_gap_count END IS NOT NULL
+                         ORDER BY m.ended_at DESC LIMIT 20
+                    """), {"pid": player_obj.id, "mid": match.id})).scalars().all()
+                    hb_med = _median([int(v) for v in hb_rows])
+                    hb_flag = (hb_gaps or 0) >= 2 + 2 * hb_med
+                if recv_flag or hb_flag:
+                    db.add(FlaggedMatch(
+                        match_id=match.id, series_id=None,
+                        player_steam_ids=[p1.steam_id, p2.steam_id],
+                        flag_reason="ping_gap_cluster",
+                        flag_details={
+                            "steam_id": player_obj.steam_id,
+                            # Which signal(s) fired — reviewers weigh victim-
+                            # observed (hb) above self-reported (recv).
+                            "signal": ("recv+hb" if (recv_flag and hb_flag)
+                                       else ("recv" if recv_flag else "hb")),
+                            "recv_gap_count": int(recv_gaps or 0),
+                            "recv_gap_max_ms": (int(recv_gap_max)
+                                                if recv_gap_max is not None else None),
+                            "hb_gap_count": int(hb_gaps or 0),
+                            "baseline_median": gap_med,
+                            "hb_baseline_median": hb_med,
+                        },
+                        auto_invalidated=False,
+                    ))
+        except Exception as _sx:
+            print(f"[ANTICHEAT] fps/lag side check error for {player_obj.steam_id}: {_sx}")
+
+
 # ── Routes: Match Submission ───────────────────────────────────
 
 @app.post("/api/v1/matches", response_model=MatchResponse, tags=["Matches"])
-async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
+async def submit_match(report: MatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """
     Submit a completed match result.
     Called by the BepInEx mod on the host player's client.
     """
+    await _check_steam_session(request, report.reported_by_steam_id, db)
     _presence_touch(report.reported_by_steam_id)
     # Validate HMAC if configured
     if not verify_hmac(report):
@@ -1462,12 +1695,48 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         # Vanilla quickplay opponents never get mod_seen_at, so genuine casual
         # games vs non-mod players are untouched; a deliberate opt-out
         # (ranked_enabled=false) is respected as before.
+        # Bug #78: mod_seen_at is a set-once stamp — "has EVER run the mod",
+        # not "mod loaded in this room". A registered player playing WITHOUT
+        # the mod (vanilla quickplay) kept getting casual games upgraded to
+        # phantom ranked series. The non-reporter must also be PRESENCE-LIVE
+        # (mod pings /presence/ping every 60s unconditionally), which every
+        # legitimate #47-race case satisfies — the race is about Photon props
+        # and startup sync, not about whether the opponent's mod is running.
+        _opp_steam = (report.player2.steam_id
+                      if report.reported_by_steam_id == report.player1.steam_id
+                      else report.player1.steam_id)
         if (p1.mod_seen_at is not None and p2.mod_seen_at is not None
                 and p1.ranked_enabled and p2.ranked_enabled):
-            print(f"[MATCH] upgraded to ranked: both mod users ranked-enabled, client "
-                  f"reported casual (race) (room={report.photon_room_id} "
-                  f"reporter={report.reported_by_steam_id})")
-            report.is_ranked = True
+            # Evidence rule 1 — RECENTLY-ACTIVE shared series: the pair is
+            # mid-sitting (game 1 already proved both clients live minutes
+            # ago), so upgrade regardless of presence. This closes the ~60s
+            # post-API-restart window where the presence dict is empty and a
+            # mid-BO3 race game would otherwise drop to casual. Deliberately
+            # bounded to CURRENT-sitting activity (created or match-ended
+            # within the reuse window) — the unbounded resume-forever arm
+            # must NOT count, or a weeks-later vanilla-quickplay rematch
+            # would re-create bug #78 via the resurrected series.
+            _recent_series_evidence = (await db.execute(text(
+                "SELECT rs.id FROM ranked_series rs "
+                "WHERE rs.status = 'active' "
+                "  AND ((rs.player1_id = :a AND rs.player2_id = :b) "
+                "    OR (rs.player1_id = :b AND rs.player2_id = :a)) "
+                "  AND (rs.created_at > NOW() - (:w || ' minutes')::interval "
+                "       OR EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id "
+                "                  AND m.ended_at > NOW() - (:w || ' minutes')::interval)) "
+                "LIMIT 1"
+            ), {"a": p1.id, "b": p2.id, "w": str(SERIES_REUSE_WINDOW_MIN)})).first()
+            # Evidence rule 2 — opponent's mod is presence-LIVE right now.
+            if _recent_series_evidence is not None or _presence_is_online(_opp_steam):
+                _via = "live series" if _recent_series_evidence is not None else "presence"
+                print(f"[MATCH] upgraded to ranked via {_via}: both mod users ranked-enabled, "
+                      f"client reported casual (race) (room={report.photon_room_id} "
+                      f"reporter={report.reported_by_steam_id})")
+                report.is_ranked = True
+            else:
+                print(f"[MATCH] upgrade skipped: opponent {_opp_steam} not presence-live "
+                      f"(mod not running) and no current-sitting series — kept casual "
+                      f"(room={report.photon_room_id})")
 
     # Determine winner
     winner = p1 if report.p1_rounds_won > report.p2_rounds_won else p2
@@ -1510,6 +1779,37 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     _p1s = _loc if reporter_is_p1 else _opp
     _p2s = _opp if reporter_is_p1 else _loc
 
+    # FPS/lag telemetry (July 21) — same reporter-side mapping. Reporter side
+    # from their own local_* counters; opponent side from the opp_* fields
+    # (extended cr_gstats prop). Asymmetries: ping + freeze_total_sec exist
+    # only for the reporter; opp_hb_gap_count is the REPORTER's observation
+    # of the OPPONENT's heartbeat gaps, so it lands on the OPPONENT's side.
+    # Old clients omit all fields → None → NULL columns (no fake zeros);
+    # empty-string timelines → NULL.
+    # Tuple order: (fps_timeline, freeze_count, freeze_focused_count,
+    #               freeze_total_sec, recv_gap_count, hb_gap_count,
+    #               ping_avg, ping_max, recv_gap_max_ms, ping_timeline)
+    _loc_lag = (report.local_fps_timeline[:512] if report.local_fps_timeline else None,
+                report.local_freeze_count, report.local_freeze_focused_count,
+                report.local_freeze_total_sec, report.local_recv_gap_count,
+                None,  # nobody observes the reporter's own heartbeat in this report
+                report.local_ping_avg, report.local_ping_max,
+                report.local_recv_gap_max_ms,
+                report.local_ping_timeline[:512] if report.local_ping_timeline else None)
+    _opp_lag = (report.opp_fps_timeline[:512] if report.opp_fps_timeline else None,
+                report.opp_freeze_count, report.opp_freeze_focused_count,
+                None,  # freeze_total_sec is reporter-side only
+                report.opp_recv_gap_count,
+                report.opp_hb_gap_count,
+                # July 22 item 3: the opponent's ping now arrives via cr_gstats
+                # field 12 — avg from the reporter-built timeline; max stays
+                # reporter-only.
+                (report.opp_ping_avg or None), None,
+                None,  # recv_gap_max is reporter-side only (no opp max in cr_gstats)
+                report.opp_ping_timeline[:512] if report.opp_ping_timeline else None)
+    _p1l = _loc_lag if reporter_is_p1 else _opp_lag
+    _p2l = _opp_lag if reporter_is_p1 else _loc_lag
+
     match = Match(
         player1_id=p1.id,
         player2_id=p2.id,
@@ -1543,6 +1843,20 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
         p2_blocks_activated=_p2s[2], p2_blocks_successful=_p2s[3],
         p2_keys_pressed=_p2s[4], p2_active_seconds=_p2s[5],
         point_timeline=(report.point_timeline or None),
+        # Analysis-era filter (July 21): the reporter client's X-Mod-Version.
+        # Cannot be backfilled — required to slice per-match stats by
+        # counting-semantics era after the hit/block fix.
+        reporter_mod_version=((_current_mod_version.get() or "")[:16] or None),
+        p1_fps_timeline=_p1l[0], p1_freeze_count=_p1l[1],
+        p1_freeze_focused_count=_p1l[2], p1_freeze_total_sec=_p1l[3],
+        p1_recv_gap_count=_p1l[4], p1_hb_gap_count=_p1l[5],
+        p1_ping_avg=_p1l[6], p1_ping_max=_p1l[7],
+        p1_recv_gap_max_ms=_p1l[8], p1_ping_timeline=_p1l[9],
+        p2_fps_timeline=_p2l[0], p2_freeze_count=_p2l[1],
+        p2_freeze_focused_count=_p2l[2], p2_freeze_total_sec=_p2l[3],
+        p2_recv_gap_count=_p2l[4], p2_hb_gap_count=_p2l[5],
+        p2_ping_avg=_p2l[6], p2_ping_max=_p2l[7],
+        p2_recv_gap_max_ms=_p2l[8], p2_ping_timeline=_p2l[9],
     )
     db.add(match)
     await db.flush()  # Get match.id
@@ -1598,6 +1912,13 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             flag_details=details,
             auto_invalidated=auto_inv,
         ))
+    # FPS/lag telemetry heuristics (July 21) — advisory only, never blocks or
+    # invalidates. Guarded so telemetry can NEVER break a match submit
+    # (learning #46's cost — a broken advisory path 500'd /matches for 26 min).
+    try:
+        await _check_fps_lag_flags(db, match, report, p1, p2)
+    except Exception as _fx:
+        print(f"[ANTICHEAT] fps/lag flag check error: {_fx}")
     if ac["invalidate"]:
         await db.commit()
         return MatchResponse(
@@ -1622,14 +1943,25 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     # Only the reporter has these numbers — the higher Steam ID's client never sees match
     # completion — so Hit % / Block % are one-sided totals accumulated from whichever side
     # happened to report each match. Incoming fields are Optional and default to 0.
-    if report.local_bullets_fired:
-        reporter.bullets_fired = (reporter.bullets_fired or 0) + report.local_bullets_fired
-    if report.local_bullets_hit:
-        reporter.bullets_hit = (reporter.bullets_hit or 0) + report.local_bullets_hit
-    if report.local_blocks_activated:
-        reporter.blocks_activated = (reporter.blocks_activated or 0) + report.local_blocks_activated
-    if report.local_blocks_successful:
-        reporter.blocks_successful = (reporter.blocks_successful or 0) + report.local_blocks_successful
+    #
+    # July 21 counting-fix gate: the hit-counting semantics (direct hits only)
+    # and the block spec changed in 1.34.0, and migration 135 zeroed every
+    # lifetime counter. Old clients keep reporting old-semantics numbers for
+    # weeks after ship — letting them accumulate would repollute the reset
+    # counters, so only >= STATS_CLEAN_MIN_VERSION reporters feed the
+    # lifetime totals. The header is guaranteed present on real submits
+    # (REQUIRE_MOD_VERSION); _parse_version returns (0,) on garbage → fails
+    # closed. Per-match p1_/p2_ columns still store for every client.
+    _reporter_ver = _parse_version(_current_mod_version.get() or "0")
+    if _reporter_ver >= _parse_version(STATS_CLEAN_MIN_VERSION):
+        if report.local_bullets_fired:
+            reporter.bullets_fired = (reporter.bullets_fired or 0) + report.local_bullets_fired
+        if report.local_bullets_hit:
+            reporter.bullets_hit = (reporter.bullets_hit or 0) + report.local_bullets_hit
+        if report.local_blocks_activated:
+            reporter.blocks_activated = (reporter.blocks_activated or 0) + report.local_blocks_activated
+        if report.local_blocks_successful:
+            reporter.blocks_successful = (reporter.blocks_successful or 0) + report.local_blocks_successful
     # Input-rate accumulators (v1.29 Compare tab: avg keystrokes/sec). Only
     # accumulate when BOTH values are present and sane — a keys count with no
     # timebase (or vice versa) would skew the lifetime average. The
@@ -1649,15 +1981,29 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     loser = p2 if winner == p1 else p1
 
     p1_won = (winner == p1)
+    # July 20 item 6: fetch both 1v1 ratings once — each side's reward scales
+    # by the OPPONENT's tier (pre-series-completion ratings; the Glicko update
+    # runs later in this request, so these are deterministic pre-update values).
+    _pair_ratings: dict = {}
+    if report.is_ranked:
+        try:
+            _rrows = (await db.execute(text(
+                "SELECT player_id, rating FROM glicko_ratings WHERE player_id IN (:pa, :pb)"
+            ), {"pa": str(p1.id), "pb": str(p2.id)})).all()
+            _pair_ratings = {str(r[0]): float(r[1]) for r in _rrows}
+        except Exception as ex:
+            print(f"[MATCH] tier-mult rating fetch failed (defaulting x1.0): {ex}")
     p1_xp, p1_bonuses = await calculate_match_xp(
         won=p1_won, is_ranked=report.is_ranked,
         winner_rounds=winner_rounds, loser_rounds=loser_rounds,
         opponent_id=p2.id, db=db,
+        opponent_rating=_pair_ratings.get(str(p2.id)),
     )
     p2_xp, p2_bonuses = await calculate_match_xp(
         won=(not p1_won), is_ranked=report.is_ranked,
         winner_rounds=winner_rounds, loser_rounds=loser_rounds,
         opponent_id=p1.id, db=db,
+        opponent_rating=_pair_ratings.get(str(p1.id)),
     )
 
     # Convert XP milestones to gold BEFORE persisting — 100 XP = 1 gold.
@@ -1678,8 +2024,8 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
 
     # Level rewards (v1.26.8): 100g per 5 levels through 50, 500g per 5
     # levels 55-100. Awarded the moment a player dings up via this match.
-    await _maybe_grant_level_rewards(db, p1, old_xp_p1, str(match.id))
-    await _maybe_grant_level_rewards(db, p2, old_xp_p2, str(match.id))
+    level_gold_p1 = await _maybe_grant_level_rewards(db, p1, old_xp_p1, str(match.id))
+    level_gold_p2 = await _maybe_grant_level_rewards(db, p2, old_xp_p2, str(match.id))
 
     # v1.30 (item 5): server-side card-combo / sweep / clutch achievements for
     # the winner. Reporter-side payload covers both players — works even when
@@ -1738,6 +2084,13 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
     series_status = "none"
     series_score = ""
     series_completed = False
+    # July 20 item 6: series-completion gold for BOTH sides, carried out of
+    # the completion block so the response breakdown reports the REAL numbers
+    # (the old response hardcoded "+5"/"+1" while 10/+2 was credited).
+    _series_gold_winner = 0
+    _series_gold_loser = 0
+    _series_gold_winner_labels: list[str] = []
+    _series_gold_loser_labels: list[str] = []
 
     if report.is_ranked:
         # Find the pair's CURRENT active series via the shared helper
@@ -1814,8 +2167,14 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             series_status = "completed"
             series_completed = True
 
-            # +10 gold to the series winner, +2 extra if it was a 2-0 sweep.
-            # (Doubled from the 5/+1 payout in v1.22 to give ranked more teeth.)
+            # July 20 item 6: opponent-tier series gold for BOTH sides.
+            #   winner: 5g x opponent-tier x2 (series win) x2 (beaten player
+            #           in leaderboard top 3), +2 sweep additive
+            #   loser:  5g x opponent-tier (playing up pays even in defeat)
+            # Beginner-opponent winner = 5*1*2 = 10g — exactly the pre-change
+            # payout, so the economy baseline is preserved. Ratings are the
+            # PRE-series-completion values fetched for the match-XP tier
+            # multiplier (Glicko applies later in this request).
             #
             # IMPORTANT: pick the series winner by series.player1/player2
             # ordering, NOT by match-report p1/p2 ordering. The two can
@@ -1827,14 +2186,44 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             series_winner = p1 if (p1.id == series.player1_id and series.p1_series_wins >= 2) \
                               or (p1.id == series.player2_id and series.p2_series_wins >= 2) \
                             else p2
-            bonus = 10
+            series_loser = p2 if series_winner is p1 else p1
+            SERIES_GOLD_BASE = 5
+            _w_mult, _w_label = _tier_mult_for(_pair_ratings.get(str(series_loser.id)))
+            _l_mult, _l_label = _tier_mult_for(_pair_ratings.get(str(series_winner.id)))
+            winner_bonus = int(SERIES_GOLD_BASE * _w_mult) * 2
+            if _w_mult > 1.0:
+                _series_gold_winner_labels.append(f"{_w_label} opp x{_w_mult:g}")
+            try:
+                if str(series_loser.id) in await _podium_map(db):
+                    winner_bonus *= 2
+                    # "Podium", not "Top 3": shipped v1.33.0 clients scan the
+                    # raw response with Contains("Top 3") to render a defunct
+                    # "Top 3 x3" XP label — this string must not contain it.
+                    _series_gold_winner_labels.append("Podium beaten x2")
+            except Exception:
+                pass
             if series.p1_series_wins == 0 or series.p2_series_wins == 0:
-                bonus += 2
-            series_winner.gold_earned = (series_winner.gold_earned or 0) + bonus
+                winner_bonus += 2
+                _series_gold_winner_labels.append("Sweep +2")
+            loser_bonus = int(SERIES_GOLD_BASE * _l_mult)
+            if _l_mult > 1.0:
+                _series_gold_loser_labels.append(f"{_l_label} opp x{_l_mult:g}")
+            _series_gold_winner_labels.insert(0, f"Series win +{winner_bonus}")
+            _series_gold_loser_labels.insert(0, f"Series loss +{loser_bonus}")
+            _series_gold_winner = winner_bonus
+            _series_gold_loser = loser_bonus
+
+            series_winner.gold_earned = (series_winner.gold_earned or 0) + winner_bonus
             db.add(GoldTransaction(
-                player_id=series_winner.id, amount=bonus,
+                player_id=series_winner.id, amount=winner_bonus,
                 reason="series_win", reference_id=str(series.id),
             ))
+            if loser_bonus > 0:
+                series_loser.gold_earned = (series_loser.gold_earned or 0) + loser_bonus
+                db.add(GoldTransaction(
+                    player_id=series_loser.id, amount=loser_bonus,
+                    reason="series_loss", reference_id=str(series.id),
+                ))
 
             # Settle all pending bets on this series.
             await _settle_series_bets(db, series)
@@ -1982,22 +2371,28 @@ async def submit_match(report: MatchReport, db: AsyncSession = Depends(get_db)):
             print(f"[TOURNAMENT] advance_tournament_match error: {ex}")
 
     # Compile gold breakdown for the reporter so the notification can show
-    # "+3 gold [XP]  [Series win +5]  [Sweep +1]" type details.
+    # "+12 gold [XP +4]  [Series win +10]" type details. July 20 item 6: uses
+    # the ACTUAL granted amounts (the old block hardcoded "+5"/"+1" while
+    # 10/+2 was credited — half-reporting since v1.22) and includes level-ding
+    # gold, which previously appeared nowhere.
     reporter_is_p1 = (report.reported_by_steam_id == report.player1.steam_id)
     reporter_gold_from_xp = gold_p1 if reporter_is_p1 else gold_p2
     reporter_gold_total = reporter_gold_from_xp
     reporter_gold_bonuses = []
     if reporter_gold_from_xp > 0:
         reporter_gold_bonuses.append(f"XP +{reporter_gold_from_xp}")
-    # Series-win gold only goes to the series winner; check if reporter == winner.
+    reporter_level_gold = level_gold_p1 if reporter_is_p1 else level_gold_p2
+    if reporter_level_gold > 0:
+        reporter_gold_total += reporter_level_gold
+        reporter_gold_bonuses.append(f"Level up +{reporter_level_gold}")
     if series_completed:
         reporter_player_id = p1.id if reporter_is_p1 else p2.id
         if series.winner_id == reporter_player_id:
-            reporter_gold_total += 5
-            reporter_gold_bonuses.append("Series win +5")
-            if series.p1_series_wins == 0 or series.p2_series_wins == 0:
-                reporter_gold_total += 1
-                reporter_gold_bonuses.append("Sweep +1")
+            reporter_gold_total += _series_gold_winner
+            reporter_gold_bonuses.extend(_series_gold_winner_labels)
+        else:
+            reporter_gold_total += _series_gold_loser
+            reporter_gold_bonuses.extend(_series_gold_loser_labels)
 
     return MatchResponse(
         match_id=match.id,
@@ -2313,42 +2708,59 @@ async def get_player_stats(
     player_total_xp = player.total_xp or 0
     player_level, xp_into_level, xp_needed_for_next = level_from_xp(player_total_xp)
 
-    # Compute best win streaks
-    # Ranked: count per SERIES completion, not per individual match
-    ranked_streak_query = text("""
+    # Compute best win streaks (July 20 item 5: game AND series units, both
+    # with best + signed current, invalidated rows excluded).
+    def _walk_streak(rows, pid):
+        """(best_win_streak, signed_current_streak) over chronological winner ids."""
+        best, run = 0, 0
+        current = 0  # signed: >0 = trailing wins, <0 = trailing losses
+        for r in rows:
+            won = r["winner_id"] == pid
+            if won:
+                run += 1
+                best = max(best, run)
+                current = current + 1 if current >= 0 else 1
+            else:
+                run = 0
+                current = current - 1 if current <= 0 else -1
+        return best, current
+
+    # Ranked per SERIES completion. best_ranked_streak keeps carrying this
+    # value for old clients + the Compare graph; the labeled fields are new.
+    ranked_streak_rows = (await db.execute(text("""
         SELECT rs.winner_id
         FROM ranked_series rs
         WHERE rs.status = 'completed'
+          AND rs.invalidated_at IS NULL
           AND (rs.player1_id = :pid OR rs.player2_id = :pid)
         ORDER BY rs.completed_at ASC
-    """)
-    ranked_streak_rows = (await db.execute(ranked_streak_query, {"pid": player.id})).mappings().all()
-    best_ranked_streak = 0
-    cur_ranked_streak = 0
-    for sr in ranked_streak_rows:
-        if sr["winner_id"] == player.id:
-            cur_ranked_streak += 1
-            best_ranked_streak = max(best_ranked_streak, cur_ranked_streak)
-        else:
-            cur_ranked_streak = 0
+    """), {"pid": player.id})).mappings().all()
+    best_ranked_streak, current_ranked_series_streak = _walk_streak(ranked_streak_rows, player.id)
+
+    # Ranked per individual GAME (1v1 only — team_ rooms report elsewhere).
+    # Sid's true game best was 177 while the old unlabeled UI line showed the
+    # 128 series best beside a client-computed current game streak.
+    ranked_game_rows = (await db.execute(text("""
+        SELECT m.winner_id
+        FROM matches m
+        WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+          AND m.is_ranked = true
+          AND m.invalidated_at IS NULL
+          AND (m.photon_room_id IS NULL OR LEFT(m.photon_room_id, 5) != 'team_')
+        ORDER BY m.ended_at ASC
+    """), {"pid": player.id})).mappings().all()
+    best_ranked_game_streak, current_ranked_game_streak = _walk_streak(ranked_game_rows, player.id)
 
     # Casual: count per individual match (no series)
-    casual_streak_query = text("""
+    casual_streak_rows = (await db.execute(text("""
         SELECT m.winner_id
         FROM matches m
         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
           AND m.is_ranked = false
+          AND m.invalidated_at IS NULL
         ORDER BY m.ended_at ASC
-    """)
-    casual_streak_rows = (await db.execute(casual_streak_query, {"pid": player.id})).mappings().all()
-    best_casual_streak = 0
-    cur_casual_streak = 0
-    for sr in casual_streak_rows:
-        if sr["winner_id"] == player.id:
-            cur_casual_streak += 1
-            best_casual_streak = max(best_casual_streak, cur_casual_streak)
-        else:
-            cur_casual_streak = 0
+    """), {"pid": player.id})).mappings().all()
+    best_casual_streak, _ = _walk_streak(casual_streak_rows, player.id)
 
     # Active cosmetic lookups (title + trail + map color)
     active_title_name: str | None = None
@@ -2715,6 +3127,21 @@ async def get_player_stats(
     except Exception:
         pass
 
+    # LFP-ping cooldown surface (July 21): seconds until this player may fire
+    # the next Discord LFP ping — same MAX(created_at) source the /lfp-ping
+    # cooldown gate reads. Guarded (and LAST before the return so a failed
+    # query can't poison the transaction for the queries above); 0 = ready.
+    lfp_seconds_left = 0
+    try:
+        _lfp_elapsed = (await db.execute(text(
+            "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "
+            "  FROM lfp_pings WHERE steam_id = :sid"
+        ), {"sid": player.steam_id})).scalar()
+        if _lfp_elapsed is not None:
+            lfp_seconds_left = max(0, 3600 - int(_lfp_elapsed))
+    except Exception:
+        lfp_seconds_left = 0
+
     return PlayerStatsResponse(
         steam_id=player.steam_id,
         display_name=player.display_name,
@@ -2761,6 +3188,10 @@ async def get_player_stats(
         xp_for_next_level=xp_needed_for_next,
         best_ranked_streak=best_ranked_streak,
         best_casual_streak=best_casual_streak,
+        best_ranked_game_streak=best_ranked_game_streak,
+        current_ranked_game_streak=current_ranked_game_streak,
+        best_ranked_series_streak=best_ranked_streak,
+        current_ranked_series_streak=current_ranked_series_streak,
         ranked_series_wins=ranked_series_wins,
         ranked_series_losses=ranked_series_losses,
         casual_wins=casual_wins,
@@ -2791,6 +3222,7 @@ async def get_player_stats(
         rank_color=rank_color,
         team_rating=team_rating,
         team_completed_series=team_completed,
+        lfp_seconds_left=lfp_seconds_left,
     )
 
 
@@ -2998,6 +3430,14 @@ async def get_player_matches(
                  ELSE m.p2_xp_gained END AS xp_gained,
             CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg ELSE m.p2_fps_avg END AS player_fps_avg,
             CASE WHEN m.player1_id = :pid THEN m.p2_fps_avg ELSE m.p1_fps_avg END AS opponent_fps_avg,
+            -- July 21: viewer-relative FPS timelines (history FPS hover graph).
+            CASE WHEN m.player1_id = :pid THEN m.p1_fps_timeline ELSE m.p2_fps_timeline END AS pl_fps_tl,
+            CASE WHEN m.player1_id = :pid THEN m.p2_fps_timeline ELSE m.p1_fps_timeline END AS op_fps_tl,
+            -- July 22 item 3: viewer-relative latency (row tag + hover graph).
+            CASE WHEN m.player1_id = :pid THEN m.p1_ping_avg ELSE m.p2_ping_avg END AS pl_ping_avg,
+            CASE WHEN m.player1_id = :pid THEN m.p2_ping_avg ELSE m.p1_ping_avg END AS op_ping_avg,
+            CASE WHEN m.player1_id = :pid THEN m.p1_ping_timeline ELSE m.p2_ping_timeline END AS pl_ping_tl,
+            CASE WHEN m.player1_id = :pid THEN m.p2_ping_timeline ELSE m.p1_ping_timeline END AS op_ping_tl,
             -- v1.30 item 4: viewer-relative per-game combat stats.
             CASE WHEN m.player1_id = :pid THEN m.p1_bullets_fired ELSE m.p2_bullets_fired END AS pl_bf,
             CASE WHEN m.player1_id = :pid THEN m.p1_bullets_hit ELSE m.p2_bullets_hit END AS pl_bh,
@@ -3016,14 +3456,16 @@ async def get_player_matches(
             -- Bug batch item 4: game length. duration_seconds is canonical
             -- (mig 027); match_duration covers pre-027 rows.
             COALESCE(m.duration_seconds, m.match_duration, 0) AS duration_seconds,
-            -- Gold earned ON this match (xp crossings), and series bonus if applicable.
+            -- Gold earned ON this match (xp crossings + level dings — dings were
+            -- previously invisible in history; July 20 item 6), and series bonus
+            -- for either side (series_loss is the new loser-side reward).
             COALESCE((
                 SELECT SUM(gt.amount) FROM gold_transactions gt
-                WHERE gt.player_id = :pid AND gt.reason = 'xp' AND gt.reference_id = m.id::text
+                WHERE gt.player_id = :pid AND gt.reason IN ('xp', 'level_reward') AND gt.reference_id = m.id::text
             ), 0) AS gold_gained,
             COALESCE((
                 SELECT SUM(gt.amount) FROM gold_transactions gt
-                WHERE gt.player_id = :pid AND gt.reason = 'series_win' AND gt.reference_id = m.series_id::text
+                WHERE gt.player_id = :pid AND gt.reason IN ('series_win', 'series_loss') AND gt.reference_id = m.series_id::text
                   AND m.series_id IS NOT NULL
             ), 0) AS series_gold_gained
         FROM matches m
@@ -3118,6 +3560,12 @@ async def get_player_matches(
             series_gold_gained=row["series_gold_gained"] or 0,
             player_fps_avg=row["player_fps_avg"],
             opponent_fps_avg=row["opponent_fps_avg"],
+            player_fps_timeline=row["pl_fps_tl"],
+            opp_fps_timeline=row["op_fps_tl"],
+            player_ping_avg=row["pl_ping_avg"] or 0,
+            opponent_ping_avg=row["op_ping_avg"] or 0,
+            player_ping_timeline=row["pl_ping_tl"],
+            opp_ping_timeline=row["op_ping_tl"],
             player_bullets_fired=row["pl_bf"], player_bullets_hit=row["pl_bh"],
             player_blocks_activated=row["pl_ba"], player_blocks_successful=row["pl_bs"],
             player_keys_pressed=row["pl_kp"], player_active_seconds=row["pl_as"],
@@ -3442,10 +3890,11 @@ async def check_player_registered(steam_id: str, db: AsyncSession = Depends(get_
 
 
 @app.post("/api/v1/mod/toggle-ranked/{steam_id}", tags=["Mod"])
-async def toggle_ranked(steam_id: str, enabled: bool = Query(...), sig: str | None = Query(None), db: AsyncSession = Depends(get_db)):
+async def toggle_ranked(steam_id: str, request: Request, enabled: bool = Query(...), sig: str | None = Query(None), db: AsyncSession = Depends(get_db)):
     """Toggle a player's ranked mode on or off. Auto-registers if needed.
     HMAC signs 'toggle-ranked:{steam_id}:{true|false}' (F5: was unauthenticated —
     anyone could flip any account in/out of matchmaking)."""
+    await _check_steam_session(request, steam_id, db)
     if not _verify_action_sig(f"toggle-ranked:{steam_id}:{str(enabled).lower()}", sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
@@ -3460,6 +3909,200 @@ async def toggle_ranked(steam_id: str, enabled: bool = Query(...), sig: str | No
     await db.commit()
 
     return {"steam_id": steam_id, "ranked_enabled": enabled}
+
+
+# ── Steam ticket auth (July 21) ───────────────────────────────
+# The client mints a Steam Web-API auth ticket at startup and POSTs it here;
+# the server verifies it against Steam's AuthenticateUserTicket endpoint and
+# issues an opaque 24h session token (sha256 stored, never the raw token —
+# steam_sessions, migration 137). The client then sends X-Session-Token on
+# every call; _check_steam_session enforces it on the mutating endpoints.
+#
+# Rollout is gated twice: with STEAM_WEB_API_KEY unset the whole pipeline is
+# a verified=false no-op (tokens issued, nothing enforced); with the key set,
+# enforcement only bites clients >= STEAM_AUTH_MIN_VERSION (older clients
+# can't mint tickets and must keep working until the version floor rises).
+#
+# SECURITY SCOPE — the version carve-out is a COMPATIBILITY measure, not a
+# security boundary: X-Mod-Version is attacker-controlled, so a raw request
+# claiming any version in [MIN_MOD_VERSION, STEAM_AUTH_MIN_VERSION) skips
+# enforcement entirely. Impersonation-of-others is only fully closed once
+# MIN_MOD_VERSION >= STEAM_AUTH_MIN_VERSION — raising that floor is the real
+# arming event, not setting the key. Until then, _check_steam_session's
+# per-ACCOUNT arming narrows the hole: an account with a recent verified
+# session enforces regardless of the claimed version. None of this makes
+# self-serving reports honest (that stays with HMAC + flag heuristics).
+
+STEAM_APPID = 1557740  # ROUNDS
+STEAM_AUTH_MIN_VERSION = "1.34.0"  # first client build that ships ticket auth
+# TODO(arming): when STEAM_WEB_API_KEY is set in prod, plan the MIN_MOD_VERSION
+# raise to >= STEAM_AUTH_MIN_VERSION — that raise, not the key, closes the
+# spoofed-old-version bypass (see SECURITY SCOPE above).
+STEAM_SESSION_TTL_SECONDS = 86400
+# MUST match the SteamAuth.cs GetAuthTicketForWebApi argument byte-for-byte —
+# a ticket minted with an identity string only verifies when the SAME identity
+# is passed to AuthenticateUserTicket; omitting it fails every verification
+# the moment enforcement is armed.
+STEAM_TICKET_IDENTITY = "competitive-rounds"
+
+
+class SteamAuthRequest(BaseModel):
+    steam_id: str = Field(..., max_length=20)
+    # Web-API tickets are <= 2560 bytes → <= 5120 hex chars.
+    ticket_hex: str = Field(..., max_length=6144)
+    mod_version: str | None = Field(None, max_length=32)
+
+
+def _steam_http_get_json(url: str, timeout: float) -> dict:
+    """Blocking stdlib GET → JSON. The API image has no httpx/aiohttp (its
+    Dockerfile isn't in the repo, so pip deps can't ride the deploy path);
+    callers MUST run this via asyncio.to_thread — a blocking urlopen on the
+    single-worker event loop would stall every request (learning #125)."""
+    with _urlreq.urlopen(url, timeout=timeout) as resp:
+        return _json.loads(resp.read().decode("utf-8", "replace"))
+
+
+@app.post("/api/v1/auth/steam", tags=["Mod"])
+async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
+    """Verify a Steam Web-API auth ticket and issue a session token.
+    Key unset → pipeline no-op mode: token issued with verified=false so the
+    client/header plumbing can be proven end-to-end before enforcement."""
+    # Reject non-hex tickets outright, before the value goes anywhere near the
+    # outbound URL — the legit client only ever sends hex (BitConverter), and
+    # raw interpolation would otherwise allow query-parameter injection
+    # (ticket_hex='...&appid=<other>'). Runs even in key-unset no-op mode.
+    if not _re.fullmatch(r"[0-9a-fA-F]+", req.ticket_hex):
+        raise HTTPException(status_code=400, detail="bad_ticket")
+    key = os.getenv("STEAM_WEB_API_KEY", "")
+    verified = False
+    if key:
+        # NEVER log this URL — it carries the Web API key.
+        url = ("https://api.steampowered.com/ISteamUserAuth/AuthenticateUserTicket/v1/"
+               f"?key={key}&appid={STEAM_APPID}&ticket={req.ticket_hex}"
+               f"&identity={STEAM_TICKET_IDENTITY}")
+        try:
+            body = await asyncio.to_thread(_steam_http_get_json, url, 6.0)
+            params = ((body or {}).get("response") or {}).get("params") or {}
+            if params.get("result") == "OK" and str(params.get("steamid") or "") == req.steam_id:
+                verified = True
+            else:
+                # result/steamid mismatch — log the redacted outcome plus
+                # Steam's error branch (errorcode/errordesc are non-secret;
+                # without them a failure logs result=None with no diagnosis).
+                err = ((body or {}).get("response") or {}).get("error") or {}
+                print(f"[STEAM-AUTH] reject for {req.steam_id}: "
+                      f"result={params.get('result')!r} steamid_match="
+                      f"{str(params.get('steamid') or '') == req.steam_id} "
+                      f"errorcode={err.get('errorcode')!r} "
+                      f"errordesc={err.get('errordesc')!r}")
+        except Exception as ex:
+            # Exception text could embed the URL (and key) — class name only.
+            print(f"[STEAM-AUTH] verify error for {req.steam_id}: {type(ex).__name__}")
+        if not verified:
+            raise HTTPException(status_code=401, detail="ticket_verification_failed")
+        print(f"[STEAM-AUTH] verified ticket for {req.steam_id} "
+              f"(mod_version={req.mod_version})")
+    # Key unset OR verified: issue the opaque token. Only the sha256 is stored.
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    try:
+        # Opportunistic prune — expired-for-a-day rows are dead weight; cheap
+        # (ix_steam_sessions_expiry) and never worth failing the auth over.
+        await db.execute(text(
+            "DELETE FROM steam_sessions WHERE expires_at < NOW() - INTERVAL '1 day'"))
+    except Exception as ex:
+        print(f"[STEAM-AUTH] prune failed (ignored): {type(ex).__name__}")
+    await db.execute(text(
+        "INSERT INTO steam_sessions (steam_id, token_hash, verified, issued_at, expires_at) "
+        "VALUES (:sid, :th, :v, :iat, :exp)"),
+        {"sid": req.steam_id, "th": hashlib.sha256(token.encode()).hexdigest(),
+         "v": verified, "iat": now,
+         "exp": now + timedelta(seconds=STEAM_SESSION_TTL_SECONDS)})
+    await db.commit()
+    return {"session_token": token, "expires_in": STEAM_SESSION_TTL_SECONDS,
+            "verified": verified}
+
+
+async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None:
+    """Session enforcement for the mutating endpoints. Reads X-Session-Token,
+    matches it (sha256, single indexed SELECT) against steam_sessions for the
+    CLAIMED steam_id. Valid → return. Invalid/missing → 401 only when
+    enforcement is armed: key set AND (caller claims >= STEAM_AUTH_MIN_VERSION
+    OR the claimed account is per-account armed — see below); otherwise one
+    soft-fail log line. X-Mod-Version is attacker-controlled, so the version
+    check alone is a compatibility carve-out, not a security boundary. Infra
+    failures (table missing mid-deploy, DB blip) are always soft — this must
+    never take down the write path it protects. Internal callers (bot) send
+    no X-Mod-Version, so enforce is always False for them; `request` may be
+    None on direct internal function calls (place_discord_bet → place_bet)."""
+    token = None
+    try:
+        if request is not None:
+            token = request.headers.get("X-Session-Token")
+    except Exception:
+        token = None
+    reason = None
+    if not token:
+        reason = "no_token"
+    else:
+        try:
+            row = (await db.execute(text(
+                "SELECT steam_id, verified, expires_at FROM steam_sessions "
+                "WHERE token_hash = :th"
+            ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
+            if row is None:
+                reason = "unknown_token"
+            elif row["expires_at"] is not None and row["expires_at"] < datetime.now(timezone.utc):
+                reason = "expired"
+            elif not row["verified"]:
+                reason = "unverified"
+            elif row["steam_id"] != steam_id:
+                reason = "steam_id_mismatch"
+        except Exception as ex:
+            print(f"[STEAM-AUTH] session lookup error (soft): {type(ex).__name__}")
+            return
+    if reason is None:
+        return
+    key_set = bool(os.getenv("STEAM_WEB_API_KEY"))
+    # Master soak switch (July 22): even with the key set, enforcement stays
+    # LOG-ONLY until STEAM_AUTH_ENFORCE is turned on. This lets 1.34.0 ship the
+    # full verification pipeline (tokens mint, verify, log) and gather real
+    # success-rate data before anyone can be locked out of a core action by a
+    # Steam-ticket hiccup. Flip STEAM_AUTH_ENFORCE=1 in .env once the logs show
+    # verification succeeding broadly — one restart arms both the version gate
+    # and per-account arming below. Gates the whole enforce decision.
+    enforce_armed = os.getenv("STEAM_AUTH_ENFORCE", "").strip().lower() in ("1", "true", "yes", "on")
+    enforce = enforce_armed and key_set and \
+        _parse_version(_current_mod_version.get() or "0") >= _parse_version(STEAM_AUTH_MIN_VERSION)
+    if enforce_armed and key_set and not enforce and request is not None:
+        # Per-ACCOUNT arming: an account that provably runs a ticket-auth
+        # client (any verified=true session issued in the last 7 days) cannot
+        # be downgraded to no-auth by omitting the header/token or claiming
+        # an old X-Mod-Version — the version carve-out exists for accounts
+        # that genuinely can't mint tickets yet, not as a per-request opt-out.
+        # Single indexed SELECT on steam_id (ix_steam_sessions_steam_id);
+        # lookup failure stays soft like everything else here. request=None
+        # (direct internal calls, place_discord_bet → place_bet) skips arming:
+        # identity there is established by Discord linkage, not a client
+        # token, and an external attacker always arrives WITH a Request.
+        try:
+            armed = (await db.execute(text(
+                "SELECT 1 FROM steam_sessions WHERE steam_id = :sid "
+                "AND verified AND issued_at > NOW() - INTERVAL '7 days' LIMIT 1"
+            ), {"sid": steam_id})).scalar() is not None
+            if armed:
+                enforce = True
+        except Exception as ex:
+            print(f"[STEAM-AUTH] per-account arm lookup error (soft): {type(ex).__name__}")
+    if enforce:
+        raise HTTPException(status_code=401, detail="session_required")
+    path = ""
+    try:
+        if request is not None:
+            path = request.url.path
+    except Exception:
+        pass
+    print(f"[STEAM-AUTH] soft-fail path={path} claimed={steam_id} reason={reason}")
 
 
 # ── Routes: Ranked Queue ──────────────────────────────────────
@@ -3488,11 +4131,12 @@ def compute_elo_range(wait_seconds: int) -> int:
 
 
 @app.post("/api/v1/queue/join", tags=["Queue"])
-async def queue_join(req: QueueJoinRequest, db: AsyncSession = Depends(get_db)):
+async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """
     Join the ranked matchmaking queue.
     Upserts the player into ranked_queue with status='searching'.
     """
+    await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
     # Banned players can't queue. Let them load the leaderboard so they see the status.
     await _check_ban_or_raise(db, req.steam_id)
@@ -4358,19 +5002,17 @@ async def report_disconnect(
     # F5 hardening: this endpoint was fully unauthenticated — anyone could loop it
     # to inflate any rival's ranked_dc_count (which feeds the leave-% denominator,
     # learning #37). Bind it to reality server-side: the two players must actually
-    # share a RECENT ranked series, and the same DC can't be counted twice for the
-    # same series. (Full HMAC signing lands with the 1.28.2 client; this closes the
-    # raw-curl / replay abuse without needing the client.)
-    recent = (await db.execute(text(
-        "SELECT rs.id FROM ranked_series rs "
-        "WHERE rs.created_at > NOW() - INTERVAL '20 minutes' "
-        "  AND ((rs.player1_id = :a AND rs.player2_id = :b) "
-        "    OR (rs.player1_id = :b AND rs.player2_id = :a)) "
-        "ORDER BY rs.created_at DESC LIMIT 1"
-    ), {"a": reporter.id, "b": disconnected.id})).first()
-    if not recent:
-        raise HTTPException(status_code=403, detail="no recent shared ranked series for this DC report")
-    series_id = recent[0]
+    # share a CURRENT ranked series, and the same DC can't be counted twice for the
+    # same series. July 20 item 4: uses the shared _find_current_active_series
+    # helper instead of a created_at-20min window — a resumed series (created
+    # days ago, the whole point of resume-forever) and game 3 of a long BO3
+    # both have ancient created_at, and the old gate 403'd exactly the leaver-
+    # accountability DCs the FAQ promises to record. The per-series dedup
+    # below still prevents replay inflation.
+    series = await _find_current_active_series(db, reporter.id, disconnected.id)
+    if series is None:
+        raise HTTPException(status_code=403, detail="no current shared ranked series for this DC report")
+    series_id = series.id
     # Per-series dedup: one DC increment per (series, disconnected player). A
     # FlaggedMatch-style marker row would be heavier; reuse AdminAction's audit
     # table is wrong here, so dedup via a dc-events guard on ranked_dc_count by
@@ -5246,27 +5888,30 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
                             batches: int = Query(0, ge=0, le=4),
                             db: AsyncSession = Depends(get_db)):
     """Most recently added shop items, for the Home tab's 'newest cosmetics'
-    panel (v1.33). Excludes achievement-pool items and not-for-sale-yet
-    artist items (stock_limit = -1). batches > 0 restricts the result to the
-    N most recent cosmetic-update days (items ship in batches; grouping by
-    created_at::date recovers the batch) — the Home tab shows the last two.
-    Key order is load-bearing for the mod's manual parser: sku first,
-    artist_name last within each entry."""
+    panel (v1.33). Excludes achievement-pool items. Not-yet-opened artist
+    items (stock_limit = -1) ARE included with on_sale=false (July 17 round
+    4 — Sid: a "newest cosmetics" panel that can't show a brand-new drop
+    until the artist opens sales is backwards; the Shop tab already lists
+    them as not-opened, so the showcase teases them as "coming soon").
+    batches > 0 restricts the result to the N most recent cosmetic-update
+    days (items ship in batches; grouping by day recovers the batch) — the
+    Home tab shows the last two. Key order is load-bearing for the mod's
+    manual parser: sku first, artist_name last within each entry."""
     # "When it shipped" = released_at when the item was stock-gated at birth
     # (artist items open sales later; migration 131), else created_at.
     rows = (await db.execute(text("""
         SELECT si.sku, si.kind, si.name, si.rarity, si.price, si.preview_color,
+               si.stock_limit,
                to_char(COALESCE(si.released_at, si.created_at), 'Mon FMDD') AS added,
                COALESCE(ap.display_name, '') AS artist_name
         FROM shop_items si
         LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
         WHERE si.rotation_pool IS NULL
-          AND COALESCE(si.stock_limit, 0) >= 0
           AND (:batches = 0 OR COALESCE(si.released_at, si.created_at)::date IN (
                 SELECT d FROM (
                     SELECT DISTINCT COALESCE(released_at, created_at)::date AS d
                     FROM shop_items
-                    WHERE rotation_pool IS NULL AND COALESCE(stock_limit, 0) >= 0
+                    WHERE rotation_pool IS NULL
                     ORDER BY d DESC LIMIT :batches
                 ) recent_days))
         ORDER BY COALESCE(si.released_at, si.created_at) DESC
@@ -5278,6 +5923,7 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
              "rarity": r["rarity"], "price": r["price"],
              "preview_color": r["preview_color"] or "",
              "added": r["added"] or "",
+             "on_sale": (r["stock_limit"] or 0) >= 0,
              "artist_name": r["artist_name"] or ""}
             for r in rows
         ]
@@ -5316,6 +5962,7 @@ async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/v1/shop/purchase", tags=["Shop"])
 async def purchase_item(
+    request: Request,
     steam_id: str = Query(...),
     sku: str = Query(...),
     sig: str = Query(...),
@@ -5323,6 +5970,7 @@ async def purchase_item(
 ):
     """Buy an item. HMAC signs 'buy:{steam_id}:{sku}'. Server rejects if:
     already-owned, not enough gold, or item doesn't exist."""
+    await _check_steam_session(request, steam_id, db)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
@@ -5763,7 +6411,7 @@ async def _refund_series_bets(db: AsyncSession, sid, reason: str = "refund_aband
 
 
 async def _prune_stale_series(db: AsyncSession) -> int:
-    """Clean up stale series. Three modes:
+    """Clean up stale series. Two modes:
       1. **No match reported within 30 min of creation** — players never
          actually played anything (preflight created the series row but the
          room died before round 1). Series abandoned + bets refunded.
@@ -5772,10 +6420,10 @@ async def _prune_stale_series(db: AsyncSession) -> int:
          'active' so the pair can resume it across sessions (bug #43). The
          refunded bets stay refunded even if the series later completes —
          _settle_series_bets only touches settled_at IS NULL rows.
-      3. **Undecided series with no activity for SERIES_RESUME_WINDOW_DAYS**
-         — the resume window has lapsed; abandon for the audit trail (any
-         bets were already refunded by mode 2, the refund here is a no-op
-         safety net).
+
+    There is deliberately NO expiry mode (July 20 item 4): an undecided
+    mid-BO3 stays 'active' forever so it reattaches whenever the pair next
+    plays — a 7-day expiry let leavers wait out the window and bank the elo.
 
     Tournament series are exempt from ALL paths — async tournament matches
     have a 7-day match deadline and the series row is created at lock time
@@ -5806,27 +6454,13 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         "      ), rs.created_at) < NOW() - (:stalled_min || ' minutes')::interval "
         "LIMIT 50"
     ), {"stalled_min": str(stalled_min)})).all()
-    # Mode 3: resume window lapsed → abandon.
-    stale_rows_c = (await db.execute(text(
-        "SELECT rs.id FROM ranked_series rs "
-        "WHERE rs.status = 'active' "
-        "  AND rs.is_tournament = FALSE "
-        "  AND rs.p1_series_wins < 2 "
-        "  AND rs.p2_series_wins < 2 "
-        "  AND EXISTS (SELECT 1 FROM matches m WHERE m.series_id = rs.id) "
-        "  AND COALESCE(("
-        "        SELECT MAX(m.ended_at) FROM matches m WHERE m.series_id = rs.id"
-        "      ), rs.created_at) < NOW() - (:resume_days || ' days')::interval "
-        "LIMIT 50"
-    ), {"resume_days": str(SERIES_RESUME_WINDOW_DAYS)})).all()
     changed = 0
     for (sid,) in stale_rows_b:
         n = await _refund_series_bets(db, sid, "refund_abandoned")
         if n:
             changed += 1
             print(f"[SERIES] refunded {n} bet(s) on stalled series {sid} (series stays resumable)")
-    abandon_rows = [(sid, "no_match_reported") for (sid,) in stale_rows_a] \
-                 + [(sid, "series_expired") for (sid,) in stale_rows_c]
+    abandon_rows = [(sid, "no_match_reported") for (sid,) in stale_rows_a]
     for (sid, prune_reason) in abandon_rows:
         n = await _refund_series_bets(db, sid, "refund_abandoned")
         await db.execute(text(
@@ -6277,8 +6911,13 @@ async def place_bet(
     amount: int = Query(..., ge=1, le=2000),  # max bet 2000g (Sid, 2026-07-06)
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
+    # Default None so place_discord_bet's direct internal call (no HTTP
+    # request in hand) still works; FastAPI injects the real Request on the
+    # HTTP path regardless of the default.
+    request: Request = None,
 ):
     """Place a bet. HMAC signs 'bet:{steam_id}:{series_id}:{bet_on_steam_id}:{amount}'."""
+    await _check_steam_session(request, steam_id, db)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
@@ -6385,6 +7024,7 @@ async def place_bet(
 
 @app.post("/api/v1/team-bets", tags=["Betting"])
 async def place_team_bet(
+    request: Request,
     steam_id: str = Query(...),
     team_series_id: str = Query(...),
     bet_on_team: int = Query(..., ge=1, le=2),
@@ -6397,6 +7037,7 @@ async def place_team_bet(
     Mirrors `place_bet` for 1v1 — same odds-uncertainty floor (>=1.10x),
     same one-bet-per-series-per-player rule, same gold debit-now /
     credit-on-settle flow."""
+    await _check_steam_session(request, steam_id, db)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
@@ -7364,6 +8005,131 @@ async def ack_pending_dms(
     return {"acked": res.rowcount or 0}
 
 
+# ── Routes: LFP Discord ping (July 21) ───────────────────────
+# In-game "LFP Ping" button → POST /lfp-ping queues a row in lfp_pings; the
+# bot's poll_lfp_pings loop drains it into the queue-beacon channel with a
+# role ping (durable ack pattern, learning #105 family). The table doubles as
+# the 1-hour cooldown store (MAX(created_at) per steam_id — survives
+# restarts, multi-worker-safe, learning #125). ALL gate outcomes are HTTP 200
+# with a status field: the client's PostRequest only surfaces request.error
+# on non-2xx, so a 429-style design would show "HTTP/1.1 429" with no
+# remaining-time info.
+
+LFP_COOLDOWN_SECONDS = 3600
+LFP_VALID_EXPIRY_MINUTES = (15, 30, 60, 180)
+
+
+class LfpPingRequest(BaseModel):
+    steam_id: str = Field(..., max_length=20)
+    message: str = Field("", max_length=300)
+    expires_minutes: int = 60
+
+
+@app.post("/api/v1/lfp-ping", tags=["Players"])
+async def lfp_ping(req: LfpPingRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """Queue a 'Looking For Player' Discord role ping for a linked player."""
+    # Session enforcement (mirrors unlock_achievement): the output is a public
+    # Discord post under the claimed player's name + mention, so a spoofed
+    # steam_id here is an impersonation/harassment surface once armed.
+    await _check_steam_session(request, req.steam_id, db)
+    exp_min = req.expires_minutes if req.expires_minutes in LFP_VALID_EXPIRY_MINUTES else 60
+    player = (await db.execute(
+        select(Player).where(Player.steam_id == req.steam_id)
+    )).scalar_one_or_none()
+    if player is None or player.deleted_at is not None or not player.discord_id:
+        return {"status": "not_linked"}
+    if not player.ranked_enabled:
+        return {"status": "ranked_disabled"}
+    elapsed = (await db.execute(text(
+        "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::int "
+        "  FROM lfp_pings WHERE steam_id = :sid"
+    ), {"sid": req.steam_id})).scalar()
+    if elapsed is not None and int(elapsed) < LFP_COOLDOWN_SECONDS:
+        return {"status": "cooldown", "seconds_left": LFP_COOLDOWN_SECONDS - int(elapsed)}
+    # Sanitize the message (defense-in-depth on top of the bot's
+    # allowed_mentions, which is the real anti-injection gate): angle brackets
+    # → parens kills <@id>/<@&id>/<#ch> syntax (mirrors _sanitize_item_text),
+    # @everyone/@here neutered case-insensitively, link-shaped text stripped
+    # (the trusted bot account must never relay attacker URLs — the bot also
+    # sends suppress_embeds=True as a second layer), newlines collapsed, 200
+    # char clamp.
+    msg = (req.message or "").replace("<", "(").replace(">", ")")
+    msg = _re.sub(r"@everyone", "everyone", msg, flags=_re.IGNORECASE)
+    msg = _re.sub(r"@here", "here", msg, flags=_re.IGNORECASE)
+    msg = _re.sub(r"(?i)\b(?:https?://|www\.|discord(?:app)?\.(?:gg|com/invite)/)\S+",
+                  "(link removed)", msg)
+    msg = _re.sub(r"[\r\n]+", " ", msg).strip()[:200]
+    await db.execute(text(
+        "INSERT INTO lfp_pings (steam_id, message, expires_minutes, expires_at) "
+        "VALUES (:sid, :msg, :m, NOW() + make_interval(mins => :m))"
+    ), {"sid": req.steam_id, "msg": msg, "m": exp_min})
+    await db.commit()
+    return {"status": "queued", "cooldown_seconds": LFP_COOLDOWN_SECONDS}
+
+
+@app.get("/api/v1/internal/lfp-pings", tags=["Internal"])
+async def internal_lfp_pings(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-poll endpoint: pending LFP role pings. Serializes the pk as
+    "ping_id" and precomputes "expires_unix" server-side — the bot reads the
+    exact same keys (learning #152). The expires_at > NOW() filter self-heals
+    stale rows (they still count for the cooldown, which reads created_at)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    rows = (await db.execute(text("""
+        SELECT l.id AS ping_id, l.steam_id, l.message,
+               EXTRACT(EPOCH FROM l.expires_at)::bigint AS expires_unix,
+               p.discord_id, p.display_name
+          FROM lfp_pings l
+          LEFT JOIN players p ON p.steam_id = l.steam_id
+         WHERE l.posted_at IS NULL AND NOT l.undeliverable AND l.expires_at > NOW()
+      ORDER BY l.created_at ASC
+         LIMIT 20"""))).mappings().all()
+    return {
+        "pings": [
+            {
+                "ping_id": str(r["ping_id"]),
+                "steam_id": r["steam_id"],
+                "message": r["message"] or "",
+                "expires_unix": int(r["expires_unix"]) if r["expires_unix"] is not None else 0,
+                "discord_id": r["discord_id"],
+                "display_name": r["display_name"] or "",
+            }
+            for r in rows
+        ],
+    }
+
+
+class _LfpPingAck(BaseModel):
+    ping_ids: list[str]
+    undeliverable: bool = False
+
+
+@app.post("/api/v1/internal/lfp-pings/ack", tags=["Internal"])
+async def ack_lfp_pings(
+    body: _LfpPingAck,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bot-only: mark LFP pings posted (or permanently undeliverable) so the
+    pending poll stops returning them (mirror of the pending-dms ack)."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    ids = [i for i in body.ping_ids[:200] if i]
+    if not ids:
+        return {"acked": 0}
+    res = await db.execute(text(
+        "UPDATE lfp_pings SET posted_at = NOW(), undeliverable = :und "
+        "WHERE id::text = ANY(:ids) AND posted_at IS NULL"
+    ), {"ids": ids, "und": bool(body.undeliverable)})
+    await db.commit()
+    return {"acked": res.rowcount or 0}
+
+
 # ── Routes: Privacy ──────────────────────────────────────────
 
 @app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
@@ -7442,10 +8208,22 @@ async def delete_player_data(steam_id: str, sig: str = Query(...), db: AsyncSess
 # v1.22.6 — achievements are rare events and 25g felt token; 100g actually buys something.
 ACHIEVEMENT_GOLD = 100
 
-# Per-key payout overrides (v1.32): the slayer achievements are community-boss
-# bounties and pay 10x the uniform reward. Existing earners were topped up by
-# migration 123. Every payout site must go through _achievement_gold().
-ACHIEVEMENT_GOLD_OVERRIDES = {"regicide": 1000, "stan_slayer": 1000}
+# Per-key payout tiers (July 21): 1000 for the near-impossible tier, 500 for
+# very hard, 300 for hard; every key not listed pays the uniform 100. The
+# slayers keep their v1.32 1000g (topped up by migration 123); the new tiers
+# were backfilled for existing earners by migration 138 (delta-based, so
+# nobody gets double-paid). Every payout site must go through
+# _achievement_gold().
+ACHIEVEMENT_GOLD_OVERRIDES = {
+    # 1000g — near-impossible
+    "regicide": 1000, "stan_slayer": 1000, "grand_master": 1000, "touch_grass": 1000,
+    # 500g — very hard
+    "master_rank": 500, "team_sweep": 500, "rise_from_the_ashes": 500,
+    "casual_conqueror": 500, "twins": 500, "immortal": 500,
+    # 300g — hard
+    "stacked_deck": 300, "flawless": 300, "silent_drill": 300,
+    "deep_end": 300, "casual_century": 300, "unstoppable": 300,
+}
 
 # The only achievements the game client is allowed to unlock through
 # POST /achievements/unlock — the exact set GameStateWatcher self-reports
@@ -7764,6 +8542,55 @@ async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_
     return AchievementListResponse(steam_id=steam_id, achievements=entries)
 
 
+@app.get("/api/v1/achievements/{key}/earners", tags=["Achievements"])
+async def get_achievement_earners(key: str, db: AsyncSession = Depends(get_db)):
+    """Who has earned this achievement (July 21, Achievements-tab click-
+    through). Public read — same exposure as the leaderboard (steam_id +
+    display_name + rating + title; deleted players filtered). July 22 (Sid):
+    ordered by WHO GOT IT FIRST (unlocked_at ASC), and each earner carries
+    their displayed title (same shop_items join + _display_title_sync
+    resolution as the leaderboard). idx_pa_key keeps the scan cheap. Path
+    shape (an extra segment) can't collide with /achievements/{steam_id}."""
+    if key not in ACHIEVEMENT_DEFS:
+        raise HTTPException(status_code=404, detail=f"Unknown achievement: {key}")
+    rows = (await db.execute(text("""
+        SELECT p.id AS player_id, p.display_name, p.steam_id, pa.unlocked_at,
+               ROUND(gr.rating::numeric, 0) AS rating,
+               si.name          AS title,
+               si.preview_color AS title_color,
+               si.sku           AS title_sku
+          FROM player_achievements pa
+          JOIN players p ON p.id = pa.player_id AND p.deleted_at IS NULL
+          LEFT JOIN glicko_ratings gr ON gr.player_id = pa.player_id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+         WHERE pa.achievement_key = :key
+      ORDER BY pa.unlocked_at ASC NULLS LAST
+         LIMIT 100"""), {"key": key})).mappings().all()
+    _colors = await _rank_colors(db)
+    _pmap = await _podium_map(db) if any(
+        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
+    earners = []
+    for r in rows:
+        _title, _title_color = _display_title_sync(
+            _colors, r["title_sku"], r["title"], r["title_color"],
+            float(r["rating"]) if r["rating"] is not None else None,
+            podium_pos=_pmap.get(r["player_id"]))
+        earners.append({
+            "display_name": r["display_name"],
+            "steam_id": r["steam_id"],
+            "rating": int(r["rating"]) if r["rating"] is not None else None,
+            "unlocked_at": r["unlocked_at"].isoformat() if r["unlocked_at"] else None,
+            "title": _title,
+            "title_color": _title_color,
+        })
+    return {
+        "achievement_key": key,
+        "name": ACHIEVEMENT_DEFS[key].get("name"),
+        "gold": _achievement_gold(key),
+        "earners": earners,
+    }
+
+
 # Steam-style global achievement stats: % of MOD USERS who have unlocked each
 # achievement. Denominator = players with mod_seen_at set (their client has
 # actually run the mod). Counting every player row massively deflated the
@@ -7804,8 +8631,9 @@ async def _achievement_global_pcts(db: AsyncSession) -> dict[str, float]:
 
 
 @app.post("/api/v1/achievements/unlock", tags=["Achievements"])
-async def unlock_achievement(req: AchievementUnlockRequest, db: AsyncSession = Depends(get_db)):
+async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Unlock an achievement for a player. Idempotent — re-unlocking is a no-op."""
+    await _check_steam_session(request, req.steam_id, db)
     if req.achievement_key not in ACHIEVEMENT_DEFS:
         raise HTTPException(status_code=400, detail=f"Unknown achievement: {req.achievement_key}")
     # Only CLIENT-detected achievements may come through this endpoint — the
@@ -8745,9 +9573,12 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
             g.rating = float(g.rating) - float(rc)
             g.updated_at = datetime.now(timezone.utc)
 
+    # July 20 item 6: also claw back the new loser-side series gold — the 2v2
+    # counterpart already reverses win AND loss reasons; without series_loss
+    # here a colluding pair keeps the loser payout through every reversal.
     txns = (await db.execute(
         select(GoldTransaction).where(
-            GoldTransaction.reason == "series_win",
+            GoldTransaction.reason.in_(["series_win", "series_loss"]),
             GoldTransaction.reference_id == str(series.id),
         )
     )).scalars().all()
@@ -8963,9 +9794,10 @@ def _team_balance_rating(rating: float, completed_series: int, fallback_rating: 
 
 
 @app.post("/api/v1/team/queue/join", tags=["Team Queue"])
-async def team_queue_join(req: TeamQueueJoinRequest, db: AsyncSession = Depends(get_db)):
+async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Upsert player into team_queue. Snapshots their 2v2 + 1v1 ratings so the
     balancer at lock-time uses queue-join values (not drifted live ratings)."""
+    await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
     await _check_ban_or_raise(db, req.steam_id)
     name = req.display_name or req.steam_id
@@ -10032,11 +10864,17 @@ async def _complete_team_series_with_ratings(
     )
 
     # ── Series-completion gold (+50 win / +25 loss) + per-slot accumulator ──
+    # July 20 item 6: scaled by the opposing team's tier, same formula as the
+    # inline submit path (learning #77 family: DC-decided series must pay
+    # identically). `inputs` holds the pre-update rating snapshot.
+    _t1_avg_rating = (inputs[t1a_id]["rating"] + inputs[t1b_id]["rating"]) / 2.0
+    _t2_avg_rating = (inputs[t2a_id]["rating"] + inputs[t2b_id]["rating"]) / 2.0
     bonus_by_pid = {}
     for pid in gids:
         player_team = 1 if pid in (t1a_id, t1b_id) else 2
         won_series = (player_team == winner_team)
-        bonus = TEAM_SERIES_WIN_GOLD if won_series else TEAM_SERIES_LOSS_GOLD
+        _s_mult, _ = _tier_mult_for(_t2_avg_rating if player_team == 1 else _t1_avg_rating)
+        bonus = int((TEAM_SERIES_WIN_GOLD if won_series else TEAM_SERIES_LOSS_GOLD) * _s_mult)
         await db.execute(
             text("UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:g, "
                  "team_gold_earned=COALESCE(team_gold_earned,0)+:g WHERE id=:pid"),
@@ -10740,9 +11578,10 @@ class _OvtQueueJoinReq(BaseModel):
 
 
 @app.post("/api/v1/ovt/queue/join", tags=["1v2 Queue"])
-async def ovt_queue_join(req: _OvtQueueJoinReq, db: AsyncSession = Depends(get_db)):
+async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSession = Depends(get_db)):
     """Join the 1v2 manual lobby (consent queue — no Elo band). Idempotent per
     player; re-joining refreshes preferences and the poll timestamp."""
+    await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
     player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
@@ -11127,10 +11966,11 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
 
 
 @app.post("/api/v1/ovt/matches", response_model=OvtMatchResponse, tags=["1v2 Matches"])
-async def submit_ovt_match(report: OvtMatchReport, db: AsyncSession = Depends(get_db)):
+async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """Record one 1v2 game. Advances the series (first to 2), applies gold+XP
     (NO rating at launch), stores the full replay surface. Concurrency-safe:
     the series completion path locks the row and re-checks status (#78)."""
+    await _check_steam_session(request, report.reported_by_steam_id, db)
     if not _verify_ovt_hmac(report):
         raise HTTPException(403, "Invalid 1v2 match signature")
     try:
@@ -11390,10 +12230,11 @@ async def ovt_leaderboard(limit: int = 200, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/v1/team/matches", response_model=TeamMatchResponse, tags=["Team Matches"])
-async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(get_db)):
+async def submit_team_match(report: TeamMatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """Submitted by the lowest-Steam-ID participant after a 2v2 game ends.
     HMAC verifies the canonical 11-field message. On series completion, applies
     Glicko-2 update to all 4 players (each player has 2 opponents = the other team)."""
+    await _check_steam_session(request, report.reported_by_steam_id, db)
     if not _verify_team_hmac(report):
         raise HTTPException(403, "Invalid team match signature")
     try:
@@ -11521,12 +12362,26 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
     # can render +Ng/+Nxp beside each player's name in their own series).
     series_xp_by_pid: dict = {}
     series_gold_by_pid: dict = {}
+    # July 20 item 6: opposing-TEAM tier multiplier (avg of the two opposing
+    # players' 2v2 ratings, pre-update — 2v2 Glicko only applies at series
+    # completion, later than this block). Missing rating rows default 1500.
+    _t2v2_ratings: dict = {}
+    try:
+        _t2v2_rows = (await db.execute(text(
+            "SELECT player_id, rating FROM glicko_ratings_2v2 WHERE player_id IN (:a, :b, :c, :d)"
+        ), {"a": str(p_t1a.id), "b": str(p_t1b.id), "c": str(p_t2a.id), "d": str(p_t2b.id)})).all()
+        _t2v2_ratings = {str(r[0]): float(r[1]) for r in _t2v2_rows}
+    except Exception as _rex:
+        print(f"[TEAM-ECON] 2v2 tier-mult rating fetch failed (defaulting x1.0): {_rex}")
+    _t1_avg_rating = (_t2v2_ratings.get(str(p_t1a.id), 1500.0) + _t2v2_ratings.get(str(p_t1b.id), 1500.0)) / 2.0
+    _t2_avg_rating = (_t2v2_ratings.get(str(p_t2a.id), 1500.0) + _t2v2_ratings.get(str(p_t2b.id), 1500.0)) / 2.0
     try:
         team_match_winner = report.winner_team
         for p in (p_t1a, p_t1b, p_t2a, p_t2b):
             p_team = 1 if p.id in (p_t1a.id, p_t1b.id) else 2
             won_match = (p_team == team_match_winner)
-            xp = TEAM_MATCH_XP_BASE
+            _opp_mult, _ = _tier_mult_for(_t2_avg_rating if p_team == 1 else _t1_avg_rating)
+            xp = int(TEAM_MATCH_XP_BASE * _opp_mult)
             if won_match:
                 xp = int(xp * TEAM_MATCH_WIN_MULT)
             old_xp_q = await db.execute(text("SELECT total_xp FROM players WHERE id = :pid"), {"pid": p.id})
@@ -11767,7 +12622,10 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
             },
         )
 
-        # Series-completion gold: +50g winner, +25g loser. Also folded into
+        # Series-completion gold: +50g winner, +25g loser, scaled by the
+        # opposing team's tier (July 20 item 6 — the 50-vs-25 split already
+        # encodes the "winning doubles" rule; uses the PRE-update team-average
+        # ratings fetched for the per-game multiplier). Also folded into
         # the team_series per-slot gold accumulator so the F5 panel can
         # render "+Ng / +Nxp" beside each player.
         bonus_by_pid = {}
@@ -11775,7 +12633,8 @@ async def submit_team_match(report: TeamMatchReport, db: AsyncSession = Depends(
             for p in (p_t1a, p_t1b, p_t2a, p_t2b):
                 player_team = 1 if p.id in (p_t1a.id, p_t1b.id) else 2
                 won_series = (player_team == winner_team)
-                bonus = TEAM_SERIES_WIN_GOLD if won_series else TEAM_SERIES_LOSS_GOLD
+                _s_mult, _ = _tier_mult_for(_t2_avg_rating if player_team == 1 else _t1_avg_rating)
+                bonus = int((TEAM_SERIES_WIN_GOLD if won_series else TEAM_SERIES_LOSS_GOLD) * _s_mult)
                 await db.execute(
                     text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, "
                          "team_gold_earned = COALESCE(team_gold_earned,0) + :g WHERE id = :pid"),

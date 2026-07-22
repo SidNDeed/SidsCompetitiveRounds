@@ -3,6 +3,7 @@ using Photon.Pun;
 using Steamworks;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using UnityEngine;
@@ -18,6 +19,8 @@ namespace CompetitiveRounds
 
         // \u2500\u2500 Match state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         private static bool isTracking = false;
+        // Read-only view for patches that gate diagnostics on "a match is live".
+        public static bool IsTracking => isTracking;
         private static bool wasGameInProgress = false;
         // Pick-phase color apply latch. Fires once per room as soon as both player
         // GOs exist, so body colors render during the very first pick phase (before
@@ -100,6 +103,38 @@ namespace CompetitiveRounds
             ? (int)Math.Round(fpsFrameCount / (double)fpsTimeAccum)
             : 0;
         public static int OpponentAvgFps => opponentAvgFps;
+
+        // ── July 21 item 2: FPS/lag exploit telemetry ─────────────────────
+        // Per-match FPS timelines (own = 5s buckets, opponent = their 3s
+        // broadcast samples), freeze events (window-drag stalls the main
+        // thread; the resume frame carries the whole gap), Photon ping
+        // aggregates, receive-gap events (deliberate NIC-cut "ghost" tell)
+        // and opponent-heartbeat gaps (victim-side view of the same). All
+        // advisory — never in the HMAC, never auto-invalidating.
+        private static readonly List<int> localFpsTimeline = new List<int>();   // cap 90 (7.5 min)
+        private static int tlFrames = 0;
+        private static float tlAccum = 0f;
+        private static int bcFrames = 0;          // frames since last 3s broadcast (instantaneous fps)
+        private static float bcAccum = 0f;
+        private static int gstatsSeq = 0;         // monotonic broadcast counter (heartbeat)
+        private static readonly List<int> oppFpsTimeline = new List<int>();     // cap 128 (511 chars worst case)
+        private static readonly List<int> oppPingTimeline = new List<int>();    // July 22 item 3: opp ping via gstats field 12
+        private static int lastOppGstatsSeq = -1;
+        private static float lastOppSeqAdvanceTime = -1f;
+        private static int localFreezeCount = 0;
+        private static int localFreezeFocusedCount = 0;   // resumed WITH focus = window-drag signature
+        private static float localFreezeTotalSec = 0f;
+        private static readonly List<int> pingSamples = new List<int>();        // 3s cadence, aggregates reported
+        private static int localRecvGapCount = 0;
+        private static int localRecvGapMaxMs = 0;
+        private static bool _recvGapOpen = false;
+        private static int oppHbGapCount = 0;
+        private static bool _oppHbGapOpen = false;
+        private static int oppFreezeCount = 0;            // opponent's own counters via cr_gstats
+        private static int oppFreezeFocusedCount = 0;
+        private static int oppRecvGapCount = 0;
+        private static long _lastTickStopwatchMs = -1;
+        private static readonly System.Diagnostics.Stopwatch _tickStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         // Pre-match card picks (cards picked before isTracking = true)
         // These get moved into localCards when OnMatchStarted fires
@@ -210,8 +245,10 @@ namespace CompetitiveRounds
         //                    (damagingWeapon has a ProjectileHit component — excludes DOT ticks,
         //                    explosion splash, card-effect damage). Bounded per match by the
         //                    _hitsRemaining gate so bullets_hit ≤ bullets_fired always.
-        //   blocks_activated  — alias of LocalBlocksThisMatch (right-click count)
-        //   blocks_successful — Harmony Block.DoBlock → block animations that actually fired
+        //   blocks_activated  — user right-click blocks that fired off-cooldown (TryBlock)
+        //   blocks_successful — right-click activations whose block (or Echo/ShieldCharge
+        //                       follow-on) absorbed a projectile; max 1 per activation,
+        //                       so succ <= act structurally (July 21 item 1 spec)
         public static int LocalBulletsFiredThisMatch { get; private set; }
         public static int LocalBulletsHitThisMatch { get; private set; }
         public static int LocalBlocksActivatedThisMatch { get; private set; }
@@ -221,13 +258,11 @@ namespace CompetitiveRounds
         // spamming on every event. Reset in OnMatchStarted alongside the counters.
         private static bool _loggedFirstFire, _loggedFirstHit, _loggedFirstBlockAct, _loggedFirstBlockOk;
 
-        // Block.DoBlock fires every time the block absorbs a projectile AND when the block
-        // extends (ROUNDS' block gets duration bumps per absorb). Without dedup, this
-        // produces >100% "success rate" in card-heavy matches. A 1.0s cooldown between
-        // credited successes captures "this activation window absorbed at least one bullet"
-        // which matches user-facing semantics. Block cooldown in ROUNDS is ~1.5s by default
-        // so successive activations can't realistically happen inside the dedup window.
-        private static float _lastBlockSuccessTime = -999f;
+        // July 21 item 1 (Stan's spec): max ONE success credit per right-click
+        // activation. Starts TRUE so an absorb arriving before any counted
+        // activation can never credit — succ <= act becomes structural (the old
+        // 1.0s time-dedup let Abyssal-style auto-absorbs produce succ > act).
+        private static bool _activationSuccessCredited = true;
 
         // Per-projectile hit gating. Previous binary gate "arm on click, consume on first hit"
         // produced 1 hit max per trigger-pull, which undercounts shotguns (5 pellets hitting
@@ -289,6 +324,7 @@ namespace CompetitiveRounds
         {
             if (!isTracking || inPickPhase) return;
             LocalBlocksActivatedThisMatch++;
+            _activationSuccessCredited = false;   // each right-click arms exactly one success credit
             LastBlockActivatedTime = Time.time;
             // Retro-classify: did this activation happen right AFTER a hit? That's the
             // "too slow" case. Under 250ms after a hit is human reaction-time territory
@@ -337,20 +373,30 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[BLOCK-DBG] HIT-NOBLK  since_act={sinceAct:F1}s dmg={damage:F1}");
             }
         }
-        public static void OnLocalBlockSuccessful()
+        public static void OnLocalBlockSuccessful(bool userChain)
         {
             if (!isTracking || inPickPhase) return;
             LocalBlockRawAbsorbs++;
             LastBlockAbsorbTime = Time.time;
-            float timeSincePrev = Time.time - _lastBlockSuccessTime;
-            if (timeSincePrev < 1.0f)
+            if (!userChain)
             {
+                // Abyssal BlinkStep / ExtraBlock / Shields Up wiring / revive
+                // blocks — no right-click origin, counts NOWHERE (Stan's spec).
                 LocalBlockDedupeDrops++;
-                LastBlockEventLabel = $"ABSORB (deduped, +{timeSincePrev:F2}s)";
-                Plugin.Log.LogInfo($"[BLOCK-DBG] ABSORB-DEDUP  raw={LocalBlockRawAbsorbs}  since_last_credit={timeSincePrev:F2}s  credited={LocalBlocksSuccessfulThisMatch}");
+                LastBlockEventLabel = "ABSORB (auto-block, not counted)";
+                Plugin.Log.LogInfo($"[BLOCK-DBG] ABSORB-NONUSER  raw={LocalBlockRawAbsorbs}  credited={LocalBlocksSuccessfulThisMatch}");
                 return;
             }
-            _lastBlockSuccessTime = Time.time;
+            if (_activationSuccessCredited)
+            {
+                // This right-click already earned its 1 credit (multi-pellet
+                // absorb, or the initial block AND its echo both absorbing).
+                LocalBlockDedupeDrops++;
+                LastBlockEventLabel = "ABSORB (already credited)";
+                Plugin.Log.LogInfo($"[BLOCK-DBG] ABSORB-DEDUP  raw={LocalBlockRawAbsorbs}  credited={LocalBlocksSuccessfulThisMatch}");
+                return;
+            }
+            _activationSuccessCredited = true;
             LocalBlocksSuccessfulThisMatch++;
             LastBlockSuccessfulTime = Time.time;
             LastBlockEventLabel = $"SUCCESSFUL #{LocalBlocksSuccessfulThisMatch}";
@@ -431,7 +477,7 @@ namespace CompetitiveRounds
                 string opp = string.IsNullOrEmpty(opponentDisplayName) ? "your opponent" : opponentDisplayName;
                 CompetitiveUI.QueueNotification(
                     $"CASUAL match — {opp} has Ranked disabled (fix: F5 top row - Enable)",
-                    new Color(0.85f, 0.8f, 0.5f), 8f);
+                    new Color(0.85f, 0.8f, 0.5f), 12f);
             }
             catch { }
         }
@@ -615,6 +661,230 @@ namespace CompetitiveRounds
 
             PollRoomState();
             PollMatchState();
+            PollRoomlessGameScene();
+        }
+
+        // ── Bug #79 / July 21 item 3: dead-matchmaking detection + AUTO-REQUEUE ──
+        // Yesterday's watchdogs waited 30-45s then bailed to the MENU; Sid: way
+        // too slow, and players want back in the QUEUE. New shape: detect the
+        // dead state within ~1-12s (three predicates below), then run a small
+        // state machine that kills any in-flight region sweep, NetworkRestarts
+        // to a clean menu scene (the persistent host behaviour survives the
+        // reload), and re-invokes vanilla's own QuickMatch() — the exact method
+        // the menu button calls. Vanilla's invite pipeline proves restart-first
+        // is mandatory: QuickMatch from a stale scene hangs WaitForConnect
+        // forever (isConnectedToMaster never sets while still joined).
+        //
+        // Predicates (all excluded while: OfflineMode, mod pending room/slots,
+        // LeavingForRanked, a live match, escape menu open, vanilla restart in
+        // flight, or the machine already running):
+        //   A. roomless game scene + sweep coroutine running  → 1s confirm
+        //   B. roomless game scene, connection state STABLE 1.5s (a live sweep
+        //      never sits still — prod logs show constant state churn) → 3s
+        //   C. full vanilla room, 2+ players, game never started → 12s
+        //      (legit window is ~3s: RPCA_FoundGame + 2.5s jingle)
+        // Non-quickplay contexts (room codes, host, invite) skip the requeue
+        // and get the old fast return-to-menu instead.
+        private enum RqPhase { Idle, KillSweep, Restarting, AwaitMenu, Settle, Queue }
+        private static RqPhase rqPhase = RqPhase.Idle;
+        private static float rqPhaseAt;
+        private static bool rqQuickmatch;          // detected context was vanilla quickplay
+        private static bool rqForcedGoToMenu;
+        private static int rqAttemptsWindow;
+        private static float rqWindowStart = -1f;
+        private static float roomlessSince = -1f;
+        private static float fullRoomNoGameSince = -1f;
+        private static object _lastClientState;
+        private static float _clientStateChangedAt;
+
+        private static void PollRoomlessGameScene()
+        {
+            try
+            {
+                if (rqPhase != RqPhase.Idle) { TickRequeueMachine(); return; }
+
+                // Shared exclusions — any true resets all detection timers.
+                bool excluded = PhotonNetwork.OfflineMode
+                                || !string.IsNullOrEmpty(Plugin.PendingRankedRoom)
+                                || Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0
+                                || LeavingForRanked
+                                || isTracking;
+                try { excluded = excluded || EscapeMenuHandler.isEscMenu; } catch { }
+                try { excluded = excluded || (NetworkConnectionHandler.instance != null && NetworkConnectionHandler.instance.m_restarting); } catch { }
+                if (excluded) { roomlessSince = -1f; fullRoomNoGameSince = -1f; return; }
+
+                // Track connection-state stability (predicate B discriminator).
+                try
+                {
+                    var st = PhotonNetwork.NetworkClientState;
+                    if (!st.Equals(_lastClientState)) { _lastClientState = st; _clientStateChangedAt = Time.unscaledTime; }
+                }
+                catch { }
+
+                // A + B: game scene alive with no room.
+                bool roomless = GM_ArmsRace.instance != null && !PhotonNetwork.InRoom;
+                if (!roomless) roomlessSince = -1f;
+                else
+                {
+                    if (roomlessSince < 0f) roomlessSince = Time.unscaledTime;
+                    float held = Time.unscaledTime - roomlessSince;
+                    bool sweep = QuickplayChurnAbandonGuardPatch.SweepActive;
+                    bool stateStable = Time.unscaledTime - _clientStateChangedAt >= 1.5f;
+                    if ((sweep && held >= 1f) || (!sweep && stateStable && held >= 3f))
+                    {
+                        FireRequeue(sweep ? "roomless+sweep" : "roomless-stable");
+                        return;
+                    }
+                }
+
+                // C: full vanilla room, game never started.
+                bool fullNoGame = false;
+                if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
+                    && PhotonNetwork.CurrentRoom.PlayerCount >= 2
+                    && GM_ArmsRace.instance == null)
+                {
+                    string rn = PhotonNetwork.CurrentRoom.Name ?? "";
+                    var props = PhotonNetwork.CurrentRoom.CustomProperties;
+                    bool modRoom = rn.StartsWith("ranked_") || rn.StartsWith("sct-") || rn.StartsWith("ovt_")
+                                   || (props != null && props.ContainsKey("cr_ff"));
+                    fullNoGame = !modRoom;
+                }
+                if (!fullNoGame) { fullRoomNoGameSince = -1f; return; }
+                if (fullRoomNoGameSince < 0f) { fullRoomNoGameSince = Time.unscaledTime; return; }
+                if (Time.unscaledTime - fullRoomNoGameSince >= 12f)
+                    FireRequeue("full-room-no-game");
+            }
+            catch { roomlessSince = -1f; fullRoomNoGameSince = -1f; }
+        }
+
+        private static void FireRequeue(string why)
+        {
+            roomlessSince = -1f; fullRoomNoGameSince = -1f;
+            // Context fork: only vanilla quickplay searches get auto-requeued.
+            int searching = 0;
+            try { searching = (int)NetworkConnectionHandler.instance.m_searchingType; } catch { }
+            rqQuickmatch = searching == 1
+                           && (Plugin.AutoRequeueOnMatchmakingBug == null || Plugin.AutoRequeueOnMatchmakingBug.Value);
+            // Loop cap: max 2 auto-requeues per rolling 5 minutes, else a
+            // region/Photon outage would ping-pong the player forever.
+            if (rqQuickmatch)
+            {
+                if (rqWindowStart < 0f || Time.unscaledTime - rqWindowStart > 300f)
+                {
+                    rqWindowStart = Time.unscaledTime; rqAttemptsWindow = 0;
+                }
+                if (++rqAttemptsWindow > 2)
+                {
+                    rqQuickmatch = false;
+                    Plugin.Log.LogWarning("[QUICKPLAY-GUARD] requeue loop cap hit — returning to menu instead");
+                    try { CompetitiveUI.ShowNotification("Matchmaking keeps failing - returning to menu. Please try again in a minute.", new Color(1f, 0.5f, 0.4f), 8f); } catch { }
+                }
+            }
+            Plugin.Log.LogWarning($"[QUICKPLAY-GUARD] dead matchmaking state ({why}) — {(rqQuickmatch ? "auto-requeue" : "returning to menu")}");
+            if (rqQuickmatch)
+            {
+                try { CompetitiveUI.ShowNotification("Matchmaking bug detected - putting you back in the quickplay queue...", new Color(1f, 0.8f, 0.3f), 6f); } catch { }
+            }
+            else
+            {
+                try { CompetitiveUI.ShowNotification("Connection was lost - returning to menu.", new Color(1f, 0.8f, 0.3f), 6f); } catch { }
+            }
+            rqForcedGoToMenu = false;
+            rqPhase = RqPhase.KillSweep;
+            rqPhaseAt = Time.unscaledTime;
+        }
+
+        private static void TickRequeueMachine()
+        {
+            float now = Time.unscaledTime;
+            // Abort if the mod's ranked flow claimed the connection mid-recovery.
+            if (!string.IsNullOrEmpty(Plugin.PendingRankedRoom) || Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0)
+            {
+                Plugin.Log.LogInfo("[QUICKPLAY-GUARD] requeue aborted — mod pending room armed");
+                rqPhase = RqPhase.Idle;
+                return;
+            }
+            switch (rqPhase)
+            {
+                case RqPhase.KillSweep:
+                    QuickplayChurnAbandonGuardPatch.AbortSweep = true;
+                    if (!QuickplayChurnAbandonGuardPatch.SweepActive || now - rqPhaseAt > 1f)
+                    {
+                        bool alreadyRestarting = false;
+                        try { alreadyRestarting = NetworkConnectionHandler.instance != null && NetworkConnectionHandler.instance.m_restarting; } catch { }
+                        if (alreadyRestarting)
+                        {
+                            // Pre-existing hung restart (the bug-#37 forever state):
+                            // m_restarting is consumed and NetworkRestart would no-op.
+                            // Disconnect + direct scene reload instead.
+                            Plugin.Log.LogWarning("[QUICKPLAY-GUARD] vanilla restart already hung — Disconnect + GoToMenu fallback");
+                            try { PhotonNetwork.Disconnect(); } catch { }
+                            try { GameManager.instance.GoToMenu(); } catch { }
+                            rqForcedGoToMenu = true;
+                        }
+                        else
+                        {
+                            try { NetworkConnectionHandler.instance.NetworkRestart(); } catch { }
+                        }
+                        rqPhase = RqPhase.AwaitMenu; rqPhaseAt = now;
+                    }
+                    break;
+
+                case RqPhase.AwaitMenu:
+                    bool menuReady = false;
+                    try
+                    {
+                        menuReady = GM_ArmsRace.instance == null
+                                    && !PhotonNetwork.InRoom
+                                    && !PhotonNetwork.IsConnected
+                                    && NetworkConnectionHandler.instance != null
+                                    && !NetworkConnectionHandler.instance.m_restarting
+                                    && MainMenuHandler.instance != null;
+                    }
+                    catch { }
+                    if (menuReady) { rqPhase = RqPhase.Settle; rqPhaseAt = now; }
+                    else if (now - rqPhaseAt > 12f)
+                    {
+                        if (!rqForcedGoToMenu)
+                        {
+                            Plugin.Log.LogWarning("[QUICKPLAY-GUARD] restart didn't land in 12s — Disconnect + GoToMenu fallback");
+                            try { PhotonNetwork.Disconnect(); } catch { }
+                            try { GameManager.instance.GoToMenu(); } catch { }
+                            rqForcedGoToMenu = true;
+                            rqPhaseAt = now;   // fresh 12s for the fallback
+                        }
+                        else
+                        {
+                            Plugin.Log.LogWarning("[QUICKPLAY-GUARD] recovery failed — giving up");
+                            try { CompetitiveUI.ShowNotification("Couldn't recover automatically - please restart matchmaking from the menu.", new Color(1f, 0.5f, 0.4f), 8f); } catch { }
+                            rqPhase = RqPhase.Idle;
+                        }
+                    }
+                    break;
+
+                case RqPhase.Settle:
+                    if (now - rqPhaseAt >= 0.7f) { rqPhase = RqPhase.Queue; rqPhaseAt = now; }
+                    break;
+
+                case RqPhase.Queue:
+                    rqPhase = RqPhase.Idle;
+                    if (!rqQuickmatch) break;   // non-quickplay context: menu is the destination
+                    try
+                    {
+                        if (PhotonNetwork.InRoom || PhotonNetwork.OfflineMode || GM_ArmsRace.instance != null) break;
+                        try { CharacterCreatorHandler.instance?.CloseMenus(); } catch { }
+                        try { MainMenuHandler.instance?.Close(); } catch { }
+                        NetworkConnectionHandler.instance.QuickMatch();   // the real menu-button path
+                        Plugin.Log.LogInfo("[QUICKPLAY-GUARD] re-entered quickplay queue after dead-state recovery");
+                        try { CompetitiveUI.ShowNotification("Back in the quickplay queue - searching for an opponent.", new Color(0.5f, 1f, 0.6f), 5f); } catch { }
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[QUICKPLAY-GUARD] requeue failed: {ex.Message}");
+                        try { CompetitiveUI.ShowNotification("Couldn't recover automatically - please restart matchmaking from the menu.", new Color(1f, 0.5f, 0.4f), 8f); } catch { }
+                    }
+                    break;
+            }
         }
 
         /// <summary>Per-Unity-frame tick; counts frames + accumulates real time so we
@@ -623,19 +893,98 @@ namespace CompetitiveRounds
         /// the opponent can read it. Only active while a match is being tracked.</summary>
         public static void TickFrame()
         {
-            if (!isTracking) return;
+            if (!isTracking) { _lastTickStopwatchMs = -1; return; }
             float dt = Time.unscaledDeltaTime;
-            if (dt <= 0f || dt > 1f) return; // skip pause / first-frame outliers
+            // July 21 item 2 — freeze detection BEFORE the dt>1 skip (that skip
+            // used to discard exactly the evidence). unscaledDeltaTime carries
+            // the gap on the resume frame; the independent Stopwatch cross-checks
+            // any engine smoothing. Focused resume = window-drag signature.
+            long nowMs = _tickStopwatch.ElapsedMilliseconds;
+            if (_lastTickStopwatchMs >= 0)
+            {
+                float wallGap = (nowMs - _lastTickStopwatchMs) / 1000f;
+                float gap = Math.Max(dt, wallGap);
+                if (gap > 0.5f && !inPickPhase)
+                {
+                    localFreezeCount++;
+                    localFreezeTotalSec += gap;
+                    bool focused = false;
+                    try { focused = Application.isFocused; } catch { }
+                    if (focused) localFreezeFocusedCount++;
+                    Plugin.Log.LogInfo($"[FREEZE-DIAG] gap={gap:F2}s dt={dt:F2} wall={wallGap:F2} focused={focused} n={localFreezeCount}");
+                }
+            }
+            _lastTickStopwatchMs = nowMs;
+            if (dt <= 0f || dt > 1f) return; // skip pause / first-frame outliers (freeze recorded above)
             fpsFrameCount++;
             fpsTimeAccum += dt;
             fpsBroadcastTimer += dt;
+            // 5s fps timeline bucket (own side)
+            tlFrames++; tlAccum += dt;
+            if (tlAccum >= 5f)
+            {
+                if (localFpsTimeline.Count < 90)
+                    localFpsTimeline.Add((int)Math.Round(tlFrames / (double)tlAccum));
+                tlFrames = 0; tlAccum = 0f;
+            }
+            bcFrames++; bcAccum += dt;
             if (fpsBroadcastTimer >= 3f)
             {
                 fpsBroadcastTimer = 0f;
                 BroadcastFps();
                 PollOpponentFps();
+                SampleConnectionQuality();
             }
             TickInputSampling(dt);
+        }
+
+        // July 21 item 2: Photon ping + receive-gap + opponent-heartbeat
+        // sampling on the 3s cadence. Receive-gap >2s = our socket went silent
+        // (the cheater-side NIC-cut tell); opp gstats seq frozen >8s while the
+        // peer stays in PlayerList = victim-side view of the opponent's cut.
+        private static void SampleConnectionQuality()
+        {
+            try
+            {
+                if (PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom || !PhotonNetwork.IsConnected) return;
+                int ping = PhotonNetwork.GetPing();
+                if (ping > 0 && pingSamples.Count < 200) pingSamples.Add(ping);
+                var client = PhotonNetwork.NetworkingClient;
+                var peer = client != null ? client.LoadBalancingPeer : null;
+                if (peer != null)
+                {
+                    // ConnectionTime and TimestampOfLastSocketReceive share the SAME
+                    // per-peer Stopwatch base (peerBase.timeInt) — this is exactly what
+                    // Photon's own VitalStatsToString / disconnect-timeout compute.
+                    // (LocalTimeInMilliSeconds is Environment.TickCount — a DIFFERENT
+                    // clock; mixing them read as system-uptime and fired falsely.)
+                    int silent = peer.ConnectionTime - peer.TimestampOfLastSocketReceive;
+                    if (silent > 2000)
+                    {
+                        if (!_recvGapOpen)
+                        {
+                            _recvGapOpen = true; localRecvGapCount++;
+                            Plugin.Log.LogInfo($"[LAG-DIAG] recv gap open silent={silent}ms n={localRecvGapCount}");
+                        }
+                        if (silent > localRecvGapMaxMs) localRecvGapMaxMs = silent;
+                    }
+                    else _recvGapOpen = false;
+                }
+                if (lastOppGstatsSeq >= 0 && lastOppSeqAdvanceTime > 0f)
+                {
+                    float since = Time.unscaledTime - lastOppSeqAdvanceTime;
+                    if (since > 8f)
+                    {
+                        if (!_oppHbGapOpen)
+                        {
+                            _oppHbGapOpen = true; oppHbGapCount++;
+                            Plugin.Log.LogInfo($"[LAG-DIAG] opp heartbeat gap {since:F1}s n={oppHbGapCount}");
+                        }
+                    }
+                    else _oppHbGapOpen = false;
+                }
+            }
+            catch { }
         }
 
         // ── Per-frame input metrics (bug #50) ─────────────────────────────
@@ -741,8 +1090,19 @@ namespace CompetitiveRounds
                 // Per-game combat stats ride the same publish (item 4) — the
                 // reporter includes the opponent's numbers in the match report
                 // so both sides of the history row can show hit/block/KPS.
+                // July 21 item 2: fields 7-11 = recentFps (3s window), seq
+                // (heartbeat), freezeCount, freezeFocusedCount, recvGapCount.
+                // Old clients parse >=6 and ignore extras (verified).
+                int recentFps = bcAccum > 0.5f ? (int)Math.Round(bcFrames / (double)bcAccum) : 0;
+                bcFrames = 0; bcAccum = 0f;
+                gstatsSeq++;
+                // Field 12 (July 22 item 3): instantaneous ping so the opponent
+                // can build our latency timeline for their history hover chart.
+                int curPing = 0;
+                try { if (!PhotonNetwork.OfflineMode && PhotonNetwork.IsConnected) curPing = PhotonNetwork.GetPing(); } catch { }
                 props[GSTATS_PROP_KEY] =
-                    $"{LocalBulletsFiredThisMatch}|{LocalBulletsHitThisMatch}|{LocalBlocksActivatedThisMatch}|{LocalBlocksSuccessfulThisMatch}|{LocalKeysThisMatch}|{LocalActiveSecondsThisMatch.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}";
+                    $"{LocalBulletsFiredThisMatch}|{LocalBulletsHitThisMatch}|{LocalBlocksActivatedThisMatch}|{LocalBlocksSuccessfulThisMatch}|{LocalKeysThisMatch}|{LocalActiveSecondsThisMatch.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}" +
+                    $"|{recentFps}|{gstatsSeq}|{localFreezeCount}|{localFreezeFocusedCount}|{localRecvGapCount}|{curPing}";
                 if (props.Count > 0)
                     PhotonNetwork.LocalPlayer.SetCustomProperties(props);
             }
@@ -772,6 +1132,27 @@ namespace CompetitiveRounds
                                 OppStatBlocksSuccessful = int.Parse(parts[3]);
                                 OppStatKeysPressed = int.Parse(parts[4]);
                                 OppStatActiveSeconds = float.Parse(parts[5], System.Globalization.CultureInfo.InvariantCulture);
+                            }
+                            // July 21 item 2: extended telemetry (new clients only).
+                            if (parts.Length >= 11)
+                            {
+                                int seq = int.Parse(parts[7]);
+                                if (seq != lastOppGstatsSeq)
+                                {
+                                    lastOppGstatsSeq = seq;
+                                    lastOppSeqAdvanceTime = Time.unscaledTime;
+                                    int rf = int.Parse(parts[6]);
+                                    if (rf > 0 && oppFpsTimeline.Count < 128) oppFpsTimeline.Add(rf);
+                                    // Field 12 (July 22 item 3) — absent on 11-field clients.
+                                    if (parts.Length >= 12)
+                                    {
+                                        int op = int.Parse(parts[11]);
+                                        if (op > 0 && oppPingTimeline.Count < 128) oppPingTimeline.Add(op);
+                                    }
+                                }
+                                oppFreezeCount = int.Parse(parts[8]);
+                                oppFreezeFocusedCount = int.Parse(parts[9]);
+                                oppRecvGapCount = int.Parse(parts[10]);
                             }
                         }
                         catch { }
@@ -1746,8 +2127,18 @@ namespace CompetitiveRounds
             fpsTimeAccum = 0f;
             fpsBroadcastTimer = 0f;
             opponentAvgFps = 0;
+            // July 21 item 2: per-match telemetry resets.
+            localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
+            bcFrames = 0; bcAccum = 0f;
+            oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f;
+            localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
+            pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
+            oppHbGapCount = 0; _oppHbGapOpen = false;
+            oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
+            _lastTickStopwatchMs = -1;
             _hitsRemaining = 0;
-            _lastBlockSuccessTime = -999f;
+            _activationSuccessCredited = true;
+            BlockChain.Reset();
             _loggedFirstFire = _loggedFirstHit = _loggedFirstBlockAct = _loggedFirstBlockOk = false;
 
             // Retry card rarity scan if it didn't work at startup
@@ -2263,10 +2654,12 @@ namespace CompetitiveRounds
                     // Block.DoBlock) wired in Plugin.cs.
                     localBulletsFired: LocalBulletsFiredThisMatch,
                     localBulletsHit: LocalBulletsHitThisMatch,
-                    // TryBlock-based activation counter includes manual right-click AND any
-                    // source (cards like Shields Up / Empower that trigger block via the
-                    // same code path). LocalBlocksThisMatch (mouse-only) remains the anti-
-                    // cheat advisory signal.
+                    // July 21 item 1 (Stan's spec): activations = user right-clicks only
+                    // (TryBlock's sole caller is Block.Update on input); successes = max 1
+                    // per activation, credited when the right-click block OR its Echo/
+                    // ShieldCharge follow-on absorbs. Pure auto-blocks (Abyssal, Shields
+                    // Up wiring) count nowhere. LocalBlocksThisMatch (mouse-only) remains
+                    // the anti-cheat advisory signal.
                     localBlocksActivated: LocalBlocksActivatedThisMatch,
                     localBlocksSuccessful: LocalBlocksSuccessfulThisMatch,
                     localAvgFps: LocalAvgFps,
@@ -2284,7 +2677,25 @@ namespace CompetitiveRounds
                     oppBlocksSuccessful: OppStatBlocksSuccessful,
                     oppKeysPressed: OppStatKeysPressed,
                     oppActiveSeconds: OppStatActiveSeconds,
-                    pointTimeline: string.Join(",", matchPointTimeline.ToArray())
+                    pointTimeline: string.Join(",", matchPointTimeline.ToArray()),
+                    // July 21 item 2: FPS/lag telemetry (advisory, non-HMAC).
+                    localFpsTimeline: string.Join(",", localFpsTimeline),
+                    oppFpsTimeline: string.Join(",", oppFpsTimeline),
+                    localFreezeCount: localFreezeCount,
+                    localFreezeFocusedCount: localFreezeFocusedCount,
+                    localFreezeTotalSec: localFreezeTotalSec,
+                    localPingAvg: pingSamples.Count > 0 ? (int)Math.Round(pingSamples.Average()) : 0,
+                    localPingMax: pingSamples.Count > 0 ? pingSamples.Max() : 0,
+                    // July 22 item 3: latency timelines for the history hover chart.
+                    localPingTimeline: string.Join(",", pingSamples),
+                    oppPingTimeline: string.Join(",", oppPingTimeline),
+                    oppPingAvg: oppPingTimeline.Count > 0 ? (int)Math.Round(oppPingTimeline.Average()) : 0,
+                    localRecvGapCount: localRecvGapCount,
+                    localRecvGapMaxMs: localRecvGapMaxMs,
+                    oppHbGapCount: oppHbGapCount,
+                    oppFreezeCount: oppFreezeCount,
+                    oppFreezeFocusedCount: oppFreezeFocusedCount,
+                    oppRecvGapCount: oppRecvGapCount
                 );
             }
 
@@ -2872,6 +3283,13 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[ACH] Evaluating: Instinct — PASSED ({pickCountThisMatch} untouched picks)");
                     ApiClient.UnlockAchievement(steamId, "instinct");
                 }
+                // July 21 (Instinct verify): re-arm for the NEXT game of the sitting.
+                // ResetMatchState only runs on room-leave, so a game-1 scroll used to
+                // block Instinct for every same-room rematch. Clearing here — after
+                // this game's evaluation consumed the flag — keeps the bug-#60 rule
+                // (never clear in OnMatchStarted; pre-match pick violations survive):
+                // the next game's pre-match picks happen after this point.
+                achLeftmostViolated = false;
 
                 // 14. God Build (July 12 spec; renamed from Unkillable, v1.32) — the real god-build qualifier is
                 // the GUN STATE at game end, not a card-name proxy: exactly 1 max
@@ -3369,8 +3787,18 @@ namespace CompetitiveRounds
             fpsTimeAccum = 0f;
             fpsBroadcastTimer = 0f;
             opponentAvgFps = 0;
+            // July 21 item 2: per-match telemetry resets.
+            localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
+            bcFrames = 0; bcAccum = 0f;
+            oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f;
+            localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
+            pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
+            oppHbGapCount = 0; _oppHbGapOpen = false;
+            oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
+            _lastTickStopwatchMs = -1;
             _hitsRemaining = 0;
-            _lastBlockSuccessTime = -999f;
+            _activationSuccessCredited = true;
+            BlockChain.Reset();
 
             // Clear our card broadcast when leaving room
             try

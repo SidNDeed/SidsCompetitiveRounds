@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, Double, FetchedValue, ForeignKey, Index, Integer,
+    BigInteger, Boolean, Column, DateTime, Double, FetchedValue, Float, ForeignKey, Index, Integer,
     SmallInteger, String, Text, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
@@ -183,6 +183,39 @@ class Match(Base):
     # Cumulative scoring timeline "p1Total:p2Total,..." (total = rounds*2+points)
     # in match-row p1/p2 orientation — drives the history score-hover graph.
     point_timeline = Column(String(512), nullable=True)
+    # Analysis-era filter (migration 136): the reporter client's X-Mod-Version
+    # at submit time. Cannot be backfilled — required to slice per-match
+    # hit/block stats by counting-semantics era after the July 21 fix.
+    reporter_mod_version = Column(String(16), nullable=True)
+    # FPS/lag telemetry (migration 136, advisory anti-cheat). Reporter side
+    # from their own counters; opponent side from the extended cr_gstats
+    # Photon prop. Asymmetries: ping + freeze_total_sec exist only for the
+    # reporter side; hb_gap is the OTHER seat's observation of this side's
+    # heartbeat. All NULL on old-client reports and pre-migration rows.
+    p1_fps_timeline = Column(String(512), nullable=True)
+    p2_fps_timeline = Column(String(512), nullable=True)
+    p1_freeze_count = Column(SmallInteger, nullable=True)
+    p2_freeze_count = Column(SmallInteger, nullable=True)
+    p1_freeze_focused_count = Column(SmallInteger, nullable=True)
+    p2_freeze_focused_count = Column(SmallInteger, nullable=True)
+    p1_freeze_total_sec = Column(Float, nullable=True)
+    p2_freeze_total_sec = Column(Float, nullable=True)
+    p1_recv_gap_count = Column(SmallInteger, nullable=True)
+    p2_recv_gap_count = Column(SmallInteger, nullable=True)
+    # Longest single socket-silence gap in ms (reporter side only — cr_gstats
+    # carries no opponent max). Integer, NOT SmallInteger: a 45s NIC cut is
+    # 45000 ms, over SMALLINT's 32767 max.
+    p1_recv_gap_max_ms = Column(Integer, nullable=True)
+    p2_recv_gap_max_ms = Column(Integer, nullable=True)
+    # July 22 item 3 — per-side latency timelines (comma ints, 3s cadence).
+    p1_ping_timeline = Column(String(512), nullable=True)
+    p2_ping_timeline = Column(String(512), nullable=True)
+    p1_hb_gap_count = Column(SmallInteger, nullable=True)
+    p2_hb_gap_count = Column(SmallInteger, nullable=True)
+    p1_ping_avg = Column(SmallInteger, nullable=True)
+    p2_ping_avg = Column(SmallInteger, nullable=True)
+    p1_ping_max = Column(SmallInteger, nullable=True)
+    p2_ping_max = Column(SmallInteger, nullable=True)
 
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
@@ -393,6 +426,22 @@ class LinkCode(Base):
     code = Column(String(6), nullable=False, unique=True, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class SteamSession(Base):
+    """Opaque session tokens issued by POST /api/v1/auth/steam after Steam
+    Web-API ticket verification (migration 137). DB-backed so sessions
+    survive `docker compose up -d --build` redeploys — an in-memory store
+    would 401-storm every client after each deploy once enforcement is on.
+    Only sha256(token) is stored, never the raw token."""
+    __tablename__ = "steam_sessions"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    steam_id = Column(String(20), nullable=False)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    verified = Column(Boolean, nullable=False, default=False)
+    issued_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    expires_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class PlayerAchievement(Base):

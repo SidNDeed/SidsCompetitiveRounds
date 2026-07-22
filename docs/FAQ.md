@@ -50,7 +50,7 @@ Everything else records as **casual** (still tracked, no rating change). The mod
 - Games vs vanilla (unmodded) players can never be ranked.
 - Ranked queue matches (F5 → Search Ranked) are always ranked — queueing is consent.
 - Ranked plays as a **best-of-3 series** vs the same opponent. Ratings (Glicko-2) apply when the series completes.
-- If a series gets interrupted (crash, disconnect), just rematch the same player — the series **resumes where it left off**, even days later (up to 7 days).
+- If a series gets interrupted (crash, disconnect), just rematch the same player — the series **resumes where it left off**, no matter how much later. Unfinished series never expire, so leaving mid-series can't save your rating.
 - Leaving mid-series counts as a DC on your record; your leave % is visible on the leaderboard. Occasional crashes won't tank it, rage-quits will.
 
 ## Message 4 — Queue, 2v2, tournaments

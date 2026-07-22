@@ -86,6 +86,34 @@ class MatchReport(BaseModel):
     opp_keys_pressed: int | None = Field(None, ge=0)
     opp_active_seconds: float | None = Field(None, ge=0, le=86400)
     point_timeline: str | None = Field(None, max_length=512)
+    # July 21 — FPS/lag exploit telemetry (advisory anti-cheat, NOT in HMAC).
+    # local_* = reporter's own counters; opp_* = sniffed off the opponent's
+    # extended cr_gstats Photon prop. Old clients omit all of these → None →
+    # NULL columns → heuristics skip. Timelines are comma-separated ints
+    # ("142,138,61,..."), truncated client-side; le bounds keep a crafted
+    # value from overflowing the SMALLINT columns and 500'ing the submit.
+    local_fps_timeline: str | None = Field(None, max_length=512)
+    opp_fps_timeline: str | None = Field(None, max_length=512)
+    local_freeze_count: int | None = Field(None, ge=0, le=30000)
+    local_freeze_focused_count: int | None = Field(None, ge=0, le=30000)
+    local_freeze_total_sec: float | None = Field(None, ge=0, le=86400)
+    local_ping_avg: int | None = Field(None, ge=0, le=30000)
+    local_ping_max: int | None = Field(None, ge=0, le=30000)
+    local_recv_gap_count: int | None = Field(None, ge=0, le=30000)
+    # le bound: stored in an INTEGER column — an unbounded crafted value would
+    # otherwise 500 the whole submit at the DB. 1h in ms covers any real gap.
+    local_recv_gap_max_ms: int | None = Field(None, ge=0, le=3600000)
+    # The reporter's observation of the OPPONENT's heartbeat gaps — stored on
+    # the opponent's side of the match row.
+    opp_hb_gap_count: int | None = Field(None, ge=0, le=30000)
+    opp_freeze_count: int | None = Field(None, ge=0, le=30000)
+    opp_freeze_focused_count: int | None = Field(None, ge=0, le=30000)
+    opp_recv_gap_count: int | None = Field(None, ge=0, le=30000)
+    # July 22 item 3 — latency timelines (own 3s GetPing samples; opponent's
+    # via cr_gstats field 12) + reporter-computed opponent average.
+    local_ping_timeline: str | None = Field(None, max_length=512)
+    opp_ping_timeline: str | None = Field(None, max_length=512)
+    opp_ping_avg: int | None = Field(None, ge=0, le=30000)
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -171,6 +199,13 @@ class PlayerStatsResponse(BaseModel):
     xp_for_next_level: int = 0
     best_ranked_streak: int = 0
     best_casual_streak: int = 0
+    # July 20 item 5: labeled game/series ranked streaks. best_ranked_streak
+    # keeps its historical per-SERIES value (old clients + Compare graph bind
+    # to it); current_* are SIGNED (negative = loss streak).
+    best_ranked_game_streak: int = 0
+    current_ranked_game_streak: int = 0
+    best_ranked_series_streak: int = 0
+    current_ranked_series_streak: int = 0
     ranked_series_wins: int = 0
     ranked_series_losses: int = 0
     casual_wins: int = 0
@@ -201,6 +236,10 @@ class PlayerStatsResponse(BaseModel):
     # Most recently observed mod version for this player (X-Mod-Version
     # header on their last mod-only request). null for non-mod players.
     mod_version: str | None = None
+    # LFP Discord-ping cooldown (July 21): seconds until this player may fire
+    # the next /lfp-ping. 0 = available now. Flat int — the mod's
+    # JsonUtility parse picks it up with zero parser changes (learning #73).
+    lfp_seconds_left: int = 0
     # Server-computed head-to-head against the optional ?viewer_steam_id
     # query param. All zero when viewer is unset or matches steam_id.
     h2h_ranked_wins: int = 0
@@ -301,6 +340,17 @@ class MatchHistoryEntry(BaseModel):
     # Cumulative scoring timeline "myTotal:oppTotal,..." — already flipped to
     # the viewer's perspective server-side.
     point_timeline: str | None = None
+    # July 21 — per-match FPS timelines (comma-separated ints, viewer-relative
+    # like the other per-side columns). None on rows predating migration 136
+    # or when the side's client didn't report one. Drives the history FPS
+    # hover graph.
+    player_fps_timeline: str | None = None
+    opp_fps_timeline: str | None = None
+    # July 22 item 3 — viewer-relative latency.
+    player_ping_avg: int = 0
+    opponent_ping_avg: int = 0
+    player_ping_timeline: str | None = None
+    opp_ping_timeline: str | None = None
     # Bug batch item 4 — total game length in seconds (0 = unknown/legacy row).
     duration_seconds: int = 0
 

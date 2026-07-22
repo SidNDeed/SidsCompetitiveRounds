@@ -12,6 +12,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using InControl;
 using UnityEngine;
+using UnityEngine.Rendering.PostProcessing;
 
 namespace CompetitiveRounds
 {
@@ -21,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.33.0";
+        public const string ModVersion = "1.34.0";   // July 22: pre-ship bump — the server's STATS_CLEAN_MIN_VERSION gate keys on this
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -47,6 +48,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> MapLightingEnabled;
         internal static ConfigEntry<bool> MapShadowsEnabled;
         internal static ConfigEntry<bool> AnimatedCosmetics;
+        internal static ConfigEntry<bool> ChromaticAberrationEnabled;
+        internal static ConfigEntry<bool> AutoRequeueOnMatchmakingBug;
         // Performance pass — master + 7 per-patch flags so users can disable
         // any individual port without giving up the rest. Mirrors the
         // granularity the original "Performance Improvements" mod offered.
@@ -265,6 +268,16 @@ namespace CompetitiveRounds
                 "UI", "AnimatedCosmetics",
                 true,
                 "Animated cosmetics (prismatic/chrome body colors, prism trail hue cycle, map-skin sparkle shimmer, animated face items). Turn OFF to freeze them all to a static frame instantly."
+            );
+            ChromaticAberrationEnabled = Config.Bind(
+                "UI", "ChromaticAberrationEnabled",
+                true,
+                "The RGB color-fringing distortion that pulses on shots/hits/deaths. Turn OFF for crisp edges and a tiny FPS gain (local only)."
+            );
+            AutoRequeueOnMatchmakingBug = Config.Bind(
+                "UI", "AutoRequeueOnMatchmakingBug",
+                true,
+                "When the vanilla 'Press Jump to Join over a dead connection' matchmaking bug is detected, automatically restart and put you back in the quickplay queue (OFF = fast return to menu instead)."
             );
 
             PerfOptimizations = Config.Bind(
@@ -623,6 +636,13 @@ namespace CompetitiveRounds
                 // Force region (via Publicizer)
                 nch.m_ForceRegion = true;
                 Plugin.Log.LogInfo("[QUEUE-JOINER] Set m_ForceRegion = true");
+                // July 21 review fix: clear any stale vanilla search context — the
+                // mod owns the connection now. Without this, a quickplay search
+                // abandoned for a ranked match leaves m_searchingType=Quickmatch,
+                // and a later dead-state recovery would auto-requeue the player
+                // into the VANILLA queue instead of returning to menu. Vanilla-
+                // safe: readers treat None like "no special search".
+                try { nch.m_searchingType = (NetworkConnectionHandler.SearchingType)0; } catch { }
 
                 // Loading screen
                 try { TimeHandler.instance.gameStartTime = 1f; } catch { }
@@ -1383,6 +1403,101 @@ namespace CompetitiveRounds
                 return true;  // fall back to vanilla CreatePlayer (still wrong but at least game runs)
             }
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bug #79 — the "Press Jump to Join does nothing" quickplay race. Vanilla's
+    // 15s region-churn timer (NetworkConnectionHandler.Update) is gated only on
+    // `InRoom && !GM_ArmsRace.instance`, and GM_ArmsRace activates ~2.5s AFTER
+    // an opponent joins (the MATCH FOUND jingle runs first). OnPlayerEnteredRoom
+    // never resets the timer, so if the opponent arrives in the last ~2.5s of
+    // the window, PlayOnBestActiveRegion() leaves the just-matched room mid-
+    // animation → a 16-region ping sweep (~25s) → "PRESS JUMP TO JOIN" shown
+    // with no room and no opponent. Always-on (vanilla race, all modes).
+    // ─────────────────────────────────────────────────────────────────────────
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "OnPlayerEnteredRoom")]
+    class QuickplayChurnFreezePatch
+    {
+        static void Postfix()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return;
+                if (PhotonNetwork.CurrentRoom.PlayerCount < 2) return;
+                var nch = NetworkConnectionHandler.instance;
+                if (nch == null) return;
+                // Publicized private field — freeze the churn timer the moment a
+                // match is found. Vanilla re-arms it to 15f in OnJoinedRoom on the
+                // next search, so no un-freeze bookkeeping is needed.
+                nch.untilTryOtherRegionCounter = float.MaxValue;
+                Plugin.Log.LogInfo("[QUICKPLAY-GUARD] opponent joined — region-churn timer frozen");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[QUICKPLAY-GUARD] freeze failed: {ex.Message}"); }
+        }
+    }
+
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "PlayOnBestActiveRegion")]
+    class QuickplayChurnAbandonGuardPatch
+    {
+        // Second freeze point: covers the JOINER seat (which never receives
+        // OnPlayerEnteredRoom — Photon routes the local join to OnJoinedRoom,
+        // so its churn timer is never frozen by the Postfix above) and any
+        // failure of that Postfix. Never abandon a room that already has a
+        // full match in it; only skip at 2+ players — lone searchers
+        // legitimately rotate regions. CRITICAL: re-arm the counter when
+        // suppressing — vanilla's Update never resets it after firing, so a
+        // bare suppression would re-trigger (and log) every frame while the
+        // counter sits expired. Re-arming to 15s also preserves vanilla's
+        // stalled-full-room escape at a delay instead of removing it.
+        //
+        // July 21 item 3: the running sweep coroutine is WRAPPED so the
+        // requeue watchdog can (a) know a sweep is in flight (a sweep never
+        // coexists with an active GM_ArmsRace except via the bug-79 race) and
+        // (b) ABORT it before NetworkRestart — restarting mid-sweep is the
+        // bug-#37 livelock (WaitForRestart's IsConnected wait is perpetually
+        // re-satisfied by the sweep's next ConnectToRegion and m_restarting
+        // is consumed forever).
+        internal static volatile bool SweepActive = false;
+        internal static volatile bool AbortSweep = false;
+
+        static bool Prefix(ref System.Collections.IEnumerator __result)
+        {
+            try
+            {
+                if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null &&
+                    PhotonNetwork.CurrentRoom.PlayerCount >= 2)
+                {
+                    Plugin.Log.LogWarning("[QUICKPLAY-GUARD] PlayOnBestActiveRegion suppressed — match already found in this room");
+                    try { NetworkConnectionHandler.instance.untilTryOtherRegionCounter = 15f; } catch { }
+                    __result = EmptyRoutine();
+                    return false;
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        static void Postfix(ref System.Collections.IEnumerator __result)
+        {
+            __result = Track(__result);
+        }
+
+        static System.Collections.IEnumerator Track(System.Collections.IEnumerator orig)
+        {
+            SweepActive = true; AbortSweep = false;
+            try
+            {
+                while (!AbortSweep && orig.MoveNext())
+                    yield return orig.Current;
+            }
+            finally
+            {
+                SweepActive = false;
+                if (AbortSweep) Plugin.Log.LogWarning("[QUICKPLAY-GUARD] region sweep aborted by requeue watchdog");
+            }
+        }
+
+        static System.Collections.IEnumerator EmptyRoutine() { yield break; }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -3918,7 +4033,9 @@ namespace CompetitiveRounds
         private static bool _postfixFirstFireLogged;
         private static bool _postfixFirstPvRejectLogged;
         private static bool _postfixFirstIsMineRejectLogged;
-        static void Postfix(Gun __instance)
+        private static bool _postfixFirstFalseRejectLogged;
+        private static bool _postfixFirstForcedRejectLogged;
+        static void Postfix(Gun __instance, bool __result, float charge, bool forceAttack)
         {
             if (!_postfixFirstFireLogged)
             {
@@ -3926,6 +4043,22 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[GUN-POST] Attack Postfix first invocation (gun={__instance?.name}, uiOpen={NativeUI.IsOpen})");
             }
             if (NativeUI.IsOpen) return;  // Prefix blocked this shot, don't credit it
+            // Attack returns false when no volley launched (cooldown/reload) — the
+            // auto-fire branch retries every frame through a reload, so counting
+            // false returns inflated bullets_fired by hundreds per match (bug #77 era).
+            if (!__result)
+            {
+                if (!_postfixFirstFalseRejectLogged) { _postfixFirstFalseRejectLogged = true; Plugin.Log.LogInfo("[GUN-POST] first __result=false reject (reload/cooldown phantom)"); }
+                return;
+            }
+            // forceAttack=true is never a player trigger pull: EMP block-rings,
+            // RadarShot auto-shots and spawned shooters all force. Only deliberate
+            // shots count toward accuracy (Sid: EMP projectiles aren't "shots").
+            if (forceAttack)
+            {
+                if (!_postfixFirstForcedRejectLogged) { _postfixFirstForcedRejectLogged = true; Plugin.Log.LogInfo("[GUN-POST] first forceAttack reject (card-driven attack)"); }
+                return;
+            }
             try
             {
                 // ROUNDS' Gun GameObject hierarchy ("WeaponBase(Clone)") doesn't walk up to a
@@ -3955,6 +4088,18 @@ namespace CompetitiveRounds
                 }
                 int projectiles = 1;
                 try { projectiles = Math.Max(1, __instance.numberOfProjectiles); } catch { }
+                // Real bullets per successful Attack = attacks (charge volleys) x bursts x
+                // projectiles — vanilla FireBurst spawns all of them and each can register
+                // a hit, so the denominator must match or Burst/charge builds inflate hit%.
+                try
+                {
+                    int bursts = Math.Max(1, __instance.bursts);
+                    int attacks = 1;
+                    if (!__instance.lockGunToDefault && charge > 0f && __instance.attackSpeed > 0f)
+                        attacks = Mathf.Clamp(Mathf.RoundToInt(0.5f * charge / __instance.attackSpeed), 1, 10);
+                    projectiles *= bursts * attacks;
+                }
+                catch { }
                 GameStateWatcher.OnLocalBulletFired(projectiles);
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[GUN-POST] exception: {ex.Message}"); }
@@ -4122,7 +4267,14 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(ProjectileHit), "RPCA_DoHit")]
     class ProjectileHit_DirectHitCounter_Patch
     {
-        static void Postfix(ProjectileHit __instance, int viewID, bool wasBlocked)
+        // PREFIX, not Postfix (bugs #77/#80): a killing blow's vanilla body runs
+        // damage → death → SetActive(false) on the target's ROOT GameObject
+        // synchronously, after which GetComponentInParent<Player>() returns null
+        // (inactive GO) and the kill shot read as "hit a box". A Postfix also
+        // never runs at all if the body throws mid-teardown. Counting up front
+        // sees the target while it is still alive; wasBlocked arrives as an
+        // argument so the block gate is unaffected.
+        static void Prefix(ProjectileHit __instance, int viewID, bool wasBlocked)
         {
             try
             {
@@ -4132,7 +4284,10 @@ namespace CompetitiveRounds
                 if (own == null || own.data == null || own.data.view == null || !own.data.view.IsMine) return;
                 var targetView = PhotonNetwork.GetPhotonView(viewID);
                 if (targetView == null) return;
-                var targetPlayer = targetView.GetComponentInParent<global::Player>();
+                // GetComponent (unlike GetComponentInParent) also works on inactive
+                // GameObjects — the Player component lives on the PhotonView's root.
+                var targetPlayer = targetView.GetComponent<global::Player>();
+                if (targetPlayer == null) targetPlayer = targetView.GetComponentInParent<global::Player>();
                 if (targetPlayer == null) return;     // hit a box or other damagable, not a player
                 if (targetPlayer.TeamID == own.TeamID) return;  // self or teammate (2v2)
                 GameStateWatcher.OnLocalBulletHit();
@@ -4142,50 +4297,106 @@ namespace CompetitiveRounds
     }
 
     // Block.TryBlock counter — drives LocalBlocksActivatedThisMatch (the blocks_activated
-    // denominator). Using the game's own TryBlock call instead of raw mouse-right-clicks so
-    // that cards like Shields Up / Empower — which invoke Block.TryBlock directly without
-    // the player pressing the mouse button — also increment the activation count. Without
-    // this hook, auto-triggered blocks would inflate the success rate (hits credited to
-    // activations we never counted). Duplicating the F5 class pattern (Prefix on the class
-    // above, Postfix here) in a separate attribute — Harmony resolves to the same method.
+    // denominator). Full-decompile fact: TryBlock has exactly ONE caller — Block.Update on
+    // user block input — so this hook IS the right-click counter (the old comment claiming
+    // Shields Up/Empower invoke TryBlock was wrong; every card block goes straight to
+    // RPCA_DoBlock). Denominator = right-clicks that fired while off cooldown.
+    // ── Block-chain classification (July 21 item 1, Stan's community spec) ──
+    // Count ONLY right-click-activated blocks: one right-click = one activation,
+    // and its Echo / Shield Charge follow-on auto-blocks inherit the same
+    // activation (max 1 success credit). Blocks with NO right-click origin
+    // (Abyssal Countdown's BlinkStep, ExtraBlock/Shields Up wiring, revive
+    // blocks) count NOWHERE. Verified against the full decompile:
+    //  - Block.TryBlock has exactly ONE caller — Block.Update on user input.
+    //    (The old comment claiming Shields Up/Empower call TryBlock was wrong.)
+    //  - Every block funnels through RPCA_DoBlock(firstBlock, dontSetCD,
+    //    triggerType, ...); Echo follow-ons are triggerType=Echo scheduled only
+    //    from Default+firstBlock events; ShieldCharge dashes start from any
+    //    non-ShieldCharge block event and fire triggerType=ShieldCharge.
+    //  - So origin inheritance by TRIGGER TYPE is exact — no time windows:
+    //    Default -> user iff called inside TryBlock (re-entrancy flag);
+    //    Echo -> status of the last Default+firstBlock; ShieldCharge -> status
+    //    of the last non-ShieldCharge event.
+    internal static class BlockChain
+    {
+        internal static bool InTryBlock;
+        // TIMESTAMPS, not last-writer-wins booleans (review finding): interleaved
+        // auto-blocks (Abyssal BlinkStep fires Default+firstBlock every 0.29s;
+        // ExtraBlock-style wiring fires inside the user's own IDoBlock) would
+        // otherwise CLOSE a still-open user absorb window and drop the user's
+        // legitimate success. Auto events can never close a user window now;
+        // the worst case flips to slightly user-FAVORABLE attribution, which
+        // _activationSuccessCredited caps at 1 credit per right-click anyway.
+        internal static float LastUserWindowTime = -999f;   // any user-chain block event (opens a 0.3s absorb window)
+        internal static float LastUserDefaultTime = -999f;  // user right-click (Default+firstBlock) — echo scheduler origin
+        internal static void Reset() { InTryBlock = false; LastUserWindowTime = LastUserDefaultTime = -999f; }
+        // The absorb event arrives ONE NETWORK ROUND-TRIP after our local
+        // block stamp (wasBlocked is decided on the bullet owner's client and
+        // RPC'd back), on top of the 0.3s vanilla window — July 21 playtest
+        // showed real user absorbs dropped at 0.35s. 0.8s covers window + RTT;
+        // over-crediting is bounded by the 1-credit-per-right-click cap.
+        internal static bool AbsorbIsUserChain() => Time.time - LastUserWindowTime <= 0.8f;
+    }
+
+    [HarmonyPatch(typeof(Block), "RPCA_DoBlock")]
+    class BlockRpcaDoBlockChainClassifierPatch
+    {
+        static void Prefix(Block __instance, bool firstBlock,
+                           BlockTrigger.BlockTriggerType triggerType, bool onlyBlockEffects)
+        {
+            try
+            {
+                var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
+                if (pv == null || !pv.IsMine) return;   // local player's block only
+                if (onlyBlockEffects) return;           // Empower bullet-site: opens no absorb window
+                bool user;
+                switch (triggerType)
+                {
+                    case BlockTrigger.BlockTriggerType.Default:
+                        user = firstBlock && BlockChain.InTryBlock;   // BlinkStep/ExtraBlock/ShieldsUp/revive → false
+                        if (user) BlockChain.LastUserDefaultTime = Time.time;
+                        break;
+                    case BlockTrigger.BlockTriggerType.Echo:
+                        // Echoes schedule at 0.2s steps from their Default+firstBlock
+                        // origin; stacked Echo cards reach ~1s. 1.5s horizon covers it.
+                        user = Time.time - BlockChain.LastUserDefaultTime <= 1.5f;
+                        break;
+                    case BlockTrigger.BlockTriggerType.ShieldCharge:
+                        // Dash blocks belong to whatever user-chain event started the
+                        // dash; dashes run a couple seconds at high levels.
+                        user = Time.time - BlockChain.LastUserWindowTime <= 3.0f;
+                        break;
+                    default:
+                        user = false;
+                        break;
+                }
+                if (user) BlockChain.LastUserWindowTime = Time.time;
+                if (GameStateWatcher.IsTracking)
+                    Plugin.Log.LogInfo($"[BLOCK-DBG] WINDOW type={triggerType} first={firstBlock} user={user}");
+            }
+            catch { }
+        }
+    }
+
     [HarmonyPatch(typeof(Block), "TryBlock")]
     class BlockTryBlockCounterPatch
     {
-        // Cache the reflected counter/cooldown FieldInfo once. ROUNDS' Block uses
-        // `counter` (elapsed cooldown timer, resets to 0 on a successful activation)
-        // and `cooldown` (max cooldown duration). When `counter < cooldown` the
-        // block is still cooling down and TryBlock no-ops — the Postfix would still
-        // fire, falsely incrementing our activation count. Capture the readiness
-        // state in __state and gate the increment on it.
-        private static System.Reflection.FieldInfo _fCounter;
-        private static System.Reflection.FieldInfo _fCooldown;
-        private static bool _fieldsResolved;
-        private static void ResolveFields()
-        {
-            if (_fieldsResolved) return;
-            try
-            {
-                var t = typeof(Block);
-                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
-                _fCounter  = t.GetField("counter", bf);
-                _fCooldown = t.GetField("cooldown", bf);
-            }
-            catch { }
-            _fieldsResolved = true;
-        }
+        // Readiness gate: vanilla activates on `counter >= Cooldown()` which is
+        // (cooldown + cdAdd) * cdMultiplier — the old reflection read of the raw
+        // `cooldown` field mis-gated whenever a block-CD-modifying card was held.
+        // Both members are publicized; read them directly.
         static void Prefix(Block __instance, out bool __state)
         {
             __state = false;
-            try
-            {
-                ResolveFields();
-                if (_fCounter == null || _fCooldown == null) { __state = true; return; } // can't tell, fall back to old behavior
-                float counter  = (float)_fCounter.GetValue(__instance);
-                float cooldown = (float)_fCooldown.GetValue(__instance);
-                // Ready when the elapsed counter has reached the cooldown duration.
-                __state = counter >= cooldown;
-            }
+            try { __state = !(__instance.counter < __instance.Cooldown()); }
             catch { __state = true; }
+            BlockChain.InTryBlock = true;   // re-entrancy marker: RPCA_DoBlock fired inside this frame = right-click
+        }
+
+        static System.Exception Finalizer(System.Exception __exception)
+        {
+            BlockChain.InTryBlock = false;  // never leave the flag stuck
+            return __exception;
         }
 
         static void Postfix(Block __instance, bool __state)
@@ -4266,7 +4477,12 @@ namespace CompetitiveRounds
             {
                 var pv = __instance != null ? __instance.GetComponentInParent<PhotonView>() : null;
                 if (pv == null || !pv.IsMine) return;
-                GameStateWatcher.OnLocalBlockSuccessful();
+                // July 21 item 1: the absorb credits the chain that opened a
+                // window RECENTLY — user right-click chains (incl. Echo/
+                // ShieldCharge follow-ons) count; pure auto-blocks (Abyssal
+                // etc.) count nowhere. Time-based so an interleaved auto event
+                // can't close a still-open user window.
+                GameStateWatcher.OnLocalBlockSuccessful(BlockChain.AbsorbIsUserChain());
             }
             catch { }
         }
@@ -4737,8 +4953,9 @@ namespace CompetitiveRounds
     {
         static void Postfix(ArtHandler __instance)
         {
-            // ArtInstance.profile is a PostProcessProfile from Unity.Postprocessing.Runtime,
-            // which we don't reference at compile time. Reflect into it so we don't have to.
+            // NOTE: the csproj references Unity.Postprocessing.Runtime directly these
+            // days (added for CustomMapColors), so typed PostProcessProfile access is
+            // fine — this diagnostic predates that and keeps its reflection harmlessly.
             try
             {
                 if (__instance.arts == null) return;
@@ -4755,6 +4972,9 @@ namespace CompetitiveRounds
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MAPCOLOR] Awake log failed: {ex.Message}"); }
+            // Item 8: assert the chromatic-aberration toggle on every art profile
+            // as soon as the scene's ArtHandler exists (per-scene coverage).
+            try { MapPhysicalColorPatch.ChromaticAberrationSetting.Apply(); } catch { }
         }
     }
 
@@ -4934,6 +5154,7 @@ namespace CompetitiveRounds
             // Field flips are transition-safe (not particle mutations), so this
             // does NOT need the MapTransitionGuardSec defer.
             RenderPerfSettings.Apply();
+            ChromaticAberrationSetting.Apply();
             // Use whatever sku is currently live after the cycle (ArtHandlerNextArtPatch sets
             // MapColorState.CurrentSku on every cycle advance). Fall back to the legacy single
             // field when the cycle hasn't run yet (fresh map load before any Shift press).
@@ -5524,6 +5745,48 @@ namespace CompetitiveRounds
             }
         }
 
+        // Item 8 (July 20): chromatic aberration toggle. CA lives as a
+        // ChromaticAberration settings object on every art's shared
+        // PostProcessProfile (baseline) plus vanilla's ChomaticAberrationFeeler
+        // (sic) writing intensity pulses each frame. Zeroing intensity loses to
+        // the feeler's per-frame writes; flipping `active` wins outright —
+        // PostProcessLayer.OverrideSettings skips inactive effects and re-blends
+        // from profiles every frame, so the flip is instant both directions and
+        // needs no vanilla-value caching (default true, vanilla never writes it).
+        // Profiles are session-long shared assets, so every apply site must
+        // assert the CURRENT toggle value, and the CustomMapColors clone cache
+        // must be swept too (clones deep-copy the CA settings object).
+        internal static class ChromaticAberrationSetting
+        {
+            internal static void Apply()
+            {
+                try
+                {
+                    bool on = Plugin.ChromaticAberrationEnabled == null || Plugin.ChromaticAberrationEnabled.Value;
+                    var ah = ArtHandler.instance;
+                    if (ah != null)
+                    {
+                        try { Set(ah.volume != null ? ah.volume.profile : null, on); } catch { }
+                        try { Set(ah.menuArt != null ? ah.menuArt.profile : null, on); } catch { }
+                        try { if (ah.arts != null) foreach (var a in ah.arts) Set(a != null ? a.profile : null, on); } catch { }
+                    }
+                    foreach (var clone in CustomMapColors.CachedClones) Set(clone, on);
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[CA-TOGGLE] apply failed: {ex.Message}"); }
+            }
+
+            private static void Set(PostProcessProfile p, bool on)
+            {
+                if (p == null) return;
+                try
+                {
+                    if (p.TryGetSettings<ChromaticAberration>(out var ca) && ca != null)
+                        ca.active = on;
+                }
+                catch { }
+            }
+        }
+
         // Per-map backdrop quads: any renderer wide enough to cover the play
         // area (x span [-35.56, 35.56] per OutOfBoundsHandler) that isn't a
         // particle. Cached vanilla colors per instance; logged once per object
@@ -5853,6 +6116,9 @@ namespace CompetitiveRounds
                     // v1.32 item 7: lighting/shadow disable settings re-assert after
                     // the skin's own lighting pass touched the renderers.
                     MapPhysicalColorPatch.RenderPerfSettings.Apply();
+                    // Freshly-built skin clones carry a copied CA object — assert
+                    // the toggle on it same-frame.
+                    MapPhysicalColorPatch.ChromaticAberrationSetting.Apply();
                     // Instant/sharp swap (v1.26.10): ROUNDS fades the post-process volume in
                     // gradually, which reads as the map "sliding" into the next skin on Shift.
                     // Force the volume to full weight on the same frame so the new ColorGrading

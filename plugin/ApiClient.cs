@@ -111,6 +111,18 @@ namespace CompetitiveRounds
             public int xp_for_next_level;
             public int best_ranked_streak;
             public int best_casual_streak;
+            // July 21 item 8: seconds until the next LFP Discord ping is allowed
+            // (0 = available now). Flat int — JsonUtility parses free (learning #73).
+            public int lfp_seconds_left;
+            // July 20 item 5: labeled game vs series ranked streaks. best_ranked_streak
+            // keeps its historical per-SERIES meaning (old clients + Compare graph bind
+            // to it); these four are the new labeled surface. current_* are SIGNED
+            // (negative = loss streak). Flat ints => JsonUtility parses them for free
+            // (learning #73).
+            public int best_ranked_game_streak;
+            public int current_ranked_game_streak;
+            public int best_ranked_series_streak;
+            public int current_ranked_series_streak;
             public int ranked_series_wins;
             public int ranked_series_losses;
             public int ranked_dc_count;
@@ -267,6 +279,11 @@ namespace CompetitiveRounds
             public int opp_blocks_activated, opp_blocks_successful;
             public int opp_keys_pressed;
             public float opp_active_seconds;
+            // July 21 item 2 — viewer-relative fps timelines for the hover chart.
+            public string player_fps_timeline, opp_fps_timeline;
+            // July 22 item 3 — latency: averages for the row tag + timelines for the hover chart.
+            public int player_ping_avg, opponent_ping_avg;
+            public string player_ping_timeline, opp_ping_timeline;
             // Cumulative scoring timeline "myTotal:oppTotal,..." (viewer-relative).
             public string point_timeline;
             // Bug batch item 4 — total game length in seconds (0 = no data).
@@ -288,6 +305,7 @@ namespace CompetitiveRounds
             public bool unlocked;
             public string unlocked_at; // ISO date or null
             public float global_pct;   // % of all players who have it (v1.30, Steam-style)
+            public int gold;           // July 21 item 7: server-authoritative reward (replaces client hardcode)
         }
 
         // Master definition list (mirrored from server)
@@ -360,8 +378,24 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(TournamentHeartbeatLoop());
             // v1.29: always-on presence ping (mod-clients-online counter).
             Plugin.Instance.StartCoroutine(PresenceLoop());
+            // July 22: mint the Steam session ASAP. Enforced actions (toggle
+            // ranked, match report, queue join) 401 without one, and the
+            // presence loop's first tick is 15s out — too long a window. This
+            // fast loop lands a session within ~2-5s of launch, then relaxes.
+            Plugin.Instance.StartCoroutine(SteamAuthLoop());
             // Bug #65: replay match reports that failed in an earlier session.
             LoadOutbox();
+        }
+
+        // July 22: fast Steam-session establishment at startup (see Initialize).
+        private static IEnumerator SteamAuthLoop()
+        {
+            yield return new WaitForSeconds(2f);   // let Steam init + the local steam id resolve
+            while (true)
+            {
+                try { SteamAuth.MaybeRefresh(); } catch { }
+                yield return new WaitForSeconds(SteamAuth.HasFreshToken ? 30f : 3f);
+            }
         }
 
         // ── Match-report outbox (bug #65) ─────────────────────────────
@@ -2479,7 +2513,24 @@ namespace CompetitiveRounds
             int oppBulletsFired = 0, int oppBulletsHit = 0,
             int oppBlocksActivated = 0, int oppBlocksSuccessful = 0,
             int oppKeysPressed = 0, float oppActiveSeconds = 0f,
-            string pointTimeline = null)
+            string pointTimeline = null,
+            // July 21 item 2 — FPS/lag exploit telemetry. All advisory, not in
+            // HMAC. Timelines are comma-int strings (own = 5s buckets, opp =
+            // their 3s broadcast samples); freeze = main-thread stalls >0.5s
+            // (focused resume = window-drag signature); recv gaps = our socket
+            // silent >2s; opp hb gaps = their gstats heartbeat frozen >8s.
+            string localFpsTimeline = null, string oppFpsTimeline = null,
+            int localFreezeCount = 0, int localFreezeFocusedCount = 0,
+            float localFreezeTotalSec = 0f,
+            int localPingAvg = 0, int localPingMax = 0,
+            int localRecvGapCount = 0, int localRecvGapMaxMs = 0,
+            int oppHbGapCount = 0,
+            int oppFreezeCount = 0, int oppFreezeFocusedCount = 0,
+            int oppRecvGapCount = 0,
+            // July 22 item 3 — latency timelines (own 3s samples; opp via
+            // gstats field 12) + opp average for the history "Ping:" tag.
+            string localPingTimeline = null, string oppPingTimeline = null,
+            int oppPingAvg = 0)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -2527,6 +2578,27 @@ namespace CompetitiveRounds
             sb.Append($"\"opp_keys_pressed\":{oppKeysPressed},");
             sb.Append($"\"opp_active_seconds\":{oppActiveSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)},");
             sb.Append($"\"point_timeline\":\"{Escape(pointTimeline ?? "")}\",");
+            // July 21 item 2 — FPS/lag telemetry (advisory, not in HMAC). Timelines
+            // are self-generated digit/comma strings; clamp to the 512-char columns
+            // COMMA-AWARE so the stored string never ends mid-number.
+            string lft = ClampTimeline(localFpsTimeline);
+            string oft = ClampTimeline(oppFpsTimeline);
+            sb.Append($"\"local_fps_timeline\":\"{Escape(lft)}\",");
+            sb.Append($"\"opp_fps_timeline\":\"{Escape(oft)}\",");
+            sb.Append($"\"local_freeze_count\":{localFreezeCount},");
+            sb.Append($"\"local_freeze_focused_count\":{localFreezeFocusedCount},");
+            sb.Append($"\"local_freeze_total_sec\":{localFreezeTotalSec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)},");
+            sb.Append($"\"local_ping_avg\":{localPingAvg},");
+            sb.Append($"\"local_ping_max\":{localPingMax},");
+            sb.Append($"\"local_recv_gap_count\":{localRecvGapCount},");
+            sb.Append($"\"local_recv_gap_max_ms\":{localRecvGapMaxMs},");
+            sb.Append($"\"opp_hb_gap_count\":{oppHbGapCount},");
+            sb.Append($"\"opp_freeze_count\":{oppFreezeCount},");
+            sb.Append($"\"opp_freeze_focused_count\":{oppFreezeFocusedCount},");
+            sb.Append($"\"opp_recv_gap_count\":{oppRecvGapCount},");
+            sb.Append($"\"local_ping_timeline\":\"{Escape(ClampTimeline(localPingTimeline))}\",");
+            sb.Append($"\"opp_ping_timeline\":\"{Escape(ClampTimeline(oppPingTimeline))}\",");
+            sb.Append($"\"opp_ping_avg\":{oppPingAvg},");
             string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
@@ -2552,16 +2624,27 @@ namespace CompetitiveRounds
                         // Track previous level for level-up detection
                         int prevLevel = CompetitiveUI.LastKnownLevel;
 
-                        // Build XP notification with breakdown
+                        // Build XP notification with breakdown. July 20 item 6: parse the
+                        // xp_bonuses array generically (same pattern as gold_bonuses below)
+                        // instead of hardcoded Contains() checks — new server labels like
+                        // "Master opp x2.5" display without a client release.
                         string xpLine = $"+{xpGained} XP";
                         var bonusParts = new List<string>();
-                        if (response.Contains("Win x")) bonusParts.Add("Win x1.5");
-                        if (response.Contains("Ranked x")) bonusParts.Add("Ranked x1.5");
-                        if (response.Contains("Sweep")) bonusParts.Add("Sweep +100");
-                        // v1.32 item 3: beating a current top-3 leaderboard player
-                        // triples match XP; top-4/5 keeps the flat +150.
-                        if (response.Contains("Top 3")) bonusParts.Add("Top 3 x3");
-                        if (response.Contains("Top 5")) bonusParts.Add("Top 5 +150");
+                        int xpArrIdx = response.IndexOf("\"xp_bonuses\":");
+                        if (xpArrIdx >= 0)
+                        {
+                            int xpOpen = response.IndexOf('[', xpArrIdx);
+                            int xpClose = xpOpen >= 0 ? response.IndexOf(']', xpOpen) : -1;
+                            if (xpOpen >= 0 && xpClose > xpOpen)
+                            {
+                                string xpBody = response.Substring(xpOpen + 1, xpClose - xpOpen - 1);
+                                foreach (var seg in xpBody.Split(','))
+                                {
+                                    string s = seg.Trim().Trim('"').Trim();
+                                    if (!string.IsNullOrEmpty(s)) bonusParts.Add(s);
+                                }
+                            }
+                        }
 
                         if (bonusParts.Count > 0)
                             xpLine += "  [" + string.Join(", ", bonusParts.ToArray()) + "]";
@@ -3692,6 +3775,12 @@ namespace CompetitiveRounds
             entry.opp_keys_pressed = ExtractJsonInt(chunk, "opp_keys_pressed");
             entry.opp_active_seconds = ExtractJsonFloat(chunk, "opp_active_seconds");
             entry.point_timeline = ExtractJsonString(chunk, "point_timeline");
+            entry.player_fps_timeline = ExtractJsonString(chunk, "player_fps_timeline");
+            entry.opp_fps_timeline = ExtractJsonString(chunk, "opp_fps_timeline");
+            entry.player_ping_avg = ExtractJsonInt(chunk, "player_ping_avg");
+            entry.opponent_ping_avg = ExtractJsonInt(chunk, "opponent_ping_avg");
+            entry.player_ping_timeline = ExtractJsonString(chunk, "player_ping_timeline");
+            entry.opp_ping_timeline = ExtractJsonString(chunk, "opp_ping_timeline");
             entry.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
             return entry;
         }
@@ -4002,7 +4091,7 @@ namespace CompetitiveRounds
             }));
         }
 
-        public static void ToggleRanked(string steamId, bool enabled)
+        public static void ToggleRanked(string steamId, bool enabled, int attempt = 1)
         {
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/mod/toggle-ranked/{steamId}?enabled={enabled.ToString().ToLower()}&sig={ComputeHmacHex($"toggle-ranked:{steamId}:{enabled.ToString().ToLower()}")}",
@@ -4017,12 +4106,28 @@ namespace CompetitiveRounds
                             enabled ? Color.green : Color.yellow
                         );
                     }
+                    else if ((response ?? "").Contains("401") && attempt < 3)
+                    {
+                        // July 22: the Steam session may still be minting in the
+                        // startup window — HandleSessionReject already re-armed
+                        // it; retry once it lands so the toggle isn't dropped.
+                        Plugin.Log.LogWarning($"[RANKED] toggle got 401 (attempt {attempt}) — retrying after session establishes");
+                        Plugin.Instance.StartCoroutine(RetryToggleRanked(steamId, enabled, attempt + 1));
+                    }
                     else
                     {
                         Plugin.Log.LogError($"Failed to toggle ranked: {response}");
                     }
                 }
             ));
+        }
+
+        private static IEnumerator RetryToggleRanked(string steamId, bool enabled, int attempt)
+        {
+            float t = 0f;
+            while (t < 6f && !SteamAuth.HasFreshToken) { t += 0.5f; yield return new WaitForSeconds(0.5f); }
+            yield return new WaitForSeconds(0.3f);
+            ToggleRanked(steamId, enabled, attempt);
         }
 
         // ── Ranked Queue ──────────────────────────────────────
@@ -4484,6 +4589,7 @@ namespace CompetitiveRounds
             public string previewColor;
             public string artistName;
             public string added;   // "Jul 12" — the cosmetic-update day (batch)
+            public bool onSale;    // false = artist hasn't opened sales yet ("coming soon")
         }
 
         public static List<NewestCosmeticEntry> CachedNewestCosmetics;
@@ -4516,6 +4622,9 @@ namespace CompetitiveRounds
                             previewColor = ExtractJsonString(chunk, "preview_color"),
                             artistName = ExtractJsonString(chunk, "artist_name"),
                             added = ExtractJsonString(chunk, "added"),
+                            // Absent key (old server) reads as false-ish; default
+                            // to on-sale so pre-round-4 servers render unchanged.
+                            onSale = !chunk.Contains("\"on_sale\":false"),
                         };
                         if (!string.IsNullOrEmpty(e.sku)) list.Add(e);
                     }
@@ -4736,6 +4845,9 @@ namespace CompetitiveRounds
             yield return new WaitForSeconds(15f);
             while (true)
             {
+                // July 21 item 4: keep a fresh Steam session (mints a web-API
+                // ticket when the current one nears expiry; 60s self-backoff).
+                try { SteamAuth.MaybeRefresh(); } catch { }
                 try
                 {
                     GameStateWatcher.EnsureIdentityResolved();
@@ -6437,11 +6549,74 @@ namespace CompetitiveRounds
 
         // ── HTTP helpers ──────────────────────────────────────
 
+        // Comma-aware 512-char clamp for the fps timeline columns: cut at the
+        // last full sample so the parser never sees a truncated fragment.
+        private static string ClampTimeline(string t)
+        {
+            t = t ?? "";
+            if (t.Length <= 512) return t;
+            int cut = t.LastIndexOf(',', 511);
+            return cut > 0 ? t.Substring(0, cut) : t.Substring(0, 512);
+        }
+
+        // July 21 review fix ([9]): 401 session_required recovery. Without this
+        // a server-side-invalidated session (key flip, table wipe) blocked every
+        // enforced write for up to ~23h — InvalidateSession was dead code. The
+        // token compare guards the race where a slow in-flight request's 401
+        // lands after a newer session was already minted.
+        private static void HandleSessionReject(UnityWebRequest req, string sentToken)
+        {
+            try
+            {
+                if (req.responseCode != 401) return;
+                string body = null;
+                try { body = req.downloadHandler?.text; } catch { }
+                if (body == null || !body.Contains("session_required")) return;
+                SteamAuth.InvalidateSessionIf(sentToken);
+                Plugin.Log.LogWarning("[STEAM-AUTH] server rejected session (401) — re-minting on next heartbeat");
+            }
+            catch { }
+        }
+
         // Stamp every outbound API call with the mod's own version so the server
         // can reject (426) any client that drops below the configured floor.
+        // July 21 item 4: also stamps the Steam session token when one is held —
+        // the server binds it to our steam_id (spoof prevention). Absent token
+        // is always allowed client-side; the server's enforcement mode decides.
         private static void StampVersionHeader(UnityWebRequest req)
         {
             try { req.SetRequestHeader("X-Mod-Version", Plugin.ModVersion ?? "0.0.0"); } catch { }
+            try
+            {
+                if (!string.IsNullOrEmpty(SteamAuth.SessionToken))
+                    req.SetRequestHeader("X-Session-Token", SteamAuth.SessionToken);
+            }
+            catch { }
+        }
+
+        /// <summary>July 21 item 4: exchange a Steam web-API auth ticket for a
+        /// server session token. Called from SteamAuth's ticket callback.</summary>
+        public static void PostSteamAuth(string ticketHex)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"ticket_hex\":\"{Escape(ticketHex)}\",\"mod_version\":\"{Escape(Plugin.ModVersion ?? "0.0.0")}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/auth/steam",
+                json,
+                (success, response) =>
+                {
+                    if (!success)
+                    {
+                        Plugin.Log.LogWarning($"[STEAM-AUTH] session exchange failed: {response}");
+                        return;
+                    }
+                    string token = ExtractJsonString(response, "session_token");
+                    int expiresIn = ExtractJsonInt(response, "expires_in");
+                    if (!string.IsNullOrEmpty(token)) SteamAuth.SetSession(token, expiresIn > 0 ? expiresIn : 86400);
+                    else Plugin.Log.LogWarning("[STEAM-AUTH] session response had no token");
+                }
+            ));
         }
 
         // Paths that MUST work before consent is granted (version probe so we can auto-update
@@ -6593,11 +6768,13 @@ namespace CompetitiveRounds
                 request.downloadHandler = new DownloadHandlerBuffer();
                 request.SetRequestHeader("Content-Type", "application/json");
                 StampVersionHeader(request);
+                string _sentTok = SteamAuth.SessionToken;
                 request.timeout = 20;
 
                 yield return request.SendWebRequest();
 
                 if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
+                HandleSessionReject(request, _sentTok);
                 bool success = request.result == UnityWebRequest.Result.Success;
                 NoteResult(success, request.responseCode);
                 callback(success, success ? request.downloadHandler.text : request.error);
@@ -6621,11 +6798,13 @@ namespace CompetitiveRounds
                     request.downloadHandler = new DownloadHandlerBuffer();
                     request.SetRequestHeader("Content-Type", "application/json");
                     StampVersionHeader(request);
+                    string _sentTok = SteamAuth.SessionToken;
                     request.timeout = 10;
 
                     yield return request.SendWebRequest();
 
                     if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
+                    HandleSessionReject(request, _sentTok);
 
                     bool success = request.result == UnityWebRequest.Result.Success;
                     NoteResult(success, request.responseCode);
@@ -6673,7 +6852,129 @@ namespace CompetitiveRounds
             ));
         }
 
+        // ── LFP Discord ping (July 21 item 8) ─────────────────────
+        // All outcomes are HTTP 200 + a status field (the transport surfaces
+        // only request.error on non-2xx, so a 429-style design would lose the
+        // remaining-time info). Message uses JsonEscapeFull — user-typed text
+        // can carry control chars (learning #100).
+        public static void SendLfpPing(string steamId, string message, int expiresMinutes)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"message\":\"{JsonEscapeFull(message ?? "")}\",\"expires_minutes\":{expiresMinutes}}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/lfp-ping",
+                json,
+                (success, response) =>
+                {
+                    if (!success)
+                    {
+                        CompetitiveUI.ShowNotification("RLFP ping failed - server unreachable. Try again shortly.", new Color(1f, 0.5f, 0.4f), 6f);
+                        return;
+                    }
+                    string status = ExtractJsonString(response, "status");
+                    switch (status)
+                    {
+                        case "queued":
+                            NativeUI.LfpArmCooldown(ExtractJsonInt(response, "cooldown_seconds"));
+                            CompetitiveUI.ShowNotification("Posted to Discord - good luck!", new Color(0.5f, 1f, 0.6f), 6f);
+                            break;
+                        case "cooldown":
+                            int left = ExtractJsonInt(response, "seconds_left");
+                            NativeUI.LfpArmCooldown(left);
+                            CompetitiveUI.ShowNotification($"RLFP ping available in {left / 60}m {left % 60}s (1 per hour).", new Color(1f, 0.8f, 0.3f), 6f);
+                            break;
+                        case "not_linked":
+                            CompetitiveUI.ShowNotification("Link your Discord account first (Home tab) to use RLFP pings.", new Color(1f, 0.8f, 0.3f), 7f);
+                            break;
+                        case "ranked_disabled":
+                            CompetitiveUI.ShowNotification("Enable Ranked first - the RLFP ping is for ranked matches.", new Color(1f, 0.8f, 0.3f), 6f);
+                            break;
+                        default:
+                            CompetitiveUI.ShowNotification($"RLFP ping failed: {status}", new Color(1f, 0.5f, 0.4f), 6f);
+                            break;
+                    }
+                }
+            ));
+        }
+
         // ── Achievements ──────────────────────────────────────────
+
+        // July 21 item 7: click an achievement row → who earned it, sorted by
+        // current 1v1 elo. Display names are ADVERSARIAL input (learning #156)
+        // — sliced with the string-aware helpers, never naive Split.
+        public class AchEarnerData
+        {
+            public string display_name;
+            public int rating;          // -1 = unrated
+            public string unlocked_at;
+            // July 22: the earner's displayed title (server-resolved, same as leaderboard).
+            public string title, title_color;
+        }
+        public static string EarnersKey { get; private set; }
+        public static List<AchEarnerData> CachedEarners { get; private set; }
+        private static bool _earnersInFlight;
+        // Review fix [7]: last-write-wins intent — a click during an in-flight
+        // fetch records the WANTED key; the callback re-fires for it, so the
+        // panel can't stick on "loading" over a stale list.
+        private static string _earnersWantedKey;
+
+        public static void FetchAchievementEarners(string achievementKey)
+        {
+            if (string.IsNullOrEmpty(achievementKey)) return;
+            _earnersWantedKey = achievementKey;
+            if (_earnersInFlight) return;
+            _earnersInFlight = true;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/achievements/{achievementKey}/earners",
+                (success, response) =>
+                {
+                    _earnersInFlight = false;
+                    if (!success)
+                    {
+                        Plugin.Log.LogWarning($"[ACH] earners fetch failed: {response}");
+                        if (_earnersWantedKey != null && _earnersWantedKey != achievementKey)
+                            FetchAchievementEarners(_earnersWantedKey);   // superseded — serve the newer click
+                        return;
+                    }
+                    try
+                    {
+                        var list = new List<AchEarnerData>();
+                        int arrIdx = response.IndexOf("\"earners\":");
+                        if (arrIdx >= 0)
+                        {
+                            int open = response.IndexOf('[', arrIdx);
+                            int close = open >= 0 ? FindMatchingBracketStringAware(response, open) : -1;
+                            if (open >= 0 && close > open)
+                            {
+                                foreach (var chunk in SliceTopLevelObjects(response.Substring(open + 1, close - open - 1)))
+                                {
+                                    var e = new AchEarnerData
+                                    {
+                                        display_name = ExtractJsonString(chunk, "display_name"),
+                                        unlocked_at = ExtractJsonString(chunk, "unlocked_at"),
+                                        rating = chunk.Contains("\"rating\":null") ? -1 : ExtractJsonInt(chunk, "rating"),
+                                        title = ExtractJsonString(chunk, "title"),
+                                        title_color = ExtractJsonString(chunk, "title_color"),
+                                    };
+                                    if (!string.IsNullOrEmpty(e.display_name)) list.Add(e);
+                                }
+                            }
+                        }
+                        EarnersKey = achievementKey;
+                        CachedEarners = list;
+                        NativeUI.MarkDirty();
+                        Plugin.Log.LogInfo($"[ACH] earners loaded for {achievementKey}: {list.Count}");
+                        if (_earnersWantedKey != null && _earnersWantedKey != achievementKey)
+                            FetchAchievementEarners(_earnersWantedKey);   // superseded — serve the newer click
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[ACH] earners parse error: {ex.Message}");
+                    }
+                }
+            ));
+        }
+
 
         public static void FetchAchievements(string steamId)
         {
@@ -6700,7 +7001,8 @@ namespace CompetitiveRounds
                                     achievement_key = key,
                                     unlocked = unlocked,
                                     unlocked_at = unlockedAt,
-                                    global_pct = ExtractJsonFloat(parts[i], "global_pct")
+                                    global_pct = ExtractJsonFloat(parts[i], "global_pct"),
+                                    gold = ExtractJsonInt(parts[i], "gold")
                                 };
                             }
                             CachedAchievements = dict;
@@ -6736,7 +7038,9 @@ namespace CompetitiveRounds
                         string name = ExtractJsonString(response, "name");
                         if (status == "unlocked" && !string.IsNullOrEmpty(name))
                         {
-                            CompetitiveUI.ShowNotification($"Achievement Unlocked: {name}!", new Color(1f, 0.85f, 0.3f), 6f);
+                            string req = AchievementDefs.TryGetValue(achievementKey, out var def) ? def[1] : null;
+                            string toast = $"Achievement Unlocked: {name}!" + (string.IsNullOrEmpty(req) ? "" : $"\n{req}");
+                            CompetitiveUI.ShowNotification(toast, new Color(1f, 0.85f, 0.3f), 8f);
                             Plugin.Log.LogInfo($"[ACH] Unlocked: {achievementKey} ({name})");
                         }
                         else

@@ -55,13 +55,21 @@ router = APIRouter(prefix="/api/v1/tournaments", tags=["Tournaments"])
 
 # ── Constants ─────────────────────────────────────────────────────
 
-READY_STALE_SECONDS = 60          # ready_at older than this = not ready
-MATCH_READY_GRACE_SECONDS = 300   # 5 min to ready up at match start
+# July 20 item 7: 60 → 120. Two missed 20s heartbeats or a ~75s API-redeploy
+# gap could mark a PRESENT player stale and forfeit them out of the whole
+# bracket (the no-show sweep cascades). No-show detection still resolves
+# within deadline + 2 min.
+READY_STALE_SECONDS = 120         # ready_at older than this = not ready
+MATCH_READY_GRACE_SECONDS = 300   # base ready-up grace unit (x2 = 600s everywhere, July 20 item 7)
 # July 17 round 2 (item 2): 7-min breather between a player's sync matches
 # (rounds 2+). The match sits in status='scheduled' with the room already
 # provisioned; both players pressing Play Now skips the break.
 MATCH_BREAK_SECONDS = 420
-FORCE_START_WINDOW_MINUTES = 30   # all force votes within this window
+# July 20 item 7: 30 → 10. A force vote could be 29 min stale when the 8th
+# vote landed, and the tournament then started INSTANTLY — the player who
+# voted half an hour ago and closed ROUNDS was no-show-forfeited with <5 min
+# of effective notice. Paired with the scheduled +10min force-start below.
+FORCE_START_WINDOW_MINUTES = 10   # all force votes within this window
 # Minimum notice between the lock deciding the winning slot and that slot
 # actually arriving (July 17 round 3, Sid item 9): players must be able to
 # answer the availability DM after the time is KNOWN. With lock_at =
@@ -798,8 +806,11 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
     # Discord feed (v1.32): the winning voted slot moved the start away from
     # the default. Sync only — async overwrites scheduled_start_ts to `now`
     # below (it starts the moment signups close), so a vote-moved notice
-    # would announce a time that never happens.
-    if t.kind != "async" and t.scheduled_start_ts != t.default_start_ts:
+    # would announce a time that never happens. Force-start also skips it
+    # (July 20 item 7): the force flow overwrites scheduled_start_ts to
+    # now+10min right after this returns, so the tally-picked time here
+    # would be a wrong public announcement.
+    if t.kind != "async" and not force and t.scheduled_start_ts != t.default_start_ts:
         try:
             mentions = await _confirmed_mentions(db, t.id)
             prefix = f"{mentions} — the" if mentions else "The"
@@ -1064,7 +1075,11 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             m.scheduled_ready_at = now + timedelta(seconds=MATCH_BREAK_SECONDS)
         else:
             m.status = "ready"
-            grace = MATCH_READY_GRACE_SECONDS * (2 if (m.round or 1) > 1 else 1)
+            # July 20 item 7: round 1 gets the same 600s as rounds 2+ — the
+            # lock DM promises "5-10 min grace" and a force-started tournament's
+            # only real notice window is exactly this deadline; 300s punished
+            # slow ROUNDS launches.
+            grace = MATCH_READY_GRACE_SECONDS * 2
             m.ready_deadline_at = now + timedelta(seconds=grace)
 
 
@@ -1549,14 +1564,38 @@ async def tournament_tick() -> None:
 async def _apply_no_show_forfeits(db: AsyncSession, tournament_id: uuid.UUID) -> None:
     """For every 'ready' match past ready_deadline_at, check both signups'
     ready_at heartbeats. If a signup isn't ready, mark it forfeited; if only
-    one side is ready, the other side's match becomes a forfeit win."""
+    one side is ready, the other side's match becomes a forfeit win.
+
+    July 20 item 7: a match whose SERIES has a game reported RECENTLY is IN
+    PLAY, not a no-show — matches never leave 'ready' during a live BO3, so
+    this sweep used to run against players mid-game forever, and one >60s
+    heartbeat gap (a crash + relaunch takes longer) forfeited the player out
+    of the ENTIRE bracket via the forfeited-flag cascade. The grace is TIME-
+    BOUNDED (45 min since the last reported game): an unconditional skip
+    would wedge the bracket forever on an abandoned mid-BO3 (no 1v1 DC
+    endpoint completes tournament series server-side, and this sweep is also
+    how the async 7-day deadline is enforced). Past the window the normal
+    heartbeat forfeit applies — a still-present survivor wins; if BOTH are
+    gone, the series-score LEADER advances (penalty tiebreak only at even
+    score) so a mid-BO3 leader isn't punished by the leaver."""
     now = datetime.now(timezone.utc)
     q = select(TournamentMatch).where(and_(
         TournamentMatch.tournament_id == tournament_id,
         TournamentMatch.status == "ready",
         TournamentMatch.ready_deadline_at <= now,
-    ))
+    )).with_for_update()
     for m in (await db.execute(q)).scalars().all():
+        series_started = False
+        if m.series_id is not None:
+            recent = (await db.execute(
+                text("SELECT 1 FROM matches WHERE series_id = :sid "
+                     "AND ended_at > NOW() - INTERVAL '45 minutes' LIMIT 1"),
+                {"sid": str(m.series_id)})).first()
+            if recent:
+                continue  # BO3 actively in progress — not a no-show
+            series_started = (await db.execute(
+                text("SELECT 1 FROM matches WHERE series_id = :sid LIMIT 1"),
+                {"sid": str(m.series_id)})).first() is not None
         p1 = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p1_signup_id))).scalar_one_or_none()
         p2 = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p2_signup_id))).scalar_one_or_none()
         p1_ready = p1 and p1.ready_at and (now - p1.ready_at).total_seconds() <= READY_STALE_SECONDS
@@ -1581,28 +1620,60 @@ async def _apply_no_show_forfeits(db: AsyncSession, tournament_id: uuid.UUID) ->
             m.status = "forfeit"
             m.ended_at = now
         else:
-            # Same penalty-aware tiebreak as _activate_ready_matches — bracket
-            # progresses, lower-penalty player wins the mutual no-show.
-            winner_id = m.p1_signup_id
-            if p1 and p2:
-                if p2.penalty_at_signup < p1.penalty_at_signup:
-                    winner_id = m.p2_signup_id
-                elif p1.penalty_at_signup == p2.penalty_at_signup and str(m.p2_signup_id) < str(m.p1_signup_id):
-                    winner_id = m.p2_signup_id
+            # Mutual no-show. If the BO3 was STARTED, the series-score leader
+            # advances (July 20 item 7 — enforces the async 7-day deadline by
+            # score and never punishes a mid-BO3 leader for the leaver);
+            # otherwise/at even score, the same penalty-aware tiebreak as
+            # _activate_ready_matches — bracket progresses either way.
+            winner_id = None
+            if series_started and p1 and p2:
+                srow = (await db.execute(
+                    text("SELECT player1_id, player2_id, p1_series_wins, p2_series_wins "
+                         "FROM ranked_series WHERE id = :sid"),
+                    {"sid": str(m.series_id)})).first()
+                if srow is not None and srow.p1_series_wins != srow.p2_series_wins:
+                    leader_pid = srow.player1_id if srow.p1_series_wins > srow.p2_series_wins else srow.player2_id
+                    if p1.player_id == leader_pid:
+                        winner_id = m.p1_signup_id
+                    elif p2.player_id == leader_pid:
+                        winner_id = m.p2_signup_id
+            if winner_id is None:
+                winner_id = m.p1_signup_id
+                if p1 and p2:
+                    if p2.penalty_at_signup < p1.penalty_at_signup:
+                        winner_id = m.p2_signup_id
+                    elif p1.penalty_at_signup == p2.penalty_at_signup and str(m.p2_signup_id) < str(m.p1_signup_id):
+                        winner_id = m.p2_signup_id
             m.status = "double_forfeit"
             m.winner_signup_id = winner_id
             m.ended_at = now
 
 
 async def _check_and_trigger_force_start(db: AsyncSession, t: Tournament) -> bool:
-    """Called from the force-vote endpoint. Triggers an immediate lock+start if:
+    """Called from the force-vote endpoint. Locks the tournament with a start
+    time 10 minutes out if:
       - tournament is in 'voting'
-      - every current signup has a force vote
-      - max(vote_ts) - min(vote_ts) <= 30 minutes
-      - signup count >= min_players"""
+      - every current CONFIRMED signup has a force vote (speculatives are an
+        inert pool and don't play — July 20 item 7: they used to be counted
+        in the denominator while the client displayed confirmed-only, so one
+        AFK speculative silently blocked the force start)
+      - max(vote_ts) - min(vote_ts) <= FORCE_START_WINDOW_MINUTES
+      - signup count >= min_players
+
+    July 20 item 7: was lock + start IN THE SAME TRANSACTION (scheduled = now).
+    That skipped every notification the bot keys off status transitions —
+    voting→running inside one 30s poll meant no lock DM, no T-15 reminder, no
+    started announce; the only signal was the per-match ready DM with <5 min
+    left, and anyone whose force vote was ~30 min old and had closed ROUNDS
+    got no-show-forfeited out of the whole bracket. Leaving status='locked'
+    with a +10min scheduled start lets the normal tick's locked→running
+    transition start it, and the whole notification stack (lock DM, reminder
+    branch at 0<mins<=15, in-game countdown banner) fires naturally."""
     if t.status != "voting":
         return False
-    sq = select(TournamentSignup.player_id).where(TournamentSignup.tournament_id == t.id)
+    sq = select(TournamentSignup.player_id).where(
+        TournamentSignup.tournament_id == t.id,
+        TournamentSignup.is_speculative == False)  # noqa: E712
     signup_player_ids = set(row[0] for row in (await db.execute(sq)).all())
     if len(signup_player_ids) < t.min_players:
         return False
@@ -1614,12 +1685,11 @@ async def _check_and_trigger_force_start(db: AsyncSession, t: Tournament) -> boo
     votes = [fv[pid] for pid in signup_player_ids]
     if (max(votes) - min(votes)).total_seconds() > FORCE_START_WINDOW_MINUTES * 60:
         return False
-    # Trigger immediate lock + start. force=True: everyone here force-voted
+    # Lock with 10 minutes of notice. force=True: everyone here force-voted
     # "start now", so the slot-agreement gate and kick pass don't apply.
     await lock_tournament(db, t, force=True)
     if t.status == "locked":
-        t.scheduled_start_ts = datetime.now(timezone.utc)
-        await start_tournament(db, t)
+        t.scheduled_start_ts = datetime.now(timezone.utc) + timedelta(minutes=10)
     return True
 
 
