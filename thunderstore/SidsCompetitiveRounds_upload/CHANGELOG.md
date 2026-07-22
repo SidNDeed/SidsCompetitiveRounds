@@ -1,3 +1,34 @@
+## v1.34.0 — 2026-07-22 — July 20-22 mega-batch
+
+### Client (mod)
+- **Accuracy & block counters restarted.** Hit % and Block % lifetime totals were reset to zero because the way they're counted changed this release (below) and old mixed-era totals couldn't be corrected per game. They rebuild cleanly from your next games on 1.34.0. If your Hit/Block shows "-" for a bit, that's why.
+- **Block % counting reworked** to the community-agreed rule: only your **right-click blocks** count. One right-click is one activation, and if that block (or its Echo / Shield Charge follow-ups) stops a bullet it counts as one success — so blocking is never over 100%. Passive auto-blocks (Abyssal Countdown, Shields Up, etc.) don't count toward the stat at all.
+- **Hit % kill-shot fix (finishing bugs #77/#80).** The round-ending kill shot was being dropped from your hit count, so high-damage builds (Careful Planning, Wind Up + Poison) could read absurdly low. Kill shots now count. Reload-spam clicks and card-spawned projectiles (EMP rings, etc.) no longer inflate your shots-fired.
+- **FPS & Latency in match history.** Ranked/Casual history rows now show both players' **FPS** and **Ping** (you / opponent). Hover the FPS number for a graph of frame-rate over the match; hover Ping for a graph of latency over the match. Handy for seeing whether a rough game was a real connection issue.
+- **Game-streak vs series-streak.** My Stats now shows both your ranked **game** streak and your **series** streak, each with its own Best, clearly labeled (they used to be mixed on one line).
+- **Rating History graph upgrade.** The leaderboard rating graph now spans the full panel, is taller, and has fixed reference lines at 1500 / 1600 / 1800 / 2000 / 2400 so you can read a player's tier at a glance. "Ranked:" record is now labeled "Ranked (series):".
+- **Achievements tab overhaul.** Sortable (Default / Rarity / Gold / Date earned — click again to reverse), the gold reward shows on every achievement even before you earn it, and clicking an achievement expands an inline list right under it of everyone who's earned it, in the order they got it, with their titles.
+- **RLFP Ping button** (top bar, between Search Ranked and Enable/Disable): pings the Ranked Looking For Player role in Discord with an optional message and an expiry (15m / 30m / 1h / 3h) so people can find you a ranked game even when your game's closed. Requires a linked Discord + ranked enabled; once per hour.
+- **Chromatic aberration toggle** in Settings — turn off the RGB color-fringing for crisper edges and a tiny FPS gain.
+- **Body-color shop previews**: each Body Color now shows a little character-shaped color swatch so you can see the real color, not just the name.
+- **Popup fixes**: on-screen messages no longer get clipped or vanish too fast, and achievement-unlock popups now show the requirement.
+- **Casual-downgrade notice** now fires reliably when your opponent has ranked disabled or isn't running the mod, so you always know a game recorded casual before investing 10 minutes.
+- **Matchmaking "Press Jump to Join" — mitigation (NOT confirmed fixed).** Added a fast detector that, when the dead-connection state is hit, restarts and drops you back into the quickplay queue automatically instead of stranding you on a dead screen, plus a guard for the underlying vanilla race. This still needs live verification — if you hit the dead screen again, please file a bug report with the log.
+- **Account verification (opt-in, staged).** The mod now proves Steam ownership to the server via a Steam auth ticket, closing the door on someone using the mod under a Steam ID that isn't theirs. Rolls out in log-only mode first.
+
+### Server
+- **Ranked series never expire.** An unfinished series now resumes whenever you next play that person, no matter how long later — so leaving mid-series can't save your rating. 52 old unfinished series were reattached. FAQ wording updated.
+- **Casual games no longer create phantom ranked series** (bug #78): a game against someone registered but not currently running the mod was being upgraded to a ranked series server-side. Fixed to require the opponent's mod to actually be live; the stray series was cleaned up.
+- **Opponent-tier gold & XP.** Ranked rewards now scale by your opponent's rank tier — Beginner ×1 up to Grand Master ×3 — on both gold **and** XP, win or lose. Winning a series doubles the series reward, and beating a current top-3 player doubles it again. Series losers now earn tier-scaled gold too. Level-up gold and the correct series gold now show in match history (previously under-reported).
+- **Achievement gold retiered** per difficulty (500 / 300 / 1000 tiers) with everyone's existing earns back-paid the difference.
+- **Sync tournament timing.** Force-start now schedules 10 minutes out through the normal notification flow (lock DM, countdown, banner) instead of starting instantly with no warning; stale-vote window tightened; a crash mid-BO3 no longer forfeits you out of the whole bracket, and an abandoned match can't wedge the tournament forever.
+- **Expanded match-review tools for admins**: additional per-match connection/performance signals (FPS/latency/freeze/heartbeat) recorded for admin review, with per-player baselines so consistent conditions aren't flagged.
+
+### v1.33.1 (rolled into this release) — bug reports 77-80
+- #77 / #80: hit-count kill-shot fix (see above).
+- #78: casual phantom-series fix (see above).
+- #79: matchmaking "Press Jump to Join" mitigation (see above — not confirmed fixed).
+
 ## v1.33.0 — RELEASED 2026-07-17 — July 17 mega-batch (rounds 1-3)
 
 ### Round 3 (Sid's 10 items + first 1v2 forensics)
