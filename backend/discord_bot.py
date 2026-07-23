@@ -2808,7 +2808,7 @@ async def cmd_game(ctx, code: str):
         await ctx.send(embed=embed, file=file)
     else:
         if mode != "1v1":
-            embed.set_footer(text="Timeline graphs need telemetry recorded by v1.35+ clients in this mode.")
+            embed.set_footer(text="Timeline graphs need telemetry recorded by v1.34.1+ clients in this mode.")
         await ctx.send(embed=embed)
 
 
