@@ -1,3 +1,40 @@
+## v1.34.1 — 2026-07-22 — July 22 nine-item batch + live feedback
+
+### Discord identity (feedback round)
+- **Discord name on the leaderboard is now opt-OUT** (was opt-in): linked players' Discord `@display name` shows on their leaderboard detail by default, so people looking for a ranked game know who to @. Turn it off in Settings → "Show Discord on leaderboard".
+- **Search Ranked beacons now name who to @** — the Discord "searching for a ranked match" post (and the 2v2/1v2 equivalents) includes the searcher's `@display name` as plain text. It never pings them (only the RLFP Ping button does).
+- **`/mystats` shows your Discord `@display name`** under the title.
+
+### Client (mod)
+- **My Stats history stat line tightened + ID button moved** (feedback): the Hit/Block/keys text is back to hugging its content (the wide split spacing is gone), and the game-ID copy button now sits right after the score instead of next to the opponent name.
+- **2v2 Recent Series widened + enlarged** (feedback): the panel takes the previously-empty space left of it, text is bigger, the game-row ID chip is just `[ID]` (click the row to copy), and the row-height math is fixed at the root so player names no longer overlap the "Game N:" line. Each game shows a per-player FPS/ping/Hit%/Block% line with a hover mini-dashboard.
+- **Hit % and Block % hover graphs** in My Stats Ranked/Casual history — for you AND your opponent (4 graphs per game). The stats line under each game is now clickable territory: hover your (or their) Hit % for a shots-fired-vs-hits chart, hover a Block % for damage-taken-vs-successful-blocks. Both are cumulative over the match, sampled every 3 seconds.
+- **Point markers on every match graph.** FPS, Ping, Hit % and Block % hover graphs now show a vertical marker at each point scored — green when you took the point, red when the opponent did — so you can line a bad stretch up against the scoreboard.
+- **Disconnect banner (bug #81).** When anyone disconnects or quits mid-game — casual, ranked, 2v2 or 1v2 — every remaining player gets a top-of-screen banner naming who left, on the spot. Between games of an unfinished series it shows an orange "left — series unfinished (1-0)" variant, and if the player left to join a ranked match it says exactly that. In 1v1 you also get an immediate note telling you whether leaving gives you the win or voids the game (the old message only appeared after you quit out yourself).
+- **Game ID buttons.** Every recorded game now has a tiny ID button (My Stats history rows) or click-to-copy row (2v2 Recent Series games) that copies a short game code — paste it into `/game` in Discord to pull up that game's full breakdown.
+- **2v2 Recent Series telemetry.** Game rows now show each player's FPS / ping / Hit % / Block % line, and hovering a player pops a 4-panel mini dashboard (FPS, ping, shots-vs-hits, damage-vs-blocks). Also: the top-left player name no longer crowds the "Game N:" line.
+- **1v2 Solo Extra Initial Pick is live in-game** — when the lobby had the toggle on, the solo's first card screen deals twice. (First-playtest-pending: the mechanism is vanilla's own multi-pick loop, but online multi-pick has never run in the wild.)
+- **1v2 leaderboard W/L split** — solo record and duo record shown separately (orange solo 3W-1L / blue duo 2W-4L) instead of one combined tally.
+- **Achievements earner lists**: now sized to their content (no more giant empty box on a 0-1 earner achievement), show 20 earners per page with a pager for the rest.
+- **Leaderboard search** — a search box under the Leaderboard/Compare sub-tabs filters the board as you type (typing "t" no longer opens chat, same guard as the Compare search).
+- **Discord on profiles (opt-out)**: linked players' "Discord: @displayname" shows on their leaderboard detail panel (above the Mod line) by default; a Settings toggle "Show Discord on leaderboard" turns it off.
+- **Home tab Discord Link** now shows your actual Discord username (the unique @handle), not your display name; falls back to the account ID. Still click-to-reveal.
+
+### Server
+- **1v2 fixes from the July 22 forensics pass**: the janitor's status-spelling mismatch that made canceled locks invisible to the continuation lookup (unrecorded-games risk, bug #70 family); abandoned mid-series 1v2 rows now close after 24h instead of staying "active" forever; a stale-husk guard on the continuation lookup (6h activity window); series slot columns realign to the in-game truth on the first reported match (protects per-slot rewards + future ranked replay).
+- **Achievements**: the earner list now resolves dynamic titles (Sid's "1st Place" podium title was silently dropped — string/UUID key mismatch), reports the true total, and serves up to 500 earners.
+- **Game lookup**: `GET /matches/by-code/{code}` — full per-game detail (both/all players' stats, timelines, cards, rewards) for the Discord bot, across 1v1/2v2/1v2.
+- **2v2 telemetry**: per-player FPS/ping/hit/block timelines + counters stored per game (new `team_match_telemetry` table) and served in the series feed.
+- **Discord identity split**: `discord_username` now holds the real @handle, new `discord_display_name` holds the display name, plus the opt-in `show_discord` flag gating third-party visibility.
+- Migrations: 141 (hit/block timelines + point times), 142 (team match telemetry), 143 (game-code indexes), 144 (discord display/show), 145 (ovt status data-fix).
+
+### Discord bot
+- **`/game <code>`** — paste a game ID copied in-game to get the full breakdown: score, per-player Hit %/Block %, FPS and ping (with graphs), cards, and gold/XP/Elo changes. (Feedback fixes: the score-progression graph reads in rounds, not doubled points, and a game with no recorded picks for a side now says so explicitly instead of dropping the field.)
+- **`!link` now stores both your @username and display name**, existing links are re-resolved on the next bot restart, and renames are tracked automatically by the half-hour role sync.
+
+### Server
+- Migration 146 flips `show_discord` to opt-out (default TRUE); recent-joins queue endpoints carry the searcher's Discord display name (gated on the opt-out).
+
 ## v1.34.0 — 2026-07-22 — July 20-22 mega-batch
 
 ### Client (mod)
