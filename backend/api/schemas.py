@@ -114,6 +114,14 @@ class MatchReport(BaseModel):
     local_ping_timeline: str | None = Field(None, max_length=512)
     opp_ping_timeline: str | None = Field(None, max_length=512)
     opp_ping_avg: int | None = Field(None, ge=0, le=30000)
+    # July 22 — cumulative Hit%/Block% timelines ("fired:hit,..." /
+    # "dmgTaken:blocksSucc,...", 3s cadence) + per-point timestamps
+    # ("12,47,89" seconds since match start, one per point_timeline entry).
+    local_hit_timeline: str | None = Field(None, max_length=1024)
+    opp_hit_timeline: str | None = Field(None, max_length=1024)
+    local_block_timeline: str | None = Field(None, max_length=1024)
+    opp_block_timeline: str | None = Field(None, max_length=1024)
+    point_times: str | None = Field(None, max_length=512)
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -152,6 +160,10 @@ class PlayerStatsResponse(BaseModel):
     ranked_enabled: bool
     discord_id: str | None = None
     discord_username: str | None = None
+    # July 22 (migration 144): display name + the opt-in that gates showing it
+    # to other players on the leaderboard detail panel.
+    discord_display_name: str | None = None
+    show_discord: bool = False
     gold_earned: int = 0
     gold_spent: int = 0
     # Lifetime gun accuracy + block success counters (v1.23).
@@ -351,6 +363,15 @@ class MatchHistoryEntry(BaseModel):
     opponent_ping_avg: int = 0
     player_ping_timeline: str | None = None
     opp_ping_timeline: str | None = None
+    # July 22 — viewer-relative cumulative Hit%/Block% timelines
+    # ("fired:hit,..." / "dmgTaken:blocksSucc,...") + per-point timestamps in
+    # seconds since match start (no orientation — who scored is derived by
+    # diffing point_timeline pairs). Drive the new history hover graphs.
+    player_hit_timeline: str | None = None
+    opp_hit_timeline: str | None = None
+    player_block_timeline: str | None = None
+    opp_block_timeline: str | None = None
+    point_times: str | None = None
     # Bug batch item 4 — total game length in seconds (0 = unknown/legacy row).
     duration_seconds: int = 0
 
@@ -717,6 +738,24 @@ class TeamQueuePollResponse(BaseModel):
     my_ready: bool = False  # the polling player's own ready flag
 
 
+class TeamPlayerTelemetry(BaseModel):
+    """Per-player 2v2 telemetry (July 22, migration 142). Advisory — NOT in
+    the HMAC. The reporter's own slot comes from its counters; the other three
+    slots from each peer's cr_gstats Photon prop. Bounds mirror MatchReport's
+    so a crafted value can't overflow a column and 500 the submit."""
+    fps_timeline: str | None = Field(None, max_length=512)
+    ping_timeline: str | None = Field(None, max_length=512)
+    ping_avg: int | None = Field(None, ge=0, le=30000)
+    hit_timeline: str | None = Field(None, max_length=1024)
+    block_timeline: str | None = Field(None, max_length=1024)
+    bullets_fired: int | None = Field(None, ge=0, le=1000000)
+    bullets_hit: int | None = Field(None, ge=0, le=1000000)
+    blocks_activated: int | None = Field(None, ge=0, le=1000000)
+    blocks_successful: int | None = Field(None, ge=0, le=1000000)
+    keys_pressed: int | None = Field(None, ge=0, le=10000000)
+    active_seconds: float | None = Field(None, ge=0, le=86400)
+
+
 class TeamMatchReport(BaseModel):
     """
     Submitted by the lowest-Steam-ID participant after a 2v2 game ends.
@@ -746,6 +785,13 @@ class TeamMatchReport(BaseModel):
     t1b_fps: int | None = Field(None, ge=0, le=10000)
     t2a_fps: int | None = Field(None, ge=0, le=10000)
     t2b_fps: int | None = Field(None, ge=0, le=10000)
+    # July 22 — per-slot telemetry blobs (timelines + hit/block counters).
+    # None from old clients; slots whose peer data never reached the reporter
+    # are None individually.
+    t1a_telemetry: TeamPlayerTelemetry | None = None
+    t1b_telemetry: TeamPlayerTelemetry | None = None
+    t2a_telemetry: TeamPlayerTelemetry | None = None
+    t2b_telemetry: TeamPlayerTelemetry | None = None
 
 
 class TeamMatchResponse(BaseModel):
@@ -835,6 +881,11 @@ class Ovt1v2LeaderboardEntry(BaseModel):
     win_rate: float
     solo_games: int
     duo_games: int
+    # July 22: W/L split by role — games played as solo vs as duo half.
+    solo_wins: int = 0
+    solo_losses: int = 0
+    duo_wins: int = 0
+    duo_losses: int = 0
     level: int = 0
     title: str | None = None
     title_color: str | None = None

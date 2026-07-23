@@ -136,6 +136,41 @@ namespace CompetitiveRounds
         private static long _lastTickStopwatchMs = -1;
         private static readonly System.Diagnostics.Stopwatch _tickStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
+        // July 22 item 1 — cumulative Hit%/Block% timelines for the new history
+        // hover graphs. Own side sampled on the 3s cadence as "fired:hit" and
+        // "dmgTakenInt:blocksSucc" pairs; opponent side sampled per cr_gstats
+        // seq-advance (same rhythm their other telemetry arrives on). Damage
+        // taken includes DOT ticks — unfilterable at TakeDamage (learning
+        // #137), acceptable for a trend graph. Advisory, never in the HMAC.
+        private static readonly List<string> localHitTimeline = new List<string>();    // cap 128
+        private static readonly List<string> localBlockTimeline = new List<string>();  // cap 128
+        private static readonly List<string> oppHitTimeline = new List<string>();      // cap 128
+        private static readonly List<string> oppBlockTimeline = new List<string>();    // cap 128
+        // Own fps at the 3s broadcast cadence — the 2v2 report ships this for
+        // the local slot so all four players' fps series share one cadence
+        // (the 1v1 report keeps using the 5s localFpsTimeline unchanged).
+        private static readonly List<int> localFps3sTimeline = new List<int>();        // cap 128
+        public static float LocalDamageTakenThisMatch { get; private set; }
+        // Seconds-since-match-start per matchPointTimeline entry, kept in
+        // LOCKSTEP with it (only appended when TimelineAppend actually
+        // appended) so graph markers can't drift from the score pairs.
+        private static readonly List<int> pointTimes = new List<int>();                // cap 64
+
+        // July 22 item 7 — per-actor telemetry harvest for 4/3-player rooms
+        // (2v2/1v2). The single-opponent fields above stay 1v1-shaped; this
+        // dict keeps EVERY non-local peer's series so the 2v2 reporter can
+        // ship all four players' telemetry. Keyed by Photon ActorNumber.
+        private class PeerTelemetry
+        {
+            public int lastSeq = -1;
+            public string lastRaw = "";
+            public readonly List<int> fps = new List<int>();
+            public readonly List<int> ping = new List<int>();
+            public readonly List<string> hit = new List<string>();
+            public readonly List<string> block = new List<string>();
+        }
+        private static readonly Dictionary<int, PeerTelemetry> peerTele = new Dictionary<int, PeerTelemetry>();
+
         // Pre-match card picks (cards picked before isTracking = true)
         // These get moved into localCards when OnMatchStarted fires
         private static List<MatchTracker.CardPickData> preMatchCards = new List<MatchTracker.CardPickData>();
@@ -184,6 +219,10 @@ namespace CompetitiveRounds
         // the in-match HUD doesn't depend on a stale /series/active cache.
         // Reset on room change (new series), and at series-completion when
         // the report-match callback bumps the session series tally.
+        // Review [4]: 1v2 per-sitting game tally (banner suppression only —
+        // the 1v1 currentSeriesGames* counters deliberately skip ovt rooms).
+        private static int ovtSoloWins = 0;
+        private static int ovtDuoWins = 0;
         private static int currentSeriesGamesWon = 0;
         private static int currentSeriesGamesLost = 0;
         private static int sessionCasualWins = 0;
@@ -351,6 +390,8 @@ namespace CompetitiveRounds
         public static void OnLocalPlayerHit(float damage)
         {
             if (!isTracking || inPickPhase) return;
+            // July 22 item 1: cumulative damage taken feeds the Block% graph.
+            if (damage > 0f && damage < 10000f) LocalDamageTakenThisMatch += damage;
             LastLocalHitTime = Time.time;
             LastBlockMissTime = Time.time;
             float sinceAct = Time.time - LastBlockActivatedTime;
@@ -934,6 +975,7 @@ namespace CompetitiveRounds
                 BroadcastFps();
                 PollOpponentFps();
                 SampleConnectionQuality();
+                SampleOwnStatTimelines();
             }
             TickInputSampling(dt);
         }
@@ -1095,14 +1137,19 @@ namespace CompetitiveRounds
                 // Old clients parse >=6 and ignore extras (verified).
                 int recentFps = bcAccum > 0.5f ? (int)Math.Round(bcFrames / (double)bcAccum) : 0;
                 bcFrames = 0; bcAccum = 0f;
+                if (recentFps > 0 && isTracking && localFps3sTimeline.Count < 128)
+                    localFps3sTimeline.Add(recentFps);
                 gstatsSeq++;
                 // Field 12 (July 22 item 3): instantaneous ping so the opponent
                 // can build our latency timeline for their history hover chart.
                 int curPing = 0;
                 try { if (!PhotonNetwork.OfflineMode && PhotonNetwork.IsConnected) curPing = PhotonNetwork.GetPing(); } catch { }
+                // Field 13 (July 22 item 1): cumulative damage taken, so peers
+                // can build our Block% graph. Append-only ordering — old
+                // clients parse >=6/12 and ignore extras.
                 props[GSTATS_PROP_KEY] =
                     $"{LocalBulletsFiredThisMatch}|{LocalBulletsHitThisMatch}|{LocalBlocksActivatedThisMatch}|{LocalBlocksSuccessfulThisMatch}|{LocalKeysThisMatch}|{LocalActiveSecondsThisMatch.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}" +
-                    $"|{recentFps}|{gstatsSeq}|{localFreezeCount}|{localFreezeFocusedCount}|{localRecvGapCount}|{curPing}";
+                    $"|{recentFps}|{gstatsSeq}|{localFreezeCount}|{localFreezeFocusedCount}|{localRecvGapCount}|{curPing}|{(int)LocalDamageTakenThisMatch}";
                 if (props.Count > 0)
                     PhotonNetwork.LocalPlayer.SetCustomProperties(props);
             }
@@ -1116,63 +1163,213 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.InRoom) return;
                 var players = PhotonNetwork.PlayerList;
                 if (players == null) return;
+                // First non-local mod-reporting peer stays the single "opponent"
+                // for the 1v1-shaped fields; EVERY peer is harvested into the
+                // per-actor dict for 4/3-player reports (July 22 item 7).
+                bool primaryTaken = false;
                 foreach (var p in players)
                 {
                     if (p == null || p.IsLocal || p.CustomProperties == null) continue;
+                    bool sawModProps = false;
                     if (p.CustomProperties.ContainsKey(GSTATS_PROP_KEY))
                     {
-                        try
+                        sawModProps = true;
+                        string raw = p.CustomProperties[GSTATS_PROP_KEY] as string ?? "";
+                        HarvestPeerTelemetry(p.ActorNumber, raw);
+                        if (!primaryTaken)
                         {
-                            var parts = (p.CustomProperties[GSTATS_PROP_KEY] as string ?? "").Split('|');
-                            if (parts.Length >= 6)
+                            try
                             {
-                                OppStatBulletsFired = int.Parse(parts[0]);
-                                OppStatBulletsHit = int.Parse(parts[1]);
-                                OppStatBlocksActivated = int.Parse(parts[2]);
-                                OppStatBlocksSuccessful = int.Parse(parts[3]);
-                                OppStatKeysPressed = int.Parse(parts[4]);
-                                OppStatActiveSeconds = float.Parse(parts[5], System.Globalization.CultureInfo.InvariantCulture);
-                            }
-                            // July 21 item 2: extended telemetry (new clients only).
-                            if (parts.Length >= 11)
-                            {
-                                int seq = int.Parse(parts[7]);
-                                if (seq != lastOppGstatsSeq)
+                                var parts = raw.Split('|');
+                                if (parts.Length >= 6)
                                 {
-                                    lastOppGstatsSeq = seq;
-                                    lastOppSeqAdvanceTime = Time.unscaledTime;
-                                    int rf = int.Parse(parts[6]);
-                                    if (rf > 0 && oppFpsTimeline.Count < 128) oppFpsTimeline.Add(rf);
-                                    // Field 12 (July 22 item 3) — absent on 11-field clients.
-                                    if (parts.Length >= 12)
+                                    OppStatBulletsFired = int.Parse(parts[0]);
+                                    OppStatBulletsHit = int.Parse(parts[1]);
+                                    OppStatBlocksActivated = int.Parse(parts[2]);
+                                    OppStatBlocksSuccessful = int.Parse(parts[3]);
+                                    OppStatKeysPressed = int.Parse(parts[4]);
+                                    OppStatActiveSeconds = float.Parse(parts[5], System.Globalization.CultureInfo.InvariantCulture);
+                                }
+                                // July 21 item 2: extended telemetry (new clients only).
+                                if (parts.Length >= 11)
+                                {
+                                    int seq = int.Parse(parts[7]);
+                                    if (seq != lastOppGstatsSeq)
                                     {
-                                        int op = int.Parse(parts[11]);
-                                        if (op > 0 && oppPingTimeline.Count < 128) oppPingTimeline.Add(op);
+                                        lastOppGstatsSeq = seq;
+                                        lastOppSeqAdvanceTime = Time.unscaledTime;
+                                        int rf = int.Parse(parts[6]);
+                                        if (rf > 0 && oppFpsTimeline.Count < 128) oppFpsTimeline.Add(rf);
+                                        // Field 12 (July 22 item 3) — absent on 11-field clients.
+                                        if (parts.Length >= 12)
+                                        {
+                                            int op = int.Parse(parts[11]);
+                                            if (op > 0 && oppPingTimeline.Count < 128) oppPingTimeline.Add(op);
+                                        }
+                                        // July 22 item 1: cumulative pair series.
+                                        // Review [3]: regression = stale previous-game
+                                        // sample got in first — restart the lists.
+                                        int curFired;
+                                        if (int.TryParse(parts[0], out curFired)
+                                            && oppHitTimeline.Count > 0 && curFired < LastPairFirst(oppHitTimeline))
+                                        {
+                                            oppHitTimeline.Clear();
+                                            oppBlockTimeline.Clear();
+                                        }
+                                        if (oppHitTimeline.Count < 128)
+                                            oppHitTimeline.Add(parts[0] + ":" + parts[1]);
+                                        // Field 13 (dmg taken) — absent on 12-field clients;
+                                        // no mixed-shape pairs, so skip block entirely then.
+                                        if (parts.Length >= 13 && oppBlockTimeline.Count < 128)
+                                            oppBlockTimeline.Add(parts[12] + ":" + parts[3]);
+                                    }
+                                    oppFreezeCount = int.Parse(parts[8]);
+                                    oppFreezeFocusedCount = int.Parse(parts[9]);
+                                    oppRecvGapCount = int.Parse(parts[10]);
+                                }
+                                else if (parts.Length >= 6 && parts[0] == "0" && parts[1] == "0")
+                                {
+                                    // Review [3]: the peer's 6-field match-start reset
+                                    // ("0|0|0|0|0|0") never reaches the >=11 branch —
+                                    // treat it as the new-game signal so a stale
+                                    // previous-game sample can't survive it.
+                                    if (oppHitTimeline.Count > 0 || oppBlockTimeline.Count > 0)
+                                    {
+                                        oppHitTimeline.Clear();
+                                        oppBlockTimeline.Clear();
                                     }
                                 }
-                                oppFreezeCount = int.Parse(parts[8]);
-                                oppFreezeFocusedCount = int.Parse(parts[9]);
-                                oppRecvGapCount = int.Parse(parts[10]);
                             }
+                            catch { }
                         }
-                        catch { }
                     }
-                    if (!p.CustomProperties.ContainsKey(FPS_PROP_KEY)) continue;
-                    try { opponentAvgFps = Convert.ToInt32(p.CustomProperties[FPS_PROP_KEY]); }
-                    catch { }
-                    return; // first non-local mod-reporting peer wins; 1v1 only has one
+                    if (p.CustomProperties.ContainsKey(FPS_PROP_KEY))
+                    {
+                        sawModProps = true;
+                        if (!primaryTaken)
+                        {
+                            try { opponentAvgFps = Convert.ToInt32(p.CustomProperties[FPS_PROP_KEY]); }
+                            catch { }
+                        }
+                    }
+                    if (sawModProps) primaryTaken = true;
                 }
             }
             catch { }
+        }
+
+        // Review [3]: first field ("fired" / "dmgTaken") of the last appended
+        // cumulative pair, or -1 when the list is empty. Cumulative counters
+        // only grow within a game — a lower incoming value means the sample we
+        // hold is from the PREVIOUS game (rematch race: the peer's reset
+        // broadcast can land ~3s after our OnMatchStarted cleared the lists).
+        private static int LastPairFirst(List<string> pairs)
+        {
+            if (pairs.Count == 0) return -1;
+            string last = pairs[pairs.Count - 1];
+            int ci = last.IndexOf(':');
+            int v;
+            if (ci > 0 && int.TryParse(last.Substring(0, ci), out v)) return v;
+            return -1;
+        }
+
+        // July 22 item 1: own cumulative pair samples on the 3s cadence.
+        private static void SampleOwnStatTimelines()
+        {
+            if (localHitTimeline.Count < 128)
+                localHitTimeline.Add(LocalBulletsFiredThisMatch + ":" + LocalBulletsHitThisMatch);
+            if (localBlockTimeline.Count < 128)
+                localBlockTimeline.Add((int)LocalDamageTakenThisMatch + ":" + LocalBlocksSuccessfulThisMatch);
+        }
+
+        // July 22 item 7: per-actor cumulative harvest (all peers, any room —
+        // consumed by the 2v2 reporter; trivial memory in 1v1 rooms).
+        private static void HarvestPeerTelemetry(int actorNumber, string raw)
+        {
+            try
+            {
+                var parts = raw.Split('|');
+                if (parts.Length < 8)
+                {
+                    // Review [3]: the 6-field "0|0|0|0|0|0" match-start reset
+                    // is the new-game signal — drop any stale entry so the new
+                    // game's harvest (and lastRaw counters) start clean.
+                    if (parts.Length >= 6 && parts[0] == "0" && parts[1] == "0")
+                        peerTele.Remove(actorNumber);
+                    return; // otherwise: needs the seq heartbeat (field 8)
+                }
+                PeerTelemetry t;
+                if (!peerTele.TryGetValue(actorNumber, out t))
+                {
+                    t = new PeerTelemetry();
+                    peerTele[actorNumber] = t;
+                }
+                t.lastRaw = raw;
+                int seq = int.Parse(parts[7]);
+                if (seq == t.lastSeq) return;
+                t.lastSeq = seq;
+                // Review [3]: cumulative regression = stale previous-game
+                // sample seeded this entry (rematch race) — restart it.
+                int curFired;
+                if (int.TryParse(parts[0], out curFired)
+                    && t.hit.Count > 0 && curFired < LastPairFirst(t.hit))
+                {
+                    t.fps.Clear(); t.ping.Clear(); t.hit.Clear(); t.block.Clear();
+                }
+                int rf = int.Parse(parts[6]);
+                if (rf > 0 && t.fps.Count < 128) t.fps.Add(rf);
+                if (parts.Length >= 12)
+                {
+                    int op = int.Parse(parts[11]);
+                    if (op > 0 && t.ping.Count < 128) t.ping.Add(op);
+                }
+                if (t.hit.Count < 128) t.hit.Add(parts[0] + ":" + parts[1]);
+                if (parts.Length >= 13 && t.block.Count < 128)
+                    t.block.Add(parts[12] + ":" + parts[3]);
+            }
+            catch { }
+        }
+
+        /// <summary>Latest harvested telemetry for a peer by actor number, or null.
+        /// Consumed by TryReportTeamMatch when assembling per-slot telemetry.</summary>
+        internal static bool TryGetPeerTelemetry(int actorNumber,
+            out string fpsTl, out string pingTl, out string hitTl, out string blockTl,
+            out int[] counters)
+        {
+            fpsTl = pingTl = hitTl = blockTl = null;
+            counters = null;
+            PeerTelemetry t;
+            if (!peerTele.TryGetValue(actorNumber, out t) || string.IsNullOrEmpty(t.lastRaw)) return false;
+            try
+            {
+                var parts = t.lastRaw.Split('|');
+                if (parts.Length < 6) return false;
+                fpsTl = string.Join(",", t.fps);
+                pingTl = string.Join(",", t.ping);
+                hitTl = string.Join(",", t.hit);
+                blockTl = string.Join(",", t.block);
+                counters = new int[] {
+                    int.Parse(parts[0]), int.Parse(parts[1]),
+                    int.Parse(parts[2]), int.Parse(parts[3]),
+                    int.Parse(parts[4]),
+                    (int)float.Parse(parts[5], System.Globalization.CultureInfo.InvariantCulture)
+                };
+                return true;
+            }
+            catch { return false; }
         }
 
         // Item 4: per-game scoring timeline for the history hover graph. Each
         // entry is cumulative "p1Total:p2Total" where total = rounds*2 + points
         // (monotonic across round resets). Reporter-side; capped at 64 events.
         private static readonly List<string> matchPointTimeline = new List<string>();
-        private static void TimelineAppend(int p1r, int p1p, int p2r, int p2p)
+        // Returns true only when an entry was actually appended — the caller
+        // pushes the matching pointTimes stamp on true, keeping the two lists
+        // in lockstep (dedup/cap drops must drop the timestamp too, or the
+        // graph markers drift off the score pairs).
+        private static bool TimelineAppend(int p1r, int p1p, int p2r, int p2p)
         {
-            if (matchPointTimeline.Count >= 64) return;
+            if (matchPointTimeline.Count >= 64) return false;
             // pts>=2 only occurs at game end (the winning point lands and the game
             // stops before the round-conversion reset) — those 2 points are already
             // counted in the rounds figure, so zero them or the final graph step
@@ -1180,8 +1377,20 @@ namespace CompetitiveRounds
             if (p1p >= 2) p1p = 0;
             if (p2p >= 2) p2p = 0;
             string entry = $"{p1r * 2 + p1p}:{p2r * 2 + p2p}";
-            if (matchPointTimeline.Count > 0 && matchPointTimeline[matchPointTimeline.Count - 1] == entry) return;
+            if (matchPointTimeline.Count > 0 && matchPointTimeline[matchPointTimeline.Count - 1] == entry) return false;
             matchPointTimeline.Add(entry);
+            return true;
+        }
+
+        // July 22 item 1: stamp the moment a timeline entry landed, in seconds
+        // since match start (marker X positions on the hover graphs).
+        private static void StampPointTime()
+        {
+            if (pointTimes.Count >= 64) return;
+            int secs = 0;
+            try { secs = (int)Math.Max(0, (DateTime.UtcNow - matchStartTime).TotalSeconds); }
+            catch { }
+            pointTimes.Add(secs);
         }
 
         // \u2500\u2500 Room state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -1337,6 +1546,7 @@ namespace CompetitiveRounds
                 // session game / series tallies stay (they're cumulative).
                 currentSeriesGamesWon = 0;
                 currentSeriesGamesLost = 0;
+                ovtSoloWins = 0; ovtDuoWins = 0;   // review [4]: 1v2 banner tally
                 Plugin.Log.LogInfo($"[POLL] Joined room: {photonRoomId} (region: {photonRegion})");
                 // Republish all local cosmetic props on every room join. Photon
                 // resets state at room creation; without re-publish, remote clients
@@ -1643,6 +1853,21 @@ namespace CompetitiveRounds
                         int totalPts = p1Points + p2Points;
                         int seriesGames = p1Rounds + p2Rounds; // games already won this series
 
+                        // July 22 item 2 (bug #81): tell the remaining player what
+                        // happens next, right at detection — previously the only
+                        // toast fired after THEY quit out, mid menu-transition.
+                        // The vanilla game hangs on the absent picker (NRE storm),
+                        // so Esc-to-menu is the actionable advice.
+                        try
+                        {
+                            string _dcName = string.IsNullOrEmpty(opponentDisplayName) ? "Opponent" : opponentDisplayName;
+                            string _dcMsg = localR >= 4
+                                ? $"{_dcName} disconnected at {localR}-{oppR} — leave to the menu, you get the win"
+                                : $"{_dcName} disconnected at {localR}-{oppR} — leave to the menu, game won't be counted";
+                            CompetitiveUI.ShowNotification(_dcMsg, new Color(1f, 0.65f, 0.2f), 10f);
+                        }
+                        catch { }
+
                         // Report for leave % if:
                         //  - match is ranked
                         //  - meaningful play happened (>=2 firefights in current game,
@@ -1668,6 +1893,117 @@ namespace CompetitiveRounds
             }
 
             wasInRoom = inRoom;
+        }
+
+        /// <summary>July 22 item 2 (bug #81): universal "player left" banner.
+        /// Called from Cr2v2DiagCallbacks.OnPlayerLeftRoom BEFORE its mode gate,
+        /// so every mode (casual/ranked/2v2/1v2) and every remaining seat gets
+        /// it. Display-only — no report path runs here. Suppressed outside a
+        /// live match unless an unfinished 1v1 series is in progress (clean
+        /// post-game leaves and lobby churn stay silent).</summary>
+        public static void NotifyPlayerLeftRoom(Photon.Realtime.Player p)
+        {
+            try
+            {
+                if (p == null || PhotonNetwork.OfflineMode) return;   // learning #122
+                string roomName = PhotonNetwork.CurrentRoom?.Name ?? "";
+                bool ovtRoom = roomName.StartsWith("ovt_");
+                bool teamRoom = ovtRoom || roomName.StartsWith("team_")
+                                || (PhotonNetwork.CurrentRoom?.CustomProperties?.ContainsKey("cr_ff") ?? false);
+                bool seriesInProgress = !ovtRoom
+                                        && CurrentSeriesGamesWon + CurrentSeriesGamesLost >= 1
+                                        && CurrentSeriesGamesWon < 2 && CurrentSeriesGamesLost < 2;
+                // Review [4]: ovt rooms track their own tally (the 1v1
+                // counters skip them) — gate on the live series id too so a
+                // completed sitting's post-series leaves stay silent-ish.
+                bool ovtSeriesInProgress = ovtRoom
+                                           && !string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId)
+                                           && ovtSoloWins + ovtDuoWins >= 1
+                                           && ovtSoloWins < 2 && ovtDuoWins < 2;
+                bool midGame = isTracking && !gameOverReported;
+                if (!midGame && !seriesInProgress && !ovtSeriesInProgress) return;
+
+                // Resolve a display name: styled NickName stripped, then the
+                // cached 1v1 opponent name via u_id, then a neutral fallback.
+                string name = "";
+                try { name = StripRichText(p.NickName ?? ""); } catch { }
+                if (string.IsNullOrEmpty(name))
+                {
+                    string sid = null;
+                    if (p.CustomProperties != null && p.CustomProperties.ContainsKey("u_id"))
+                        sid = p.CustomProperties["u_id"]?.ToString();
+                    if (!string.IsNullOrEmpty(sid) && sid == opponentSteamId && !string.IsNullOrEmpty(opponentDisplayName))
+                        name = opponentDisplayName;
+                }
+                if (string.IsNullOrEmpty(name)) name = "A player";
+                if (name.Length > 24) name = name.Substring(0, 24);
+
+                // Teammate vs opponent wording in team modes (t_id published at
+                // ready_join by both 2v2 and 1v2 clients).
+                bool isTeammate = false;
+                try
+                {
+                    var myProps = PhotonNetwork.LocalPlayer?.CustomProperties;
+                    if (p.CustomProperties != null && myProps != null
+                        && p.CustomProperties.ContainsKey("t_id") && myProps.ContainsKey("t_id"))
+                        isTeammate = p.CustomProperties["t_id"]?.ToString() == myProps["t_id"]?.ToString();
+                }
+                catch { }
+
+                // Photon can't distinguish a quit from a connection drop on the
+                // observer's seat — neutral wording. Exception: a peer that
+                // flagged cr_lv_rk left deliberately for a ranked match.
+                bool leftForRanked = false;
+                try
+                {
+                    leftForRanked = p.CustomProperties != null && p.CustomProperties.ContainsKey("cr_lv_rk")
+                                    && p.CustomProperties["cr_lv_rk"]?.ToString() == "1";
+                }
+                catch { }
+
+                string whoTag = isTeammate ? $"Your teammate <b>{name}</b>" : $"<b>{name}</b>";
+                string text;
+                bool red;
+                if (leftForRanked)
+                {
+                    text = $"{whoTag} left to join a ranked match";
+                    red = false;
+                }
+                else if (midGame)
+                {
+                    text = $"{whoTag} disconnected or quit mid-game";
+                    red = true;
+                }
+                else if (ovtSeriesInProgress)
+                {
+                    text = $"{whoTag} left — 1v2 series unfinished";
+                    red = false;
+                }
+                else
+                {
+                    // Review [13]: between games of a 1v1 series, only the
+                    // tracked OPPONENT leaving is news — a bystander joining
+                    // and leaving the room (quickplay/private churn) must not
+                    // be bannered with the series score. Team rooms keep the
+                    // no-identity behavior (any of the 3 peers matters).
+                    if (!teamRoom)
+                    {
+                        string lu = null;
+                        if (p.CustomProperties != null && p.CustomProperties.ContainsKey("u_id"))
+                            lu = p.CustomProperties["u_id"]?.ToString();
+                        bool isTrackedOpp =
+                            (!string.IsNullOrEmpty(lu) && lu == opponentSteamId)
+                            || (!string.IsNullOrEmpty(opponentDisplayName)
+                                && name == StripRichText(opponentDisplayName));
+                        if (!isTrackedOpp) return;
+                    }
+                    text = $"{whoTag} left — series unfinished ({CurrentSeriesGamesWon}-{CurrentSeriesGamesLost})";
+                    red = false;
+                }
+                Plugin.Log.LogInfo($"[LEAVER-BANNER] {text.Replace("<b>", "").Replace("</b>", "")} (midGame={midGame} series={seriesInProgress} teammate={isTeammate})");
+                CompetitiveUI.ShowLeaverBanner(text, red);
+            }
+            catch { }
         }
 
         /// <summary>
@@ -1933,7 +2269,8 @@ namespace CompetitiveRounds
                 {
                     p1Points = curP1Points;
                     p2Points = curP2Points;
-                    TimelineAppend(curP1Rounds, curP1Points, curP2Rounds, curP2Points);
+                    if (TimelineAppend(curP1Rounds, curP1Points, curP2Rounds, curP2Points))
+                        StampPointTime();
                     // v1.22 — report live points to the server during ranked games so betting
                     // locks once 2 points are scored in game 1. Only fires while we're in the
                     // first match of a series (p1Rounds + p2Rounds == 0) to keep traffic low.
@@ -1950,7 +2287,8 @@ namespace CompetitiveRounds
                     p1Rounds = curP1Rounds;
                     p2Rounds = curP2Rounds;
                     currentRound = p1Rounds + p2Rounds + 1;
-                    TimelineAppend(curP1Rounds, curP1Points, curP2Rounds, curP2Points);
+                    if (TimelineAppend(curP1Rounds, curP1Points, curP2Rounds, curP2Points))
+                        StampPointTime();
                     // Deep End bookkeeping: a round just completed — bank whether
                     // Abyssal fired during it, reset for the next round.
                     if (abyssalActivatedThisRound) { abyssalRoundsActivated++; abyssalActivatedThisRound = false; }
@@ -2140,6 +2478,13 @@ namespace CompetitiveRounds
             _activationSuccessCredited = true;
             BlockChain.Reset();
             _loggedFirstFire = _loggedFirstHit = _loggedFirstBlockAct = _loggedFirstBlockOk = false;
+            // July 22 item 1/7: hit/block timelines + point stamps + per-actor harvest.
+            localHitTimeline.Clear(); localBlockTimeline.Clear();
+            oppHitTimeline.Clear(); oppBlockTimeline.Clear();
+            localFps3sTimeline.Clear();
+            pointTimes.Clear();
+            LocalDamageTakenThisMatch = 0f;
+            peerTele.Clear();
 
             // Retry card rarity scan if it didn't work at startup
             if (CardRarityLookup.Count == 0)
@@ -2394,6 +2739,34 @@ namespace CompetitiveRounds
             else
             {
                 if (localWon) sessionCasualWins++; else sessionCasualLosses++;
+            }
+
+            // Review [4]: 1v2 series tally for the leaver banner — the 1v1
+            // counters above deliberately skip ovt rooms, which made the
+            // between-games banner silent there. Solo = the singleton ROUNDS
+            // team (same detection TryReportOvtMatch trusts); team 0 maps to
+            // p1Rounds.
+            if (sessionRoomIsOvt)
+            {
+                try
+                {
+                    if (ovtSoloWins >= 2 || ovtDuoWins >= 2) { ovtSoloWins = 0; ovtDuoWins = 0; }
+                    var pmOvt = PlayerManager.instance;
+                    int t0 = 0, t1 = 0;
+                    if (pmOvt != null && pmOvt.players != null)
+                        foreach (var poOvt in pmOvt.players)
+                        {
+                            if (poOvt == null) continue;
+                            if (poOvt.TeamID == 0) t0++; else if (poOvt.TeamID == 1) t1++;
+                        }
+                    int soloTeam = t0 == 1 ? 0 : (t1 == 1 ? 1 : -1);
+                    if (soloTeam >= 0)
+                    {
+                        bool team0Won = p1Rounds > p2Rounds;
+                        if ((soloTeam == 0) == team0Won) ovtSoloWins++; else ovtDuoWins++;
+                    }
+                }
+                catch { }
             }
 
             // Update session time immediately (not just on room leave)
@@ -2695,7 +3068,14 @@ namespace CompetitiveRounds
                     oppHbGapCount: oppHbGapCount,
                     oppFreezeCount: oppFreezeCount,
                     oppFreezeFocusedCount: oppFreezeFocusedCount,
-                    oppRecvGapCount: oppRecvGapCount
+                    oppRecvGapCount: oppRecvGapCount,
+                    // July 22 item 1: cumulative Hit%/Block% pair timelines +
+                    // per-point timestamps for the new hover graphs.
+                    localHitTimeline: string.Join(",", localHitTimeline.ToArray()),
+                    oppHitTimeline: string.Join(",", oppHitTimeline.ToArray()),
+                    localBlockTimeline: string.Join(",", localBlockTimeline.ToArray()),
+                    oppBlockTimeline: string.Join(",", oppBlockTimeline.ToArray()),
+                    pointTimes: string.Join(",", pointTimes)
                 );
             }
 
@@ -2908,6 +3288,9 @@ namespace CompetitiveRounds
             // teamID to know who's on team 1 vs team 2.
             var photonPlayers = PhotonNetwork.PlayerList;
             var bySteam = new Dictionary<string, (string name, int teamId, List<MatchTracker.CardPickData> cards, int fps)>();
+            // July 22 item 7: per-player telemetry blobs keyed by steam id —
+            // local slot from own counters, peers from the cr_gstats harvest.
+            var teleBySid = new Dictionary<string, ApiClient.TeamTelemetry>();
 
             foreach (var pp in photonPlayers)
             {
@@ -2972,6 +3355,48 @@ namespace CompetitiveRounds
                     if (localCards != null && localCards.Count > 0) pickList = new List<MatchTracker.CardPickData>(localCards);
                     int myFps = LocalAvgFps;
                     if (myFps > 0) fps = myFps;
+                    teleBySid[sid] = new ApiClient.TeamTelemetry
+                    {
+                        fpsTimeline = string.Join(",", localFps3sTimeline),
+                        pingTimeline = string.Join(",", pingSamples),
+                        pingAvg = pingSamples.Count > 0 ? (int)Math.Round(pingSamples.Average()) : 0,
+                        hitTimeline = string.Join(",", localHitTimeline.ToArray()),
+                        blockTimeline = string.Join(",", localBlockTimeline.ToArray()),
+                        bulletsFired = LocalBulletsFiredThisMatch,
+                        bulletsHit = LocalBulletsHitThisMatch,
+                        blocksActivated = LocalBlocksActivatedThisMatch,
+                        blocksSuccessful = LocalBlocksSuccessfulThisMatch,
+                        keysPressed = LocalKeysThisMatch,
+                        activeSeconds = LocalActiveSecondsThisMatch,
+                    };
+                }
+                else if (TryGetPeerTelemetry(pp.ActorNumber,
+                             out string pFps, out string pPing, out string pHit, out string pBlock,
+                             out int[] pCounters))
+                {
+                    int pingAvg = 0;
+                    try
+                    {
+                        var pings = new List<int>();
+                        foreach (var s in (pPing ?? "").Split(','))
+                            if (int.TryParse(s, out int v) && v > 0) pings.Add(v);
+                        if (pings.Count > 0) pingAvg = (int)Math.Round(pings.Average());
+                    }
+                    catch { }
+                    teleBySid[sid] = new ApiClient.TeamTelemetry
+                    {
+                        fpsTimeline = pFps,
+                        pingTimeline = pPing,
+                        pingAvg = pingAvg,
+                        hitTimeline = pHit,
+                        blockTimeline = pBlock,
+                        bulletsFired = pCounters[0],
+                        bulletsHit = pCounters[1],
+                        blocksActivated = pCounters[2],
+                        blocksSuccessful = pCounters[3],
+                        keysPressed = pCounters[4],
+                        activeSeconds = pCounters[5],
+                    };
                 }
                 bySteam[sid] = (name, peerTeamId, pickList, fps);
             }
@@ -3035,7 +3460,11 @@ namespace CompetitiveRounds
                 durationSeconds: duration, startedAt: matchStartTime,
                 reporterSteamId: localSteamId, isRanked: matchIsRanked, winnerTeam: winnerTeam,
                 t1aFps: bySteam[t1aSid].fps, t1bFps: bySteam[t1bSid].fps,
-                t2aFps: bySteam[t2aSid].fps, t2bFps: bySteam[t2bSid].fps
+                t2aFps: bySteam[t2aSid].fps, t2bFps: bySteam[t2bSid].fps,
+                t1aTele: teleBySid.TryGetValue(t1aSid, out var _ta) ? _ta : null,
+                t1bTele: teleBySid.TryGetValue(t1bSid, out var _tb) ? _tb : null,
+                t2aTele: teleBySid.TryGetValue(t2aSid, out var _tc) ? _tc : null,
+                t2bTele: teleBySid.TryGetValue(t2bSid, out var _td) ? _td : null
             );
             Plugin.Log.LogInfo($"[2v2-REPORT] submitted: t1={t1aSid},{t1bSid} t2={t2aSid},{t2bSid} winner=T{winnerTeam}");
             return true;
@@ -3799,6 +4228,13 @@ namespace CompetitiveRounds
             _hitsRemaining = 0;
             _activationSuccessCredited = true;
             BlockChain.Reset();
+            // July 22 item 1/7: hit/block timelines + point stamps + per-actor harvest.
+            localHitTimeline.Clear(); localBlockTimeline.Clear();
+            oppHitTimeline.Clear(); oppBlockTimeline.Clear();
+            localFps3sTimeline.Clear();
+            pointTimes.Clear();
+            LocalDamageTakenThisMatch = 0f;
+            peerTele.Clear();
 
             // Clear our card broadcast when leaving room
             try

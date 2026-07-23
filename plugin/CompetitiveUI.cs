@@ -129,6 +129,7 @@ namespace CompetitiveRounds
             DrawScoreHoverGraph();
             DrawFpsHoverGraph();
             DrawCompareSearch();
+            DrawLeaderboardSearch();
             DrawMapColorToast();
             DrawCustomBetPrompt();
             DrawLfpPrompt();
@@ -136,6 +137,7 @@ namespace CompetitiveRounds
             DrawArtistPicker();
             DrawPlayerSearch();
             DrawCosmeticReview();
+            DrawLeaverBanner();
             DrawTournamentBanner();
             // Block clicks to the F5 page behind any open IMGUI modal (lopi #14:
             // clicks on the bug-report form were also hitting F5 buttons underneath).
@@ -166,6 +168,53 @@ namespace CompetitiveRounds
         // Plays the match-found sound + flashes the taskbar once per match.
         private static readonly HashSet<string> _tourneyBannerAnnounced = new HashSet<string>();
         private static GUIStyle tourneyBannerStyle;
+
+        // ── July 22 item 2 (bug #81): "player left" banner ─────────────────
+        // Full-width top bar naming who disconnected/quit, shown on every
+        // remaining seat in every mode (casual/ranked/2v2/1v2). Red = mid-game
+        // DC, orange = between-games leave with the series unfinished. NOT
+        // gated on Plugin.ShowNotifications — match-critical information.
+        private static string _leaverText;
+        private static float _leaverUntil;
+        private static bool _leaverRed;
+        private static GUIStyle _leaverStyle;
+        public static void ShowLeaverBanner(string text, bool red)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            bool live = Time.unscaledTime < _leaverUntil && !string.IsNullOrEmpty(_leaverText);
+            // A second leaver inside the display window (duo rage-quit) appends
+            // rather than replaces, so both names are visible.
+            if (live && _leaverText != text && _leaverText.Length < 160)
+                _leaverText = _leaverText + "    +    " + text;
+            else
+                _leaverText = text;
+            _leaverRed = red || (live && _leaverRed);
+            _leaverUntil = Time.unscaledTime + 9f;
+            try { TaskbarFlash.Flash(); } catch { }
+        }
+        public static void ClearLeaverBanner() { _leaverUntil = 0f; _leaverText = null; _leaverRed = false; }
+        private static void DrawLeaverBanner()
+        {
+            if (string.IsNullOrEmpty(_leaverText) || Time.unscaledTime >= _leaverUntil) return;
+            float barH = 34f;
+            Color bg = _leaverRed ? new Color(0.72f, 0.10f, 0.10f, 0f) : new Color(0.82f, 0.52f, 0.08f, 0f);
+            // Same pulse family as the tournament banner; fade out over the last second.
+            float pulse = 0.78f + 0.14f * Mathf.Sin(Time.unscaledTime * 5f);
+            float fade = Mathf.Clamp01(_leaverUntil - Time.unscaledTime);
+            bg.a = 0.92f * pulse * fade;
+            GUI.DrawTexture(new Rect(0, 0, Screen.width, barH), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, bg, 0, 0);
+            if (_leaverStyle == null)
+                _leaverStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 16, fontStyle = FontStyle.Bold, richText = true,
+                    alignment = TextAnchor.MiddleCenter, clipping = TextClipping.Overflow,
+                };
+            var prev = GUI.color;
+            GUI.color = new Color(1f, 1f, 1f, Mathf.Clamp01(fade * 1.5f));
+            GUI.Label(new Rect(0, 0, Screen.width, barH), _leaverText, _leaverStyle);
+            GUI.color = prev;
+        }
 
         private static void DrawTournamentBanner()
         {
@@ -475,6 +524,41 @@ namespace CompetitiveRounds
             catch { /* search is best-effort cosmetic */ }
         }
 
+        // July 22 item 8: leaderboard search — same IMGUI-over-anchor clone,
+        // gated to tab 1, own focus flag feeding the T-chat mutex.
+        private static bool lbSearchFocused = false;
+        public static bool IsLbSearchFocused => lbSearchFocused;
+        private const string LB_SEARCH_CTRL = "LbSearchField";
+        private static void DrawLeaderboardSearch()
+        {
+            lbSearchFocused = false;
+            try
+            {
+                if (!NativeUI.IsOpen || NativeUI.CurrentTab != 1) return;
+                Rect r = NativeUI.GetLbSearchScreenRect();
+                if (r.width < 1f || r.height < 1f) return;
+                if (compareSearchStyle == null)
+                    compareSearchStyle = new GUIStyle(GUI.skin.textField) { fontSize = 13, alignment = TextAnchor.MiddleLeft };
+                if (compareSearchHintStyle == null)
+                    compareSearchHintStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, alignment = TextAnchor.MiddleLeft, richText = true };
+                float h = Mathf.Max(r.height, 22f);
+                var fieldRect = new Rect(r.x, r.y, Mathf.Max(r.width, 200f), h);
+                string cur = NativeUI.LeaderboardSearch ?? "";
+                GUI.SetNextControlName(LB_SEARCH_CTRL);
+                string next = GUI.TextField(fieldRect, cur, compareSearchStyle);
+                lbSearchFocused = GUI.GetNameOfFocusedControl() == LB_SEARCH_CTRL;
+                if (string.IsNullOrEmpty(next))
+                    GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
+                              "<color=#7788AA><i>search players...</i></color>", compareSearchHintStyle);
+                if (next != cur)
+                {
+                    NativeUI.LeaderboardSearch = next;
+                    NativeUI.MarkDirty();
+                }
+            }
+            catch { /* search is best-effort cosmetic */ }
+        }
+
         // ── Card hover tooltip (v1.26.8) ───────────────────────────────
         // NativeUI.FillRow registers a screen-space rect + the full card list
         // for each history row's chips line. On every OnGUI tick we check
@@ -632,7 +716,8 @@ namespace CompetitiveRounds
         private static GUIStyle _scoreGraphLbl;
         private static void DrawScoreHoverGraph()
         {
-            if (!NativeUI.IsOpen || NativeUI.CurrentTab != 0) return;
+            // July 22: tab 8 (2v2) hosts hover graphs too.
+            if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8)) return;
             if (_scoreGraphRegions.Count == 0) return;
             Vector2 mp = Input.mousePosition;
             ScoreGraphRegion? hit = null;
@@ -721,7 +806,14 @@ namespace CompetitiveRounds
             public Rect screenRect;
             public string mySeries;
             public string oppSeries;
-            public bool isPing;
+            public int kind;            // 0=fps 1=ping 2=hit pairs 3=block pairs 4=player combo (2v2)
+            public float myStep;        // seconds per "my" sample (5 = 1v1 fps buckets, else 3)
+            public bool subjectIsOpp;   // kind 2/3/4: hovered player uses the red/orange palette
+            public string pairHit;      // kind 4: "fired:hit,..." for the combo popup
+            public string pairBlock;    // kind 4: "dmgTaken:blocksSucc,..."
+            public string subjectLabel; // kind 4: player name for the popup title
+            public string pointTimes;   // "12,47,..." seconds since match start (marker X)
+            public string pointTimeline;// "mine:theirs,..." viewer-relative (marker color = scorer)
             public RectTransform sourceRT;
             public Camera sourceCam;
             public float widthFrac;
@@ -731,11 +823,51 @@ namespace CompetitiveRounds
         private static readonly List<FpsGraphRegion> _fpsGraphRegions = new List<FpsGraphRegion>(60);
         public static void RegisterFpsGraphRegion(Rect screenRect, string mySeries, string oppSeries, bool isPing,
                                                   RectTransform sourceRT, Camera sourceCam, float widthFrac,
-                                                  RectTransform clipRT, object sourceTxt = null)
+                                                  RectTransform clipRT, object sourceTxt = null,
+                                                  string pointTimes = null, string pointTimeline = null,
+                                                  float myStep = 0f)
         {
             if (string.IsNullOrEmpty(mySeries) && string.IsNullOrEmpty(oppSeries)) return;
             _fpsGraphRegions.Add(new FpsGraphRegion {
-                screenRect = screenRect, mySeries = mySeries ?? "", oppSeries = oppSeries ?? "", isPing = isPing,
+                screenRect = screenRect, mySeries = mySeries ?? "", oppSeries = oppSeries ?? "",
+                kind = isPing ? 1 : 0, myStep = myStep > 0f ? myStep : (isPing ? 3f : 5f),
+                pointTimes = pointTimes, pointTimeline = pointTimeline,
+                sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
+                sourceTxt = sourceTxt,
+            });
+        }
+
+        // July 22 item 1: hover region for a single player's cumulative PAIR
+        // series — Hit% ("fired:hit,...") or Block% ("dmgTaken:blocksSucc,...").
+        public static void RegisterPairGraphRegion(Rect screenRect, string pairSeries, bool isBlock, bool subjectIsOpp,
+                                                   RectTransform sourceRT, Camera sourceCam, float widthFrac,
+                                                   RectTransform clipRT, object sourceTxt,
+                                                   string pointTimes, string pointTimeline)
+        {
+            if (string.IsNullOrEmpty(pairSeries) || pairSeries.IndexOf(':') < 0) return;
+            _fpsGraphRegions.Add(new FpsGraphRegion {
+                screenRect = screenRect, mySeries = pairSeries, oppSeries = "",
+                kind = isBlock ? 3 : 2, myStep = 3f, subjectIsOpp = subjectIsOpp,
+                pointTimes = pointTimes, pointTimeline = pointTimeline,
+                sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
+                sourceTxt = sourceTxt,
+            });
+        }
+
+        // July 22 item 7: one hover target per 2v2 player — pops a 2x2 combo
+        // popup (FPS / Ping / Hit / Block) for that player.
+        public static void RegisterPlayerComboRegion(Rect screenRect, string fpsSeries, string pingSeries,
+                                                     string hitPairs, string blockPairs,
+                                                     string playerName, bool isRightTeam,
+                                                     RectTransform sourceRT, Camera sourceCam, float widthFrac,
+                                                     RectTransform clipRT, object sourceTxt)
+        {
+            if (string.IsNullOrEmpty(fpsSeries) && string.IsNullOrEmpty(pingSeries)
+                && string.IsNullOrEmpty(hitPairs) && string.IsNullOrEmpty(blockPairs)) return;
+            _fpsGraphRegions.Add(new FpsGraphRegion {
+                screenRect = screenRect, mySeries = fpsSeries ?? "", oppSeries = pingSeries ?? "",
+                kind = 4, myStep = 3f, subjectIsOpp = isRightTeam,
+                pairHit = hitPairs, pairBlock = blockPairs, subjectLabel = playerName,
                 sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
                 sourceTxt = sourceTxt,
             });
@@ -750,9 +882,70 @@ namespace CompetitiveRounds
             return vals.Count >= 2 ? vals.ToArray() : null;
         }
 
+        // Parse "a:b,a:b,..." cumulative pairs into two aligned arrays. Unlike
+        // ParseFpsSeries, zeros are KEPT (a 0-damage or 0-hit prefix is real
+        // data on a cumulative series); a 0:0 origin is prepended.
+        private static bool ParsePairSeries(string csv, out int[] first, out int[] second)
+        {
+            first = null; second = null;
+            if (string.IsNullOrEmpty(csv)) return false;
+            var parts = csv.Split(',');
+            var a = new List<int>(parts.Length + 1) { 0 };
+            var b = new List<int>(parts.Length + 1) { 0 };
+            foreach (var s in parts)
+            {
+                int ci = s.IndexOf(':');
+                if (ci <= 0) continue;
+                int x, y;
+                if (!int.TryParse(s.Substring(0, ci), out x) || !int.TryParse(s.Substring(ci + 1), out y)) continue;
+                a.Add(x); b.Add(y);
+            }
+            if (a.Count < 3) return false;
+            first = a.ToArray(); second = b.ToArray();
+            return true;
+        }
+
+        // July 22 item 1: vertical marker per point scored, colored by scorer
+        // (green = the viewer, red = opponent side). Times come from point_times
+        // (seconds since start); who-scored is derived by diffing the
+        // viewer-relative point_timeline pairs. Drawn UNDER the series lines.
+        private static float DrawPointMarkers(Rect plot, float maxT, string pointTimes, string pointTimeline, bool drawNow)
+        {
+            if (string.IsNullOrEmpty(pointTimes) || string.IsNullOrEmpty(pointTimeline)) return 0f;
+            var tParts = pointTimes.Split(',');
+            var sParts = pointTimeline.Split(',');
+            int n = Mathf.Min(tParts.Length, sParts.Length);
+            float lastT = 0f;
+            int prevMine = 0, prevTheirs = 0;
+            for (int i = 0; i < n; i++)
+            {
+                int t;
+                if (!int.TryParse(tParts[i], out t)) continue;
+                if (t > lastT) lastT = t;
+                if (!drawNow) { }
+                int ci = sParts[i].IndexOf(':');
+                if (ci <= 0) continue;
+                int mv, tv;
+                if (!int.TryParse(sParts[i].Substring(0, ci), out mv) || !int.TryParse(sParts[i].Substring(ci + 1), out tv)) continue;
+                bool mineScored = mv > prevMine;
+                bool theirsScored = tv > prevTheirs;
+                prevMine = mv; prevTheirs = tv;
+                if (drawNow && maxT > 0f)
+                {
+                    float x = plot.xMin + plot.width * Mathf.Clamp01(t / maxT);
+                    // Both changed in one poll tick (rare) → draw both, offset 2px.
+                    if (mineScored)
+                        GuiLine(new Vector2(x, plot.yMin), new Vector2(x, plot.yMax), new Color(0.30f, 0.85f, 0.30f, 0.35f), 2f);
+                    if (theirsScored)
+                        GuiLine(new Vector2(x + (mineScored ? 2f : 0f), plot.yMin), new Vector2(x + (mineScored ? 2f : 0f), plot.yMax), new Color(0.90f, 0.30f, 0.30f, 0.35f), 2f);
+                }
+            }
+            return lastT;
+        }
+
         private static void DrawFpsHoverGraph()
         {
-            if (!NativeUI.IsOpen || NativeUI.CurrentTab != 0) return;
+            if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8)) return;
             if (_fpsGraphRegions.Count == 0) return;
             Vector2 mp = Input.mousePosition;
             FpsGraphRegion? hit = null;
@@ -765,19 +958,22 @@ namespace CompetitiveRounds
             }
             if (hit == null) return;
 
-            bool isPing = hit.Value.isPing;
-            // "you" series cadence: fps buckets are 5s, ping/opp samples are 3s.
-            float myStep = isPing ? 3f : 5f;
-            var mine = ParseFpsSeries(hit.Value.mySeries);
-            var opp = ParseFpsSeries(hit.Value.oppSeries);
-            if (mine == null && opp == null) return;
-
             if (_scoreGraphLbl == null)
                 _scoreGraphLbl = new GUIStyle(GUI.skin.label)
                 {
                     fontSize = 12, richText = true, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft,
                     clipping = TextClipping.Overflow, wordWrap = false,
                 };
+
+            int kind = hit.Value.kind;
+            if (kind == 4) { DrawPlayerComboGraph(hit.Value, mp); return; }
+            if (kind >= 2) { DrawPairHoverGraph(hit.Value, mp); return; }
+
+            bool isPing = kind == 1;
+            float myStep = hit.Value.myStep;
+            var mine = ParseFpsSeries(hit.Value.mySeries);
+            var opp = ParseFpsSeries(hit.Value.oppSeries);
+            if (mine == null && opp == null) return;
 
             // One big chart per hover (July 22): the whole popup is the plot, so
             // a 600-vs-30 FPS gap or a big latency spike still reads clearly.
@@ -794,6 +990,11 @@ namespace CompetitiveRounds
             float maxT = 1f;
             if (mine != null) maxT = Mathf.Max(maxT, (mine.Length - 1) * myStep);
             if (opp != null) maxT = Mathf.Max(maxT, (opp.Length - 1) * 3f);
+            // Marker times can outrun the series (samples cap earlier) — include
+            // them in the axis so late points still land inside the plot.
+            Rect plotProbe = default(Rect);
+            float lastMarkT = DrawPointMarkers(plotProbe, 0f, hit.Value.pointTimes, hit.Value.pointTimeline, false);
+            if (lastMarkT > maxT) maxT = lastMarkT;
 
             // Auto-scaled Y so a huge FPS ceiling or a latency spike both fit,
             // with a small headroom margin so the peak isn't glued to the top.
@@ -816,6 +1017,9 @@ namespace CompetitiveRounds
                 GUI.Label(new Rect(gx + 2, y - 11f, pad - 6f, 22f), $"<color=#777>{gl}</color>", _scoreGraphLbl);
             }
 
+            // Point-scored markers (July 22 item 1) — under the series lines.
+            DrawPointMarkers(plot, maxT, hit.Value.pointTimes, hit.Value.pointTimeline, true);
+
             System.Action<int[], float, Color> drawSeries = (vals, step, col) =>
             {
                 if (vals == null) return;
@@ -830,6 +1034,191 @@ namespace CompetitiveRounds
             };
             drawSeries(opp, 3f, new Color(0.90f, 0.60f, 0.53f, 0.95f));
             drawSeries(mine, myStep, new Color(0.60f, 0.70f, 0.90f, 0.95f));
+        }
+
+        // July 22 item 1: single-player cumulative pair chart.
+        // kind 2 (Hit%): shots fired (dim) vs shots hit (bright), one Y scale.
+        // kind 3 (Block%): damage taken (left scale, dim) vs successful blocks
+        // (right scale, bright) — dual axes because damage is ~100x block counts.
+        private static void DrawPairHoverGraph(FpsGraphRegion reg, Vector2 mp)
+        {
+            int[] a, b;
+            if (!ParsePairSeries(reg.mySeries, out a, out b)) return;
+            bool isBlock = reg.kind == 3;
+            bool oppSubject = reg.subjectIsOpp;
+            Color bright = oppSubject ? new Color(0.95f, 0.55f, 0.45f, 0.95f) : new Color(0.55f, 0.75f, 0.98f, 0.95f);
+            Color dim = oppSubject ? new Color(0.70f, 0.42f, 0.38f, 0.80f) : new Color(0.42f, 0.52f, 0.70f, 0.80f);
+            string who = oppSubject ? "<color=#E69988>opponent</color>" : "<color=#99B3E6>you</color>";
+            string brightHex = oppSubject ? "#F28C73" : "#8CBFFA";
+            string dimHex = oppSubject ? "#B36B61" : "#6B85B3";
+
+            if (_scoreGraphLbl == null)
+                _scoreGraphLbl = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 12, richText = true, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft,
+                    clipping = TextClipping.Overflow, wordWrap = false,
+                };
+
+            float w = 360f, h = 230f, pad = 44f, padR = isBlock ? 34f : 12f;
+            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
+            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
+            string title = isBlock
+                ? $"<color=#CCCCCC>Block — {who}</color>  <color={dimHex}>dmg taken</color> <color=#888>·</color> <color={brightHex}>blocks</color>"
+                : $"<color=#CCCCCC>Hit — {who}</color>  <color={dimHex}>shots fired</color> <color=#888>·</color> <color={brightHex}>hits</color>";
+            GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24), title, _scoreGraphLbl);
+
+            int n = a.Length;
+            float maxT = Mathf.Max(1f, (n - 1) * 3f);
+            float lastMarkT = DrawPointMarkers(default(Rect), 0f, reg.pointTimes, reg.pointTimeline, false);
+            if (lastMarkT > maxT) maxT = lastMarkT;
+
+            int maxA = 1, maxB = 1;
+            foreach (var v in a) if (v > maxA) maxA = v;
+            foreach (var v in b) if (v > maxB) maxB = v;
+            maxA = Mathf.CeilToInt(maxA * 1.08f);
+            // Hit chart shares one scale (hits <= fired structurally); block
+            // chart scales each line to its own max.
+            int maxBAxis = isBlock ? Mathf.CeilToInt(maxB * 1.08f) : maxA;
+            if (maxBAxis < 1) maxBAxis = 1;
+
+            Rect plot = new Rect(gx + pad, gy + 34f, w - pad - padR, h - 34f - 26f);
+
+            // Left-axis gridlines from the A series (fired / damage).
+            int[] steps = { 1, 2, 5, 10, 20, 25, 50, 100, 150, 200, 300, 500, 1000, 2000 };
+            int gstep = steps[steps.Length - 1];
+            foreach (int s in steps) { if (maxA / s <= 6) { gstep = s; break; } }
+            for (int gl = gstep; gl <= maxA; gl += gstep)
+            {
+                float y = plot.yMax - plot.height * gl / maxA;
+                GuiLine(new Vector2(plot.xMin, y), new Vector2(plot.xMax, y), new Color(1f, 1f, 1f, 0.08f), 1f);
+                GUI.Label(new Rect(gx + 2, y - 11f, pad - 6f, 22f), $"<color=#777>{gl}</color>", _scoreGraphLbl);
+            }
+            if (isBlock)
+            {
+                // Right-axis reference for the blocks line — label the AXIS
+                // ceiling (maxBAxis, what the line is actually scaled to),
+                // not the raw series max (review [9]).
+                GUI.Label(new Rect(plot.xMax + 4f, plot.yMin - 11f, padR - 4f, 22f),
+                    $"<color={brightHex}>{maxBAxis}</color>", _scoreGraphLbl);
+                GUI.Label(new Rect(plot.xMax + 4f, plot.yMax - 11f, padR - 4f, 22f),
+                    $"<color={brightHex}>0</color>", _scoreGraphLbl);
+            }
+
+            DrawPointMarkers(plot, maxT, reg.pointTimes, reg.pointTimeline, true);
+
+            System.Action<int[], int, Color> drawSeries = (vals, maxV, col) =>
+            {
+                for (int i = 1; i < vals.Length; i++)
+                {
+                    float x0 = plot.xMin + plot.width * ((i - 1) * 3f / maxT);
+                    float x1 = plot.xMin + plot.width * (i * 3f / maxT);
+                    float y0 = plot.yMax - plot.height * Mathf.Min(vals[i - 1], maxV) / (float)maxV;
+                    float y1 = plot.yMax - plot.height * Mathf.Min(vals[i], maxV) / (float)maxV;
+                    GuiLine(new Vector2(x0, y0), new Vector2(x1, y1), col, 2f);
+                }
+            };
+            drawSeries(a, maxA, dim);
+            drawSeries(b, maxBAxis, bright);
+
+            // Footer: final tallies + the resulting percentage.
+            string footer;
+            if (isBlock)
+                footer = $"<color=#777>{a[n - 1]} dmg taken · {b[n - 1]} successful blocks · markers = points scored</color>";
+            else
+            {
+                float pct = a[n - 1] > 0 ? 100f * b[n - 1] / a[n - 1] : 0f;
+                footer = $"<color=#777>{a[n - 1]} fired · {b[n - 1]} hit · {pct:F0}% · markers = points scored</color>";
+            }
+            GUI.Label(new Rect(gx + 8, gy + h - 22f, w - 16, 22f), footer, _scoreGraphLbl);
+        }
+
+        // July 22 item 7: 2v2 per-player combo popup — 2x2 mini panels
+        // (FPS / Ping / shots fired-vs-hit / dmg-vs-blocks) for one player.
+        private static void DrawPlayerComboGraph(FpsGraphRegion reg, Vector2 mp)
+        {
+            var fps = ParseFpsSeries(reg.mySeries);
+            var ping = ParseFpsSeries(reg.oppSeries);
+            int[] hA = null, hB = null, bA = null, bB = null;
+            ParsePairSeries(reg.pairHit, out hA, out hB);
+            ParsePairSeries(reg.pairBlock, out bA, out bB);
+            if (fps == null && ping == null && hA == null && bA == null) return;
+
+            bool right = reg.subjectIsOpp;
+            Color bright = right ? new Color(1.00f, 0.69f, 0.53f, 0.95f) : new Color(0.55f, 0.80f, 1.00f, 0.95f);
+            Color dim = right ? new Color(0.72f, 0.50f, 0.40f, 0.85f) : new Color(0.42f, 0.58f, 0.72f, 0.85f);
+            string nameHex = right ? "#FFB086" : "#8CCFFF";
+
+            if (_scoreGraphLbl == null)
+                _scoreGraphLbl = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 12, richText = true, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft,
+                    clipping = TextClipping.Overflow, wordWrap = false,
+                };
+
+            float w = 430f, h = 306f;
+            float gx = Mathf.Min(mp.x + 18f, Screen.width - w - 8f);
+            float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
+            GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
+            GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 22),
+                $"<color={nameHex}>{reg.subjectLabel}</color> <color=#888>— match telemetry</color>", _scoreGraphLbl);
+
+            // Panel grid: 2 x 2, each panel has its own auto Y scale.
+            float pw = (w - 30f) / 2f, ph = (h - 40f) / 2f;
+            System.Action<Rect, string, int[], int[], Color, Color, string> panel =
+                (r, title, s1, s2, c1, c2, foot) =>
+            {
+                GUI.Label(new Rect(r.x, r.y - 4f, r.width, 18f), title, _scoreGraphLbl);
+                Rect plot = new Rect(r.x + 26f, r.y + 16f, r.width - 30f, r.height - 40f);
+                int maxV = 1;
+                if (s1 != null) foreach (var v in s1) if (v > maxV) maxV = v;
+                if (s2 != null) foreach (var v in s2) if (v > maxV) maxV = v;
+                maxV = Mathf.CeilToInt(maxV * 1.08f);
+                GuiLine(new Vector2(plot.xMin, plot.yMax), new Vector2(plot.xMax, plot.yMax), new Color(1f, 1f, 1f, 0.15f), 1f);
+                GuiLine(new Vector2(plot.xMin, plot.yMin), new Vector2(plot.xMax, plot.yMin), new Color(1f, 1f, 1f, 0.06f), 1f);
+                GUI.Label(new Rect(r.x - 2f, plot.yMin - 10f, 30f, 20f), $"<color=#777>{maxV}</color>", _scoreGraphLbl);
+                int nMax = Mathf.Max(s1 != null ? s1.Length : 0, s2 != null ? s2.Length : 0);
+                if (nMax < 2) return;
+                System.Action<int[], Color> line = (vals, col) =>
+                {
+                    if (vals == null || vals.Length < 2) return;
+                    for (int i = 1; i < vals.Length; i++)
+                    {
+                        float x0 = plot.xMin + plot.width * (i - 1) / (nMax - 1);
+                        float x1 = plot.xMin + plot.width * i / (nMax - 1);
+                        float y0 = plot.yMax - plot.height * Mathf.Min(vals[i - 1], maxV) / (float)maxV;
+                        float y1 = plot.yMax - plot.height * Mathf.Min(vals[i], maxV) / (float)maxV;
+                        GuiLine(new Vector2(x0, y0), new Vector2(x1, y1), col, 2f);
+                    }
+                };
+                line(s1, c1);
+                line(s2, c2);
+                if (!string.IsNullOrEmpty(foot))
+                    GUI.Label(new Rect(r.x + 4f, r.yMax - 18f, r.width - 8f, 18f), foot, _scoreGraphLbl);
+            };
+
+            string hitFoot = hA != null && hA.Length > 1
+                ? $"<color=#777>{hA[hA.Length - 1]} fired / {hB[hB.Length - 1]} hit ({(hA[hA.Length - 1] > 0 ? 100f * hB[hB.Length - 1] / hA[hA.Length - 1] : 0f):F0}%)</color>" : "";
+            string blkFoot = bA != null && bA.Length > 1
+                ? $"<color=#777>{bA[bA.Length - 1]} dmg / {bB[bB.Length - 1]} blocks</color>" : "";
+            // Blocks are ~100x smaller than damage — rescale the blocks line to
+            // the damage axis so the mini panel shows both trends (real numbers
+            // live in the footer; the full-size 1v1 popup uses true dual axes).
+            int[] bBScaled = null;
+            if (bA != null && bB != null)
+            {
+                int maxDmg = 1, maxBlk = 1;
+                foreach (var v in bA) if (v > maxDmg) maxDmg = v;
+                foreach (var v in bB) if (v > maxBlk) maxBlk = v;
+                bBScaled = new int[bB.Length];
+                for (int i = 0; i < bB.Length; i++) bBScaled[i] = (int)((long)bB[i] * maxDmg / maxBlk);
+            }
+            panel(new Rect(gx + 10f, gy + 40f, pw, ph), "<color=#CCC>FPS</color>", fps, null, bright, bright, "");
+            panel(new Rect(gx + 20f + pw, gy + 40f, pw, ph), "<color=#CCC>Ping (ms)</color>", ping, null, bright, bright, "");
+            panel(new Rect(gx + 10f, gy + 44f + ph, pw, ph), "<color=#CCC>Shots fired vs hits</color>", hA, hB, dim, bright, hitFoot);
+            panel(new Rect(gx + 20f + pw, gy + 44f + ph, pw, ph), "<color=#CCC>Dmg taken vs blocks</color>", bA, bBScaled, dim, bright, blkFoot);
         }
         public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent)
             => RegisterCardHoverRegion(screenRect, fullCardLine, isOpponent, null, null, null, null, -1f, null);
@@ -2697,6 +3086,8 @@ namespace CompetitiveRounds
             // search field all have their own text entry that need T to type
             // "the", "tree", etc. (lopi: typing "t" in Compare search opened chat).
             if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused
+                // July 22 item 8: leaderboard search takes typed text too.
+                || lbSearchFocused
                 || NativeUI.CustomBetPromptOpen
                 // July 21 item 8: the LFP message box takes typed text — 't'
                 // there must not open chat.

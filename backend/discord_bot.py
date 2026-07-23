@@ -274,6 +274,12 @@ async def on_ready():
 
 
 async def backfill_discord_usernames():
+    """July 22 (items 8+9): the players table now splits Discord identity into
+    discord_username (the unique @handle, user.name — Home tab shows this) and
+    discord_display_name (global display name — leaderboard opt-in shows this).
+    Legacy rows held DISPLAY names in discord_username, so this sweep now
+    re-resolves EVERY linked row (endpoint returns stored values so unchanged
+    rows are skipped — no N no-op POSTs on every restart)."""
     if not http_session or not API_SECRET_KEY:
         return
     await asyncio.sleep(5)  # give the API a moment to settle after bot restart
@@ -289,30 +295,43 @@ async def backfill_discord_usernames():
     except Exception as e:
         print(f"[BACKFILL] failed to fetch list: {e}"); return
 
-    ids = data.get("discord_ids", [])
-    if not ids:
+    rows = data.get("players") or [{"discord_id": d} for d in data.get("discord_ids", [])]
+    if not rows:
         print("[BACKFILL] No Discord usernames to backfill"); return
-    print(f"[BACKFILL] Resolving {len(ids)} Discord usernames")
+    print(f"[BACKFILL] Checking {len(rows)} linked Discord identities")
     resolved = 0
-    for did in ids:
+    for row in rows:
+        did = row.get("discord_id")
+        if not did:
+            continue
         try:
-            user = bot.get_user(int(did)) or await bot.fetch_user(int(did))
+            # Review [10]: fetch_user is an HTTP call for every UNCACHED user —
+            # pace the fetch itself, not just the update path, or the sweep
+            # bursts the whole linked set at Discord in one go.
+            user = bot.get_user(int(did))
+            if user is None:
+                await asyncio.sleep(0.15)
+                user = await bot.fetch_user(int(did))
             if user is None: continue
-            username = getattr(user, "global_name", None) or user.name
+            username = user.name                                        # the unique @handle
+            display = getattr(user, "global_name", None) or user.name   # what people see
+            if (row.get("discord_username") == username
+                    and row.get("discord_display_name") == display):
+                continue  # already correct — skip the POST entirely
             await http_session.post(
                 f"{API_BASE_URL}/api/v1/admin/set-discord-username",
-                json={"discord_id": str(did), "discord_username": username},
+                json={"discord_id": str(did), "discord_username": username,
+                      "discord_display_name": display},
                 headers={"X-Internal-Key": API_SECRET_KEY},
                 timeout=aiohttp.ClientTimeout(total=5),
             )
             resolved += 1
+            await asyncio.sleep(0.2)
         except discord.NotFound:
             continue
         except Exception as e:
             print(f"[BACKFILL] {did}: {e}")
-        # Rate-limit: Discord is lenient on user fetches but 5/s keeps us polite.
-        await asyncio.sleep(0.2)
-    print(f"[BACKFILL] Resolved {resolved}/{len(ids)} Discord usernames")
+    print(f"[BACKFILL] Updated {resolved}/{len(rows)} Discord identities")
 
 
 # ══ FAQ auto-responder (v1.33) ═══════════════════════════════════════════
@@ -1577,13 +1596,14 @@ async def on_close():
 async def cmd_link(ctx, code: str = None):
     if not code:
         await ctx.send("**How to link:**\n1. Open ROUNDS → press F5 → Home tab (Discord Link panel)\n2. Click **Get Link Code**\n3. Type `!link YOUR_CODE` here"); return
-    # Send Discord username alongside the ID so the in-game UI can display "Linked as @foo"
-    # instead of raw ID. Prefer global_name (new display-name system), fall back to legacy name.
-    discord_username = getattr(ctx.author, "global_name", None) or ctx.author.name
+    # July 22 (items 8+9): identity split — discord_username is the unique
+    # @handle (user.name; Home tab "Linked as @foo"), discord_display_name is
+    # the global display name (leaderboard opt-in surface).
     result = await api_post("/players/link-discord", params={
         "code": code.upper(),
         "discord_id": str(ctx.author.id),
-        "discord_username": discord_username,
+        "discord_username": ctx.author.name,
+        "discord_display_name": getattr(ctx.author, "global_name", None) or ctx.author.name,
     })
     if not result: await ctx.send("❌ API unreachable."); return
     if "error" in result:
@@ -2569,6 +2589,229 @@ async def cmd_graph(ctx, player1: discord.Member, player2: discord.Member,
     await ctx.send(embed=embed, file=file)
 
 
+# ── /game — one recorded game by its short code (July 22 item 6) ─────────
+
+def _csv_ints(s):
+    out = []
+    for tok in (s or "").split(","):
+        try:
+            v = int(tok)
+            if v >= 0:
+                out.append(v)
+        except ValueError:
+            pass
+    return out
+
+
+def _pair_series(s):
+    """'a:b,a:b,...' cumulative pairs → ([a...], [b...]); ([], []) when absent."""
+    aa, bb = [], []
+    for tok in (s or "").split(","):
+        if ":" not in tok:
+            continue
+        l, _, r = tok.partition(":")
+        try:
+            aa.append(int(l)); bb.append(int(r))
+        except ValueError:
+            pass
+    return aa, bb
+
+
+def _render_game_detail_png_locked(game):
+    """Stacked panels for whatever series the game actually recorded:
+    score progression, FPS, ping, shots fired-vs-hit, dmg-vs-blocks.
+    1v1 = two players; 2v2 = up to four (from telemetry_by_player fields the
+    by-code endpoint flattens onto each player). Returns BytesIO or None."""
+    players = game.get("players") or []
+    palette = ["#00B0F4", "#ED4245", "#57F287", "#FAA61A"]
+    panels = []
+
+    # Series tuples carry an EXPLICIT palette index (review [11]) — the color
+    # is the player's position, never sniffed from the label text (a player
+    # literally named "hit" must not recolor the chart).
+    tl = game.get("point_timeline")
+    if tl and game.get("mode") == "1v1":
+        a, b = _pair_series(tl)
+        if len(a) >= 2:
+            n1 = players[0]["name"][:14] if players else "P1"
+            n2 = players[1]["name"][:14] if len(players) > 1 else "P2"
+            # Stored totals are POINTS (rounds*2+points); every in-game surface
+            # shows ROUNDS, so halve (feedback item 3: "10 points" on a 5-round
+            # game). Half-steps = a point inside an unfinished round.
+            panels.append(("Score progression (rounds)",
+                           [(n1, [v / 2.0 for v in [0] + a], "-", 0),
+                            (n2, [v / 2.0 for v in [0] + b], "-", 1)], None))
+    fps_series = [(p["name"][:14], _csv_ints(p.get("fps_timeline")), "-", pi)
+                  for pi, p in enumerate(players) if _csv_ints(p.get("fps_timeline"))]
+    if fps_series:
+        panels.append(("FPS", fps_series, None))
+    ping_series = [(p["name"][:14], _csv_ints(p.get("ping_timeline")), "-", pi)
+                   for pi, p in enumerate(players) if _csv_ints(p.get("ping_timeline"))]
+    if ping_series:
+        panels.append(("Ping (ms)", ping_series, None))
+    hit_series = []
+    for pi, p in enumerate(players):
+        fa, fb = _pair_series(p.get("hit_timeline"))
+        if len(fa) >= 2:
+            hit_series.append((f"{p['name'][:12]} fired", fa, "--", pi))
+            hit_series.append((f"{p['name'][:12]} hit", fb, "-", pi))
+    if hit_series:
+        panels.append(("Shots fired (dashed) vs hits (solid)", hit_series, None))
+    blk_series = []
+    for pi, p in enumerate(players):
+        ba, bb = _pair_series(p.get("block_timeline"))
+        if len(ba) >= 2:
+            blk_series.append((f"{p['name'][:12]} dmg", ba, "--", pi))
+            blk_series.append((f"{p['name'][:12]} blocks", bb, "-", pi))
+    if blk_series:
+        panels.append(("Damage taken (dashed, left) vs successful blocks (solid, right)", blk_series, "dual"))
+
+    if not panels:
+        return None
+    with _mpl_render_lock:
+        fig, axes = plt.subplots(len(panels), 1, figsize=(10, 2.7 * len(panels)), dpi=110)
+        try:
+            if len(panels) == 1:
+                axes = [axes]
+            fig.patch.set_facecolor(_CHART_BG)
+            for ax, (title, series, special) in zip(axes, panels):
+                _style_axes(ax)
+                ax.set_title(title, color="#ffffff", fontsize=11, pad=6, loc="left")
+                ax.grid(True, axis="y", color=_CHART_GRID, linewidth=0.6, alpha=0.5)
+                ax.set_axisbelow(True)
+                if special == "dual":
+                    ax2 = ax.twinx()
+                    ax2.tick_params(colors=_CHART_MUTED, labelsize=9)
+                    for spine in ax2.spines.values():
+                        spine.set_color(_CHART_GRID)
+                    for label, vals, style, color_idx in series:
+                        col = palette[color_idx % len(palette)]
+                        target = ax if style == "--" else ax2
+                        target.plot(range(len(vals)), vals, style, color=col,
+                                    linewidth=1.8, label=label)
+                    h1, l1 = ax.get_legend_handles_labels()
+                    h2, l2 = ax2.get_legend_handles_labels()
+                    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=8,
+                              facecolor=_CHART_BG, labelcolor=_CHART_FG, edgecolor=_CHART_GRID)
+                else:
+                    for label, vals, style, color_idx in series:
+                        col = palette[color_idx % len(palette)]
+                        ax.plot(range(len(vals)), vals, style, color=col,
+                                linewidth=1.8, label=label)
+                    ax.legend(loc="upper left", fontsize=8, facecolor=_CHART_BG,
+                              labelcolor=_CHART_FG, edgecolor=_CHART_GRID)
+                ax.set_xlabel("time (samples every ~3-5s)", color=_CHART_MUTED, fontsize=8)
+            fig.tight_layout()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", facecolor=_CHART_BG)
+            buf.seek(0)
+            return buf
+        finally:
+            plt.close(fig)
+
+
+@bot.hybrid_command(name="game", description="Look up one recorded game by its ID (copy it from the F5 menu)")
+@app_commands.describe(code="12-character game code — click the ID button next to any game in the F5 menu")
+async def cmd_game(ctx, code: str):
+    """July 22 item 6: full per-game breakdown for any recorded game — score
+    history, hit/block, FPS/ping graphs, cards, rewards — for all players in
+    it. Works for 1v1 (full telemetry), 2v2 (per-player telemetry rows) and
+    1v2 (score + cards + rewards)."""
+    norm = "".join(c for c in (code or "").lower() if c in "0123456789abcdef")
+    if len(norm) not in (12, 32):
+        await ctx.send("❌ That doesn't look like a game code — copy it with the ID button next to a game in the F5 menu.")
+        return
+    await _maybe_defer(ctx)
+    game = await api_get(f"/matches/by-code/{norm[:12]}")
+    if not game:
+        await ctx.send(f"❌ No game found for `{norm[:12].upper()}`.")
+        return
+
+    mode = game.get("mode", "1v1")
+    label = {"1v1": "1v1 " + ("Ranked" if game.get("is_ranked") else "Casual"),
+             "2v2": "2v2 Ranked", "1v2": "1v2 (unranked beta)"}.get(mode, mode)
+    when = (game.get("ended_at") or "")[:10]
+    dur = game.get("duration_seconds") or 0
+    players = game.get("players") or []
+
+    if mode == "1v1":
+        score = f"{players[0]['rounds_won']}-{players[1]['rounds_won']}" if len(players) == 2 else "?"
+    elif mode == "2v2":
+        score = f"{game.get('t1_rounds_won', '?')}-{game.get('t2_rounds_won', '?')}"
+    else:
+        score = f"solo {game.get('solo_rounds_won', '?')} - duo {game.get('duo_rounds_won', '?')}"
+
+    desc = f"**{label}** · {when} · score **{score}**"
+    if dur:
+        desc += f" · {dur // 60}:{dur % 60:02d}"
+    if game.get("series_status"):
+        desc += f" · series {game['series_status']}"
+    if game.get("invalidated"):
+        desc += f"\n⚠ invalidated: {game.get('invalidation_reason') or 'admin'}"
+    embed = discord.Embed(title=f"🎮 Game {game.get('code', norm[:12].upper())}",
+                          description=desc, color=0x5865F2)
+
+    for p in players:
+        won = p.get("won")
+        head = f"{'🏆 ' if won else ''}{p['name']}"
+        if mode == "2v2":
+            head += f"  (team {p.get('team')})"
+        elif mode == "1v2":
+            head += f"  ({p.get('side')})"
+        lines = []
+        bf, bh = p.get("bullets_fired"), p.get("bullets_hit")
+        ba, bs = p.get("blocks_activated"), p.get("blocks_successful")
+        if bf or ba:
+            lines.append(f"Hit {_pct(bh, bf):.0f}% ({bh or 0}/{bf or 0}) · Block {_pct(bs, ba):.0f}% ({bs or 0}/{ba or 0})")
+        perf = []
+        if p.get("fps_avg"):
+            perf.append(f"{p['fps_avg']} fps")
+        if p.get("ping_avg"):
+            perf.append(f"{p['ping_avg']} ms" + (f" (max {p['ping_max']})" if p.get("ping_max") else ""))
+        if perf:
+            lines.append(" · ".join(perf))
+        rewards = []
+        if p.get("xp_gained"):
+            rewards.append(f"+{p['xp_gained']} xp")
+        if p.get("xp_earned"):
+            rewards.append(f"+{p['xp_earned']} xp (series)")
+        if p.get("gold_gained"):
+            rewards.append(f"+{p['gold_gained']} g")
+        if p.get("gold_earned"):
+            rewards.append(f"+{p['gold_earned']} g (series)")
+        rc = p.get("rating_change")
+        if rc is not None:
+            rewards.append(f"{'+' if rc >= 0 else ''}{rc:.1f} elo (series)")
+        if rewards:
+            lines.append(" · ".join(rewards))
+        cards = p.get("cards") or []
+        if cards:
+            cl = ", ".join(cards)
+            if len(cl) > 300:
+                cl = cl[:297] + "..."
+            lines.append(f"Cards: {cl}")
+        else:
+            # Feedback item 2: absence must be legible — older games (and some
+            # unmodded-opponent games) never recorded this side's picks.
+            lines.append("Cards: *(not recorded for this game)*")
+        embed.add_field(name=head[:256], value=("\n".join(lines) or "—")[:1024], inline=False)
+
+    buf = None
+    if _MPL_AVAILABLE:
+        try:
+            buf = await asyncio.to_thread(_render_game_detail_png_locked, game)
+        except Exception as e:
+            print(f"[GAME] graph render failed: {e}")
+    if buf:
+        file = discord.File(buf, filename="graph.png")
+        embed.set_image(url="attachment://graph.png")
+        await ctx.send(embed=embed, file=file)
+    else:
+        if mode != "1v1":
+            embed.set_footer(text="Timeline graphs need telemetry recorded by v1.35+ clients in this mode.")
+        await ctx.send(embed=embed)
+
+
 @bot.hybrid_command(name="mystats", description="Full My Stats page — everything the F5 menu shows")
 @app_commands.describe(member="Player to look up (defaults to yourself)")
 async def cmd_mystats(ctx, member: discord.Member = None):
@@ -2586,6 +2829,11 @@ async def cmd_mystats(ctx, member: discord.Member = None):
     hist = await api_get(f"/players/{steam_id}/matches?limit=50")
     rank = s.get("rank_name") or get_rank_name(s["rating"])
     embed = discord.Embed(title=f"{rank_emoji(rank)}  {s['display_name']}  —  My Stats", color=0x9B59B6)
+    # v1.34.1: surface the Discord @display name (opt-out honored — the API
+    # nulls discord_display_name when show_discord is off). No real mention.
+    _dname = s.get("discord_display_name")
+    if _dname:
+        embed.description = f"Discord: **@{discord.utils.escape_markdown(str(_dname))}**"
     embed.set_thumbnail(url=target.display_avatar.url)
 
     # Rating box
@@ -2712,6 +2960,19 @@ async def cmd_cards(ctx, member: discord.Member = None,
 # ── Queue Beacon (15s) ───────────────────────────────────────────
 seen_queue_joins = {}  # steam_id -> timestamp
 
+
+def _beacon_discord_suffix(j):
+    """v1.34.1: append the searcher's Discord @display name to a queue beacon
+    so people know who to @ — PLAIN TEXT only (not a <@id> mention), and every
+    beacon send already passes allowed_mentions=none, so this can never ping
+    (Sid's ask: name yes, ping no). Empty when the player opted out or isn't
+    linked (the API nulls discord_display_name via the show_discord gate)."""
+    dname = (j or {}).get("discord_display_name")
+    if not dname:
+        return ""
+    return f"  ·  Discord: @{discord.utils.escape_markdown(str(dname))}"
+
+
 @tasks.loop(seconds=15)
 async def poll_queue_beacon():
     if not QUEUE_BEACON_CHANNEL_ID:
@@ -2743,7 +3004,8 @@ async def poll_queue_beacon():
                     continue
 
             await channel.send(
-                f"🔍 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for a ranked match!",
+                f"🔍 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for a ranked match!"
+                + _beacon_discord_suffix(j),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
     except Exception as e:
@@ -2784,7 +3046,8 @@ async def poll_team_queue_beacon():
                 except:
                     continue
             await channel.send(
-                f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **2v2** — **{qsize}/4** queued!",
+                f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **2v2** — **{qsize}/4** queued!"
+                + _beacon_discord_suffix(j),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
     except Exception as e:
@@ -2826,7 +3089,8 @@ async def poll_ovt_queue_beacon():
                 except:
                     continue
             await channel.send(
-                f"⚔️ **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **1v2** — **{qsize}/3** in the lobby!",
+                f"⚔️ **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **1v2** — **{qsize}/3** in the lobby!"
+                + _beacon_discord_suffix(j),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
     except Exception as e:
@@ -3307,8 +3571,11 @@ async def sync_roles_periodic():
     try:
         linked = await api_get("/internal/linked-players")
         rmap = {}
+        umap = {}
         if linked and linked.get("players"):
             rmap = {p["discord_id"]: p.get("rating", 0) for p in linked["players"] if p.get("discord_id")}
+            umap = {p["discord_id"]: (p.get("discord_username"), p.get("discord_display_name"))
+                    for p in linked["players"] if p.get("discord_id")}
         if not rmap:
             return
         for guild in bot.guilds:
@@ -3321,6 +3588,24 @@ async def sync_roles_periodic():
                 if member.bot: continue
                 rat = rmap.get(str(member.id))
                 if rat is None: continue
+                # July 22 (items 8+9): rename tracking rides the same tick —
+                # only CHANGED names post (no extra traffic in steady state).
+                try:
+                    stored = umap.get(str(member.id))
+                    if stored is not None:
+                        cur_user = member.name
+                        cur_disp = getattr(member, "global_name", None) or member.name
+                        if stored[0] != cur_user or stored[1] != cur_disp:
+                            await http_session.post(
+                                f"{API_BASE_URL}/api/v1/admin/set-discord-username",
+                                json={"discord_id": str(member.id),
+                                      "discord_username": cur_user,
+                                      "discord_display_name": cur_disp},
+                                headers={"X-Internal-Key": API_SECRET_KEY},
+                                timeout=aiohttp.ClientTimeout(total=5),
+                            )
+                except Exception:
+                    pass
                 try:
                     await update_member_role(member, rat)
                     await asyncio.sleep(0.3)   # rate-limit slack only for actual role work

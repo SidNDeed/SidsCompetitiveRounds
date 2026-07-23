@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.34.0";   // July 22: pre-ship bump — the server's STATS_CLEAN_MIN_VERSION gate keys on this
+        public const string ModVersion = "1.34.1";   // July 22: nine-item batch + feedback; STATS_CLEAN/STEAM_AUTH gates stay at 1.34.0 (1.34.1 passes them)
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -552,6 +552,17 @@ namespace CompetitiveRounds
                         targetRegion = Plugin.PendingRankedRegion;
                         joinInitiated = true;
                         GameStateWatcher.LeavingForRanked = true;
+                        // July 22 item 2: flag the deliberate leave so observers'
+                        // leaver banner says "left for a ranked match" instead of
+                        // implying a rage-quit. Best-effort — prop may not
+                        // replicate before the leave lands on slow links.
+                        try
+                        {
+                            var lvProps = new ExitGames.Client.Photon.Hashtable();
+                            lvProps["cr_lv_rk"] = "1";
+                            PhotonNetwork.LocalPlayer?.SetCustomProperties(lvProps);
+                        }
+                        catch { }
                         PhotonNetwork.LeaveRoom();
                         Plugin.Log.LogInfo("[QUEUE-JOINER] Leaving current room before ranked join...");
                         state = JoinState.LeavingRoom;
@@ -669,6 +680,11 @@ namespace CompetitiveRounds
                             { "C2", capturedRoom }
                         };
                         if (is2v2) roomProps["cr_ff"] = true;
+                        // July 22 item 3: solo-extra-pick flag rides the ROOM
+                        // props (design doc: room-prop carrier) — all 3 clients
+                        // got it in the lock payload, so whichever creates the
+                        // room stamps it and late joiners read one truth.
+                        if (is1v2 && ApiClient.OvtSoloExtraPick) roomProps["cr_ovt_xp"] = true;
                         var roomOptions = new Photon.Realtime.RoomOptions
                         {
                             MaxPlayers = (byte)(is2v2 ? 4 : (is1v2 ? 3 : 2)),
@@ -1644,6 +1660,11 @@ namespace CompetitiveRounds
 
         public void OnPlayerLeftRoom(Photon.Realtime.Player p)
         {
+            // July 22 item 2 (bug #81): universal leaver banner — BEFORE the
+            // Diag2v2 gate so casual/ranked 1v1 rooms get it too. Photon fires
+            // this on every remaining seat, so the ally AND both opponents all
+            // see who left. Display-only; every report path below is untouched.
+            try { GameStateWatcher.NotifyPlayerLeftRoom(p); } catch { }
             if (!Diag2v2.IsActive()) return;
             try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
             catch { }
@@ -1772,6 +1793,20 @@ namespace CompetitiveRounds
                     Plugin.ClearPending2v2Slot();
                 if (Plugin.PendingOvtSlot >= 0 && !rn.StartsWith("ovt_"))
                     Plugin.ClearPendingOvtSlot();
+            }
+            catch { }
+            // July 22 item 2: fresh room, stale leaver banner (and our own
+            // left-for-ranked flag) must not carry over.
+            try { CompetitiveUI.ClearLeaverBanner(); } catch { }
+            try
+            {
+                var myProps = PhotonNetwork.LocalPlayer?.CustomProperties;
+                if (myProps != null && myProps.ContainsKey("cr_lv_rk"))
+                {
+                    var clr = new ExitGames.Client.Photon.Hashtable();
+                    clr["cr_lv_rk"] = "0";
+                    PhotonNetwork.LocalPlayer.SetCustomProperties(clr);
+                }
             }
             catch { }
 
@@ -3130,6 +3165,62 @@ namespace CompetitiveRounds
                 catch { }
             }
             return __exception;  // rethrow normally — don't swallow
+        }
+    }
+
+    /// <summary>
+    /// July 22 item 3 — 1v2 Solo Extra Initial Pick. Vanilla's pick loop is
+    /// natively multi-pick (StartPick sets `picks`; ReplaceCards re-deals while
+    /// picks > 0, all driven on the PICKER's client only, so a flag mismatch
+    /// can never stall the WaitForSyncUp barrier — remote clients just watch
+    /// replicated card spawns until RPCA_DonePicking). We bump the SOLO
+    /// player's INITIAL draw from 1 to 2 picks when the series has the toggle.
+    /// Initial-draw discriminator: all four GM_ArmsRace score fields are 0
+    /// (round picks always run after RPCA_NextRound incremented rounds; holds
+    /// for same-room rematches too since ResetMatch zeroes scores first).
+    /// Flag carrier: cr_ovt_xp ROOM prop (stamped by the room creator from the
+    /// lock payload) with the local lock cache as fallback.
+    /// FIRST-PLAYTEST-PENDING: vanilla online never passes picks>1, so the
+    /// second ReplaceCards round-trip is unproven in the wild (learning #145).
+    /// </summary>
+    [HarmonyPatch(typeof(CardChoice), "StartPick")]
+    class OvtExtraPickPatch
+    {
+        static void Prefix(ref int picksToSet, int pickerIDToSet)
+        {
+            try
+            {
+                if (picksToSet != 1) return;
+                if (PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return;
+                string rn = PhotonNetwork.CurrentRoom?.Name ?? "";
+                if (!rn.StartsWith("ovt_")) return;
+                // Flag: room prop first, local lock cache as fallback.
+                bool extra = false;
+                var rp = PhotonNetwork.CurrentRoom.CustomProperties;
+                if (rp != null && rp.ContainsKey("cr_ovt_xp"))
+                    extra = rp["cr_ovt_xp"] is bool b ? b : rp["cr_ovt_xp"]?.ToString() == "True";
+                else
+                    extra = ApiClient.OvtSoloExtraPick;
+                if (!extra) return;
+                // Initial draw only: every score field still zero.
+                var gm = GM_ArmsRace.instance;
+                if (gm == null) return;
+                if (gm.p1Points != 0 || gm.p2Points != 0 || gm.p1Rounds != 0 || gm.p2Rounds != 0) return;
+                // Picker must be the SOLO side = the ROUNDS team with exactly
+                // one player (same detection TryReportOvtMatch trusts).
+                var picker = PlayerManager.instance?.GetPlayerWithID(pickerIDToSet);
+                if (picker == null) return;
+                int teamSize = 0;
+                foreach (var po in PlayerManager.instance.players)
+                    if (po != null && po.TeamID == picker.TeamID) teamSize++;
+                if (teamSize != 1) return;
+                picksToSet = 2;
+                Plugin.Log.LogInfo($"[1v2-EXTRAPICK] solo picker {pickerIDToSet} (team {picker.TeamID}) gets 2 initial picks");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[1v2-EXTRAPICK] prefix failed: {ex.Message}");
+            }
         }
     }
 

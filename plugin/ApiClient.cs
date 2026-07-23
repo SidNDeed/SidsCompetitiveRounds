@@ -161,6 +161,10 @@ namespace CompetitiveRounds
             // Hide-gold utility toggle state. When true the leaderboard masks our gold.
             public bool hide_gold;
             public bool appear_offline;
+            // July 22 item 8: opt-in Discord display name on the leaderboard
+            // detail. Flat scalars — JsonUtility parses them for free (#73).
+            public string discord_display_name;
+            public bool show_discord;
             // Stackable rich-text nametag styles by sku. Parsed manually (JsonUtility can't handle
             // string arrays without a wrapper class). Null or empty = no styling applied.
             public List<string> active_nametag_skus;
@@ -284,6 +288,12 @@ namespace CompetitiveRounds
             // July 22 item 3 — latency: averages for the row tag + timelines for the hover chart.
             public int player_ping_avg, opponent_ping_avg;
             public string player_ping_timeline, opp_ping_timeline;
+            // July 22 item 1 — viewer-relative cumulative pair timelines
+            // ("fired:hit,..." / "dmgTaken:blocksSucc,...") + per-point second
+            // stamps (no orientation) for the new hover graphs.
+            public string player_hit_timeline, opp_hit_timeline;
+            public string player_block_timeline, opp_block_timeline;
+            public string point_times;
             // Cumulative scoring timeline "myTotal:oppTotal,..." (viewer-relative).
             public string point_timeline;
             // Bug batch item 4 — total game length in seconds (0 = no data).
@@ -1418,6 +1428,20 @@ namespace CompetitiveRounds
             }));
         }
 
+        /// <summary>July 22 item 8: opt-IN "show my Discord on the leaderboard"
+        /// toggle. HMAC over "show_discord:{steam_id}:{1|0}".</summary>
+        public static void SetShowDiscord(string steamId, bool on, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"show_discord:{steamId}:{(on ? 1 : 0)}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/show-discord?on={(on ? "true" : "false")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SETTINGS] set show_discord {on}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) FetchPlayerStats(steamId);
+            }));
+        }
+
         /// <summary>Toggle a nametag rich-text style on/off. Stackable — multiple styles can be active.
         /// HMAC over "nametag:{steam_id}:{item_id}".</summary>
         public static void ToggleNametagStyle(string steamId, long itemId, Action<bool, string> callback = null)
@@ -2530,7 +2554,13 @@ namespace CompetitiveRounds
             // July 22 item 3 — latency timelines (own 3s samples; opp via
             // gstats field 12) + opp average for the history "Ping:" tag.
             string localPingTimeline = null, string oppPingTimeline = null,
-            int oppPingAvg = 0)
+            int oppPingAvg = 0,
+            // July 22 item 1 — cumulative Hit%/Block% pair timelines
+            // ("fired:hit,..." / "dmgTaken:blocksSucc,...", 3s cadence) +
+            // per-point second stamps for the graph markers. Advisory.
+            string localHitTimeline = null, string oppHitTimeline = null,
+            string localBlockTimeline = null, string oppBlockTimeline = null,
+            string pointTimes = null)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -2599,6 +2629,13 @@ namespace CompetitiveRounds
             sb.Append($"\"local_ping_timeline\":\"{Escape(ClampTimeline(localPingTimeline))}\",");
             sb.Append($"\"opp_ping_timeline\":\"{Escape(ClampTimeline(oppPingTimeline))}\",");
             sb.Append($"\"opp_ping_avg\":{oppPingAvg},");
+            // July 22 item 1 — hit/block pair timelines (1024-char columns) +
+            // point-time stamps (512). Same digit/comma/colon-only wire shape.
+            sb.Append($"\"local_hit_timeline\":\"{Escape(ClampTimeline(localHitTimeline, 1024))}\",");
+            sb.Append($"\"opp_hit_timeline\":\"{Escape(ClampTimeline(oppHitTimeline, 1024))}\",");
+            sb.Append($"\"local_block_timeline\":\"{Escape(ClampTimeline(localBlockTimeline, 1024))}\",");
+            sb.Append($"\"opp_block_timeline\":\"{Escape(ClampTimeline(oppBlockTimeline, 1024))}\",");
+            sb.Append($"\"point_times\":\"{Escape(ClampTimeline(pointTimes))}\",");
             string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
@@ -3781,6 +3818,12 @@ namespace CompetitiveRounds
             entry.opponent_ping_avg = ExtractJsonInt(chunk, "opponent_ping_avg");
             entry.player_ping_timeline = ExtractJsonString(chunk, "player_ping_timeline");
             entry.opp_ping_timeline = ExtractJsonString(chunk, "opp_ping_timeline");
+            // July 22 item 1 — Hit%/Block% pair timelines + point-time stamps.
+            entry.player_hit_timeline = ExtractJsonString(chunk, "player_hit_timeline");
+            entry.opp_hit_timeline = ExtractJsonString(chunk, "opp_hit_timeline");
+            entry.player_block_timeline = ExtractJsonString(chunk, "player_block_timeline");
+            entry.opp_block_timeline = ExtractJsonString(chunk, "opp_block_timeline");
+            entry.point_times = ExtractJsonString(chunk, "point_times");
             entry.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
             return entry;
         }
@@ -4549,6 +4592,28 @@ namespace CompetitiveRounds
                 if (c == '"') { inStr = true; continue; }
                 if (c == '[') depth++;
                 else if (c == ']') { depth--; if (depth == 0) return i; }
+            }
+            return -1;
+        }
+
+        // Curly twin of the above (learning #156: any slice over a region that
+        // can carry user-authored strings must be string-aware).
+        private static int FindMatchingBraceStringAware(string s, int openPos)
+        {
+            if (openPos < 0 || openPos >= s.Length) return -1;
+            int depth = 0; bool inStr = false;
+            for (int i = openPos; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (inStr)
+                {
+                    if (c == '\\') i++;
+                    else if (c == '"') inStr = false;
+                    continue;
+                }
+                if (c == '"') { inStr = true; continue; }
+                if (c == '{') depth++;
+                else if (c == '}') { depth--; if (depth == 0) return i; }
             }
             return -1;
         }
@@ -5497,6 +5562,34 @@ namespace CompetitiveRounds
         /// <summary>Submit a 2v2 match. Reporter is the lowest Steam ID across
         /// all 4 participants. Builds the 11-field HMAC over
         /// t1a:t1b:t2a:t2b:t1r:t2r:is_ranked:reporter:room_id:winner_team:series_id.</summary>
+        /// <summary>Per-slot 2v2 telemetry blob (July 22 item 7). Null slot =
+        /// that player's data never reached the reporter (old client).</summary>
+        public class TeamTelemetry
+        {
+            public string fpsTimeline, pingTimeline, hitTimeline, blockTimeline;
+            public int pingAvg;
+            public int bulletsFired, bulletsHit, blocksActivated, blocksSuccessful, keysPressed;
+            public float activeSeconds;
+        }
+
+        private static void AppendTeamTelemetry(StringBuilder sb, string slot, TeamTelemetry t)
+        {
+            if (t == null) return;
+            sb.Append($"\"{slot}_telemetry\":{{");
+            sb.Append($"\"fps_timeline\":\"{Escape(ClampTimeline(t.fpsTimeline))}\",");
+            sb.Append($"\"ping_timeline\":\"{Escape(ClampTimeline(t.pingTimeline))}\",");
+            sb.Append($"\"ping_avg\":{Math.Max(0, Math.Min(30000, t.pingAvg))},");
+            sb.Append($"\"hit_timeline\":\"{Escape(ClampTimeline(t.hitTimeline, 1024))}\",");
+            sb.Append($"\"block_timeline\":\"{Escape(ClampTimeline(t.blockTimeline, 1024))}\",");
+            sb.Append($"\"bullets_fired\":{Math.Max(0, t.bulletsFired)},");
+            sb.Append($"\"bullets_hit\":{Math.Max(0, t.bulletsHit)},");
+            sb.Append($"\"blocks_activated\":{Math.Max(0, t.blocksActivated)},");
+            sb.Append($"\"blocks_successful\":{Math.Max(0, t.blocksSuccessful)},");
+            sb.Append($"\"keys_pressed\":{Math.Max(0, t.keysPressed)},");
+            sb.Append($"\"active_seconds\":{Math.Max(0f, t.activeSeconds).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
+            sb.Append("},");
+        }
+
         public static void ReportTeamMatch(
             string seriesId,
             string t1aSteam, string t1aName, List<MatchTracker.CardPickData> t1aCards,
@@ -5506,7 +5599,11 @@ namespace CompetitiveRounds
             int t1Rounds, int t2Rounds, int t1Points, int t2Points,
             string photonRoomId, string region, int durationSeconds, DateTime startedAt,
             string reporterSteamId, bool isRanked, int winnerTeam,
-            int t1aFps, int t1bFps, int t2aFps, int t2bFps)
+            int t1aFps, int t1bFps, int t2aFps, int t2bFps,
+            // July 22 item 7 — per-slot telemetry (timelines + counters), same
+            // slot ordering as the fps args. Null-safe: absent slots omitted.
+            TeamTelemetry t1aTele = null, TeamTelemetry t1bTele = null,
+            TeamTelemetry t2aTele = null, TeamTelemetry t2bTele = null)
         {
             var sb = new StringBuilder();
             sb.Append("{");
@@ -5534,6 +5631,12 @@ namespace CompetitiveRounds
             sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
             sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteamId)}\",");
             sb.Append($"\"t1a_fps\":{t1aFps},\"t1b_fps\":{t1bFps},\"t2a_fps\":{t2aFps},\"t2b_fps\":{t2bFps},");
+            // July 22 item 7 — per-slot telemetry objects (advisory, NOT in the
+            // 11-field HMAC below; that canonical must never change).
+            AppendTeamTelemetry(sb, "t1a", t1aTele);
+            AppendTeamTelemetry(sb, "t1b", t1bTele);
+            AppendTeamTelemetry(sb, "t2a", t2aTele);
+            AppendTeamTelemetry(sb, "t2b", t2bTele);
 
             string canonical =
                 $"{t1aSteam}:{t1bSteam}:{t2aSteam}:{t2bSteam}:" +
@@ -5665,10 +5768,21 @@ namespace CompetitiveRounds
         }
 
         [Serializable]
+        public class TeamPlayerTele
+        {
+            public string fps_timeline, ping_timeline, hit_timeline, block_timeline;
+            public int ping_avg, bullets_fired, bullets_hit, blocks_activated, blocks_successful;
+        }
+
+        [Serializable]
         public class TeamSeriesMatch
         {
             public string match_id, ended_at;
             public int t1_rounds_won, t2_rounds_won, t1_points_total, t2_points_total;
+            // July 22 item 7: per-game telemetry parity with My Stats.
+            public int duration_seconds;
+            public Dictionary<string, int> fps_by_player = new Dictionary<string, int>();
+            public Dictionary<string, TeamPlayerTele> telemetry_by_player = new Dictionary<string, TeamPlayerTele>();
             // steam_id -> [card_name, card_name, ...]
             public Dictionary<string, List<string>> cards_by_player = new Dictionary<string, List<string>>();
         }
@@ -5788,7 +5902,75 @@ namespace CompetitiveRounds
                     t2_rounds_won = ExtractJsonInt(m, "t2_rounds_won"),
                     t1_points_total = ExtractJsonInt(m, "t1_points_total"),
                     t2_points_total = ExtractJsonInt(m, "t2_points_total"),
+                    duration_seconds = ExtractJsonInt(m, "duration_seconds"),
                 };
+                // July 22 item 7: fps_by_player {sid: int} — string-aware slice
+                // (sits beside user-authored card names; learning #156).
+                int fIdx = m.IndexOf("\"fps_by_player\":");
+                if (fIdx >= 0)
+                {
+                    int fS = m.IndexOf('{', fIdx);
+                    int fE = fS >= 0 ? FindMatchingBraceStringAware(m, fS) : -1;
+                    if (fS >= 0 && fE > fS)
+                    {
+                        string fb = m.Substring(fS + 1, fE - fS - 1);
+                        int fc = 0;
+                        while (fc < fb.Length)
+                        {
+                            int kS = fb.IndexOf('"', fc);
+                            if (kS < 0) break;
+                            int kE = fb.IndexOf('"', kS + 1);
+                            if (kE < 0) break;
+                            string sid = fb.Substring(kS + 1, kE - kS - 1);
+                            int col = fb.IndexOf(':', kE);
+                            if (col < 0) break;
+                            int vEnd = col + 1;
+                            while (vEnd < fb.Length && (char.IsDigit(fb[vEnd]) || fb[vEnd] == ' ')) vEnd++;
+                            int fv;
+                            if (int.TryParse(fb.Substring(col + 1, vEnd - col - 1).Trim(), out fv))
+                                entry.fps_by_player[sid] = fv;
+                            fc = vEnd + 1;
+                        }
+                    }
+                }
+                // telemetry_by_player {sid: {fields...}}
+                int tIdx = m.IndexOf("\"telemetry_by_player\":");
+                if (tIdx >= 0)
+                {
+                    int tS = m.IndexOf('{', tIdx);
+                    int tE = tS >= 0 ? FindMatchingBraceStringAware(m, tS) : -1;
+                    if (tS >= 0 && tE > tS)
+                    {
+                        string tb = m.Substring(tS + 1, tE - tS - 1);
+                        int tc = 0;
+                        while (tc < tb.Length)
+                        {
+                            int kS = tb.IndexOf('"', tc);
+                            if (kS < 0) break;
+                            int kE = tb.IndexOf('"', kS + 1);
+                            if (kE < 0) break;
+                            string sid = tb.Substring(kS + 1, kE - kS - 1);
+                            int oS = tb.IndexOf('{', kE);
+                            if (oS < 0) break;
+                            int oE = FindMatchingBraceStringAware(tb, oS);
+                            if (oE < 0) break;
+                            string ob = tb.Substring(oS, oE - oS + 1);
+                            entry.telemetry_by_player[sid] = new TeamPlayerTele
+                            {
+                                fps_timeline = ExtractJsonString(ob, "fps_timeline"),
+                                ping_timeline = ExtractJsonString(ob, "ping_timeline"),
+                                hit_timeline = ExtractJsonString(ob, "hit_timeline"),
+                                block_timeline = ExtractJsonString(ob, "block_timeline"),
+                                ping_avg = ExtractJsonInt(ob, "ping_avg"),
+                                bullets_fired = ExtractJsonInt(ob, "bullets_fired"),
+                                bullets_hit = ExtractJsonInt(ob, "bullets_hit"),
+                                blocks_activated = ExtractJsonInt(ob, "blocks_activated"),
+                                blocks_successful = ExtractJsonInt(ob, "blocks_successful"),
+                            };
+                            tc = oE + 1;
+                        }
+                    }
+                }
                 // cards_by_player parser (same shape as TeamMatchHistoryEntry).
                 int cIdx = m.IndexOf("\"cards_by_player\":");
                 if (cIdx >= 0)
@@ -6058,6 +6240,8 @@ namespace CompetitiveRounds
         {
             public int rank; public string steam_id, display_name;
             public int games_played, wins, losses, solo_games, duo_games, level;
+            // July 22 item 3: W/L split by role (as solo vs as duo half).
+            public int solo_wins, solo_losses, duo_wins, duo_losses;
             public float win_rate;
         }
         public static List<OvtLeaderboardEntry> CachedOvtLeaderboard = null;
@@ -6381,6 +6565,10 @@ namespace CompetitiveRounds
                             win_rate = ExtractJsonFloat(chunk, "win_rate"),
                             solo_games = ExtractJsonInt(chunk, "solo_games"),
                             duo_games = ExtractJsonInt(chunk, "duo_games"),
+                            solo_wins = ExtractJsonInt(chunk, "solo_wins"),
+                            solo_losses = ExtractJsonInt(chunk, "solo_losses"),
+                            duo_wins = ExtractJsonInt(chunk, "duo_wins"),
+                            duo_losses = ExtractJsonInt(chunk, "duo_losses"),
                             level = ExtractJsonInt(chunk, "level"),
                         });
                     }
@@ -6551,12 +6739,12 @@ namespace CompetitiveRounds
 
         // Comma-aware 512-char clamp for the fps timeline columns: cut at the
         // last full sample so the parser never sees a truncated fragment.
-        private static string ClampTimeline(string t)
+        private static string ClampTimeline(string t, int max = 512)
         {
             t = t ?? "";
-            if (t.Length <= 512) return t;
-            int cut = t.LastIndexOf(',', 511);
-            return cut > 0 ? t.Substring(0, cut) : t.Substring(0, 512);
+            if (t.Length <= max) return t;
+            int cut = t.LastIndexOf(',', max - 1);
+            return cut > 0 ? t.Substring(0, cut) : t.Substring(0, max);
         }
 
         // July 21 review fix ([9]): 401 session_required recovery. Without this
@@ -6912,6 +7100,9 @@ namespace CompetitiveRounds
         }
         public static string EarnersKey { get; private set; }
         public static List<AchEarnerData> CachedEarners { get; private set; }
+        // July 22 item 4: full earner count from the server (the list itself is
+        // capped at 500 rows) so the header can't under-report.
+        public static int CachedEarnersTotal { get; private set; }
         private static bool _earnersInFlight;
         // Review fix [7]: last-write-wins intent — a click during an in-flight
         // fetch records the WANTED key; the callback re-fires for it, so the
@@ -6962,8 +7153,9 @@ namespace CompetitiveRounds
                         }
                         EarnersKey = achievementKey;
                         CachedEarners = list;
+                        CachedEarnersTotal = ExtractJsonInt(response, "total");
                         NativeUI.MarkDirty();
-                        Plugin.Log.LogInfo($"[ACH] earners loaded for {achievementKey}: {list.Count}");
+                        Plugin.Log.LogInfo($"[ACH] earners loaded for {achievementKey}: {list.Count} (total={CachedEarnersTotal})");
                         if (_earnersWantedKey != null && _earnersWantedKey != achievementKey)
                             FetchAchievementEarners(_earnersWantedKey);   // superseded — serve the newer click
                     }

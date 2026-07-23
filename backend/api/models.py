@@ -28,7 +28,15 @@ class Player(Base):
     total_xp = Column(Integer, nullable=False, default=0)
     ranked_dc_count = Column(Integer, nullable=False, default=0)
     discord_id = Column(String(20), nullable=True, unique=True, index=True)
+    # The unique @handle (user.name). Pre-migration-144 rows held DISPLAY
+    # names here; the bot re-resolves and overwrites on startup.
     discord_username = Column(String(64), nullable=True)
+    # July 22 (migration 144): the global/server display name, shown on the
+    # leaderboard player detail, Search-Ranked beacon, and /mystats when
+    # show_discord is true. v1.34.1 (migration 146): flipped to OPT-OUT —
+    # default TRUE; a player hides via the Settings toggle.
+    discord_display_name = Column(String(64), nullable=True)
+    show_discord = Column(Boolean, nullable=False, default=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     gold_earned = Column(Integer, nullable=False, default=0)
     team_gold_earned = Column(Integer, nullable=False, default=0)
@@ -216,6 +224,14 @@ class Match(Base):
     p2_ping_avg = Column(SmallInteger, nullable=True)
     p1_ping_max = Column(SmallInteger, nullable=True)
     p2_ping_max = Column(SmallInteger, nullable=True)
+    # July 22 (migration 141) — cumulative hit/block timelines, 3s cadence:
+    # hit = "fired:hit,...", block = "dmgTaken:blocksSucc,...". point_times =
+    # seconds-since-start per point_timeline entry (no p1/p2 orientation).
+    p1_hit_timeline = Column(String(1024), nullable=True)
+    p2_hit_timeline = Column(String(1024), nullable=True)
+    p1_block_timeline = Column(String(1024), nullable=True)
+    p2_block_timeline = Column(String(1024), nullable=True)
+    point_times = Column(String(512), nullable=True)
 
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
@@ -784,6 +800,28 @@ class TeamMatchCard(Base):
     card_rarity = Column(String(16), nullable=True)
     pick_order = Column(SmallInteger, nullable=False)
     round_number = Column(SmallInteger, nullable=False)
+
+
+class TeamMatchTelemetry(Base):
+    """Per-player 2v2 telemetry (migration 142) — one row per (match, player),
+    written by submit_team_match from the reporter's harvest of everyone's
+    cr_gstats props. Rows exist only for players whose data reached the
+    reporter; old-client peers have no row."""
+    __tablename__ = "team_match_telemetry"
+
+    match_id = Column(UUID(as_uuid=True), ForeignKey("team_matches.id", ondelete="CASCADE"), primary_key=True)
+    player_id = Column(UUID(as_uuid=True), ForeignKey("players.id"), primary_key=True)
+    fps_timeline = Column(String(512), nullable=True)
+    ping_timeline = Column(String(512), nullable=True)
+    ping_avg = Column(SmallInteger, nullable=True)
+    hit_timeline = Column(String(1024), nullable=True)
+    block_timeline = Column(String(1024), nullable=True)
+    bullets_fired = Column(Integer, nullable=True)
+    bullets_hit = Column(Integer, nullable=True)
+    blocks_activated = Column(Integer, nullable=True)
+    blocks_successful = Column(Integer, nullable=True)
+    keys_pressed = Column(Integer, nullable=True)
+    active_seconds = Column(Double, nullable=True)
 
 
 class ArtistUser(Base):

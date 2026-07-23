@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from glicko2 import calculate_new_rating
-from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard
+from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry
 from schemas import (
     AchievementUnlockRequest,
     AchievementListResponse,
@@ -636,9 +636,15 @@ async def queue_cleanup_loop():
                         RETURNING steam_id, status"""))
                 for r in husk_result.fetchall():
                     print(f"[OVT-CLEANUP] Husk row swept: {r[0]} status={r[1]}")
+                # NOTE: status is 'canceled' (one L) — every other ovt path
+                # uses that spelling and the continuation prior-series lookup
+                # filters on it; the janitor's original 'cancelled' made its
+                # rows invisible to that lookup (July 22 forensics).
                 dead_result = await db.execute(
                     text("""UPDATE ovt_series s
-                        SET status = 'cancelled'
+                        SET status = 'canceled',
+                            invalidated_at = NOW(),
+                            invalidation_reason = 'janitor_dead_lock'
                         WHERE s.status = 'active'
                           AND s.created_at < NOW() - INTERVAL '30 minutes'
                           AND NOT EXISTS (SELECT 1 FROM ovt_matches m
@@ -648,7 +654,29 @@ async def queue_cleanup_loop():
                                             AND q.last_polled >= NOW() - INTERVAL '15 minutes')
                         RETURNING s.id"""))
                 for r in dead_result.fetchall():
-                    print(f"[OVT-CLEANUP] Zero-game dead lock cancelled: series {r[0]}")
+                    print(f"[OVT-CLEANUP] Zero-game dead lock canceled: series {r[0]}")
+                # Abandoned mid-series sweep (July 22 forensics): a series with
+                # >=1 played game whose trio never finished stays 'active'
+                # forever otherwise — and the continuation live-lookup has no
+                # time window, so a 5-day-old 0-1 husk would get resumed with
+                # stale tallies. Match rows stay (they're valid games and feed
+                # the 1v2 leaderboard); only the series shell is closed. 24h is
+                # far beyond any legitimate between-games gap.
+                abandoned_result = await db.execute(
+                    text("""UPDATE ovt_series s
+                        SET status = 'canceled',
+                            invalidated_at = NOW(),
+                            invalidation_reason = 'series_abandoned'
+                        WHERE s.status = 'active'
+                          AND s.created_at < NOW() - INTERVAL '24 hours'
+                          AND EXISTS (SELECT 1 FROM ovt_matches m
+                                      WHERE m.series_id = s.id)
+                          AND NOT EXISTS (SELECT 1 FROM ovt_matches m
+                                          WHERE m.series_id = s.id
+                                            AND m.ended_at >= NOW() - INTERVAL '24 hours')
+                        RETURNING s.id"""))
+                for r in abandoned_result.fetchall():
+                    print(f"[OVT-CLEANUP] Abandoned mid-series canceled: series {r[0]}")
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] Error: {e}")
@@ -1131,7 +1159,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.34.0"
+LATEST_MOD_VERSION = "1.34.1"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1809,6 +1837,13 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 report.opp_ping_timeline[:512] if report.opp_ping_timeline else None)
     _p1l = _loc_lag if reporter_is_p1 else _opp_lag
     _p2l = _opp_lag if reporter_is_p1 else _loc_lag
+    # July 22 — cumulative Hit%/Block% timelines (hit, block) per side.
+    _loc_tl = (report.local_hit_timeline[:1024] if report.local_hit_timeline else None,
+               report.local_block_timeline[:1024] if report.local_block_timeline else None)
+    _opp_tl = (report.opp_hit_timeline[:1024] if report.opp_hit_timeline else None,
+               report.opp_block_timeline[:1024] if report.opp_block_timeline else None)
+    _p1t = _loc_tl if reporter_is_p1 else _opp_tl
+    _p2t = _opp_tl if reporter_is_p1 else _loc_tl
 
     match = Match(
         player1_id=p1.id,
@@ -1857,6 +1892,10 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         p2_recv_gap_count=_p2l[4], p2_hb_gap_count=_p2l[5],
         p2_ping_avg=_p2l[6], p2_ping_max=_p2l[7],
         p2_recv_gap_max_ms=_p2l[8], p2_ping_timeline=_p2l[9],
+        p1_hit_timeline=_p1t[0], p1_block_timeline=_p1t[1],
+        p2_hit_timeline=_p2t[0], p2_block_timeline=_p2t[1],
+        # No p1/p2 orientation — plain seconds-since-start marks.
+        point_times=((report.point_times or "")[:512] or None),
     )
     db.add(match)
     await db.flush()  # Get match.id
@@ -3156,6 +3195,14 @@ async def get_player_stats(
         ranked_enabled=player.ranked_enabled,
         discord_id=player.discord_id,
         discord_username=player.discord_username,
+        # July 22 (migration 144), review [1]/[6]: the display name is opt-IN,
+        # gated on show_discord ALONE — viewer_steam_id is an unauthenticated
+        # query param, so any viewer-based "self" exception is spoofable by a
+        # bare curl. Nothing needs a self-view exception: the Home tab reads
+        # discord_username, and the Settings toggle reads only show_discord.
+        discord_display_name=(player.discord_display_name
+                              if bool(player.show_discord) else None),
+        show_discord=bool(player.show_discord),
         gold_earned=player.gold_earned or 0,
         gold_spent=player.gold_spent or 0,
         bullets_fired=player.bullets_fired or 0,
@@ -3438,6 +3485,12 @@ async def get_player_matches(
             CASE WHEN m.player1_id = :pid THEN m.p2_ping_avg ELSE m.p1_ping_avg END AS op_ping_avg,
             CASE WHEN m.player1_id = :pid THEN m.p1_ping_timeline ELSE m.p2_ping_timeline END AS pl_ping_tl,
             CASE WHEN m.player1_id = :pid THEN m.p2_ping_timeline ELSE m.p1_ping_timeline END AS op_ping_tl,
+            -- July 22: viewer-relative Hit%/Block% timelines (new hover graphs).
+            CASE WHEN m.player1_id = :pid THEN m.p1_hit_timeline ELSE m.p2_hit_timeline END AS pl_hit_tl,
+            CASE WHEN m.player1_id = :pid THEN m.p2_hit_timeline ELSE m.p1_hit_timeline END AS op_hit_tl,
+            CASE WHEN m.player1_id = :pid THEN m.p1_block_timeline ELSE m.p2_block_timeline END AS pl_block_tl,
+            CASE WHEN m.player1_id = :pid THEN m.p2_block_timeline ELSE m.p1_block_timeline END AS op_block_tl,
+            m.point_times,
             -- v1.30 item 4: viewer-relative per-game combat stats.
             CASE WHEN m.player1_id = :pid THEN m.p1_bullets_fired ELSE m.p2_bullets_fired END AS pl_bf,
             CASE WHEN m.player1_id = :pid THEN m.p1_bullets_hit ELSE m.p2_bullets_hit END AS pl_bh,
@@ -3573,6 +3626,12 @@ async def get_player_matches(
             opp_blocks_activated=row["op_ba"], opp_blocks_successful=row["op_bs"],
             opp_keys_pressed=row["op_kp"], opp_active_seconds=row["op_as"],
             point_timeline=_viewer_timeline(row["point_timeline"], bool(row["viewer_is_p1"])),
+            player_hit_timeline=row["pl_hit_tl"],
+            opp_hit_timeline=row["op_hit_tl"],
+            player_block_timeline=row["pl_block_tl"],
+            opp_block_timeline=row["op_block_tl"],
+            # Seconds-since-start marks — no orientation, no flip.
+            point_times=row["point_times"],
             duration_seconds=row["duration_seconds"] or 0,
         ))
 
@@ -3591,6 +3650,270 @@ def _viewer_timeline(tl: str | None, viewer_is_p1: bool) -> str | None:
                         (pair.split(":", 1) for pair in tl.split(",")))
     except Exception:
         return tl
+
+
+# ── Routes: Game lookup by short code (July 22, Discord bot /game) ─────────
+
+_GAME_CODE_RE = _re.compile(r"^[0-9a-f]{12}([0-9a-f]{20})?$")
+
+
+@app.get("/api/v1/matches/by-code/{code}", tags=["Matches"])
+async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
+    """Look one recorded game up by its short code — the first 12 hex chars of
+    the match UUID (dashes stripped), as copied from the in-game ID button.
+    Public read, same exposure as /players/{id}/matches. Tries all three match
+    tables (UUIDs share one random space; a 12-hex cross-table collision is
+    negligible). Data is raw p1/p2 (or slot) oriented — the bot labels sides
+    by name, no viewer flipping. The WHERE expression must stay byte-identical
+    to the migration-143 index expression."""
+    code_n = (code or "").strip().lower().replace("-", "")
+    if not _GAME_CODE_RE.match(code_n):
+        raise HTTPException(400, "Bad game code — expected 12 hex characters")
+    code12 = code_n[:12]
+
+    # ── 1v1 ──
+    row = (await db.execute(text("""
+        SELECT m.id, m.ended_at, m.is_ranked, m.invalidated_at, m.invalidation_reason,
+               m.p1_rounds_won, m.p2_rounds_won, m.p1_points_total, m.p2_points_total,
+               m.point_timeline, m.point_times,
+               COALESCE(m.duration_seconds, m.match_duration, 0) AS duration_seconds,
+               m.reporter_mod_version, m.series_id,
+               m.p1_fps_avg, m.p2_fps_avg, m.p1_fps_timeline, m.p2_fps_timeline,
+               m.p1_ping_avg, m.p2_ping_avg, m.p1_ping_max, m.p2_ping_max,
+               m.p1_ping_timeline, m.p2_ping_timeline,
+               m.p1_hit_timeline, m.p2_hit_timeline,
+               m.p1_block_timeline, m.p2_block_timeline,
+               m.p1_bullets_fired, m.p1_bullets_hit, m.p2_bullets_fired, m.p2_bullets_hit,
+               m.p1_blocks_activated, m.p1_blocks_successful,
+               m.p2_blocks_activated, m.p2_blocks_successful,
+               m.p1_keys_pressed, m.p2_keys_pressed,
+               m.p1_active_seconds, m.p2_active_seconds,
+               m.p1_xp_gained, m.p2_xp_gained,
+               m.player1_id, m.player2_id, m.winner_id,
+               p1.steam_id AS p1_sid, p1.display_name AS p1_name,
+               p2.steam_id AS p2_sid, p2.display_name AS p2_name,
+               rs.p1_rating_change AS s_p1_rc, rs.p2_rating_change AS s_p2_rc,
+               rs.player1_id AS s_p1_id, rs.status AS series_status
+          FROM matches m
+          JOIN players p1 ON p1.id = m.player1_id
+          JOIN players p2 ON p2.id = m.player2_id
+          LEFT JOIN ranked_series rs ON rs.id = m.series_id
+         WHERE LEFT(REPLACE(m.id::text,'-',''),12) = :c
+         LIMIT 1"""), {"c": code12})).mappings().first()
+    if row is not None:
+        cards: dict = {}
+        c_rows = (await db.execute(text("""
+            SELECT mc.player_id, mc.card_name
+              FROM match_cards mc
+             WHERE mc.match_id = :mid
+             ORDER BY mc.round_number, mc.pick_order"""),
+            {"mid": row["id"]})).all()
+        for pid, cname in c_rows:
+            sid = row["p1_sid"] if pid == row["player1_id"] else row["p2_sid"]
+            cards.setdefault(sid, []).append(cname)
+        gold_rows = (await db.execute(text("""
+            SELECT gt.player_id, SUM(gt.amount) FROM gold_transactions gt
+             WHERE gt.reason IN ('xp', 'level_reward') AND gt.reference_id = :ref
+             GROUP BY gt.player_id"""), {"ref": str(row["id"])})).all()
+        gold_by_pid = {str(pid): int(amt or 0) for pid, amt in gold_rows}
+        # Series rating change per side, oriented to THIS match row's p1/p2
+        # (series p1 ordering can differ from the match's — learning #36).
+        s_rc_p1 = s_rc_p2 = None
+        if row["s_p1_id"] is not None:
+            if row["s_p1_id"] == row["player1_id"]:
+                s_rc_p1, s_rc_p2 = row["s_p1_rc"], row["s_p2_rc"]
+            else:
+                s_rc_p1, s_rc_p2 = row["s_p2_rc"], row["s_p1_rc"]
+
+        def _side1v1(n):
+            o = "p1" if n == 1 else "p2"
+            pid_col = "player1_id" if n == 1 else "player2_id"
+            return {
+                "steam_id": row[f"{o}_sid"], "name": row[f"{o}_name"],
+                "rounds_won": row[f"{o}_rounds_won"], "points_total": row[f"{o}_points_total"] or 0,
+                "won": row["winner_id"] == row[pid_col],
+                "fps_avg": row[f"{o}_fps_avg"], "fps_timeline": row[f"{o}_fps_timeline"],
+                "ping_avg": row[f"{o}_ping_avg"], "ping_max": row[f"{o}_ping_max"],
+                "ping_timeline": row[f"{o}_ping_timeline"],
+                "hit_timeline": row[f"{o}_hit_timeline"],
+                "block_timeline": row[f"{o}_block_timeline"],
+                "bullets_fired": row[f"{o}_bullets_fired"], "bullets_hit": row[f"{o}_bullets_hit"],
+                "blocks_activated": row[f"{o}_blocks_activated"],
+                "blocks_successful": row[f"{o}_blocks_successful"],
+                "keys_pressed": row[f"{o}_keys_pressed"], "active_seconds": row[f"{o}_active_seconds"],
+                "xp_gained": row[f"{o}_xp_gained"] or 0,
+                "gold_gained": gold_by_pid.get(str(row[pid_col]), 0),
+                "rating_change": (float(s_rc_p1) if n == 1 else float(s_rc_p2))
+                                 if (s_rc_p1 is not None if n == 1 else s_rc_p2 is not None) else None,
+                "cards": cards.get(row[f"{o}_sid"], []),
+            }
+        return {
+            "mode": "1v1",
+            "code": code12.upper(),
+            "match_id": str(row["id"]),
+            "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+            "is_ranked": bool(row["is_ranked"]),
+            "invalidated": row["invalidated_at"] is not None,
+            "invalidation_reason": row["invalidation_reason"],
+            "duration_seconds": row["duration_seconds"] or 0,
+            "point_timeline": row["point_timeline"],
+            "point_times": row["point_times"],
+            "series_status": row["series_status"],
+            "players": [_side1v1(1), _side1v1(2)],
+        }
+
+    # ── 2v2 ──
+    row = (await db.execute(text("""
+        SELECT m.id, m.ended_at, m.invalidated_at, m.invalidation_reason,
+               m.t1_rounds_won, m.t2_rounds_won, m.t1_points_total, m.t2_points_total,
+               m.winner_team, m.duration_seconds, m.series_id,
+               m.t1a_fps_avg, m.t1b_fps_avg, m.t2a_fps_avg, m.t2b_fps_avg,
+               m.t1a_id, m.t1b_id, m.t2a_id, m.t2b_id,
+               pa.steam_id AS t1a_sid, pa.display_name AS t1a_name,
+               pb.steam_id AS t1b_sid, pb.display_name AS t1b_name,
+               pc.steam_id AS t2a_sid, pc.display_name AS t2a_name,
+               pd.steam_id AS t2b_sid, pd.display_name AS t2b_name,
+               s.t1a_rating_change, s.t1b_rating_change, s.t2a_rating_change, s.t2b_rating_change,
+               s.t1a_gold_earned, s.t1b_gold_earned, s.t2a_gold_earned, s.t2b_gold_earned,
+               s.t1a_xp_earned, s.t1b_xp_earned, s.t2a_xp_earned, s.t2b_xp_earned,
+               s.t1a_id AS s_t1a_id, s.t1b_id AS s_t1b_id,
+               s.t2a_id AS s_t2a_id, s.t2b_id AS s_t2b_id,
+               s.status AS series_status
+          FROM team_matches m
+          JOIN players pa ON pa.id = m.t1a_id
+          JOIN players pb ON pb.id = m.t1b_id
+          JOIN players pc ON pc.id = m.t2a_id
+          JOIN players pd ON pd.id = m.t2b_id
+          LEFT JOIN team_series s ON s.id = m.series_id
+         WHERE LEFT(REPLACE(m.id::text,'-',''),12) = :c
+         LIMIT 1"""), {"c": code12})).mappings().first()
+    if row is not None:
+        pid_to_sid = {str(row["t1a_id"]): row["t1a_sid"], str(row["t1b_id"]): row["t1b_sid"],
+                      str(row["t2a_id"]): row["t2a_sid"], str(row["t2b_id"]): row["t2b_sid"]}
+        cards = {}
+        c_rows = (await db.execute(text("""
+            SELECT player_id, card_name FROM team_match_cards
+             WHERE match_id = :mid ORDER BY round_number, pick_order"""),
+            {"mid": row["id"]})).all()
+        for pid, cname in c_rows:
+            sid = pid_to_sid.get(str(pid))
+            if sid:
+                cards.setdefault(sid, []).append(cname)
+        tele = {}
+        t_rows = (await db.execute(text("""
+            SELECT player_id, fps_timeline, ping_timeline, ping_avg, hit_timeline,
+                   block_timeline, bullets_fired, bullets_hit, blocks_activated,
+                   blocks_successful
+              FROM team_match_telemetry WHERE match_id = :mid"""),
+            {"mid": row["id"]})).mappings().all()
+        for t in t_rows:
+            sid = pid_to_sid.get(str(t["player_id"]))
+            if sid:
+                tele[sid] = dict(t)
+                tele[sid].pop("player_id", None)
+        # Series accumulators are keyed by the SERIES row's slots.
+        series_slot_by_pid = {}
+        if row["s_t1a_id"] is not None:
+            series_slot_by_pid = {str(row["s_t1a_id"]): "t1a", str(row["s_t1b_id"]): "t1b",
+                                  str(row["s_t2a_id"]): "t2a", str(row["s_t2b_id"]): "t2b"}
+
+        def _side2v2(slot_col, team):
+            pid = str(row[f"{slot_col}_id"])
+            s_slot = series_slot_by_pid.get(pid)
+            t = tele.get(row[f"{slot_col}_sid"], {})
+            return {
+                "steam_id": row[f"{slot_col}_sid"], "name": row[f"{slot_col}_name"],
+                "team": team, "won": row["winner_team"] == team,
+                "fps_avg": row[f"{slot_col}_fps_avg"],
+                "rating_change": float(row[f"{s_slot}_rating_change"]) if s_slot and row[f"{s_slot}_rating_change"] is not None else None,
+                "gold_earned": int(row[f"{s_slot}_gold_earned"] or 0) if s_slot else 0,
+                "xp_earned": int(row[f"{s_slot}_xp_earned"] or 0) if s_slot else 0,
+                "cards": cards.get(row[f"{slot_col}_sid"], []),
+                **{k: t.get(k) for k in ("fps_timeline", "ping_timeline", "ping_avg",
+                                         "hit_timeline", "block_timeline", "bullets_fired",
+                                         "bullets_hit", "blocks_activated", "blocks_successful")},
+            }
+        return {
+            "mode": "2v2",
+            "code": code12.upper(),
+            "match_id": str(row["id"]),
+            "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+            "is_ranked": True,
+            "invalidated": row["invalidated_at"] is not None,
+            "invalidation_reason": row["invalidation_reason"],
+            "duration_seconds": row["duration_seconds"] or 0,
+            "t1_rounds_won": row["t1_rounds_won"], "t2_rounds_won": row["t2_rounds_won"],
+            "winner_team": row["winner_team"],
+            "series_status": row["series_status"],
+            "players": [_side2v2("t1a", 1), _side2v2("t1b", 1),
+                        _side2v2("t2a", 2), _side2v2("t2b", 2)],
+        }
+
+    # ── 1v2 ──
+    row = (await db.execute(text("""
+        SELECT m.id, m.ended_at, m.invalidated_at,
+               m.solo_rounds_won, m.duo_rounds_won, m.solo_points_total, m.duo_points_total,
+               m.winner_side, m.duration_seconds, m.series_id,
+               m.solo_fps_avg, m.duo_a_fps_avg, m.duo_b_fps_avg,
+               m.solo_id, m.duo_a_id, m.duo_b_id,
+               ps.steam_id AS solo_sid, ps.display_name AS solo_name,
+               pa.steam_id AS duo_a_sid, pa.display_name AS duo_a_name,
+               pb.steam_id AS duo_b_sid, pb.display_name AS duo_b_name,
+               s.solo_gold_earned, s.duo_a_gold_earned, s.duo_b_gold_earned,
+               s.solo_xp_earned, s.duo_a_xp_earned, s.duo_b_xp_earned,
+               s.solo_id AS s_solo_id, s.duo_a_id AS s_duo_a_id, s.duo_b_id AS s_duo_b_id,
+               s.status AS series_status
+          FROM ovt_matches m
+          JOIN players ps ON ps.id = m.solo_id
+          JOIN players pa ON pa.id = m.duo_a_id
+          JOIN players pb ON pb.id = m.duo_b_id
+          LEFT JOIN ovt_series s ON s.id = m.series_id
+         WHERE LEFT(REPLACE(m.id::text,'-',''),12) = :c
+         LIMIT 1"""), {"c": code12})).mappings().first()
+    if row is not None:
+        pid_to_sid = {str(row["solo_id"]): row["solo_sid"], str(row["duo_a_id"]): row["duo_a_sid"],
+                      str(row["duo_b_id"]): row["duo_b_sid"]}
+        cards = {}
+        c_rows = (await db.execute(text("""
+            SELECT player_id, card_name FROM ovt_match_cards
+             WHERE match_id = :mid ORDER BY pick_order"""),
+            {"mid": row["id"]})).all()
+        for pid, cname in c_rows:
+            sid = pid_to_sid.get(str(pid))
+            if sid:
+                cards.setdefault(sid, []).append(cname)
+        series_slot_by_pid = {}
+        if row["s_solo_id"] is not None:
+            series_slot_by_pid = {str(row["s_solo_id"]): "solo", str(row["s_duo_a_id"]): "duo_a",
+                                  str(row["s_duo_b_id"]): "duo_b"}
+
+        def _side1v2(slot_col, side):
+            pid = str(row[f"{slot_col}_id"])
+            s_slot = series_slot_by_pid.get(pid)
+            return {
+                "steam_id": row[f"{slot_col}_sid"], "name": row[f"{slot_col}_name"],
+                "side": "solo" if side == 1 else "duo", "won": row["winner_side"] == side,
+                "fps_avg": row[f"{slot_col}_fps_avg"],
+                "gold_earned": int(row[f"{s_slot}_gold_earned"] or 0) if s_slot else 0,
+                "xp_earned": int(row[f"{s_slot}_xp_earned"] or 0) if s_slot else 0,
+                "cards": cards.get(row[f"{slot_col}_sid"], []),
+            }
+        return {
+            "mode": "1v2",
+            "code": code12.upper(),
+            "match_id": str(row["id"]),
+            "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+            "is_ranked": False,
+            "invalidated": row["invalidated_at"] is not None,
+            "invalidation_reason": None,
+            "duration_seconds": row["duration_seconds"] or 0,
+            "solo_rounds_won": row["solo_rounds_won"], "duo_rounds_won": row["duo_rounds_won"],
+            "winner_side": row["winner_side"],
+            "series_status": row["series_status"],
+            "players": [_side1v2("solo", 1), _side1v2("duo_a", 2), _side1v2("duo_b", 2)],
+        }
+
+    raise HTTPException(404, "No game found for that code")
 
 
 # ── Routes: Card Stats ─────────────────────────────────────────
@@ -4479,11 +4802,15 @@ async def booster_grant(
 
 @app.get("/api/v1/queue/recent-joins", tags=["Queue"])
 async def queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
-    """Return players who joined the queue within the last N seconds."""
+    """Return players who joined the queue within the last N seconds. v1.34.1:
+    also carries the searcher's Discord display name (opt-out honored) so the
+    Search-Ranked beacon can name who to @ — plain text, never a real ping."""
     result = await db.execute(
         text("""
-            SELECT rq.display_name, rq.steam_id, rq.rating, rq.joined_at
+            SELECT rq.display_name, rq.steam_id, rq.rating, rq.joined_at,
+                   CASE WHEN p.show_discord THEN p.discord_display_name END AS discord_display_name
             FROM ranked_queue rq
+            LEFT JOIN players p ON p.id = rq.player_id
             WHERE rq.status = 'searching'
               AND rq.joined_at > NOW() - INTERVAL '1 second' * :secs
             ORDER BY rq.joined_at DESC
@@ -4492,7 +4819,8 @@ async def queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depend
     rows = result.mappings().all()
     return {"joins": [
         {"display_name": r["display_name"], "steam_id": r["steam_id"],
-         "rating": round(r["rating"]), "joined_at": r["joined_at"].isoformat()}
+         "rating": round(r["rating"]), "joined_at": r["joined_at"].isoformat(),
+         "discord_display_name": r["discord_display_name"]}
         for r in rows
     ]}
 
@@ -5071,6 +5399,7 @@ async def link_discord(
     code: str = Query(...),
     discord_id: str = Query(...),
     discord_username: str | None = Query(None, max_length=64),
+    discord_display_name: str | None = Query(None, max_length=64),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -5114,6 +5443,8 @@ async def link_discord(
     player.discord_id = discord_id
     if discord_username:
         player.discord_username = discord_username
+    if discord_display_name:
+        player.discord_display_name = discord_display_name
 
     # Delete the used code
     await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": player.id})
@@ -5133,17 +5464,29 @@ async def missing_discord_usernames(
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Internal — used by the bot's startup backfill. Returns Discord IDs that
-    are linked but haven't cached a username yet."""
+    """Internal — used by the bot's startup backfill + rename sync. July 22:
+    returns ALL linked rows (not just NULL-username ones) with their currently
+    stored values, so the bot can (a) correct legacy rows where the username
+    column held a display name, and (b) skip rows already up to date."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     rows = (await db.execute(text(
-        "SELECT discord_id FROM players "
-        "WHERE discord_id IS NOT NULL AND discord_username IS NULL AND deleted_at IS NULL "
-        "LIMIT 500"
+        "SELECT discord_id, discord_username, discord_display_name FROM players "
+        "WHERE discord_id IS NOT NULL AND deleted_at IS NULL "
+        "LIMIT 2000"
     ))).mappings().all()
-    return {"discord_ids": [r["discord_id"] for r in rows]}
+    return {
+        # Review [2] (version skew): the legacy key KEEPS its old semantics —
+        # NULL-username rows only. An old bot reading discord_ids then behaves
+        # exactly as before (writes only into empty cells); handing it ALL
+        # linked rows would have let it clobber every migrated @handle back to
+        # a display name. The new bot reads `players` and ignores this key.
+        "discord_ids": [r["discord_id"] for r in rows if not r["discord_username"]],
+        "players": [{"discord_id": r["discord_id"],
+                     "discord_username": r["discord_username"],
+                     "discord_display_name": r["discord_display_name"]} for r in rows],
+    }
 
 
 @app.post("/api/v1/admin/set-discord-username", tags=["Discord"])
@@ -5152,18 +5495,28 @@ async def set_discord_username(
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Internal — bot writes resolved Discord usernames here."""
+    """Internal — bot writes resolved Discord usernames/display names here.
+    July 22: overwrites are allowed (bot resolves fresh from Discord each
+    time — needed to correct legacy rows where discord_username held a
+    display name, and to track renames)."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     discord_id = str(payload.get("discord_id", "")).strip()
     username = str(payload.get("discord_username", "")).strip()[:64]
-    if not discord_id or not username:
+    display_name = str(payload.get("discord_display_name", "")).strip()[:64]
+    if not discord_id or not (username or display_name):
         return {"status": "skipped"}
-    await db.execute(
-        text("UPDATE players SET discord_username = :u WHERE discord_id = :did AND discord_username IS NULL"),
-        {"u": username, "did": discord_id},
-    )
+    if username:
+        await db.execute(
+            text("UPDATE players SET discord_username = :u WHERE discord_id = :did"),
+            {"u": username, "did": discord_id},
+        )
+    if display_name:
+        await db.execute(
+            text("UPDATE players SET discord_display_name = :d WHERE discord_id = :did"),
+            {"d": display_name, "did": discord_id},
+        )
     await db.commit()
     return {"status": "ok"}
 
@@ -6203,6 +6556,35 @@ async def set_appear_offline(
     player.appear_offline = bool(on)
     await db.commit()
     return {"status": "set", "appear_offline": player.appear_offline}
+
+
+@app.post("/api/v1/players/{steam_id}/show-discord", tags=["Players"])
+async def set_show_discord(
+    steam_id: str,
+    on: bool = Query(..., description="True to show the Discord display name on the leaderboard detail"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Opt-IN toggle (July 22, migration 144): show 'Discord: @displayname' on
+    this player's leaderboard detail panel. Default OFF. Free setting — no
+    ownership gate. HMAC signs 'show_discord:{steam_id}:{1|0}'."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"show_discord:{steam_id}:{1 if on else 0}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    player.show_discord = bool(on)
+    await db.commit()
+    return {"status": "set", "show_discord": player.show_discord}
 
 
 @app.post("/api/v1/players/{steam_id}/color-toggle", tags=["Shop"])
@@ -7814,12 +8196,15 @@ async def internal_linked_players(
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     rows = (await db.execute(text(
-        "SELECT p.discord_id, p.steam_id, COALESCE(gr.rating, 1500) AS rating "
+        "SELECT p.discord_id, p.steam_id, COALESCE(gr.rating, 1500) AS rating, "
+        "       p.discord_username, p.discord_display_name "
         "FROM players p LEFT JOIN glicko_ratings gr ON gr.player_id = p.id "
         "WHERE p.discord_id IS NOT NULL AND p.deleted_at IS NULL"
     ))).mappings().all()
     return {"players": [
-        {"discord_id": r["discord_id"], "steam_id": r["steam_id"], "rating": float(r["rating"])}
+        {"discord_id": r["discord_id"], "steam_id": r["steam_id"], "rating": float(r["rating"]),
+         "discord_username": r["discord_username"],
+         "discord_display_name": r["discord_display_name"]}
         for r in rows
     ]}
 
@@ -8554,7 +8939,7 @@ async def get_achievement_earners(key: str, db: AsyncSession = Depends(get_db)):
     if key not in ACHIEVEMENT_DEFS:
         raise HTTPException(status_code=404, detail=f"Unknown achievement: {key}")
     rows = (await db.execute(text("""
-        SELECT p.id AS player_id, p.display_name, p.steam_id, pa.unlocked_at,
+        SELECT p.id::text AS player_id, p.display_name, p.steam_id, pa.unlocked_at,
                ROUND(gr.rating::numeric, 0) AS rating,
                si.name          AS title,
                si.preview_color AS title_color,
@@ -8565,7 +8950,7 @@ async def get_achievement_earners(key: str, db: AsyncSession = Depends(get_db)):
           LEFT JOIN shop_items si ON si.id = p.active_title_id
          WHERE pa.achievement_key = :key
       ORDER BY pa.unlocked_at ASC NULLS LAST
-         LIMIT 100"""), {"key": key})).mappings().all()
+         LIMIT 500"""), {"key": key})).mappings().all()
     _colors = await _rank_colors(db)
     _pmap = await _podium_map(db) if any(
         r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
@@ -8583,10 +8968,15 @@ async def get_achievement_earners(key: str, db: AsyncSession = Depends(get_db)):
             "title": _title,
             "title_color": _title_color,
         })
+    total = (await db.execute(text("""
+        SELECT COUNT(*) FROM player_achievements pa
+          JOIN players p ON p.id = pa.player_id AND p.deleted_at IS NULL
+         WHERE pa.achievement_key = :key"""), {"key": key})).scalar() or 0
     return {
         "achievement_key": key,
         "name": ACHIEVEMENT_DEFS[key].get("name"),
         "gold": _achievement_gold(key),
+        "total": int(total),
         "earners": earners,
     }
 
@@ -9989,8 +10379,10 @@ async def team_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = D
     only beacons random-matchmaking joins."""
     result = await db.execute(
         text("""
-            SELECT tq.display_name, tq.steam_id, tq.rating, tq.joined_at
+            SELECT tq.display_name, tq.steam_id, tq.rating, tq.joined_at,
+                   CASE WHEN p.show_discord THEN p.discord_display_name END AS discord_display_name
             FROM team_queue tq
+            LEFT JOIN players p ON p.steam_id = tq.steam_id
             WHERE tq.status = 'searching'
               AND tq.queue_type = 'auto'
               AND tq.joined_at > NOW() - INTERVAL '1 second' * :secs
@@ -10003,7 +10395,8 @@ async def team_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = D
     return {
         "joins": [
             {"display_name": r["display_name"], "steam_id": r["steam_id"],
-             "rating": round(r["rating"]), "joined_at": r["joined_at"].isoformat()}
+             "rating": round(r["rating"]), "joined_at": r["joined_at"].isoformat(),
+             "discord_display_name": r["discord_display_name"]}
             for r in rows
         ],
         "queue_size": cnt,
@@ -11667,11 +12060,13 @@ async def ovt_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = De
     to show. queue_size counts only FRESH searching rows (same liveness the
     lock uses) so the beacon never advertises ghost lobbies."""
     result = await db.execute(text("""
-        SELECT display_name, steam_id, fallback_rating, joined_at
-          FROM ovt_queue
-         WHERE status = 'searching'
-           AND joined_at > NOW() - INTERVAL '1 second' * :secs
-         ORDER BY joined_at DESC
+        SELECT q.display_name, q.steam_id, q.fallback_rating, q.joined_at,
+               CASE WHEN p.show_discord THEN p.discord_display_name END AS discord_display_name
+          FROM ovt_queue q
+          LEFT JOIN players p ON p.steam_id = q.steam_id
+         WHERE q.status = 'searching'
+           AND q.joined_at > NOW() - INTERVAL '1 second' * :secs
+         ORDER BY q.joined_at DESC
     """), {"secs": seconds})
     rows = result.mappings().all()
     cnt = (await db.execute(text(
@@ -11682,7 +12077,8 @@ async def ovt_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = De
         "joins": [
             {"display_name": r["display_name"], "steam_id": r["steam_id"],
              "rating": int(round(r["fallback_rating"] or 1500)),
-             "joined_at": r["joined_at"].isoformat() if r["joined_at"] else None}
+             "joined_at": r["joined_at"].isoformat() if r["joined_at"] else None,
+             "discord_display_name": r["discord_display_name"]}
             for r in rows
         ],
         "queue_size": int(cnt),
@@ -11924,11 +12320,20 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     if len(id_by_steam) != 3:
         raise HTTPException(404, "One or more players not registered")
     ids = list(id_by_steam.values())
+    # Activity window (July 22 forensics): without it, a days-old abandoned
+    # 'active' husk (e.g. a 0-1 series the trio walked away from) would be
+    # returned as "existing" and the next sitting's games would complete an
+    # ancient series with stale tallies. Recent creation OR a recent match
+    # counts as live (learning #101 pattern).
     live = (await db.execute(text("""
-        SELECT id FROM ovt_series
-         WHERE status IN ('active', 'dc_paused', 'dc_incomplete')
-           AND solo_id = ANY(:ids) AND duo_a_id = ANY(:ids) AND duo_b_id = ANY(:ids)
-         ORDER BY created_at DESC LIMIT 1
+        SELECT id FROM ovt_series s
+         WHERE s.status IN ('active', 'dc_paused', 'dc_incomplete')
+           AND s.solo_id = ANY(:ids) AND s.duo_a_id = ANY(:ids) AND s.duo_b_id = ANY(:ids)
+           AND (s.created_at > NOW() - INTERVAL '6 hours'
+                OR EXISTS (SELECT 1 FROM ovt_matches m
+                           WHERE m.series_id = s.id
+                             AND m.ended_at > NOW() - INTERVAL '6 hours'))
+         ORDER BY s.created_at DESC LIMIT 1
     """), {"ids": ids})).scalar_one_or_none()
     if live is not None:
         return {"series_id": str(live), "status": "existing"}
@@ -11939,7 +12344,7 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     prior = (await db.execute(text("""
         SELECT completed_at, created_at, solo_id, duo_a_id, duo_b_id, solo_extra_pick
           FROM ovt_series
-         WHERE status IN ('completed', 'canceled')
+         WHERE status IN ('completed', 'canceled', 'cancelled')
            AND solo_id = ANY(:ids) AND duo_a_id = ANY(:ids) AND duo_b_id = ANY(:ids)
          ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 1
     """), {"ids": ids})).mappings().first()
@@ -12018,6 +12423,28 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # preserve, so it's NOT authoritative for round attribution.
     if {solo_id, duo_a_id, duo_b_id} != {series["solo_id"], series["duo_a_id"], series["duo_b_id"]}:
         raise HTTPException(403, "Reported players do not match the series")
+
+    # Slot-identity realign (July 22 forensics): the series row's solo/duo_a/duo_b
+    # is a queue-time preference; the report's is the in-game truth (team sizes).
+    # When they disagree, the per-slot accumulators (solo_xp_earned, ...) and a
+    # future ranked replay would credit the wrong player. On the FIRST match of
+    # a series, rewrite the series row's slot ids to the report's ordering —
+    # under the row lock, before any accumulator applies. Mid-series drift
+    # (should be impossible: sides are fixed per sitting) is logged only.
+    if (solo_id, duo_a_id, duo_b_id) != (series["solo_id"], series["duo_a_id"], series["duo_b_id"]):
+        prior_games = (await db.execute(text(
+            "SELECT COUNT(*) FROM ovt_matches WHERE series_id = :sid"
+        ), {"sid": series_uuid})).scalar() or 0
+        if prior_games == 0:
+            await db.execute(text("""
+                UPDATE ovt_series SET solo_id = :solo, duo_a_id = :da, duo_b_id = :db
+                 WHERE id = :sid
+            """), {"solo": solo_id, "da": duo_a_id, "db": duo_b_id, "sid": series_uuid})
+            print(f"[OVT] series {series_uuid} slots realigned to report ordering "
+                  f"(solo={report.solo.steam_id})")
+        else:
+            print(f"[OVT] WARNING: series {series_uuid} slot ordering differs from "
+                  f"report mid-series (game {prior_games + 1}) — leaving as-is")
 
     # Insert the match (dedup on the room+players unique constraint → replay no-op).
     match_id = uuid.uuid4()
@@ -12190,22 +12617,27 @@ async def ovt_leaderboard(limit: int = 200, db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(text("""
         WITH per_player AS (
             SELECT pid, SUM(played) AS games, SUM(won) AS wins,
-                   SUM(solo_g) AS solo_games, SUM(duo_g) AS duo_games
+                   SUM(solo_g) AS solo_games, SUM(duo_g) AS duo_games,
+                   SUM(solo_w) AS solo_wins, SUM(duo_w) AS duo_wins
             FROM (
                 SELECT solo_id AS pid, 1 AS played,
-                       CASE WHEN winner_side=1 THEN 1 ELSE 0 END AS won, 1 AS solo_g, 0 AS duo_g
+                       CASE WHEN winner_side=1 THEN 1 ELSE 0 END AS won, 1 AS solo_g, 0 AS duo_g,
+                       CASE WHEN winner_side=1 THEN 1 ELSE 0 END AS solo_w, 0 AS duo_w
                   FROM ovt_matches WHERE invalidated_at IS NULL
                 UNION ALL
-                SELECT duo_a_id, 1, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, 0, 1
+                SELECT duo_a_id, 1, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, 0, 1,
+                       0, CASE WHEN winner_side=2 THEN 1 ELSE 0 END
                   FROM ovt_matches WHERE invalidated_at IS NULL
                 UNION ALL
-                SELECT duo_b_id, 1, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, 0, 1
+                SELECT duo_b_id, 1, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, 0, 1,
+                       0, CASE WHEN winner_side=2 THEN 1 ELSE 0 END
                   FROM ovt_matches WHERE invalidated_at IS NULL
             ) u
             GROUP BY pid
         )
         SELECT pp.pid, p.steam_id, p.display_name, p.total_xp,
-               pp.games, pp.wins, pp.solo_games, pp.duo_games
+               pp.games, pp.wins, pp.solo_games, pp.duo_games,
+               pp.solo_wins, pp.duo_wins
           FROM per_player pp JOIN players p ON p.id = pp.pid
          WHERE p.deleted_at IS NULL
          ORDER BY pp.games DESC, (pp.wins::float / NULLIF(pp.games,0)) DESC NULLS LAST
@@ -12217,11 +12649,17 @@ async def ovt_leaderboard(limit: int = 200, db: AsyncSession = Depends(get_db)):
         wins = int(r["wins"] or 0)
         losses = games - wins
         lvl, _, _ = level_from_xp(r["total_xp"] or 0)
+        solo_g = int(r["solo_games"] or 0)
+        duo_g = int(r["duo_games"] or 0)
+        solo_w = int(r["solo_wins"] or 0)
+        duo_w = int(r["duo_wins"] or 0)
         entries.append(Ovt1v2LeaderboardEntry(
             rank=i + 1, steam_id=r["steam_id"], display_name=r["display_name"] or "Player",
             games_played=games, wins=wins, losses=losses,
             win_rate=round(100.0 * wins / games, 1) if games else 0.0,
-            solo_games=int(r["solo_games"] or 0), duo_games=int(r["duo_games"] or 0),
+            solo_games=solo_g, duo_games=duo_g,
+            solo_wins=solo_w, solo_losses=solo_g - solo_w,
+            duo_wins=duo_w, duo_losses=duo_g - duo_w,
             level=lvl,
         ))
     return Ovt1v2LeaderboardResponse(
@@ -12354,6 +12792,30 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                 pick_order=card.pick_order,
                 round_number=card.round_number,
             ))
+
+    # July 22 (migration 142): per-player telemetry rows. Slots whose data
+    # never reached the reporter (old-client peers) arrive as None — no row.
+    for player_obj, tele in (
+        (p_t1a, report.t1a_telemetry), (p_t1b, report.t1b_telemetry),
+        (p_t2a, report.t2a_telemetry), (p_t2b, report.t2b_telemetry),
+    ):
+        if tele is None:
+            continue
+        db.add(TeamMatchTelemetry(
+            match_id=new_match.id,
+            player_id=player_obj.id,
+            fps_timeline=(tele.fps_timeline or None),
+            ping_timeline=(tele.ping_timeline or None),
+            ping_avg=tele.ping_avg,
+            hit_timeline=(tele.hit_timeline or None),
+            block_timeline=(tele.block_timeline or None),
+            bullets_fired=tele.bullets_fired,
+            bullets_hit=tele.bullets_hit,
+            blocks_activated=tele.blocks_activated,
+            blocks_successful=tele.blocks_successful,
+            keys_pressed=tele.keys_pressed,
+            active_seconds=tele.active_seconds,
+        ))
 
     # Per-match XP awards. Higher base than 1v1 so wins land in user's
     # ~800-900 band and losses near ~600. 100xp=1g auto-conversion still
@@ -13145,16 +13607,23 @@ async def team_all_series_paged(
         # Per-series matches.
         m_q = text("""
             SELECT id AS match_id, ended_at, t1_rounds_won, t2_rounds_won,
-                   t1_points_total, t2_points_total
+                   t1_points_total, t2_points_total, duration_seconds,
+                   t1a_fps_avg, t1b_fps_avg, t2a_fps_avg, t2b_fps_avg,
+                   t1a_id, t1b_id, t2a_id, t2b_id
               FROM team_matches
              WHERE series_id = :sid AND invalidated_at IS NULL
              ORDER BY ended_at ASC
         """)
         m_rows = (await db.execute(m_q, {"sid": r["series_id"]})).mappings().all()
         matches = []
-        # Per-(match, player) cards lookup.
+        # Per-(match, player) cards + telemetry lookups.
         match_ids = [m["match_id"] for m in m_rows]
+        pid_to_sid = {
+            str(r["t1a_id"]): r["t1a_sid"], str(r["t1b_id"]): r["t1b_sid"],
+            str(r["t2a_id"]): r["t2a_sid"], str(r["t2b_id"]): r["t2b_sid"],
+        }
         cards_by_match: dict = {}
+        tele_by_match: dict = {}
         if match_ids:
             c_q = text("""
                 SELECT match_id, player_id, card_name, pick_order, round_number
@@ -13163,22 +13632,54 @@ async def team_all_series_paged(
                  ORDER BY match_id, player_id, round_number, pick_order
             """)
             c_rows = (await db.execute(c_q, {"mids": match_ids})).mappings().all()
-            pid_to_sid = {
-                str(r["t1a_id"]): r["t1a_sid"], str(r["t1b_id"]): r["t1b_sid"],
-                str(r["t2a_id"]): r["t2a_sid"], str(r["t2b_id"]): r["t2b_sid"],
-            }
             for c in c_rows:
                 mid_key = str(c["match_id"])
                 sid_for = pid_to_sid.get(str(c["player_id"]))
                 if not sid_for: continue
                 cards_by_match.setdefault(mid_key, {}).setdefault(sid_for, []).append(c["card_name"])
+            # July 22 (migration 142): per-player telemetry for the game-row
+            # stats line + hover graphs on the 2v2 tab.
+            t_rows = (await db.execute(text("""
+                SELECT match_id, player_id, fps_timeline, ping_timeline, ping_avg,
+                       hit_timeline, block_timeline, bullets_fired, bullets_hit,
+                       blocks_activated, blocks_successful
+                  FROM team_match_telemetry
+                 WHERE match_id = ANY(:mids)
+            """), {"mids": match_ids})).mappings().all()
+            for t in t_rows:
+                sid_for = pid_to_sid.get(str(t["player_id"]))
+                if not sid_for: continue
+                tele_by_match.setdefault(str(t["match_id"]), {})[sid_for] = {
+                    "fps_timeline": t["fps_timeline"],
+                    "ping_timeline": t["ping_timeline"],
+                    "ping_avg": t["ping_avg"] or 0,
+                    "hit_timeline": t["hit_timeline"],
+                    "block_timeline": t["block_timeline"],
+                    "bullets_fired": t["bullets_fired"] or 0,
+                    "bullets_hit": t["bullets_hit"] or 0,
+                    "blocks_activated": t["blocks_activated"] or 0,
+                    "blocks_successful": t["blocks_successful"] or 0,
+                }
         for m in m_rows:
+            # Review [5]: key FPS by the MATCH row's own slot ids (mid-series
+            # auto-balance and slot realigns make series-row slots diverge from
+            # match-row slots — series-keyed FPS cross-attributes swapped
+            # players). pid_to_sid covers the same 4-player set.
+            fps_by_player = {}
+            for pfx in ("t1a", "t1b", "t2a", "t2b"):
+                if m[f"{pfx}_fps_avg"]:
+                    sid_for = pid_to_sid.get(str(m[f"{pfx}_id"]))
+                    if sid_for:
+                        fps_by_player[sid_for] = int(m[f"{pfx}_fps_avg"])
             matches.append({
                 "match_id": str(m["match_id"]),
                 "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
                 "t1_rounds_won": m["t1_rounds_won"], "t2_rounds_won": m["t2_rounds_won"],
                 "t1_points_total": m["t1_points_total"] or 0, "t2_points_total": m["t2_points_total"] or 0,
+                "duration_seconds": m["duration_seconds"] or 0,
+                "fps_by_player": fps_by_player,
                 "cards_by_player": cards_by_match.get(str(m["match_id"]), {}),
+                "telemetry_by_player": tele_by_match.get(str(m["match_id"]), {}),
             })
 
         def slot(prefix):
