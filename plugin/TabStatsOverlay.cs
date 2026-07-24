@@ -24,6 +24,13 @@ namespace CompetitiveRounds
     internal static class TabStatsOverlay
     {
         private static GUIStyle stTitle, stName, stLabel, stCell, stCards;
+        private static readonly List<Player> cachedPlayers = new List<Player>(4);
+        private static readonly List<string> cachedNames = new List<string>(4);
+        private static readonly List<string> cachedCards = new List<string>(4);
+        private static readonly List<Color> cachedColors = new List<Color>(4);
+        private static readonly List<string[]> cachedValues = new List<string[]>(4);
+        private static int cachedPlayerCount;
+        private static float nextSnapshotAt;
 
         // Stat row description: label + per-player value resolver.
         private struct StatRow
@@ -70,29 +77,55 @@ namespace CompetitiveRounds
             new Color(0.90f, 0.30f, 0.30f), new Color(0.40f, 0.85f, 0.45f),
         };
 
+        private static void RefreshSnapshot(PlayerManager pm)
+        {
+            nextSnapshotAt = Time.unscaledTime + 0.125f; // 8 Hz stays visually live.
+            cachedPlayers.Clear();
+            foreach (var p in pm.players)
+                if (p != null && p.data != null) cachedPlayers.Add(p);
+            cachedPlayers.Sort((a, b) => a.TeamID != b.TeamID ? a.TeamID.CompareTo(b.TeamID)
+                                                               : a.PlayerID.CompareTo(b.PlayerID));
+            cachedPlayerCount = cachedPlayers.Count;
+
+            while (cachedNames.Count < cachedPlayerCount) cachedNames.Add("");
+            while (cachedCards.Count < cachedPlayerCount) cachedCards.Add("");
+            while (cachedColors.Count < cachedPlayerCount) cachedColors.Add(Color.white);
+            while (cachedValues.Count < cachedPlayerCount) cachedValues.Add(new string[ROWS.Length]);
+
+            for (int i = 0; i < cachedPlayerCount; i++)
+            {
+                var p = cachedPlayers[i];
+                cachedNames[i] = Trunc(PlayerName(p), 16);
+                cachedCards[i] = CardLine(p);
+                cachedColors[i] = TeamColor(p);
+                var values = cachedValues[i];
+                for (int r = 0; r < ROWS.Length; r++)
+                {
+                    try { values[r] = ROWS[r].value(p); }
+                    catch { values[r] = "-"; }
+                }
+            }
+        }
+
         public static void Draw()
         {
             try
             {
+                if (Event.current == null || Event.current.type != EventType.Repaint) return;
                 if (!Input.GetKey(KeyCode.Tab)) return;
                 if (NativeUI.IsOpen) return;                    // F5 menu owns the screen
                 if (CompetitiveUI.IsChatInputOpen) return;      // typing in chat
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null || pm.players.Count == 0) return;
 
-                // Collect live players sorted by team then player id — TabInfo's order.
-                var players = new List<Player>();
-                foreach (var p in pm.players)
-                    if (p != null && p.data != null) players.Add(p);
-                if (players.Count == 0) return;
-                players.Sort((a, b) => a.TeamID != b.TeamID ? a.TeamID.CompareTo(b.TeamID)
-                                                             : a.PlayerID.CompareTo(b.PlayerID));
+                if (Time.unscaledTime >= nextSnapshotAt) RefreshSnapshot(pm);
+                if (cachedPlayerCount == 0) return;
 
                 EnsureStyles();
 
                 float labelW = 118f;
-                float colW = Mathf.Clamp((Screen.width * 0.62f - labelW) / players.Count, 130f, 210f);
-                float w = labelW + colW * players.Count + 24f;
+                float colW = Mathf.Clamp((Screen.width * 0.62f - labelW) / cachedPlayerCount, 130f, 210f);
+                float w = labelW + colW * cachedPlayerCount + 24f;
                 float rowH = 21f;
                 float cardsH = 52f;
                 float h = 34f + 26f + ROWS.Length * rowH + cardsH + 16f;
@@ -106,13 +139,11 @@ namespace CompetitiveRounds
 
                 // Player name headers, team-colored.
                 float cx = x + 12 + labelW;
-                foreach (var p in players)
+                for (int i = 0; i < cachedPlayerCount; i++)
                 {
-                    Color tc = TeamColor(p);
-                    string nm = PlayerName(p);
                     var prev = GUI.contentColor;
-                    GUI.contentColor = tc;
-                    GUI.Label(new Rect(cx, y + 34, colW - 6, 22), Trunc(nm, 16), stName);
+                    GUI.contentColor = cachedColors[i];
+                    GUI.Label(new Rect(cx, y + 34, colW - 6, 22), cachedNames[i], stName);
                     GUI.contentColor = prev;
                     cx += colW;
                 }
@@ -126,12 +157,9 @@ namespace CompetitiveRounds
                             ScaleMode.StretchToFill, true, 0, new Color(1f, 1f, 1f, 0.03f), 0, 0);
                     GUI.Label(new Rect(x + 12, ry, labelW, rowH), ROWS[r].label, stLabel);
                     cx = x + 12 + labelW;
-                    foreach (var p in players)
+                    for (int i = 0; i < cachedPlayerCount; i++)
                     {
-                        string v;
-                        try { v = ROWS[r].value(p); }
-                        catch { v = "-"; }
-                        GUI.Label(new Rect(cx, ry, colW - 6, rowH), v, stCell);
+                        GUI.Label(new Rect(cx, ry, colW - 6, rowH), cachedValues[i][r], stCell);
                         cx += colW;
                     }
                     ry += rowH;
@@ -141,9 +169,9 @@ namespace CompetitiveRounds
                 ry += 4f;
                 GUI.Label(new Rect(x + 12, ry, labelW, cardsH), "Cards", stLabel);
                 cx = x + 12 + labelW;
-                foreach (var p in players)
+                for (int i = 0; i < cachedPlayerCount; i++)
                 {
-                    GUI.Label(new Rect(cx, ry, colW - 8, cardsH), CardLine(p), stCards);
+                    GUI.Label(new Rect(cx, ry, colW - 8, cardsH), cachedCards[i], stCards);
                     cx += colW;
                 }
             }

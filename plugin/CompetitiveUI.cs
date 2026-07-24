@@ -16,6 +16,9 @@ namespace CompetitiveRounds
         private static int fpsCnt = 0;
         private static float fpsVal = 0f;
         private static GUIStyle fpsStyle;
+        private static string fpsLabel = "";
+        private static float fpsLabelWidth = 60f;
+        private static bool fpsLabelShowFps, fpsLabelShowRegion;
 
         // Notification (IMGUI)
         private static string notifText = "";
@@ -136,7 +139,10 @@ namespace CompetitiveRounds
             DrawArtistInput();
             DrawArtistPicker();
             DrawPlayerSearch();
+            DrawCosmeticTestPreview();
             DrawCosmeticReview();
+            DrawCosmeticReleaseQueue();
+            DrawFlagEvidence();
             DrawLeaverBanner();
             DrawTournamentBanner();
             // Block clicks to the F5 page behind any open IMGUI modal (lopi #14:
@@ -149,7 +155,9 @@ namespace CompetitiveRounds
             // it isn't in this set; adminPromptOpen was previously missing from the
             // uGUI list too — added here so both paths cover it.
             bool anyModal = bugModalOpen || logViewerOpen || bugAdminOpen || NativeUI.CustomBetPromptOpen
-                          || artistPromptOpen || artistPickerOpen || playerSearchOpen || cosReviewOpen
+                           || artistPromptOpen || artistPickerOpen || playerSearchOpen || cosTestOpen || cosReviewOpen
+                           || cosReleaseOpen
+                           || flagEvidenceOpen
                           || adminPromptOpen || NativeUI.LfpPromptOpen;
             NativeUI.SetClickBlocker(anyModal);
             ClickHandler.ModalBlockInput = anyModal || !Plugin.DataConsentAsked;
@@ -195,6 +203,7 @@ namespace CompetitiveRounds
         public static void ClearLeaverBanner() { _leaverUntil = 0f; _leaverText = null; _leaverRed = false; }
         private static void DrawLeaverBanner()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (string.IsNullOrEmpty(_leaverText) || Time.unscaledTime >= _leaverUntil) return;
             float barH = 34f;
             Color bg = _leaverRed ? new Color(0.72f, 0.10f, 0.10f, 0f) : new Color(0.82f, 0.52f, 0.08f, 0f);
@@ -218,6 +227,7 @@ namespace CompetitiveRounds
 
         private static void DrawTournamentBanner()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             try
             {
                 ApiClient.ActiveTournamentMatch ready = null;
@@ -350,6 +360,7 @@ namespace CompetitiveRounds
         private static GUIStyle mapToastStyle;
         private static void DrawMapColorToast()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             try
             {
                 if (Time.unscaledTime >= MapColorState.ToastUntil) return;
@@ -716,6 +727,7 @@ namespace CompetitiveRounds
         private static GUIStyle _scoreGraphLbl;
         private static void DrawScoreHoverGraph()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             // July 22: tab 8 (2v2) hosts hover graphs too.
             if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8)) return;
             if (_scoreGraphRegions.Count == 0) return;
@@ -945,6 +957,7 @@ namespace CompetitiveRounds
 
         private static void DrawFpsHoverGraph()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8)) return;
             if (_fpsGraphRegions.Count == 0) return;
             Vector2 mp = Input.mousePosition;
@@ -1243,6 +1256,7 @@ namespace CompetitiveRounds
         private static GUIStyle _cardTipTitleStyle, _cardTipBodyStyle;
         private static void DrawCardHoverTooltip()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (!NativeUI.IsOpen) return;
             // My Stats (tab 0) and the 2v2 tab (tab 8) both register card hover
             // regions. On any OTHER tab the regions from the last render would
@@ -1725,6 +1739,7 @@ namespace CompetitiveRounds
         private static GUIStyle inputKeySmallStyle;
         private static void DrawInputOverlay()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (Plugin.ShowInputOverlay == null || !Plugin.ShowInputOverlay.Value) return;
             if (!GameStateWatcher.IsInMatch) return;
             if (inputKeyStyle == null)
@@ -1809,6 +1824,7 @@ namespace CompetitiveRounds
 
         private static void DrawBlockDebug()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (Plugin.ShowBlockDebug == null || !Plugin.ShowBlockDebug.Value) return;
             if (!GameStateWatcher.IsInMatch) return;
 
@@ -1908,7 +1924,10 @@ namespace CompetitiveRounds
         private struct ChatLineLayout { public string Disp; public float H; }
         private static readonly Dictionary<string, ChatLineLayout> chatLayoutCache =
             new Dictionary<string, ChatLineLayout>();
+        private static readonly List<NativeUI.ChatEntry> _chatEntryScratch =
+            new List<NativeUI.ChatEntry>(8);
         private static ChatLineLayout[] _chatLayoutScratch = new ChatLineLayout[8];
+        private static float[] _chatAlphaScratch = new float[8];
 
         private static ChatLineLayout MeasureChatLine(string line, float w)
         {
@@ -1956,12 +1975,14 @@ namespace CompetitiveRounds
 
         private static void DrawInGameChat()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (Plugin.ShowIngameChat != null && !Plugin.ShowIngameChat.Value) return;
             if (!Plugin.DataConsentGranted) return;
             if (NativeUI.IsOpen) return;  // the F5 chat panel covers this
 
-            var entries = NativeUI.SnapshotChat(8);
-            if (entries == null || entries.Length == 0) return;
+            NativeUI.CopyChatTail(_chatEntryScratch, 8);
+            var entries = _chatEntryScratch;
+            if (entries.Count == 0) return;
 
             if (ingameChatStyle == null)
             {
@@ -1976,10 +1997,12 @@ namespace CompetitiveRounds
 
             // Compute alphas first so the backdrop can match the most-visible line.
             var now = DateTime.UtcNow;
-            float[] alphas = new float[entries.Length];
+            if (_chatAlphaScratch.Length < entries.Count)
+                _chatAlphaScratch = new float[entries.Count];
+            var alphas = _chatAlphaScratch;
             float maxAlpha = 0f;
             int visibleCount = 0;
-            for (int i = 0; i < entries.Length; i++)
+            for (int i = 0; i < entries.Count; i++)
             {
                 double age = (now - entries[i].AddedUtc).TotalSeconds;
                 float a = age < 25 ? 1f : age < 35 ? 1f - (float)((age - 25) / 10.0) : 0f;
@@ -1997,11 +2020,11 @@ namespace CompetitiveRounds
             // Scratch buffer reused across frames — OnGUI runs multiple times
             // per rendered frame, so a fresh array here would be steady GC
             // pressure in the in-match hot path.
-            if (_chatLayoutScratch.Length < entries.Length)
-                _chatLayoutScratch = new ChatLineLayout[entries.Length];
+            if (_chatLayoutScratch.Length < entries.Count)
+                _chatLayoutScratch = new ChatLineLayout[entries.Count];
             var layouts = _chatLayoutScratch;
             float totalH = 0f;
-            for (int i = 0; i < entries.Length; i++)
+            for (int i = 0; i < entries.Count; i++)
             {
                 if (alphas[i] <= 0.02f) continue;
                 layouts[i] = MeasureChatLine(entries[i].Line, w);
@@ -2020,7 +2043,7 @@ namespace CompetitiveRounds
             // including the bottom one — gets its full rect (no clipped
             // descenders).
             float yCursor = yBottom - padding;
-            for (int i = entries.Length - 1; i >= 0; i--)
+            for (int i = entries.Count - 1; i >= 0; i--)
             {
                 float a = alphas[i];
                 if (a <= 0.02f) continue;
@@ -2130,7 +2153,8 @@ namespace CompetitiveRounds
             artistPromptOpen = true;
         }
 
-        public static bool ArtistPromptOpen => artistPromptOpen || artistPickerOpen || playerSearchOpen || cosReviewOpen;
+        public static bool ArtistPromptOpen => artistPromptOpen || artistPickerOpen || playerSearchOpen
+                                            || cosTestOpen || cosReviewOpen;
 
         // ── Artist picker modal (July 12 item 3; list form per bug batch item 5) ──
         // Lists the full artist roster so admins assign/revoke without typing steam
@@ -2328,22 +2352,246 @@ namespace CompetitiveRounds
         // Admin queue for artist-submitted cosmetics: real art preview (decoded
         // from the server's base64), Approve mints the shop row (born out of
         // stock), Deny asks for a note the artist will see.
+        // Artist-side scale preview. A 512px canvas does not equal one player
+        // body: with the game's 100 PPU sprite and 0.16 item-parent scale, the
+        // body is approximately 662.5 source pixels across at render scale 1.
+        // The fixed orange circle below is the body; the submitted canvas grows
+        // around it exactly as the in-game render scale changes.
+        private static bool cosTestOpen = false;
+        private static Texture2D cosTestTex = null;
+        private static string cosTestName = "", cosTestSlot = "";
+        private static float cosTestScale = 1.30f;
+        private static Vector2 cosTestOffset = Vector2.zero;
+        private static bool cosTestDragging = false;
+        private static Vector2 cosTestLastMouse = Vector2.zero;
+        private static string cosTestSubmitLabel = "Submit";
+        private static bool cosTestIsRevision = false;
+        private static Action<float, float, float> cosTestOnSubmit = null;
+        private const float COS_BODY_SOURCE_PX = 662.5f;
+        // CharacterItem.offset is expressed before the face-parent's 0.16
+        // scale. A 1.06-world-unit body is therefore about 6.625 local units.
+        private const float COS_BODY_LOCAL_DIAMETER = 6.625f;
+        private static readonly Color COS_BODY_ORANGE = new Color(0.96f, 0.55f, 0.23f, 0.82f);
+
+        public static void OpenCosmeticTestPreview(byte[] pngBytes, string name, string slot,
+            Action<float, float, float> onSubmit, float initialScale = 1.30f,
+            float initialOffsetX = 0f, float initialOffsetY = 0f,
+            string submitLabel = "Submit", bool isRevision = false)
+        {
+            Texture2D tex = null;
+            try
+            {
+                tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (pngBytes == null || !tex.LoadImage(pngBytes))
+                {
+                    UnityEngine.Object.Destroy(tex);
+                    ShowNotification("Could not open that cosmetic preview.", new Color(1f, 0.45f, 0.4f), 5f);
+                    return;
+                }
+            }
+            catch
+            {
+                try { if (tex != null) UnityEngine.Object.Destroy(tex); } catch { }
+                ShowNotification("Could not open that cosmetic preview.", new Color(1f, 0.45f, 0.4f), 5f);
+                return;
+            }
+
+            CloseCosmeticTestPreview(false);
+            // A delayed preview fetch can finish after the artist reopened the
+            // selector. The preview owns the next step, so retire that selector
+            // explicitly instead of drawing two IMGUI modals on top of each
+            // other until the user cancels one.
+            artistPickerOpen = false;
+            artistPickerOnPick = null;
+            cosTestTex = tex;
+            cosTestName = name ?? "Cosmetic";
+            cosTestSlot = slot ?? "detail";
+            cosTestScale = Mathf.Clamp(initialScale, 0.50f, 2.25f);
+            cosTestOffset = Vector2.ClampMagnitude(
+                new Vector2(initialOffsetX, initialOffsetY), 4.50f);
+            cosTestDragging = false;
+            cosTestSubmitLabel = string.IsNullOrEmpty(submitLabel) ? "Submit" : submitLabel;
+            cosTestIsRevision = isRevision;
+            cosTestOnSubmit = onSubmit;
+            cosTestOpen = true;
+        }
+
+        private static void CloseCosmeticTestPreview(bool submit)
+        {
+            var cb = submit ? cosTestOnSubmit : null;
+            float scale = Mathf.Clamp(cosTestScale, 0.50f, 2.25f);
+            Vector2 offset = Vector2.ClampMagnitude(cosTestOffset, 4.50f);
+            cosTestOpen = false;
+            cosTestDragging = false;
+            cosTestOnSubmit = null;
+            try { if (cosTestTex != null) UnityEngine.Object.Destroy(cosTestTex); } catch { }
+            cosTestTex = null;
+            cosTestName = "";
+            cosTestSlot = "";
+            cosTestOffset = Vector2.zero;
+            if (cb != null)
+            {
+                try { cb(scale, offset.x, offset.y); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] preview submit: {ex.Message}"); }
+            }
+        }
+
+        private static void DrawRectOutline(Rect r, Color color, float thickness = 1f)
+        {
+            GUI.DrawTexture(new Rect(r.x, r.y, r.width, thickness), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, color, 0, 0);
+            GUI.DrawTexture(new Rect(r.x, r.yMax - thickness, r.width, thickness), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, color, 0, 0);
+            GUI.DrawTexture(new Rect(r.x, r.y, thickness, r.height), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, color, 0, 0);
+            GUI.DrawTexture(new Rect(r.xMax - thickness, r.y, thickness, r.height), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, color, 0, 0);
+        }
+
+        private static void DrawCosmeticScalePreview(
+            Rect bounds, Texture2D tex, float scale, Vector2 offset)
+        {
+            GUI.DrawTexture(bounds, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
+                new Color(0.16f, 0.17f, 0.20f, 1f), 0, 4);
+
+            float bodyD = bounds.width * 0.50f;
+            Rect body = new Rect(bounds.center.x - bodyD / 2f, bounds.center.y - bodyD / 2f, bodyD, bodyD);
+            GUI.DrawTexture(body, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
+                COS_BODY_ORANGE, 0, bodyD / 2f);
+
+            float canvasD = bodyD * (512f / COS_BODY_SOURCE_PX) * Mathf.Clamp(scale, 0.50f, 2.25f);
+            float pixelsPerOffsetUnit = bodyD / COS_BODY_LOCAL_DIAMETER;
+            Vector2 center = new Vector2(
+                bounds.center.x + offset.x * pixelsPerOffsetUnit,
+                bounds.center.y - offset.y * pixelsPerOffsetUnit);
+            Rect canvas = new Rect(center.x - canvasD / 2f, center.y - canvasD / 2f,
+                                   canvasD, canvasD);
+            DrawRectOutline(canvas, new Color(1f, 1f, 1f, 0.55f), 1f);
+            if (tex != null) GUI.DrawTexture(canvas, tex, ScaleMode.ScaleToFit, true);
+        }
+
+        private static void HandleCosmeticPlacementDrag(
+            Rect bounds, ref Vector2 offset, ref bool dragging, ref Vector2 lastMouse)
+        {
+            var ev = Event.current;
+            if (ev == null) return;
+            if (ev.type == EventType.MouseDown && ev.button == 0 && bounds.Contains(ev.mousePosition))
+            {
+                dragging = true;
+                lastMouse = ev.mousePosition;
+                ev.Use();
+                return;
+            }
+            if (ev.type == EventType.MouseDrag && ev.button == 0 && dragging)
+            {
+                float bodyD = bounds.width * 0.50f;
+                float unitsPerPixel = COS_BODY_LOCAL_DIAMETER / Mathf.Max(1f, bodyD);
+                Vector2 delta = ev.mousePosition - lastMouse;
+                offset += new Vector2(delta.x * unitsPerPixel, -delta.y * unitsPerPixel);
+                offset = Vector2.ClampMagnitude(offset, 4.50f);
+                lastMouse = ev.mousePosition;
+                ev.Use();
+                return;
+            }
+            if (ev.type == EventType.MouseUp && ev.button == 0 && dragging)
+            {
+                dragging = false;
+                ev.Use();
+            }
+        }
+
+        private static void DrawCosmeticTestPreview()
+        {
+            if (!cosTestOpen) return;
+            if (!NativeUI.IsOpen) { CloseCosmeticTestPreview(false); return; }
+            var ev = Event.current;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
+            { ev.Use(); CloseCosmeticTestPreview(false); return; }
+            if (adminLabelStyle == null) adminLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+
+            float w = Mathf.Min(760f, Mathf.Max(500f, Screen.width - 24f));
+            float h = Mathf.Min(560f, Mathf.Max(450f, Screen.height - 24f));
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
+                new Color(0, 0, 0, 0.96f), 0, 0);
+            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26),
+                $"Placement preview: '{cosTestName}' ({cosTestSlot})",
+                new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
+            GUI.Label(new Rect(x + 12, y + 40, w - 24, 38),
+                "Orange circle = player body. Drag the cosmetic in the preview; the white square is its 512x512 canvas.",
+                new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
+
+            float previewSize = Mathf.Min(h - 142f, w - 330f);
+            previewSize = Mathf.Clamp(previewSize, 300f, 414f);
+            Rect preview = new Rect(x + 12, y + 80, previewSize, previewSize);
+            DrawCosmeticScalePreview(preview, cosTestTex, cosTestScale, cosTestOffset);
+            HandleCosmeticPlacementDrag(
+                preview, ref cosTestOffset, ref cosTestDragging, ref cosTestLastMouse);
+
+            float rx = preview.xMax + 18f;
+            float rw = x + w - 12f - rx;
+            GUI.Label(new Rect(rx, y + 84, rw, 24), $"Render scale: {cosTestScale:F2}x",
+                new GUIStyle(adminLabelStyle) { fontSize = 16, fontStyle = FontStyle.Bold });
+            int bodyPx = Mathf.RoundToInt(COS_BODY_SOURCE_PX / cosTestScale);
+            GUI.Label(new Rect(rx, y + 112, rw, 52),
+                $"At this scale, the player body is about {bodyPx}px across in your source image.\n" +
+                "Transparent pixels still count toward the 512px canvas.",
+                new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
+            cosTestScale = GUI.HorizontalSlider(new Rect(rx, y + 158, rw, 22),
+                cosTestScale, 0.50f, 2.25f);
+            cosTestScale = Mathf.Round(cosTestScale * 20f) / 20f;
+
+            if (GUI.Button(new Rect(rx, y + 184, 42, 28), "-")) cosTestScale -= 0.05f;
+            if (GUI.Button(new Rect(rx + 50, y + 184, 42, 28), "+")) cosTestScale += 0.05f;
+            if (GUI.Button(new Rect(rx + 100, y + 184, Mathf.Max(64f, rw - 100f), 28), "Center"))
+                cosTestOffset = Vector2.zero;
+            cosTestScale = Mathf.Clamp(cosTestScale, 0.50f, 2.25f);
+
+            GUI.Label(new Rect(rx, y + 218, rw, 22),
+                $"Offset: {cosTestOffset.x:F2}, {cosTestOffset.y:F2}", adminLabelStyle);
+            GUI.Label(new Rect(rx, y + 244, rw, 22), "Useful scale presets:", adminLabelStyle);
+            float bw = (rw - 8f) / 2f;
+            if (GUI.Button(new Rect(rx, y + 268, bw, 28), "1.00  compact")) cosTestScale = 1.00f;
+            if (GUI.Button(new Rect(rx + bw + 8, y + 268, bw, 28), "1.30  body")) cosTestScale = 1.30f;
+            if (GUI.Button(new Rect(rx, y + 302, bw, 28), "1.70  cape")) cosTestScale = 1.70f;
+            if (GUI.Button(new Rect(rx + bw + 8, y + 302, bw, 28), "2.10  wings")) cosTestScale = 2.10f;
+            GUI.Label(new Rect(rx, y + 336, rw, 72),
+                (cosTestIsRevision
+                    ? "Changing scale or placement sends this cosmetic back to admin review. Its last approved placement stays active meanwhile. "
+                    : "Scale and placement are part of approval. ")
+                + "Badly scaled, obstructive, or misplaced art will be rejected or rescaled/repositioned by an admin.",
+                new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
+
+            if (GUI.Button(new Rect(x + 12, y + h - 42, 110, 30), "Cancel"))
+            { CloseCosmeticTestPreview(false); return; }
+            if (GUI.Button(new Rect(x + w - 152, y + h - 42, 140, 30), cosTestSubmitLabel))
+            { CloseCosmeticTestPreview(true); return; }
+        }
+
         private static bool cosReviewOpen = false;
         private static List<ApiClient.CosmeticSubmission> cosReviewSubs = null;
         private static int cosReviewIdx = 0;
         private static bool cosReviewBusy = false;
         private static string cosReviewStatus = "";
+        private static string cosReviewDenialReason = "";
+        private static bool cosReviewDragging = false;
+        private static Vector2 cosReviewLastMouse = Vector2.zero;
+        private static GUIStyle cosReviewReasonStyle;
         private static readonly Dictionary<int, Texture2D> cosReviewTex = new Dictionary<int, Texture2D>();
 
         public static bool CosmeticReviewOpen => cosReviewOpen;
 
         public static void OpenCosmeticReview()
         {
+            cosReleaseOpen = false;
             cosReviewOpen = true;
             cosReviewSubs = null;
             cosReviewIdx = 0;
             cosReviewBusy = true;
             cosReviewStatus = "Loading pending submissions...";
+            cosReviewDenialReason = "";
+            cosReviewDragging = false;
             ApiClient.FetchCosmeticSubmissionsAdmin(MatchTracker.LocalSteamId, (ok, list) =>
             {
                 cosReviewBusy = false;
@@ -2360,6 +2608,8 @@ namespace CompetitiveRounds
             foreach (var t in cosReviewTex.Values) { try { if (t != null) UnityEngine.Object.Destroy(t); } catch { } }
             cosReviewTex.Clear();
             cosReviewSubs = null;
+            cosReviewDenialReason = "";
+            cosReviewDragging = false;
         }
 
         private static Texture2D CosReviewTexture(ApiClient.CosmeticSubmission s)
@@ -2384,6 +2634,8 @@ namespace CompetitiveRounds
             Texture2D t;
             if (cosReviewTex.TryGetValue(id, out t)) { try { if (t != null) UnityEngine.Object.Destroy(t); } catch { } cosReviewTex.Remove(id); }
             if (cosReviewSubs.Count == 0) cosReviewStatus = "All reviewed!";
+            cosReviewDenialReason = "";
+            cosReviewDragging = false;
         }
 
         private static string CosTrunc(string s, int n) => string.IsNullOrEmpty(s) ? "" : (s.Length <= n ? s : s.Substring(0, n));
@@ -2395,8 +2647,13 @@ namespace CompetitiveRounds
             var ev = Event.current;
             if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape) { ev.Use(); CloseCosmeticReview(); return; }
             if (adminLabelStyle == null) adminLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+            if (cosReviewReasonStyle == null)
+                cosReviewReasonStyle = new GUIStyle(GUI.skin.textArea) { fontSize = 13, wordWrap = true };
 
-            float w = 560, h = 470;
+            // Clamp to the actual game window. The previous fixed 720x650
+            // panel put the title/Close button above a 1024x576 window.
+            float w = Mathf.Min(720f, Mathf.Max(500f, Screen.width - 24f));
+            float h = Mathf.Min(620f, Mathf.Max(500f, Screen.height - 24f));
             float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
             GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
                 Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.94f), 0, 0);
@@ -2404,35 +2661,93 @@ namespace CompetitiveRounds
                 new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
             if (GUI.Button(new Rect(x + w - 90, y + 10, 78, 26), "Close")) { CloseCosmeticReview(); return; }
 
+            GUI.Label(new Rect(x + 12, y + 42, w - 24, 118),
+                "<b>Approval guidelines</b>\n" +
+                "1. All cosmetics must have a transparent background.\n" +
+                "2. All cosmetics must be tasteful, attractive, and fitting with the current cosmetics.\n" +
+                "3. Cosmetics must not be large just to be large, purposely distracting or flashing, or made only for one player's personal use.\n" +
+                "4. The cosmetic type must fit the art (for example, no mouths in the eyes section).\n" +
+                "5. Scale and placement must fit the body/slot and not obscure play; reject or adjust anything disproportionate or misplaced.",
+                new GUIStyle(adminLabelStyle) { fontSize = 11, richText = true, wordWrap = true });
+
             var subs = cosReviewSubs;
             if (cosReviewBusy || subs == null || subs.Count == 0)
             {
-                GUI.Label(new Rect(x + 12, y + 60, w - 24, 30),
+                GUI.Label(new Rect(x + 12, y + 164, w - 24, 30),
                     string.IsNullOrEmpty(cosReviewStatus) ? "..." : cosReviewStatus, adminLabelStyle);
                 return;
             }
             cosReviewIdx = Mathf.Clamp(cosReviewIdx, 0, subs.Count - 1);
             var s = subs[cosReviewIdx];
             int approxKb = (s.png_base64 != null ? s.png_base64.Length * 3 / 4 : 0) / 1024;
-            GUI.Label(new Rect(x + 12, y + 42, w - 24, 22),
-                $"#{s.id}  '{s.name}'  ({s.slot})  by {s.artist_name}  512x512, {approxKb} KB   -   {cosReviewIdx + 1}/{subs.Count}",
+            string reviewKind = s.review_kind == "placement" ? "PLACEMENT CHANGE" : "NEW COSMETIC";
+            GUI.Label(new Rect(x + 12, y + 164, w - 24, 22),
+                $"[{reviewKind}]  #{s.id} rev {s.placement_revision}  '{s.name}' ({s.slot}) by {s.artist_name}  {approxKb} KB   -   {cosReviewIdx + 1}/{subs.Count}",
                 new GUIStyle(adminLabelStyle) { fontStyle = FontStyle.Bold });
-            // Mid-grey backdrop so the transparent regions are visible as such.
-            Rect prev = new Rect(x + (w - 256) / 2f, y + 72, 256, 256);
-            GUI.DrawTexture(prev, Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0.45f, 0.45f, 0.5f, 1f), 0, 0);
+            float prevSize = Mathf.Clamp(h - 320f, 170f, 235f);
+            Rect prev = new Rect(x + 12, y + 192, prevSize, prevSize);
             var tex = CosReviewTexture(s);
-            if (tex != null) GUI.DrawTexture(prev, tex, ScaleMode.ScaleToFit, true);
-            else GUI.Label(new Rect(prev.x, prev.y + 110, prev.width, 30), "  (preview failed to decode)", adminLabelStyle);
-            GUI.Label(new Rect(x + 12, y + 338, w - 24, 40),
-                "Approve creates the shop row (OUT OF STOCK until the artist opens sales) and queues the art for the next mod bundle.",
-                new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
+            if (s.render_scale <= 0f) s.render_scale = 1f;
+            Vector2 reviewOffset = new Vector2(s.render_offset_x, s.render_offset_y);
+            DrawCosmeticScalePreview(prev, tex, s.render_scale, reviewOffset);
+            HandleCosmeticPlacementDrag(
+                prev, ref reviewOffset, ref cosReviewDragging, ref cosReviewLastMouse);
+            s.render_offset_x = reviewOffset.x;
+            s.render_offset_y = reviewOffset.y;
+            if (tex == null)
+                GUI.Label(new Rect(prev.x, prev.center.y - 15, prev.width, 30), "  (preview failed to decode)", adminLabelStyle);
 
+            float rx = prev.xMax + 14f;
+            float rw = x + w - 12f - rx;
+            GUI.Label(new Rect(rx, y + 194, rw, 24), $"Render scale: {s.render_scale:F2}x",
+                new GUIStyle(adminLabelStyle) { fontSize = 15, fontStyle = FontStyle.Bold });
+            s.render_scale = GUI.HorizontalSlider(
+                new Rect(rx, y + 222, rw, 20), s.render_scale, 0.50f, 2.25f);
+            s.render_scale = Mathf.Round(s.render_scale * 20f) / 20f;
+            if (GUI.Button(new Rect(rx, y + 248, 42, 27), "-")) s.render_scale -= 0.05f;
+            if (GUI.Button(new Rect(rx + 50, y + 248, 42, 27), "+")) s.render_scale += 0.05f;
+            if (GUI.Button(new Rect(rx + 100, y + 248, Mathf.Max(64f, rw - 100f), 27), "Center"))
+            {
+                s.render_offset_x = 0f;
+                s.render_offset_y = 0f;
+            }
+            s.render_scale = Mathf.Clamp(s.render_scale, 0.50f, 2.25f);
+            // Offset is only the item's DEFAULT starting position — every player
+            // can drag face items freely in ROUNDS' own character editor — so it
+            // does not decide whether a cosmetic FITS. Scale does. The numeric
+            // offset is therefore not surfaced here; drag the preview if you want
+            // to nudge the default, and judge approval on the scale line below.
+            GUI.Label(new Rect(rx, y + 282, rw, 38),
+                "Drag in the preview to nudge the default position (players can\nreposition it themselves in the character editor).",
+                new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
+            // Re-placements: show the ORIGINAL (currently approved) scale beside
+            // the proposed one so the change being reviewed is explicit.
+            string approved = s.approved_placement_revision > 0
+                ? $"Scale: {s.approved_render_scale:F2}x (current, rev {s.approved_placement_revision})"
+                  + $"   ->   {s.render_scale:F2}x (proposed)"
+                  + (Mathf.Abs(s.render_scale - s.approved_render_scale) < 0.005f
+                      ? "   [unchanged]" : "")
+                : $"First placement for this art — proposed scale {s.render_scale:F2}x.";
+            GUI.Label(new Rect(rx, y + 324, rw, 34), approved,
+                new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true, fontStyle = FontStyle.Bold });
+            float reasonY = y + h - 108f;
+            GUI.Label(new Rect(rx, y + 360, rw, Mathf.Max(24f, reasonY - (y + 366))),
+                "Approve saves the values shown here. New art and approved revisions take effect only after those exact values ship in a mod update.",
+                new GUIStyle(adminLabelStyle) { fontSize = 11, wordWrap = true });
+            GUI.Label(new Rect(x + 12, reasonY + 4, 130, 22), "Denial reason:", adminLabelStyle);
             float by = y + h - 46;
+            cosReviewDenialReason = GUI.TextArea(
+                new Rect(x + 142, reasonY, w - 154, Mathf.Max(42f, by - reasonY - 8f)),
+                cosReviewDenialReason ?? "", 200,
+                cosReviewReasonStyle);
+
             if (!cosReviewBusy && GUI.Button(new Rect(x + 12, by, 120, 32), "Approve"))
             {
                 cosReviewBusy = true;
                 int sid = s.id; string nm = s.name;
-                ApiClient.AdminReviewCosmetic(MatchTracker.LocalSteamId, sid, true, "", (ok, resp) =>
+                ApiClient.AdminReviewCosmetic(
+                    MatchTracker.LocalSteamId, sid, true, s.placement_revision,
+                    s.render_scale, s.render_offset_x, s.render_offset_y, "", (ok, resp) =>
                 {
                     cosReviewBusy = false;
                     if (!cosReviewOpen) return;
@@ -2440,21 +2755,376 @@ namespace CompetitiveRounds
                     else ShowNotification("Approve failed: " + CosTrunc(resp, 90), new Color(1f, 0.45f, 0.4f), 6f);
                 });
             }
-            if (!cosReviewBusy && GUI.Button(new Rect(x + 142, by, 120, 32), "Deny..."))
+            if (!cosReviewBusy && GUI.Button(new Rect(x + 142, by, 120, 32), "Deny"))
             {
                 int sid = s.id; string nm = s.name;
-                OpenArtistInput($"Deny '{nm}' - why?", "Reason (shown to the artist)", "", note =>
+                string note = (cosReviewDenialReason ?? "").Trim();
+                if (string.IsNullOrEmpty(note))
                 {
-                    ApiClient.AdminReviewCosmetic(MatchTracker.LocalSteamId, sid, false, note ?? "", (ok, resp) =>
+                    ShowNotification("Enter a denial reason first.", new Color(1f, 0.7f, 0.4f), 4f);
+                }
+                else
+                {
+                    cosReviewBusy = true;
+                    ApiClient.AdminReviewCosmetic(
+                        MatchTracker.LocalSteamId, sid, false, s.placement_revision,
+                        s.render_scale, s.render_offset_x, s.render_offset_y, note, (ok, resp) =>
                     {
+                        cosReviewBusy = false;
                         if (!cosReviewOpen) return;
                         if (ok) { ShowNotification($"Denied '{nm}'.", new Color(1f, 0.7f, 0.4f), 4f); RemoveCosReview(sid); }
                         else ShowNotification("Deny failed: " + CosTrunc(resp, 90), new Color(1f, 0.45f, 0.4f), 6f);
                     });
-                });
+                }
             }
             if (subs.Count > 1 && GUI.Button(new Rect(x + w - 132, by, 120, 32), "Next >"))
+            {
                 cosReviewIdx = (cosReviewIdx + 1) % subs.Count;
+                cosReviewDenialReason = "";
+                cosReviewDragging = false;
+            }
+        }
+
+        private static bool cosReleaseOpen = false;
+        private static bool cosReleaseBusy = false;
+        private static string cosReleaseStatus = "";
+        private static Vector2 cosReleaseScroll = Vector2.zero;
+        private static List<ApiClient.CosmeticReleaseCandidate> cosReleaseCandidates =
+            new List<ApiClient.CosmeticReleaseCandidate>();
+
+        public static void OpenCosmeticReleaseQueue()
+        {
+            if (cosReviewOpen) CloseCosmeticReview();
+            cosReleaseOpen = true;
+            cosReleaseBusy = true;
+            cosReleaseStatus = "Loading approved cosmetics...";
+            cosReleaseScroll = Vector2.zero;
+            cosReleaseCandidates.Clear();
+            ApiClient.FetchCosmeticReleaseCandidatesAdmin(
+                MatchTracker.LocalSteamId, (ok, list, resp) =>
+                {
+                    cosReleaseBusy = false;
+                    if (!cosReleaseOpen) return;
+                    if (!ok)
+                    {
+                        cosReleaseStatus = "Fetch failed: " + CosTrunc(resp, 120);
+                        return;
+                    }
+                    cosReleaseCandidates = list
+                        ?? new List<ApiClient.CosmeticReleaseCandidate>();
+                    cosReleaseStatus = cosReleaseCandidates.Count == 0
+                        ? "Nothing is waiting for a client update."
+                        : "";
+                });
+        }
+
+        private static string CosReleaseSafe(string value)
+        {
+            return string.IsNullOrEmpty(value)
+                ? ""
+                : value.Replace("<", "[").Replace(">", "]");
+        }
+
+        private static void DrawCosmeticReleaseQueue()
+        {
+            if (!cosReleaseOpen) return;
+            if (!NativeUI.IsOpen) { cosReleaseOpen = false; return; }
+            var ev = Event.current;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
+            {
+                ev.Use();
+                cosReleaseOpen = false;
+                return;
+            }
+            if (adminLabelStyle == null)
+                adminLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+
+            float w = Mathf.Min(780f, Mathf.Max(520f, Screen.width - 24f));
+            float h = Mathf.Min(600f, Mathf.Max(480f, Screen.height - 24f));
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(
+                new Rect(x - 8, y - 8, w + 16, h + 16),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
+                new Color(0, 0, 0, 0.96f), 0, 0);
+            GUI.Label(
+                new Rect(x + 12, y + 10, w - 118, 28),
+                "Approved cosmetics awaiting a client update",
+                new GUIStyle(adminLabelStyle)
+                { fontSize = 17, fontStyle = FontStyle.Bold });
+            if (GUI.Button(new Rect(x + w - 92, y + 10, 80, 28), "Close"))
+            {
+                cosReleaseOpen = false;
+                return;
+            }
+            GUI.Label(
+                new Rect(x + 12, y + 45, w - 24, 58),
+                "This is the implementation queue. Approval saves an exact PNG, scale, and offset, "
+                + "but installed clients do not change until those values are copied into the "
+                + "append-only catalog and released. Rows disappear only after that revision is marked published.",
+                new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
+
+            if (cosReleaseBusy || cosReleaseCandidates.Count == 0)
+            {
+                GUI.Label(
+                    new Rect(x + 12, y + 112, w - 150, 30),
+                    string.IsNullOrEmpty(cosReleaseStatus) ? "..." : cosReleaseStatus,
+                    adminLabelStyle);
+                if (!cosReleaseBusy
+                    && GUI.Button(new Rect(x + w - 132, y + 108, 120, 28), "Refresh"))
+                    OpenCosmeticReleaseQueue();
+                return;
+            }
+
+            float listY = y + 108f;
+            float listH = h - 158f;
+            float rowH = 104f;
+            float innerW = w - 45f;
+            cosReleaseScroll = GUI.BeginScrollView(
+                new Rect(x + 12, listY, w - 24, listH),
+                cosReleaseScroll,
+                new Rect(0, 0, innerW,
+                    Mathf.Max(listH - 2f, cosReleaseCandidates.Count * rowH)));
+            for (int i = 0; i < cosReleaseCandidates.Count; i++)
+            {
+                var c = cosReleaseCandidates[i];
+                float ry = i * rowH;
+                GUI.DrawTexture(
+                    new Rect(0, ry, innerW, rowH - 6f),
+                    Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
+                    new Color(0.11f, 0.13f, 0.17f, 0.98f), 0, 4);
+                string kind = c.catalog_ready
+                    ? "PLACEMENT UPDATE"
+                    : "NEW COSMETIC";
+                string status = c.catalog_ready
+                    ? $"Published rev {c.published_placement_revision} remains live"
+                    : "Not yet available in any released client";
+                GUI.Label(
+                    new Rect(10, ry + 7, innerW - 20, 23),
+                    $"<b>{kind}</b>  #{c.id}  {CosReleaseSafe(c.name)} "
+                    + $"<color=#888>by {CosReleaseSafe(c.artist_name)}</color>",
+                    new GUIStyle(adminLabelStyle)
+                    { fontSize = 14, richText = true });
+                GUI.Label(
+                    new Rect(10, ry + 31, innerW - 20, 21),
+                    $"{CosReleaseSafe(c.shop_sku)}  <color=#888>({c.slot}, "
+                    + $"{Mathf.Max(0, c.png_bytes) / 1024} KB)</color>",
+                    new GUIStyle(adminLabelStyle)
+                    { fontSize = 12, richText = true });
+                GUI.Label(
+                    new Rect(10, ry + 53, innerW - 20, 21),
+                    // Scale is what the integrator must transcribe into
+                    // CustomCosmetics.cs; offset is only a default start position
+                    // the player can drag, so it stays out of this tracker line.
+                    $"Approved rev {c.placement_revision}: {c.render_scale:F2}x",
+                    new GUIStyle(adminLabelStyle)
+                    { fontSize = 13, fontStyle = FontStyle.Bold });
+                GUI.Label(
+                    new Rect(10, ry + 75, innerW - 20, 20),
+                    $"<color=#FFD94D>{status}</color>",
+                    new GUIStyle(adminLabelStyle)
+                    { fontSize = 12, richText = true });
+            }
+            GUI.EndScrollView();
+
+            GUI.Label(
+                new Rect(x + 12, y + h - 38, w - 160, 25),
+                $"{cosReleaseCandidates.Count} approved revision(s) waiting",
+                adminLabelStyle);
+            if (GUI.Button(new Rect(x + w - 132, y + h - 42, 120, 30), "Refresh"))
+                OpenCosmeticReleaseQueue();
+        }
+
+        private static bool flagEvidenceOpen = false;
+        private static bool flagEvidenceBusy = false;
+        private static bool flagRepairConfirm = false;
+        private static ApiClient.FlaggedMatchEntry flagEvidenceEntry;
+        private static Vector2 flagEvidenceScroll = Vector2.zero;
+
+        public static void OpenFlagEvidence(ApiClient.FlaggedMatchEntry entry)
+        {
+            if (entry == null) return;
+            flagEvidenceEntry = entry;
+            flagEvidenceScroll = Vector2.zero;
+            flagEvidenceBusy = false;
+            flagRepairConfirm = false;
+            flagEvidenceOpen = true;
+        }
+
+        private static void CloseFlagEvidence()
+        {
+            flagEvidenceOpen = false;
+            flagEvidenceBusy = false;
+            flagRepairConfirm = false;
+            flagEvidenceEntry = null;
+        }
+
+        private static void SubmitFlagEvidenceVerdict(string action)
+        {
+            var entry = flagEvidenceEntry;
+            string adminId = MatchTracker.LocalSteamId;
+            if (entry == null || string.IsNullOrEmpty(entry.id) || string.IsNullOrEmpty(adminId)) return;
+            flagEvidenceBusy = true;
+            ApiClient.AdminReviewFlag(
+                adminId, entry.id, action, entry.discord_evidence_revision,
+                (ok, resp) =>
+            {
+                flagEvidenceBusy = false;
+                if (!flagEvidenceOpen || flagEvidenceEntry != entry) return;
+                if (!ok)
+                {
+                    ShowNotification("Flag review failed: " + CosTrunc(resp, 100),
+                        new Color(1f, 0.45f, 0.4f), 6f);
+                    return;
+                }
+                bool restorationRequired = resp != null
+                    && (resp.Contains("\"restoration_required\":true")
+                        || resp.Contains("\"restoration_required\": true"));
+                ShowNotification(
+                    restorationRequired
+                        ? "False positive recorded. The auto-invalidation still needs a manual reward/series repair."
+                        : action == "confirmed_cheat"
+                            ? "Flag marked as confirmed."
+                            : "Flag marked false positive.",
+                    restorationRequired
+                        ? new Color(1f, 0.72f, 0.32f)
+                        : new Color(0.45f, 0.9f, 0.55f),
+                    restorationRequired ? 9f : 5f);
+                CloseFlagEvidence();
+                ApiClient.FetchFlaggedMatches(adminId);
+            });
+        }
+
+        private static void SubmitFlagRestorationComplete()
+        {
+            var entry = flagEvidenceEntry;
+            string adminId = MatchTracker.LocalSteamId;
+            if (entry == null || !entry.restoration_required
+                || string.IsNullOrEmpty(entry.id) || string.IsNullOrEmpty(adminId)) return;
+            flagEvidenceBusy = true;
+            ApiClient.AdminResolveFlagRestoration(adminId, entry.id, (ok, resp) =>
+            {
+                flagEvidenceBusy = false;
+                if (!flagEvidenceOpen || flagEvidenceEntry != entry) return;
+                if (!ok)
+                {
+                    ShowNotification("Could not close repair reminder: " + CosTrunc(resp, 100),
+                        new Color(1f, 0.45f, 0.4f), 6f);
+                    return;
+                }
+                ShowNotification("Manual restoration marked complete.",
+                    new Color(0.45f, 0.9f, 0.55f), 5f);
+                CloseFlagEvidence();
+                ApiClient.FetchFlaggedMatches(adminId);
+            });
+        }
+
+        private static void DrawFlagEvidence()
+        {
+            if (!flagEvidenceOpen) return;
+            if (!NativeUI.IsOpen || flagEvidenceEntry == null) { CloseFlagEvidence(); return; }
+            var ev = Event.current;
+            if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
+            { ev.Use(); CloseFlagEvidence(); return; }
+            if (adminLabelStyle == null) adminLabelStyle = new GUIStyle(GUI.skin.label) { fontSize = 14 };
+            var e = flagEvidenceEntry;
+            float w = Mathf.Min(920f, Mathf.Max(540f, Screen.width - 24f));
+            float h = Mathf.Min(700f, Mathf.Max(500f, Screen.height - 24f));
+            float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
+            GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
+                Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0,
+                new Color(0, 0, 0, 0.96f), 0, 0);
+            var titleStyle = new GUIStyle(adminLabelStyle)
+                { fontSize = 17, fontStyle = FontStyle.Bold, richText = false };
+            GUI.Label(new Rect(x + 12, y + 10, w - 112, 28),
+                $"Flag evidence: {e.flag_reason}", titleStyle);
+            if (GUI.Button(new Rect(x + w - 90, y + 10, 78, 26), "Close"))
+            { CloseFlagEvidence(); return; }
+
+            string participants =
+                $"{e.p1_name} [{e.p1_steam_id}]\n{e.p2_name} [{e.p2_steam_id}]\n"
+                + $"Suspect(s): {e.suspect_steam_text}";
+            string match =
+                $"{(e.is_ranked ? "Ranked" : "Casual")} | game code {e.game_code} | match {e.match_id}"
+                + (string.IsNullOrEmpty(e.series_id) ? "" : $" | series {e.series_id}")
+                + $"\n{e.score_summary}\n"
+                + $"Detector action: {(e.auto_invalidated ? "auto-invalidated" : "advisory only")}; "
+                + $"match is currently {(e.match_invalidated ? "invalidated" : "valid")}"
+                + (e.match_invalidated && !string.IsNullOrEmpty(e.match_invalidation_reason)
+                    ? $" ({e.match_invalidation_reason})" : "")
+                + "."
+                + (e.restoration_required
+                    ? "\nFALSE POSITIVE RECORDED — manual reward/series repair remains required."
+                        + (flagRepairConfirm
+                            ? "\nCONFIRM ONLY after rewards, rating, and series state have been repaired."
+                            : "")
+                    : "");
+            string[] headings = {
+                "Participants / Steam IDs", "Match and point state", "Detector evidence",
+                "Point progression", "Cards picked", "Combat and input telemetry",
+                "FPS / connection telemetry", "Reporter context"
+            };
+            string[] bodies = {
+                participants, match, e.evidence_summary, e.point_progress,
+                e.cards_summary, e.telemetry_summary, e.connection_summary, e.match_context
+            };
+            var headingStyle = new GUIStyle(adminLabelStyle)
+                { fontSize = 13, fontStyle = FontStyle.Bold, richText = false };
+            var bodyStyle = new GUIStyle(adminLabelStyle)
+                { fontSize = 12, wordWrap = true, richText = false };
+            float contentW = w - 54f;
+            float contentH = 10f;
+            for (int i = 0; i < headings.Length; i++)
+            {
+                contentH += 20f;
+                contentH += Mathf.Max(22f, bodyStyle.CalcHeight(
+                    new GUIContent(bodies[i] ?? "not recorded"), contentW));
+                contentH += 10f;
+            }
+            Rect view = new Rect(x + 12, y + 46, w - 24, h - 104);
+            flagEvidenceScroll = GUI.BeginScrollView(
+                view, flagEvidenceScroll, new Rect(0, 0, view.width - 18, contentH));
+            float cy = 4f;
+            for (int i = 0; i < headings.Length; i++)
+            {
+                GUI.Label(new Rect(4, cy, contentW, 20), headings[i], headingStyle);
+                cy += 20f;
+                string body = string.IsNullOrEmpty(bodies[i]) ? "not recorded" : bodies[i];
+                float bh = Mathf.Max(22f, bodyStyle.CalcHeight(new GUIContent(body), contentW));
+                GUI.Label(new Rect(4, cy, contentW, bh), body, bodyStyle);
+                cy += bh + 10f;
+            }
+            GUI.EndScrollView();
+
+            float by = y + h - 46f;
+            if (GUI.Button(new Rect(x + 12, by, 92, 30), "Copy P1 ID"))
+                GUIUtility.systemCopyBuffer = e.p1_steam_id ?? "";
+            if (GUI.Button(new Rect(x + 112, by, 92, 30), "Copy P2 ID"))
+                GUIUtility.systemCopyBuffer = e.p2_steam_id ?? "";
+            if (GUI.Button(new Rect(x + 212, by, 104, 30), "Copy game ID"))
+                GUIUtility.systemCopyBuffer = e.game_code ?? e.match_id ?? "";
+            if (e.restoration_required)
+            {
+                if (!flagEvidenceBusy && !flagRepairConfirm && GUI.Button(
+                        new Rect(x + w - 182, by, 170, 30), "Mark repair complete..."))
+                    flagRepairConfirm = true;
+                else if (!flagEvidenceBusy && flagRepairConfirm)
+                {
+                    if (GUI.Button(new Rect(x + w - 292, by, 140, 30), "Not repaired yet"))
+                        flagRepairConfirm = false;
+                    if (GUI.Button(new Rect(x + w - 142, by, 130, 30), "Repair is done"))
+                        SubmitFlagRestorationComplete();
+                }
+            }
+            else
+            {
+                if (!flagEvidenceBusy && GUI.Button(
+                        new Rect(x + w - 292, by, 140, 30),
+                        e.auto_invalidated ? "False+ (manual fix)" : "False positive"))
+                    SubmitFlagEvidenceVerdict("false_positive");
+                if (!flagEvidenceBusy && GUI.Button(
+                        new Rect(x + w - 142, by, 130, 30), "Confirm cheat"))
+                    SubmitFlagEvidenceVerdict("confirmed_cheat");
+            }
         }
 
         private static void DrawArtistInput()
@@ -3312,6 +3982,9 @@ namespace CompetitiveRounds
 
         private static void DrawFPS()
         {
+            // OnGUI runs Layout + Repaint (and once per input event). Count and
+            // render only Repaint so the overlay reports real rendered frames.
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             // FPS counter — independently toggleable.
             bool showFps = Plugin.ShowFps == null || Plugin.ShowFps.Value;
             bool showRegion = Plugin.ShowRegionPing == null || Plugin.ShowRegionPing.Value;
@@ -3319,40 +3992,56 @@ namespace CompetitiveRounds
 
             fpsCnt++;
             fpsTimer += Time.deltaTime;
-            if (fpsTimer >= 0.5f) { fpsVal = fpsCnt / fpsTimer; fpsCnt = 0; fpsTimer = 0f; }
             if (fpsStyle == null) { fpsStyle = new GUIStyle(GUI.skin.label); fpsStyle.fontSize = 11; fpsStyle.normal.textColor = new Color(0.5f, 0.5f, 0.5f, 0.7f); }
 
-            string label = showFps ? $"{fpsVal:F0} FPS" : "";
-            float width = 60;
-
-            if (showRegion)
+            // FPS/ping/region change slowly. Rebuilding four formatted strings
+            // every rendered frame created steady managed garbage in every match.
+            bool refreshLabel = fpsTimer >= 0.5f
+                             || fpsLabelShowFps != showFps
+                             || fpsLabelShowRegion != showRegion;
+            if (refreshLabel)
             {
-                try
+                if (fpsTimer >= 0.5f)
                 {
-                    if (PhotonNetwork.IsConnected && PhotonNetwork.InRoom)
-                    {
-                        int ping = PhotonNetwork.GetPing();
-                        string region = PhotonNetwork.CloudRegion ?? "";
-                        if (!string.IsNullOrEmpty(region))
-                        {
-                            int slash = region.IndexOf('/');
-                            if (slash > 0) region = region.Substring(0, slash);
-                            region = region.ToUpper();
-                        }
-                        string pingPart = $"{ping}ms  {region}";
-                        label = showFps ? $"{label}  |  {pingPart}" : pingPart;
-                        width = 200;
-                    }
+                    fpsVal = fpsCnt / fpsTimer;
+                    fpsCnt = 0;
+                    fpsTimer = 0f;
                 }
-                catch { }
+                fpsLabelShowFps = showFps;
+                fpsLabelShowRegion = showRegion;
+                fpsLabel = showFps ? $"{fpsVal:F0} FPS" : "";
+                fpsLabelWidth = 60f;
+
+                if (showRegion)
+                {
+                    try
+                    {
+                        if (PhotonNetwork.IsConnected && PhotonNetwork.InRoom)
+                        {
+                            int ping = PhotonNetwork.GetPing();
+                            string region = PhotonNetwork.CloudRegion ?? "";
+                            if (!string.IsNullOrEmpty(region))
+                            {
+                                int slash = region.IndexOf('/');
+                                if (slash > 0) region = region.Substring(0, slash);
+                                region = region.ToUpperInvariant();
+                            }
+                            string pingPart = $"{ping}ms  {region}";
+                            fpsLabel = showFps ? $"{fpsLabel}  |  {pingPart}" : pingPart;
+                            fpsLabelWidth = 200f;
+                        }
+                    }
+                    catch { }
+                }
             }
 
-            if (!string.IsNullOrEmpty(label))
-                GUI.Label(new Rect(6, 4, width, 18), label, fpsStyle);
+            if (!string.IsNullOrEmpty(fpsLabel))
+                GUI.Label(new Rect(6, 4, fpsLabelWidth, 18), fpsLabel, fpsStyle);
         }
 
         private static void DrawNotification()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (notifTimer <= 0f && notifQueue.Count > 0)
             {
                 var n = notifQueue[0]; notifQueue.RemoveAt(0);
@@ -3361,8 +4050,7 @@ namespace CompetitiveRounds
             if (notifTimer <= 0f) return;
             // OnGUI runs 2+ times per frame (Layout + Repaint + one per input event);
             // only tick the timer on Repaint or toasts live at half nominal duration or less.
-            if (Event.current.type == EventType.Repaint)
-                notifTimer -= Time.unscaledDeltaTime;
+            notifTimer -= Time.unscaledDeltaTime;
             float alpha = Mathf.Clamp01(notifTimer / 0.75f);
 
             if (notifStyle == null)
@@ -3393,8 +4081,72 @@ namespace CompetitiveRounds
             GUI.contentColor = origColor;
         }
 
+        private static float matchStatusCacheUntil = 0f;
+        private static bool matchStatusCachedRanked = false;
+        private static string matchStatusSeries = "", matchStatusSession = "", matchStatusH2H = "";
+        private static Color matchStatusH2HTint = new Color(0.7f, 0.7f, 0.7f);
+
+        private static void RefreshMatchStatusCache(bool isRanked)
+        {
+            matchStatusCacheUntil = Time.unscaledTime + 0.25f;
+            matchStatusCachedRanked = isRanked;
+            matchStatusSeries = "";
+            matchStatusSession = "";
+            matchStatusH2H = "";
+
+            if (isRanked)
+            {
+                // The old "Session: N-N games (N-N series)" line was dropped —
+                // the games tally wasn't a metric anyone used. The session
+                // SERIES record is the part worth keeping, so it rides on the
+                // Series line instead of owning a row of its own.
+                int ssw = GameStateWatcher.SessionRankedSeriesWins;
+                int ssl = GameStateWatcher.SessionRankedSeriesLosses;
+                matchStatusSeries =
+                    $"Series: {GameStateWatcher.CurrentSeriesGamesWon} - {GameStateWatcher.CurrentSeriesGamesLost}"
+                    + $"   (session {ssw}-{ssl})";
+                matchStatusSession = "";
+            }
+
+            try
+            {
+                string oppSid = GameStateWatcher.OpponentSteamId;
+                string oppName = GameStateWatcher.OpponentDisplayName;
+                var rp = Photon.Pun.PhotonNetwork.CurrentRoom?.CustomProperties;
+                bool isCrFf = rp != null && rp.ContainsKey("cr_ff");
+                if (isCrFf || string.IsNullOrEmpty(oppName) || oppName == "Opponent"
+                    || (oppSid != null && oppSid.StartsWith("photon_")))
+                    return;
+
+                int w = 0, l = 0;
+                int[] counts;
+                var dict = GameStateWatcher.SessionWLByOpponent;
+                if (dict != null && dict.TryGetValue(oppName, out counts)
+                    && counts != null && counts.Length >= 4)
+                {
+                    w = counts[0] + counts[2];
+                    l = counts[1] + counts[3];
+                }
+                string shortName = oppName.Length > 18 ? oppName.Substring(0, 18) : oppName;
+                if (w + l > 0)
+                {
+                    matchStatusH2HTint = w > l ? new Color(0.6f, 1f, 0.6f)
+                                           : w < l ? new Color(1f, 0.6f, 0.6f)
+                                                   : new Color(0.85f, 0.85f, 0.85f);
+                    matchStatusH2H = $"vs {shortName}: {w}-{l} this session";
+                }
+                else
+                {
+                    matchStatusH2HTint = new Color(0.7f, 0.7f, 0.7f);
+                    matchStatusH2H = $"vs {shortName}: first game this session";
+                }
+            }
+            catch { }
+        }
+
         private static void DrawMatchStatus()
         {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (!MatchTracker.IsInMatch) return;
             bool isRanked = GameStateWatcher.MatchIsRanked;
             if (statusStyle == null)
@@ -3411,6 +4163,8 @@ namespace CompetitiveRounds
                 scoreStyle.fontStyle = FontStyle.Bold;
                 scoreStyle.alignment = TextAnchor.MiddleCenter;
             }
+            if (Time.unscaledTime >= matchStatusCacheUntil || matchStatusCachedRanked != isRanked)
+                RefreshMatchStatusCache(isRanked);
             var oc = GUI.contentColor;
 
             // Top banner: "RANKED - Recording" only on ranked. Casual gets no banner —
@@ -3436,79 +4190,21 @@ namespace CompetitiveRounds
             float nextLineY = scoreY;
             if (isRanked)
             {
-                int sgw = GameStateWatcher.CurrentSeriesGamesWon;
-                int sgl = GameStateWatcher.CurrentSeriesGamesLost;
-                int rgw = GameStateWatcher.SessionRankedWins;
-                int rgl = GameStateWatcher.SessionRankedLosses;
-                int rsw = GameStateWatcher.SessionRankedSeriesWins;
-                int rsl = GameStateWatcher.SessionRankedSeriesLosses;
-
+                // Wider rect: the Series line now carries the session series
+                // record too. The old blue "Session:" row is gone, so the H2H
+                // line below moves up one row instead of leaving a gap.
                 GUI.contentColor = new Color(1f, 0.85f, 0.3f);
-                GUI.Label(new Rect((Screen.width - 260) / 2f, scoreY, 260, 22),
-                    $"Series: {sgw} - {sgl}", scoreStyle);
-                GUI.contentColor = new Color(0.75f, 0.85f, 1f);
-                GUI.Label(new Rect((Screen.width - 320) / 2f, scoreY + 18, 320, 20),
-                    $"Session: {rgw}-{rgl} games  ({rsw}-{rsl} series)", scoreStyle);
-                nextLineY = scoreY + 36;
+                GUI.Label(new Rect((Screen.width - 380) / 2f, scoreY, 380, 22),
+                    matchStatusSeries, scoreStyle);
+                nextLineY = scoreY + 18;
             }
 
-            // Per-opponent session H2H — fires on both ranked AND casual so a
-            // regular game shows "vs Opponent: 2-1 this session" right under
-            // the score line. Skip 2v2 (cr_ff) rooms: opponentSteamId latches
-            // on one of the two opposing players which makes the H2H number
-            // misleading.
-            try
+            if (!string.IsNullOrEmpty(matchStatusH2H))
             {
-                string oppSid = GameStateWatcher.OpponentSteamId;
-                string oppName = GameStateWatcher.OpponentDisplayName;
-                bool isCrFf = false;
-                try
-                {
-                    var rp = Photon.Pun.PhotonNetwork.CurrentRoom?.CustomProperties;
-                    isCrFf = rp != null && rp.ContainsKey("cr_ff");
-                }
-                catch { }
-                if (!isCrFf
-                    && !string.IsNullOrEmpty(oppName)
-                    && oppName != "Opponent"
-                    && !(oppSid != null && oppSid.StartsWith("photon_")))
-                {
-                    var dict = GameStateWatcher.SessionWLByOpponent;
-                    int[] counts;
-                    // sessionWLByOpponent is keyed by DISPLAY NAME, not steam_id
-                    // (see GameStateWatcher.OnGameOver — uses opponentDisplayName).
-                    if (dict != null && dict.TryGetValue(oppName, out counts) && counts != null && counts.Length >= 4)
-                    {
-                        int w = counts[0] + counts[2];   // ranked W + casual W
-                        int l = counts[1] + counts[3];   // ranked L + casual L
-                        if (w + l > 0)
-                        {
-                            Color tint = w > l ? new Color(0.6f, 1f, 0.6f)
-                                       : w < l ? new Color(1f, 0.6f, 0.6f)
-                                              : new Color(0.85f, 0.85f, 0.85f);
-                            GUI.contentColor = tint;
-                            string shortName = oppName.Length > 18 ? oppName.Substring(0, 18) : oppName;
-                            GUI.Label(new Rect((Screen.width - 360) / 2f, nextLineY, 360, 20),
-                                      $"vs {shortName}: {w}-{l} this session", scoreStyle);
-                        }
-                        else
-                        {
-                            GUI.contentColor = new Color(0.7f, 0.7f, 0.7f);
-                            string shortName = oppName.Length > 18 ? oppName.Substring(0, 18) : oppName;
-                            GUI.Label(new Rect((Screen.width - 360) / 2f, nextLineY, 360, 20),
-                                      $"vs {shortName}: first game this session", scoreStyle);
-                        }
-                    }
-                    else
-                    {
-                        GUI.contentColor = new Color(0.7f, 0.7f, 0.7f);
-                        string shortName = oppName.Length > 18 ? oppName.Substring(0, 18) : oppName;
-                        GUI.Label(new Rect((Screen.width - 360) / 2f, nextLineY, 360, 20),
-                                  $"vs {shortName}: first game this session", scoreStyle);
-                    }
-                }
+                GUI.contentColor = matchStatusH2HTint;
+                GUI.Label(new Rect((Screen.width - 360) / 2f, nextLineY, 360, 20),
+                    matchStatusH2H, scoreStyle);
             }
-            catch { }
             GUI.contentColor = oc;
         }
 

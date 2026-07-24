@@ -59,6 +59,9 @@ namespace CompetitiveRounds
             // re-paints the blob to our chosen color.
             public List<ParticleSystem> tintedParticles = new List<ParticleSystem>();
             public List<Color> originalParticleColors = new List<Color>();
+            // Static-cosmetics mode applies one representative frame, then leaves
+            // the renderers alone until animation resumes.
+            public bool staticFrameApplied;
         }
         private static readonly Dictionary<int, AnimState> animByActor = new Dictionary<int, AnimState>();
         private static Coroutine animLoop;
@@ -501,11 +504,13 @@ namespace CompetitiveRounds
                 // v1.32 item 8: static-cosmetics mode freezes the animation clock —
                 // prismatic/chrome render a stable representative hue instantly (and
                 // resume from live time the moment the setting flips back on).
-                float now = (Plugin.AnimatedCosmetics != null && !Plugin.AnimatedCosmetics.Value) ? 0f : Time.time;
+                bool animationsEnabled = Plugin.AnimatedCosmetics == null || Plugin.AnimatedCosmetics.Value;
+                float now = animationsEnabled ? Time.time : 0f;
                 foreach (var kv in animByActor)
                 {
                     var st = kv.Value;
                     if (!IsAnimatedSku(st.sku)) continue;
+                    if (!animationsEnabled && st.staticFrameApplied) continue;
                     Color c = st.baseColor;
                     if (st.sku == "pcolor_prismatic")
                     {
@@ -530,6 +535,7 @@ namespace CompetitiveRounds
                         var main = ps.main;
                         main.startColor = new ParticleSystem.MinMaxGradient(c);
                     }
+                    st.staticFrameApplied = !animationsEnabled;
                 }
                 yield return wait;
             }

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Cosmetic body-size guide at render scale 1.30</title>
+  <desc>A 510 pixel orange player-body circle on a transparent 512 pixel canvas.</desc>
+  <circle cx="256" cy="256" r="255" fill="#F58C3B"/>
+</svg>

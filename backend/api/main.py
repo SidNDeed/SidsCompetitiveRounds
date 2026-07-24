@@ -32,6 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
+from flag_evidence import fetch_flag_context_rows, flag_payload
 from glicko2 import calculate_new_rating
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry
 from schemas import (
@@ -1159,7 +1160,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.34.1"
+LATEST_MOD_VERSION = "1.34.2"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -1171,74 +1172,71 @@ async def get_mod_version():
 
 @app.get("/api/v1/internal/recent-flags", tags=["Internal"])
 async def get_recent_flags(
-    since_id: str | None = Query(None, description="Last flag ID the bot has already posted"),
+    since_id: str | None = Query(
+        None,
+        description="Compatibility cursor used only by the pre-acknowledgement bot",
+    ),
     limit: int = Query(50, ge=1, le=200),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bot-only feed for the #scr-admin channel poller. Returns newly-created
-    flagged_matches rows with enough match context to render a one-line embed."""
+    """Durable bot-only queue for the #scr-admin evidence feed."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
 
-    # Pull flag rows with the underlying match's relevant fields. Order by created_at ASC
-    # so the bot can post in chronological order. since_id filtering uses created_at lookup
-    # because UUIDs aren't sortable as time but the (id, created_at) pair is unique.
+    # During a staggered API/bot restart, the previous bot still supplies its
+    # in-memory cursor and has no acknowledgement call. Honor that cursor so it
+    # cannot repost the whole durable queue every minute. The new bot omits
+    # since_id and consumes the acknowledgement-backed queue below.
+    cutoff = None
     if since_id:
-        cutoff_q = await db.execute(
-            text("SELECT created_at FROM flagged_matches WHERE id = :id"),
-            {"id": since_id},
-        )
-        cutoff_row = cutoff_q.first()
-        cutoff = cutoff_row[0] if cutoff_row else None
-    else:
-        cutoff = None
-
+        cutoff = (await db.execute(text(
+            "SELECT created_at FROM flagged_matches WHERE id = :id"
+        ), {"id": since_id})).scalar_one_or_none()
     if cutoff is not None:
-        rows = (await db.execute(text(
-            "SELECT fm.id, fm.match_id, fm.flag_reason, fm.flag_details, fm.auto_invalidated, "
-            "       fm.player_steam_ids, fm.created_at, "
-            "       m.is_ranked, m.duration_seconds, m.match_duration, "
-            "       p1.display_name AS p1_name, p2.display_name AS p2_name "
-            "FROM flagged_matches fm "
-            "JOIN matches m ON m.id = fm.match_id "
-            "JOIN players p1 ON p1.id = m.player1_id "
-            "JOIN players p2 ON p2.id = m.player2_id "
-            "WHERE fm.created_at > :cutoff "
-            "ORDER BY fm.created_at ASC LIMIT :limit"
-        ), {"cutoff": cutoff, "limit": limit})).mappings().all()
+        rows = await fetch_flag_context_rows(
+            db, "fm.created_at > :cutoff", {"cutoff": cutoff},
+            "fm.created_at ASC, fm.id ASC", limit)
     else:
-        rows = (await db.execute(text(
-            "SELECT fm.id, fm.match_id, fm.flag_reason, fm.flag_details, fm.auto_invalidated, "
-            "       fm.player_steam_ids, fm.created_at, "
-            "       m.is_ranked, m.duration_seconds, m.match_duration, "
-            "       p1.display_name AS p1_name, p2.display_name AS p2_name "
-            "FROM flagged_matches fm "
-            "JOIN matches m ON m.id = fm.match_id "
-            "JOIN players p1 ON p1.id = m.player1_id "
-            "JOIN players p2 ON p2.id = m.player2_id "
-            "ORDER BY fm.created_at ASC LIMIT :limit"
-        ), {"limit": limit})).mappings().all()
+        rows = await fetch_flag_context_rows(
+            db, "fm.discord_posted_at IS NULL", {},
+            "fm.created_at ASC, fm.id ASC", limit)
+    return {"flags": [flag_payload(r) for r in rows]}
 
-    return {
-        "flags": [
-            {
-                "id": str(r["id"]),
-                "match_id": str(r["match_id"]),
-                "flag_reason": r["flag_reason"],
-                "flag_details": r["flag_details"],
-                "auto_invalidated": r["auto_invalidated"],
-                "player_steam_ids": r["player_steam_ids"],
-                "p1_name": r["p1_name"],
-                "p2_name": r["p2_name"],
-                "is_ranked": r["is_ranked"],
-                "duration_seconds": r["duration_seconds"] or r["match_duration"],
-                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-            }
-            for r in rows
-        ]
-    }
+
+@app.post("/api/v1/internal/recent-flags/ack", tags=["Internal"])
+async def acknowledge_recent_flag(
+    flag_id: UUID = Query(...),
+    evidence_revision: int = Query(..., ge=1),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Acknowledge only the evidence revision Discord actually accepted."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
+    acked = (await db.execute(text(
+        "UPDATE flagged_matches "
+        "SET discord_posted_at = COALESCE(discord_posted_at, NOW()) "
+        "WHERE id = :id AND discord_evidence_revision = :revision "
+        "RETURNING id"
+    ), {
+        "id": str(flag_id),
+        "revision": evidence_revision,
+    })).scalar_one_or_none()
+    if acked is None:
+        exists = (await db.execute(text(
+            "SELECT 1 FROM flagged_matches WHERE id = :id"
+        ), {"id": str(flag_id)})).scalar_one_or_none()
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Flag not found")
+        raise HTTPException(
+            status_code=409,
+            detail="Evidence changed before acknowledgement",
+        )
+    await db.commit()
+    return {"status": "acknowledged", "flag_id": str(acked)}
 
 
 # ── Anti-cheat detection ───────────────────────────────────────
@@ -1445,19 +1443,55 @@ async def _check_anti_cheat(
             False,
         ))
 
-    # 4. Macro suspicion (#50, advisory — flag only). The client counts
-    # 1-second windows whose gameplay-key event rate exceeded a sustained-
-    # superhuman threshold (25 events/s across WASD/arrows/space/mouse).
-    # A couple of suspect seconds can be frame-timing artifacts; a double-
-    # digit count across one match means a repeating input device.
-    if (report.local_macro_suspect_seconds or 0) >= 10:
+    # 4. Macro suspicion (#50, advisory — flag only). The elected reporter
+    # carries both its own windows and the opponent's cr_gstats snapshot, so
+    # either player can be attributed. Ten threshold-breaking seconds avoids
+    # one-off frame/input artifacts.
+    reporter_is_p1 = report.reported_by_steam_id == report.player1.steam_id
+    opponent_steam = p2.steam_id if reporter_is_p1 else p1.steam_id
+    macro_sides = [
+        (
+            report.reported_by_steam_id,
+            report.local_macro_suspect_seconds,
+            report.local_keys_pressed,
+            report.local_active_seconds,
+            report.local_macro_peak_kps,
+            report.local_macro_peak_cps,
+            report.local_macro_peak_eps,
+            report.local_macro_timeline,
+            "local sampler",
+        ),
+        (
+            opponent_steam,
+            report.opp_macro_suspect_seconds,
+            report.opp_keys_pressed,
+            report.opp_active_seconds,
+            report.opp_macro_peak_kps,
+            report.opp_macro_peak_cps,
+            report.opp_macro_peak_eps,
+            report.opp_macro_timeline,
+            "peer cr_gstats snapshot",
+        ),
+    ]
+    for (suspect_steam, suspect_seconds, keys_pressed, active_seconds,
+         peak_kps, peak_cps, peak_eps, suspect_windows, evidence_source) in macro_sides:
+        if (suspect_seconds or 0) < 10:
+            continue
         flags.append((
             "suspected_macro",
             {
-                "reporter_steam": report.reported_by_steam_id,
-                "macro_suspect_seconds": report.local_macro_suspect_seconds,
-                "keys_pressed": report.local_keys_pressed or 0,
-                "active_seconds": report.local_active_seconds or 0,
+                "suspect_steam": suspect_steam,
+                # Historical formatter compatibility.
+                "reporter_steam": suspect_steam,
+                "macro_suspect_seconds": suspect_seconds,
+                "keys_pressed": keys_pressed or 0,
+                "active_seconds": active_seconds or 0,
+                "peak_keys_per_second": peak_kps,
+                "peak_clicks_per_second": peak_cps,
+                "peak_events_per_second": peak_eps,
+                "suspect_windows": suspect_windows or "",
+                "threshold_events_per_second": 25,
+                "evidence_source": evidence_source,
             },
             False,
         ))
@@ -1639,6 +1673,265 @@ async def _check_fps_lag_flags(
 
 
 # ── Routes: Match Submission ───────────────────────────────────
+
+@app.post("/api/v1/matches/macro-evidence", tags=["Matches"])
+async def submit_macro_evidence(
+    request: Request,
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Attach a participant's exact local macro windows to its just-recorded
+    1v1 match. Each client sends this independently, so the elected reporter
+    does not need to receive the final Photon property before game-over."""
+    reporter_steam = str(payload.get("reporter_steam_id") or "")
+    p1_steam = str(payload.get("p1_steam_id") or "")
+    p2_steam = str(payload.get("p2_steam_id") or "")
+    room_id = str(payload.get("photon_room_id") or "")
+    started_at_text = str(payload.get("match_started_at") or "")
+    timeline = str(payload.get("suspect_windows") or "")
+    sig = str(payload.get("hmac_signature") or "")
+    shared_token_key_present = "shared_game_token" in payload
+    shared_token_value = payload.get("shared_game_token", False)
+    if (shared_token_key_present
+            and not isinstance(shared_token_value, bool)):
+        raise HTTPException(400, "Invalid shared game token marker")
+    shared_game_token = bool(shared_token_value)
+    try:
+        p1_rounds = int(payload.get("p1_rounds_won"))
+        p2_rounds = int(payload.get("p2_rounds_won"))
+        duration_seconds = int(payload.get("duration_seconds"))
+        suspect_seconds = int(payload.get("macro_suspect_seconds"))
+        peak_kps = int(payload.get("peak_keys_per_second"))
+        peak_cps = int(payload.get("peak_clicks_per_second"))
+        peak_eps = int(payload.get("peak_events_per_second"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid macro evidence counters")
+
+    if (not _re.fullmatch(r"\d{15,20}", p1_steam)
+            or not _re.fullmatch(r"\d{15,20}", p2_steam)
+            or reporter_steam not in (p1_steam, p2_steam)):
+        raise HTTPException(400, "Reporter must be a match participant")
+    if not room_id or len(room_id) > 64:
+        raise HTTPException(400, "Invalid match room id")
+    if not _re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+        started_at_text,
+    ):
+        raise HTTPException(400, "Invalid match start time")
+    try:
+        direct_started_at = datetime.strptime(
+            started_at_text, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(400, "Invalid match start time")
+    now_utc = datetime.now(timezone.utc)
+    if (direct_started_at < now_utc - timedelta(days=7)
+            or direct_started_at > now_utc + timedelta(days=1)
+            or not 10 <= duration_seconds <= 7200):
+        raise HTTPException(400, "Invalid match timing")
+    if not (0 <= p1_rounds <= 5 and 0 <= p2_rounds <= 5
+            and p1_rounds != p2_rounds):
+        raise HTTPException(400, "Invalid final round score")
+    if not (10 <= suspect_seconds <= 3600
+            and 0 <= peak_kps <= 32767
+            and 0 <= peak_cps <= 32767
+            and 25 <= peak_eps <= 32767):
+        raise HTTPException(400, "Invalid macro evidence range")
+    if (len(timeline) > 1024
+            or not _re.fullmatch(r"\d+:\d+:\d+(?:,\d+:\d+:\d+)*", timeline)):
+        raise HTTPException(400, "Invalid macro evidence timeline")
+
+    room_hash = hashlib.sha256(room_id.encode("utf-8")).hexdigest()
+    started_hash = hashlib.sha256(
+        started_at_text.encode("utf-8")
+    ).hexdigest()
+    timeline_hash = hashlib.sha256(timeline.encode("utf-8")).hexdigest()
+    canonical_prefix = (
+        f"macro-evidence:{reporter_steam}:{p1_steam}:{p2_steam}:{room_hash}:"
+        f"{started_hash}:{duration_seconds}:"
+    )
+    # Preserve the pre-capability canonical for queued development builds that
+    # omitted this field. Current clients sign the marker so evidence records
+    # retain trustworthy shared-token provenance.
+    canonical = (
+        canonical_prefix
+        + (f"{1 if shared_game_token else 0}:"
+           if shared_token_key_present else "")
+        + f"{p1_rounds}:{p2_rounds}:"
+        + f"{suspect_seconds}:{peak_kps}:{peak_cps}:"
+        + f"{peak_eps}:{timeline_hash}"
+    )
+    evidence_fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    direct_details = {
+        "suspect_steam": reporter_steam,
+        "reporter_steam": reporter_steam,
+        "macro_suspect_seconds": suspect_seconds,
+        "peak_keys_per_second": peak_kps,
+        "peak_clicks_per_second": peak_cps,
+        "peak_events_per_second": peak_eps,
+        "suspect_windows": timeline,
+        "match_started_at": started_at_text,
+        "duration_seconds": duration_seconds,
+        "shared_game_token": shared_game_token,
+        "threshold_events_per_second": 25,
+        "evidence_source": "direct signed local sampler",
+        "evidence_fingerprint": evidence_fingerprint,
+    }
+    if not _artist_hmac_ok(sig, canonical):
+        raise HTTPException(403, "Invalid signature")
+    await _check_steam_session(request, reporter_steam, db)
+    _presence_touch(reporter_steam)
+
+    # Lost-response retry after a successful attach. This lookup remains valid
+    # after the exact match leaves any timing window.
+    prior_attach = (await db.execute(text(
+        "SELECT id, match_id FROM flagged_matches "
+        "WHERE flag_reason = 'suspected_macro' "
+        "  AND flag_details->>'evidence_fingerprint' = :fingerprint "
+        "LIMIT 1"
+    ), {"fingerprint": evidence_fingerprint})).mappings().first()
+    if prior_attach is not None:
+        return {
+            "status": "already_recorded",
+            "match_id": str(prior_attach["match_id"]),
+            "flag_id": str(prior_attach["id"]),
+        }
+
+    players = (await db.execute(
+        select(Player).where(Player.steam_id.in_([p1_steam, p2_steam]))
+    )).scalars().all()
+    by_steam = {p.steam_id: p for p in players}
+    if p1_steam not in by_steam or p2_steam not in by_steam:
+        raise HTTPException(409, "Match is not recorded yet")
+
+    # Evidence attribution is exact-only. Cross-client wall clocks can have
+    # arbitrary skew, so even a narrow "nearby start/duration" fallback can map
+    # a rematch to a previous same-score game. Current clients negotiate a
+    # shared per-game Photon token; mixed-version evidence attaches only when
+    # its exact legacy room ID matches the elected reporter's ID.
+    identity_filters = (
+        Match.player1_id == by_steam[p1_steam].id,
+        Match.player2_id == by_steam[p2_steam].id,
+        Match.p1_rounds_won == p1_rounds,
+        Match.p2_rounds_won == p2_rounds,
+    )
+    match = (await db.execute(
+        select(Match).where(
+            *identity_filters,
+            Match.photon_room_id == room_id,
+        ).limit(1).with_for_update()
+    )).scalar_one_or_none()
+    if match is None:
+        # The normal reporter often races this request. A 409 deliberately
+        # engages the client's bounded retry loop.
+        raise HTTPException(409, "Match is not recorded yet")
+
+    # The first fingerprint check happens before correlation. Recheck after
+    # acquiring the Match row lock so two simultaneous identical deliveries
+    # cannot both pass the pre-lock lookup and create duplicate flags.
+    prior_attach = (await db.execute(text(
+        "SELECT id, match_id FROM flagged_matches "
+        "WHERE flag_reason = 'suspected_macro' "
+        "  AND flag_details->>'evidence_fingerprint' = :fingerprint "
+        "LIMIT 1"
+    ), {"fingerprint": evidence_fingerprint})).mappings().first()
+    if prior_attach is not None:
+        return {
+            "status": "already_recorded",
+            "match_id": str(prior_attach["match_id"]),
+            "flag_id": str(prior_attach["id"]),
+        }
+
+    existing_flag = (await db.execute(text(
+        "SELECT id FROM flagged_matches "
+        "WHERE match_id = :mid AND flag_reason = 'suspected_macro' "
+        "  AND COALESCE(flag_details->>'suspect_steam', "
+        "               flag_details->>'reporter_steam') = :sid "
+        "ORDER BY (reviewed_at IS NULL) DESC, created_at DESC "
+        "LIMIT 1"
+    ), {"mid": match.id, "sid": reporter_steam})).mappings().first()
+    if existing_flag is not None:
+        # Lock and inspect the live review state. An admin may have reviewed the
+        # row after the lookup above while this request waited on its row lock.
+        flag = (await db.execute(
+            select(FlaggedMatch)
+            .where(FlaggedMatch.id == existing_flag["id"])
+            .with_for_update()
+        )).scalar_one_or_none()
+        if flag is not None and flag.reviewed_at is None:
+            # A reporter-carried peer snapshot can arrive first, but it is
+            # capped and can be one bucket stale. Merge the participant's signed
+            # local evidence into it and requeue Discord.
+            #
+            # The merge must never WEAKEN what the peer already captured. The
+            # peer snapshot is relayed mid-match over the cr_gstats heartbeat,
+            # while this submission is built at match end on the suspect's own
+            # machine — so a blind dict.update() would let a tampered client
+            # replace an incriminating captured peak with clean end-of-match
+            # numbers. Peaks/durations therefore take the MAX of the two, and
+            # the longer suspect-window timeline wins; only descriptive fields
+            # are overwritten. Both sources are recorded for the admin.
+            merged_details = (
+                dict(flag.flag_details)
+                if isinstance(flag.flag_details, dict) else {}
+            )
+
+            def _keep_stronger(key: str):
+                old_v, new_v = merged_details.get(key), direct_details.get(key)
+                try:
+                    if old_v is not None and new_v is not None:
+                        return max(float(old_v), float(new_v)) == float(old_v)
+                except (TypeError, ValueError):
+                    pass
+                return False
+
+            preserved = {
+                k: merged_details[k]
+                for k in ("macro_suspect_seconds", "peak_keys_per_second",
+                          "peak_clicks_per_second", "peak_events_per_second",
+                          "duration_seconds")
+                if _keep_stronger(k)
+            }
+            old_windows = merged_details.get("suspect_windows") or ""
+            new_windows = direct_details.get("suspect_windows") or ""
+            prior_source = merged_details.get("evidence_source")
+            merged_details.update(direct_details)
+            merged_details.update(preserved)
+            if len(str(old_windows)) > len(str(new_windows)):
+                merged_details["suspect_windows"] = old_windows
+            if preserved or len(str(old_windows)) > len(str(new_windows)):
+                merged_details["evidence_source"] = (
+                    f"{direct_details.get('evidence_source')} + retained peer-captured peaks"
+                )
+                merged_details["peer_evidence_source"] = prior_source
+            flag.flag_details = merged_details
+            flag.discord_posted_at = None
+            await db.commit()
+            return {
+                "status": "evidence_upgraded",
+                "match_id": str(match.id),
+                "flag_id": str(flag.id),
+            }
+        if flag is not None:
+            # Preserve the completed audit decision and open a fresh review
+            # item for materially stronger evidence that arrived afterward.
+            direct_details["supersedes_reviewed_flag_id"] = str(flag.id)
+    flag = FlaggedMatch(
+        match_id=match.id,
+        series_id=match.series_id,
+        player_steam_ids=[p1_steam, p2_steam],
+        flag_reason="suspected_macro",
+        flag_details=direct_details,
+        auto_invalidated=False,
+    )
+    db.add(flag)
+    await db.commit()
+    return {
+        "status": "recorded",
+        "match_id": str(match.id),
+        "flag_id": str(flag.id),
+    }
+
 
 @app.post("/api/v1/matches", response_model=MatchResponse, tags=["Matches"])
 async def submit_match(report: MatchReport, request: Request, db: AsyncSession = Depends(get_db)):
@@ -1862,6 +2155,10 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         local_keys_pressed=report.local_keys_pressed if report.local_macro_suspect_seconds is not None else None,
         local_active_seconds=report.local_active_seconds if report.local_macro_suspect_seconds is not None else None,
         local_macro_suspect_seconds=report.local_macro_suspect_seconds,
+        local_macro_peak_kps=report.local_macro_peak_kps,
+        local_macro_peak_cps=report.local_macro_peak_cps,
+        local_macro_peak_eps=report.local_macro_peak_eps,
+        local_macro_timeline=((report.local_macro_timeline or "")[:1024] or None),
         photon_room_id=report.photon_room_id,
         game_version=report.game_version,
         region=report.region,
@@ -2172,29 +2469,55 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # ── Server-side speedhack flag (advisory) ──────────────────────────
         # A Cheat-Engine-style speedhack speeds the GAME clock — and the client's
         # own reference clock with it — so client-reported match_duration is
-        # untrustworthy. The SERVER's wall clock can't be sped up by a client, so
-        # series.created_at→now is the unfakeable baseline. Only meaningful when
-        # the series existed BEFORE this report (an inline-created series has
-        # created_at≈now → no baseline). Conservative floor (20s/game) so a false
-        # positive is near-impossible; FLAG only (no auto-invalidate) → it just
-        # pings #scr-admin via the existing flagged_matches poller for review.
+        # untrustworthy. Measure between server receipt times instead. A series
+        # row created by game 1 does not include game 1's duration, so using
+        # series.created_at while dividing by every series win produces false
+        # positives. The first persisted match is the baseline; only games whose
+        # full interval is observed after it count toward the threshold.
         if not series_was_new:
             try:
-                games_played = series.p1_series_wins + series.p2_series_wins
-                elapsed = (datetime.now(timezone.utc) - series.created_at).total_seconds()
-                MIN_SEC_PER_GAME = 20.0
-                if games_played >= 1 and 0 < elapsed < games_played * MIN_SEC_PER_GAME:
-                    db.add(FlaggedMatch(
-                        match_id=match.id,
-                        series_id=series.id,
-                        player_steam_ids=[p1.steam_id, p2.steam_id],
-                        flag_reason="suspected_speedhack",
-                        flag_details=f"{games_played} game(s) in {elapsed:.0f}s server wall-time "
-                                     f"(below {MIN_SEC_PER_GAME:.0f}s/game floor)",
-                        auto_invalidated=False,
-                    ))
-                    print(f"[ANTICHEAT] suspected_speedhack series={series.id} "
-                          f"{games_played} games in {elapsed:.0f}s")
+                prior_matches = (await db.execute(
+                    select(Match.id, Match.ended_at)
+                    .where(Match.series_id == series.id, Match.id != match.id)
+                    .order_by(Match.ended_at.asc(), Match.id.asc())
+                )).all()
+                if prior_matches:
+                    baseline_at = prior_matches[0].ended_at
+                    elapsed = (
+                        datetime.now(timezone.utc) - baseline_at
+                    ).total_seconds()
+                    observed_games = len(prior_matches)
+                    MIN_SEC_PER_GAME = 20.0
+                    if 0 < elapsed < observed_games * MIN_SEC_PER_GAME:
+                        observed_ids = [
+                            str(r.id) for r in prior_matches[1:]
+                        ] + [str(match.id)]
+                        db.add(FlaggedMatch(
+                            match_id=match.id,
+                            series_id=series.id,
+                            player_steam_ids=[p1.steam_id, p2.steam_id],
+                            flag_reason="suspected_speedhack",
+                            flag_details={
+                                "observed_games": observed_games,
+                                "baseline_match_id": str(prior_matches[0].id),
+                                "observed_match_ids": observed_ids,
+                                "related_match_ids": [
+                                    str(prior_matches[0].id)
+                                ] + observed_ids,
+                                "server_wall_seconds": round(elapsed, 1),
+                                "minimum_seconds_per_game": MIN_SEC_PER_GAME,
+                                "description": (
+                                    f"{observed_games} fully observed game(s) in "
+                                    f"{elapsed:.0f}s server wall-time "
+                                    f"(below {MIN_SEC_PER_GAME:.0f}s/game floor)"
+                                ),
+                            },
+                            auto_invalidated=False,
+                        ))
+                        print(
+                            f"[ANTICHEAT] suspected_speedhack series={series.id} "
+                            f"{observed_games} observed games in {elapsed:.0f}s"
+                        )
             except Exception as _sx:
                 print(f"[ANTICHEAT] speedhack check error: {_sx}")
 
@@ -6162,8 +6485,15 @@ async def list_shop_items(steam_id: str | None = Query(None), db: AsyncSession =
     """Always-available items + (future) today's rotation pick. If steam_id is
     provided, annotates each item with 'owned' so the UI can hide Buy buttons
     for already-owned items."""
+    # catalog_ready gate (learning #163): approved community art whose PNG
+    # hasn't shipped in the client yet must not surface here — it can't render
+    # (blank swatch) and Buy would 409. It stays visible to its artist on the
+    # Artist tab ("awaiting mod update") until the release that ships its art
+    # flips catalog_ready. House/existing items default catalog_ready = true.
     rows = (await db.execute(
-        select(ShopItem).where(ShopItem.rotation_pool.is_(None)).order_by(ShopItem.price)
+        select(ShopItem)
+        .where(ShopItem.rotation_pool.is_(None), ShopItem.catalog_ready.is_(True))
+        .order_by(ShopItem.price)
     )).scalars().all()
 
     owned_ids: set[int] = set()
@@ -6241,11 +6571,12 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
                             batches: int = Query(0, ge=0, le=4),
                             db: AsyncSession = Depends(get_db)):
     """Most recently added shop items, for the Home tab's 'newest cosmetics'
-    panel (v1.33). Excludes achievement-pool items. Not-yet-opened artist
-    items (stock_limit = -1) ARE included with on_sale=false (July 17 round
-    4 — Sid: a "newest cosmetics" panel that can't show a brand-new drop
-    until the artist opens sales is backwards; the Shop tab already lists
-    them as not-opened, so the showcase teases them as "coming soon").
+    panel (v1.33). Excludes achievement-pool items and unpublished community
+    art (catalog_ready = false — its PNG hasn't shipped in the client yet, so
+    it would render as a blank swatch). Shipped-but-not-yet-opened items ARE
+    included with on_sale=false so the Home panel teases them as 'coming soon'
+    (July 17 round 4 — Sid: a 'newest' panel that can't show a brand-new drop
+    until the artist opens sales is backwards; a shipped item renders fine).
     batches > 0 restricts the result to the N most recent cosmetic-update
     days (items ship in batches; grouping by day recovers the batch) — the
     Home tab shows the last two. Key order is load-bearing for the mod's
@@ -6260,11 +6591,13 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
         FROM shop_items si
         LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
         WHERE si.rotation_pool IS NULL
+          AND si.catalog_ready
           AND (:batches = 0 OR COALESCE(si.released_at, si.created_at)::date IN (
                 SELECT d FROM (
                     SELECT DISTINCT COALESCE(released_at, created_at)::date AS d
                     FROM shop_items
                     WHERE rotation_pool IS NULL
+                      AND catalog_ready
                     ORDER BY d DESC LIMIT :batches
                 ) recent_days))
         ORDER BY COALESCE(si.released_at, si.created_at) DESC
@@ -6341,6 +6674,8 @@ async def purchase_item(
     item = (await db.execute(select(ShopItem).where(ShopItem.sku == sku))).scalar_one_or_none()
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found")
+    if not getattr(item, "catalog_ready", True):
+        raise HTTPException(status_code=409, detail="This cosmetic is approved but has not shipped in the mod yet")
     # Achievement-gated items (Sid Slayer / Stan Slayer titles) can't be
     # bought — they're granted by their achievement. rotation_pool doubles as
     # the gate marker; these items are also hidden from /shop/items.
@@ -7668,7 +8003,8 @@ async def artist_items(steam_id: str, db: AsyncSession = Depends(get_db)):
     if not await _is_artist(db, steam_id):
         raise HTTPException(status_code=403, detail="Not an artist account")
     rows = (await db.execute(text(
-        "SELECT si.id, si.sku, si.kind, si.name, si.description, si.price, si.rarity, si.stock_limit, "
+        "SELECT si.id, si.sku, si.kind, si.name, si.description, si.price, si.rarity, "
+        "       si.stock_limit, si.catalog_ready, "
         "       COALESCE(pi.n, 0) AS sold, COALESCE(pi.gifted, 0) AS gifted, "
         "       COALESCE(roy.earned, 0) AS earned "
         "FROM shop_items si "
@@ -7696,6 +8032,7 @@ async def artist_items(steam_id: str, db: AsyncSession = Depends(get_db)):
                 "description": r["description"] or "",
                 "price": r["price"], "rarity": r["rarity"],
                 "stock_limit": r["stock_limit"] or 0,
+                "catalog_ready": bool(r["catalog_ready"]),
                 "sold": int(r["sold"]), "gifted": int(r["gifted"]),
                 "earned": int(r["earned"]),
             } for r in rows
@@ -7840,6 +8177,26 @@ async def list_artists(db: AsyncSession = Depends(get_db)):
 COSMETIC_SLOTS = {"eyes", "mouth", "detail"}
 COSMETIC_MAX_B64 = 1_600_000          # ~1.2 MB decoded — 512px flat art is ~50-300 KB
 COSMETIC_MAX_PENDING_PER_ARTIST = 5
+COSMETIC_SCALE_MIN = 0.50
+COSMETIC_SCALE_MAX = 2.25
+COSMETIC_OFFSET_RADIUS_MAX = 4.50
+
+
+def _validated_cosmetic_placement(scale, offset_x, offset_y):
+    """Validate and quantize CharacterItem defaults used by the client catalog."""
+    try:
+        scale = float(scale)
+        offset_x = float(offset_x)
+        offset_y = float(offset_y)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="scale and offsets must be numbers")
+    if not all(math.isfinite(v) for v in (scale, offset_x, offset_y)):
+        raise HTTPException(status_code=400, detail="scale and offsets must be finite")
+    if scale < COSMETIC_SCALE_MIN or scale > COSMETIC_SCALE_MAX:
+        raise HTTPException(status_code=400, detail="render_scale must be between 0.50 and 2.25")
+    if math.hypot(offset_x, offset_y) > COSMETIC_OFFSET_RADIUS_MAX + 0.0001:
+        raise HTTPException(status_code=400, detail="placement is outside the character editor limit")
+    return round(scale, 2), round(offset_x, 3), round(offset_y, 3)
 
 
 def _png_dims_and_alpha(data: bytes):
@@ -7860,15 +8217,52 @@ def _png_dims_and_alpha(data: bytes):
 
 @app.post("/api/v1/artist/submit-cosmetic", tags=["Artist"])
 async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
-    """HMAC signs 'artist:{steam_id}:submit:{slot}:{len(png_base64)}' — the
-    length pins the payload without name-encoding ambiguity."""
+    """v2 signs payload hashes plus integer placement values. The legacy
+    length-only canonical remains accepted for already-shipped clients."""
     steam_id = str(payload.get("steam_id") or "")
     raw_name = str(payload.get("name") or "")
     name = _re.sub(r"[^A-Za-z0-9 '\-]", "", raw_name).strip()[:40]
     slot = str(payload.get("slot") or "").lower().strip()
     b64 = str(payload.get("png_base64") or "")
     sig = str(payload.get("sig") or "")
-    if not _artist_hmac_ok(sig, f"artist:{steam_id}:submit:{slot}:{len(b64)}"):
+    try:
+        signature_version = int(payload.get("signature_version") or 1)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid signature version")
+    submission_fingerprint = None
+    if signature_version == 2:
+        try:
+            scale_centi = int(payload["scale_centi"])
+            offset_x_milli = int(payload["offset_x_milli"])
+            offset_y_milli = int(payload["offset_y_milli"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Signed placement integers are required")
+        render_scale, render_offset_x, render_offset_y = _validated_cosmetic_placement(
+            scale_centi / 100.0, offset_x_milli / 1000.0, offset_y_milli / 1000.0)
+        request_id = str(payload.get("upload_request_id") or "").lower()
+        if not _re.fullmatch(r"[0-9a-f]{32}", request_id):
+            raise HTTPException(status_code=400, detail="Valid upload_request_id is required")
+        name_hash = hashlib.sha256(raw_name.encode("utf-8")).hexdigest()
+        png_hash = hashlib.sha256(b64.encode("utf-8")).hexdigest()
+        canonical = (
+            f"artist:{steam_id}:submit-v2:{request_id}:{slot}:{len(b64)}:{scale_centi}:"
+            f"{offset_x_milli}:{offset_y_milli}:{name_hash}:{png_hash}"
+        )
+        submission_fingerprint = hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest()
+    elif signature_version == 1:
+        # Compatibility for already-shipped clients. New clients never send
+        # this signature, so removing v2 fields cannot downgrade their request.
+        render_scale, render_offset_x, render_offset_y = _validated_cosmetic_placement(
+            payload.get("render_scale", 1.0),
+            payload.get("render_offset_x", 0.0),
+            payload.get("render_offset_y", 0.0),
+        )
+        canonical = f"artist:{steam_id}:submit:{slot}:{len(b64)}"
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported signature version")
+    if not _artist_hmac_ok(sig, canonical):
         raise HTTPException(status_code=403, detail="Invalid signature")
     if not await _is_artist(db, steam_id):
         raise HTTPException(status_code=403, detail="Not an artist account")
@@ -7878,6 +8272,13 @@ async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = D
         raise HTTPException(status_code=400, detail="name too short (letters/numbers/spaces only)")
     if not b64 or len(b64) > COSMETIC_MAX_B64:
         raise HTTPException(status_code=400, detail="PNG missing or too large (1 MB max)")
+    if submission_fingerprint is not None:
+        existing_id = (await db.execute(text(
+            "SELECT id FROM cosmetic_submissions "
+            "WHERE submission_fingerprint = :f AND artist_steam_id = :s"
+        ), {"f": submission_fingerprint, "s": steam_id})).scalar_one_or_none()
+        if existing_id is not None:
+            return {"status": "already_submitted", "id": existing_id}
     try:
         data = base64.b64decode(b64, validate=True)
     except Exception:
@@ -7891,15 +8292,32 @@ async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = D
     if not has_alpha:
         raise HTTPException(status_code=400, detail="PNG has no transparency layer — export with alpha")
     pending = (await db.execute(text(
-        "SELECT COUNT(*) FROM cosmetic_submissions WHERE artist_steam_id = :s AND status = 'pending'"
+        "SELECT COUNT(*) FROM cosmetic_submissions WHERE artist_steam_id = :s "
+        "AND (status = 'pending' OR (status = 'approved' AND placement_status = 'pending'))"
     ), {"s": steam_id})).scalar() or 0
     if pending >= COSMETIC_MAX_PENDING_PER_ARTIST:
         raise HTTPException(status_code=429, detail=f"{pending} submissions already awaiting review — wait for those first")
     new_id = (await db.execute(text(
-        "INSERT INTO cosmetic_submissions (artist_steam_id, name, slot, png_data, png_bytes) "
-        "VALUES (:s, :n, :sl, :png, :b) RETURNING id"
-    ), {"s": steam_id, "n": name, "sl": slot, "png": data, "b": len(data)})).scalar()
-    await _artist_audit(db, steam_id, "submit-cosmetic", f"sub#{new_id}", f"{name} ({slot}, {len(data)}b)")
+        "INSERT INTO cosmetic_submissions "
+        "(artist_steam_id, name, slot, png_data, png_bytes, render_scale, "
+        " render_offset_x, render_offset_y, submission_fingerprint) "
+        "VALUES (:s, :n, :sl, :png, :b, :sc, :ox, :oy, :f) "
+        "ON CONFLICT (submission_fingerprint) DO NOTHING RETURNING id"
+    ), {"s": steam_id, "n": name, "sl": slot, "png": data, "b": len(data),
+        "sc": render_scale, "ox": render_offset_x, "oy": render_offset_y,
+        "f": submission_fingerprint})).scalar()
+    if new_id is None and submission_fingerprint is not None:
+        # Concurrent retry: the unique fingerprint won between our pre-check
+        # and insert. Return the original row rather than minting a duplicate.
+        new_id = (await db.execute(text(
+            "SELECT id FROM cosmetic_submissions "
+            "WHERE submission_fingerprint = :f AND artist_steam_id = :s"
+        ), {"f": submission_fingerprint, "s": steam_id})).scalar_one()
+        return {"status": "already_submitted", "id": new_id}
+    await _artist_audit(
+        db, steam_id, "submit-cosmetic", f"sub#{new_id}",
+        f"{name} ({slot}, {len(data)}b, scale={render_scale:.2f}, "
+        f"offset={render_offset_x:.3f}:{render_offset_y:.3f})")
     await db.commit()
     print(f"[COSMETIC] submission #{new_id} '{name}' ({slot}) from {steam_id}")
     return {"status": "submitted", "id": new_id}
@@ -7914,16 +8332,287 @@ async def artist_my_submissions(
     if not _artist_hmac_ok(sig, f"artist:{steam_id}:my-submissions"):
         raise HTTPException(status_code=403, detail="Invalid signature")
     rows = (await db.execute(text(
-        "SELECT id, name, slot, status, review_note, shop_sku, created_at "
+        "SELECT id, name, slot, status, review_note, shop_sku, "
+        "       render_scale, render_offset_x, render_offset_y, placement_revision, "
+        "       placement_status, placement_review_note, approved_render_scale, "
+        "       approved_render_offset_x, approved_render_offset_y, "
+        "       approved_placement_revision, published_placement_revision, created_at "
         "FROM cosmetic_submissions WHERE artist_steam_id = :s "
-        "ORDER BY created_at DESC LIMIT 20"
+        "ORDER BY created_at DESC"
     ), {"s": steam_id})).mappings().all()
     return {"submissions": [
         {"id": r["id"], "name": r["name"], "slot": r["slot"], "status": r["status"],
          "review_note": r["review_note"] or "", "shop_sku": r["shop_sku"] or "",
+         "render_scale": float(r["render_scale"] or 1.0),
+         "render_offset_x": float(r["render_offset_x"] or 0.0),
+         "render_offset_y": float(r["render_offset_y"] or 0.0),
+         "placement_revision": int(r["placement_revision"] or 1),
+         "placement_status": r["placement_status"] or "pending",
+         "placement_review_note": r["placement_review_note"] or "",
+         "approved_render_scale": (float(r["approved_render_scale"])
+                                   if r["approved_render_scale"] is not None else None),
+         "approved_render_offset_x": (float(r["approved_render_offset_x"])
+                                      if r["approved_render_offset_x"] is not None else None),
+         "approved_render_offset_y": (float(r["approved_render_offset_y"])
+                                      if r["approved_render_offset_y"] is not None else None),
+         "approved_placement_revision": r["approved_placement_revision"],
+         "published_placement_revision": int(r["published_placement_revision"] or 0),
          "created_at": r["created_at"].isoformat() if r["created_at"] else ""}
         for r in rows
     ]}
+
+
+@app.get("/api/v1/artist/cosmetic-preview", tags=["Artist"])
+async def artist_cosmetic_preview(
+    steam_id: str = Query(...),
+    submission_id: int = Query(..., ge=1),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return one owned PNG on demand; keeping it out of my-submissions avoids
+    turning a status refresh into a multi-megabyte response."""
+    if not _artist_hmac_ok(sig, f"artist:{steam_id}:cosmetic-preview:{submission_id}"):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    row = (await db.execute(text(
+        "SELECT id, name, slot, status, review_note, shop_sku, png_data, png_bytes, "
+        "       render_scale, render_offset_x, render_offset_y, placement_revision, "
+        "       placement_status, placement_review_note, approved_render_scale, "
+        "       approved_render_offset_x, approved_render_offset_y, "
+        "       approved_placement_revision, published_placement_revision, created_at "
+        "FROM cosmetic_submissions "
+        "WHERE id = :i AND artist_steam_id = :s"
+    ), {"i": submission_id, "s": steam_id})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Cosmetic submission not found")
+    return {
+        "id": row["id"], "name": row["name"], "slot": row["slot"],
+        "status": row["status"], "review_note": row["review_note"] or "",
+        "shop_sku": row["shop_sku"] or "", "png_bytes": row["png_bytes"],
+        "render_scale": float(row["render_scale"] or 1.0),
+        "render_offset_x": float(row["render_offset_x"] or 0.0),
+        "render_offset_y": float(row["render_offset_y"] or 0.0),
+        "placement_revision": int(row["placement_revision"] or 1),
+        "placement_status": row["placement_status"] or "pending",
+        "placement_review_note": row["placement_review_note"] or "",
+        "approved_render_scale": (float(row["approved_render_scale"])
+                                  if row["approved_render_scale"] is not None else None),
+        "approved_render_offset_x": (float(row["approved_render_offset_x"])
+                                     if row["approved_render_offset_x"] is not None else None),
+        "approved_render_offset_y": (float(row["approved_render_offset_y"])
+                                     if row["approved_render_offset_y"] is not None else None),
+        "approved_placement_revision": row["approved_placement_revision"],
+        "published_placement_revision": int(row["published_placement_revision"] or 0),
+        "created_at": row["created_at"].isoformat() if row["created_at"] else "",
+        "png_base64": base64.b64encode(row["png_data"]).decode("ascii"),
+    }
+
+
+@app.post("/api/v1/artist/cosmetic-placement", tags=["Artist"])
+async def artist_cosmetic_placement(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
+    """Submit a placement revision. The old approved snapshot remains effective
+    until an admin approves this revision and it ships in a client update."""
+    steam_id = str(payload.get("steam_id") or "")
+    try:
+        submission_id = int(payload.get("submission_id") or 0)
+        expected_revision = int(payload.get("expected_revision") or 0)
+        scale_centi = int(payload.get("scale_centi") or 0)
+        offset_x_milli = int(payload.get("offset_x_milli") or 0)
+        offset_y_milli = int(payload.get("offset_y_milli") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid placement request")
+    if submission_id < 1 or expected_revision < 1:
+        raise HTTPException(status_code=400, detail="Invalid placement revision")
+    sig = str(payload.get("sig") or "")
+    canonical = (
+        f"artist:{steam_id}:cosmetic-placement:{submission_id}:{expected_revision}:"
+        f"{scale_centi}:{offset_x_milli}:{offset_y_milli}"
+    )
+    if not _artist_hmac_ok(sig, canonical):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    scale, offset_x, offset_y = _validated_cosmetic_placement(
+        scale_centi / 100.0, offset_x_milli / 1000.0, offset_y_milli / 1000.0)
+    row = (await db.execute(text(
+        "SELECT id, name, status, placement_status, placement_revision "
+        "FROM cosmetic_submissions "
+        "WHERE id = :i AND artist_steam_id = :s FOR UPDATE"
+    ), {"i": submission_id, "s": steam_id})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Cosmetic submission not found")
+    if row["status"] == "denied":
+        raise HTTPException(status_code=409, detail="Denied artwork cannot be reopened by a placement change")
+    if int(row["placement_revision"] or 1) != expected_revision:
+        raise HTTPException(status_code=409, detail="Placement changed since this preview; reload it and try again")
+    if row["status"] == "approved" and row["placement_status"] != "pending":
+        pending = (await db.execute(text(
+            "SELECT COUNT(*) FROM cosmetic_submissions "
+            "WHERE artist_steam_id = :s AND id != :i "
+            "  AND (status = 'pending' OR (status = 'approved' AND placement_status = 'pending'))"
+        ), {"s": steam_id, "i": submission_id})).scalar() or 0
+        if pending >= COSMETIC_MAX_PENDING_PER_ARTIST:
+            raise HTTPException(status_code=429, detail="Too many cosmetic changes are already awaiting review")
+    next_revision = expected_revision + 1
+    await db.execute(text(
+        "UPDATE cosmetic_submissions "
+        "SET render_scale=:sc, render_offset_x=:ox, render_offset_y=:oy, "
+        "    placement_revision=:rev, placement_status='pending', "
+        "    placement_submitted_at=NOW(), "
+        "    placement_review_note=NULL, placement_reviewed_by=NULL, placement_reviewed_at=NULL "
+        "WHERE id=:i"
+    ), {"sc": scale, "ox": offset_x, "oy": offset_y,
+        "rev": next_revision, "i": submission_id})
+    await _artist_audit(
+        db, steam_id, "cosmetic-placement", f"sub#{submission_id}",
+        f"revision {next_revision}: scale={scale:.2f}, offset={offset_x:.3f}:{offset_y:.3f}")
+    await db.commit()
+    return {"status": "pending_review", "id": submission_id, "placement_revision": next_revision}
+
+
+@app.post("/api/v1/artist/catalog-cosmetic-placement", tags=["Artist"])
+async def artist_catalog_cosmetic_placement(
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Start the first placement revision for an artist-owned cosmetic that
+    shipped before cosmetic_submissions existed. The compiled client values
+    become approved/published revision 1; only the proposed revision 2 enters
+    review."""
+    steam_id = str(payload.get("steam_id") or "")
+    sku = str(payload.get("sku") or "").strip().lower()[:64]
+    slot = str(payload.get("slot") or "").strip().lower()
+    b64 = str(payload.get("png_base64") or "")
+    supplied_png_hash = str(payload.get("png_hash") or "").lower()
+    try:
+        published_scale_centi = int(payload.get("published_scale_centi") or 0)
+        published_offset_x_milli = int(payload.get("published_offset_x_milli") or 0)
+        published_offset_y_milli = int(payload.get("published_offset_y_milli") or 0)
+        proposed_scale_centi = int(payload.get("proposed_scale_centi") or 0)
+        proposed_offset_x_milli = int(payload.get("proposed_offset_x_milli") or 0)
+        proposed_offset_y_milli = int(payload.get("proposed_offset_y_milli") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid catalog placement request")
+
+    if slot not in COSMETIC_SLOTS or not sku.startswith(f"face_{slot}_"):
+        raise HTTPException(status_code=400, detail="Cosmetic slot does not match its catalog SKU")
+    if not b64 or len(b64) > COSMETIC_MAX_B64:
+        raise HTTPException(status_code=400, detail="PNG payload is missing or too large")
+    png_hash = hashlib.sha256(b64.encode("utf-8")).hexdigest()
+    if supplied_png_hash != png_hash:
+        raise HTTPException(status_code=400, detail="PNG hash does not match the payload")
+    canonical = (
+        f"artist:{steam_id}:catalog-placement:{sku}:{slot}:{len(b64)}:"
+        f"{published_scale_centi}:{published_offset_x_milli}:{published_offset_y_milli}:"
+        f"{proposed_scale_centi}:{proposed_offset_x_milli}:{proposed_offset_y_milli}:"
+        f"{png_hash}"
+    )
+    if not _artist_hmac_ok(str(payload.get("sig") or ""), canonical):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+
+    published_scale, published_offset_x, published_offset_y = _validated_cosmetic_placement(
+        published_scale_centi / 100.0,
+        published_offset_x_milli / 1000.0,
+        published_offset_y_milli / 1000.0,
+    )
+    proposed_scale, proposed_offset_x, proposed_offset_y = _validated_cosmetic_placement(
+        proposed_scale_centi / 100.0,
+        proposed_offset_x_milli / 1000.0,
+        proposed_offset_y_milli / 1000.0,
+    )
+    try:
+        png_data = base64.b64decode(b64, validate=True)
+        width, height, has_alpha = _png_dims_and_alpha(png_data)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid PNG data")
+    if width != 512 or height != 512 or not has_alpha:
+        raise HTTPException(
+            status_code=400,
+            detail="Published cosmetic source must be a transparent 512x512 PNG",
+        )
+
+    # The shop-row lock serializes lost-response retries and simultaneous clicks
+    # for the same SKU. A retry after commit returns the already-created bridge
+    # instead of opening a duplicate review.
+    item = (await db.execute(text(
+        "SELECT id, name, catalog_ready "
+        "FROM shop_items "
+        "WHERE sku=:k AND artist_steam_id=:s AND kind='face' "
+        "FOR UPDATE"
+    ), {"k": sku, "s": steam_id})).mappings().first()
+    if item is None:
+        raise HTTPException(status_code=404, detail="Artist-owned face cosmetic not found")
+    if not item["catalog_ready"]:
+        raise HTTPException(
+            status_code=409,
+            detail="This cosmetic has not shipped yet; adjust its existing submission instead",
+        )
+    existing = (await db.execute(text(
+        "SELECT id, placement_revision FROM cosmetic_submissions "
+        "WHERE shop_sku=:k AND artist_steam_id=:s "
+        "ORDER BY id DESC LIMIT 1"
+    ), {"k": sku, "s": steam_id})).mappings().first()
+    if existing is not None:
+        await db.commit()
+        return {
+            "status": "already_linked",
+            "id": int(existing["id"]),
+            "placement_revision": int(existing["placement_revision"] or 1),
+        }
+
+    pending = (await db.execute(text(
+        "SELECT COUNT(*) FROM cosmetic_submissions "
+        "WHERE artist_steam_id=:s "
+        "  AND (status='pending' OR (status='approved' AND placement_status='pending'))"
+    ), {"s": steam_id})).scalar() or 0
+    if pending >= COSMETIC_MAX_PENDING_PER_ARTIST:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many cosmetic changes are already awaiting review",
+        )
+
+    fingerprint = hashlib.sha256(f"catalog-placement:{sku}".encode("utf-8")).hexdigest()
+    new_id = (await db.execute(text(
+        "INSERT INTO cosmetic_submissions "
+        "(artist_steam_id, name, slot, png_data, png_bytes, status, review_note, "
+        " reviewed_at, shop_sku, render_scale, render_offset_x, render_offset_y, "
+        " placement_revision, approved_render_scale, approved_render_offset_x, "
+        " approved_render_offset_y, approved_placement_revision, "
+        " published_placement_revision, placement_status, placement_submitted_at, "
+        " submission_fingerprint) "
+        "VALUES "
+        "(:s, :n, :slot, :png, :bytes, 'approved', "
+        " 'Imported from the published client catalog.', NOW(), :sku, "
+        " :psc, :pox, :poy, 2, :bsc, :box, :boy, 1, 1, 'pending', NOW(), :fp) "
+        "RETURNING id"
+    ), {
+        "s": steam_id,
+        "n": str(item["name"] or sku)[:64],
+        "slot": slot,
+        "png": png_data,
+        "bytes": len(png_data),
+        "sku": sku,
+        "psc": proposed_scale,
+        "pox": proposed_offset_x,
+        "poy": proposed_offset_y,
+        "bsc": published_scale,
+        "box": published_offset_x,
+        "boy": published_offset_y,
+        "fp": fingerprint,
+    })).scalar_one()
+    await _artist_audit(
+        db,
+        steam_id,
+        "cosmetic-placement",
+        f"sub#{new_id}",
+        f"catalog bridge revision 2: scale={proposed_scale:.2f}, "
+        f"offset={proposed_offset_x:.3f}:{proposed_offset_y:.3f}",
+    )
+    await db.commit()
+    return {"status": "pending_review", "id": int(new_id), "placement_revision": 2}
 
 
 @app.get("/api/v1/admin/cosmetic-submissions", tags=["Admin"])
@@ -7936,20 +8625,107 @@ async def admin_cosmetic_submissions(
     a real preview. HMAC action 'cosmetic-subs', target 'list'."""
     await _require_admin(db, admin_steam_id, "cosmetic-subs", "list", sig)
     rows = (await db.execute(text(
-        "SELECT cs.id, cs.name, cs.slot, cs.png_data, cs.png_bytes, cs.created_at, "
+        "SELECT cs.id, cs.name, cs.slot, cs.status, cs.shop_sku, cs.png_data, cs.png_bytes, "
+        "       cs.render_scale, cs.render_offset_x, cs.render_offset_y, cs.placement_revision, "
+        "       cs.placement_status, cs.approved_render_scale, cs.approved_render_offset_x, "
+        "       cs.approved_render_offset_y, cs.approved_placement_revision, "
+        "       cs.published_placement_revision, cs.created_at, "
         "       cs.artist_steam_id, COALESCE(p.display_name, au.display_name, cs.artist_steam_id) AS artist_name "
         "FROM cosmetic_submissions cs "
         "LEFT JOIN artist_users au ON au.steam_id = cs.artist_steam_id "
         "LEFT JOIN players p ON p.steam_id = cs.artist_steam_id "
-        "WHERE cs.status = 'pending' ORDER BY cs.created_at LIMIT 10"
+        "WHERE (cs.status = 'pending' "
+        "   OR (cs.status = 'approved' AND cs.placement_status = 'pending')) "
+        # Order by when the CURRENT proposal arrived: a placement tweak on an
+        # old item must not keep its original upload date and permanently hold
+        # a slot in this LIMIT 10 window ahead of brand-new art.
+        "ORDER BY COALESCE(cs.placement_submitted_at, cs.created_at) LIMIT 10"
     ))).mappings().all()
     return {"submissions": [
         {"id": r["id"], "name": r["name"], "slot": r["slot"], "png_bytes": r["png_bytes"],
          "artist_steam_id": r["artist_steam_id"], "artist_name": r["artist_name"],
+         "render_scale": float(r["render_scale"] or 1.0),
+         "render_offset_x": float(r["render_offset_x"] or 0.0),
+         "render_offset_y": float(r["render_offset_y"] or 0.0),
+         "placement_revision": int(r["placement_revision"] or 1),
+         "placement_status": r["placement_status"] or "pending",
+         "review_kind": "placement" if r["status"] == "approved" else "initial",
+         "shop_sku": r["shop_sku"] or "",
+         "approved_render_scale": (float(r["approved_render_scale"])
+                                   if r["approved_render_scale"] is not None else None),
+         "approved_render_offset_x": (float(r["approved_render_offset_x"])
+                                      if r["approved_render_offset_x"] is not None else None),
+         "approved_render_offset_y": (float(r["approved_render_offset_y"])
+                                      if r["approved_render_offset_y"] is not None else None),
+         "approved_placement_revision": r["approved_placement_revision"],
+         "published_placement_revision": int(r["published_placement_revision"] or 0),
          "created_at": r["created_at"].isoformat() if r["created_at"] else "",
          "png_base64": base64.b64encode(r["png_data"]).decode("ascii")}
         for r in rows
     ]}
+
+
+@app.get("/api/v1/admin/cosmetic-release-candidates", tags=["Admin"])
+async def admin_cosmetic_release_candidates(
+    admin_steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Read-only tracker for admin-approved art/placement revisions whose exact
+    values have not yet been copied into a released client catalog."""
+    await _require_admin(db, admin_steam_id, "cosmetic-releases", "list", sig)
+    rows = (await db.execute(text(
+        "SELECT c.id, c.shop_sku, c.name, c.slot, c.png_bytes, "
+        "       c.render_scale, c.render_offset_x, c.render_offset_y, "
+        "       c.placement_revision, c.published_placement_revision, "
+        "       cs.artist_steam_id, "
+        "       COALESCE(p.display_name, au.display_name, cs.artist_steam_id) AS artist_name, "
+        "       cs.placement_reviewed_at AS approved_at, si.catalog_ready "
+        "FROM cosmetic_release_candidates c "
+        "JOIN cosmetic_submissions cs ON cs.id=c.id "
+        "JOIN shop_items si ON si.sku=c.shop_sku "
+        "LEFT JOIN artist_users au ON au.steam_id=cs.artist_steam_id "
+        "LEFT JOIN players p ON p.steam_id=cs.artist_steam_id "
+        "ORDER BY cs.placement_reviewed_at DESC NULLS LAST, c.id"
+    ))).mappings().all()
+    return {"candidates": [
+        {
+            "id": int(r["id"]),
+            "shop_sku": r["shop_sku"],
+            "name": r["name"],
+            "slot": r["slot"],
+            "artist_steam_id": r["artist_steam_id"],
+            "artist_name": r["artist_name"],
+            "png_bytes": int(r["png_bytes"] or 0),
+            "render_scale": float(r["render_scale"]),
+            "render_offset_x": float(r["render_offset_x"]),
+            "render_offset_y": float(r["render_offset_y"]),
+            "placement_revision": int(r["placement_revision"]),
+            "published_placement_revision": int(r["published_placement_revision"] or 0),
+            "catalog_ready": bool(r["catalog_ready"]),
+            "approved_at": (
+                r["approved_at"].isoformat() if r["approved_at"] else ""
+            ),
+        }
+        for r in rows
+    ]}
+
+
+async def _queue_cosmetic_review_dm(
+    db: AsyncSession, steam_id: str, content: str, submission_id: int
+) -> None:
+    """A notification outage must not roll back a completed admin review.
+    The savepoint keeps the review + audit atomic while making the DM an
+    explicitly best-effort side effect."""
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "INSERT INTO pending_dms (steam_id, content) VALUES (:s, :c)"
+            ), {"s": steam_id, "c": content})
+    except Exception as ex:
+        print(
+            f"[COSMETIC] review #{submission_id} saved without DM notification: {ex}"
+        )
 
 
 @app.post("/api/v1/admin/cosmetic-review", tags=["Admin"])
@@ -7957,53 +8733,190 @@ async def admin_cosmetic_review(
     admin_steam_id: str = Query(...),
     submission_id: int = Query(...),
     action: str = Query(...),
+    expected_revision: int = Query(..., ge=1),
+    scale_centi: int = Query(..., ge=50, le=225),
+    offset_x_milli: int = Query(..., ge=-4500, le=4500),
+    offset_y_milli: int = Query(..., ge=-4500, le=4500),
     note: str = Query(""),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Approve/deny a submission. HMAC action 'cosmetic-review', target
-    '{submission_id}:{action}'. Approval creates the shop row born OUT OF
-    STOCK (stock_limit=-1); the art ships with the next mod bundle."""
-    await _require_admin(db, admin_steam_id, "cosmetic-review", f"{submission_id}:{action}", sig)
+    """Atomically review the shown placement revision. Initial approval mints
+    the shop row; later placement approval keeps that row and old live values."""
+    review_target = (
+        f"{submission_id}:{action}:{expected_revision}:"
+        f"{scale_centi}:{offset_x_milli}:{offset_y_milli}"
+    )
+    await _require_admin(db, admin_steam_id, "cosmetic-review", review_target, sig)
     if action not in ("approve", "deny"):
         raise HTTPException(status_code=400, detail="action must be approve or deny")
+    # A bare 500 here is undiagnosable: the container keeps only a short log
+    # window, so by the time the failure is reported the traceback is gone.
+    # Wrap the whole body and log the exception CLASS + message with the exact
+    # parameters, then re-raise so behaviour is unchanged.
+    try:
+        return await _admin_cosmetic_review_impl(
+            db, admin_steam_id, submission_id, action, expected_revision,
+            render_scale=None, note=note, review_target=review_target,
+            scale_centi=scale_centi, offset_x_milli=offset_x_milli,
+            offset_y_milli=offset_y_milli)
+    except HTTPException:
+        raise
+    except Exception as ex:
+        print(f"[COSMETIC] review FAILED sub#{submission_id} action={action} "
+              f"rev={expected_revision} admin={admin_steam_id}: "
+              f"{type(ex).__name__}: {ex}")
+        raise
+
+
+async def _admin_cosmetic_review_impl(
+    db, admin_steam_id, submission_id, action, expected_revision,
+    render_scale, note, review_target,
+    scale_centi, offset_x_milli, offset_y_milli,
+):
+    render_scale, render_offset_x, render_offset_y = _validated_cosmetic_placement(
+        scale_centi / 100.0, offset_x_milli / 1000.0, offset_y_milli / 1000.0)
     row = (await db.execute(text(
-        "SELECT id, artist_steam_id, name, slot FROM cosmetic_submissions "
-        "WHERE id = :i AND status = 'pending' FOR UPDATE"
+        "SELECT id, artist_steam_id, name, slot, status, shop_sku, "
+        "       placement_status, placement_revision "
+        "FROM cosmetic_submissions "
+        "WHERE id = :i "
+        "  AND (status = 'pending' OR (status = 'approved' AND placement_status = 'pending')) "
+        "FOR UPDATE"
     ), {"i": submission_id})).mappings().first()
     if row is None:
-        raise HTTPException(status_code=404, detail="No pending submission with that id")
+        raise HTTPException(status_code=404, detail="No pending cosmetic review with that id")
+    if int(row["placement_revision"] or 1) != expected_revision:
+        raise HTTPException(status_code=409, detail="Placement changed after this review opened; reload the queue")
+    is_placement_review = row["status"] == "approved"
     note = (note or "").strip()[:200]
     if action == "deny":
-        await db.execute(text(
-            "UPDATE cosmetic_submissions SET status='denied', review_note=:n, "
-            "reviewed_by=:a, reviewed_at=NOW() WHERE id=:i"
-        ), {"n": note or "denied", "a": admin_steam_id, "i": submission_id})
+        if not note:
+            raise HTTPException(status_code=400, detail="A denial reason is required")
+        if is_placement_review:
+            await db.execute(text(
+                "UPDATE cosmetic_submissions "
+                "SET placement_status='denied', placement_review_note=:n, "
+                "    placement_reviewed_by=:a, placement_reviewed_at=NOW() "
+                "WHERE id=:i"
+            ), {"n": note, "a": admin_steam_id, "i": submission_id})
+            dm_content = (
+                f'Your placement change for "{row["name"]}" was not approved. '
+                f"Your last approved placement remains active. Reason: {note}"
+            )
+            result_status = "placement_denied"
+        else:
+            # Distinct bind names per column: reviewed_by is text while
+            # placement_reviewed_by is varchar(20) (and review_note/
+            # placement_review_note likewise differ by declaration), so reusing
+            # ONE parameter across both targets asks PostgreSQL to deduce a
+            # single type for two different target types. Separate binds remove
+            # that inference entirely.
+            await db.execute(text(
+                "UPDATE cosmetic_submissions "
+                "SET status='denied', review_note=:n, reviewed_by=:a, reviewed_at=NOW(), "
+                "    placement_status='denied', placement_review_note=:pn, "
+                "    placement_reviewed_by=:pa, placement_reviewed_at=NOW() "
+                "WHERE id=:i"
+            ), {"n": note, "a": admin_steam_id,
+                "pn": note, "pa": admin_steam_id, "i": submission_id})
+            dm_content = f'Your cosmetic "{row["name"]}" was not approved. Reason: {note}'
+            result_status = "denied"
+        db.add(AdminAction(
+            admin_steam_id=admin_steam_id,
+            action="cosmetic-placement-deny" if is_placement_review else "cosmetic-deny",
+            target_steam_id=row["artist_steam_id"],
+            details={"submission_id": submission_id, "name": row["name"],
+                     "placement_revision": expected_revision, "reason": note},
+        ))
+        try:
+            await db.flush()
+        except Exception as ex:
+            print(f"[COSMETIC] review #{submission_id} core deny failed: {ex}")
+            raise
+        await _queue_cosmetic_review_dm(
+            db, row["artist_steam_id"], dm_content, submission_id
+        )
         await db.commit()
-        print(f"[COSMETIC] submission #{submission_id} denied by {admin_steam_id}")
-        return {"status": "denied", "id": submission_id}
-    # approve: mint the shop row (unique sku from the name).
-    slug = _re.sub(r"[^a-z0-9]+", "_", row["name"].lower()).strip("_")[:32] or f"sub{submission_id}"
-    sku = f"face_{row['slot']}_{slug}"
-    exists = (await db.execute(select(ShopItem.id).where(ShopItem.sku == sku))).scalar_one_or_none()
-    if exists is not None:
-        sku = f"{sku}_{submission_id}"
-    db.add(ShopItem(
-        sku=sku, kind="face", name=row["name"],
-        description=f"{row['slot'].capitalize()}: community cosmetic. Ships with the next mod update; equip in the Character editor.",
-        price=750, rarity="rare", preview_color="#7FE8C3",
-        artist_steam_id=row["artist_steam_id"], stock_limit=-1,
+        print(f"[COSMETIC] submission #{submission_id} {result_status} by {admin_steam_id}")
+        return {"status": result_status, "id": submission_id}
+
+    if is_placement_review:
+        sku = row["shop_sku"]
+        if not sku:
+            raise HTTPException(status_code=409, detail="Approved cosmetic has no linked shop item")
+    else:
+        # Initial approval mints one shop row. Placement reviews must never mint
+        # another row for the same art.
+        slug = _re.sub(r"[^a-z0-9]+", "_", row["name"].lower()).strip("_")[:32] or f"sub{submission_id}"
+        sku = f"face_{row['slot']}_{slug}"
+        exists = (await db.execute(select(ShopItem.id).where(ShopItem.sku == sku))).scalar_one_or_none()
+        if exists is not None:
+            sku = f"{sku}_{submission_id}"
+        db.add(ShopItem(
+            sku=sku, kind="face", name=row["name"],
+            description=f"{row['slot'].capitalize()}: community cosmetic. Ships with the next mod update; equip in the Character editor.",
+            price=750, rarity="rare", preview_color="#7FE8C3",
+            artist_steam_id=row["artist_steam_id"], stock_limit=-1, catalog_ready=False,
+        ))
+
+    if is_placement_review:
+        await db.execute(text(
+            "UPDATE cosmetic_submissions "
+            "SET render_scale=:sc, render_offset_x=:ox, render_offset_y=:oy, "
+            "    approved_render_scale=:sc, approved_render_offset_x=:ox, "
+            "    approved_render_offset_y=:oy, approved_placement_revision=:rev, "
+            "    placement_status='approved', placement_review_note=:n, "
+            "    placement_reviewed_by=:a, placement_reviewed_at=NOW() "
+            "WHERE id=:i"
+        ), {"sc": render_scale, "ox": render_offset_x, "oy": render_offset_y,
+            "rev": expected_revision, "n": note, "a": admin_steam_id, "i": submission_id})
+        dm_content = (
+            f'Your placement change for "{row["name"]}" was approved at '
+            f"{render_scale:.2f}x, offset {render_offset_x:.3f}:{render_offset_y:.3f}. "
+            "Your last published placement remains active until this revision ships in a mod update."
+        )
+        result_status = "placement_approved"
+    else:
+        await db.execute(text(
+            "UPDATE cosmetic_submissions "
+            "SET status='approved', review_note=:n, reviewed_by=:a, reviewed_at=NOW(), shop_sku=:k, "
+            "    render_scale=:sc, render_offset_x=:ox, render_offset_y=:oy, "
+            "    approved_render_scale=:sc, approved_render_offset_x=:ox, "
+            "    approved_render_offset_y=:oy, approved_placement_revision=:rev, "
+            "    placement_status='approved', placement_review_note=:pn, "
+            "    placement_reviewed_by=:pa, placement_reviewed_at=NOW() "
+            "WHERE id=:i"
+        ), {"n": note, "a": admin_steam_id, "pn": note, "pa": admin_steam_id,
+            "k": sku, "sc": render_scale,
+            "ox": render_offset_x, "oy": render_offset_y,
+            "rev": expected_revision, "i": submission_id})
+        dm_content = (
+            f'Your cosmetic "{row["name"]}" was approved at {render_scale:.2f}x, '
+            f"offset {render_offset_x:.3f}:{render_offset_y:.3f}. It will appear in-game "
+            "after its art and reviewed placement are included in a mod update."
+        )
+        result_status = "approved"
+    db.add(AdminAction(
+        admin_steam_id=admin_steam_id,
+        action="cosmetic-placement-approve" if is_placement_review else "cosmetic-approve",
+        target_steam_id=row["artist_steam_id"],
+        details={"submission_id": submission_id, "name": row["name"], "sku": sku,
+                 "placement_revision": expected_revision, "render_scale": render_scale,
+                 "render_offset_x": render_offset_x, "render_offset_y": render_offset_y},
     ))
-    await db.execute(text(
-        "UPDATE cosmetic_submissions SET status='approved', review_note=:n, "
-        "reviewed_by=:a, reviewed_at=NOW(), shop_sku=:k WHERE id=:i"
-    ), {"n": note, "a": admin_steam_id, "k": sku, "i": submission_id})
-    db.add(AdminAction(admin_steam_id=admin_steam_id, action="cosmetic-approve",
-                       target_steam_id=row["artist_steam_id"],
-                       details={"submission_id": submission_id, "name": row["name"], "sku": sku}))
+    try:
+        await db.flush()
+    except Exception as ex:
+        print(f"[COSMETIC] review #{submission_id} core approve failed: {ex}")
+        raise
+    await _queue_cosmetic_review_dm(
+        db, row["artist_steam_id"], dm_content, submission_id
+    )
     await db.commit()
-    print(f"[COSMETIC] submission #{submission_id} approved -> {sku}")
-    return {"status": "approved", "id": submission_id, "sku": sku}
+    print(f"[COSMETIC] submission #{submission_id} {result_status} -> {sku}")
+    return {"status": result_status, "id": submission_id, "sku": sku,
+            "placement_revision": expected_revision}
 
 
 @app.post("/api/v1/artist/set-stock", tags=["Artist"])
@@ -8019,6 +8932,8 @@ async def artist_set_stock(
     if not _artist_hmac_ok(sig, f"artist:{steam_id}:set-stock:{sku}:{stock}"):
         raise HTTPException(status_code=403, detail="Invalid signature")
     item = await _artist_own_item(db, steam_id, sku)
+    if not getattr(item, "catalog_ready", True):
+        raise HTTPException(status_code=409, detail="This cosmetic has not shipped in the mod yet; stock stays closed until it does")
     old = getattr(item, "stock_limit", None) or 0
     item.stock_limit = stock if stock > 0 else None
     # First open from the born-out-of-stock state: stamp released_at so the
@@ -8046,6 +8961,8 @@ async def artist_gift(
     if not _artist_hmac_ok(sig, f"artist:{steam_id}:gift:{sku}:{target_steam_id}"):
         raise HTTPException(status_code=403, detail="Invalid signature")
     item = await _artist_own_item(db, steam_id, sku)
+    if not getattr(item, "catalog_ready", True):
+        raise HTTPException(status_code=409, detail="This cosmetic has not shipped in the mod yet and cannot be gifted")
     target = (await db.execute(
         select(Player).where(Player.steam_id == target_steam_id, Player.deleted_at.is_(None))
     )).scalar_one_or_none()
@@ -9753,40 +10670,13 @@ async def admin_list_flagged(
     db: AsyncSession = Depends(get_db),
 ):
     await _require_admin(db, admin_steam_id, "list_flagged", "", hmac_signature)
-    where = "" if include_reviewed else "WHERE fm.reviewed_at IS NULL"
-    rows = (await db.execute(text(
-        "SELECT fm.id, fm.match_id, fm.series_id, fm.flag_reason, fm.flag_details, fm.auto_invalidated, "
-        "       fm.player_steam_ids, fm.reviewed_at, fm.review_action, fm.created_at, "
-        "       m.is_ranked, m.invalidated_at, m.invalidation_reason, "
-        "       COALESCE(m.duration_seconds, m.match_duration) AS duration, "
-        "       p1.display_name AS p1_name, p2.display_name AS p2_name "
-        "FROM flagged_matches fm "
-        "JOIN matches m ON m.id = fm.match_id "
-        "JOIN players p1 ON p1.id = m.player1_id "
-        "JOIN players p2 ON p2.id = m.player2_id "
-        + where + " "
-        "ORDER BY fm.created_at DESC LIMIT :lim OFFSET :off"
-    ), {"lim": limit, "off": offset})).mappings().all()
-    return {"flags": [
-        {
-            "id": str(r["id"]),
-            "match_id": str(r["match_id"]),
-            "series_id": str(r["series_id"]) if r["series_id"] else None,
-            "flag_reason": r["flag_reason"],
-            "flag_details": r["flag_details"],
-            "auto_invalidated": r["auto_invalidated"],
-            "match_invalidated": r["invalidated_at"] is not None,
-            "match_invalidation_reason": r["invalidation_reason"],
-            "player_steam_ids": r["player_steam_ids"],
-            "p1_name": r["p1_name"],
-            "p2_name": r["p2_name"],
-            "is_ranked": r["is_ranked"],
-            "duration_seconds": r["duration"],
-            "reviewed_at": r["reviewed_at"].isoformat() if r["reviewed_at"] else None,
-            "review_action": r["review_action"],
-            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-        } for r in rows
-    ]}
+    where_sql = (
+        "TRUE" if include_reviewed
+        else "(fm.reviewed_at IS NULL OR fm.restoration_required)"
+    )
+    rows = await fetch_flag_context_rows(
+        db, where_sql, {}, "fm.created_at DESC", limit, offset)
+    return {"flags": [flag_payload(r) for r in rows]}
 
 
 @app.get("/api/v1/admin/banned-users", tags=["Admin"])
@@ -10005,32 +10895,119 @@ class _AdminReviewFlagReq(BaseModel):
     admin_steam_id: str
     flag_id: str
     review_action: str
+    evidence_revision: int = Field(..., ge=1)
+    signature_version: int = 1
     hmac_signature: str | None = None
 
 
 @app.post("/api/v1/admin/review-flag", tags=["Admin"])
 async def admin_review_flag(req: _AdminReviewFlagReq, db: AsyncSession = Depends(get_db)):
-    await _require_admin(db, req.admin_steam_id, "review_flag", req.flag_id, req.hmac_signature)
     if req.review_action not in ("confirmed_cheat", "false_positive"):
         raise HTTPException(400, "review_action must be 'confirmed_cheat' or 'false_positive'")
-    fm = (await db.execute(select(FlaggedMatch).where(FlaggedMatch.id == req.flag_id))).scalar_one_or_none()
+    if req.signature_version != 3:
+        # Released clients signed only the flag id, allowing an intercepted body
+        # to swap the verdict or decide evidence that changed after the admin
+        # opened it. Do not silently accept either weaker request.
+        raise HTTPException(
+            status_code=426,
+            detail="Flag review requires the updated admin client",
+        )
+    await _require_admin(
+        db, req.admin_steam_id, "review_flag",
+        f"{req.flag_id}:{req.review_action}:{req.evidence_revision}",
+        req.hmac_signature)
+    fm = (await db.execute(
+        select(FlaggedMatch).where(FlaggedMatch.id == req.flag_id).with_for_update()
+    )).scalar_one_or_none()
     if fm is None:
         raise HTTPException(404, "Flag not found")
+    if fm.discord_evidence_revision != req.evidence_revision:
+        raise HTTPException(
+            409,
+            "Flag evidence changed; refresh and review the latest evidence",
+        )
+    if fm.reviewed_at is not None:
+        # The client retries POSTs after transport failures. If this exact
+        # admin/verdict already committed, return the durable result; a
+        # different admin or opposite verdict remains a conflict.
+        if (fm.reviewed_by_steam_id == req.admin_steam_id
+                and fm.review_action == req.review_action):
+            return {
+                "status": "already_reviewed",
+                "flag_id": req.flag_id,
+                "review_action": fm.review_action,
+                "restoration_required": bool(fm.restoration_required),
+            }
+        raise HTTPException(409, "Flag was already reviewed")
     fm.reviewed_at = datetime.now(timezone.utc)
     fm.reviewed_by_steam_id = req.admin_steam_id
     fm.review_action = req.review_action
-    if req.review_action == "false_positive" and fm.auto_invalidated:
-        m = (await db.execute(select(Match).where(Match.id == fm.match_id))).scalar_one_or_none()
-        if m is not None and m.invalidated_at is not None:
-            m.invalidated_at = None
-            m.invalidation_reason = None
+    # Auto-invalidated reports have two materially different histories:
+    # the triggering match skipped rewards/series processing entirely, while
+    # retroactive matches already had XP/gold reversed and their series marked
+    # invalid. Merely clearing invalidated_at produces a valid-looking but
+    # economically inconsistent row. Record the verdict, preserve the state,
+    # and make the required manual repair explicit until a deterministic
+    # replay/reward restoration workflow exists.
+    restoration_required = bool(
+        req.review_action == "false_positive" and fm.auto_invalidated)
+    fm.restoration_required = restoration_required
     db.add(AdminAction(
         admin_steam_id=req.admin_steam_id, action="flag_review",
         target_match_id=fm.match_id,
-        details={"flag_id": req.flag_id, "review_action": req.review_action},
+        details={"flag_id": req.flag_id, "review_action": req.review_action,
+                 "evidence_revision": req.evidence_revision,
+                 "restoration_required": restoration_required},
     ))
     await db.commit()
-    return {"status": "reviewed", "flag_id": req.flag_id, "review_action": req.review_action}
+    return {
+        "status": "reviewed",
+        "flag_id": req.flag_id,
+        "review_action": req.review_action,
+        "restoration_required": restoration_required,
+    }
+
+
+class _AdminResolveFlagRestorationReq(BaseModel):
+    admin_steam_id: str
+    flag_id: str
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/admin/resolve-flag-restoration", tags=["Admin"])
+async def admin_resolve_flag_restoration(
+    req: _AdminResolveFlagRestorationReq,
+    db: AsyncSession = Depends(get_db),
+):
+    """Close the durable repair reminder after an admin has restored the
+    invalidated match's rewards/series state through the controlled repair
+    workflow. This endpoint records the attestation; it does not alter economy
+    or rating rows itself."""
+    await _require_admin(
+        db, req.admin_steam_id, "resolve_flag_restoration",
+        req.flag_id, req.hmac_signature)
+    fm = (await db.execute(
+        select(FlaggedMatch)
+        .where(FlaggedMatch.id == req.flag_id)
+        .with_for_update()
+    )).scalar_one_or_none()
+    if fm is None:
+        raise HTTPException(404, "Flag not found")
+    if fm.review_action != "false_positive" or fm.reviewed_at is None:
+        raise HTTPException(409, "Only a reviewed false positive can close restoration")
+    if not fm.restoration_required:
+        # A lost HTTP response must not turn the client's automatic retry into
+        # a visible failure after the first attempt already committed.
+        return {"status": "restoration_already_completed", "flag_id": req.flag_id}
+    fm.restoration_required = False
+    db.add(AdminAction(
+        admin_steam_id=req.admin_steam_id,
+        action="flag_restoration_completed",
+        target_match_id=fm.match_id,
+        details={"flag_id": req.flag_id},
+    ))
+    await db.commit()
+    return {"status": "restoration_completed", "flag_id": req.flag_id}
 
 
 # ── Maintenance mode endpoints ───────────────────────────────────

@@ -81,6 +81,7 @@ namespace CompetitiveRounds
             public Sprite[] frames;
             public float fps = 10f;
             private SpriteRenderer sr;
+            private int lastFrame = -1;
             private void Awake() { sr = GetComponent<SpriteRenderer>(); }
             private void Update()
             {
@@ -90,10 +91,17 @@ namespace CompetitiveRounds
                 // menu portraits) because vanilla clones this component onto each.
                 if (Plugin.AnimatedCosmetics != null && !Plugin.AnimatedCosmetics.Value)
                 {
-                    if (sr.sprite != frames[0]) sr.sprite = frames[0];
+                    if (lastFrame != 0 || sr.sprite != frames[0])
+                    {
+                        sr.sprite = frames[0];
+                        lastFrame = 0;
+                    }
                     return;
                 }
-                sr.sprite = frames[(int)(Time.unscaledTime * fps) % frames.Length];
+                int frame = (int)(Time.unscaledTime * fps) % frames.Length;
+                if (frame == lastFrame && sr.sprite == frames[frame]) return;
+                sr.sprite = frames[frame];
+                lastFrame = frame;
             }
         }
 
@@ -159,6 +167,64 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(sku)) return null;
             Sprite s;
             return _spriteBySku.TryGetValue(sku, out s) ? s : null;
+        }
+
+        /// <summary>
+        /// Returns the exact base PNG and published placement compiled into this
+        /// client. Legacy artist-owned cosmetics predate cosmetic_submissions, so
+        /// the Artist tab uses this as the source for their first placement
+        /// revision. The server still verifies ownership and the PNG container;
+        /// an admin must approve the proposed values before a later client ships
+        /// them.
+        /// </summary>
+        public static bool TryGetPublishedPlacement(
+            string sku, out string slot, out float scale, out Vector2 offset,
+            out byte[] pngBytes)
+        {
+            slot = "";
+            scale = 1f;
+            offset = Vector2.zero;
+            pngBytes = null;
+            if (string.IsNullOrEmpty(sku)) return false;
+
+            CosmeticDef match = null;
+            for (int i = 0; i < Catalog.Length; i++)
+            {
+                if (string.Equals(Catalog[i].Sku, sku, StringComparison.OrdinalIgnoreCase))
+                {
+                    match = Catalog[i];
+                    break;
+                }
+            }
+            if (match == null) return false;
+
+            slot = match.Slot == CharacterItemType.Eyes ? "eyes"
+                 : match.Slot == CharacterItemType.Mouth ? "mouth"
+                 : "detail";
+            scale = match.Scale;
+            offset = match.Offset;
+
+            try
+            {
+                string dir = _cosmeticsDir;
+                if (string.IsNullOrEmpty(dir))
+                {
+                    string dllDir = System.IO.Path.GetDirectoryName(
+                        System.Reflection.Assembly.GetExecutingAssembly().Location);
+                    dir = System.IO.Path.Combine(dllDir, "cosmetics");
+                }
+                string path = System.IO.Path.Combine(dir, match.PngFile);
+                if (!System.IO.File.Exists(path)) return false;
+                pngBytes = System.IO.File.ReadAllBytes(path);
+                return pngBytes.Length > 0;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning(
+                    $"[COSMETIC] could not read published art for {sku}: {ex.Message}");
+                pngBytes = null;
+                return false;
+            }
         }
 
         // Bug #74: animated items were static in the shop thumbnail. Frames +

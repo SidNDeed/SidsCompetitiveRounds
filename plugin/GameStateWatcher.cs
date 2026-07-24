@@ -117,6 +117,7 @@ namespace CompetitiveRounds
         private static int bcFrames = 0;          // frames since last 3s broadcast (instantaneous fps)
         private static float bcAccum = 0f;
         private static int gstatsSeq = 0;         // monotonic broadcast counter (heartbeat)
+        private static int lastBroadcastRecentFps = 0;
         private static readonly List<int> oppFpsTimeline = new List<int>();     // cap 128 (511 chars worst case)
         private static readonly List<int> oppPingTimeline = new List<int>();    // July 22 item 3: opp ping via gstats field 12
         private static int lastOppGstatsSeq = -1;
@@ -179,9 +180,22 @@ namespace CompetitiveRounds
         // Room info
         private static string photonRoomId = "";
         private static string photonRegion = "";
+        // The Photon master publishes one token per game. Both clients then
+        // build the same durable report ID even when their local clocks cross
+        // a second boundary at match start.
+        private const string GAME_TOKEN_PROP_KEY = "cr_game_token";
+        private const string GAME_TOKEN_CAP_PROP_KEY = "cr_game_token_v";
+        private static string sharedGameToken = "";
+        private static string previousGameToken = "";
+        private static int matchStartServerTimestamp;
 
         // Game over
         private static bool gameOverReported = false;
+        // Capture the mode while the room is still full. A disconnect can
+        // shrink PlayerList before OnGameOver, but it must not erase the
+        // surviving participant's exact input evidence.
+        private static bool oneVOneMatchAtStart = false;
+        private static bool macroEvidenceDispatched = false;
 
         // Opponent disconnect detection
         private static bool opponentWasPresent = false;
@@ -266,15 +280,18 @@ namespace CompetitiveRounds
         // Counters reset in OnMatchStarted alongside the achievement flags.
         public static int LocalShotsThisMatch { get; private set; }
         public static int LocalBlocksThisMatch { get; private set; }
-        // v1.29 — input-rate metrics for the Compare tab ("avg keystrokes/sec").
-        // Keys = discrete anyKeyDown events during active combat (movement, shots,
-        // blocks — anything). Seconds = wall time actually spent alive in combat
-        // (pick phase / death / menus excluded), so the ratio is a true in-game
-        // input rate. Reset with the other per-match counters.
+        // v1.29 — input-rate metrics for the Compare tab ("avg inputs/sec").
+        // Events = discrete gameplay key and mouse-button downs during active
+        // combat. Seconds = wall time actually spent alive in combat (pick phase /
+        // death / menus excluded). Reset with the other per-match counters.
         public static int LocalKeysThisMatch { get; private set; }
         // #50 macro detector: count of 1-second windows whose gameplay-key event
         // rate exceeded MACRO_EVENTS_PER_SEC. Advisory — reported with the match.
         public static int LocalMacroSuspectSeconds { get; private set; }
+        public static int LocalMacroPeakKeysPerSecond { get; private set; }
+        public static int LocalMacroPeakClicksPerSecond { get; private set; }
+        public static int LocalMacroPeakEventsPerSecond { get; private set; }
+        public static string LocalMacroTimeline => string.Join(",", inputSuspectWindows.ToArray());
         public static float LocalActiveSecondsThisMatch { get; private set; }
         // v1.23 — hit/block lifetime counters.
         //   bullets_fired  — sum of Gun.numberOfProjectiles across every Gun.Attack call by the
@@ -296,6 +313,9 @@ namespace CompetitiveRounds
         // First-fire-per-match log lines let us confirm Harmony patches attach and fire without
         // spamming on every event. Reset in OnMatchStarted alongside the counters.
         private static bool _loggedFirstFire, _loggedFirstHit, _loggedFirstBlockAct, _loggedFirstBlockOk;
+        private static bool _loggedHitBudgetDrop;
+        private static bool BlockDebugEnabled =>
+            Plugin.ShowBlockDebug != null && Plugin.ShowBlockDebug.Value;
 
         // July 21 item 1 (Stan's spec): max ONE success credit per right-click
         // activation. Starts TRUE so an absorb arriving before any counted
@@ -334,9 +354,13 @@ namespace CompetitiveRounds
             if (_hitsRemaining <= 0)
             {
                 // Budget exhausted = more counted impacts than trigger pulls
-                // (splash/echo artifacts). Log it (throttled by rarity) so a
-                // residual #77-style undercount is diagnosable from logs.
-                Plugin.Log.LogInfo($"[HIT-DROP] budget exhausted (fired={LocalBulletsFiredThisMatch} hit={LocalBulletsHitThisMatch})");
+                // (splash/echo artifacts). Keep detailed diagnostics opt-in and
+                // emit at most once per match so combat never becomes log I/O.
+                if (BlockDebugEnabled && !_loggedHitBudgetDrop)
+                {
+                    _loggedHitBudgetDrop = true;
+                    Plugin.Log.LogInfo($"[HIT-DROP] budget exhausted (fired={LocalBulletsFiredThisMatch} hit={LocalBulletsHitThisMatch})");
+                }
                 return;
             }
             _hitsRemaining--;
@@ -364,6 +388,11 @@ namespace CompetitiveRounds
             if (!isTracking || inPickPhase) return;
             LocalBlocksActivatedThisMatch++;
             _activationSuccessCredited = false;   // each right-click arms exactly one success credit
+            if (!BlockDebugEnabled)
+            {
+                if (!_loggedFirstBlockAct) { _loggedFirstBlockAct = true; Plugin.Log.LogInfo("[STATS] first block activation this match"); }
+                return;
+            }
             LastBlockActivatedTime = Time.time;
             // Retro-classify: did this activation happen right AFTER a hit? That's the
             // "too slow" case. Under 250ms after a hit is human reaction-time territory
@@ -392,6 +421,7 @@ namespace CompetitiveRounds
             if (!isTracking || inPickPhase) return;
             // July 22 item 1: cumulative damage taken feeds the Block% graph.
             if (damage > 0f && damage < 10000f) LocalDamageTakenThisMatch += damage;
+            if (!BlockDebugEnabled) return;
             LastLocalHitTime = Time.time;
             LastBlockMissTime = Time.time;
             float sinceAct = Time.time - LastBlockActivatedTime;
@@ -418,14 +448,18 @@ namespace CompetitiveRounds
         {
             if (!isTracking || inPickPhase) return;
             LocalBlockRawAbsorbs++;
-            LastBlockAbsorbTime = Time.time;
+            bool debug = BlockDebugEnabled;
+            if (debug) LastBlockAbsorbTime = Time.time;
             if (!userChain)
             {
                 // Abyssal BlinkStep / ExtraBlock / Shields Up wiring / revive
                 // blocks — no right-click origin, counts NOWHERE (Stan's spec).
                 LocalBlockDedupeDrops++;
-                LastBlockEventLabel = "ABSORB (auto-block, not counted)";
-                Plugin.Log.LogInfo($"[BLOCK-DBG] ABSORB-NONUSER  raw={LocalBlockRawAbsorbs}  credited={LocalBlocksSuccessfulThisMatch}");
+                if (debug)
+                {
+                    LastBlockEventLabel = "ABSORB (auto-block, not counted)";
+                    Plugin.Log.LogInfo($"[BLOCK-DBG] ABSORB-NONUSER  raw={LocalBlockRawAbsorbs}  credited={LocalBlocksSuccessfulThisMatch}");
+                }
                 return;
             }
             if (_activationSuccessCredited)
@@ -433,15 +467,21 @@ namespace CompetitiveRounds
                 // This right-click already earned its 1 credit (multi-pellet
                 // absorb, or the initial block AND its echo both absorbing).
                 LocalBlockDedupeDrops++;
-                LastBlockEventLabel = "ABSORB (already credited)";
-                Plugin.Log.LogInfo($"[BLOCK-DBG] ABSORB-DEDUP  raw={LocalBlockRawAbsorbs}  credited={LocalBlocksSuccessfulThisMatch}");
+                if (debug)
+                {
+                    LastBlockEventLabel = "ABSORB (already credited)";
+                    Plugin.Log.LogInfo($"[BLOCK-DBG] ABSORB-DEDUP  raw={LocalBlockRawAbsorbs}  credited={LocalBlocksSuccessfulThisMatch}");
+                }
                 return;
             }
             _activationSuccessCredited = true;
             LocalBlocksSuccessfulThisMatch++;
-            LastBlockSuccessfulTime = Time.time;
-            LastBlockEventLabel = $"SUCCESSFUL #{LocalBlocksSuccessfulThisMatch}";
-            Plugin.Log.LogInfo($"[BLOCK-DBG] SUCCESS    act={LocalBlocksActivatedThisMatch}  succ={LocalBlocksSuccessfulThisMatch}  raw={LocalBlockRawAbsorbs}  drops={LocalBlockDedupeDrops}");
+            if (debug)
+            {
+                LastBlockSuccessfulTime = Time.time;
+                LastBlockEventLabel = $"SUCCESSFUL #{LocalBlocksSuccessfulThisMatch}";
+                Plugin.Log.LogInfo($"[BLOCK-DBG] SUCCESS    act={LocalBlocksActivatedThisMatch}  succ={LocalBlocksSuccessfulThisMatch}  raw={LocalBlockRawAbsorbs}  drops={LocalBlockDedupeDrops}");
+            }
             if (!_loggedFirstBlockOk) { _loggedFirstBlockOk = true; Plugin.Log.LogInfo("[STATS] first successful block this match"); }
         }
         // Pick-phase gate: input gating must exclude card-pick UI (Space jump, A/D carousel,
@@ -470,8 +510,21 @@ namespace CompetitiveRounds
         public static int SessionRankedSeriesLosses => sessionRankedSeriesLosses;
         public static int CurrentSeriesGamesWon => currentSeriesGamesWon;
         public static int CurrentSeriesGamesLost => currentSeriesGamesLost;
+        // One tally per series, whichever path observes the completion first.
+        // The server-confirmed path only runs on the REPORTER (lower Steam ID
+        // reports), so the other player's session series count sat at 0-0 all
+        // session (SpyD's report). The local BO3-threshold path below now also
+        // counts, and this flag keeps the two from double-counting.
+        private static bool sessionSeriesCounted = false;
         public static void IncrementSessionRankedSeries(bool won)
         {
+            if (sessionSeriesCounted)
+            {
+                currentSeriesGamesWon = 0;
+                currentSeriesGamesLost = 0;
+                return;
+            }
+            sessionSeriesCounted = true;
             if (won) sessionRankedSeriesWins++; else sessionRankedSeriesLosses++;
             // Series ended -> reset the per-series game counter so the next
             // BO3 starts at 0-0 in the HUD.
@@ -702,6 +755,7 @@ namespace CompetitiveRounds
 
             PollRoomState();
             PollMatchState();
+            if (isTracking) TryRefreshSharedGameToken();
             PollRoomlessGameScene();
         }
 
@@ -1043,6 +1097,12 @@ namespace CompetitiveRounds
         private const int MACRO_EVENTS_PER_SEC = 25; // sustained superhuman rate
         private static float inputBucketTimer = 0f;
         private static int inputBucketCount = 0;
+        private static int inputBucketKeyCount = 0;
+        private static int inputBucketClickCount = 0;
+        private static long inputBucketStartedAtMs = -1;
+        // Compact suspect-only entries: elapsedSecond:keyRate:clickRate. Forty-
+        // eight windows stay comfortably inside the 1024-character DB field.
+        private static readonly List<string> inputSuspectWindows = new List<string>();
         private static float lastMacroLogAt = -999f;
 
         private static void TickInputSampling(float dt)
@@ -1054,27 +1114,39 @@ namespace CompetitiveRounds
             {
                 inputBucketTimer = 0f;
                 inputBucketCount = 0;
+                inputBucketKeyCount = 0;
+                inputBucketClickCount = 0;
+                inputBucketStartedAtMs = -1;
                 return;
             }
             bool typingInChat = false;
             try { typingInChat = CompetitiveUI.IsChatInputOpen || NativeUI.IsOpen; } catch { }
-            if (typingInChat) return;
+            if (typingInChat)
+            {
+                inputBucketTimer = 0f;
+                inputBucketCount = 0;
+                inputBucketKeyCount = 0;
+                inputBucketClickCount = 0;
+                inputBucketStartedAtMs = -1;
+                return;
+            }
 
             LocalActiveSecondsThisMatch += dt;
 
-            int downs = 0;
-            if (Input.GetKeyDown(KeyCode.W)) downs++;
-            if (Input.GetKeyDown(KeyCode.A)) downs++;
-            if (Input.GetKeyDown(KeyCode.S)) downs++;
-            if (Input.GetKeyDown(KeyCode.D)) downs++;
-            if (Input.GetKeyDown(KeyCode.Space)) downs++;
-            if (Input.GetKeyDown(KeyCode.UpArrow)) downs++;
-            if (Input.GetKeyDown(KeyCode.DownArrow)) downs++;
-            if (Input.GetKeyDown(KeyCode.LeftArrow)) downs++;
-            if (Input.GetKeyDown(KeyCode.RightArrow)) downs++;
+            int keyDowns = 0;
+            int clickDowns = 0;
+            if (Input.GetKeyDown(KeyCode.W)) keyDowns++;
+            if (Input.GetKeyDown(KeyCode.A)) keyDowns++;
+            if (Input.GetKeyDown(KeyCode.S)) keyDowns++;
+            if (Input.GetKeyDown(KeyCode.D)) keyDowns++;
+            if (Input.GetKeyDown(KeyCode.Space)) keyDowns++;
+            if (Input.GetKeyDown(KeyCode.UpArrow)) keyDowns++;
+            if (Input.GetKeyDown(KeyCode.DownArrow)) keyDowns++;
+            if (Input.GetKeyDown(KeyCode.LeftArrow)) keyDowns++;
+            if (Input.GetKeyDown(KeyCode.RightArrow)) keyDowns++;
             if (Input.GetMouseButtonDown(0))
             {
-                downs++;
+                clickDowns++;
                 LocalShotsThisMatch++;
                 if (!achFiredShot)
                 {
@@ -1084,29 +1156,55 @@ namespace CompetitiveRounds
             }
             if (Input.GetMouseButtonDown(1))
             {
-                downs++;
+                clickDowns++;
                 LocalBlocksThisMatch++;
             }
+            int downs = keyDowns + clickDowns;
             if (downs > 0) LocalKeysThisMatch += downs;
 
-            // Macro detector (#50): rolling 1-second buckets; a bucket beyond
+            // Macro detector (#50): consecutive ~1-second buckets; a bucket beyond
             // MACRO_EVENTS_PER_SEC is past sustained human speed. Advisory
             // counter only — reported with the match, flagged server-side.
-            inputBucketTimer += dt;
+            long nowMs = _tickStopwatch.ElapsedMilliseconds;
+            if (inputBucketStartedAtMs < 0) inputBucketStartedAtMs = nowMs;
+            inputBucketTimer = (nowMs - inputBucketStartedAtMs) / 1000f;
             inputBucketCount += downs;
+            inputBucketKeyCount += keyDowns;
+            inputBucketClickCount += clickDowns;
             if (inputBucketTimer >= 1f)
             {
-                if (inputBucketCount >= MACRO_EVENTS_PER_SEC)
+                float seconds = Mathf.Max(0.001f, inputBucketTimer);
+                int keyRate = Mathf.RoundToInt(inputBucketKeyCount / seconds);
+                int clickRate = Mathf.RoundToInt(inputBucketClickCount / seconds);
+                int eventRate = Mathf.RoundToInt(inputBucketCount / seconds);
+                if (keyRate > LocalMacroPeakKeysPerSecond) LocalMacroPeakKeysPerSecond = keyRate;
+                if (clickRate > LocalMacroPeakClicksPerSecond) LocalMacroPeakClicksPerSecond = clickRate;
+                if (eventRate > LocalMacroPeakEventsPerSecond) LocalMacroPeakEventsPerSecond = eventRate;
+                if (eventRate >= MACRO_EVENTS_PER_SEC)
                 {
                     LocalMacroSuspectSeconds++;
+                    // Retain the most recent windows: end-of-match bursts are
+                    // the most useful evidence and must not be displaced by a
+                    // long macro-heavy opening.
+                    if (inputSuspectWindows.Count >= 48)
+                        inputSuspectWindows.RemoveAt(0);
+                    int elapsed = Mathf.Max(0, Mathf.RoundToInt(LocalActiveSecondsThisMatch));
+                    inputSuspectWindows.Add($"{elapsed}:{keyRate}:{clickRate}");
                     if (Time.realtimeSinceStartup - lastMacroLogAt > 10f)
                     {
                         lastMacroLogAt = Time.realtimeSinceStartup;
-                        Plugin.Log.LogWarning($"[INPUT] macro-suspect second: {inputBucketCount} gameplay key events in 1s (total suspect s: {LocalMacroSuspectSeconds})");
+                        Plugin.Log.LogWarning($"[INPUT] macro-suspect second: {eventRate}/s gameplay events ({keyRate} keys/s, {clickRate} clicks/s; total suspect s: {LocalMacroSuspectSeconds})");
                     }
+                    // The elected reporter may be the other player. Publish each
+                    // threshold-breaking window immediately so the last 1-2
+                    // seconds of a match cannot sit behind the normal 3s cadence.
+                    BroadcastGstatsImmediate();
                 }
                 inputBucketTimer = 0f;
                 inputBucketCount = 0;
+                inputBucketKeyCount = 0;
+                inputBucketClickCount = 0;
+                inputBucketStartedAtMs = nowMs;
             }
         }
 
@@ -1120,6 +1218,59 @@ namespace CompetitiveRounds
         public static int OppStatBlocksSuccessful { get; private set; }
         public static int OppStatKeysPressed { get; private set; }
         public static float OppStatActiveSeconds { get; private set; }
+        public static int OppStatMacroSuspectSeconds { get; private set; }
+        public static int OppStatMacroPeakKeysPerSecond { get; private set; }
+        public static int OppStatMacroPeakClicksPerSecond { get; private set; }
+        public static int OppStatMacroPeakEventsPerSecond { get; private set; }
+        public static string OppStatMacroTimeline { get; private set; } = "";
+
+        private static string MacroTimelineForPeer()
+        {
+            int count = Math.Min(16, inputSuspectWindows.Count);
+            if (count <= 0) return "";
+            int start = inputSuspectWindows.Count - count;
+            var sb = new System.Text.StringBuilder(count * 12);
+            for (int i = 0; i < count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append(inputSuspectWindows[start + i]);
+            }
+            return sb.ToString();
+        }
+
+        private static string BuildGstatsPayload(int recentFps, bool advanceSequence)
+        {
+            if (advanceSequence) gstatsSeq++;
+            int curPing = 0;
+            try
+            {
+                if (!PhotonNetwork.OfflineMode && PhotonNetwork.IsConnected)
+                    curPing = PhotonNetwork.GetPing();
+            }
+            catch { }
+            return
+                $"{LocalBulletsFiredThisMatch}|{LocalBulletsHitThisMatch}|{LocalBlocksActivatedThisMatch}|{LocalBlocksSuccessfulThisMatch}|{LocalKeysThisMatch}|{LocalActiveSecondsThisMatch.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}" +
+                $"|{recentFps}|{gstatsSeq}|{localFreezeCount}|{localFreezeFocusedCount}|{localRecvGapCount}|{curPing}|{(int)LocalDamageTakenThisMatch}" +
+                $"|{LocalMacroSuspectSeconds}|{LocalMacroPeakKeysPerSecond}|{LocalMacroPeakClicksPerSecond}|{LocalMacroPeakEventsPerSecond}|{MacroTimelineForPeer()}";
+        }
+
+        private static void BroadcastGstatsImmediate()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.LocalPlayer == null) return;
+                var props = new Hashtable();
+                // Keep the heartbeat sequence stable. PollOpponentFps parses the
+                // macro fields before its seq gate, so the changed payload still
+                // updates exact evidence without adding fake FPS/heartbeat samples.
+                // Preserve the most recent real FPS sample. Replacing the
+                // property with zero here can erase that sample before a peer
+                // observes the sequence which owns it.
+                props[GSTATS_PROP_KEY] = BuildGstatsPayload(lastBroadcastRecentFps, false);
+                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+            }
+            catch { }
+        }
 
         private static void BroadcastFps()
         {
@@ -1137,19 +1288,12 @@ namespace CompetitiveRounds
                 // Old clients parse >=6 and ignore extras (verified).
                 int recentFps = bcAccum > 0.5f ? (int)Math.Round(bcFrames / (double)bcAccum) : 0;
                 bcFrames = 0; bcAccum = 0f;
+                if (recentFps > 0) lastBroadcastRecentFps = recentFps;
                 if (recentFps > 0 && isTracking && localFps3sTimeline.Count < 128)
                     localFps3sTimeline.Add(recentFps);
-                gstatsSeq++;
-                // Field 12 (July 22 item 3): instantaneous ping so the opponent
-                // can build our latency timeline for their history hover chart.
-                int curPing = 0;
-                try { if (!PhotonNetwork.OfflineMode && PhotonNetwork.IsConnected) curPing = PhotonNetwork.GetPing(); } catch { }
-                // Field 13 (July 22 item 1): cumulative damage taken, so peers
-                // can build our Block% graph. Append-only ordering — old
-                // clients parse >=6/12 and ignore extras.
-                props[GSTATS_PROP_KEY] =
-                    $"{LocalBulletsFiredThisMatch}|{LocalBulletsHitThisMatch}|{LocalBlocksActivatedThisMatch}|{LocalBlocksSuccessfulThisMatch}|{LocalKeysThisMatch}|{LocalActiveSecondsThisMatch.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}" +
-                    $"|{recentFps}|{gstatsSeq}|{localFreezeCount}|{localFreezeFocusedCount}|{localRecvGapCount}|{curPing}|{(int)LocalDamageTakenThisMatch}";
+                // Field 12 = instantaneous ping; field 13 = cumulative damage
+                // taken. Append-only ordering keeps old clients compatible.
+                props[GSTATS_PROP_KEY] = BuildGstatsPayload(recentFps, true);
                 if (props.Count > 0)
                     PhotonNetwork.LocalPlayer.SetCustomProperties(props);
             }
@@ -1189,6 +1333,17 @@ namespace CompetitiveRounds
                                     OppStatBlocksSuccessful = int.Parse(parts[3]);
                                     OppStatKeysPressed = int.Parse(parts[4]);
                                     OppStatActiveSeconds = float.Parse(parts[5], System.Globalization.CultureInfo.InvariantCulture);
+                                }
+                                // Fields 14-18 carry the peer's macro evidence.
+                                // Without them only the elected reporter's own
+                                // input windows survive into the match report.
+                                if (parts.Length >= 18)
+                                {
+                                    OppStatMacroSuspectSeconds = int.Parse(parts[13]);
+                                    OppStatMacroPeakKeysPerSecond = int.Parse(parts[14]);
+                                    OppStatMacroPeakClicksPerSecond = int.Parse(parts[15]);
+                                    OppStatMacroPeakEventsPerSecond = int.Parse(parts[16]);
+                                    OppStatMacroTimeline = parts[17] ?? "";
                                 }
                                 // July 21 item 2: extended telemetry (new clients only).
                                 if (parts.Length >= 11)
@@ -1238,6 +1393,11 @@ namespace CompetitiveRounds
                                         oppHitTimeline.Clear();
                                         oppBlockTimeline.Clear();
                                     }
+                                    OppStatMacroSuspectSeconds = 0;
+                                    OppStatMacroPeakKeysPerSecond = 0;
+                                    OppStatMacroPeakClicksPerSecond = 0;
+                                    OppStatMacroPeakEventsPerSecond = 0;
+                                    OppStatMacroTimeline = "";
                                 }
                             }
                             catch { }
@@ -1506,6 +1666,40 @@ namespace CompetitiveRounds
                 photonRegion = PhotonNetwork.CloudRegion ?? "";
                 roomJoinTime = DateTime.UtcNow;
                 IdentifyLocalPlayer();
+                // Capability negotiation keeps mixed-version rooms on the
+                // local-time report-ID fallback. A shared token is advertised
+                // only when both 1v1 participants understand it.
+                try
+                {
+                    var existingRoomProps =
+                        PhotonNetwork.CurrentRoom?.CustomProperties;
+                    if (existingRoomProps != null
+                        && existingRoomProps.ContainsKey(GAME_TOKEN_PROP_KEY))
+                    {
+                        string existingRaw =
+                            existingRoomProps[GAME_TOKEN_PROP_KEY]?.ToString()
+                            ?? "";
+                        int separator = existingRaw.IndexOf(':');
+                        string existingToken = separator > 0
+                            ? existingRaw.Substring(0, separator) : existingRaw;
+                        if (Regex.IsMatch(existingToken, @"^\d{6}$"))
+                            previousGameToken = existingToken;
+                    }
+                    if (PhotonNetwork.LocalPlayer != null)
+                    {
+                        var capProps = new Hashtable();
+                        // Player properties persist across Photon rooms. Bind
+                        // the capability to this room + actor assignment so a
+                        // stale value (including a same-room reconnect) cannot
+                        // make the master publish before the peer has joined.
+                        capProps[GAME_TOKEN_CAP_PROP_KEY] =
+                            photonRoomId + ":"
+                            + PhotonNetwork.LocalPlayer.ActorNumber.ToString(
+                                System.Globalization.CultureInfo.InvariantCulture);
+                        PhotonNetwork.LocalPlayer.SetCustomProperties(capProps);
+                    }
+                }
+                catch { }
                 playersIdentified = false;
                 opponentSteamIdResolved = false;
                 opponentRankChecked = false;
@@ -1562,6 +1756,9 @@ namespace CompetitiveRounds
                 try { PlayerEffectCosmetic.PublishLocalProps(); } catch { }
             }
 
+            if (inRoom && isTracking && oneVOneMatchAtStart)
+                TryRefreshSharedGameToken();
+
             if (!inRoom && wasInRoom)
             {
                 // Accumulate session time for this opponent
@@ -1574,6 +1771,27 @@ namespace CompetitiveRounds
                     int oppRounds = localTeamId == 0 ? p2Rounds : p1Rounds;
                     string matchType = matchIsRanked ? "RANKED" : "CASUAL";
 
+                    // If this client is the leaver while the opponent already
+                    // has a reportable DC-win lead, preserve its exact local
+                    // macro sample before ResetMatchState clears the counters.
+                    if (oppRounds >= 4
+                        && oppRounds > localRounds)
+                        TryDispatchMacroEvidence();
+                    else if (!opponentDCReported
+                        && localRounds >= 4
+                        && oppRounds >= 4)
+                    {
+                        // This client is the one leaving a tied match. The
+                        // remaining opponent will persist the awarded 5-4, so
+                        // send our exact sampler against that same final score.
+                        int evidenceP1Rounds = p1Rounds;
+                        int evidenceP2Rounds = p2Rounds;
+                        if (localTeamId == 0) evidenceP2Rounds = 5;
+                        else if (localTeamId == 1) evidenceP1Rounds = 5;
+                        TryDispatchMacroEvidence(
+                            null, evidenceP1Rounds, evidenceP2Rounds);
+                    }
+
                     if (LeavingForRanked)
                     {
                         // We initiated the leave for a ranked match — cancel, don't count
@@ -1581,7 +1799,8 @@ namespace CompetitiveRounds
                         CompetitiveUI.ShowNotification("Left match for ranked queue", new Color(0.4f, 0.8f, 1f));
                         LeavingForRanked = false;
                     }
-                    else if (localRounds >= 4 && oppRounds >= 4)
+                    else if (opponentDCReported
+                        && localRounds >= 4 && oppRounds >= 4)
                     {
                         // Both at match point and someone DC'd — give the win to the
                         // local player (the one still in the room). Closes the
@@ -1589,9 +1808,14 @@ namespace CompetitiveRounds
                         // because they had ≥4 rounds at disconnect time).
                         Plugin.Log.LogInfo($"[POLL] === {matchType} DC Win (4-4 tiebreak) === Opponent DC'd at {localRounds}-{oppRounds}");
                         int winnerTeam = localTeamId;
+                        // Persist the awarded tiebreak in the report itself.
+                        // A tied 4-4 body is invalid and also prevents exact
+                        // macro evidence from correlating to the recorded win.
+                        if (winnerTeam == 0) p1Rounds = 5;
+                        else if (winnerTeam == 1) p2Rounds = 5;
                         OnGameOver(winnerTeam);
                     }
-                    else if (localRounds >= 4)
+                    else if (opponentDCReported && localRounds >= 4)
                     {
                         // Local player had dominant lead — count as a win
                         Plugin.Log.LogInfo($"[POLL] === {matchType} DC Win === Opponent disconnected at {localRounds}-{oppRounds}");
@@ -1844,6 +2068,19 @@ namespace CompetitiveRounds
                     int playerCount = PhotonNetwork.PlayerList?.Length ?? 0;
                     if (playerCount >= 2)
                         opponentWasPresent = true;
+
+                    // The opponent is back (Photon rejoin after a blip). Clear the
+                    // latch: a stale one lets THIS client take the 4-4 DC-win branch
+                    // when IT later leaves, i.e. the leaver awards itself the win —
+                    // the exact exploit that branch exists to close. Only a genuine
+                    // return to 2 players clears it, so the normal
+                    // "opponent left, then I left" sequence (count stays 1) is
+                    // unaffected.
+                    if (playerCount >= 2 && opponentDCReported)
+                    {
+                        opponentDCReported = false;
+                        Plugin.Log.LogInfo("[POLL] Opponent returned to the room — cleared stale DC latch");
+                    }
 
                     if (opponentWasPresent && playerCount <= 1 && !opponentDCReported)
                     {
@@ -2336,11 +2573,252 @@ namespace CompetitiveRounds
 
         // \u2500\u2500 Events \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
+        private static bool BothPlayersSupportSharedGameToken()
+        {
+            try
+            {
+                var players = PhotonNetwork.PlayerList;
+                string expectedRoom =
+                    PhotonNetwork.CurrentRoom?.Name ?? "";
+                if (players == null
+                    || players.Length != 2
+                    || string.IsNullOrEmpty(expectedRoom))
+                    return false;
+                foreach (var player in players)
+                {
+                    if (player == null || player.CustomProperties == null)
+                        return false;
+                    string expectedCapability =
+                        expectedRoom + ":"
+                        + player.ActorNumber.ToString(
+                            System.Globalization.CultureInfo.InvariantCulture);
+                    if (!player.CustomProperties.ContainsKey(
+                            GAME_TOKEN_CAP_PROP_KEY)
+                        || (player.CustomProperties[
+                            GAME_TOKEN_CAP_PROP_KEY]?.ToString() ?? "")
+                            != expectedCapability)
+                        return false;
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static void TryPublishSharedGameToken()
+        {
+            if (!oneVOneMatchAtStart
+                || !string.IsNullOrEmpty(sharedGameToken)
+                || matchStartServerTimestamp == 0
+                || !BothPlayersSupportSharedGameToken())
+                return;
+            try
+            {
+                if (!PhotonNetwork.IsMasterClient
+                    || PhotonNetwork.CurrentRoom == null)
+                    return;
+
+                string previous = "";
+                var roomProps = PhotonNetwork.CurrentRoom.CustomProperties;
+                if (roomProps != null
+                    && roomProps.ContainsKey(GAME_TOKEN_PROP_KEY))
+                {
+                    string raw = roomProps[GAME_TOKEN_PROP_KEY]?.ToString() ?? "";
+                    int separator = raw.IndexOf(':');
+                    previous = separator > 0 ? raw.Substring(0, separator) : raw;
+                }
+
+                string token;
+                do
+                {
+                    uint randomBits = BitConverter.ToUInt32(
+                        Guid.NewGuid().ToByteArray(), 0);
+                    token = (randomBits % 1000000u).ToString(
+                        "D6",
+                        System.Globalization.CultureInfo.InvariantCulture);
+                }
+                while (token == previous || token == previousGameToken);
+
+                var props = new Hashtable();
+                props[GAME_TOKEN_PROP_KEY] =
+                    token + ":" + matchStartServerTimestamp.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture);
+                if (!PhotonNetwork.CurrentRoom.SetCustomProperties(props))
+                    return;
+                sharedGameToken = token;
+            }
+            catch { }
+        }
+
+        private static void BeginSharedGameToken()
+        {
+            // A joining player may have captured the room's stale prior-game
+            // token before publishing its room-bound capability. Preserve that
+            // guard when it has not adopted a shared token in this sitting yet.
+            if (!string.IsNullOrEmpty(sharedGameToken))
+                previousGameToken = sharedGameToken;
+            sharedGameToken = "";
+            matchStartServerTimestamp = 0;
+            if (!oneVOneMatchAtStart) return;
+            // Record the common Photon clock even if this client has not yet
+            // observed both capability properties. The master may already see
+            // both and publish; this lets a non-master adopt that token later.
+            try { matchStartServerTimestamp = PhotonNetwork.ServerTimestamp; }
+            catch { return; }
+            TryPublishSharedGameToken();
+        }
+
+        private static void TryRefreshSharedGameToken()
+        {
+            if (!oneVOneMatchAtStart
+                || !string.IsNullOrEmpty(sharedGameToken))
+                return;
+            try
+            {
+                var props = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (props != null
+                    && props.ContainsKey(GAME_TOKEN_PROP_KEY))
+                {
+                    string raw = props[GAME_TOKEN_PROP_KEY]?.ToString() ?? "";
+                    string[] parts = raw.Split(':');
+                    int publishedAt;
+                    if (parts.Length == 2
+                        && Regex.IsMatch(parts[0], @"^\d{6}$")
+                        && parts[0] != previousGameToken
+                        && int.TryParse(
+                            parts[1],
+                            System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out publishedAt))
+                    {
+                        // Token freshness is established by the previous-token
+                        // guard. Do not compare the two clients' hook times:
+                        // one Unity main thread can enter the match >10s later
+                        // even though Photon delivered the correct room token.
+                        sharedGameToken = parts[0];
+                        return;
+                    }
+                }
+            }
+            catch { }
+            // The master may have missed the peer's capability property on the
+            // exact game-start frame. Retry while the match is live so current
+            // clients converge on a shared exact report ID.
+            TryPublishSharedGameToken();
+        }
+
+        private static string BuildReportRoomId(
+            int reportP1Rounds = -1, int reportP2Rounds = -1)
+        {
+            TryRefreshSharedGameToken();
+            string token = !string.IsNullOrEmpty(sharedGameToken)
+                ? sharedGameToken
+                : matchStartTime.ToString(
+                    "HHmmss",
+                    System.Globalization.CultureInfo.InvariantCulture);
+            int reportRoundTotal =
+                reportP1Rounds >= 0 && reportP2Rounds >= 0
+                    ? reportP1Rounds + reportP2Rounds
+                    : p1Rounds + p2Rounds;
+            return $"{photonRoomId}_{token}_r{reportRoundTotal}";
+        }
+
+        // Anti-cheat telemetry must NEVER be able to abort a match report. All
+        // three call sites run on the critical path — two in the room-leave block
+        // (before wasInRoom is updated) and one inside OnGameOver ABOVE the report
+        // routing, with gameOverReported already latched. An escaping exception
+        // there would silently drop a real ranked game, so contain everything here
+        // and let every caller stay a plain call.
+        private static void TryDispatchMacroEvidence(
+            string reportRoomId = null,
+            int reportP1Rounds = -1, int reportP2Rounds = -1)
+        {
+            try
+            {
+                DispatchMacroEvidenceCore(reportRoomId, reportP1Rounds, reportP2Rounds);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning(
+                    $"[MACRO-EVIDENCE] dispatch failed (match reporting unaffected): {ex.Message}");
+            }
+        }
+
+        private static void DispatchMacroEvidenceCore(
+            string reportRoomId,
+            int reportP1Rounds, int reportP2Rounds)
+        {
+            int finalP1Rounds =
+                reportP1Rounds >= 0 ? reportP1Rounds : p1Rounds;
+            int finalP2Rounds =
+                reportP2Rounds >= 0 ? reportP2Rounds : p2Rounds;
+            if (macroEvidenceDispatched
+                || !oneVOneMatchAtStart
+                || LocalMacroSuspectSeconds < 10
+                || finalP1Rounds == finalP2Rounds
+                || (localTeamId != 0 && localTeamId != 1)
+                || string.IsNullOrEmpty(localSteamId)
+                || string.IsNullOrEmpty(opponentSteamId)
+                || opponentSteamId.StartsWith("photon_")
+                || (photonRoomId ?? "").IndexOf(
+                    "offline", StringComparison.OrdinalIgnoreCase) >= 0)
+                return;
+            try
+            {
+                if (PhotonNetwork.OfflineMode) return;
+            }
+            catch { }
+
+            string p1SteamId = localTeamId == 0
+                ? localSteamId : opponentSteamId;
+            string p2SteamId = localTeamId == 0
+                ? opponentSteamId : localSteamId;
+            int duration = Math.Max(
+                0, (int)(DateTime.UtcNow - matchStartTime).TotalSeconds);
+            string durableRoomId = string.IsNullOrEmpty(reportRoomId)
+                ? BuildReportRoomId(finalP1Rounds, finalP2Rounds)
+                : reportRoomId;
+            bool usedSharedGameToken =
+                !string.IsNullOrEmpty(sharedGameToken);
+
+            // Snapshot the primitives before any room/reset mutation. The API
+            // client persists the signed body before its first network attempt.
+            macroEvidenceDispatched = true;
+            ApiClient.ReportMacroEvidence(
+                p1SteamId, p2SteamId, finalP1Rounds, finalP2Rounds,
+                durableRoomId, matchStartTime, duration,
+                usedSharedGameToken, localSteamId,
+                LocalMacroSuspectSeconds,
+                LocalMacroPeakKeysPerSecond,
+                LocalMacroPeakClicksPerSecond,
+                LocalMacroPeakEventsPerSecond,
+                LocalMacroTimeline);
+        }
+
         private static void OnMatchStarted()
         {
             isTracking = true;
             gameOverReported = false;
+            macroEvidenceDispatched = false;
+            // Match-scoped DC latch — must reset per GAME, not only on room leave
+            // (learning #27). Rematches reuse the room, so a latch set during
+            // game 1 would otherwise still be true in game 2 and let a LEAVER
+            // take the 4-4 DC-win branch (which now also persists a 5-4 score).
+            opponentDCReported = false;
             matchStartTime = DateTime.UtcNow;
+            try
+            {
+                string roomName = PhotonNetwork.CurrentRoom?.Name ?? "";
+                var roomProps = PhotonNetwork.CurrentRoom?.CustomProperties;
+                oneVOneMatchAtStart =
+                    !PhotonNetwork.OfflineMode
+                    && !roomName.StartsWith("ovt_", StringComparison.Ordinal)
+                    && !roomName.StartsWith("team_", StringComparison.Ordinal)
+                    && !(roomProps?.ContainsKey("cr_ff") ?? false)
+                    && PhotonNetwork.PlayerList != null
+                    && PhotonNetwork.PlayerList.Length == 2;
+            }
+            catch { oneVOneMatchAtStart = false; }
+            BeginSharedGameToken();
 
             // Restore matchIsRanked for game 2+ in a series. OnGameOver clears
             // matchIsRanked at the end of every game (line ~1370) so the in-game
@@ -2446,8 +2924,15 @@ namespace CompetitiveRounds
             LocalBlocksThisMatch = 0;
             LocalKeysThisMatch = 0;
             LocalMacroSuspectSeconds = 0;
+            LocalMacroPeakKeysPerSecond = 0;
+            LocalMacroPeakClicksPerSecond = 0;
+            LocalMacroPeakEventsPerSecond = 0;
+            inputSuspectWindows.Clear();
             inputBucketTimer = 0f;
             inputBucketCount = 0;
+            inputBucketKeyCount = 0;
+            inputBucketClickCount = 0;
+            inputBucketStartedAtMs = -1;
             LocalActiveSecondsThisMatch = 0f;
             LocalBulletsFiredThisMatch = 0;
             LocalBulletsHitThisMatch = 0;
@@ -2467,7 +2952,7 @@ namespace CompetitiveRounds
             opponentAvgFps = 0;
             // July 21 item 2: per-match telemetry resets.
             localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
-            bcFrames = 0; bcAccum = 0f;
+            bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
@@ -2478,6 +2963,7 @@ namespace CompetitiveRounds
             _activationSuccessCredited = true;
             BlockChain.Reset();
             _loggedFirstFire = _loggedFirstHit = _loggedFirstBlockAct = _loggedFirstBlockOk = false;
+            _loggedHitBudgetDrop = false;
             // July 22 item 1/7: hit/block timelines + point stamps + per-actor harvest.
             localHitTimeline.Clear(); localBlockTimeline.Clear();
             oppHitTimeline.Clear(); oppBlockTimeline.Clear();
@@ -2526,6 +3012,11 @@ namespace CompetitiveRounds
             OppStatBulletsFired = 0; OppStatBulletsHit = 0;
             OppStatBlocksActivated = 0; OppStatBlocksSuccessful = 0;
             OppStatKeysPressed = 0; OppStatActiveSeconds = 0f;
+            OppStatMacroSuspectSeconds = 0;
+            OppStatMacroPeakKeysPerSecond = 0;
+            OppStatMacroPeakClicksPerSecond = 0;
+            OppStatMacroPeakEventsPerSecond = 0;
+            OppStatMacroTimeline = "";
 
             // Recover pre-match card picks into localCards
             // These were captured by the log listener before tracking started
@@ -2637,6 +3128,13 @@ namespace CompetitiveRounds
             gameOverReported = true;
             sessionMatchCount++;
 
+            // Best-effort peer handoff before reporter election. Exact local
+            // suspect evidence also follows its own signed API path below, so
+            // correctness never depends on waiting while match state can reset.
+            BroadcastGstatsImmediate();
+            try { PhotonNetwork.SendAllOutgoingCommands(); } catch { }
+            PollOpponentFps();
+
             if (!opponentSteamIdResolved)
                 TryResolveOpponent();
 
@@ -2648,7 +3146,6 @@ namespace CompetitiveRounds
                 ? $"[POLL] YOU WON vs {opponentDisplayName}!"
                 : $"[POLL] You lost to {opponentDisplayName}");
             Plugin.Log.LogInfo($"[POLL] Final: P1 {p1Rounds}r - P2 {p2Rounds}r");
-
             // ── Update session W/L tracking ──
             // Build the opponent set: in 1v1 it's just opponentDisplayName; in
             // 2v2 it's the two ENEMY-team players. The teammate is recorded
@@ -2733,8 +3230,25 @@ namespace CompetitiveRounds
                 {
                     currentSeriesGamesWon = 0;
                     currentSeriesGamesLost = 0;
+                    // A new BO3 starts here — re-arm the session series tally.
+                    sessionSeriesCounted = false;
                 }
                 if (localWon) currentSeriesGamesWon++; else currentSeriesGamesLost++;
+                // Count the series locally the moment this game decides it (first
+                // to 2). Both clients reach this, so the non-reporting player's
+                // session series tally is no longer stuck at 0-0. Idempotent: the
+                // reporter's server-confirmed call finds it already counted.
+                if (currentSeriesGamesWon >= 2 || currentSeriesGamesLost >= 2)
+                {
+                    bool seriesWon = currentSeriesGamesWon >= 2;
+                    if (!sessionSeriesCounted)
+                    {
+                        sessionSeriesCounted = true;
+                        if (seriesWon) sessionRankedSeriesWins++; else sessionRankedSeriesLosses++;
+                        Plugin.Log.LogInfo($"[SESSION] Ranked series tally (local BO3 decision): {sessionRankedSeriesWins}-{sessionRankedSeriesLosses}");
+                        SaveSessionState();
+                    }
+                }
             }
             else
             {
@@ -2842,8 +3356,10 @@ namespace CompetitiveRounds
                 }
             }
 
-            // Use consistent room ID (no per-PC timestamp, use round count instead)
-            string reportRoomId = $"{photonRoomId}_{matchStartTime:HHmmss}_r{p1Rounds + p2Rounds}";
+            // The Photon-master token is shared by both participants and stays
+            // stable in the durable outbox. The local-time fallback preserves
+            // mixed-version compatibility.
+            string reportRoomId = BuildReportRoomId();
 
             // Hard block: offline / practice / bot matches must never reach the server. ROUNDS'
             // offline mode uses photon room names like "offline room" and replaces the opponent
@@ -2865,6 +3381,11 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[POLL] Skipping match report — offline/practice detected (room='{photonRoomId}')");
                 shouldReport = false;
             }
+
+            // Every 1v1 client independently submits its own threshold-breaking
+            // windows. This immutable snapshot is persisted before networking.
+            if (!isOfflineMatch)
+                TryDispatchMacroEvidence(reportRoomId);
 
             // ── 2v2 routing ────────────────────────────────────────
             // If this room has 4 players AND we have an active team series id, route through
@@ -3040,6 +3561,15 @@ namespace CompetitiveRounds
                     localKeysPressed: LocalKeysThisMatch,
                     localActiveSeconds: LocalActiveSecondsThisMatch,
                     localMacroSuspectSeconds: LocalMacroSuspectSeconds,
+                    localMacroPeakKps: LocalMacroPeakKeysPerSecond,
+                    localMacroPeakCps: LocalMacroPeakClicksPerSecond,
+                    localMacroPeakEps: LocalMacroPeakEventsPerSecond,
+                    localMacroTimeline: LocalMacroTimeline,
+                    oppMacroSuspectSeconds: OppStatMacroSuspectSeconds,
+                    oppMacroPeakKps: OppStatMacroPeakKeysPerSecond,
+                    oppMacroPeakCps: OppStatMacroPeakClicksPerSecond,
+                    oppMacroPeakEps: OppStatMacroPeakEventsPerSecond,
+                    oppMacroTimeline: OppStatMacroTimeline,
                     // Item 4 (v1.30): opponent's per-game combat stats (their
                     // client publishes cr_gstats every ~3s; we ship the latest
                     // snapshot) + the cumulative scoring timeline for the
@@ -4143,6 +4673,11 @@ namespace CompetitiveRounds
         {
             isTracking = false;
             gameOverReported = false;
+            oneVOneMatchAtStart = false;
+            macroEvidenceDispatched = false;
+            sharedGameToken = "";
+            previousGameToken = "";
+            matchStartServerTimestamp = 0;
             wasGameInProgress = false;
             pcolorRoomApplied = false;
             // Room over — drop the Tab-board card baselines (bug #64); the Player
@@ -4197,8 +4732,15 @@ namespace CompetitiveRounds
             LocalBlocksThisMatch = 0;
             LocalKeysThisMatch = 0;
             LocalMacroSuspectSeconds = 0;
+            LocalMacroPeakKeysPerSecond = 0;
+            LocalMacroPeakClicksPerSecond = 0;
+            LocalMacroPeakEventsPerSecond = 0;
+            inputSuspectWindows.Clear();
             inputBucketTimer = 0f;
             inputBucketCount = 0;
+            inputBucketKeyCount = 0;
+            inputBucketClickCount = 0;
+            inputBucketStartedAtMs = -1;
             LocalActiveSecondsThisMatch = 0f;
             LocalBulletsFiredThisMatch = 0;
             LocalBulletsHitThisMatch = 0;
@@ -4218,7 +4760,7 @@ namespace CompetitiveRounds
             opponentAvgFps = 0;
             // July 21 item 2: per-match telemetry resets.
             localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
-            bcFrames = 0; bcAccum = 0f;
+            bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
@@ -4228,6 +4770,7 @@ namespace CompetitiveRounds
             _hitsRemaining = 0;
             _activationSuccessCredited = true;
             BlockChain.Reset();
+            _loggedHitBudgetDrop = false;
             // July 22 item 1/7: hit/block timelines + point stamps + per-actor harvest.
             localHitTimeline.Clear(); localBlockTimeline.Clear();
             oppHitTimeline.Clear(); oppBlockTimeline.Clear();
@@ -4235,6 +4778,11 @@ namespace CompetitiveRounds
             pointTimes.Clear();
             LocalDamageTakenThisMatch = 0f;
             peerTele.Clear();
+            OppStatMacroSuspectSeconds = 0;
+            OppStatMacroPeakKeysPerSecond = 0;
+            OppStatMacroPeakClicksPerSecond = 0;
+            OppStatMacroPeakEventsPerSecond = 0;
+            OppStatMacroTimeline = "";
 
             // Clear our card broadcast when leaving room
             try

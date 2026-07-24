@@ -76,6 +76,19 @@ class MatchReport(BaseModel):
     # #50 macro detector: count of 1-second windows whose gameplay-key event
     # rate was superhuman on the reporter's client. Advisory, NOT in HMAC.
     local_macro_suspect_seconds: int | None = Field(None, ge=0, le=86400)
+    # Per-second diagnostic evidence for that detector. Timeline entries are
+    # "elapsedSecond:keyRate:clickRate" and contain suspect windows only.
+    local_macro_peak_kps: int | None = Field(None, ge=0, le=32767)
+    local_macro_peak_cps: int | None = Field(None, ge=0, le=32767)
+    local_macro_peak_eps: int | None = Field(None, ge=0, le=32767)
+    local_macro_timeline: str | None = Field(None, max_length=1024)
+    # The elected reporter receives the other player's compact evidence via
+    # cr_gstats so macros on either side can be diagnosed.
+    opp_macro_suspect_seconds: int | None = Field(None, ge=0, le=86400)
+    opp_macro_peak_kps: int | None = Field(None, ge=0, le=32767)
+    opp_macro_peak_cps: int | None = Field(None, ge=0, le=32767)
+    opp_macro_peak_eps: int | None = Field(None, ge=0, le=32767)
+    opp_macro_timeline: str | None = Field(None, max_length=1024)
     # v1.30 item 4 — opponent's per-game combat stats (their cr_gstats Photon
     # prop snapshot) + the cumulative scoring timeline for the history hover
     # graph. All advisory; not in HMAC.
@@ -936,5 +949,3 @@ class TeamMatchHistoryEntry(BaseModel):
     series_score: str | None = None
     series_rating_change: float | None = None
     fps_by_player: dict[str, int] = Field(default_factory=dict)  # keyed by steam_id, 0 = missing
-
-

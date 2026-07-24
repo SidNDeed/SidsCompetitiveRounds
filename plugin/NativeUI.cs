@@ -298,16 +298,55 @@ namespace CompetitiveRounds
         // CompetitiveUI sets this whenever any IMGUI modal is open, the same
         // condition that drives the uGUI blocker.
         public static bool ModalBlockInput;
+        private bool ContainsScreenPoint(RectTransform target, Vector3 point)
+        {
+            if (target == null) return false;
+            Vector3[] corners = new Vector3[4];
+            target.GetWorldCorners(corners);
+            float minX = float.PositiveInfinity, minY = float.PositiveInfinity;
+            float maxX = float.NegativeInfinity, maxY = float.NegativeInfinity;
+            for (int i = 0; i < corners.Length; i++)
+            {
+                Vector3 c = canvasCamera != null
+                    ? canvasCamera.WorldToScreenPoint(corners[i])
+                    : corners[i];
+                minX = Mathf.Min(minX, c.x);
+                minY = Mathf.Min(minY, c.y);
+                maxX = Mathf.Max(maxX, c.x);
+                maxY = Mathf.Max(maxY, c.y);
+            }
+            return point.x >= minX && point.x <= maxX
+                && point.y >= minY && point.y <= maxY;
+        }
+        private bool IsInsideAncestorMasks(Vector3 point)
+        {
+            // Unity's EventSystem respects a ScrollView Mask when raycasting,
+            // but this component polls Input directly. Enforce every ancestor
+            // mask here too so clipped rows cannot be clicked through panels
+            // that visually cover them.
+            if (UIFactory.tMask == null) return true;
+            Transform cursor = transform.parent;
+            while (cursor != null)
+            {
+                try
+                {
+                    if (cursor.GetComponent(UIFactory.tMask) != null
+                        && !ContainsScreenPoint(cursor as RectTransform, point))
+                        return false;
+                }
+                catch { }
+                cursor = cursor.parent;
+            }
+            return true;
+        }
         private void Update()
         {
             if(rt==null||onClick==null||!gameObject.activeInHierarchy)return;
             if(ModalBlockInput)return;
             if(!Input.GetMouseButtonDown(0))return;
             if(!cameraResolved)ResolveCamera();
-            Vector3[] corners=new Vector3[4];rt.GetWorldCorners(corners);
-            if(canvasCamera!=null)for(int i=0;i<4;i++)corners[i]=canvasCamera.WorldToScreenPoint(corners[i]);
             Vector3 mp=Input.mousePosition;
-            if(mp.x>=corners[0].x&&mp.x<=corners[2].x&&mp.y>=corners[0].y&&mp.y<=corners[2].y)onClick.Invoke();
+            if(ContainsScreenPoint(rt,mp)&&IsInsideAncestorMasks(mp))onClick.Invoke();
         }
     }
 
@@ -427,6 +466,19 @@ namespace CompetitiveRounds
                 var arr = new ChatEntry[chatLines.Count - start];
                 for (int i = 0; i < arr.Length; i++) arr[i] = chatLines[start + i];
                 return arr;
+            }
+        }
+
+        /// <summary>Copy recent chat into caller-owned storage without allocating
+        /// an array every OnGUI repaint.</summary>
+        public static void CopyChatTail(List<ChatEntry> destination, int tail)
+        {
+            if (destination == null) return;
+            lock (chatLinesLock)
+            {
+                destination.Clear();
+                int start = Math.Max(0, chatLines.Count - tail);
+                for (int i = start; i < chatLines.Count; i++) destination.Add(chatLines[i]);
             }
         }
         private static GameObject rankedContainer,casualContainer;
@@ -803,6 +855,8 @@ namespace CompetitiveRounds
             tournamentIndRow = tIndRow;
             BuildTabBar(content.transform);
             tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);
+            // (The [ID] button's position is set in CreateHistoryRow itself, so
+            // it cannot desync from tab-build ordering.)
 
             var bottom=new GameObject("Bottom");bottom.transform.SetParent(content.transform,false);bottom.AddComponent<RectTransform>();UIFactory.AddHLG(bottom,spacing:8,forceExpandH:true);UIFactory.AddLE(bottom,prefH:26,minH:26,flexH:0);
             UIFactory.CreateText("Ver",bottom.transform,$"<b>v{Plugin.ModVersion}</b>",13f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(90,22));
@@ -1416,6 +1470,13 @@ namespace CompetitiveRounds
                     var row=homeCosRows[i];
                     if(cos==null||i>=cos.Count){if(row.artImg!=null)TrackAnimatedThumb(row.artImg,null,0f);row.root.SetActive(false);continue;}
                     var c=cos[i];
+                    // Defense-in-depth (learning #163): the server hides community
+                    // face items whose PNG hasn't shipped (catalog_ready=false), but
+                    // a client older than the release that flipped catalog_ready could
+                    // still receive one — and a face sku with no local sprite renders
+                    // as a flat preview_color swatch (the "green square"). Skip it.
+                    if((c.kind??"")=="face"&&CustomCosmetics.GetShopSprite(c.sku)==null)
+                    {if(row.artImg!=null)TrackAnimatedThumb(row.artImg,null,0f);row.root.SetActive(false);continue;}
                     string col=!string.IsNullOrEmpty(c.previewColor)&&c.previewColor.StartsWith("#")?c.previewColor:"#FFFFFF";
                     string kind=(c.kind??"").Replace('_',' ');
                     string artistLine=!string.IsNullOrEmpty(c.artistName)?$"  <color=#888>by {HomeSan(c.artistName)}</color>":"";
@@ -1475,7 +1536,7 @@ namespace CompetitiveRounds
         var right=new GameObject("Right");right.transform.SetParent(panel.transform,false);right.AddComponent<RectTransform>();UIFactory.AddVLG(right,spacing:4);UIFactory.AddLE(right,flexW:1,flexH:1);var rkBox=UIFactory.CreatePanel("RkB",right.transform,C_PANEL);UIFactory.AddVLG(rkBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(rkBox,flexH:1);UIFactory.CreateText("RkH",rkBox.transform,"Ranked History",21f,C_GOLD,sizeDelta:new Vector2(250,30));txtOppSummary=UIFactory.CreateText("OS",rkBox.transform,"",15f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(500,22));var rkSV=UIFactory.CreateScrollView("RkSV",rkBox.transform,spacing:1);UIFactory.AddLE(rkSV.scrollGO,flexH:1);rankedContainer=rkSV.content;for(int i=0;i<15;i++)rankedRows.Add(CreateHistoryRow(rankedContainer.transform,$"rr{i}"));var rPg=new GameObject("RPg");rPg.transform.SetParent(rkBox.transform,false);rPg.AddComponent<RectTransform>();UIFactory.AddHLG(rPg,spacing:6,forceExpandH:true);UIFactory.AddLE(rPg,prefH:20,flexH:0);var rS1=new GameObject("S");rS1.transform.SetParent(rPg.transform,false);rS1.AddComponent<RectTransform>();UIFactory.AddLE(rS1,flexW:1);rPrev=UIFactory.CreateButton("rP",rPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(rankedPage>0){rankedPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtRankedPage=UIFactory.CreateText("rPI",rPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));rNext=UIFactory.CreateButton("rN",rPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{rankedPage++;dirty=true;},sizeDelta:new Vector2(50,18));var rS2=new GameObject("S");rS2.transform.SetParent(rPg.transform,false);rS2.AddComponent<RectTransform>();UIFactory.AddLE(rS2,flexW:1);rCardModeBtn=UIFactory.CreateButton("rCm",rPg.transform,"",10f,C_LABEL,C_BTN,ToggleHistoryCardMode,sizeDelta:new Vector2(100,18));rCardModeTxt=UIFactory.GetButtonText(rCardModeBtn);
         var csBox=UIFactory.CreatePanel("CsB",right.transform,C_PANEL);UIFactory.AddVLG(csBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(csBox,flexH:1);UIFactory.CreateText("CsH",csBox.transform,"Casual History",21f,C_SUB,sizeDelta:new Vector2(250,30));var csSV=UIFactory.CreateScrollView("CsSV",csBox.transform,spacing:1);UIFactory.AddLE(csSV.scrollGO,flexH:1);casualContainer=csSV.content;for(int i=0;i<12;i++)casualRows.Add(CreateHistoryRow(casualContainer.transform,$"cr{i}"));var cPg=new GameObject("CPg");cPg.transform.SetParent(csBox.transform,false);cPg.AddComponent<RectTransform>();UIFactory.AddHLG(cPg,spacing:6,forceExpandH:true);UIFactory.AddLE(cPg,prefH:20,flexH:0);var cS1=new GameObject("S");cS1.transform.SetParent(cPg.transform,false);cS1.AddComponent<RectTransform>();UIFactory.AddLE(cS1,flexW:1);cPrev=UIFactory.CreateButton("cP",cPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(casualPage>0){casualPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtCasualPage=UIFactory.CreateText("cPI",cPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));cNext=UIFactory.CreateButton("cN",cPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{casualPage++;dirty=true;},sizeDelta:new Vector2(50,18));var cS2=new GameObject("S");cS2.transform.SetParent(cPg.transform,false);cS2.AddComponent<RectTransform>();UIFactory.AddLE(cS2,flexW:1);cCardModeBtn=UIFactory.CreateButton("cCm",cPg.transform,"",10f,C_LABEL,C_BTN,ToggleHistoryCardMode,sizeDelta:new Vector2(100,18));cCardModeTxt=UIFactory.GetButtonText(cCardModeBtn);return outer;}
 
-        private static HistoryRow CreateHistoryRow(Transform parent,string name){var row=new HistoryRow();row.seriesGO=new GameObject(name+"s");row.seriesGO.transform.SetParent(parent,false);row.seriesGO.AddComponent<RectTransform>();UIFactory.AddHLG(row.seriesGO,spacing:4,padL:4);UIFactory.AddLE(row.seriesGO,prefH:25);row.txtSeriesHead=UIFactory.CreateText("sh",row.seriesGO.transform,"",19f,C_GREEN,sizeDelta:new Vector2(500,25));row.txtSeriesElo=UIFactory.CreateText("se",row.seriesGO.transform,"",19f,C_GREEN,UIFactory.AlignMidRight,sizeDelta:new Vector2(160,25));row.seriesGO.SetActive(false);row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddVLG(row.root,spacing:0,padL:4);var main=new GameObject("m");main.transform.SetParent(row.root.transform,false);main.AddComponent<RectTransform>();UIFactory.AddHLG(main,spacing:4);UIFactory.AddLE(main,prefH:25);/* Feedback item 4: txtResult width hugs the score text (was 200 — the dead right half pushed the ID button visually next to "vs Player" instead of the score). */row.txtResult=UIFactory.CreateText("r",main.transform,"",19f,C_GREEN,UIFactory.AlignMidLeft,sizeDelta:new Vector2(132,25));/* July 22 item 6: tiny click-to-copy game-ID button right after the score. Sits OUTSIDE txtResult's rect so the score hover graph keeps its region. */row.btnId=UIFactory.CreateButton("id",main.transform,"ID",9f,C_DIM,C_BTN,()=>CopyGameCode(row.currentMatchId),sizeDelta:new Vector2(24,17));row.btnId.SetActive(false);row.txtOpp=UIFactory.CreateText("o",main.transform,"",18f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,25));row.txtFps=UIFactory.CreateText("fp",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(120,25));var spFp=new GameObject("Sfp");spFp.transform.SetParent(main.transform,false);spFp.AddComponent<RectTransform>();UIFactory.AddLE(spFp,prefW:22,flexW:0);row.txtPing=UIFactory.CreateText("pg",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(150,25));/* July 22: FPS and Ping are SEPARATE hover targets, spaced apart */var sp=new GameObject("S");sp.transform.SetParent(main.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);row.txtXP=UIFactory.CreateText("x",main.transform,"",16f,C_BLUE,UIFactory.AlignMidRight,sizeDelta:new Vector2(65,25));row.txtDate=UIFactory.CreateText("d",main.transform,"",15f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(45,25));/* Item 4 (v1.30): per-game combat stats line — sits in the dead space under the FPS values. Hidden (empty) for rows without telemetry. July 22 item 1: split into per-player elements so each Hit%/Block% is its own hover target popping its own graph. */var st=new GameObject("st");st.transform.SetParent(row.root.transform,false);st.AddComponent<RectTransform>();UIFactory.AddHLG(st,spacing:2);UIFactory.AddLE(st,prefH:20);var cStat=new Color(0.65f,0.7f,0.78f);/* Feedback item 4: widths hug the rendered text so the line reads like the old single-string layout (hover regions trim to preferredWidth regardless). */row.txtStats=UIFactory.CreateText("st0",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(70,20));row.txtHitYou=UIFactory.CreateText("hy",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,20));row.txtBlockYou=UIFactory.CreateText("by",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(88,20));row.txtKpsYou=UIFactory.CreateText("ky",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(96,20));row.txtHitOpp=UIFactory.CreateText("ho",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,20));row.txtBlockOpp=UIFactory.CreateText("bo",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(88,20));row.txtKpsOpp=UIFactory.CreateText("ko",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(96,20));row.txtCards=UIFactory.CreateText("c",row.root.transform,"",19f,new Color(0.6f,0.7f,0.9f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtCards,1.5f);row.txtOppCards=UIFactory.CreateText("oc",row.root.transform,"",19f,new Color(0.9f,0.6f,0.5f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtOppCards,1.5f);row.root.SetActive(false);return row;}
+        private static HistoryRow CreateHistoryRow(Transform parent,string name){var row=new HistoryRow();row.seriesGO=new GameObject(name+"s");row.seriesGO.transform.SetParent(parent,false);row.seriesGO.AddComponent<RectTransform>();UIFactory.AddHLG(row.seriesGO,spacing:4,padL:4);UIFactory.AddLE(row.seriesGO,prefH:25);row.txtSeriesHead=UIFactory.CreateText("sh",row.seriesGO.transform,"",19f,C_GREEN,sizeDelta:new Vector2(500,25));row.txtSeriesElo=UIFactory.CreateText("se",row.seriesGO.transform,"",19f,C_GREEN,UIFactory.AlignMidRight,sizeDelta:new Vector2(160,25));row.seriesGO.SetActive(false);row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddVLG(row.root,spacing:0,padL:4);var main=new GameObject("m");main.transform.SetParent(row.root.transform,false);main.AddComponent<RectTransform>();UIFactory.AddHLG(main,spacing:4);UIFactory.AddLE(main,prefH:25);/* Feedback item 4: txtResult width hugs the score text (was 200 — the dead right half pushed the ID button visually next to "vs Player" instead of the score). */row.txtResult=UIFactory.CreateText("r",main.transform,"",19f,C_GREEN,UIFactory.AlignMidLeft,sizeDelta:new Vector2(132,25));/* July 22 item 6: tiny click-to-copy game-ID button. Sits OUTSIDE txtResult's rect so the score hover graph keeps its region. Ordered FIRST (before the score) in both ranked and casual history — next to the scoring column, not the "vs Player" text. Setting the sibling index here, at creation, is deliberate: doing it from BuildPage instead would silently no-op if tab construction ever became lazy or reordered (learning #91/#158). Later-created children append after it, so index 0 stays index 0. */row.btnId=UIFactory.CreateButton("id",main.transform,"ID",9f,C_DIM,C_BTN,()=>CopyGameCode(row.currentMatchId),sizeDelta:new Vector2(24,17));row.btnId.transform.SetSiblingIndex(0);row.btnId.SetActive(false);row.txtOpp=UIFactory.CreateText("o",main.transform,"",18f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,25));row.txtFps=UIFactory.CreateText("fp",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(120,25));var spFp=new GameObject("Sfp");spFp.transform.SetParent(main.transform,false);spFp.AddComponent<RectTransform>();UIFactory.AddLE(spFp,prefW:22,flexW:0);row.txtPing=UIFactory.CreateText("pg",main.transform,"",14f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(150,25));/* July 22: FPS and Ping are SEPARATE hover targets, spaced apart */var sp=new GameObject("S");sp.transform.SetParent(main.transform,false);sp.AddComponent<RectTransform>();UIFactory.AddLE(sp,flexW:1);row.txtXP=UIFactory.CreateText("x",main.transform,"",16f,C_BLUE,UIFactory.AlignMidRight,sizeDelta:new Vector2(65,25));row.txtDate=UIFactory.CreateText("d",main.transform,"",15f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(45,25));/* Item 4 (v1.30): per-game combat stats line — sits in the dead space under the FPS values. Hidden (empty) for rows without telemetry. July 22 item 1: split into per-player elements so each Hit%/Block% is its own hover target popping its own graph. */var st=new GameObject("st");st.transform.SetParent(row.root.transform,false);st.AddComponent<RectTransform>();UIFactory.AddHLG(st,spacing:2);UIFactory.AddLE(st,prefH:20);var cStat=new Color(0.65f,0.7f,0.78f);/* Feedback item 4: widths hug the rendered text so the line reads like the old single-string layout (hover regions trim to preferredWidth regardless). */row.txtStats=UIFactory.CreateText("st0",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(70,20));row.txtHitYou=UIFactory.CreateText("hy",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,20));row.txtBlockYou=UIFactory.CreateText("by",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(88,20));row.txtKpsYou=UIFactory.CreateText("ky",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(96,20));row.txtHitOpp=UIFactory.CreateText("ho",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,20));row.txtBlockOpp=UIFactory.CreateText("bo",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(88,20));row.txtKpsOpp=UIFactory.CreateText("ko",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(96,20));row.txtCards=UIFactory.CreateText("c",row.root.transform,"",19f,new Color(0.6f,0.7f,0.9f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtCards,1.5f);row.txtOppCards=UIFactory.CreateText("oc",row.root.transform,"",19f,new Color(0.9f,0.6f,0.5f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtOppCards,1.5f);row.root.SetActive(false);return row;}
 
         private static object txtLBPlayerName;
         private static GameObject BuildLeaderboardTab(Transform parent){var panel=new GameObject("Leaderboard");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:6);UIFactory.AddLE(panel,flexH:1);/* === LEFT: Recent Ranked Series === */var seriesCol=UIFactory.CreatePanel("LBSeries",panel.transform,C_PANEL);UIFactory.AddVLG(seriesCol,spacing:2,padL:8,padR:8,padT:6,padB:6);/* Round 7: both SIDE panels carry identical prefW 400 + flexW 1 so the leftover splits evenly and the fixed-width table column sits in the TRUE screen center (sub-tabs anchor inside it and center with it). The flex value being EXPLICIT is still load-bearing — see learning #132. */UIFactory.AddLE(seriesCol,prefW:400,minW:340,flexW:1,flexH:1);txtLiveHeader=UIFactory.CreateText("RSL",seriesCol.transform,"<color=#FF6688>* Live Ranked Games</color>",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));txtLiveSeries=UIFactory.CreateText("LIVE",seriesCol.transform,"<color=#666><i>No live games right now.</i></color>",13f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(280,24));UIFactory.SetWordWrap(txtLiveSeries,true);liveBetsContainer=new GameObject("LiveBets");liveBetsContainer.transform.SetParent(seriesCol.transform,false);liveBetsContainer.AddComponent<RectTransform>();UIFactory.AddVLG(liveBetsContainer,spacing:2);/* No LayoutElement: VLG on this container already sums child preferred heights with priority 0 and reports that as its preferred height, so the parent VLG sizes us correctly. Previously an LE with prefH:0 priority:1 was overriding that sum to 0, collapsing the live series into the recent series list below. */
@@ -2323,6 +2384,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             public GameObject artImgGO; public object artImg;   // item 9: cosmetic art thumbnail
             public string sku, name;
             public int price, stock;
+            public bool catalogReady;
         }
         private class ArtistBlockRow
         {
@@ -2335,6 +2397,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static readonly List<ArtistBlockRow> artistBlockRows = new List<ArtistBlockRow>();
         private static GameObject artistItemsContainer, artistBlocksContainer;
         private static object txtArtistStatus, txtArtistSubs, txtArtistSales;
+        private static bool cosmeticPlacementLoading;
+        private static int cosmeticPlacementLoadTicket;
 
         private static GameObject BuildArtistTab(Transform parent)
         {
@@ -2348,8 +2412,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.CreateText("ArtH", panel.transform, "Artist Studio", 22f, C_GOLD,
                 UIFactory.AlignTopLeft, sizeDelta: new Vector2(600, 30));
             UIFactory.CreateText("ArtHint", panel.transform,
-                "Your cosmetics. Rename them, set the description and price, cap how many copies exist, gift copies, or block specific buyers. You earn 30% of every sale. Changes are live in the shop immediately.",
-                13f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 22));
+                "Manage your cosmetics and earn 30% of every sale. Scale/placement changes return to admin review; badly scaled, obstructive, or misplaced art may be rejected or adjusted by an admin.",
+                13f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 32));
             txtArtistStatus = UIFactory.CreateText("ArtSt", panel.transform, "", 14f, C_LABEL,
                 UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 22));
 
@@ -2418,6 +2482,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] open folder: {ex.Message}"); }
                 }, sizeDelta: new Vector2(180, 28));
+            UIFactory.CreateButton("ArtPlace", blockRow.transform,
+                "Adjust placement...", 14f, C_WHITE, new Color(0.35f, 0.3f, 0.55f, 0.95f),
+                StartCosmeticPlacementAdjustment, sizeDelta: new Vector2(175, 28));
             var blockSp = new GameObject("S");
             blockSp.transform.SetParent(blockRow.transform, false);
             blockSp.AddComponent<RectTransform>();
@@ -2512,12 +2579,147 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 slot =>
                 {
                     if (string.IsNullOrEmpty(slot)) return;
-                    string b64 = Convert.ToBase64String(bytes);
-                    ApiClient.ArtistSubmitCosmetic(MatchTracker.LocalSteamId, name, slot, b64,
-                        (ok, resp) => ShowArtistResult(ok,
-                            ok ? $"'{name}' submitted for review! You'll see the status on this tab."
-                               : resp));
-                }, actionLabel: "Submit", showClear: false);
+                    CompetitiveUI.OpenCosmeticTestPreview(bytes, name, slot,
+                        (renderScale, renderOffsetX, renderOffsetY) =>
+                    {
+                        string b64 = Convert.ToBase64String(bytes);
+                        ApiClient.ArtistSubmitCosmetic(
+                            MatchTracker.LocalSteamId, name, slot, b64,
+                            renderScale, renderOffsetX, renderOffsetY,
+                            (ok, resp) => ShowArtistResult(ok,
+                                ok ? $"'{name}' submitted for scale/placement review. You'll see the status on this tab."
+                                   : resp));
+                    });
+                }, actionLabel: "Preview", showClear: false);
+        }
+
+        private static void StartCosmeticPlacementAdjustment()
+        {
+            if (cosmeticPlacementLoading)
+            {
+                CompetitiveUI.ShowNotification(
+                    "The selected cosmetic is still loading.",
+                    new Color(0.55f, 0.75f, 1f), 3f);
+                return;
+            }
+            var all = ApiClient.CachedMySubmissions;
+            var editable = all == null
+                ? new List<ApiClient.CosmeticSubmission>()
+                : all.Where(s => s != null && (s.status == "pending" || s.status == "approved")).ToList();
+            var linkedSkus = new HashSet<string>(
+                editable.Where(s => !string.IsNullOrEmpty(s.shop_sku))
+                        .Select(s => s.shop_sku),
+                StringComparer.OrdinalIgnoreCase);
+            var legacyItems = (ApiClient.CachedArtistItems ?? new List<ApiClient.ArtistItemEntry>())
+                .Where(it => it != null
+                    && it.catalog_ready
+                    && string.Equals(it.kind, "face", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrEmpty(it.sku)
+                    && !linkedSkus.Contains(it.sku))
+                .ToList();
+            if (editable.Count == 0 && legacyItems.Count == 0)
+            {
+                ShowArtistResult(false, "{\"detail\":\"no pending or approved cosmetics to adjust\"}");
+                return;
+            }
+            string[] labels = new string[editable.Count + legacyItems.Count];
+            string[] ids = new string[labels.Length];
+            for (int i = 0; i < editable.Count; i++)
+            {
+                var s = editable[i];
+                string state = s.status == "approved"
+                    ? (s.placement_status == "pending" ? "placement pending" : "approved")
+                    : "initial review pending";
+                labels[i] = $"{s.name} ({s.slot}, {state})";
+                ids[i] = $"submission:{s.id}";
+            }
+            for (int i = 0; i < legacyItems.Count; i++)
+            {
+                var it = legacyItems[i];
+                int at = editable.Count + i;
+                labels[at] = $"{it.name} (published; first placement revision)";
+                ids[at] = $"catalog:{it.sku}";
+            }
+            CompetitiveUI.OpenArtistPicker(
+                "Adjust which cosmetic? Changes return to admin review.",
+                labels, ids, selected =>
+                {
+                    if (selected.StartsWith("catalog:", StringComparison.Ordinal))
+                    {
+                        string sku = selected.Substring("catalog:".Length);
+                        var item = legacyItems.FirstOrDefault(
+                            it => string.Equals(it.sku, sku, StringComparison.OrdinalIgnoreCase));
+                        string slot;
+                        float publishedScale;
+                        Vector2 publishedOffset;
+                        byte[] bytes;
+                        if (item == null || !CustomCosmetics.TryGetPublishedPlacement(
+                                sku, out slot, out publishedScale, out publishedOffset, out bytes))
+                        {
+                            ShowArtistResult(false,
+                                "{\"detail\":\"the published PNG is missing locally; reinstall or update the cosmetic art bundle\"}");
+                            return;
+                        }
+                        CompetitiveUI.OpenCosmeticTestPreview(
+                            bytes, item.name, slot,
+                            (scale, offsetX, offsetY) =>
+                                ApiClient.ArtistStartCatalogPlacementRevision(
+                                    MatchTracker.LocalSteamId, sku, slot,
+                                    Convert.ToBase64String(bytes),
+                                    publishedScale, publishedOffset.x, publishedOffset.y,
+                                    scale, offsetX, offsetY,
+                                    (saved, saveResp) => ShowArtistResult(
+                                        saved,
+                                        saved
+                                            ? $"'{item.name}' placement revision sent for admin review. Its current published placement stays active until the approved revision ships."
+                                            : saveResp)),
+                            publishedScale, publishedOffset.x, publishedOffset.y,
+                            "Send to review", isRevision: true);
+                        return;
+                    }
+
+                    if (!selected.StartsWith("submission:", StringComparison.Ordinal)) return;
+                    int submissionId;
+                    if (!int.TryParse(
+                            selected.Substring("submission:".Length), out submissionId))
+                        return;
+                    cosmeticPlacementLoading = true;
+                    int ticket = ++cosmeticPlacementLoadTicket;
+                    CompetitiveUI.ShowNotification(
+                        "Loading the reviewed cosmetic...", new Color(0.55f, 0.75f, 1f), 3f);
+                    ApiClient.FetchCosmeticSubmissionPreview(
+                        MatchTracker.LocalSteamId, submissionId, (ok, sub, resp) =>
+                        {
+                            if (ticket != cosmeticPlacementLoadTicket) return;
+                            cosmeticPlacementLoading = false;
+                            if (!ok || sub == null)
+                            {
+                                ShowArtistResult(false, resp);
+                                return;
+                            }
+                            byte[] bytes;
+                            try { bytes = Convert.FromBase64String(sub.png_base64 ?? ""); }
+                            catch
+                            {
+                                ShowArtistResult(false, "{\"detail\":\"could not decode the saved preview\"}");
+                                return;
+                            }
+                            if (!isOpen) return;
+                            CompetitiveUI.OpenCosmeticTestPreview(
+                                bytes, sub.name, sub.slot,
+                                (scale, offsetX, offsetY) =>
+                                    ApiClient.ArtistUpdateCosmeticPlacement(
+                                        MatchTracker.LocalSteamId, sub.id, sub.placement_revision,
+                                        scale, offsetX, offsetY,
+                                        (saved, saveResp) => ShowArtistResult(
+                                            saved,
+                                            saved
+                                                ? $"'{sub.name}' placement revision sent for admin review. The last approved placement stays active until this one is approved and shipped."
+                                                : saveResp)),
+                                sub.render_scale, sub.render_offset_x, sub.render_offset_y,
+                                "Send to review", isRevision: true);
+                        });
+                }, actionLabel: "Preview", showClear: false);
         }
 
         private static void ShowArtistResult(bool ok, string msg)
@@ -2553,7 +2755,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 foreach (var it in items)
                 {
                     var row = GetOrCreateArtistRow(i++);
-                    row.sku = it.sku; row.name = it.name; row.price = it.price; row.stock = it.stock_limit;
+                    row.sku = it.sku; row.name = it.name; row.price = it.price;
+                    row.stock = it.stock_limit; row.catalogReady = it.catalog_ready;
+                    if (row.stockBtn != null) row.stockBtn.SetActive(it.catalog_ready);
+                    if (row.giftBtn != null) row.giftBtn.SetActive(it.catalog_ready);
                     // Item 9: cosmetic art thumbnail (face items have runtime sprites;
                     // other kinds simply hide the slot).
                     try
@@ -2568,11 +2773,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         else if (row.artImgGO != null) row.artImgGO.SetActive(false);
                     }
                     catch { }
-                    string stockStr = it.stock_limit < 0
-                        ? "<color=#FF6666>NOT OPENED - set stock to start selling!</color>"
-                        : it.stock_limit > 0
-                            ? $"{Math.Max(0, it.stock_limit - it.sold)} of {it.stock_limit} left"
-                            : "unlimited";
+                    string stockStr = !it.catalog_ready
+                        ? "<color=#FFD94D>APPROVED - awaiting mod update</color>"
+                        : it.stock_limit < 0
+                            ? "<color=#FF6666>NOT OPENED - set stock to start selling!</color>"
+                            : it.stock_limit > 0
+                                ? $"{Math.Max(0, it.stock_limit - it.sold)} of {it.stock_limit} left"
+                                : "unlimited";
                     UIFactory.SetText(row.txtInfo,
                         $"<b>{it.name}</b> <color=#888>({it.kind}, {it.rarity})</color>  " +
                         $"<color=#FFD94D>{it.price}g</color>  <color=#7FE8C3>{stockStr}</color>  " +
@@ -2595,12 +2802,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     foreach (var s in subs)
                     {
                         if (shown++ >= 6) break;
-                        string st = s.status == "approved"
-                            ? $"<color=#66DD66>APPROVED</color> <color=#888>(in the shop as {s.shop_sku}; art ships with the next mod update)</color>"
-                            : s.status == "denied"
-                                ? $"<color=#FF6666>DENIED</color>{(string.IsNullOrEmpty(s.review_note) ? "" : $" <color=#888>- {s.review_note}</color>")}"
-                                : "<color=#FFD94D>pending review</color>";
-                        ssb.Append($"  {s.name} <color=#888>({s.slot})</color>  {st}\n");
+                        string st;
+                        if (s.status == "approved" && s.placement_status == "pending")
+                            st = "<color=#FFD94D>PLACEMENT PENDING REVIEW</color> <color=#888>(last approved placement stays active)</color>";
+                        else if (s.status == "approved" && s.placement_status == "denied")
+                            st = "<color=#FF9966>PLACEMENT CHANGE REJECTED</color>"
+                               + (string.IsNullOrEmpty(s.placement_review_note) ? ""
+                                  : $" <color=#888>- {HomeSan(s.placement_review_note)}</color>")
+                               + " <color=#888>(last approved placement stays active)</color>";
+                        else if (s.status == "approved")
+                            st = s.approved_placement_revision > s.published_placement_revision
+                                ? $"<color=#66DD66>APPROVED</color> <color=#888>(rev {s.approved_placement_revision} awaits a mod update)</color>"
+                                : $"<color=#66DD66>APPROVED</color> <color=#888>({s.shop_sku})</color>";
+                        else if (s.status == "denied")
+                            st = $"<color=#FF6666>DENIED</color>{(string.IsNullOrEmpty(s.review_note) ? "" : $" <color=#888>- {HomeSan(s.review_note)}</color>")}";
+                        else
+                            st = "<color=#FFD94D>pending initial review</color>";
+                        // Offset is just the default start position (players drag
+                        // face items themselves), so it isn't shown in list rows —
+                        // scale is the value that decides whether the art fits.
+                        ssb.Append($"  {HomeSan(s.name)} <color=#888>({s.slot}, {s.render_scale:F2}x, "
+                                   + $"rev {s.placement_revision})</color>  {st}\n");
                     }
                     UIFactory.SetText(txtArtistSubs, ssb.ToString().TrimEnd('\n'));
                 }
@@ -2710,6 +2932,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }, sizeDelta: new Vector2(60, 24));
                 row.stockBtn = UIFactory.CreateButton("s", row.root.transform, "Stock", 13f, C_WHITE, C_BTN, () =>
                 {
+                    if (!r.catalogReady)
+                    { ShowArtistResult(false, "{\"detail\":\"art is still awaiting a mod update\"}"); return; }
                     CompetitiveUI.OpenArtistInput($"Set stock - {r.name}", "Max copies (0 = unlimited)",
                         r.stock.ToString(), v =>
                         {
@@ -2723,6 +2947,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 row.giftBtn = UIFactory.CreateButton("g", row.root.transform, "Gift", 13f, C_WHITE,
                     new Color(0.2f, 0.45f, 0.25f, 0.9f), () =>
                 {
+                    if (!r.catalogReady)
+                    { ShowArtistResult(false, "{\"detail\":\"art is still awaiting a mod update\"}"); return; }
                     // Item 8: search by name (elo shown beside each result so a
                     // rename-imposter can't receive someone else's gift).
                     CompetitiveUI.OpenPlayerSearch($"Gift {r.name} - find the recipient",
@@ -4703,7 +4929,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
             // -- Animated cosmetics (v1.32 item 8) --
             UIFactory.CreateText("SAnimCosL", dispBox.transform,
-                "Animated cosmetics: prismatic/chrome body colors, prism trail, map-skin shimmer, animated faces. Off = all freeze to a static frame instantly.",
+                "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = all freeze to a static frame instantly.",
                 13f, C_DIM, sizeDelta: new Vector2(700, 34));
             animCosToggleBtn = SettingsButton(dispBox.transform, "SAnimCos", "",
                 C_WHITE, C_BTN, new Vector2(260, 28),
@@ -4711,6 +4937,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Animated cosmetics toggled");
                     Plugin.AnimatedCosmetics.Value = !Plugin.AnimatedCosmetics.Value;
+                    try { PlayerEffectCosmetic.OnAnimatedCosmeticsToggled(); } catch { }
                     dirty = true;
                 });
             animCosToggleTxt = UIFactory.GetButtonText(animCosToggleBtn);
@@ -7789,16 +8016,21 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 CompetitiveUI.OpenAdminPrompt("reverse"), sizeDelta: new Vector2(150, 26));
             UIFactory.CreateButton("ABugRpt", actionRow.transform, "Bug Reports...", 13f, C_WHITE, new Color(0.2f, 0.3f, 0.5f, 0.9f), () =>
                 CompetitiveUI.OpenBugReportAdminViewer(), sizeDelta: new Vector2(150, 26));
+            var artistActionRow = new GameObject("AArtistAct");
+            artistActionRow.transform.SetParent(panel.transform, false);
+            artistActionRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(artistActionRow, spacing: 8);
+            UIFactory.AddLE(artistActionRow, prefH: 30, flexH: 0);
             // Item 1 (v1.30): artist-role management. Assigning ITEMS to an
             // artist lives on the shop rows (admin-only "Artist" button there).
-            UIFactory.CreateButton("AArtG", actionRow.transform, "Grant Artist...", 13f, C_WHITE, new Color(0.3f, 0.45f, 0.35f, 0.9f), () =>
+            UIFactory.CreateButton("AArtG", artistActionRow.transform, "Grant Artist...", 13f, C_WHITE, new Color(0.3f, 0.45f, 0.35f, 0.9f), () =>
                 // Grant targets someone who ISN'T an artist yet, so the roster
                 // can't offer them — use the name search (elo disambiguates).
                 CompetitiveUI.OpenPlayerSearch("Grant the artist role - find the player",
                     (sid, pname) => { if (!string.IsNullOrEmpty(sid)) ApiClient.AdminSetArtist(MatchTracker.LocalSteamId, sid, true,
                         (ok, resp) => ShowArtistResult(ok, ok ? $"Artist role granted to {pname}." : resp)); }),
                 sizeDelta: new Vector2(130, 26));
-            UIFactory.CreateButton("AArtR", actionRow.transform, "Revoke Artist...", 13f, C_WHITE, new Color(0.45f, 0.3f, 0.3f, 0.9f), () =>
+            UIFactory.CreateButton("AArtR", artistActionRow.transform, "Revoke Artist...", 13f, C_WHITE, new Color(0.45f, 0.3f, 0.3f, 0.9f), () =>
                 // Bug batch item 5: revoking should list the CURRENT artists, not
                 // ask for a raw Steam64.
                 ApiClient.FetchArtistsList(ok =>
@@ -7820,8 +8052,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 }),
                 sizeDelta: new Vector2(135, 26));
             // Round 3 item 2: review queue for artist-submitted cosmetics.
-            UIFactory.CreateButton("ACosR", actionRow.transform, "Cosmetic Reviews...", 13f, C_WHITE, new Color(0.3f, 0.4f, 0.55f, 0.9f), () =>
+            UIFactory.CreateButton("ACosR", artistActionRow.transform, "Cosmetic Reviews...", 13f, C_WHITE, new Color(0.3f, 0.4f, 0.55f, 0.9f), () =>
                 CompetitiveUI.OpenCosmeticReview(), sizeDelta: new Vector2(150, 26));
+            UIFactory.CreateButton("ACosQ", artistActionRow.transform, "Approved Update Queue...", 13f, C_WHITE, new Color(0.35f, 0.3f, 0.6f, 0.95f), () =>
+                CompetitiveUI.OpenCosmeticReleaseQueue(), sizeDelta: new Vector2(190, 26));
 
             // Recent Ranked Series — the main series-management section (Award/Void/Reverse).
             var seriesHdrRow = new GameObject("ASHRow"); seriesHdrRow.transform.SetParent(panel.transform, false); seriesHdrRow.AddComponent<RectTransform>();
@@ -7829,11 +8063,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             txtAdminSeriesHdr = UIFactory.CreateText("ASH", seriesHdrRow.transform, "Recent Ranked Series", 16f, new Color(0.6f, 0.85f, 1f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
             UIFactory.SetBold(txtAdminSeriesHdr, true);
             var seriesSV = UIFactory.CreateScrollView("ASSV", panel.transform, spacing: 3);
-            UIFactory.AddLE(seriesSV.scrollGO, flexH: 1);
+            // Responsive 1:2 split: enough series space to operate at 1024x576,
+            // while Flagged Matches receives the larger share at every height.
+            UIFactory.AddLE(seriesSV.scrollGO, minH: 80, flexH: 1);
             adminSeriesContainer = seriesSV.content;
 
             var split = new GameObject("ASplit"); split.transform.SetParent(panel.transform, false); split.AddComponent<RectTransform>();
-            UIFactory.AddHLG(split, spacing: 8); UIFactory.AddLE(split, prefH: 168, flexH: 0);
+            UIFactory.AddHLG(split, spacing: 8); UIFactory.AddLE(split, minH: 140, flexH: 2);
 
             // Left column: flagged matches.
             var leftCol = new GameObject("AFLeft"); leftCol.transform.SetParent(split.transform, false); leftCol.AddComponent<RectTransform>();
@@ -7860,7 +8096,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         {
             // Flag rows
             var flags = ApiClient.CachedFlaggedMatches ?? new List<ApiClient.FlaggedMatchEntry>();
-            UIFactory.SetText(txtAdminFlagsHdr, $"Flagged Matches ({flags.Count} unreviewed)");
+            UIFactory.SetText(txtAdminFlagsHdr, $"Flagged Matches ({flags.Count} actionable)");
             // Hide pooled rows past current count
             for (int i = flags.Count; i < adminFlagRowPool.Count; i++) adminFlagRowPool[i].SetActive(false);
             for (int i = 0; i < flags.Count; i++)
@@ -7901,10 +8137,26 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddLE(row, prefH: 38, flexH: 0);
             var txt = UIFactory.CreateText("AFT", row.transform, "", 13f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(420, 30));
             UIFactory.SetWordWrap(txt, false);
-            row.transform.GetChild(0).gameObject.AddComponent<RectTransform>(); // ensure
-            // The two action buttons; their onClick is rebuilt per-row in FillAdminFlagRow.
-            var btnConfirm = UIFactory.CreateButton($"AFOK{idx}", row.transform, "Cheat", 11f, C_WHITE, new Color(0.5f, 0.15f, 0.15f, 0.9f), () => { }, sizeDelta: new Vector2(70, 26));
-            var btnFalse   = UIFactory.CreateButton($"AFNO{idx}", row.transform, "False+", 11f, C_WHITE, new Color(0.15f, 0.4f, 0.15f, 0.9f), () => { }, sizeDelta: new Vector2(70, 26));
+            // The flag line grew (steam ids + suspect + score), and an unwrapped
+            // TMP overflows its rect and draws OVER the Details button that
+            // follows it in this HLG. Take the row's spare width and ellipsize
+            // instead of overflowing — full text lives in the Details viewer.
+            {
+                var txtComp = txt as Component;
+                if (txtComp != null && UIFactory.tLE != null)
+                {
+                    var le = txtComp.gameObject.GetComponent(UIFactory.tLE)
+                             ?? txtComp.gameObject.AddComponent(UIFactory.tLE);
+                    UIFactory.tLE.GetProperty("flexibleWidth", BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, 1f);
+                    UIFactory.tLE.GetProperty("minWidth", BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, 240f);
+                }
+                UIFactory.SetOverflowMode(txt, 1);   // TMP TextOverflowModes.Ellipsis
+            }
+            // Decisions live in the evidence viewer so admins see the telemetry
+            // before choosing Cheat or False positive.
+            UIFactory.CreateButton($"AFDT{idx}", row.transform, "Details", 11f, C_WHITE,
+                new Color(0.25f, 0.38f, 0.55f, 0.95f), () => { },
+                sizeDelta: new Vector2(76, 26));
             row.SetActive(false);
             return row;
         }
@@ -7918,29 +8170,24 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             {
                 string when = "";
                 try { if (!string.IsNullOrEmpty(e.created_at)) when = DateTime.Parse(e.created_at).ToString("HH:mm"); } catch { }
-                string verdict = e.auto_invalidated ? "<color=#FF6666>auto-inv</color>" : "<color=#DDAA44>advisory</color>";
+                string verdict = e.restoration_required
+                    ? "<color=#FFCC44>FALSE+ / MANUAL REPAIR</color>"
+                    : e.auto_invalidated
+                        ? "<color=#FF6666>auto-inv</color>"
+                        : "<color=#DDAA44>advisory</color>";
                 string mode = e.is_ranked ? "R" : "C";
-                string line = $"[{when}] <b>{e.flag_reason}</b> {verdict}  {Trunc(e.p1_name, 12)} vs {Trunc(e.p2_name, 12)}  {mode}/{e.duration_seconds}s";
+                string duration = string.IsNullOrEmpty(e.duration_text)
+                    ? (e.duration_seconds > 0 ? e.duration_seconds + "s" : "not recorded")
+                    : e.duration_text;
+                string line = $"[{when}] <b>{e.flag_reason}</b> {verdict}  "
+                            + $"{Trunc(HomeSan(e.p1_name), 12)} vs {Trunc(HomeSan(e.p2_name), 12)}  "
+                            + $"{mode}/{duration}  <color=#889>{e.game_code}</color>";
                 // tTMP isn't accessible outside UIFactory. Iterate child components by reflected name.
                 foreach (var c in txt.GetComponents<Component>())
                     if (c.GetType().Name == "TextMeshProUGUI") { UIFactory.SetText(c, line); break; }
             }
-            // Rebuild button click handlers - capture this entry's id.
-            var ok = row.transform.Find("AFOK" + row.name.Substring(2));
-            var no = row.transform.Find("AFNO" + row.name.Substring(2));
-            if (ok != null) WireButton(ok.gameObject, () => SubmitFlagReview(e.id, "confirmed_cheat"));
-            if (no != null) WireButton(no.gameObject, () => SubmitFlagReview(e.id, "false_positive"));
-        }
-
-        private static void SubmitFlagReview(string flagId, string action)
-        {
-            var sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid)) return;
-            ApiClient.AdminReviewFlag(sid, flagId, action, (ok, resp) =>
-            {
-                Plugin.Log.LogInfo($"[ADMIN] review {action} on {flagId}: {(ok?"OK":"FAIL")} {resp}");
-                if (ok) ApiClient.FetchFlaggedMatches(sid);
-            });
+            var details = row.transform.Find("AFDT" + row.name.Substring(2));
+            if (details != null) WireButton(details.gameObject, () => CompetitiveUI.OpenFlagEvidence(e));
         }
 
         private static GameObject BuildAdminBanRow(Transform parent, int idx)
@@ -8149,13 +8396,17 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     var add = ev.GetType().GetMethod("AddListener");
                     if (add != null)
                     {
-                        UnityEngine.Events.UnityAction guarded = () => { if (ClickGuard.Claim()) onClick(); };
+                        // Key the debounce on THIS button (learning #142): a
+                        // parameterless Claim() shares one global key, so
+                        // clicking Details on two different flagged rows inside
+                        // 0.2s silently swallowed the second click.
+                        UnityEngine.Events.UnityAction guarded = () => { if (ClickGuard.Claim(btn)) onClick(); };
                         add.Invoke(ev, new object[] { guarded });
                     }
                 }
                 // Also rewire the secondary ClickHandler attached by CreateButton.
                 var ch = btn.GetComponent<ClickHandler>();
-                if (ch != null) ch.onClick = () => { if (ClickGuard.Claim()) onClick(); };
+                if (ch != null) ch.onClick = () => { if (ClickGuard.Claim(btn)) onClick(); };
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[ADMIN] WireButton failed: {ex.Message}"); }
         }
@@ -10094,6 +10345,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private class TeamHistRow {
             public GameObject root;
             public object txtLine1, txtLine2;
+            // Game-ID copy is a tightly-sized control parented to line 1.
+            // Header rows hide it; game rows place it after the rendered text.
+            public GameObject btnId;
             // Stacked cards columns — used for game rows. Hidden for series
             // header rows (which show the teams + player titles in txtLine2).
             public GameObject cardsRow;
@@ -10107,8 +10361,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // ClickHandler knows which series this pooled row currently represents.
             public string seriesKey;
             public bool isHeader;
-            // July 22 item 6: game rows carry the match UUID — clicking a game
-            // row copies its short game code for the Discord /game command.
+            // Game rows carry the match UUID for their small [ID] copy button.
             public string matchKey;
         }
 
@@ -10139,6 +10392,26 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             /* Feedback item 5: bigger series text (15->17 / 13->14) + rows widened
              * to use the panel (the column itself is also wider now). */
             row.txtLine1 = UIFactory.CreateText("l1", row.root.transform, "", 17f, C_WHITE, UIFactory.AlignTopLeft, sizeDelta: new Vector2(1000, 26));
+            // Keep the chip outside the row VLG by parenting it to the line text.
+            // Its 34x18 rect is the whole copy target; the old target was the
+            // complete game row, including both card columns and blank space.
+            var line1Comp = row.txtLine1 as Component;
+            if (line1Comp != null)
+            {
+                row.btnId = UIFactory.CreateButton("id", line1Comp.transform, "[ID]", 12f, C_DIM,
+                    new Color(0.18f, 0.20f, 0.26f, 0.45f),
+                    () =>
+                    {
+                        if (!string.IsNullOrEmpty(row.matchKey))
+                            CopyGameCode(row.matchKey);
+                    },
+                    sizeDelta: new Vector2(34, 18));
+                var idRt = row.btnId.GetComponent<RectTransform>();
+                idRt.anchorMin = idRt.anchorMax = new Vector2(0f, 0.5f);
+                idRt.pivot = new Vector2(0f, 0.5f);
+                idRt.anchoredPosition = new Vector2(260f, 0f);
+                row.btnId.SetActive(false);
+            }
             // Line 2 holds the "Team A vs Team B" header text on series rows.
             // Hidden when the row renders a per-match cards block instead.
             row.txtLine2 = UIFactory.CreateText("l2", row.root.transform, "", 14f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(1000, 24));
@@ -10208,13 +10481,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 ch.onClick = () =>
                 {
                     if (!ClickGuard.Claim(capturedRow.root)) return;
-                    // July 22 item 6: clicking a GAME row copies its game code.
-                    if (!capturedRow.isHeader)
-                    {
-                        if (!string.IsNullOrEmpty(capturedRow.matchKey))
-                            CopyGameCode(capturedRow.matchKey);
-                        return;
-                    }
+                    // Game rows intentionally do nothing here. Their small [ID]
+                    // button owns copy input; the rest of the row remains inert.
+                    if (!capturedRow.isHeader) return;
                     if (string.IsNullOrEmpty(capturedRow.seriesKey)) return;
                     bool cur;
                     _teamSeriesExpanded.TryGetValue(capturedRow.seriesKey, out cur);
@@ -10248,37 +10517,78 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             return row;
         }
 
-        // Read/write the 2v2 history scroll position (0=bottom, 1=top) via the
-        // same reflected ScrollRect property the chat log uses. Returns -1 when
-        // unavailable so the caller can skip restoring.
-        private static float ReadTeamHistScroll()
+        // Preserve the content's PIXEL offset, not verticalNormalizedPosition.
+        // Expanding a series changes the content height; restoring the same
+        // percentage against that new height maps to a different pixel offset
+        // and is the intermittent "click a series, list scrolls down" jump.
+        private static float ReadTeamHistScrollY()
         {
             try
             {
-                if (teamHistScrollRect == null) return -1f;
-                var p = UIFactory.tScrollRect.GetProperty("verticalNormalizedPosition", BindingFlags.Public | BindingFlags.Instance);
-                return p != null ? (float)p.GetValue(teamHistScrollRect) : -1f;
+                var contentRt = teamHistContainer?.GetComponent<RectTransform>();
+                return contentRt != null ? contentRt.anchoredPosition.y : -1f;
             }
             catch { return -1f; }
         }
-        private static void WriteTeamHistScroll(float v)
+
+        private static void WriteTeamHistScrollY(float y)
         {
             try
             {
-                if (teamHistScrollRect == null || v < 0f) return;
-                var p = UIFactory.tScrollRect.GetProperty("verticalNormalizedPosition", BindingFlags.Public | BindingFlags.Instance);
-                p?.SetValue(teamHistScrollRect, Mathf.Clamp01(v));
+                if (teamHistScrollRect == null || y < 0f) return;
+                var contentRt = teamHistContainer?.GetComponent<RectTransform>();
+                var scrollComp = teamHistScrollRect as Component;
+                var viewportRt = scrollComp != null && scrollComp.transform.childCount > 0
+                    ? scrollComp.transform.GetChild(0) as RectTransform
+                    : null;
+                if (contentRt == null) return;
+
+                float maxY = viewportRt != null
+                    ? Mathf.Max(0f, contentRt.rect.height - viewportRt.rect.height)
+                    : Mathf.Max(0f, y);
+                var pos = contentRt.anchoredPosition;
+                pos.y = Mathf.Clamp(y, 0f, maxY);
+                contentRt.anchoredPosition = pos;
+
+                // A wheel flick immediately before the click can leave ScrollRect
+                // velocity active; stop it so inertia cannot move the restored anchor.
+                UIFactory.tScrollRect.GetMethod("StopMovement", BindingFlags.Public | BindingFlags.Instance)
+                    ?.Invoke(teamHistScrollRect, null);
             }
             catch { }
         }
-        // Restore AFTER the layout rebuild: ContentSizeFitter + VLG recompute the
-        // content height during this frame's layout pass, which would clobber a
-        // same-frame set. Wait one frame + end-of-frame, then apply.
-        private static System.Collections.IEnumerator RestoreTeamHistScroll(float v)
+
+        private static void PositionTeamHistIdButton(TeamHistRow row)
+        {
+            if (row?.btnId == null || row.txtLine1 == null || row.isHeader) return;
+            try
+            {
+                var textComp = row.txtLine1 as Component;
+                var textRt = textComp?.GetComponent<RectTransform>();
+                var idRt = row.btnId.GetComponent<RectTransform>();
+                if (textComp == null || textRt == null || idRt == null) return;
+
+                float renderedW = 0f;
+                var p = textComp.GetType().GetProperty("preferredWidth", BindingFlags.Public | BindingFlags.Instance);
+                if (p != null) renderedW = Convert.ToSingle(p.GetValue(textComp));
+                if (renderedW < 1f) renderedW = 260f;
+                float maxX = textRt.rect.width > idRt.rect.width
+                    ? textRt.rect.width - idRt.rect.width
+                    : renderedW + 4f;
+                idRt.anchoredPosition = new Vector2(Mathf.Clamp(renderedW + 4f, 0f, maxX), 0f);
+            }
+            catch { }
+        }
+
+        // Restore AFTER ContentSizeFitter + VLG settle. The button positions use
+        // TMP's rendered width from the same completed layout pass.
+        private static System.Collections.IEnumerator RestoreTeamHistScroll(float y)
         {
             yield return null;
             yield return new WaitForEndOfFrame();
-            WriteTeamHistScroll(v);
+            foreach (var row in teamHistRows)
+                if (row.root.activeSelf && !row.isHeader) PositionTeamHistIdButton(row);
+            WriteTeamHistScrollY(y);
         }
 
         private static void RefreshTeamTab()
@@ -10286,7 +10596,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // Preserve the Recent-2v2-Series scroll position across this re-render
             // (the 10s auto-refetch + expand clicks both re-render the list and
             // would otherwise snap it to the top). Restored at the end of the method.
-            float _savedTeamScroll = ReadTeamHistScroll();
+            float _savedTeamScrollY = ReadTeamHistScrollY();
             // Header live count — green when anyone's searching (matches the 1v1 vibe).
             int searchingCount = ApiClient.CachedTeamQueueSearching;
             string countCol = searchingCount > 0 ? "#88FF88" : "#888";
@@ -10643,6 +10953,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 if (hdr.cardsRow != null) hdr.cardsRow.SetActive(false);
                 if (hdr.teleRow != null) hdr.teleRow.SetActive(false);
                 hdr.matchKey = null;
+                if (hdr.btnId != null) hdr.btnId.SetActive(false);
                 // Honest height: pad 8 + l1 26 + spacing 2 + l2 24 = 60.
                 SetTeamHistRowPrefH(hdr, 60, 0);
                 hdr.root.SetActive(true);
@@ -10676,14 +10987,15 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     row.isHeader = false;
                     row.seriesKey = s.series_id ?? "";
                     row.matchKey = m.match_id;
-                    // Feedback item 5: just "[ID]" — the full code + hint read
-                    // as clutter. Clicking the row still copies the code.
-                    string idChip = string.IsNullOrEmpty(m.match_id) ? "" :
-                        "   <size=75%><color=#777>[ID]</color></size>";
                     string durChip = m.duration_seconds > 0 ?
                         $"  <color=#8FA3B8><size=85%>{m.duration_seconds / 60}:{m.duration_seconds % 60:00}</size></color>" : "";
                     UIFactory.SetText(row.txtLine1,
-                        $"    <color=#666>—</color>  <b>Game {gameNum}</b>: {gOut} {leftR}-{rightR}{durChip}{idChip}");
+                        $"    <color=#666>—</color>  <b>Game {gameNum}</b>: {gOut} {leftR}-{rightR}{durChip}");
+                    if (row.btnId != null)
+                    {
+                        row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));
+                        PositionTeamHistIdButton(row);
+                    }
                     // Hide line2; show stacked cards block.
                     var rl2 = (row.txtLine2 as Component)?.gameObject;
                     if (rl2 != null) rl2.SetActive(false);
@@ -10752,8 +11064,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
             // Restore the pre-render scroll position once layout settles, so the
             // periodic 10s refetch and expand clicks don't yank the user to top.
-            if (_savedTeamScroll >= 0f && Plugin.Instance != null)
-                Plugin.Instance.StartCoroutine(RestoreTeamHistScroll(_savedTeamScroll));
+            if (_savedTeamScrollY >= 0f && Plugin.Instance != null)
+                Plugin.Instance.StartCoroutine(RestoreTeamHistScroll(_savedTeamScrollY));
         }
 
         private static string FormatTitleName(ApiClient.TeamSeriesSlot s)

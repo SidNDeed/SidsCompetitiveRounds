@@ -455,19 +455,29 @@ namespace CompetitiveRounds
     [HarmonyPriority(800)]
     internal class MenuControllerHandlerUpdateBail
     {
+        private static bool _wasSkipping;
+
         static bool Prefix()
         {
-            if (!PerfGate.Check(Plugin.PerfSkipMenuUpdateInMatch)) return true;
+            if (!PerfGate.Check(Plugin.PerfSkipMenuUpdateInMatch))
+            {
+                _wasSkipping = false;
+                return true;
+            }
             try
             {
                 bool inMatch = GameStateWatcher.IsInMatch;
                 bool escOpen = false;
                 try { escOpen = EscapeMenuHandler.isEscMenu; } catch { }
                 bool runOriginal = !inMatch || escOpen;
-                if (!runOriginal) PerfGate.Hit("SkipMenuUpdateInMatch");
+                // Record the transition, not every skipped frame. Updating two
+                // telemetry dictionaries each frame partially erased this
+                // deliberately small hot-path optimization.
+                if (!runOriginal && !_wasSkipping) PerfGate.Hit("SkipMenuUpdateInMatch");
+                _wasSkipping = !runOriginal;
                 return runOriginal;
             }
-            catch { return true; }
+            catch { _wasSkipping = false; return true; }
         }
     }
 

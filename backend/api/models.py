@@ -169,6 +169,12 @@ class Match(Base):
     local_active_seconds = Column(Double, nullable=True)
     # #50 macro detector (migration 106): 1s windows with superhuman key rates.
     local_macro_suspect_seconds = Column(Integer, nullable=True)
+    # Per-second evidence behind the aggregate macro flag (migration 148).
+    # These remain reporter-side advisory telemetry, like the existing count.
+    local_macro_peak_kps = Column(SmallInteger, nullable=True)
+    local_macro_peak_cps = Column(SmallInteger, nullable=True)
+    local_macro_peak_eps = Column(SmallInteger, nullable=True)
+    local_macro_timeline = Column(String(1024), nullable=True)
     invalidated_at = Column(DateTime(timezone=True), nullable=True)
     invalidation_reason = Column(String(64), nullable=True)
     p1_fps_avg = Column(SmallInteger, nullable=True)
@@ -344,6 +350,9 @@ class ShopItem(Base):
     # from the born-out-of-stock -1 state; migration 131). NULL = never
     # gated — readers COALESCE to created_at.
     released_at = Column(DateTime(timezone=True), nullable=True)
+    # Community art stays unavailable until its PNG and append-only client
+    # catalog entry have shipped. House/existing items default ready.
+    catalog_ready = Column(Boolean, nullable=False, default=True)
 
 
 class PlayerItem(Base):
@@ -534,6 +543,9 @@ class FlaggedMatch(Base):
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
     reviewed_by_steam_id = Column(String(20), nullable=True)
     review_action = Column(String(32), nullable=True)
+    restoration_required = Column(Boolean, nullable=False, default=False)
+    discord_posted_at = Column(DateTime(timezone=True), nullable=True)
+    discord_evidence_revision = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 

@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.34.1";   // July 22: nine-item batch + feedback; STATS_CLEAN/STEAM_AUTH gates stay at 1.34.0 (1.34.1 passes them)
+        public const string ModVersion = "1.34.2";   // July 24: cosmetic placement workflow, flag evidence, perf pass; STATS_CLEAN/STEAM_AUTH gates stay at 1.34.0 (1.34.2 passes them)
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;
@@ -267,7 +267,7 @@ namespace CompetitiveRounds
             AnimatedCosmetics = Config.Bind(
                 "UI", "AnimatedCosmetics",
                 true,
-                "Animated cosmetics (prismatic/chrome body colors, prism trail hue cycle, map-skin sparkle shimmer, animated face items). Turn OFF to freeze them all to a static frame instantly."
+                "Animated cosmetics (prismatic/chrome body colors, prism trail hue cycle, player effects, map-skin sparkle shimmer, animated face items). Turn OFF to freeze them all to a static frame instantly."
             );
             ChromaticAberrationEnabled = Config.Bind(
                 "UI", "ChromaticAberrationEnabled",
@@ -4258,17 +4258,11 @@ namespace CompetitiveRounds
             return best;
         }
 
-        // Log the first few TakeDamage events so we can see what damagingWeapon actually
-        // looks like in ROUNDS. Previous ProjectileHit-component filter rejected everything
-        // (bullets_hit stayed at 0), so we need real data on the damager GameObject to know
-        // what to filter on. Capped at 5 lines to avoid log spam during DOT-heavy matches.
-        private static int _takeDamageFirstLogRemaining = 5;
         // FF-DIAG: in 2v2 rooms (cr_ff Photon room property = true), log when a teammate's
         // damage REACHES TakeDamage. If we see it: the team-filter is downstream of TakeDamage
         // (we'd patch HealthHandler.CallTakeDamage's bail-out). If we DON'T: filter is upstream
-        // (in ProjectileCollision / MoveTransform). Capped at 8 lines/match.
+        // (in ProjectileCollision / MoveTransform). Opt-in with Block Debug and capped.
         private static int _ffDiagRemaining = 8;
-        private static int _ffDiagLastResetRound = -1;
         static void Postfix(HealthHandler __instance, Vector2 damage, GameObject damagingWeapon, Player damagingPlayer)
         {
             try
@@ -4280,7 +4274,8 @@ namespace CompetitiveRounds
                 // not just enemy ones. Enabled when cr_ff Photon room property is true.
                 try
                 {
-                    if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
+                    if (Plugin.ShowBlockDebug != null && Plugin.ShowBlockDebug.Value
+                        && PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
                         && PhotonNetwork.CurrentRoom.CustomProperties != null
                         && PhotonNetwork.CurrentRoom.CustomProperties.ContainsKey("cr_ff")
                         && _ffDiagRemaining > 0)
@@ -4316,35 +4311,17 @@ namespace CompetitiveRounds
                 // Self-damage (rebounds, own explosions) shouldn't count toward Hit %.
                 if (targetPV != null && targetPV.IsMine) return;
 
-                if (_takeDamageFirstLogRemaining > 0)
-                {
-                    _takeDamageFirstLogRemaining--;
-                    string weaponName = damagingWeapon != null ? damagingWeapon.name : "(null)";
-                    string weaponComponents = "";
-                    if (damagingWeapon != null)
-                    {
-                        try
-                        {
-                            var comps = damagingWeapon.GetComponents<Component>();
-                            var names = new List<string>();
-                            foreach (var c in comps) if (c != null) names.Add(c.GetType().Name);
-                            weaponComponents = string.Join(",", names);
-                        }
-                        catch { }
-                    }
-                    Plugin.Log.LogInfo($"[HIT-DIAG] damage={damage.magnitude:F1} weapon='{weaponName}' components=[{weaponComponents}]");
-                }
-
                 // Hit counting moved to ProjectileHit_DirectHitCounter_Patch (bug #69).
                 // The HIT-DIAG data settled the question this postfix was waiting on:
                 // TakeDamage's damagingWeapon is always the GUN (WeaponBase), for DOT
                 // ticks too (damage=1.2 events carried the same weapon), so no filter
-                // HERE can separate direct hits from poison/burn ticks. The relaxed
+                // here can separate direct hits from poison/burn ticks. The relaxed
                 // count let DOT pump bullets_hit up to the _hitsRemaining cap — i.e.
                 // hits == fired == "100% accuracy" for any DOT build (Stan's report).
                 // Direct impacts are counted at ProjectileHit.RPCA_DoHit instead, the
                 // single funnel every real bullet impact passes through and DOT never
-                // does. This postfix still owns HIT-DIAG + the block-debug hit signal.
+                // does. This postfix still owns the damage timeline and the opt-in
+                // block-debug hit signal.
             }
             catch { }
         }
@@ -4462,7 +4439,8 @@ namespace CompetitiveRounds
                         break;
                 }
                 if (user) BlockChain.LastUserWindowTime = Time.time;
-                if (GameStateWatcher.IsTracking)
+                if (GameStateWatcher.IsTracking
+                    && Plugin.ShowBlockDebug != null && Plugin.ShowBlockDebug.Value)
                     Plugin.Log.LogInfo($"[BLOCK-DBG] WINDOW type={triggerType} first={firstBlock} user={user}");
             }
             catch { }
@@ -4504,7 +4482,8 @@ namespace CompetitiveRounds
                 // Captures only competitive (mod-issued) rooms so the noise is bounded.
                 try
                 {
-                    if (CompetitiveRoomDetect.IsCompetitiveRoom() && !_diagThrottled())
+                    if (Plugin.ShowBlockDebug != null && Plugin.ShowBlockDebug.Value
+                        && CompetitiveRoomDetect.IsCompetitiveRoom() && !_diagThrottled())
                     {
                         var p = __instance.GetComponentInParent<global::Player>();
                         int team = -1, playerId = -1;

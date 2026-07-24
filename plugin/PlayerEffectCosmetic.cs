@@ -86,6 +86,43 @@ namespace CompetitiveRounds
             else if (GameStateWatcher.IsInMatch) OnMatchStart();
         }
 
+        public static void OnAnimatedCosmeticsToggled()
+        {
+            bool animate = Plugin.AnimatedCosmetics == null || Plugin.AnimatedCosmetics.Value;
+            foreach (var kv in auraByActor)
+            {
+                try
+                {
+                    var ps = kv.Value != null ? kv.Value.GetComponent<ParticleSystem>() : null;
+                    if (ps == null) continue;
+                    ApplyAnimationState(ps, animate);
+                }
+                catch { }
+            }
+        }
+
+        private static void ApplyAnimationState(ParticleSystem ps, bool animate)
+        {
+            if (ps == null) return;
+            ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+            var main = ps.main;
+            main.simulationSpace = animate
+                ? ParticleSystemSimulationSpace.World
+                : ParticleSystemSimulationSpace.Local;
+            if (animate)
+            {
+                ps.Play(true);
+            }
+            else
+            {
+                // Local-space particles remain attached to a moving player
+                // after the simulation is paused; world-space particles would
+                // be left behind as a detached ghost.
+                ps.Simulate(0.75f, true, true);
+                ps.Pause(true);
+            }
+        }
+
         public static void OnPlayerPropertiesChanged(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changed)
         {
             if (target == null || changed == null) return;
@@ -188,7 +225,10 @@ namespace CompetitiveRounds
                     psr.renderMode = ParticleSystemRenderMode.Billboard;
                 }
 
-                ps.Play(true);
+                // Seed/freeze in local space when animations are disabled so
+                // the static aura follows the player without simulating.
+                ApplyAnimationState(ps,
+                    Plugin.AnimatedCosmetics == null || Plugin.AnimatedCosmetics.Value);
                 auraByActor[actor] = go;
                 skuByActor[actor] = sku;
                 Plugin.Log.LogInfo($"[EFFECT] Applied actor={actor} sku={sku}");

@@ -1,5 +1,40 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.34.2 — 2026-07-24 — Cosmetic placement workflow, flagged-match evidence, performance pass
+
+### Cosmetics — artists & admins
+- **Artists set the render scale at upload.** The in-game uploader now opens a size preview: your PNG against an orange player-body circle, with a scale slider (0.50x–2.25x) and presets. A full 512x512 canvas equals the body only at ~1.30x — the preview shows the truth instead of a rule of thumb.
+- **Drag to position.** Both the artist preview and the admin review let you drag the art. Offset is only the *default* start position (players can reposition face items themselves in the character editor), so it no longer clutters the list menus — scale is what decides whether art fits.
+- **Adjust placement on already-shipped cosmetics.** Previously only new submissions could be adjusted; items that shipped before the review workflow existed had no record to edit. They can now be adjusted, and the change goes back through admin review before taking effect.
+- **Placement changes are reviewed, not instant.** Scale/offset are compiled into the client, so an approved change goes live with the next mod update. The live item keeps its current placement until then.
+- **Admin review upgrades:** the four approval guidelines plus a scale-appropriateness rule are shown in the popup, a denial reason is required, and re-placements show the current approved scale beside the proposed one.
+- **Approve/deny now DMs the artist** with the outcome (and the reason on a denial).
+- **A release tracker** lists approved cosmetics awaiting a client update, with the exact scale to bundle.
+- **Unreleased art can no longer appear in the shop or on Home.** Community art stays hidden until its PNG actually ships in a client release, so Newest Cosmetics can't be taken over by an unreleased batch.
+
+### Flagged matches (admin)
+- **Flags now carry real evidence.** Both the in-game Admin panel and #scr-admin show Steam IDs and the suspect, the detector's reasoning, score and point progression, cards picked by each player, combat/input/FPS telemetry, and connection data.
+- **Suspected-macro flags record the exact per-second windows** that broke the threshold, from both players rather than only the match reporter.
+- **Flagged Matches gets more room** in the Admin tab, and clicking Details opens a full evidence view.
+
+### In-match HUD
+- **The Session line is gone.** The series score line now carries your session series record instead: `Series: 1 - 1   (session 2-1)`.
+- **Session series now counts for both players.** It previously only updated on the client that submitted the match report, so one player in every match saw `0-0` all session.
+
+### Performance
+- Overlays now only draw on render frames, slow-changing labels refresh a few times a second instead of every frame, the hold-Tab table snapshots at 8 Hz, and chat reuses its buffers. Combat diagnostics are off unless Block Debug is on.
+- **Animated Cosmetics now also freezes player-effect auras** — they kept emitting after the setting was turned off.
+
+### Discord bot
+- **Elo calculator fixed** — it timed out silently and never replied; it now answers or explains why it can't.
+- **FAQ accuracy pass** across many false positives and missed questions, plus new answers (Grow, room codes, series, DC rules, install safety, questions channel, Steam↔Discord lookup).
+- **Malformed room codes get a heads-up** — a posted code that isn't six capital letters gets a reply explaining the game reads it as offline. Ordinary chat, slang and names are left alone.
+
+### Fixes
+- 2v2 Recent Series no longer jumps the scroll when you click a series, and the `[ID]` copy target is the chip itself instead of the whole row.
+- The game-ID button sits left of the score in both ranked and casual history.
+- Artist rows hidden by scrolling are no longer clickable through the section above them.
+
 ## v1.34.1 — 2026-07-22 — July 22 nine-item batch + live feedback
 
 ### Discord identity (feedback round)

@@ -446,19 +446,20 @@ namespace CompetitiveRounds
     {
         public TrailRenderer Target;
         private float t;
+        private bool colorApplied;
 
         void Update()
         {
             if (Target == null) return;
             // v1.32 item 8: static-cosmetics mode freezes the hue where it is.
-            if (Plugin.AnimatedCosmetics == null || Plugin.AnimatedCosmetics.Value)
-            {
-                t += Time.deltaTime * 0.6f;  // one full hue cycle every ~1.7s
-                if (t > 1f) t -= 1f;
-            }
+            bool animationsEnabled = Plugin.AnimatedCosmetics == null || Plugin.AnimatedCosmetics.Value;
+            if (!animationsEnabled && colorApplied) return;
+            if (animationsEnabled)
+                t = (t + Time.deltaTime * 0.6f) % 1f;  // one full hue cycle every ~1.7s
             var col = Color.HSVToRGB(t, 0.85f, 1.0f);
             Target.startColor = col;
             Target.endColor = new Color(col.r, col.g, col.b, 0f);
+            colorApplied = true;
         }
     }
 

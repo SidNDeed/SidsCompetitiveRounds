@@ -48,6 +48,17 @@ docs/deploy-reference.md
 docs/SECURITY_ACTION_ITEMS.md
 scripts/
 
+# Dual-AI (Codex CLI) setup — LOCAL ONLY, same reason as the internal docs
+# above. AGENTS.md mirrors CLAUDE.md's operational context for Codex; the
+# collab scratch + dual-AI guides reference infra/workflow. The docs/ ignores
+# are per-FILE (not per-dir), so each new doc is listed explicitly.
+AGENTS.md
+AGENTS.override.md
+.codex/
+ai-collab/
+docs/DUAL-AI-SETUP.md
+docs/CODEX-CHEATSHEET.md
+
 # NuGet
 packages/
 *.nupkg

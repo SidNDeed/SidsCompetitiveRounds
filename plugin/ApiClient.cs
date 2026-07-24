@@ -400,11 +400,14 @@ namespace CompetitiveRounds
         // July 22: fast Steam-session establishment at startup (see Initialize).
         private static IEnumerator SteamAuthLoop()
         {
-            yield return new WaitForSeconds(2f);   // let Steam init + the local steam id resolve
+            // Authentication and durable-report recovery must keep moving on
+            // paused result/menu screens where Time.timeScale can be zero.
+            yield return new WaitForSecondsRealtime(2f);
             while (true)
             {
                 try { SteamAuth.MaybeRefresh(); } catch { }
-                yield return new WaitForSeconds(SteamAuth.HasFreshToken ? 30f : 3f);
+                yield return new WaitForSecondsRealtime(
+                    SteamAuth.HasFreshToken ? 30f : 3f);
             }
         }
 
@@ -435,13 +438,47 @@ namespace CompetitiveRounds
             try
             {
                 if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(json)) return;
-                _pendingReports.Add(new PendingReport { url = url, json = json, attempts = 0, nextAt = Time.realtimeSinceStartup + 30f });
+                // A lost response can reach more than one retry callback. Keep
+                // one durable copy of an idempotent payload.
+                foreach (var pending in _pendingReports)
+                    if (pending.url == url && pending.json == json)
+                        return;
+                float initialDelay = IsSilentOutboxUrl(url) ? 120f : 30f;
+                _pendingReports.Add(new PendingReport
+                {
+                    url = url,
+                    json = json,
+                    attempts = 0,
+                    nextAt = Time.realtimeSinceStartup + initialDelay,
+                });
                 PersistOutbox();
                 EnsureOutboxLoop();
-                Plugin.Log.LogWarning($"[OUTBOX] report queued for retry ({_pendingReports.Count} pending)");
-                CompetitiveUI.ShowNotification("Report failed — will retry in background", new Color(1f, 0.75f, 0.3f), 4f);
+                if (!IsSilentOutboxUrl(url))
+                {
+                    Plugin.Log.LogWarning($"[OUTBOX] report queued for retry ({_pendingReports.Count} pending)");
+                    CompetitiveUI.ShowNotification("Report failed — will retry in background", new Color(1f, 0.75f, 0.3f), 4f);
+                }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] enqueue failed: {ex.Message}"); }
+        }
+
+        private static bool IsSilentOutboxUrl(string url)
+        {
+            return !string.IsNullOrEmpty(url)
+                && url.EndsWith("/api/v1/matches/macro-evidence", StringComparison.Ordinal);
+        }
+
+        private static void RemovePendingReport(string url, string json)
+        {
+            bool removed = false;
+            for (int i = _pendingReports.Count - 1; i >= 0; i--)
+            {
+                var pending = _pendingReports[i];
+                if (pending.url != url || pending.json != json) continue;
+                _pendingReports.RemoveAt(i);
+                removed = true;
+            }
+            if (removed) PersistOutbox();
         }
 
         private static void PersistOutbox()
@@ -494,7 +531,7 @@ namespace CompetitiveRounds
         {
             while (true)
             {
-                yield return new WaitForSeconds(10f);
+                yield return new WaitForSecondsRealtime(10f);
                 if (_pendingReports.Count == 0) continue;
                 float now = Time.realtimeSinceStartup;
                 bool changed = false;
@@ -511,7 +548,8 @@ namespace CompetitiveRounds
                     if (ok)
                     {
                         Plugin.Log.LogInfo($"[OUTBOX] queued report delivered on retry {p.attempts}");
-                        CompetitiveUI.ShowNotification("Match report delivered", new Color(0.4f, 1f, 0.5f), 4f);
+                        if (!IsSilentOutboxUrl(p.url))
+                            CompetitiveUI.ShowNotification("Match report delivered", new Color(0.4f, 1f, 0.5f), 4f);
                         _pendingReports.RemoveAt(i);
                         changed = true;
                     }
@@ -520,7 +558,21 @@ namespace CompetitiveRounds
                         // 4xx = the server understood and refused (bad signature, dup,
                         // validation) — retrying can never succeed. 5xx/transport keep
                         // retrying until the budget runs out.
-                        bool permanent = resp != null && (resp.Contains("HTTP/1.1 4") || resp.Contains("duplicate key"));
+                        // Macro evidence can legitimately race the elected
+                        // reporter's match insert. Its 409 becomes retryable;
+                        // exact room correlation remains valid after a restart.
+                        bool retryableMacroResponse =
+                            IsSilentOutboxUrl(p.url)
+                            && resp != null
+                            && (resp.Contains("401")
+                                || resp.Contains("409")
+                                || resp.Contains("429"));
+                        bool permanent =
+                            !retryableMacroResponse
+                            && resp != null
+                            && (resp.StartsWith("HTTP 4", StringComparison.Ordinal)
+                                || resp.Contains("HTTP/1.1 4")
+                                || resp.Contains("duplicate key"));
                         if (permanent || p.attempts >= OUTBOX_MAX_ATTEMPTS)
                         {
                             Plugin.Log.LogWarning($"[OUTBOX] dropping report after {p.attempts} attempt(s): {Trunc(resp ?? "(no response)", 160)}");
@@ -958,6 +1010,21 @@ namespace CompetitiveRounds
                 using (var hmac = new HMACSHA256(GetHmacKeyBytes()))
                 {
                     byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(message));
+                    var sb = new StringBuilder(hash.Length * 2);
+                    foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                    return sb.ToString();
+                }
+            }
+            catch { return ""; }
+        }
+
+        private static string ComputeSha256Hex(string value)
+        {
+            try
+            {
+                using (var sha = SHA256.Create())
+                {
+                    byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(value ?? ""));
                     var sb = new StringBuilder(hash.Length * 2);
                     foreach (byte b in hash) sb.Append(b.ToString("x2"));
                     return sb.ToString();
@@ -1566,14 +1633,17 @@ namespace CompetitiveRounds
 
         public class FlaggedMatchEntry
         {
-            public string id, match_id, series_id, flag_reason;
-            public string p1_name, p2_name;
+            public string id, match_id, game_code, series_id, flag_reason;
+            public string p1_name, p2_name, p1_steam_id, p2_steam_id;
+            public string suspect_steam_text;
             public List<string> player_steam_ids = new List<string>();
-            public bool auto_invalidated, match_invalidated, is_ranked;
-            public int duration_seconds;
-            public string review_action;        // null = unreviewed
+            public bool auto_invalidated, match_invalidated, is_ranked, restoration_required;
+            public int duration_seconds, discord_evidence_revision;
+            public string duration_text;
+            public string review_action, match_invalidation_reason; // null = unreviewed/valid
             public string created_at;
-            public string flag_details_summary; // pre-rendered short string for the UI row
+            public string score_summary, cards_summary, point_progress;
+            public string evidence_summary, telemetry_summary, connection_summary, match_context;
         }
 
         public class BannedUserEntry
@@ -1612,6 +1682,7 @@ namespace CompetitiveRounds
         {
             public string sku, kind, name, rarity, description;
             public int price, stock_limit, sold, gifted;
+            public bool catalog_ready;
             public int earned;   // lifetime 30% royalty gold from sales (July 12)
         }
 
@@ -1665,6 +1736,7 @@ namespace CompetitiveRounds
                         it.rarity = ExtractJsonString(chunk, "rarity");
                         it.price = ExtractJsonInt(chunk, "price");
                         it.stock_limit = ExtractJsonInt(chunk, "stock_limit");
+                        it.catalog_ready = ExtractJsonBool(chunk, "catalog_ready");
                         it.sold = ExtractJsonInt(chunk, "sold");
                         it.gifted = ExtractJsonInt(chunk, "gifted");
                         it.earned = ExtractJsonInt(chunk, "earned");
@@ -1850,26 +1922,163 @@ namespace CompetitiveRounds
         public class CosmeticSubmission
         {
             public int id;
+            public float render_scale = 1f;
+            public float render_offset_x, render_offset_y;
+            public int placement_revision = 1;
+            public string placement_status, placement_review_note, review_kind;
+            public float approved_render_scale, approved_render_offset_x, approved_render_offset_y;
+            public int approved_placement_revision, published_placement_revision;
             public string name, slot, status, review_note, shop_sku, created_at;
             public string artist_name, artist_steam_id;   // admin list only
-            public string png_base64;                      // admin list only
+            public string png_base64;                      // admin list / targeted artist preview
+        }
+        public class CosmeticReleaseCandidate
+        {
+            public int id, placement_revision, published_placement_revision, png_bytes;
+            public string shop_sku, name, slot, artist_name, artist_steam_id, approved_at;
+            public float render_scale, render_offset_x, render_offset_y;
+            public bool catalog_ready;
         }
         public static List<CosmeticSubmission> CachedMySubmissions { get; private set; } = new List<CosmeticSubmission>();
 
-        public static void ArtistSubmitCosmetic(string steamId, string name, string slot, string pngBase64, Action<bool, string> callback = null)
+        private static void QuantizeCosmeticPlacement(
+            float renderScale, float renderOffsetX, float renderOffsetY,
+            out int scaleCenti, out int offsetXMilli, out int offsetYMilli)
         {
-            // Signature pins the payload by base64 LENGTH — no name-encoding
-            // ambiguity between client and server canonical strings.
-            string sig = ComputeHmacHex($"artist:{steamId}:submit:{slot}:{pngBase64.Length}");
+            scaleCenti = Mathf.RoundToInt(
+                Mathf.Clamp(renderScale, 0.50f, 2.25f) * 100f);
+            Vector2 offset = Vector2.ClampMagnitude(
+                new Vector2(renderOffsetX, renderOffsetY), 4.50f);
+            offsetXMilli = Mathf.RoundToInt(offset.x * 1000f);
+            offsetYMilli = Mathf.RoundToInt(offset.y * 1000f);
+
+            // Component-wise millesimal rounding can push a point that was
+            // exactly on the radius just outside it. Pull the dominant axis
+            // inward until the signed integer pair itself satisfies the limit.
+            const long maxRadiusSq = 4500L * 4500L;
+            while ((long)offsetXMilli * offsetXMilli
+                   + (long)offsetYMilli * offsetYMilli > maxRadiusSq)
+            {
+                if (Math.Abs(offsetXMilli) >= Math.Abs(offsetYMilli))
+                    offsetXMilli -= Math.Sign(offsetXMilli);
+                else
+                    offsetYMilli -= Math.Sign(offsetYMilli);
+            }
+        }
+
+        public static void ArtistSubmitCosmetic(string steamId, string name, string slot,
+            string pngBase64, float renderScale, float renderOffsetX, float renderOffsetY,
+            Action<bool, string> callback = null)
+        {
+            int scaleCenti, offsetXMilli, offsetYMilli;
+            QuantizeCosmeticPlacement(
+                renderScale, renderOffsetX, renderOffsetY,
+                out scaleCenti, out offsetXMilli, out offsetYMilli);
+            string nameHash = ComputeSha256Hex(name ?? "");
+            string pngHash = ComputeSha256Hex(pngBase64 ?? "");
+            // Keep the idempotency key across a restart or an exhausted retry
+            // loop. A confirmed response clears it; a deliberately new upload
+            // gets a different content/placement hash and therefore a new id.
+            const string retryHashKey = "cr_cosmetic_upload_retry_hash";
+            const string retryIdKey = "cr_cosmetic_upload_retry_id";
+            string retryHash = ComputeSha256Hex(
+                $"{steamId}:{slot}:{scaleCenti}:{offsetXMilli}:{offsetYMilli}:"
+                + $"{nameHash}:{pngHash}");
+            string requestId = "";
+            if (PlayerPrefs.GetString(retryHashKey, "") == retryHash)
+                requestId = PlayerPrefs.GetString(retryIdKey, "");
+            if (!Regex.IsMatch(requestId ?? "", "^[0-9a-f]{32}$"))
+            {
+                requestId = Guid.NewGuid().ToString("N");
+                PlayerPrefs.SetString(retryHashKey, retryHash);
+                PlayerPrefs.SetString(retryIdKey, requestId);
+                PlayerPrefs.Save();
+            }
+            string canonical = $"artist:{steamId}:submit-v2:{requestId}:{slot}:{pngBase64.Length}:"
+                             + $"{scaleCenti}:{offsetXMilli}:{offsetYMilli}:{nameHash}:{pngHash}";
+            string sig = ComputeHmacHex(canonical);
+            string scaleJson = (scaleCenti / 100f)
+                .ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+            string offsetXJson = (offsetXMilli / 1000f)
+                .ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+            string offsetYJson = (offsetYMilli / 1000f)
+                .ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
             string body = "{\"steam_id\":\"" + Escape(steamId) + "\",\"name\":\"" + JsonEscapeFull(name)
                         + "\",\"slot\":\"" + slot + "\",\"png_base64\":\"" + pngBase64
-                        + "\",\"sig\":\"" + sig + "\"}";
-            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/artist/submit-cosmetic", body, (ok, resp) =>
+                        + "\",\"signature_version\":2"
+                        + ",\"upload_request_id\":\"" + requestId + "\""
+                        + ",\"scale_centi\":" + scaleCenti
+                        + ",\"offset_x_milli\":" + offsetXMilli
+                        + ",\"offset_y_milli\":" + offsetYMilli
+                        + ",\"render_scale\":" + scaleJson
+                        + ",\"render_offset_x\":" + offsetXJson
+                        + ",\"render_offset_y\":" + offsetYJson
+                        + ",\"sig\":\"" + sig + "\"}";
+            // The signed request id makes this safe to retry: if the insert
+            // committed but its response was lost, the server returns that same
+            // submission instead of creating another pending row.
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/artist/submit-cosmetic", body, (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[COSMETIC] submit '{name}' ({slot}, {pngBase64.Length} b64): ok={ok}");
-                if (ok) FetchMySubmissions(steamId);
+                if (ok)
+                {
+                    if (PlayerPrefs.GetString(retryHashKey, "") == retryHash
+                        && PlayerPrefs.GetString(retryIdKey, "") == requestId)
+                    {
+                        PlayerPrefs.DeleteKey(retryHashKey);
+                        PlayerPrefs.DeleteKey(retryIdKey);
+                        PlayerPrefs.Save();
+                    }
+                    FetchMySubmissions(steamId);
+                }
                 callback?.Invoke(ok, resp);
             }));
+        }
+
+        private static CosmeticSubmission ParseCosmeticSubmissionObject(string chunk)
+        {
+            var s = new CosmeticSubmission();
+            s.id = ExtractJsonInt(chunk, "id");
+            s.name = ExtractJsonString(chunk, "name");
+            s.slot = ExtractJsonString(chunk, "slot");
+            s.status = ExtractJsonString(chunk, "status");
+            s.review_note = ExtractJsonString(chunk, "review_note");
+            s.shop_sku = ExtractJsonString(chunk, "shop_sku");
+            s.artist_steam_id = ExtractJsonString(chunk, "artist_steam_id");
+            s.artist_name = ExtractJsonString(chunk, "artist_name");
+            s.render_scale = ExtractJsonFloat(chunk, "render_scale");
+            if (s.render_scale <= 0f) s.render_scale = 1f;
+            s.render_offset_x = ExtractJsonFloat(chunk, "render_offset_x");
+            s.render_offset_y = ExtractJsonFloat(chunk, "render_offset_y");
+            s.placement_revision = ExtractJsonInt(chunk, "placement_revision");
+            if (s.placement_revision < 1) s.placement_revision = 1;
+            s.placement_status = ExtractJsonString(chunk, "placement_status");
+            s.placement_review_note = ExtractJsonString(chunk, "placement_review_note");
+            s.review_kind = ExtractJsonString(chunk, "review_kind");
+            s.approved_render_scale = ExtractJsonFloat(chunk, "approved_render_scale");
+            s.approved_render_offset_x = ExtractJsonFloat(chunk, "approved_render_offset_x");
+            s.approved_render_offset_y = ExtractJsonFloat(chunk, "approved_render_offset_y");
+            s.approved_placement_revision = ExtractJsonInt(chunk, "approved_placement_revision");
+            s.published_placement_revision = ExtractJsonInt(chunk, "published_placement_revision");
+            s.created_at = ExtractJsonString(chunk, "created_at");
+            s.png_base64 = ExtractJsonString(chunk, "png_base64");
+            return s;
+        }
+
+        private static List<CosmeticSubmission> ParseCosmeticSubmissionArray(string json)
+        {
+            var list = new List<CosmeticSubmission>();
+            if (string.IsNullOrEmpty(json)) return list;
+            int key = json.IndexOf("\"submissions\":", StringComparison.Ordinal);
+            int open = key >= 0 ? json.IndexOf('[', key) : -1;
+            int close = open >= 0 ? FindMatchingBracketStringAware(json, open) : -1;
+            if (open < 0 || close <= open) return list;
+            foreach (var chunk in SliceTopLevelObjects(json.Substring(open + 1, close - open - 1)))
+            {
+                var s = ParseCosmeticSubmissionObject(chunk);
+                if (s.id > 0) list.Add(s);
+            }
+            return list;
         }
 
         public static void FetchMySubmissions(string steamId, Action<bool> callback = null)
@@ -1881,26 +2090,11 @@ namespace CompetitiveRounds
                 {
                     if (ok)
                     {
-                        var list = new List<CosmeticSubmission>();
                         try
                         {
-                            var parts = resp.Split(new[] { "{\"id\":" }, StringSplitOptions.None);
-                            for (int i = 1; i < parts.Length; i++)
-                            {
-                                string chunk = "{\"id\":" + parts[i];
-                                var s = new CosmeticSubmission();
-                                s.id = ExtractJsonInt(chunk, "id");
-                                s.name = ExtractJsonString(chunk, "name");
-                                s.slot = ExtractJsonString(chunk, "slot");
-                                s.status = ExtractJsonString(chunk, "status");
-                                s.review_note = ExtractJsonString(chunk, "review_note");
-                                s.shop_sku = ExtractJsonString(chunk, "shop_sku");
-                                s.created_at = ExtractJsonString(chunk, "created_at");
-                                if (s.id > 0) list.Add(s);
-                            }
+                            CachedMySubmissions = ParseCosmeticSubmissionArray(resp);
                         }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] my-subs parse: {ex.Message}"); }
-                        CachedMySubmissions = list;
                         NativeUI.MarkDirty();
                     }
                     callback?.Invoke(ok);
@@ -1919,20 +2113,7 @@ namespace CompetitiveRounds
                     {
                         try
                         {
-                            var parts = resp.Split(new[] { "{\"id\":" }, StringSplitOptions.None);
-                            for (int i = 1; i < parts.Length; i++)
-                            {
-                                string chunk = "{\"id\":" + parts[i];
-                                var s = new CosmeticSubmission();
-                                s.id = ExtractJsonInt(chunk, "id");
-                                s.name = ExtractJsonString(chunk, "name");
-                                s.slot = ExtractJsonString(chunk, "slot");
-                                s.artist_steam_id = ExtractJsonString(chunk, "artist_steam_id");
-                                s.artist_name = ExtractJsonString(chunk, "artist_name");
-                                s.created_at = ExtractJsonString(chunk, "created_at");
-                                s.png_base64 = ExtractJsonString(chunk, "png_base64");
-                                if (s.id > 0) list.Add(s);
-                            }
+                            list = ParseCosmeticSubmissionArray(resp);
                         }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] admin-subs parse: {ex.Message}"); }
                     }
@@ -1940,12 +2121,161 @@ namespace CompetitiveRounds
                 }));
         }
 
-        public static void AdminReviewCosmetic(string adminSteamId, int submissionId, bool approve, string note, Action<bool, string> callback = null)
+        public static void FetchCosmeticSubmissionPreview(string steamId, int submissionId,
+            Action<bool, CosmeticSubmission, string> callback)
+        {
+            string sig = ComputeHmacHex($"artist:{steamId}:cosmetic-preview:{submissionId}");
+            string url = $"{baseUrl}/api/v1/artist/cosmetic-preview?steam_id={Escape(steamId)}"
+                       + $"&submission_id={submissionId}&sig={sig}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                CosmeticSubmission sub = null;
+                if (ok)
+                {
+                    try { sub = ParseCosmeticSubmissionObject(resp); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] preview parse: {ex.Message}"); ok = false; }
+                }
+                callback?.Invoke(ok && sub != null && sub.id > 0, sub, resp);
+            }));
+        }
+
+        public static void ArtistUpdateCosmeticPlacement(string steamId, int submissionId,
+            int expectedRevision, float renderScale, float renderOffsetX, float renderOffsetY,
+            Action<bool, string> callback = null)
+        {
+            int scaleCenti, offsetXMilli, offsetYMilli;
+            QuantizeCosmeticPlacement(
+                renderScale, renderOffsetX, renderOffsetY,
+                out scaleCenti, out offsetXMilli, out offsetYMilli);
+            string canonical = $"artist:{steamId}:cosmetic-placement:{submissionId}:{expectedRevision}:"
+                             + $"{scaleCenti}:{offsetXMilli}:{offsetYMilli}";
+            string sig = ComputeHmacHex(canonical);
+            string body = "{\"steam_id\":\"" + Escape(steamId) + "\""
+                        + ",\"submission_id\":" + submissionId
+                        + ",\"expected_revision\":" + expectedRevision
+                        + ",\"scale_centi\":" + scaleCenti
+                        + ",\"offset_x_milli\":" + offsetXMilli
+                        + ",\"offset_y_milli\":" + offsetYMilli
+                        + ",\"sig\":\"" + sig + "\"}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/artist/cosmetic-placement", body, (ok, resp) =>
+                {
+                    if (ok) FetchMySubmissions(steamId);
+                    callback?.Invoke(ok, resp);
+                }));
+        }
+
+        public static void ArtistStartCatalogPlacementRevision(
+            string steamId, string sku, string slot, string pngBase64,
+            float publishedScale, float publishedOffsetX, float publishedOffsetY,
+            float proposedScale, float proposedOffsetX, float proposedOffsetY,
+            Action<bool, string> callback = null)
+        {
+            int baseScaleCenti, baseOffsetXMilli, baseOffsetYMilli;
+            int nextScaleCenti, nextOffsetXMilli, nextOffsetYMilli;
+            string b64 = pngBase64 ?? "";
+            QuantizeCosmeticPlacement(
+                publishedScale, publishedOffsetX, publishedOffsetY,
+                out baseScaleCenti, out baseOffsetXMilli, out baseOffsetYMilli);
+            QuantizeCosmeticPlacement(
+                proposedScale, proposedOffsetX, proposedOffsetY,
+                out nextScaleCenti, out nextOffsetXMilli, out nextOffsetYMilli);
+            string pngHash = ComputeSha256Hex(b64);
+            string canonical =
+                $"artist:{steamId}:catalog-placement:{sku}:{slot}:{b64.Length}:"
+                + $"{baseScaleCenti}:{baseOffsetXMilli}:{baseOffsetYMilli}:"
+                + $"{nextScaleCenti}:{nextOffsetXMilli}:{nextOffsetYMilli}:{pngHash}";
+            string sig = ComputeHmacHex(canonical);
+            string body = "{\"steam_id\":\"" + Escape(steamId) + "\""
+                        + ",\"sku\":\"" + JsonEscapeFull(sku) + "\""
+                        + ",\"slot\":\"" + JsonEscapeFull(slot) + "\""
+                        + ",\"png_base64\":\"" + b64 + "\""
+                        + ",\"published_scale_centi\":" + baseScaleCenti
+                        + ",\"published_offset_x_milli\":" + baseOffsetXMilli
+                        + ",\"published_offset_y_milli\":" + baseOffsetYMilli
+                        + ",\"proposed_scale_centi\":" + nextScaleCenti
+                        + ",\"proposed_offset_x_milli\":" + nextOffsetXMilli
+                        + ",\"proposed_offset_y_milli\":" + nextOffsetYMilli
+                        + ",\"png_hash\":\"" + pngHash + "\""
+                        + ",\"sig\":\"" + sig + "\"}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                $"{baseUrl}/api/v1/artist/catalog-cosmetic-placement", body, (ok, resp) =>
+                {
+                    Plugin.Log.LogInfo($"[COSMETIC] catalog placement {sku}: ok={ok}");
+                    if (ok) FetchMySubmissions(steamId);
+                    callback?.Invoke(ok, resp);
+                }));
+        }
+
+        public static void FetchCosmeticReleaseCandidatesAdmin(
+            string adminSteamId, Action<bool, List<CosmeticReleaseCandidate>, string> callback)
+        {
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:cosmetic-releases:list");
+            string url = $"{baseUrl}/api/v1/admin/cosmetic-release-candidates"
+                       + $"?admin_steam_id={Escape(adminSteamId)}&sig={sig}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                var list = new List<CosmeticReleaseCandidate>();
+                if (ok)
+                {
+                    try
+                    {
+                        int key = resp.IndexOf("\"candidates\":", StringComparison.Ordinal);
+                        int open = key >= 0 ? resp.IndexOf('[', key) : -1;
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (open >= 0 && close > open)
+                        {
+                            foreach (var chunk in SliceTopLevelObjects(
+                                resp.Substring(open + 1, close - open - 1)))
+                            {
+                                var c = new CosmeticReleaseCandidate();
+                                c.id = ExtractJsonInt(chunk, "id");
+                                c.shop_sku = ExtractJsonString(chunk, "shop_sku");
+                                c.name = ExtractJsonString(chunk, "name");
+                                c.slot = ExtractJsonString(chunk, "slot");
+                                c.artist_name = ExtractJsonString(chunk, "artist_name");
+                                c.artist_steam_id = ExtractJsonString(chunk, "artist_steam_id");
+                                c.render_scale = ExtractJsonFloat(chunk, "render_scale");
+                                c.render_offset_x = ExtractJsonFloat(chunk, "render_offset_x");
+                                c.render_offset_y = ExtractJsonFloat(chunk, "render_offset_y");
+                                c.placement_revision = ExtractJsonInt(chunk, "placement_revision");
+                                c.published_placement_revision =
+                                    ExtractJsonInt(chunk, "published_placement_revision");
+                                c.png_bytes = ExtractJsonInt(chunk, "png_bytes");
+                                c.catalog_ready = ExtractJsonBool(chunk, "catalog_ready");
+                                c.approved_at = ExtractJsonString(chunk, "approved_at");
+                                if (c.id > 0 && !string.IsNullOrEmpty(c.shop_sku))
+                                    list.Add(c);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[COSMETIC] release queue parse: {ex.Message}");
+                        ok = false;
+                    }
+                }
+                callback?.Invoke(ok, list, resp);
+            }));
+        }
+
+        public static void AdminReviewCosmetic(string adminSteamId, int submissionId, bool approve,
+            int expectedRevision, float renderScale, float renderOffsetX, float renderOffsetY,
+            string note, Action<bool, string> callback = null)
         {
             string action = approve ? "approve" : "deny";
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:cosmetic-review:{submissionId}:{action}");
+            int scaleCenti, offsetXMilli, offsetYMilli;
+            QuantizeCosmeticPlacement(
+                renderScale, renderOffsetX, renderOffsetY,
+                out scaleCenti, out offsetXMilli, out offsetYMilli);
+            string target = $"{submissionId}:{action}:{expectedRevision}:"
+                          + $"{scaleCenti}:{offsetXMilli}:{offsetYMilli}";
+            string sig = ComputeHmacHex($"admin:{adminSteamId}:cosmetic-review:{target}");
             string url = $"{baseUrl}/api/v1/admin/cosmetic-review?admin_steam_id={Escape(adminSteamId)}"
-                       + $"&submission_id={submissionId}&action={action}&note={UnityWebRequest.EscapeURL(note ?? "")}&sig={sig}";
+                       + $"&submission_id={submissionId}&action={action}"
+                       + $"&expected_revision={expectedRevision}&scale_centi={scaleCenti}"
+                       + $"&offset_x_milli={offsetXMilli}&offset_y_milli={offsetYMilli}"
+                       + $"&note={UnityWebRequest.EscapeURL(note ?? "")}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[COSMETIC] review #{submissionId} {action}: ok={ok}");
@@ -2012,7 +2342,12 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
             {
                 if (!ok) { Plugin.Log.LogWarning($"[ADMIN] flagged fetch failed: {body}"); callback?.Invoke(false); return; }
-                try { CachedFlaggedMatches = ParseFlaggedMatches(body); callback?.Invoke(true); }
+                try
+                {
+                    CachedFlaggedMatches = ParseFlaggedMatches(body);
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(true);
+                }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[ADMIN] flagged parse: {ex.Message}"); callback?.Invoke(false); }
             }));
         }
@@ -2058,11 +2393,35 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/reverse-series", body, (ok, resp) => callback?.Invoke(ok, resp)));
         }
 
-        public static void AdminReviewFlag(string adminSteamId, string flagId, string action, Action<bool, string> callback = null)
+        public static void AdminReviewFlag(
+            string adminSteamId, string flagId, string action,
+            int evidenceRevision, Action<bool, string> callback = null)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:review_flag:{flagId}");
-            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"flag_id\":\"{Escape(flagId)}\",\"review_action\":\"{Escape(action)}\",\"hmac_signature\":\"{sig}\"}}";
+            if (evidenceRevision < 1)
+            {
+                callback?.Invoke(false, "missing evidence revision; refresh flagged matches");
+                return;
+            }
+            // Bind the verdict as well as the flag. Otherwise a captured request
+            // can be replayed with the opposite action. Bind the evidence revision
+            // too, so an admin cannot close evidence that changed after opening it.
+            string sig = ComputeHmacHex(
+                $"admin:{adminSteamId}:review_flag:{flagId}:{action}:{evidenceRevision}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"flag_id\":\"{Escape(flagId)}\",\"review_action\":\"{Escape(action)}\",\"evidence_revision\":{evidenceRevision},\"signature_version\":3,\"hmac_signature\":\"{sig}\"}}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/review-flag", body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        public static void AdminResolveFlagRestoration(
+            string adminSteamId, string flagId, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex(
+                $"admin:{adminSteamId}:resolve_flag_restoration:{flagId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\","
+                        + $"\"flag_id\":\"{Escape(flagId)}\","
+                        + $"\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                $"{baseUrl}/api/v1/admin/resolve-flag-restoration",
+                body, (ok, resp) => callback?.Invoke(ok, resp)));
         }
 
         // ── Admin: recent-series log + 2v2 resolve/reverse (in-mod series management) ──
@@ -2400,29 +2759,48 @@ namespace CompetitiveRounds
         {
             var list = new List<FlaggedMatchEntry>();
             if (string.IsNullOrEmpty(json)) return list;
-            // Each flag begins with "id":"<uuid>" — split on that anchor and parse forward.
-            var parts = json.Split(new[] { "\"id\":\"" }, StringSplitOptions.None);
-            for (int i = 1; i < parts.Length; i++)
+            // The array contains user-authored display names, so both its outer
+            // boundary and object slicing must be string-aware (learning #156).
+            int key = json.IndexOf("\"flags\":", StringComparison.Ordinal);
+            int open = key >= 0 ? json.IndexOf('[', key) : -1;
+            int close = open >= 0 ? FindMatchingBracketStringAware(json, open) : -1;
+            if (open < 0 || close <= open) return list;
+            foreach (var chunk in SliceTopLevelObjects(
+                json.Substring(open + 1, close - open - 1)))
             {
-                var chunk = parts[i];
-                int qend = chunk.IndexOf('"');
-                if (qend < 0) continue;
                 var e = new FlaggedMatchEntry();
-                e.id = chunk.Substring(0, qend);
+                e.id = ExtractJsonString(chunk, "id");
                 e.match_id = ExtractJsonString(chunk, "match_id");
+                e.game_code = ExtractJsonString(chunk, "game_code");
                 e.series_id = ExtractJsonString(chunk, "series_id");
                 e.flag_reason = ExtractJsonString(chunk, "flag_reason");
                 e.p1_name = ExtractJsonString(chunk, "p1_name");
                 e.p2_name = ExtractJsonString(chunk, "p2_name");
+                e.p1_steam_id = ExtractJsonString(chunk, "p1_steam_id");
+                e.p2_steam_id = ExtractJsonString(chunk, "p2_steam_id");
+                e.suspect_steam_text = ExtractJsonString(chunk, "suspect_steam_text");
+                if (!string.IsNullOrEmpty(e.p1_steam_id)) e.player_steam_ids.Add(e.p1_steam_id);
+                if (!string.IsNullOrEmpty(e.p2_steam_id)) e.player_steam_ids.Add(e.p2_steam_id);
                 e.auto_invalidated = chunk.Contains("\"auto_invalidated\":true") || chunk.Contains("\"auto_invalidated\": true");
                 e.match_invalidated = chunk.Contains("\"match_invalidated\":true") || chunk.Contains("\"match_invalidated\": true");
                 e.is_ranked = chunk.Contains("\"is_ranked\":true") || chunk.Contains("\"is_ranked\": true");
+                e.restoration_required = chunk.Contains("\"restoration_required\":true")
+                    || chunk.Contains("\"restoration_required\": true");
                 e.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
+                e.discord_evidence_revision = ExtractJsonInt(
+                    chunk, "discord_evidence_revision");
+                e.duration_text = ExtractJsonString(chunk, "duration_text");
                 e.review_action = ExtractJsonString(chunk, "review_action");
+                e.match_invalidation_reason = ExtractJsonString(chunk, "match_invalidation_reason");
                 e.created_at = ExtractJsonString(chunk, "created_at");
-                // Rough single-line summary (the JSON is nested, we just hint the key signals).
-                e.flag_details_summary = $"{e.flag_reason}  {(e.is_ranked?"R":"C")}  {e.duration_seconds}s  {(e.auto_invalidated?"[auto-inv]":"[advisory]")}";
-                list.Add(e);
+                e.score_summary = ExtractJsonString(chunk, "score_summary");
+                e.cards_summary = ExtractJsonString(chunk, "cards_summary");
+                e.point_progress = ExtractJsonString(chunk, "point_progress");
+                e.evidence_summary = ExtractJsonString(chunk, "evidence_summary");
+                e.telemetry_summary = ExtractJsonString(chunk, "telemetry_summary");
+                e.connection_summary = ExtractJsonString(chunk, "connection_summary");
+                e.match_context = ExtractJsonString(chunk, "match_context");
+                if (!string.IsNullOrEmpty(e.id)) list.Add(e);
             }
             return list;
         }
@@ -2502,6 +2880,69 @@ namespace CompetitiveRounds
 
         // ── Match reporting ───────────────────────────────────
 
+        public static void ReportMacroEvidence(
+            string p1SteamId, string p2SteamId,
+            int p1RoundsWon, int p2RoundsWon,
+            string photonRoomId, DateTime matchStartedAt,
+            int durationSeconds, bool sharedGameTokenUsed,
+            string reporterSteamId,
+            int suspectSeconds, int peakKps, int peakCps, int peakEps,
+            string suspectTimeline)
+        {
+            if (suspectSeconds < 10 || string.IsNullOrEmpty(reporterSteamId)) return;
+            string timeline = ClampTimeline(suspectTimeline, 1024);
+            string roomHash = ComputeSha256Hex(photonRoomId ?? "");
+            string startedAt = matchStartedAt.ToUniversalTime()
+                .ToString(
+                    "yyyy-MM-ddTHH:mm:ssZ",
+                    System.Globalization.CultureInfo.InvariantCulture);
+            string startedHash = ComputeSha256Hex(startedAt);
+            string timelineHash = ComputeSha256Hex(timeline);
+            string canonical =
+                $"macro-evidence:{reporterSteamId}:{p1SteamId}:{p2SteamId}:"
+                + $"{roomHash}:{startedHash}:{durationSeconds}:"
+                + $"{(sharedGameTokenUsed ? 1 : 0)}:"
+                + $"{p1RoundsWon}:{p2RoundsWon}:{suspectSeconds}:"
+                + $"{peakKps}:{peakCps}:{peakEps}:{timelineHash}";
+            string sig = ComputeHmacHex(canonical);
+            string body =
+                "{\"reporter_steam_id\":\"" + Escape(reporterSteamId) + "\""
+                + ",\"p1_steam_id\":\"" + Escape(p1SteamId) + "\""
+                + ",\"p2_steam_id\":\"" + Escape(p2SteamId) + "\""
+                + ",\"p1_rounds_won\":" + p1RoundsWon
+                + ",\"p2_rounds_won\":" + p2RoundsWon
+                + ",\"photon_room_id\":\"" + Escape(photonRoomId) + "\""
+                + ",\"match_started_at\":\"" + startedAt + "\""
+                + ",\"duration_seconds\":" + durationSeconds
+                + ",\"shared_game_token\":"
+                + (sharedGameTokenUsed ? "true" : "false")
+                + ",\"macro_suspect_seconds\":" + suspectSeconds
+                + ",\"peak_keys_per_second\":" + peakKps
+                + ",\"peak_clicks_per_second\":" + peakCps
+                + ",\"peak_events_per_second\":" + peakEps
+                + ",\"suspect_windows\":\"" + Escape(timeline) + "\""
+                + ",\"hmac_signature\":\"" + sig + "\"}";
+            string url = $"{baseUrl}/api/v1/matches/macro-evidence";
+            // Persist before the first network yield so a quit, crash, or long
+            // outage cannot erase the immutable evidence body.
+            EnqueueFailedReport(url, body);
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                url, body,
+                (ok, resp) =>
+                {
+                    if (ok)
+                    {
+                        RemovePendingReport(url, body);
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning(
+                            $"[INPUT] exact macro evidence was not attached: {Trunc120(resp)}");
+                    }
+                },
+                maxRetries: 6, retryDelay: 2f));
+        }
+
         public static void ReportMatch(
             string p1SteamId, string p1Name,
             string p2SteamId, string p2Name,
@@ -2527,9 +2968,16 @@ namespace CompetitiveRounds
             int localAvgFps = 0, int opponentAvgFps = 0,
             // v1.29 — Compare-tab input-rate metrics (keys per active-combat second).
             int localKeysPressed = 0, float localActiveSeconds = 0f,
-            // v1.29.1 (#50) — count of 1s windows whose gameplay-key rate was
-            // superhuman (macro suspicion). Advisory, not in HMAC.
+            // v1.29.1 (#50) — count of 1s windows whose combined gameplay key
+            // and click rate was superhuman. Advisory, not in HMAC.
             int localMacroSuspectSeconds = 0,
+            int localMacroPeakKps = 0, int localMacroPeakCps = 0,
+            int localMacroPeakEps = 0, string localMacroTimeline = null,
+            // Peer-carried copy of the non-reporting player's exact macro
+            // evidence. Advisory and outside the immutable match HMAC.
+            int oppMacroSuspectSeconds = 0,
+            int oppMacroPeakKps = 0, int oppMacroPeakCps = 0,
+            int oppMacroPeakEps = 0, string oppMacroTimeline = null,
             // v1.30 (item 4) — opponent's per-game combat stats (from their
             // cr_gstats Photon prop) + the cumulative scoring timeline
             // ("2:0,2:1,4:1,..." — rounds*2+points per event) for the history
@@ -2582,7 +3030,7 @@ namespace CompetitiveRounds
             sb.Append($"\"game_version\":\"v{Application.version}\",");
             sb.Append($"\"region\":\"{Escape(region)}\",");
             sb.Append($"\"match_duration\":{durationSeconds},");
-            sb.Append($"\"started_at\":\"{startedAt:yyyy-MM-ddTHH:mm:ssZ}\",");
+            sb.Append($"\"started_at\":\"{startedAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture)}\",");
             sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
             sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteamId)}\",");
             // Reporter's combat input counts for inactive-player anti-cheat. Server-side advisory.
@@ -2600,6 +3048,15 @@ namespace CompetitiveRounds
             sb.Append($"\"local_keys_pressed\":{localKeysPressed},");
             sb.Append($"\"local_active_seconds\":{localActiveSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)},");
             sb.Append($"\"local_macro_suspect_seconds\":{localMacroSuspectSeconds},");
+            sb.Append($"\"local_macro_peak_kps\":{localMacroPeakKps},");
+            sb.Append($"\"local_macro_peak_cps\":{localMacroPeakCps},");
+            sb.Append($"\"local_macro_peak_eps\":{localMacroPeakEps},");
+            sb.Append($"\"local_macro_timeline\":\"{Escape(ClampTimeline(localMacroTimeline, 1024))}\",");
+            sb.Append($"\"opp_macro_suspect_seconds\":{oppMacroSuspectSeconds},");
+            sb.Append($"\"opp_macro_peak_kps\":{oppMacroPeakKps},");
+            sb.Append($"\"opp_macro_peak_cps\":{oppMacroPeakCps},");
+            sb.Append($"\"opp_macro_peak_eps\":{oppMacroPeakEps},");
+            sb.Append($"\"opp_macro_timeline\":\"{Escape(ClampTimeline(oppMacroTimeline, 1024))}\",");
             // v1.30 item 4 — opponent per-game stats + scoring timeline (advisory).
             sb.Append($"\"opp_bullets_fired\":{oppBulletsFired},");
             sb.Append($"\"opp_bullets_hit\":{oppBulletsHit},");
@@ -5627,7 +6084,7 @@ namespace CompetitiveRounds
             sb.Append($"\"game_version\":\"v{Application.version}\",");
             sb.Append($"\"region\":\"{Escape(region)}\",");
             sb.Append($"\"match_duration\":{durationSeconds},");
-            sb.Append($"\"started_at\":\"{startedAt:yyyy-MM-ddTHH:mm:ssZ}\",");
+            sb.Append($"\"started_at\":\"{startedAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture)}\",");
             sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
             sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteamId)}\",");
             sb.Append($"\"t1a_fps\":{t1aFps},\"t1b_fps\":{t1bFps},\"t2a_fps\":{t2aFps},\"t2b_fps\":{t2bFps},");
@@ -6965,8 +7422,20 @@ namespace CompetitiveRounds
                 HandleSessionReject(request, _sentTok);
                 bool success = request.result == UnityWebRequest.Result.Success;
                 NoteResult(success, request.responseCode);
-                callback(success, success ? request.downloadHandler.text : request.error);
+                callback(
+                    success,
+                    success
+                        ? request.downloadHandler.text
+                        : FormatRequestError(request));
             }
+        }
+
+        private static string FormatRequestError(UnityWebRequest request)
+        {
+            if (request == null) return "request failed";
+            return request.responseCode > 0
+                ? $"HTTP {request.responseCode}: {request.error}"
+                : request.error;
         }
 
         /// <summary>POST with automatic retry on failure (DNS hiccups, timeouts).</summary>
@@ -7005,9 +7474,11 @@ namespace CompetitiveRounds
                     Plugin.Log.LogWarning($"[HTTP] POST attempt {attempt}/{maxRetries} failed: {request.error}");
 
                     if (attempt < maxRetries)
-                        yield return new WaitForSeconds(retryDelay);
+                        // Network recovery must keep moving while ROUNDS pauses
+                        // or slows game time on result/menu screens.
+                        yield return new WaitForSecondsRealtime(retryDelay);
                     else
-                        callback(false, request.error);
+                        callback(false, FormatRequestError(request));
                 }
             }
         }

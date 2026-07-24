@@ -121,9 +121,18 @@ bot = commands.Bot(command_prefix="!", intents=intents, chunk_guilds_at_startup=
 http_session = None
 seen_series = set()
 
-async def api_get(path):
+async def api_get(path, timeout=8.0):
     try:
-        async with http_session.get(f"{API_BASE_URL}/api/v1{path}") as r:
+        # Every caller needs a bounded failure mode.  The FAQ Elo calculator
+        # makes several reads before it can reply; aiohttp's default timeout is
+        # minutes, which left Discord interactions "thinking" indefinitely
+        # whenever the API or one DB query stalled. 8s suits the fast reads
+        # every caller does today; a heavier endpoint can pass a larger timeout
+        # rather than inheriting an unbounded wait.
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1{path}",
+            timeout=aiohttp.ClientTimeout(total=timeout),
+        ) as r:
             if r.status == 200:
                 return await r.json()
             # A non-200 used to return None with no trace — consumers like the
@@ -346,6 +355,8 @@ import difflib as _faq_difflib
 
 FAQ_INFO_CHANNEL = "<#1159243585309384805>"       # #ranked-information
 FAQ_INSTALL_CHANNEL = "<#1491701002267791401>"    # #scr-competitive-rounds-how-to-install
+FAQ_GENERAL_MODS_CHANNEL = "<#1137267505673547846>" # #how-to-install-mods
+FAQ_MODPACKS_CHANNEL = "<#1137271024132571156>"    # #mod-packs
 FAQ_MODPACK_CODE = "019f642f-9c88-f5f7-5199-41b4b7d30ebf"
 FAQ_THUNDERSTORE_URL = "https://thunderstore.io/c/rounds/p/Team_Sid/SidsCompetitiveRounds/"
 FAQ_HELPER_NAME = "SCR Helper"
@@ -379,12 +390,46 @@ def _faq_norm(text: str) -> str:
 
 
 _FAQ_QUESTION_RE = _faq_re.compile(
-    r"(\?|^(how|what|whats|what's|where|when|who|whos|who's|why|can|could|does|do|is|are|any|which|help)\b"
+    r"(\?|^(how|what|whats|what's|where|when|who|whos|who's|why|can|could|does|do|is|are|any|which|help|"
+    r"explain|list|show|fastest)\b"
     r"|\b(how do i|how to|what is|where is|can i|does the|is there|anyone know))")
 
 
 def _faq_question_like(norm: str) -> bool:
     return bool(_FAQ_QUESTION_RE.search(norm))
+
+
+_FAQ_FUZZY_STOPWORDS = frozenset({
+    "a", "about", "an", "and", "any", "are", "can", "could", "do", "does",
+    "file", "for", "here", "how", "i", "in", "install", "installer", "is",
+    "it", "me", "my", "of", "on", "please", "safe", "series", "some",
+    "system", "the", "there", "this", "to", "we", "what",
+    "whats", "where", "which", "who", "why", "with", "work", "works", "you",
+})
+
+
+def _faq_topic_tokens(text: str) -> set:
+    """Meaning-bearing tokens for the fuzzy layer.
+
+    Whole-sentence similarity alone treats short questions such as
+    "how does grow work" and "how does ranked work" as near-duplicates.
+    Requiring one exact or typo-close topic token preserves useful typo
+    matching without allowing question scaffolding to choose the topic.
+    """
+    return {
+        token for token in _faq_re.findall(r"[a-z0-9]+", text or "")
+        if len(token) >= 3 and token not in _FAQ_FUZZY_STOPWORDS
+    }
+
+
+def _faq_topics_overlap(left: set, right: set) -> bool:
+    if not left or not right:
+        return False
+    for a in left:
+        for b in right:
+            if a == b or _faq_difflib.SequenceMatcher(None, a, b).ratio() >= 0.84:
+                return True
+    return False
 
 
 def _faq_plainify(text: str, cap: int = 420) -> str:
@@ -457,18 +502,62 @@ async def _faq_top_player(message):
     return line
 
 
+async def _faq_discord_link(discord_id):
+    """Return (state, payload): state is ok, unlinked, or error.
+
+    The shared api_get intentionally collapses non-200 and transport failure to
+    None for simple pollers. The Elo calculator must distinguish a real 404
+    from an API timeout or it falsely tells linked players to link again.
+    """
+    try:
+        async with http_session.get(
+            f"{API_BASE_URL}/api/v1/players/by-discord/{discord_id}",
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as r:
+            if r.status == 200:
+                return "ok", await r.json()
+            if r.status == 404:
+                return "unlinked", None
+            print(f"API GET /players/by-discord/{{id}} -> HTTP {r.status}")
+            return "error", None
+    except Exception as ex:
+        print(f"API GET /players/by-discord/{{id}} error: {ex}")
+        return "error", None
+
+
 async def _faq_elo_delta(message):
     """Dynamic: Glicko preview between the asker and a mentioned player (or
     between the first two mentioned players). Mentions are taken from the
     message CONTENT in text order — Message.mentions is unordered and also
     includes the replied-to author on ping-replies, which would silently
-    compute the wrong pair."""
+    compute the wrong pair. A dict request is used by the slash-command form,
+    where discord.py has no backing Message object."""
     if message is None:
         return None
-    by_id = {str(m.id): m for m in message.mentions}
+    if isinstance(message, dict):
+        content = message.get("content") or ""
+        author = message.get("author")
+        guild = message.get("guild")
+        known_mentions = message.get("mentions") or []
+    else:
+        content = message.content or ""
+        author = message.author
+        guild = message.guild
+        known_mentions = message.mentions
+
+    by_id = {str(m.id): m for m in known_mentions}
     mentions, seen_ids = [], set()
-    for mid in _faq_re.findall(r"<@!?(\d+)>", message.content or ""):
+    for mid in _faq_re.findall(r"<@!?(\d+)>", content):
         m = by_id.get(mid)
+        if m is None and guild is not None:
+            m = guild.get_member(int(mid))
+        if m is None:
+            m = bot.get_user(int(mid))
+        if m is None:
+            try:
+                m = await bot.fetch_user(int(mid))
+            except Exception:
+                m = None
         if m is None or m.bot or m.id in seen_ids:
             continue
         seen_ids.add(m.id)
@@ -480,12 +569,24 @@ async def _faq_elo_delta(message):
     if len(mentions) >= 2:
         user_a, user_b = mentions[0], mentions[1]
     else:
-        user_a, user_b = message.author, mentions[0]
-    link_a = await api_get(f"/players/by-discord/{user_a.id}")
-    if not link_a:
+        user_a, user_b = author, mentions[0]
+    if user_a is None:
+        return "Couldn't identify the first player — mention both players and try again."
+
+    # These lookups are independent. Running them together halves normal
+    # latency and, paired with api_get's timeout, guarantees this interaction
+    # reaches either a result or a friendly failure instead of hanging.
+    result_a, result_b = await asyncio.gather(
+        _faq_discord_link(user_a.id),
+        _faq_discord_link(user_b.id),
+    )
+    state_a, link_a = result_a
+    state_b, link_b = result_b
+    if state_a == "error" or state_b == "error":
+        return "Couldn't reach the player database right now — try again in a minute."
+    if state_a == "unlinked":
         return f"❌ {user_a.display_name} isn't linked yet — they need `/link` first."
-    link_b = await api_get(f"/players/by-discord/{user_b.id}")
-    if not link_b:
+    if state_b == "unlinked":
         return f"❌ {user_b.display_name} isn't linked yet — they need `/link` first."
     prev = await api_get(f"/players/{link_a['steam_id']}/rating-preview"
                          f"?opponent_steam_id={link_b['steam_id']}")
@@ -524,6 +625,7 @@ FAQ_ENTRIES = [
         "examples": ["how much elo will i gain if i play against @player",
                      "how much rating do i lose against @player"],
         "handler": _faq_elo_delta,
+        "error_answer": "Couldn't compute that right now — the calculator timed out. Try again in a minute.",
         "discord_only": True,
     },
     {
@@ -538,13 +640,27 @@ FAQ_ENTRIES = [
         "handler": _faq_top_player,
     },
     {
+        "key": "community_modpacks",
+        "title": "Community mod packs",
+        "patterns": [
+            r"(cool|good|balanced|fun|recommended|recommend|best).{0,30}mod ?packs?",
+            r"mod ?packs?.{0,25}(cool|good|balanced|fun|recommended|recommend|best)",
+            r"where.{0,25}(find|get|see).{0,20}mod ?packs?",
+        ],
+        "examples": ["is there a cool balanced mod pack", "where can i find community mod packs"],
+        "answer": (f"Yes — browse {FAQ_MODPACKS_CHANNEL}. That channel is for community ROUNDS mod packs "
+                   "and balance packs.\n"
+                   "If you meant the clean **SCR-only** r2modman profile instead, ask for the "
+                   "*SCR modpack code*."),
+    },
+    {
         "key": "modpack_code",
-        "title": "Modpack code",
+        "title": "SCR modpack code",
         "patterns": [
             r"mod ?pack.{0,20}code",
-            r"(what|is there|where|got a?).{0,25}mod ?pack",
-            r"(r2modman|thunderstore).{0,20}(profile|code)",
-            r"profile code",
+            r"(r2modman|thunderstore).{0,20}(profile|import).{0,10}code",
+            r"(scr|competitive).{0,20}(profile|mod ?pack)",
+            r"profile (import )?code",
         ],
         "examples": ["what is the modpack code", "is there a modpack code"],
         "answer": (f"Yes — modpack code: `{FAQ_MODPACK_CODE}`\n"
@@ -556,14 +672,14 @@ FAQ_ENTRIES = [
     },
     {
         "key": "mods_not_working",
-        "title": "Mods not working — checklist",
+        "title": "SCR mod not working — checklist",
         "patterns": [
-            r"(mod|mods|scr|bepinex|plugin).{0,40}(not|isn'?t|aren'?t|won'?t|wont|stopped|broken|doesn'?t|dont|don'?t).{0,20}(work|load|show|start|open|run)",
-            r"help.{0,20}(my )?mods?\b",
-            r"mod (is )?disabled",
+            r"(scr|competitive rounds|sid'?s competitive rounds|the scr mod|this mod|the mod).{0,40}(not|isn'?t|won'?t|wont|stopped|broken|doesn'?t|dont|don'?t).{0,20}(work|load|show|start|open|run)",
+            r"(not|isn'?t|won'?t|wont|stopped|broken|doesn'?t).{0,20}(scr|competitive rounds|the scr mod|this mod|the mod).{0,15}(work|load|show|start|open|run)",
+            r"(scr|the scr mod|the mod|this mod) (is )?disabled",
             r"f5 (does nothing|not work|doesn'?t work|wont work|won'?t work)",
         ],
-        "examples": ["help, my mods aren't working", "the mod won't load", "mod not working"],
+        "examples": ["the scr mod isn't working", "the mod won't load", "scr not working"],
         "require_question": False,
         "answer": ("Quick checklist:\n"
                    "1. **ROUNDS version** — SCR needs the **current** ROUNDS (v1.1.2) on the **default** Steam branch. "
@@ -578,15 +694,37 @@ FAQ_ENTRIES = [
                    f"Full install walkthrough: {FAQ_INSTALL_CHANNEL}"),
     },
     {
+        "key": "general_mods_not_working",
+        "title": "ROUNDS mods not working",
+        "patterns": [
+            r"\bmy mods?\b.{0,35}(not|isn'?t|aren'?t|won'?t|wont|stopped|broken|doesn'?t|dont|don'?t).{0,20}(work|load|show|start|open|run)",
+            r"\bmods\b.{0,30}(not|aren'?t|won'?t|wont|stopped|broken|dont|don'?t).{0,20}(work|load|show|start|open|run)",
+            r"help.{0,20}(my )?mods?\b",
+        ],
+        "examples": ["my mods aren't working", "help my rounds mods won't load"],
+        "require_question": False,
+        "answer": (f"Use the **Mods not working checklist** in {FAQ_GENERAL_MODS_CHANNEL}. That channel covers "
+                   "normal modded ROUNDS profiles.\n"
+                   "If you specifically mean **Sid's Competitive Rounds**, say *the SCR mod isn't working* "
+                   "and I'll give you SCR's separate checklist."),
+    },
+    {
         "key": "vanilla_lobbies",
         "title": "Vanilla lobbies & normal matchmaking",
         "patterns": [
-            r"(vanilla|normal|regular|unmodded|casual).{0,30}(lobby|lobbies|lobbys|matchmaking|quick ?match)",
+            r"(can|could|will|do|does).{0,35}(play|join|use).{0,25}(vanilla|normal|regular|unmodded|casual).{0,20}(lobby|lobbies|lobbys|matchmaking|quick ?match|players?)",
             r"(does|is).{0,15}(normal|regular|vanilla).{0,15}matchmaking.{0,15}(work|still)",
             r"play with.{0,25}(friends|people|players).{0,20}without.{0,15}mod",
             r"(still )?play.{0,15}(against|with).{0,15}(vanilla|unmodded|normal) players?",
+            r"play.{0,15}(randos|randoms|random people|random players).{0,35}(scr|competitive|mod)",
+            # Bare phrasing without a play/join/use verb, e.g. "do vanilla
+            # lobbies still work?" — deliberately NOT matching "casual
+            # matchmaking" (that was the false positive), so this requires
+            # vanilla/unmodded/regular/normal paired with an actual lobby word.
+            r"(vanilla|unmodded|regular|normal) (lobby|lobbies|lobbys)",
         ],
-        "examples": ["can i still play in vanilla lobbies", "does normal matchmaking still work"],
+        "examples": ["can i still play in vanilla lobbies", "does normal matchmaking still work",
+                     "do vanilla lobbies still work", "can i play random people with the scr mod"],
         "answer": ("**Yes.** Normal Photon matchmaking and vanilla lobbies work exactly as before with the mod "
                    "installed — Sid was given permission by Landfall to publish the mod with normal matchmaking "
                    "enabled, as long as it doesn't change gameplay or inhibit unmodded players.\n"
@@ -651,14 +789,29 @@ FAQ_ENTRIES = [
                    "If a game is genuinely missing, file a bug report: F5 → Settings → Report a Bug (attach log)."),
     },
     {
+        "key": "grow_card",
+        "title": "How Grow works",
+        "patterns": [
+            r"how.{0,15}\bgrow\b.{0,12}(work|works)",
+            r"\bgrow\b.{0,25}(fps|frame ?rate|frames?|frame based)",
+            r"(fps|frame ?rate|frames?|frame based).{0,25}\bgrow\b",
+        ],
+        "examples": ["how does grow work", "is grow fps based"],
+        "answer": ("**Grow** makes a bullet gain damage the longer it stays in flight, so long-distance and "
+                   "slow-projectile shots benefit most.\n"
+                   "**Yes, vanilla Grow is frame-rate dependent.** Its growth is not fully normalized to elapsed "
+                   "time, so the result can vary with FPS. SCR currently records and organizes matches but does "
+                   "not alter Grow's gameplay code."),
+    },
+    {
         "key": "ranked_explained",
         "title": "How ranked works",
         "patterns": [
-            r"how (does|do) (the )?(ranked|rating|elo( system)?|ranking|glicko|series) (system )?work",
-            r"(explain|what is) (ranked|the ranked system|elo|the elo system|glicko)",
+            r"how (does|do) (the )?(ranked|ranks|rank|rating|elo( system)?|ranking|glicko|series) (system )?work",
+            r"(explain|what is) (ranked|the ranked system|ranks|elo|the elo system|glicko)",
             r"what.{0,10}(bo3|best of (3|three))",
         ],
-        "examples": ["how does ranked work", "explain the ranked system",
+        "examples": ["how does ranked work", "how do ranks work", "explain the ranked system",
                      "how does the elo system work"],
         "answer": ("• Ranked plays as a **best-of-3 series** vs the same opponent — first to 2 game wins. Your "
                    "**Glicko-2** rating updates when the series completes (that's elo with an uncertainty value: "
@@ -670,6 +823,22 @@ FAQ_ENTRIES = [
                    "Advanced → Master → Grand Master) — ask me *what are the elo requirements for each rank* for "
                    "the full table.\n"
                    f"More detail: {FAQ_INFO_CHANNEL}"),
+    },
+    {
+        "key": "what_is_series",
+        "title": "What is a ranked series?",
+        "patterns": [
+            r"what('?s| is) (a |the )?(ranked )?series",
+            r"ranked series.{0,15}(mean|work|works)",
+            r"how (does|do) (a |the )?(ranked )?series work",
+            r"what('?s| is) (a )?(bo3|best of (3|three))",
+        ],
+        "examples": ["what is a series", "what does ranked series mean"],
+        "answer": ("A **series** is a best-of-3 set of full ROUNDS games against the same opponent. The first "
+                   "player to win **2 games** wins the series, and Glicko rating changes once at that point — "
+                   "not after every game.\n"
+                   "If someone disconnects before it is decided, the series stays open and resumes at the same "
+                   "score when those players meet again."),
     },
     {
         "key": "turn_off_ranked",
@@ -705,6 +874,35 @@ FAQ_ENTRIES = [
                    "file a bug report (F5 → Settings → Report a Bug) so it can be chased down."),
     },
     {
+        "key": "questions_channel",
+        "title": "Questions & ranked information",
+        "patterns": [
+            r"(is there|where('?s| is)).{0,20}(a )?(questions?|help|information|info).{0,12}channel",
+            r"(questions?|ask questions?).{0,20}(channel|where)",
+        ],
+        "examples": ["is there a questions channel", "where should i ask ranked questions"],
+        "answer": (f"Start with {FAQ_INFO_CHANNEL}. It has the ranked overview and is the right place to find "
+                   "answers or ask SCR/ranked questions."),
+    },
+    {
+        "key": "room_codes",
+        "title": "Joining with a room code",
+        "patterns": [
+            r"(join|enter|input|type|use).{0,20}(a )?room ?codes?",
+            r"room ?codes?.{0,25}(join|enter|input|type|use|work|works)",
+            r"what (do|should) i do with.{0,15}(the )?room ?code",
+            r"(special way|how).{0,25}(meet up|play together).{0,35}(mod|online|room|code)",
+            r"(meet up|connect).{0,35}(type|enter).{0,20}(online|room|code)",
+        ],
+        "examples": ["how do i join room codes", "what do i do with the room code",
+                     "do i type the room code into online like before"],
+        "answer": ("For a private match, use ROUNDS' normal flow: **Online → Private → Join**, then enter the "
+                   "**6-letter room code** exactly as the host sent it. Both players should use the same Photon "
+                   "region.\n"
+                   "SCR's ranked queue needs no manual code — click **Ready** and the mod auto-connects you. "
+                   "Private-room games still count as ranked when both players have SCR running and ranked enabled."),
+    },
+    {
         "key": "play_ranked",
         "title": "How to play ranked",
         "patterns": [
@@ -726,9 +924,10 @@ FAQ_ENTRIES = [
         "key": "modes_1v2_ffa",
         "title": "1v2 and FFA",
         "patterns": [
-            r"\b1 ?v ?2\b",
+            r"(what|how|where|when|can|is).{0,25}\b1 ?v ?2\b",
+            r"\b1 ?v ?2\b.{0,20}(work|works|play|queue|ranked|rating|available|live|beta)",
             r"(what|how).{0,15}(is|about|play).{0,10}(ffa|free ?for ?all)",
-            r"solo (vs|versus|against) duo",
+            r"(what|how|where|when|can|is).{0,20}solo (vs|versus|against) duo",
         ],
         "examples": ["what is 1v2", "how do i play 1v2", "when is ffa coming"],
         "answer": ("• **1v2** (solo vs duo) is live as an **unranked beta** — queue from **F5 → Multiplayer → 1v2**. "
@@ -817,10 +1016,13 @@ FAQ_ENTRIES = [
         "answer": ("**DM Sid** with some art you'd like to upload — that's the whole application.\n"
                    "Format: **512×512 PNG** with real transparency, drawn for a character slot (eyes, mouth, or "
                    "detail/accessory).\n"
-                   "**Animated cosmetics**: export each frame as its own PNG — `myitem.png` is frame 1, then "
-                   "`myitem__f2.png`, `myitem__f3.png`, … Existing items run 4–13 frames at ~7–10 fps.\n"
-                   "Approved artists get the in-game **Artist tab** (F5): upload cosmetics directly, set price and "
-                   "stock, gift copies — and earn a **30% royalty** on every sale."),
+                   "The in-game uploader currently submits **one static PNG** and lets you preview its true size "
+                   "against the player body before review. It does **not** bundle animation frames yet.\n"
+                   "For an animated submission, upload frame 1 for review and send the remaining frames plus the "
+                   "intended FPS to Sid separately. Shipped files use `myitem.png`, then `myitem__f2.png`, "
+                   "`myitem__f3.png`, …\n"
+                   "Approved artists get the in-game **Artist tab** (F5): upload cosmetics, set price and stock "
+                   "after the art ships, gift copies, and earn a **30% royalty** on every sale."),
     },
     {
         "key": "bug_report",
@@ -880,6 +1082,21 @@ FAQ_ENTRIES = [
                   "exclusive titles). Full list + your progress: F5 -> Achievements."),
     },
     {
+        "key": "discord_steam_lookup",
+        "title": "Finding a linked Steam name",
+        "patterns": [
+            r"(find|see|check|look ?up).{0,30}(steam|rounds).{0,20}(name|account).{0,30}(discord|linked)",
+            r"(steam|rounds).{0,20}(name|account).{0,25}(linked|connected).{0,15}discord",
+            r"discord.{0,20}(linked|connected).{0,20}(steam|rounds).{0,15}(name|account)",
+        ],
+        "examples": ["how do i find the steam name linked to discord",
+                     "can i look up a discord user's rounds name"],
+        "answer": ("Yes — use `/rank @person`, `/stats @person`, or `/mystats @person`. If that Discord user "
+                   "linked their account, the result is headed by their linked ROUNDS/Steam display name. "
+                   "If the bot says *not linked*, there is no Discord-to-Steam lookup available for them."),
+        "discord_only": True,
+    },
+    {
         "key": "link_account",
         "title": "Linking your account",
         "patterns": [
@@ -893,6 +1110,22 @@ FAQ_ENTRIES = [
                    "2. Type `!link YOURCODE` (or use `/link`) here in the Discord server. Codes last 10 minutes.\n"
                    "Linking gets you: your **rank role**, Discord **bet buttons**, **bug-report DMs**, tournament "
                    "reminder DMs, and **server-booster gold** (2000g/month)."),
+    },
+    {
+        "key": "install_safety",
+        "title": "Is SCR safe to install?",
+        "patterns": [
+            r"(is|are).{0,15}(the )?(scr|mod|installer|competitive rounds).{0,20}(safe|legit|virus|malware)",
+            r"(safe|legit).{0,20}(install|download|run).{0,15}(scr|the mod|installer|competitive rounds)",
+            r"(installer|scr).{0,15}(virus|malware)",
+        ],
+        "examples": ["is the mod safe to install", "is the installer safe"],
+        "answer": ("**Yes, when you get it from the official SCR release pins or official Thunderstore page.** "
+                   "The project source is public; the installer only sets up BepInEx/SCR in your ROUNDS install, "
+                   "and SCR does not change gameplay.\n"
+                   "The standalone Windows installer is not code-signed, so Windows or antivirus software may "
+                   "show a reputation warning. Do not use reuploads or files sent by strangers. Official install "
+                   f"instructions: {FAQ_INSTALL_CHANNEL}"),
     },
     {
         "key": "install",
@@ -935,13 +1168,22 @@ FAQ_ENTRIES = [
             r"opponent.{0,15}(left|dc'?d|dc\b|disconnected|quit)",
             r"rage ?quit",
             r"(dc|disconnect|leave).{0,20}(penalty|count|percent)",
+            r"(resolv(?:e|ing)|finish|settle|complete).{0,30}(ranked )?(game|match|series).{0,30}(left|leave|dc|disconnect)",
+            r"(ranked )?(game|match|series).{0,30}(someone|player|opponent).{0,20}(left|leave|dc|disconnect)",
+            r"(count|counts).{0,15}(as )?(a )?(loss|lose).{0,20}(if|when).{0,12}(i )?(dc|disconnect|leave)",
+            r"(dc|disconnect|leave).{0,20}(count|counts).{0,15}(as )?(a )?(loss|lose)",
         ],
-        "examples": ["what happens if someone disconnects", "my opponent rage quit"],
+        "examples": ["what happens if someone disconnects", "my opponent rage quit",
+                     "does it count as a loss if i disconnect"],
         "require_question": False,
-        "answer": ("• A mid-series leave counts as a **DC on the leaver's record** — leave % is visible on the "
-                   "leaderboard. Occasional crashes won't tank it; rage-quits will.\n"
+        "answer": ("• In 1v1, a disconnect does **not automatically become a series loss**. It counts as a "
+                   "**DC on the leaver's record** — leave % is visible on the leaderboard — and the open series "
+                   "keeps its score.\n"
                    "• The series isn't lost: **rematch the same player and it resumes** where it left off, no "
                    "matter how much later — unfinished series never expire.\n"
+                   "• In 2v2, leaving can immediately forfeit the series when the other team was already up a "
+                   "game and the abandoned game had meaningful play. Other 2v2 DCs are marked incomplete for "
+                   "an admin to award or void; they do not silently become a loss.\n"
                    "• If a series never finishes, any bets on it auto-refund (~1 hour).\n"
                    "• Game crashed mid-match? Relaunch and rejoin your opponent — the series picks back up."),
     },
@@ -1024,6 +1266,24 @@ FAQ_ENTRIES = [
                    "Boards need 1+ recorded match to show a player."),
     },
     {
+        "key": "bullet_hitboxes",
+        "title": "Why a bullet can look far from you",
+        "patterns": [
+            r"(hit|damage|killed).{0,35}bullet.{0,35}(nowhere|far|close|near|miss|touch)",
+            r"bullet.{0,35}(nowhere|far|not|wasn'?t|wasnt).{0,25}(near|close|touch|hit).{0,20}(me|player)",
+            r"(weird|bad|wrong).{0,15}(bullet )?(hitbox|hitboxes|hits|collision)",
+            r"(desync|lag).{0,20}(bullet|hitbox|hit)",
+        ],
+        "examples": ["why do bullets hit me when they look nowhere close",
+                     "why are the bullet hitboxes weird"],
+        "answer": ("SCR does not change bullet hitboxes or damage. Vanilla ROUNDS simulates projectiles over "
+                   "Photon, and the visible sprite/trail is not a perfect picture of the collision at the instant "
+                   "the hit was confirmed. Ping, interpolation, frame-time spikes, bullet-size cards, homing, and "
+                   "bounces can widen that visual mismatch.\n"
+                   "If it is repeatable with low ping, record a clip with the F5 FPS/ping display visible and file "
+                   "an attached-log bug report so it can be separated from ordinary network desync."),
+    },
+    {
         "key": "hosting",
         "title": "Hosting & netcode",
         "patterns": [
@@ -1099,6 +1359,7 @@ FAQ_ENTRIES = [
 for _e in FAQ_ENTRIES:
     _e["compiled"] = [_faq_re.compile(p) for p in _e["patterns"]]
     _e["examples_norm"] = [_faq_norm(x) for x in _e.get("examples", [])]
+    _e["example_topics"] = [_faq_topic_tokens(x) for x in _e["examples_norm"]]
 
 
 def _faq_find_match(content: str):
@@ -1116,14 +1377,329 @@ def _faq_find_match(content: str):
                 return e
     if question_like:
         best, best_ratio = None, 0.0
+        norm_topics = _faq_topic_tokens(norm)
         for e in FAQ_ENTRIES:
-            for ex in e["examples_norm"]:
+            for ex, ex_topics in zip(e["examples_norm"], e["example_topics"]):
+                if not _faq_topics_overlap(norm_topics, ex_topics):
+                    continue
                 r = _faq_difflib.SequenceMatcher(None, norm, ex).ratio()
                 if r > best_ratio:
                     best, best_ratio = e, r
         if best is not None and best_ratio >= 0.78:
             return best
     return None
+
+
+_ROOM_CODE_CANDIDATE_RE = _faq_re.compile(
+    r"(?<![A-Z0-9])(-[A-Z]{5}|[A-Z]{5})(?![A-Z0-9])"
+)
+# These are the ordinary all-caps chat words most likely to satisfy the
+# deliberately conservative "looks randomly generated" fallback below.
+_ROOM_CODE_WORDS = frozenset("""
+ABOUT ABOVE ABUSE ACTOR ACUTE ADMIT ADOPT ADULT AFTER AGAIN AGENT AGREE AHEAD
+ALARM ALBUM ALERT ALICE ALIKE ALIVE ALLOW ALONE ALONG ALTER AMONG ANGER ANGLE
+ANGRY APART APPLE APPLY ARGUE ARISE ARRAY ASIDE ASSET AUDIO AUDIT AVOID AWARD
+AWARE BADLY BAKER BASED BASIC BASIS BEACH BEGAN BEGIN BEGUN BEING BELOW BENCH
+BILLY BIRTH BLACK BLAME BLIND BLOCK BLOOD BOARD BOOST BOOTH BOUND BRAIN BRAND
+BREAD BREAK BREED BRIEF BRING BROAD BROKE BROWN BUILD BUILT BUYER CABLE CARRY
+CARDS CATCH CAUSE CHAIN CHAIR CHART CHASE CHEAP CHECK CHEST CHIEF CHILD CHOSE
+CIVIL CLAIM CLASS CLEAN CLEAR CLICK CLIMB CLOCK CLOSE COACH COAST COULD COUNT
+COURT COVER CRAFT CRASH CREAM CRIME CROSS CROWD CROWN CURVE CYCLE DAILY DANCE
+DEALT DEATH DEBUT DELAY DEPTH DOING DOUBT DOZEN DRAFT DRAMA DRAWN DREAM DRESS
+DRILL DRINK DRIVE DROVE DODGE DYING EAGER EARLY EARTH EIGHT ELITE EMAIL EMPTY ENEMY ENJOY
+ENTER ENTRY EQUAL ERROR EVENT EVERY EXACT EXIST EXTRA FAITH FALSE FAULT FIBER
+FIELD FIFTH FIFTY FIGHT FINAL FIRST FIXED FLASH FLEET FLOOR FLUID FOCUS FORCE
+FORTH FORTY FORUM FOUND FRAME FRANK FRAUD FRESH FRONT FRUIT FULLY FUNNY GAMES
+GIANT GIVEN GLASS GLOBE GOING GRACE GRADE GRAND GRANT GRASS GREAT GREEN GROSS
+GROUP GROWN GUARD GUESS GUEST GUIDE HAPPY HEART HEAVY HELLO HENCE HENRY HORSE
+HOTEL HOUSE HUMAN IDEAL IMAGE INDEX INNER INPUT ISSUE JACKS JAMES JERKS JERKY
+JIMMY JOINT JONES JUDGE JUMPS KNOWN LABEL LARGE LASER LATER LAUGH LAYER LEARN
+LEAST LEAVE LEGAL LEVEL LEWIS LIGHT LIMIT LINKS LIVES LOCAL LOGIC LOOSE LOWER
+LUCKY LUNCH LYING MAGIC MAJOR MAKER MARCH MARIA MATCH MAYBE MAYOR MEANT MEDIA
+METAL MIGHT MINOR MODEL MONEY MONTH MORAL MOTOR MOUNT MOUSE MOUTH MOVIE MUSIC
+NEEDS NEVER NEWLY NIGHT NOISE NORTH NOTED NOVEL NURSE OCCUR OCEAN OFFER OFTEN
+ORDER OTHER OUGHT PAINT PANEL PAPER PARTY PAUSE PEACE PETER PHASE PHONE PHOTO PIECE
+PILOT PITCH PLACE PLAIN PLANE PLANT PLATE PLAYS POINT POUND POWER PRESS PRICE
+PRIDE PRIME PRINT PRIOR PRIZE PROOF PROUD PROVE QUEEN QUEUE QUICK QUIET QUITE
+RADIO RAISE RANGE RAPID RATIO REACH READY REFER RESET RETRY RIGHT RIVAL RIVER ROBIN ROGER
+ROMAN ROOMS ROUGH ROUND ROUTE ROYAL RURAL SCALE SCARY SCENE SCOPE SCORE SENSE SERVE
+SEVEN SHALL SHAPE SHARE SHARP SHEET SHELF SHELL SHIFT SHIRT SHOCK SHOOT SHORT
+SHOWN SIGHT SINCE SIXTH SIXTY SIZED SKILL SLEEP SLIDE SMALL SMART SMILE SMITH
+SMOKE SOLID SOLVE SORRY SOUND SOUTH SPACE SPEAK SPEED SPEND SPENT SPLIT SPOKE
+SPORT STAFF STAGE STAKE STAND START STATE STEAM STEEL STICK STILL STOCK STONE
+STOOD STORE STORM STORY STRIP STUCK STUDY STUFF STYLE SUGAR SUITE SUPER SWEET
+TABLE TAKEN TASTE TAXES TEACH TEAMS THANK THEIR THEME THERE THESE THICK THING
+THINK THIRD THOSE THREE THROW TIGHT TIMES TITLE TODAY TOPIC TOTAL TOUCH TOUGH
+TOWER TRACK TRADE TRAIN TREAT TREND TRIAL TRIED TRUCK TRULY TRUST TRUTH TWICE
+UNDER UNION UNITY UNTIL UPPER UPSET URBAN USAGE USUAL VALID VALUE VIDEO VIRUS
+VISIT VITAL VOICE WASTE WATCH WATER WHEEL WHERE WHICH WHILE WHITE WHOLE WHOSE
+WOMAN WOMEN WORLD WORRY WORSE WORST WORTH WOULD WOUND WRITE WRONG WROTE YIELD
+YOUNG YOUTH WALTZ ZILCH ZINGS ZONKS
+""".split())
+
+# A five-letter token is "word-shaped" only when its first two letters and all
+# adjacent letter pairs occur in ordinary five-letter English words. This
+# compact shape veto avoids pretending that a finite hand-written word list is
+# exhaustive: ambiguous English-looking tokens stay silent unless the message
+# explicitly identifies them as a room code.
+_ROOM_CODE_WORD_START_SECONDS = (
+    "abcdefghiklmnoprstuvwxyz",  # a
+    "aeijloruy",                 # b
+    "aehiloruyz",                # c
+    "adehioruvwy",               # d
+    "abcdefgijlmnpqrstuvwxy",     # e
+    "aeijlorsu",                  # f
+    "aehilnoruy",                 # g
+    "adeimouy",                   # h
+    "abcdglmnoqrstvz",            # i
+    "aeiouy",                     # j
+    "aehilmnoruy",                # k
+    "aehilouy",                   # l
+    "abcefiouy",                  # m
+    "aeioruy",                    # n
+    "abcdfghiklmnprstuvwxz",      # o
+    "aehilorsuy",                 # p
+    "au",                         # q
+    "aehiosuy",                   # r
+    "acehiklmnopqtuvwy",          # s
+    "aehioruwy",                  # t
+    "dgklmnprstvz",               # u
+    "aeiouy",                     # v
+    "aehioruy",                   # w
+    "ehitvy",                     # x
+    "aeiopu",                     # y
+    "aeilou",                     # z
+)
+_ROOM_CODE_WORD_PAIR_SECONDS = (
+    "abcdefghijklmnopqrstuvwxyz",  # a
+    "abdehijklnorstuy",            # b
+    "aceghikloprstuyz",            # c
+    "adeghiklmnoqrstuvwyz",        # d
+    "abcdefghijklmnopqrstuvwxyz",  # e
+    "aefijklorstuy",               # f
+    "abdeghilmnorstuy",            # g
+    "abdeilmnorstuwy",             # h
+    "abcdefghijklmnopqrstuvxyz",   # i
+    "aeijouy",                     # j
+    "abehiklmnorsuy",              # k
+    "abcdefghiklmnoprstuvwy",      # l
+    "abcdefiklmoprstuwy",          # m
+    "abcdefghijklnoprstuvwxyz",    # n
+    "abcdefghijklmnopqrstuvwxyz",  # o
+    "acefhikloprstuy",              # p
+    "abiru",                        # q
+    "abcdefghijklmnoprstuvwyz",    # r
+    "abcdefhiklmnopqrstuvwyz",     # s
+    "acdeghiklmnorstuwyz",         # t
+    "abcdefghijklmnopqrstvxyz",    # u
+    "aeilorsuvy",                  # v
+    "adefhiklnorsuy",              # w
+    "abcehioptuvxy",               # x
+    "abcdegiklmnoprstuvwx",        # y
+    "abcdeilmotuyz",               # z
+)
+_room_code_warning_at: dict = {}
+
+
+def _room_code_member_names(message) -> set:
+    """Five-letter words that are names of cached guild members.
+
+    The bot intentionally does not chunk all ~2,500 members at startup, so the
+    cache is not proof that a token is not a name. It is still a useful veto;
+    the structural fallback below supplies the second, conservative veto.
+    """
+    names = set()
+    members = [getattr(message, "author", None)]
+    members.extend(getattr(message, "mentions", None) or [])
+    guild = getattr(message, "guild", None)
+    if guild is not None:
+        members.extend(getattr(guild, "members", None) or [])
+    for member in members:
+        if member is None:
+            continue
+        for attr in ("name", "display_name", "global_name", "nick"):
+            value = getattr(member, attr, None)
+            if not value:
+                continue
+            joined = "".join(_faq_re.findall(r"[A-Za-z]", str(value))).upper()
+            if len(joined) == 5:
+                names.add(joined)
+            for word in _faq_re.findall(r"[A-Za-z]{5}", str(value)):
+                names.add(word.upper())
+    return names
+
+
+def _room_code_looks_generated(token: str) -> bool:
+    """High-precision fallback for a bare five-letter post.
+
+    We would rather miss an ambiguous typo than tell someone their ordinary
+    word/name is a room code. Reject only a token with a first pair or internal
+    pair that does not occur in ordinary five-letter English words.
+    """
+    lower = token.lower()
+    if len(lower) != 5 or not lower.isalpha():
+        return False
+    first_index = ord(lower[0]) - ord("a")
+    if not 0 <= first_index < 26:
+        return False
+    if lower[1] not in _ROOM_CODE_WORD_START_SECONDS[first_index]:
+        return True
+    for left, right in zip(lower, lower[1:]):
+        left_index = ord(left) - ord("a")
+        if not 0 <= left_index < 26:
+            return False
+        if right not in _ROOM_CODE_WORD_PAIR_SECONDS[left_index]:
+            return True
+    return False
+
+
+# A bare five-letter token is treated as an ATTEMPTED room code only when a
+# room-code keyword IMMEDIATELY precedes it ("join QRDDO", "room code QRDDO",
+# "my code is QRDDO"). This is the gate that stops all-caps chat slang from
+# being called a room code: "LMFAO join us" never has a keyword right BEFORE
+# the LMFAO token, so it is never flagged. Dash-prefixed tokens need no keyword.
+_ROOM_CODE_LEADIN_RE = _faq_re.compile(
+    r"(?:room ?code|game ?code|the ?code|my ?code|room|lobby|invite|join(?:ing)?|host(?:ing)?|"
+    r"private (?:match|game|lobby|room)|come play|play (?:with|together))"
+    r"(?:\s+(?:is|the|my|it|code|here|are|to))*\s*[:=\-]?\s*$",
+    _faq_re.IGNORECASE,
+)
+# Common exactly-five-letter all-caps interjections/acronyms — vetoed on the
+# lone-message path so a solo "LMFAO"/"BRUHH" is never called a room code. Only
+# consulted when the whole message is the token (contextual matches skip it).
+_ROOM_CODE_SLANG = frozenset("""
+LMFAO LMAOO ROFLL BRUHH BRUUH YOOOO OMGGG WTFFF WTHHH AYYYY POGGG EZPZZ GGWPP
+HAHAH HEHEH WELPP DAMNN WOOSH YEEET YEETT NOOOO NOOBS SMHHH OOFFF UGHHH AWWWW
+GRRRR RIPPP NICEE COOLL LOLLL LOLOL SIMPP ONGGG FRRRR TBHHH MMMMM HMMMM PFFFT
+SHEEE NGLLL WOMPP BOOOO WOOOO HYPEE GYATT RAWRR EEEEE AAAAA OOOOO
+""".split())
+
+
+def _find_invalid_room_code(message):
+    """Return a safely identified malformed room code, otherwise None.
+
+    A valid ROUNDS room code is six capital letters. We warn only about a
+    five-letter (or dash + five-letter) capital token, and only when confident
+    it is an ATTEMPTED room code rather than ordinary chat:
+      * a dash-prefixed token ("-KCMON") is unambiguous — words, names and
+        slang don't start with a dash — so it stands on its own;
+      * a bare five-letter token ("QRDDO") is flagged only when a room-code
+        keyword immediately precedes it, or when the whole message is just that
+        token and it is not common slang.
+    Known words, Discord member names and word-shaped tokens always veto a
+    warning — this ordering is what keeps all-caps slang (LMFAO, BRUHH, ...)
+    silent.
+    """
+    content = (getattr(message, "content", None) or "").strip()
+    if not content or content.startswith(("!", "/", ".")):
+        return None
+    member_names = None
+    for match in _ROOM_CODE_CANDIDATE_RE.finditer(content):
+        raw = match.group(1)
+        is_dash = raw.startswith("-")
+        token = raw[1:] if is_dash else raw
+        if token in _ROOM_CODE_WORDS:
+            continue
+        if not _room_code_looks_generated(token):
+            continue
+        if member_names is None:
+            member_names = _room_code_member_names(message)
+        if token in member_names:
+            continue
+        if is_dash:
+            return raw
+        # Bare token: require room-code context so chat slang stays silent.
+        if _ROOM_CODE_LEADIN_RE.search(content[:match.start()]):
+            return raw
+        if content == raw and token not in _ROOM_CODE_SLANG:
+            return raw
+    return None
+
+
+async def _room_code_is_member_name(message, token: str) -> bool:
+    """Check cached names, then Discord's member search for uncached names.
+
+    This bot deliberately does not cache the full guild at startup. A targeted
+    REST query prevents a five-letter username/nickname from being called an
+    invalid room code without bringing back the old multi-thousand-member
+    startup chunk.
+    """
+    if token in _room_code_member_names(message):
+        return True
+    guild = getattr(message, "guild", None)
+    query = getattr(guild, "query_members", None) if guild is not None else None
+    if query is None:
+        return False
+    try:
+        members = await query(query=token, limit=20, cache=False)
+    except Exception as ex:
+        # On lookup failure, favor silence over falsely correcting a person's
+        # name. A later post can retry normally.
+        print(f"[ROOM-CODE] member-name check failed: {ex}")
+        return True
+    for member in members or []:
+        for attr in ("name", "display_name", "global_name", "nick"):
+            value = getattr(member, attr, None)
+            if not value:
+                continue
+            joined = "".join(_faq_re.findall(r"[A-Za-z]", str(value))).upper()
+            words = {w.upper() for w in _faq_re.findall(r"[A-Za-z]{5}", str(value))}
+            if joined == token or token in words:
+                return True
+    return False
+
+
+def _room_code_warning_rate_ok(message, candidate: str) -> bool:
+    now = _faq_time.monotonic()
+    key = (
+        getattr(getattr(message, "channel", None), "id", 0),
+        getattr(getattr(message, "author", None), "id", 0),
+        candidate,
+    )
+    if now - _room_code_warning_at.get(key, 0.0) < 120.0:
+        return False
+    if len(_room_code_warning_at) >= 500:
+        cutoff = now - 600.0
+        for old_key, stamped_at in list(_room_code_warning_at.items()):
+            if stamped_at < cutoff:
+                _room_code_warning_at.pop(old_key, None)
+    _room_code_warning_at[key] = now
+    return True
+
+
+async def _maybe_warn_invalid_room_code(message) -> None:
+    if getattr(message, "guild", None) is None:
+        return
+    candidate = _find_invalid_room_code(message)
+    if candidate is None:
+        return
+    # Run the async member-name veto BEFORE consuming the rate-limit slot, so a
+    # token that turns out to be someone's name doesn't burn the 120s dedup
+    # window that a genuine code posted right after would need.
+    token = candidate[1:] if candidate.startswith("-") else candidate
+    if await _room_code_is_member_name(message, token):
+        return
+    if not _room_code_warning_rate_ok(message, candidate):
+        return
+    reason = ("it starts with a dash" if candidate.startswith("-")
+              else "it has only five letters")
+    try:
+        await message.reply(
+            f"⚠️ `{candidate}` is not a valid ROUNDS room code because {reason}. "
+            "**Room codes are exactly six capital letters with no dash.** "
+            "ROUNDS reports the host/player as offline for a malformed code, so ask them to resend the full code.",
+            mention_author=False,
+        )
+        print(f"[ROOM-CODE] warned for malformed code {candidate}")
+    except Exception as ex:
+        print(f"[ROOM-CODE] warning reply failed: {ex}")
+
+
+async def _room_code_warning_task(message) -> None:
+    try:
+        await _maybe_warn_invalid_room_code(message)
+    except Exception as ex:
+        print(f"[ROOM-CODE] handler error: {ex}")
 
 
 async def _faq_resolve_answer(entry, message=None):
@@ -1136,7 +1712,7 @@ async def _faq_resolve_answer(entry, message=None):
         return await handler(message)
     except Exception as ex:
         print(f"[FAQ] handler {entry['key']} failed: {ex}")
-        return None
+        return entry.get("error_answer")
 
 
 def _faq_embed(entry, answer_text: str) -> discord.Embed:
@@ -1344,7 +1920,17 @@ async def cmd_faq(ctx, *, topic: str = ""):
     if entry is None:
         await ctx.send("No FAQ matches that — try `/faq` for the topic list.")
         return
-    answer = await _faq_resolve_answer(entry, ctx.message if ctx.message else None)
+    await _maybe_defer(ctx)
+    # Hybrid slash contexts can expose a truthy synthetic Message whose
+    # content/mentions are empty. Always carry the explicit command argument;
+    # prefix-command mentions are still supplied as a resolution cache.
+    request = {
+        "content": topic,
+        "author": ctx.author,
+        "guild": ctx.guild,
+        "mentions": (getattr(ctx.message, "mentions", None) or []),
+    }
+    answer = await _faq_resolve_answer(entry, request)
     if not answer:
         await ctx.send("Couldn't build that answer right now.")
         return
@@ -1393,6 +1979,12 @@ async def on_message(message: discord.Message):
         except Exception as ex:
             print(f"[TICKET-DM] handler error: {ex}")
         return
+    # Malformed native room-code warning. Kept in its own task so a Discord
+    # send cannot delay prefix/slash command dispatch.
+    try:
+        asyncio.create_task(_room_code_warning_task(message))
+    except Exception as ex:
+        print(f"[ROOM-CODE] task spawn error: {ex}")
     # FAQ auto-responder (v1.33) — after the chat relay so in-game viewers see
     # the question before the answer. Spawned as a task so a slow API lookup
     # (dynamic answers hit /leaderboard, /rating-preview) can never delay
@@ -3923,11 +4515,10 @@ async def publish_lb(guild):
     print(f"[LB] posted fresh leaderboard message in {ch.id}")
 
 # ── Anti-cheat flag relay ────────────────────────────────────────
-# Tracks the most-recently-posted flag ID so we don't repeat on bot restart.
-# Persisted in-memory only — on cold start, anchor at "now" by pulling once and
-# remembering the latest ID without posting (handled by the first poll tick).
-_last_flag_id_posted: str | None = None
-_flag_poller_initialized = False
+# IDs whose Discord send succeeded but durable API acknowledgement failed.
+# Retrying the ack without reposting gives process-lifetime exactly-once
+# behavior; a crash in that tiny window may duplicate once, never lose a flag.
+_flag_posts_pending_ack: dict[str, int] = {}
 
 _last_ban_id_posted: str | None = None
 _ban_poller_initialized = False
@@ -4031,10 +4622,40 @@ async def before_channel_posts():
 
 
 def _flag_color_and_emoji(reason: str, auto_inv: bool):
+    if reason == "suspected_macro":         return (0xC0392B, "M")
+    if reason == "fps_dip_pattern":         return (0x9B59B6, "F")
+    if reason == "low_fps_outlier":         return (0x8E44AD, "F")
+    if reason == "freeze_events":           return (0x3498DB, "Z")
+    if reason == "ping_gap_cluster":        return (0x2980B9, "N")
+    if reason == "suspected_speedhack":     return (0xD35400, "S")
     if reason == "too_many_cards":          return (0xE74C3C, "🃏")  # red
     if reason == "short_duration_pattern":  return (0xE67E22, "⏱️")  # orange
     if reason == "inactive_player":         return (0xF1C40F, "💤")  # yellow (advisory)
     return (0x95A5A6, "🚩")
+
+
+def _flag_embed_text(value, limit=850):
+    rendered = discord.utils.escape_markdown(str(value or "not recorded"))
+    return rendered if len(rendered) <= limit else rendered[:limit - 3] + "..."
+
+
+async def _ack_anticheat_flag(flag_id: str, evidence_revision: int) -> bool:
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/recent-flags/ack",
+            params={
+                "flag_id": flag_id,
+                "evidence_revision": evidence_revision,
+            },
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status == 200:
+                return True
+            print(f"[ANTICHEAT] ack status={resp.status} flag={flag_id}")
+    except Exception as ex:
+        print(f"[ANTICHEAT] ack error flag={flag_id}: {ex}")
+    return False
 
 
 @tasks.loop(seconds=30)
@@ -4056,13 +4677,10 @@ async def poll_chat_catchup():
 @tasks.loop(seconds=60)
 async def poll_anticheat_flags():
     """Poll the API for new flagged_matches entries and post them to #scr-admin."""
-    global _last_flag_id_posted, _flag_poller_initialized
     if not http_session or not API_SECRET_KEY or not ADMIN_CHANNEL_ID:
         return
     try:
         params = {"limit": 50}
-        if _last_flag_id_posted:
-            params["since_id"] = _last_flag_id_posted
         async with http_session.get(
             f"{API_BASE_URL}/api/v1/internal/recent-flags",
             params=params,
@@ -4081,53 +4699,78 @@ async def poll_anticheat_flags():
     if not flags:
         return
 
-    # Cold-start: don't spam the channel with the entire history. Skip posting
-    # on the very first tick, just memo the most-recent ID.
-    if not _flag_poller_initialized:
-        _flag_poller_initialized = True
-        _last_flag_id_posted = flags[-1]["id"]
-        print(f"[ANTICHEAT] cold start, anchored at {_last_flag_id_posted[:8]}")
+    try:
+        channel = bot.get_channel(ADMIN_CHANNEL_ID) or await bot.fetch_channel(ADMIN_CHANNEL_ID)
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as ex:
+        # Keep the loop alive and leave every row unacknowledged for retry.
+        print(f"[ANTICHEAT] admin channel resolution failed: {ex}")
         return
-
-    channel = bot.get_channel(ADMIN_CHANNEL_ID) or await bot.fetch_channel(ADMIN_CHANNEL_ID)
+    except Exception as ex:
+        print(f"[ANTICHEAT] unexpected channel resolution error: {ex}")
+        return
     if channel is None:
         print(f"[ANTICHEAT] admin channel {ADMIN_CHANNEL_ID} not resolvable")
         return
 
     for f in flags:
+        flag_id = str(f.get("id") or "")
+        if not flag_id:
+            continue
+        evidence_revision = int(f.get("discord_evidence_revision") or 1)
+        if flag_id in _flag_posts_pending_ack:
+            pending_revision = _flag_posts_pending_ack[flag_id]
+            if pending_revision != evidence_revision:
+                # The evidence changed after the prior embed was accepted.
+                # Post the new revision instead of acknowledging it unseen.
+                _flag_posts_pending_ack.pop(flag_id, None)
+            elif await _ack_anticheat_flag(flag_id, pending_revision):
+                _flag_posts_pending_ack.pop(flag_id, None)
+                continue
+            else:
+                return
         try:
             color, emoji = _flag_color_and_emoji(f["flag_reason"], f["auto_invalidated"])
-            details = f.get("flag_details") or {}
             mode = "Ranked" if f.get("is_ranked") else "Casual"
             dur = f.get("duration_seconds")
             dur_str = f"{dur}s" if dur is not None else "—"
             verdict = "auto-invalidated" if f["auto_invalidated"] else "advisory (manual review)"
+            match_state = "currently valid"
+            if f.get("match_invalidated"):
+                match_state = "currently invalidated"
+                if f.get("match_invalidation_reason"):
+                    match_state += f" ({f['match_invalidation_reason']})"
             embed = discord.Embed(
                 title=f"{emoji} Match flagged: `{f['flag_reason']}`",
                 description=(
-                    f"**{f['p1_name']}** vs **{f['p2_name']}** ({mode}, {dur_str})\n"
-                    f"Status: **{verdict}**\n"
-                    f"Match ID: `{f['match_id']}`"
+                    f"**{discord.utils.escape_markdown(str(f['p1_name']))}** vs "
+                    f"**{discord.utils.escape_markdown(str(f['p2_name']))}** ({mode}, {dur_str})\n"
+                    f"Status: **{verdict}**; {_flag_embed_text(match_state, 180)}\n"
+                    f"Game code: `{f.get('game_code') or 'not recorded'}` | Match ID: `{f['match_id']}`"
                 ),
                 color=color,
                 timestamp=datetime.fromisoformat(f["created_at"].replace("Z", "+00:00")) if f.get("created_at") else None,
             )
-            # Per-reason context fields.
-            if f["flag_reason"] == "too_many_cards":
-                embed.add_field(name="Cards picked", value=f"P1: {details.get('p1_cards')}  P2: {details.get('p2_cards')} (max {details.get('max_allowed')})", inline=False)
-            elif f["flag_reason"] == "short_duration_pattern":
-                prior = details.get("prior_match_ids") or []
-                embed.add_field(name="Pattern", value=f"This + {len(prior)} prior match(es) under 60s in a 2hr window", inline=False)
-                if details.get("retroactive"):
-                    embed.add_field(name="Retroactive", value=f"Triggered by {details.get('triggered_by_match','')[:8]}…", inline=False)
-            elif f["flag_reason"] == "inactive_player":
-                embed.add_field(name="Reporter inputs", value=f"Shots: {details.get('shots',0)}  Blocks: {details.get('blocks',0)}  Duration: {details.get('duration_seconds')}s", inline=False)
-                embed.add_field(name="Reporter", value=f"`{details.get('reporter_steam','?')}`", inline=False)
-            embed.add_field(name="Steam IDs", value="`" + "`, `".join(f.get("player_steam_ids") or []) + "`", inline=False)
-            await channel.send(embed=embed)
-            _last_flag_id_posted = f["id"]
+            ids = (
+                f"{f.get('p1_name')}: {f.get('p1_steam_id')}\n"
+                f"{f.get('p2_name')}: {f.get('p2_steam_id')}\n"
+                f"Suspect(s): {f.get('suspect_steam_text') or 'not attributable'}"
+            )
+            embed.add_field(name="Steam IDs / suspect", value=_flag_embed_text(ids, 500), inline=False)
+            embed.add_field(name="Detector evidence", value=_flag_embed_text(f.get("evidence_summary"), 700), inline=False)
+            progress = f"{f.get('score_summary')}\nPoints: {f.get('point_progress')}"
+            embed.add_field(name="Score / point progress", value=_flag_embed_text(progress, 650), inline=False)
+            embed.add_field(name="Cards picked", value=_flag_embed_text(f.get("cards_summary"), 650), inline=False)
+            embed.add_field(name="Combat / input / FPS", value=_flag_embed_text(f.get("telemetry_summary"), 750), inline=False)
+            embed.add_field(name="Connection evidence", value=_flag_embed_text(f.get("connection_summary"), 750), inline=False)
+            embed.add_field(name="Reporter context", value=_flag_embed_text(f.get("match_context"), 400), inline=False)
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            _flag_posts_pending_ack[flag_id] = evidence_revision
+            if not await _ack_anticheat_flag(flag_id, evidence_revision):
+                return
+            _flag_posts_pending_ack.pop(flag_id, None)
         except Exception as ex:
             print(f"[ANTICHEAT] post error for flag {f.get('id')}: {ex}")
+            return
 
 
 # ── GitHub release announcements ───────────────────────────────────────────
