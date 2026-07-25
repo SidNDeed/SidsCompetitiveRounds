@@ -154,6 +154,12 @@ namespace CompetitiveRounds
             // offset. Players can still drag-adjust like any face item.
             new CosmeticDef { Sku = "face_detail_rounds_cat",    DisplayName = "Rounds Cat",       Slot = CharacterItemType.Detail, PngFile = "detail_rounds_cat.png",    Scale = 1.0f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_detail_star_spin",     DisplayName = "Star Spin",        Slot = CharacterItemType.Detail, PngFile = "detail_star_spin.png",     Scale = 1.0f, Offset = Vector2.zero, Fps = 6f },
+            // v1.34.3 — first community submission shipped through the artist
+            // upload + admin placement review workflow. Scale/Offset are the
+            // ADMIN-APPROVED values (approved_placement_revision 1), copied
+            // verbatim from cosmetic_submissions so the render matches exactly
+            // what was reviewed in-game (learning #164/#165).
+            new CosmeticDef { Sku = "face_detail_spooky_head_bouncers", DisplayName = "Spooky Head-Bouncers", Slot = CharacterItemType.Detail, PngFile = "detail_spooky_head_bouncers.png", Scale = 1.3f, Offset = new Vector2(0.113f, 3.665f) },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

@@ -6558,12 +6558,16 @@ async def poll_gambler_pings():
     else:
         items = []
     open_now = {}
+    # Every series still live, INCLUDING ones whose bets are momentarily locked
+    # while a game is being played. Used only for pruning the pinged-set below.
+    live_now = set()
     for s in items:
         if not isinstance(s, dict):
             continue
         sid = s.get("series_id") or s.get("id")
         if not sid:
             continue
+        live_now.add(str(sid))
         if s.get("bets_locked", False):
             continue
         open_now[str(sid)] = s
@@ -6571,7 +6575,10 @@ async def poll_gambler_pings():
     # restart doesn't mass-ping every match already in progress.
     if not _gambler_seeded:
         _gambler_seeded = True
-        _gambler_pinged.update(open_now.keys())
+        # Seed with every LIVE series, not just the currently-bettable ones:
+        # restarting mid-game (bets locked) would otherwise leave the series
+        # unseeded and ping it the moment betting re-opened.
+        _gambler_pinged.update(live_now)
         return
     channel = bot.get_channel(LIVE_BETS_CHANNEL_ID)
     if channel is None:
@@ -6597,9 +6604,14 @@ async def poll_gambler_pings():
             )
         except Exception as e:
             print(f"[GAMBLER] ping failed for {sid}: {e}")
-    # Drop ids no longer open so memory stays bounded.
+    # Drop ids once the series is GONE, not merely because betting is locked.
+    # Bets lock for the duration of each game and re-open between games, so
+    # pruning against open_now made the bot forget a live series at every game
+    # boundary and ping it again on the next one — the same series id was
+    # announced twice hours apart (TechTara vs NotNic, 1:38 PM and 3:46 PM).
+    # Pruning against live_now keeps one ping per series for its whole life.
     for sid in list(_gambler_pinged):
-        if sid not in open_now:
+        if sid not in live_now:
             _gambler_pinged.discard(sid)
 
 

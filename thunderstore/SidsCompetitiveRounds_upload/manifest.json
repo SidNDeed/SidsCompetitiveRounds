@@ -1,6 +1,6 @@
 {
   "name": "SidsCompetitiveRounds",
-  "version_number": "1.34.2",
+  "version_number": "1.34.3",
   "website_url": "https://github.com/SidNDeed/SidsCompetitiveRounds",
   "description": "Ranked mod for vanilla ROUNDS v1.1.2. Glicko-2 BO3 matchmaking (1v1, 2v2, new 1v2), community character cosmetics (animated!), hold-Tab scoreboard, 40 achievements, tournaments, tier lists, map colors, shop, betting, Discord bridge, anti-cheat.",
   "dependencies": [

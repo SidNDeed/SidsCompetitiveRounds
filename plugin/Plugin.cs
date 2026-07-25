@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.34.2";   // July 24: cosmetic placement workflow, flag evidence, perf pass; STATS_CLEAN/STEAM_AUTH gates stay at 1.34.0 (1.34.2 passes them)
+        public const string ModVersion = "1.34.3";   // July 24: bundles the first workflow-reviewed community cosmetic; gates stay at 1.34.0
         public const string RequiredGameVersion = "1.1.2";
 
         internal static ManualLogSource Log;

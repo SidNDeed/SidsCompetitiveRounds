@@ -1,5 +1,14 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.34.3 — 2026-07-24 — First community cosmetic ships + gambler ping fix
+
+### Cosmetics
+- **Spooky Head-Bouncers by Nix is live** — the first community cosmetic to go through the full artist upload -> admin placement review -> release pipeline. It ships at the exact scale and position that were approved in-game.
+- **Releases now always bundle approved cosmetics.** v1.34.2 shipped without this one because the art lives in the database until a release compiles it into the client; the ship process now requires it, with a checksum check on the extracted art and a migration guard that refuses to publish if the approved placement changed after the bundle was cut.
+
+### Discord
+- **The gambler ping no longer repeats for the same series.** Bets lock while a game is being played and re-open between games, and the bot was forgetting a series every time that happened — so the same match got announced again on the next game. It now announces once per series for its whole life.
+
 ## v1.34.2 — 2026-07-24 — Cosmetic placement workflow, flagged-match evidence, performance pass
 
 ### Cosmetics — artists & admins
