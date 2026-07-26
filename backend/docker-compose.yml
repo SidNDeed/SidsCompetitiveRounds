@@ -41,7 +41,11 @@ services:
     # resurface those bugs. If the API ever needs more throughput, scale
     # verticals (asyncio handles this community's load easily) or move the
     # shared state to Redis FIRST.
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # --no-access-log: ~40 endpoints carry HMAC signatures as query params, so
+    # uvicorn's access log recorded every sig verbatim, forever, in an
+    # unrotated file (audit lower-pri item). App-level prints (the [TAG] lines)
+    # are unaffected — they're where real diagnosis happens anyway.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     depends_on:
       db:
         condition: service_healthy
@@ -62,6 +66,10 @@ services:
       # with the key set. Set STEAM_AUTH_ENFORCE=1 in .env once the logs show
       # ticket verification succeeding broadly, then restart the api container.
       STEAM_AUTH_ENFORCE: ${STEAM_AUTH_ENFORCE:-}
+      # Security A2: admin HMAC secret — separate from the DLL-shipped
+      # MATCH_HMAC_SECRET. Lives in .env; unset = every admin endpoint fails
+      # closed (403), by design.
+      ADMIN_HMAC_SECRET: ${ADMIN_HMAC_SECRET:-}
     volumes:
       # Bind-mount bug-report logs to the host so they survive container
       # rebuilds. Without this, every `docker compose up -d --build api`

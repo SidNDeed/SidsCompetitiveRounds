@@ -38,8 +38,12 @@ services:
     # NEVER set this to "*" while 8443 is publicly reachable — that turns the
     # raw port into a source-IP spoofing primitive that defeats the rate
     # limiter. Still exactly ONE worker (learning #125).
+    # --no-access-log: this override REPLACES the base compose command, so the
+    # flag must be repeated here or query-string HMAC signatures land in
+    # uvicorn's access log on the TLS deployment too (Codex review find).
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000",
-              "--proxy-headers", "--forwarded-allow-ips", "172.30.0.10"]
+              "--proxy-headers", "--forwarded-allow-ips", "172.30.0.10",
+              "--no-access-log"]
     networks:
       - default
       - edge

@@ -530,6 +530,9 @@ namespace CompetitiveRounds
             // BO3 starts at 0-0 in the HUD.
             currentSeriesGamesWon = 0;
             currentSeriesGamesLost = 0;
+            // Keep the HUD's lifetime "Total Series" H2H tally live: bump the
+            // cached count and re-arm the server fetch for reconciliation.
+            try { ApiClient.OnSeriesCompletedVsOpponent(opponentSteamId, won); } catch { }
             Plugin.Log.LogInfo($"[SESSION] Ranked series tally: {sessionRankedSeriesWins}-{sessionRankedSeriesLosses}; current series counters reset");
             SaveSessionState();
         }
@@ -3245,6 +3248,13 @@ namespace CompetitiveRounds
                     {
                         sessionSeriesCounted = true;
                         if (seriesWon) sessionRankedSeriesWins++; else sessionRankedSeriesLosses++;
+                        // Review find: this local BO3-decision path is the one
+                        // that actually fires in the normal flow on BOTH clients
+                        // (the reporter's server-confirmed call arrives later and
+                        // dedupes out on sessionSeriesCounted) — so the lifetime
+                        // H2H "Total Series" bump must live HERE, not only in
+                        // IncrementSessionRankedSeries where it was unreachable.
+                        try { ApiClient.OnSeriesCompletedVsOpponent(opponentSteamId, seriesWon); } catch { }
                         Plugin.Log.LogInfo($"[SESSION] Ranked series tally (local BO3 decision): {sessionRankedSeriesWins}-{sessionRankedSeriesLosses}");
                         SaveSessionState();
                     }

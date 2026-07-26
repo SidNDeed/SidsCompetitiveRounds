@@ -75,6 +75,12 @@ from schemas import (
 # ── Config from environment ────────────────────────────────────
 
 MATCH_HMAC_SECRET = os.getenv("MATCH_HMAC_SECRET", "")
+# Security A2: admin actions were signed with MATCH_HMAC_SECRET — the secret
+# compiled into every player's DLL, meaning anyone who unzips the mod could
+# ban/unban/grant/reverse as any admin_users steam_id. Admin HMACs now use a
+# SEPARATE secret that exists only in the server .env and in the admin's own
+# local BepInEx config (delivered out-of-band, never compiled or shipped).
+ADMIN_HMAC_SECRET = os.getenv("ADMIN_HMAC_SECRET", "")
 GLICKO2_TAU = float(os.getenv("GLICKO2_TAU", "0.5"))
 GLICKO2_DEFAULT_RATING = float(os.getenv("GLICKO2_DEFAULT_RATING", "1500"))
 GLICKO2_DEFAULT_RD = float(os.getenv("GLICKO2_DEFAULT_RD", "350"))
@@ -555,27 +561,59 @@ async def team_queue_cleanup_loop():
                 )
                 for srow in stale_series.fetchall():
                     sid = srow[0]
+                    # Freshness recheck AT UPDATE TIME (Codex review find): the
+                    # discovery SELECT above is unlocked — a poll can refresh a
+                    # 61s-stale heartbeat between it and this UPDATE. Cancel
+                    # only if NO member row is fresh right now.
                     await db.execute(
-                        text("""UPDATE team_series
+                        text("""UPDATE team_series ts
                                SET status='cancelled', invalidated_at=NOW(),
                                    invalidation_reason='stale_queue_rows'
-                               WHERE id=:sid
-                                 AND status='active'
-                                 AND spawn_confirmations < 4"""),
+                               WHERE ts.id=:sid
+                                 AND ts.status='active'
+                                 AND ts.spawn_confirmations < 4
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM team_queue tq2
+                                      WHERE tq2.series_id = ts.id
+                                        AND tq2.last_polled >= NOW() - INTERVAL '60 seconds')"""),
                         {"sid": sid},
                     )
-                # Stale-poll cleanup
+                # Stale-poll cleanup, SPLIT by whether the row still references
+                # an ACTIVE series (Codex review find refining the 90s change):
+                # - Rows on an active series keep the 90s threshold — they must
+                #   outlive the 60s series-cancel detection above (which JOINs
+                #   on these very rows; deleting them first orphaned the series
+                #   as forever-'active').
+                # - Everything else (searching rows, rows whose series is
+                #   already cancelled/completed/missing) deletes at the old
+                #   30s — no cancel-ordering concern, and a cancelled lock's
+                #   clients recover as fast as before instead of polling a
+                #   dead matched state for up to 90s.
                 stale_q = await db.execute(
                     text("""DELETE FROM team_queue
-                        WHERE last_polled < NOW() - INTERVAL '30 seconds'
-                          AND joined_at >= NOW() - INTERVAL '30 minutes'
+                        WHERE player_id IN (
+                            SELECT tq.player_id FROM team_queue tq
+                            LEFT JOIN team_series ts ON ts.id = tq.series_id
+                            WHERE tq.joined_at >= NOW() - INTERVAL '30 minutes'
+                              AND (
+                                    tq.last_polled < NOW() - INTERVAL '90 seconds'
+                                 OR (tq.last_polled < NOW() - INTERVAL '30 seconds'
+                                     AND (tq.series_id IS NULL
+                                          OR ts.status IS DISTINCT FROM 'active'))
+                              )
+                            FOR UPDATE SKIP LOCKED
+                        )
                         RETURNING steam_id, display_name, status, series_id""")
                 )
                 stale_rows = stale_q.fetchall()
                 # Absolute-timeout cleanup (joined > 30 min ago, never matched)
                 timeout_q = await db.execute(
                     text("""DELETE FROM team_queue
-                        WHERE joined_at < NOW() - INTERVAL '30 minutes'
+                        WHERE player_id IN (
+                            SELECT player_id FROM team_queue
+                            WHERE joined_at < NOW() - INTERVAL '30 minutes'
+                            FOR UPDATE SKIP LOCKED
+                        )
                         RETURNING steam_id, display_name, status, series_id""")
                 )
                 timeout_rows = timeout_q.fetchall()
@@ -605,14 +643,22 @@ async def queue_cleanup_loop():
                 # Separate the two cleanup reasons so we can attribute each one.
                 stale_result = await db.execute(
                     text("""DELETE FROM ranked_queue
-                        WHERE last_polled < NOW() - INTERVAL '30 seconds'
-                          AND joined_at >= NOW() - INTERVAL '30 minutes'
+                        WHERE player_id IN (
+                            SELECT player_id FROM ranked_queue
+                            WHERE last_polled < NOW() - INTERVAL '30 seconds'
+                              AND joined_at >= NOW() - INTERVAL '30 minutes'
+                            FOR UPDATE SKIP LOCKED
+                        )
                         RETURNING steam_id, display_name, status, matched_with""")
                 )
                 stale_rows = stale_result.fetchall()
                 timeout_result = await db.execute(
                     text("""DELETE FROM ranked_queue
-                        WHERE joined_at < NOW() - INTERVAL '30 minutes'
+                        WHERE player_id IN (
+                            SELECT player_id FROM ranked_queue
+                            WHERE joined_at < NOW() - INTERVAL '30 minutes'
+                            FOR UPDATE SKIP LOCKED
+                        )
                         RETURNING steam_id, display_name, status, matched_with""")
                 )
                 timeout_rows = timeout_result.fetchall()
@@ -631,12 +677,6 @@ async def queue_cleanup_loop():
                 # never be able to hit a live game 1 — the fine-grained
                 # cleanup stays in the poll paths; this is the janitor for
                 # the nobody-is-polling case only).
-                husk_result = await db.execute(
-                    text("""DELETE FROM ovt_queue
-                        WHERE last_polled < NOW() - INTERVAL '30 minutes'
-                        RETURNING steam_id, status"""))
-                for r in husk_result.fetchall():
-                    print(f"[OVT-CLEANUP] Husk row swept: {r[0]} status={r[1]}")
                 # NOTE: status is 'canceled' (one L) — every other ovt path
                 # uses that spelling and the continuation prior-series lookup
                 # filters on it; the janitor's original 'cancelled' made its
@@ -654,8 +694,24 @@ async def queue_cleanup_loop():
                                           WHERE q.series_id = s.id
                                             AND q.last_polled >= NOW() - INTERVAL '15 minutes')
                         RETURNING s.id"""))
-                for r in dead_result.fetchall():
-                    print(f"[OVT-CLEANUP] Zero-game dead lock canceled: series {r[0]}")
+                dead_series_ids = [r[0] for r in dead_result.fetchall()]
+                for sid in dead_series_ids:
+                    print(f"[OVT-CLEANUP] Zero-game dead lock canceled: series {sid}")
+                # Clear the canceled locks' queue rows in the same tick instead
+                # of leaving ready_join husks for the 30-min sweep. Series row is
+                # already locked by the UPDATE above (series-before-queue-members
+                # cross-table order); SKIP LOCKED skips rows a live poll holds —
+                # that poll's own dead-test resets them the moment it runs.
+                if dead_series_ids:
+                    await db.execute(
+                        text("""DELETE FROM ovt_queue
+                            WHERE player_id IN (
+                                SELECT player_id FROM ovt_queue
+                                WHERE series_id = ANY(:sids)
+                                FOR UPDATE SKIP LOCKED
+                            )"""),
+                        {"sids": dead_series_ids},
+                    )
                 # Abandoned mid-series sweep (July 22 forensics): a series with
                 # >=1 played game whose trio never finished stays 'active'
                 # forever otherwise — and the continuation live-lookup has no
@@ -678,6 +734,20 @@ async def queue_cleanup_loop():
                         RETURNING s.id"""))
                 for r in abandoned_result.fetchall():
                     print(f"[OVT-CLEANUP] Abandoned mid-series canceled: series {r[0]}")
+                # Series rows are always locked before their queue members. Keep
+                # that cross-table order here too, then skip any queue row held
+                # by a live poll/leave instead of waiting in an arbitrary DELETE
+                # scan order.
+                husk_result = await db.execute(
+                    text("""DELETE FROM ovt_queue
+                        WHERE player_id IN (
+                            SELECT player_id FROM ovt_queue
+                            WHERE last_polled < NOW() - INTERVAL '30 minutes'
+                            FOR UPDATE SKIP LOCKED
+                        )
+                        RETURNING steam_id, status"""))
+                for r in husk_result.fetchall():
+                    print(f"[OVT-CLEANUP] Husk row swept: {r[0]} status={r[1]}")
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] Error: {e}")
@@ -688,11 +758,23 @@ app = FastAPI(
     description="Backend for ranked matchmaking, Glicko-2 ratings, and card stats in ROUNDS.",
     version="1.0.0",
     lifespan=lifespan,
+    # Security A6: /docs, /redoc and /openapi.json were fully public — 172
+    # endpoints enumerable, including every admin route and every sig
+    # parameter. The only clients are the mod and our own tooling; neither
+    # reads the OpenAPI surface.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Tighten in production if adding a web dashboard
+    # Security (lower-pri audit item): there is NO browser client — the mod,
+    # the bot and the ops wrappers are all native HTTP. A wildcard here only
+    # helps a malicious web page script against players' sessions. Empty list
+    # = no cross-origin grants; re-add a specific origin if a web dashboard
+    # ever ships.
+    allow_origins=[],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -711,7 +793,12 @@ app.include_router(tournaments_router)
 # wild). Once adoption of the header is universal, set REQUIRE_MOD_VERSION
 # to True to lock out anyone who removes it.
 
-MIN_MOD_VERSION = "1.28.2"  # Enforced floor: <1.28.2 clients get 426 → auto-update on relaunch.
+# Security A4, staged raise (announce → 1.33.0 → 1.34.0): any client below
+# STEAM_AUTH_MIN_VERSION can claim an old X-Mod-Version and ride the
+# compatibility carve-out around steam-session enforcement, so the floor climbs
+# until the carve-out is gone. 1.33.0 is stage one; raise to 1.34.0 once
+# players.mod_version shows adoption. Old clients get 426 → auto-update.
+MIN_MOD_VERSION = "1.33.0"
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
 # First client build with the fixed hit/block counting semantics (July 21:
@@ -4632,6 +4719,12 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
     # (ticket_hex='...&appid=<other>'). Runs even in key-unset no-op mode.
     if not _re.fullmatch(r"[0-9a-fA-F]+", req.ticket_hex):
         raise HTTPException(status_code=400, detail="bad_ticket")
+    # Review find: without a ban gate here, admin_ban's session revocation held
+    # only until the client's automatic re-mint ("re-minting on next
+    # heartbeat") — a banned account could immediately obtain a fresh verified
+    # session and keep using every session-gated endpoint that lacks a
+    # usage-site ban check. Bans must also stop the mint.
+    await _check_ban_or_raise(db, req.steam_id)
     key = os.getenv("STEAM_WEB_API_KEY", "")
     verified = False
     if key:
@@ -4664,11 +4757,31 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
     # Key unset OR verified: issue the opaque token. Only the sha256 is stored.
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
+    if verified:
+        # Monotonic per-account arming (A4): once an account has EVER minted a
+        # verified session, session enforcement stays armed for it forever.
+        # steam_sessions can't carry this — its rows are pruned ~1 day after
+        # their 24h expiry, which is why the old 7-day window DE-armed anyone
+        # who didn't play for a week. COALESCE keeps the first-seen timestamp.
+        # (A brand-new account may have no Player row yet — the UPDATE hits
+        # zero rows; _check_steam_session's arming backfill and the next
+        # launch's mint cover it once the row exists.) Savepoint so a failure
+        # here can't abort the transaction the session INSERT below needs.
+        try:
+            async with db.begin_nested():
+                await db.execute(text(
+                    "UPDATE players SET steam_auth_seen_at = COALESCE(steam_auth_seen_at, NOW()) "
+                    "WHERE steam_id = :sid"), {"sid": req.steam_id})
+        except Exception as ex:
+            print(f"[STEAM-AUTH] arming stamp failed (soft): {type(ex).__name__}")
     try:
         # Opportunistic prune — expired-for-a-day rows are dead weight; cheap
         # (ix_steam_sessions_expiry) and never worth failing the auth over.
-        await db.execute(text(
-            "DELETE FROM steam_sessions WHERE expires_at < NOW() - INTERVAL '1 day'"))
+        # Savepoint (learning #187): without it a failure here aborts the
+        # whole transaction and the session INSERT below dies too.
+        async with db.begin_nested():
+            await db.execute(text(
+                "DELETE FROM steam_sessions WHERE expires_at < NOW() - INTERVAL '1 day'"))
     except Exception as ex:
         print(f"[STEAM-AUTH] prune failed (ignored): {type(ex).__name__}")
     await db.execute(text(
@@ -4734,21 +4847,47 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
     enforce = enforce_armed and key_set and \
         _parse_version(_current_mod_version.get() or "0") >= _parse_version(STEAM_AUTH_MIN_VERSION)
     if enforce_armed and key_set and not enforce and request is not None:
-        # Per-ACCOUNT arming: an account that provably runs a ticket-auth
-        # client (any verified=true session issued in the last 7 days) cannot
-        # be downgraded to no-auth by omitting the header/token or claiming
-        # an old X-Mod-Version — the version carve-out exists for accounts
-        # that genuinely can't mint tickets yet, not as a per-request opt-out.
-        # Single indexed SELECT on steam_id (ix_steam_sessions_steam_id);
-        # lookup failure stays soft like everything else here. request=None
+        # Per-ACCOUNT arming: an account that has EVER provably run a
+        # ticket-auth client cannot be downgraded to no-auth by omitting the
+        # header/token or claiming an old X-Mod-Version — the version
+        # carve-out exists for accounts that genuinely can't mint tickets
+        # yet, not as a per-request opt-out. MONOTONIC (A4): reads
+        # players.steam_auth_seen_at, stamped once at the first verified mint
+        # and never cleared — the old steam_sessions 7-day window silently
+        # DE-armed accounts that skipped a week (the table only holds ~2 days
+        # of rows anyway; migration 151 backfilled the column from what's
+        # left). DEPLOY ORDER: migration 151 MUST apply before this code
+        # deploys — a missing column aborts the transaction and NO fallback
+        # can save that request. The legacy steam_sessions read below only
+        # covers accounts whose latest verified mint happened between the
+        # migration's backfill snapshot and this code's first stamp.
+        # Lookup failure stays soft like everything else here. request=None
         # (direct internal calls, place_discord_bet → place_bet) skips arming:
         # identity there is established by Discord linkage, not a client
         # token, and an external attacker always arrives WITH a Request.
         try:
             armed = (await db.execute(text(
-                "SELECT 1 FROM steam_sessions WHERE steam_id = :sid "
-                "AND verified AND issued_at > NOW() - INTERVAL '7 days' LIMIT 1"
+                "SELECT 1 FROM players WHERE steam_id = :sid "
+                "AND steam_auth_seen_at IS NOT NULL LIMIT 1"
             ), {"sid": steam_id})).scalar() is not None
+            if not armed:
+                armed = (await db.execute(text(
+                    "SELECT 1 FROM steam_sessions WHERE steam_id = :sid "
+                    "AND verified AND issued_at > NOW() - INTERVAL '7 days' LIMIT 1"
+                ), {"sid": steam_id})).scalar() is not None
+                if armed:
+                    # Codex review find: a verified mint that beat the Player
+                    # row's creation stamped nothing (UPDATE hit zero rows).
+                    # Backfill the monotonic column whenever session history
+                    # proves prior verification, so arming survives the
+                    # session prune even for those accounts.
+                    try:
+                        async with db.begin_nested():  # savepoint: never poison the caller's tx
+                            await db.execute(text(
+                                "UPDATE players SET steam_auth_seen_at = COALESCE(steam_auth_seen_at, NOW()) "
+                                "WHERE steam_id = :sid"), {"sid": steam_id})
+                    except Exception as ex2:
+                        print(f"[STEAM-AUTH] arming backfill failed (soft): {type(ex2).__name__}")
             if armed:
                 enforce = True
         except Exception as ex:
@@ -4775,6 +4914,143 @@ QUEUE_BLOCK_MINUTES = 5
 # context switching. Additionally, /queue/ready resets matched_at on the
 # first-to-ready so the slower player gets a fresh window, not leftover time.
 READY_TIMEOUT_SECONDS = 90
+
+
+# Tables whose queue rows are locked pairwise/group-wise. Closed set: the table
+# name is interpolated into SQL below, so it must never come from a request
+# (learning #188 — an "obviously safe" interpolation is how the last injection got in).
+_QUEUE_LOCK_TABLES = {"ranked_queue", "team_queue", "ovt_queue"}
+_QUEUE_GROUP_SERIES_TABLES = {
+    "team_queue": "team_series",
+    "ovt_queue": "ovt_series",
+}
+_QUEUE_GROUP_STATUSES = {
+    "team_queue": {"matched", "ready"},
+    "ovt_queue": {"matched", "ready_join"},
+}
+
+
+async def _lock_queue_rows_ordered(db: AsyncSession, table: str, player_ids) -> None:
+    """Take FOR UPDATE locks on the given queue rows in a deterministic GLOBAL
+    order (ascending player_id), one statement per row.
+
+    Why this exists: queue_poll and queue_ready both used to lock the CALLER's
+    row first and then the opponent's. Two players polling at the same instant
+    therefore grabbed the same two rows in opposite orders — textbook ABBA.
+    Postgres logged it twice on 2026-07-26 07:02 ("deadlock detected ... while
+    locking tuple in relation ranked_queue"), and the loser's request 500s; the
+    client silently retries its poll 3s later, so it reads as a stutter in
+    matchmaking rather than an error anyone reports.
+
+    Why one statement per row instead of a single
+    `WHERE player_id = ANY(...) ORDER BY player_id FOR UPDATE`: that form relies
+    on the planner putting LockRows above the Sort so rows lock in sorted order.
+    It normally does, but it is a plan-shape assumption, and this is the one
+    place where being wrong reintroduces exactly the bug we are fixing. Separate
+    ordered statements are unambiguous and each is a single indexed lookup.
+
+    CRITICAL: the caller must NOT already hold a lock on any of these rows.
+    Discover the peer ids with an UNLOCKED read, call this, then re-read the
+    authoritative state under the locks — a lock acquired before this runs puts
+    us right back into an inconsistent order.
+
+    Missing rows are simply not locked; callers revalidate after the re-read.
+    """
+    if table not in _QUEUE_LOCK_TABLES:
+        raise ValueError(f"refusing to lock unknown table {table!r}")
+    seen = []
+    for pid in player_ids:
+        if pid is not None and pid not in seen:
+            seen.append(pid)
+    for pid in sorted(seen, key=str):
+        await db.execute(
+            text(f"SELECT 1 FROM {table} WHERE player_id = :pid FOR UPDATE"),
+            {"pid": pid},
+        )
+
+
+async def _lock_queue_group_for_player(
+    db: AsyncSession, table: str, steam_id: str, max_attempts: int = 3
+):
+    """Lock one searching row or an existing 2v2/1v2 group without self-first ABBA.
+
+    Grouped paths lock the series row first, then every current queue member in
+    UUID order. The series-first rule matches match completion, which already
+    locks the series before deleting/updating its queue rows. Discovery is
+    unlocked, so the snapshot is revalidated after locking; a player who became
+    grouped while we were acquiring only their searching row forces a retry.
+    """
+    series_table = _QUEUE_GROUP_SERIES_TABLES.get(table)
+    grouped_statuses = _QUEUE_GROUP_STATUSES.get(table)
+    if series_table is None or grouped_statuses is None:
+        raise ValueError(f"refusing grouped lock for unknown table {table!r}")
+
+    for attempt in range(1, max_attempts + 1):
+        disc = (await db.execute(
+            text(f"""
+                SELECT player_id, status, series_id
+                FROM {table}
+                WHERE steam_id = :sid
+            """),
+            {"sid": steam_id},
+        )).mappings().first()
+        if disc is None:
+            await db.commit()
+            return None
+
+        disc_grouped = (
+            disc["status"] in grouped_statuses and disc["series_id"] is not None
+        )
+        disc_series_id = disc["series_id"] if disc_grouped else None
+        locked_ids = [disc["player_id"]]
+        if disc_series_id is not None:
+            # Stabilize membership against leave/completion before taking queue
+            # rows. A missing series cannot reappear with the same UUID.
+            await db.execute(
+                text(f"SELECT 1 FROM {series_table} WHERE id = :sid FOR UPDATE"),
+                {"sid": disc_series_id},
+            )
+            locked_ids = list((await db.execute(
+                text(f"SELECT player_id FROM {table} WHERE series_id = :sid"),
+                {"sid": disc_series_id},
+            )).scalars().all())
+            if disc["player_id"] not in locked_ids:
+                locked_ids.append(disc["player_id"])
+
+        await _lock_queue_rows_ordered(db, table, locked_ids)
+
+        current = (await db.execute(
+            text(f"""
+                SELECT player_id, status, series_id
+                FROM {table}
+                WHERE steam_id = :sid
+            """),
+            {"sid": steam_id},
+        )).mappings().first()
+        if current is None:
+            await db.commit()
+            return None
+
+        current_grouped = (
+            current["status"] in grouped_statuses
+            and current["series_id"] is not None
+        )
+        stable = not current_grouped
+        if current_grouped and current["series_id"] == disc_series_id:
+            current_ids = set((await db.execute(
+                text(f"SELECT player_id FROM {table} WHERE series_id = :sid"),
+                {"sid": current["series_id"]},
+            )).scalars().all())
+            stable = current_ids.issubset(set(locked_ids))
+
+        if stable:
+            return current
+
+        await db.commit()
+        print(f"[QUEUE-LOCK] {table} membership changed while locking "
+              f"{steam_id}; retry {attempt}/{max_attempts}")
+
+    raise HTTPException(status_code=503, detail="queue_contended")
 
 
 def compute_elo_range(wait_seconds: int) -> int:
@@ -4879,8 +5155,10 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
 
 
 @app.post("/api/v1/queue/leave", tags=["Queue"])
-async def queue_leave(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
     """Leave the ranked queue."""
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if player:
@@ -5172,10 +5450,44 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     import uuid as uuid_mod
 
     _presence_touch(steam_id)
-    # Clean up expired blocks opportunistically
-    await db.execute(text("DELETE FROM queue_blocks WHERE expires_at < now()"))
+    # Clean up expired blocks opportunistically without waiting on a concurrent
+    # decline/account cleanup that is touching another block row.
+    await db.execute(text("""
+        DELETE FROM queue_blocks
+        WHERE ctid IN (
+            SELECT ctid FROM queue_blocks
+            WHERE expires_at < NOW()
+            FOR UPDATE SKIP LOCKED
+        )
+    """))
 
-    # Find our queue entry (lock it)
+    # Discovery read — deliberately UNLOCKED. Its only job is to learn our
+    # player_id and who we are matched with, so the pair can then be locked in a
+    # globally consistent order. Locking our own row here first is what caused
+    # the ABBA deadlock (see _lock_queue_rows_ordered). Nothing is decided from
+    # these values; the authoritative read happens below, under the locks.
+    disc = (await db.execute(
+        text("""
+            SELECT rq.player_id, rq.matched_with
+            FROM ranked_queue rq
+            JOIN players p ON rq.player_id = p.id
+            WHERE p.steam_id = :sid
+        """),
+        {"sid": steam_id},
+    )).mappings().first()
+
+    if not disc:
+        await db.commit()
+        return QueuePollResponse(status="not_in_queue")
+
+    await _lock_queue_rows_ordered(
+        db, "ranked_queue", [disc["player_id"], disc["matched_with"]])
+    _lock_attempts = 1
+
+    # Authoritative read, now that both rows are held. matched_with may have
+    # changed between the discovery read and the locks (the opponent could have
+    # left, or a matcher could have re-paired us), so everything below uses THIS
+    # row, never `disc`.
     result = await db.execute(
         text("""
             SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
@@ -5185,7 +5497,6 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             FROM ranked_queue rq
             JOIN players p ON rq.player_id = p.id
             WHERE p.steam_id = :sid
-            FOR UPDATE OF rq
         """),
         {"sid": steam_id},
     )
@@ -5194,6 +5505,54 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     if not entry:
         await db.commit()
         return QueuePollResponse(status="not_in_queue")
+
+    # The pair we LOCKED came from the unlocked discovery read. If a matcher
+    # re-paired us in that window, the opponent row below is one we do NOT hold,
+    # and grabbing it now would be an out-of-order acquisition — the deadlock we
+    # just removed. Resolve it HERE by releasing and re-discovering, rather than
+    # returning a synthetic status: an earlier version returned "searching", which
+    # makes the client print a false "Match canceled" and reset its state
+    # (ApiClient.cs poll handler only enters Matched from Searching).
+    while entry["matched_with"] != disc["matched_with"] and _lock_attempts < 3:
+        _lock_attempts += 1
+        await db.commit()          # release the mis-ordered set, then start over
+        disc = (await db.execute(
+            text("""
+                SELECT rq.player_id, rq.matched_with
+                FROM ranked_queue rq
+                JOIN players p ON rq.player_id = p.id
+                WHERE p.steam_id = :sid
+            """),
+            {"sid": steam_id},
+        )).mappings().first()
+        if not disc:
+            await db.commit()
+            return QueuePollResponse(status="not_in_queue")
+        await _lock_queue_rows_ordered(
+            db, "ranked_queue", [disc["player_id"], disc["matched_with"]])
+        entry = (await db.execute(
+            text("""
+                SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
+                       rq.rating_deviation, rq.status, rq.matched_with,
+                       rq.room_name, rq.room_region, rq.region, rq.ready,
+                       rq.joined_at, rq.matched_at
+                FROM ranked_queue rq
+                JOIN players p ON rq.player_id = p.id
+                WHERE p.steam_id = :sid
+            """),
+            {"sid": steam_id},
+        )).mappings().first()
+        if not entry:
+            await db.commit()
+            return QueuePollResponse(status="not_in_queue")
+
+    if entry["matched_with"] != disc["matched_with"]:
+        # Three inversions in a row is effectively impossible. Fail the request so
+        # the client's next 3s poll re-enters cleanly; a 5xx leaves client state
+        # untouched, whereas any 200 body would be acted on.
+        print(f"[QUEUE-POLL] {steam_id} pair kept changing under lock acquisition; asking for a retry")
+        await db.commit()
+        raise HTTPException(status_code=503, detail="queue_contended")
 
     now = datetime.now(timezone.utc)
     wait_seconds = int((now - entry["joined_at"]).total_seconds())
@@ -5216,12 +5575,15 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
     # ── MATCHED state: handle ready-up and room joining ──
     if entry["status"] == "matched" and entry["matched_with"]:
-        # Get opponent info (lock their row too for atomic updates)
+        # Opponent row is ALREADY locked by _lock_queue_rows_ordered above, so
+        # this is a plain read. Re-adding FOR UPDATE here would be a harmless
+        # no-op today, but it is exactly the line that made the lock order
+        # caller-first and deadlocked — leave it off so the ordering invariant is
+        # visible at the point someone would be tempted to reintroduce it.
         opp_result = await db.execute(
             text("""
                 SELECT player_id, steam_id, display_name, rating, ready, room_name, region
                 FROM ranked_queue WHERE player_id = :oid
-                FOR UPDATE
             """),
             {"oid": entry["matched_with"]},
         )
@@ -5424,24 +5786,37 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/v1/queue/ready", tags=["Queue"])
-async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
     """
     Mark player as ready for their matched game.
     If opponent is also ready, generates a room immediately.
     """
     import uuid as uuid_mod
 
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
+
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if not player:
         raise HTTPException(status_code=404, detail="Player not found")
 
-    # Lock our queue entry
+    # Discovery read — UNLOCKED on purpose, same reasoning as queue_poll: locking
+    # our own row before the opponent's is what deadlocked. Learn the peer, lock
+    # the pair in global order, then re-read authoritatively.
+    disc = (await db.execute(
+        text("SELECT player_id, matched_with FROM ranked_queue WHERE player_id = :pid"),
+        {"pid": player.id},
+    )).mappings().first()
+
+    await _lock_queue_rows_ordered(
+        db, "ranked_queue",
+        [player.id, disc["matched_with"] if disc else None])
+
     entry_result = await db.execute(
         text("""
             SELECT player_id, status, matched_with, room_name, room_region, region, ready
             FROM ranked_queue WHERE player_id = :pid
-            FOR UPDATE
         """),
         {"pid": player.id},
     )
@@ -5452,19 +5827,30 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
         await db.commit()
         return {"status": "not_matched", "message": "Not currently in a matched state"}
 
+    # Same re-pair race as queue_poll. It MUST NOT be answered with HTTP 200:
+    # PostRequestWithRetry treats any 200 as success and stops retrying
+    # (ApiClient.cs), the callback treats every status except both_ready as
+    # "waiting", and ReadyUp refuses to fire again unless state is Matched — so a
+    # 200 here strands the player in ReadySent, never actually ready, until the
+    # match times out. That is strictly worse than the deadlock this fix removes.
+    # A 5xx is what the client's retry loop is built for.
+    if entry["matched_with"] != (disc["matched_with"] if disc else None):
+        print(f"[QUEUE-READY] {steam_id} re-paired during lock acquisition; returning 503 for client retry")
+        await db.commit()
+        raise HTTPException(status_code=503, detail="queue_contended")
+
     # Set ourselves as ready.
     await db.execute(
         text("UPDATE ranked_queue SET ready = true WHERE player_id = :pid"),
         {"pid": player.id},
     )
 
-    # Check if opponent is also ready (must FOR UPDATE-lock their row before
-    # the matched_at reset below so polls don't see a half-state).
+    # Opponent row is already held by the ordered lock above (that is what keeps
+    # the matched_at reset below from letting polls see a half-state) — plain read.
     opp_result = await db.execute(
         text("""
             SELECT player_id, ready, room_name, region
             FROM ranked_queue WHERE player_id = :oid
-            FOR UPDATE
         """),
         {"oid": entry["matched_with"]},
     )
@@ -5527,11 +5913,13 @@ async def queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get
 
 
 @app.post("/api/v1/queue/decline", tags=["Queue"])
-async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get_db)):
+async def queue_decline(req: QueueDeclineRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """
     Decline a matched opponent. Blocks re-matching for 5 minutes.
     Both players are reset to searching (stay in queue).
     """
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, req.steam_id, db)
     p1_result = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
     p1 = p1_result.scalar_one_or_none()
     p2_result = await db.execute(select(Player).where(Player.steam_id == req.opponent_steam_id))
@@ -5540,10 +5928,37 @@ async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get
     if not p1 or not p2:
         raise HTTPException(status_code=404, detail="Player not found")
 
+    # Lock the pair in the SAME global order every other queue writer uses
+    # (updating in request order was an independent ABBA source against
+    # queue_poll/queue_ready), then do an AUTHORITATIVE read under the locks.
+    await _lock_queue_rows_ordered(db, "ranked_queue", [p1.id, p2.id])
+
+    # Review find (griefing DoS): the caller must actually BE matched with the
+    # named opponent. Without this check, any player with a valid session could
+    # decline (steam_id=self, opponent=victim) while the victim was matched
+    # with a THIRD player — resetting the victim's row to searching and
+    # inserting attacker<->victim blocks, repeatably. Validate under the locks;
+    # a mismatch writes nothing.
+    entry = (await db.execute(
+        text("SELECT status, matched_with FROM ranked_queue WHERE player_id = :pid"),
+        {"pid": p1.id},
+    )).mappings().first()
+    if entry is None or entry["status"] != "matched" or entry["matched_with"] != p2.id:
+        await db.commit()
+        raise HTTPException(status_code=409, detail="not_matched_with_that_player")
+
     expires = datetime.now(timezone.utc) + timedelta(minutes=QUEUE_BLOCK_MINUTES)
 
-    # Insert bidirectional blocks
-    for blocker, blocked in [(p1.id, p2.id), (p2.id, p1.id)]:
+    # Insert the two directional rows in a deterministic order too. Opposite
+    # simultaneous declines otherwise take (A,B) then (B,A) in reverse order
+    # and can deadlock on queue_blocks. (queue_blocks rows are only ever
+    # touched here in sorted order or via SKIP LOCKED sweeps, so taking them
+    # AFTER the ranked_queue locks keeps one global cross-table order.)
+    block_pairs = sorted(
+        [(p1.id, p2.id), (p2.id, p1.id)],
+        key=lambda pair: (str(pair[0]), str(pair[1])),
+    )
+    for blocker, blocked in block_pairs:
         await db.execute(
             text("""
                 INSERT INTO queue_blocks (blocker_id, blocked_id, expires_at)
@@ -5554,7 +5969,7 @@ async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get
             {"b": blocker, "bl": blocked, "ex": expires},
         )
 
-    # Reset BOTH players back to searching (stay in queue, find other opponents)
+    # Reset BOTH players back to searching (stay in queue, find other opponents).
     for pid in [p1.id, p2.id]:
         await db.execute(
             text("""
@@ -5574,6 +5989,7 @@ async def queue_decline(req: QueueDeclineRequest, db: AsyncSession = Depends(get
 
 @app.post("/api/v1/players/block", tags=["Players"])
 async def block_player(
+    request: Request,
     steam_id: str = Query(...),
     target_steam_id: str = Query(...),
     sig: str | None = Query(None),
@@ -5583,6 +5999,8 @@ async def block_player(
     HMAC signs 'block:{steam_id}:{target_steam_id}' (F5: was unauthenticated)."""
     if not _verify_action_sig(f"block:{steam_id}:{target_steam_id}", sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     p1 = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     p2 = (await db.execute(select(Player).where(Player.steam_id == target_steam_id))).scalar_one_or_none()
     if not p1 or not p2:
@@ -5601,6 +6019,7 @@ async def block_player(
 
 @app.post("/api/v1/players/unblock", tags=["Players"])
 async def unblock_player(
+    request: Request,
     steam_id: str = Query(...),
     target_steam_id: str = Query(...),
     sig: str | None = Query(None),
@@ -5610,6 +6029,8 @@ async def unblock_player(
     HMAC signs 'unblock:{steam_id}:{target_steam_id}' (F5: was unauthenticated)."""
     if not _verify_action_sig(f"unblock:{steam_id}:{target_steam_id}", sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     p1 = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     p2 = (await db.execute(select(Player).where(Player.steam_id == target_steam_id))).scalar_one_or_none()
     if not p1 or not p2:
@@ -6766,26 +7187,33 @@ async def purchase_item(
 @app.post("/api/v1/players/{steam_id}/active-title", tags=["Shop"])
 async def set_active_title(
     steam_id: str,
+    request: Request,
     item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     return await _set_active_cosmetic(db, steam_id, "title", "title", item_id, sig)
 
 
 @app.post("/api/v1/players/{steam_id}/active-trail", tags=["Shop"])
 async def set_active_trail(
     steam_id: str,
+    request: Request,
     item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     return await _set_active_cosmetic(db, steam_id, "trail", "trail", item_id, sig)
 
 
 @app.post("/api/v1/players/{steam_id}/active-color", tags=["Shop"])
 async def set_active_color(
     steam_id: str,
+    request: Request,
     item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -6793,6 +7221,8 @@ async def set_active_color(
     """Legacy single-active-color endpoint (v1.22 and older clients). New clients should
     use /color-toggle instead. Kept so older installs don't break — writes both the single
     active_color_id column AND replaces active_color_ids with a single-element list."""
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     result = await _set_active_cosmetic(db, steam_id, "color", "color", item_id, sig)
     # Mirror into the multi-equip array so the two fields stay in sync.
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
@@ -6805,42 +7235,52 @@ async def set_active_color(
 @app.post("/api/v1/players/{steam_id}/active-player-color", tags=["Shop"])
 async def set_active_player_color(
     steam_id: str,
+    request: Request,
     item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
     """Equip / unequip a player body color (kind='player_color'). Single-equip:
     setting a new color displaces the previous one. Pass item_id=null to clear."""
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     return await _set_active_cosmetic(db, steam_id, "player_color", "player_color", item_id, sig)
 
 
 @app.post("/api/v1/players/{steam_id}/active-cursor-color", tags=["Shop"])
 async def set_active_cursor_color(
     steam_id: str,
+    request: Request,
     item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
     """Equip / unequip a cursor color (kind='cursor_color'). Single-equip; the
     client recolors the in-menu mouse cursor locally."""
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     return await _set_active_cosmetic(db, steam_id, "cursor_color", "cursor_color", item_id, sig)
 
 
 @app.post("/api/v1/players/{steam_id}/active-player-effect", tags=["Shop"])
 async def set_active_player_effect(
     steam_id: str,
+    request: Request,
     item_id: int | None = Query(None, description="Shop item ID, or null to clear"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
     """Equip / unequip a player effect (kind='player_effect'). Single-equip;
     cross-visible in-match via the Photon cr_effect_sku custom prop."""
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     return await _set_active_cosmetic(db, steam_id, "player_effect", "player_effect", item_id, sig)
 
 
 @app.post("/api/v1/players/{steam_id}/hide-gold", tags=["Shop"])
 async def set_hide_gold(
     steam_id: str,
+    request: Request,
     on: bool = Query(..., description="True to hide gold on the leaderboard"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -6857,6 +7297,9 @@ async def set_hide_gold(
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
+
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
 
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
@@ -6880,6 +7323,7 @@ async def set_hide_gold(
 @app.post("/api/v1/players/{steam_id}/appear-offline", tags=["Players"])
 async def set_appear_offline(
     steam_id: str,
+    request: Request,
     on: bool = Query(..., description="True to hide from online/recently-online lists"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -6897,6 +7341,9 @@ async def set_appear_offline(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
+
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -6909,6 +7356,7 @@ async def set_appear_offline(
 @app.post("/api/v1/players/{steam_id}/show-discord", tags=["Players"])
 async def set_show_discord(
     steam_id: str,
+    request: Request,
     on: bool = Query(..., description="True to show the Discord display name on the leaderboard detail"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -6926,6 +7374,9 @@ async def set_show_discord(
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
+
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -6938,6 +7389,7 @@ async def set_show_discord(
 @app.post("/api/v1/players/{steam_id}/color-toggle", tags=["Shop"])
 async def toggle_color(
     steam_id: str,
+    request: Request,
     item_id: int = Query(..., description="Map color shop item ID to toggle on/off"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -6954,6 +7406,9 @@ async def toggle_color(
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
+
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
 
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
@@ -6989,6 +7444,7 @@ async def toggle_color(
 @app.post("/api/v1/players/{steam_id}/nametag-toggle", tags=["Shop"])
 async def toggle_nametag_style(
     steam_id: str,
+    request: Request,
     item_id: int = Query(..., description="Nametag shop item ID to toggle on/off"),
     sig: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -7004,6 +7460,9 @@ async def toggle_nametag_style(
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
+
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
 
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
@@ -9448,7 +9907,7 @@ async def ack_lfp_pings(
 # ── Routes: Privacy ──────────────────────────────────────────
 
 @app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
-async def delete_player_data(steam_id: str, sig: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def delete_player_data(steam_id: str, request: Request, sig: str = Query(...), db: AsyncSession = Depends(get_db)):
     """
     Anonymize a player's identity. Irreversible.
 
@@ -9461,9 +9920,20 @@ async def delete_player_data(steam_id: str, sig: str = Query(...), db: AsyncSess
       - discord_id, discord_username → NULL
       - ranked_enabled → false (drops from matchmaking immediately)
       - deleted_at stamped so the row is hidden from leaderboards
-      - personal-only rows (achievements, link codes, queue entries, blocks) deleted
+      - personal-only rows (achievements, link codes, 1v1/2v2/1v2 queue
+        entries, blocks, Steam sessions) deleted
 
-    Requires an HMAC signature over "delete:{steam_id}" using the mod secret.
+    Requires an HMAC signature over "delete:{steam_id}" using the mod secret,
+    AND a verified Steam session for the same steam_id — STRICT, not the
+    armed/soft helper: the HMAC secret ships inside every client DLL, so on
+    its own it must not authorize an irreversible action against an arbitrary
+    account (security item A3), and the soft carve-outs (old X-Mod-Version
+    claims, unarmed accounts) are exactly what an attacker would present
+    (Codex review find). Two deliberate exceptions: STEAM_WEB_API_KEY unset
+    (no-op pipeline mode — nothing can be verified) and BANNED accounts —
+    a ban revokes sessions and blocks re-minting, and the right to delete
+    your own data must survive a ban, so a banned account falls back to
+    HMAC-only (the pre-batch protection level).
     """
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
@@ -9476,6 +9946,38 @@ async def delete_player_data(steam_id: str, sig: str = Query(...), db: AsyncSess
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
+    if os.getenv("STEAM_WEB_API_KEY") and not await _is_banned(db, steam_id):
+        token = None
+        try:
+            if request is not None:
+                token = request.headers.get("X-Session-Token")
+        except Exception:
+            token = None
+        session_ok = False
+        if token:
+            try:
+                srow = (await db.execute(text(
+                    "SELECT steam_id, verified, expires_at FROM steam_sessions "
+                    "WHERE token_hash = :th"
+                ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
+                session_ok = (
+                    srow is not None
+                    and bool(srow["verified"])
+                    and srow["steam_id"] == steam_id
+                    and (srow["expires_at"] is None
+                         or srow["expires_at"] >= datetime.now(timezone.utc))
+                )
+            except Exception as ex:
+                # Infra failure: fail CLOSED here (unlike the soft helper) —
+                # a retryable 503 on an irreversible action beats a bypass.
+                print(f"[PRIVACY] delete session lookup error: {type(ex).__name__}")
+                raise HTTPException(status_code=503, detail="session_check_unavailable")
+        if not session_ok:
+            raise HTTPException(
+                status_code=401,
+                detail="session_required_update_mod",
+            )
+
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
         return {"status": "not_found", "steam_id": steam_id}
@@ -9487,8 +9989,103 @@ async def delete_player_data(steam_id: str, sig: str = Query(...), db: AsyncSess
     # Drop purely personal rows — no cross-player impact.
     await db.execute(text("DELETE FROM player_achievements WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": pid})
-    await db.execute(text("DELETE FROM ranked_queue WHERE player_id = :pid OR matched_with = :pid"), {"pid": pid})
-    await db.execute(text("DELETE FROM queue_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
+    # This endpoint must not wait on a live decline/poll and must not discover a
+    # pair, then broad-DELETE a newly re-paired row that was outside that stale
+    # discovery set (#148/#150). Delete only rows the subqueries actually locked.
+    # If anything remains, roll the whole anonymization transaction back and ask
+    # the caller to retry; partial personal-data cleanup is not acceptable.
+    await db.execute(text("""
+        DELETE FROM queue_blocks
+        WHERE ctid IN (
+            SELECT ctid FROM queue_blocks
+            WHERE blocker_id = :pid OR blocked_id = :pid
+            FOR UPDATE SKIP LOCKED
+        )
+    """), {"pid": pid})
+    blocks_left = (await db.execute(text(
+        "SELECT 1 FROM queue_blocks "
+        "WHERE blocker_id = :pid OR blocked_id = :pid LIMIT 1"
+    ), {"pid": pid})).first()
+    if blocks_left is not None:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="account_cleanup_contended")
+
+    await db.execute(text("""
+        DELETE FROM ranked_queue
+        WHERE player_id IN (
+            SELECT player_id FROM ranked_queue
+            WHERE player_id = :pid OR matched_with = :pid
+            FOR UPDATE SKIP LOCKED
+        )
+    """), {"pid": pid})
+    queue_left = (await db.execute(text(
+        "SELECT 1 FROM ranked_queue "
+        "WHERE player_id = :pid OR matched_with = :pid LIMIT 1"
+    ), {"pid": pid})).first()
+    if queue_left is not None:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="account_cleanup_contended")
+
+    # 2v2 and 1v2 queue rows carry COPIED raw steam_id + display_name, and the
+    # player row is anonymized rather than deleted, so ON DELETE CASCADE never
+    # fires for them — they must be cleared explicitly or the identity survives
+    # the anonymization (privacy audit HIGH). Same SKIP LOCKED + verify shape as
+    # ranked_queue above. Codex review find: also DISSOLVE any zero-progress
+    # locked group the deleted account was part of (mirror of the leave
+    # endpoints) — otherwise the other members can reset themselves one by one
+    # and leave a forever-'active' series shell no janitor predicate can find.
+    _grp = (await db.execute(text(
+        "SELECT series_id FROM team_queue WHERE player_id = :pid AND series_id IS NOT NULL"
+    ), {"pid": pid})).scalars().all()
+    _ovt_grp = (await db.execute(text(
+        "SELECT series_id FROM ovt_queue WHERE player_id = :pid AND series_id IS NOT NULL"
+    ), {"pid": pid})).scalars().all()
+    for _qt in ("team_queue", "ovt_queue"):
+        await db.execute(text(f"""
+            DELETE FROM {_qt}
+            WHERE player_id IN (
+                SELECT player_id FROM {_qt}
+                WHERE player_id = :pid
+                FOR UPDATE SKIP LOCKED
+            )
+        """), {"pid": pid})
+        _qleft = (await db.execute(text(
+            f"SELECT 1 FROM {_qt} WHERE player_id = :pid LIMIT 1"
+        ), {"pid": pid})).first()
+        if _qleft is not None:
+            await db.rollback()
+            raise HTTPException(status_code=503, detail="account_cleanup_contended")
+    for _sid in _grp:
+        await db.execute(text(
+            """UPDATE team_series SET status='cancelled', invalidated_at=NOW(),
+                      invalidation_reason='member_deleted'
+                WHERE id=:sid AND status='active' AND spawn_confirmations < 4"""),
+            {"sid": _sid})
+        await db.execute(text(
+            """UPDATE team_queue SET status='searching', series_id=NULL, team_assigned=NULL,
+                      room_name=NULL, matched_at=NULL
+                WHERE series_id=:sid
+                  AND EXISTS (SELECT 1 FROM team_series ts WHERE ts.id=:sid
+                              AND ts.invalidation_reason='member_deleted')"""),
+            {"sid": _sid})
+    for _sid in _ovt_grp:
+        await db.execute(text(
+            """UPDATE ovt_series SET status='canceled', invalidation_reason='member_deleted',
+                      invalidated_at=NOW()
+                WHERE id=:sid AND status='active'
+                  AND NOT EXISTS (SELECT 1 FROM ovt_matches m WHERE m.series_id=:sid)"""),
+            {"sid": _sid})
+        await db.execute(text(
+            """UPDATE ovt_queue SET status='searching', series_id=NULL, side_assigned=NULL,
+                      room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+                WHERE series_id=:sid
+                  AND EXISTS (SELECT 1 FROM ovt_series s WHERE s.id=:sid
+                              AND s.invalidation_reason='member_deleted')"""),
+            {"sid": _sid})
+
+    # Steam sessions store the raw Steam ID (and authenticate as it) — purge
+    # them so no live token outlives the account.
+    await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text("DELETE FROM player_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
 
     # Anonymize the player row. Keep rating_history / glicko / matches untouched
@@ -10593,7 +11190,8 @@ async def user_comment_on_bug_report(
 #
 # Auth: every mutating admin endpoint requires
 #   admin_steam_id  — must be in admin_users
-#   hmac_signature  — HMAC-SHA256 over `admin:{admin_steam_id}:{action}:{target}` using MATCH_HMAC_SECRET
+#   hmac_signature  — HMAC-SHA256 over `admin:{admin_steam_id}:{action}:{target}` using ADMIN_HMAC_SECRET
+#                     (A2: a separate secret — server .env + admin's local config only, never in the DLL)
 # Banning is enforced at queue join, /chat/post, and /bets POST via _check_ban_or_raise.
 
 def _admin_canonical(admin_steam_id: str, action: str, target: str = "") -> str:
@@ -10613,14 +11211,19 @@ def _verify_action_sig(canonical: str, signature) -> bool:
 
 
 def _verify_admin_hmac(admin_steam_id: str, action: str, target: str, signature):
-    if not MATCH_HMAC_SECRET:
-        # Fail CLOSED (F10): if the secret is somehow unset, DENY admin actions
-        # rather than letting every signature pass unconditionally.
+    # Security A2: keyed with ADMIN_HMAC_SECRET, NOT the DLL-shipped mod
+    # secret. There is deliberately NO fallback to MATCH_HMAC_SECRET — a
+    # fallback would keep the "any player can forge admin sigs" hole open.
+    if not ADMIN_HMAC_SECRET:
+        # Fail CLOSED (F10): if the secret is unset, DENY admin actions
+        # rather than letting every signature pass unconditionally. (Ops note:
+        # ADMIN_HMAC_SECRET missing from .env = every admin endpoint 403s;
+        # the bug-report wrapper is unaffected, it rides API_SECRET_KEY.)
         return False
     if not signature:
         return False
     expected = hmac.new(
-        MATCH_HMAC_SECRET.encode(),
+        ADMIN_HMAC_SECRET.encode(),
         _admin_canonical(admin_steam_id, action, target).encode(),
         hashlib.sha256,
     ).hexdigest()
@@ -10741,8 +11344,17 @@ class _AdminBanReq(BaseModel):
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
+    # Revoke live Steam sessions (audit lower-pri item): without this a banned
+    # player's existing verified session kept authenticating session-gated
+    # endpoints until its 24h expiry. Ban checks at usage sites still apply;
+    # this closes the token half. Runs BEFORE the already_banned early return
+    # (Codex review find) so re-banning also re-purges — the recovery lever
+    # for any session that survived (migration 152 cleans pre-batch bans).
+    await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"),
+                     {"sid": req.target_steam_id})
     existing = await _is_banned(db, req.target_steam_id)
     if existing:
+        await db.commit()
         return {"status": "already_banned", "reason": existing}
     db.add(PlayerBan(steam_id=req.target_steam_id, reason=req.reason[:256], banned_by_steam_id=req.admin_steam_id))
     db.add(AdminAction(
@@ -11264,19 +11876,19 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
 
 
 @app.post("/api/v1/team/queue/leave", tags=["Team Queue"])
-async def team_queue_leave(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def team_queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if player:
+        r = await _lock_queue_group_for_player(db, "team_queue", steam_id)
+        if r is None:
+            return {"status": "left"}
         # If player is in a locked match (status='matched'), tearing down their row
         # alone would strand the other 3. Cascade: cancel the whole series and
         # release the other 3 back to searching, rather than leave them locked
         # against a ghost teammate.
-        row = await db.execute(
-            text("SELECT series_id, status FROM team_queue WHERE player_id = :pid"),
-            {"pid": player.id},
-        )
-        r = row.mappings().first()
         if r and r["series_id"] and r["status"] in ("matched", "ready"):
             await db.execute(
                 text("""
@@ -11414,7 +12026,15 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
     _presence_touch(steam_id)
 
-    # Find caller's queue row (locked).
+    # Discover and lock either just the searching caller or the entire existing
+    # series group. The old self-FOR-UPDATE followed by bulk four-row writes was
+    # the same ABBA shape as 1v1; SKIP LOCKED candidate selection below was safe,
+    # but the matched/ready branch was not.
+    locked = await _lock_queue_group_for_player(db, "team_queue", steam_id)
+    if locked is None:
+        return TeamQueuePollResponse(status="not_in_queue")
+
+    # Authoritative full row under the locks.
     me_q = await db.execute(
         text("""
             SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
@@ -11424,7 +12044,6 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             FROM team_queue tq
             JOIN players p ON tq.player_id = p.id
             WHERE p.steam_id = :sid
-            FOR UPDATE OF tq
         """),
         {"sid": steam_id},
     )
@@ -11605,6 +12224,11 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             WHERE tq.status = 'searching'
               AND tq.player_id != :pid
               AND tq.queue_type = :qt
+              -- Freshness (review find): a crashed client's row must never lock
+              -- into a series (its player would never spawn-confirm). Mirrors
+              -- the 1v2 matcher's 10s rule; matters more now that the janitor
+              -- sweep runs at 90s instead of 30s.
+              AND tq.last_polled > NOW() - INTERVAL '10 seconds'
               AND ABS(tq.rating - :my_r) <= :range
               AND tq.player_id NOT IN (
                   SELECT blocked_id FROM player_blocks WHERE blocker_id = :pid
@@ -11634,6 +12258,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                AND :pid IN (t1a_id, t1b_id, t2a_id, t2b_id)
              ORDER BY dc_grace_until DESC
              LIMIT 1
+             FOR UPDATE SKIP LOCKED
         """),
         {"pid": my_pid},
     )
@@ -11648,6 +12273,9 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                  WHERE player_id = ANY(:pids)
                    AND status IN ('searching', 'matched', 'ready')
                    AND player_id != :me
+                   -- Freshness (review find): don't resume a series onto a
+                   -- crashed teammate's ghost row.
+                   AND last_polled > NOW() - INTERVAL '10 seconds'
                 FOR UPDATE SKIP LOCKED
             """),
             {"pids": original_pids, "me": my_pid},
@@ -11867,6 +12495,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
 @app.post("/api/v1/team/queue/manual-pick-toggle", tags=["Team Queue"])
 async def team_queue_manual_pick_toggle(
+    request: Request,
     steam_id: str = Query(...),
     enabled: bool = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -11875,6 +12504,8 @@ async def team_queue_manual_pick_toggle(
     `preferred_team` only when at least 3 queuers have the flag enabled
     (otherwise it auto-balances by elo). When disabling, the queuer's
     preferred_team is cleared."""
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     pid = (await db.execute(select(Player.id).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if pid is None:
         raise HTTPException(404, "Player not found")
@@ -11894,6 +12525,7 @@ async def team_queue_manual_pick_toggle(
 
 @app.post("/api/v1/team/queue/preferred-team", tags=["Team Queue"])
 async def team_queue_preferred_team(
+    request: Request,
     steam_id: str = Query(...),
     team: int = Query(..., ge=1, le=2),
     db: AsyncSession = Depends(get_db),
@@ -11901,6 +12533,8 @@ async def team_queue_preferred_team(
     """Claim Team 1 or Team 2. Only honored when the queuer is in the manual
     (pick-teams) queue. Auto-queue calls are no-ops because the matchmaker
     ignores preferred_team for that queue."""
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     pid = (await db.execute(select(Player.id).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if pid is None:
         raise HTTPException(404, "Player not found")
@@ -11917,19 +12551,18 @@ async def team_queue_preferred_team(
 
 
 @app.post("/api/v1/team/queue/ready", tags=["Team Queue"])
-async def team_queue_ready(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def team_queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
     """Mark caller ready. Resets matched_at on all 4 rows so the timeout window
     refreshes for whoever is the slowest of the four. (Lesson 51 from 1v1.)"""
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if not player:
         return {"status": "error", "message": "Unknown player"}
-    me_q = await db.execute(
-        text("SELECT series_id, status FROM team_queue WHERE player_id = :pid"),
-        {"pid": player.id},
-    )
-    me = me_q.mappings().first()
+    me = await _lock_queue_group_for_player(db, "team_queue", steam_id)
     if not me or not me["series_id"] or me["status"] not in ("matched", "ready"):
+        await db.commit()
         return {"status": "error", "message": "Not in a matched 2v2 series"}
     await db.execute(
         text("""UPDATE team_queue
@@ -12145,8 +12778,14 @@ async def _complete_team_series_with_ratings(
     reason: str,
     dc_pid=None,
 ):
-    """Fully complete a 2v2 series — Glicko-2 + gold + xp + per-slot accumulators +
+    """Fully complete a 2v2 series — Glicko-2 + series gold + per-slot accumulators +
     completed_series counter — for the DC / forfeit / admin-resolution paths.
+
+    Deliberately awards NO XP: match XP is a per-GAME payout granted inline by
+    submit_team_match for each game actually played (and those games already
+    paid out before the DC). A forfeit ends the series without another game, so
+    there is no game to pay XP for. (The docstring used to claim xp — audit
+    found the body never awarded it; the claim was wrong, not the body.)
 
     Before v1.28 the DC paths (report-dc, grace-expiry) marked a series 'completed'
     but applied NO ratings/gold, so a DC-decided win never moved Elo or paid out —
@@ -12184,11 +12823,16 @@ async def _complete_team_series_with_ratings(
     gids = [t1a_id, t1b_id, t2a_id, t2b_id]
     if any(g is None for g in gids):
         # Defensive: a series with an unfilled slot can't have ratings applied.
+        # Still free the queue rows — the normal path's DELETE at the bottom is
+        # skipped by this early return, and completed-series rows that linger in
+        # team_queue block their players from re-queueing until the janitor.
         await db.execute(
             text("""UPDATE team_series SET status='completed', winner_team=:wt,
                        completed_at=NOW(), invalidation_reason=:rsn WHERE id=:sid"""),
             {"wt": winner_team, "rsn": reason, "sid": series_uuid},
         )
+        await _lock_queue_rows_ordered(db, "team_queue", [g for g in gids if g is not None])
+        await db.execute(text("DELETE FROM team_queue WHERE series_id = :sid"), {"sid": series_uuid})
         return {}
 
     # Mark completed (winner + reason) up front.
@@ -12200,9 +12844,20 @@ async def _complete_team_series_with_ratings(
     )
 
     # ── Glicko-2 (mirrors submit_team_match:7232-7306) ──
+    # Canonical-order lock pass first (learning #197 / review find): two
+    # completions can share players across DIFFERENT series (dc_incomplete
+    # husk resolved while the same four play a new series), and each series'
+    # slot order differs — an ANY(...) FOR UPDATE locks in planner order, an
+    # ABBA edge. One indexed lock per row, ascending str(pid), same rule as
+    # _lock_queue_rows_ordered.
+    for _pid in sorted(gids, key=str):
+        await db.execute(
+            text("SELECT 1 FROM glicko_ratings_2v2 WHERE player_id = :pid FOR UPDATE"),
+            {"pid": _pid},
+        )
     gres = await db.execute(
         text("SELECT player_id, rating, rating_deviation, volatility, peak_rating, completed_series "
-             "FROM glicko_ratings_2v2 WHERE player_id = ANY(:ids) FOR UPDATE"),
+             "FROM glicko_ratings_2v2 WHERE player_id = ANY(:ids)"),
         {"ids": gids},
     )
     existing = {r["player_id"]: dict(r) for r in gres.mappings().all()}
@@ -12265,7 +12920,9 @@ async def _complete_team_series_with_ratings(
     _t1_avg_rating = (inputs[t1a_id]["rating"] + inputs[t1b_id]["rating"]) / 2.0
     _t2_avg_rating = (inputs[t2a_id]["rating"] + inputs[t2b_id]["rating"]) / 2.0
     bonus_by_pid = {}
-    for pid in gids:
+    # sorted(key=str): players-row tuple locks in canonical order — slot order
+    # differs per series and two completions can share players (review find).
+    for pid in sorted(gids, key=str):
         player_team = 1 if pid in (t1a_id, t1b_id) else 2
         won_series = (player_team == winner_team)
         _s_mult, _ = _tier_mult_for(_t2_avg_rating if player_team == 1 else _t1_avg_rating)
@@ -12292,25 +12949,35 @@ async def _complete_team_series_with_ratings(
     )
 
     # Settle any open 2v2 bets on this series (mirror submit_team_match).
+    # SAVEPOINT (learning #187 family): a bare try/except around writes inside
+    # an open Postgres transaction does NOT contain the failure — a failed
+    # statement aborts the WHOLE transaction and the later commit dies anyway.
+    # begin_nested() rolls back only this block on error, so the series
+    # completion above still commits. The flush() runs the pending ORM adds
+    # inside the savepoint (an unflushed add would survive the rollback).
     try:
-        unsettled = (await db.execute(text("""
-            SELECT id, player_id, amount, odds_multiplier, bet_on_team
-              FROM team_bets WHERE team_series_id = :sid AND settled_at IS NULL
-        """), {"sid": series_uuid})).mappings().all()
-        for b in unsettled:
-            won = (b["bet_on_team"] == winner_team)
-            payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
-            await db.execute(text("UPDATE team_bets SET settled_at=NOW(), payout=:p WHERE id=:id"),
-                             {"p": payout, "id": b["id"]})
-            if payout > 0:
-                await db.execute(text("UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:p WHERE id=:pid"),
-                                 {"p": payout, "pid": b["player_id"]})
-                db.add(GoldTransaction(player_id=b["player_id"], amount=payout,
-                                       reason="team_bet_payout", reference_id=str(series_uuid)))
+        async with db.begin_nested():
+            unsettled = (await db.execute(text("""
+                SELECT id, player_id, amount, odds_multiplier, bet_on_team
+                  FROM team_bets WHERE team_series_id = :sid AND settled_at IS NULL
+                 ORDER BY player_id::text, id
+            """), {"sid": series_uuid})).mappings().all()
+            for b in unsettled:
+                won = (b["bet_on_team"] == winner_team)
+                payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
+                await db.execute(text("UPDATE team_bets SET settled_at=NOW(), payout=:p WHERE id=:id"),
+                                 {"p": payout, "id": b["id"]})
+                if payout > 0:
+                    await db.execute(text("UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:p WHERE id=:pid"),
+                                     {"p": payout, "pid": b["player_id"]})
+                    db.add(GoldTransaction(player_id=b["player_id"], amount=payout,
+                                           reason="team_bet_payout", reference_id=str(series_uuid)))
+            await db.flush()
     except Exception as bex:
         print(f"[TEAM-DC-COMPLETE] bet settle error for {series_uuid}: {bex}")
 
     # Free the queue rows.
+    await _lock_queue_rows_ordered(db, "team_queue", gids)
     await db.execute(text("DELETE FROM team_queue WHERE series_id = :sid"), {"sid": series_uuid})
     return new_ratings
 
@@ -12376,6 +13043,10 @@ async def admin_resolve_team_series(
                        invalidation_reason='admin_void' WHERE series_id=:sid AND invalidated_at IS NULL"""),
             {"sid": sid_uuid},
         )
+        void_queue_ids = list((await db.execute(text(
+            "SELECT player_id FROM team_queue WHERE series_id = :sid"
+        ), {"sid": sid_uuid})).scalars().all())
+        await _lock_queue_rows_ordered(db, "team_queue", void_queue_ids)
         await db.execute(text("DELETE FROM team_queue WHERE series_id=:sid"), {"sid": sid_uuid})
         await db.commit()
         return {"status": "voided", "series_id": series_id}
@@ -13013,7 +13684,7 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
 
 
 @app.post("/api/v1/ovt/queue/leave", tags=["1v2 Queue"])
-async def ovt_queue_leave(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def ovt_queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
     """Leave the 1v2 queue. If the leaver was LOCKED into a series that never
     produced a game, the lock is dissolved: the series is canceled and the
     other two lobby rows reset to searching. Without this, a no-show/failed
@@ -13021,10 +13692,9 @@ async def ovt_queue_leave(steam_id: str = Query(...), db: AsyncSession = Depends
     (the leave endpoint used to delete only the leaver's own row). A series
     with >=1 reported game is left alone — that's a mid-series leave and the
     match pipeline owns its lifecycle."""
-    me = (await db.execute(text(
-        "SELECT q.player_id, q.status, q.series_id FROM ovt_queue q "
-        "JOIN players p ON p.id = q.player_id WHERE p.steam_id = :sid"
-    ), {"sid": steam_id})).mappings().first()
+    # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
+    await _check_steam_session(request, steam_id, db)
+    me = await _lock_queue_group_for_player(db, "ovt_queue", steam_id)
     if me is None:
         return {"status": "ok"}
     dissolved = False
@@ -13136,13 +13806,20 @@ async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     else join order), creates the series + room, and flips all three to
     'ready_join'. SELECT FOR UPDATE SKIP LOCKED (#34) prevents duplicate rooms."""
     _presence_touch(steam_id)
+    locked = await _lock_queue_group_for_player(db, "ovt_queue", steam_id)
+    if locked is None:
+        return {"status": "not_in_queue", "queue_count": 0}
     me = (await db.execute(text(
         "SELECT q.*, p.id AS pid FROM ovt_queue q JOIN players p ON p.id = q.player_id "
         "WHERE q.steam_id = :sid"
     ), {"sid": steam_id})).mappings().first()
     if me is None:
+        await db.commit()
         return {"status": "not_in_queue", "queue_count": 0}
-    await db.execute(text("UPDATE ovt_queue SET last_polled = NOW() WHERE steam_id = :sid"), {"sid": steam_id})
+    await db.execute(
+        text("UPDATE ovt_queue SET last_polled = NOW() WHERE player_id = :pid"),
+        {"pid": me["player_id"]},
+    )
 
     # Prune ghosts: a crashed/killed client stops polling but its 'searching'
     # row stays. Clients poll every ~2s; the 75s window survives a backend
@@ -13211,6 +13888,13 @@ async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     # whose client stopped polling must never lock into a series (its player
     # would never join the room) — live clients poll every ~2s, so 10s of
     # silence disqualifies without waiting for the 75s prune.
+    # LIMIT 3: lock exactly one lobby's worth of rows, not the whole searching
+    # pool. The old no-LIMIT form locked every fresh searching row (only
+    # rows[:3] were used), so a second independent trio could never assemble
+    # concurrently — its poller found everything locked and bounced. With
+    # LIMIT 3 + SKIP LOCKED, concurrent pollers carve the pool into disjoint
+    # 3-row lobbies. queue_count is reported from a separate plain COUNT —
+    # len(rows) is capped by the LIMIT and misses rows other pollers hold.
     rows = (await db.execute(text("""
         SELECT player_id, steam_id, display_name, preferred_side, solo_extra_pick,
                region, rating, rating_deviation, completed_series
@@ -13218,11 +13902,16 @@ async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
          WHERE status = 'searching'
            AND last_polled > NOW() - INTERVAL '10 seconds'
          ORDER BY joined_at
+         LIMIT 3
          FOR UPDATE SKIP LOCKED
     """))).mappings().all()
     if len(rows) < 3:
         await db.commit()
-        return {"status": "searching", "queue_count": len(rows)}
+        n = (await db.execute(text(
+            "SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"
+            "   AND last_polled > NOW() - INTERVAL '75 seconds'"
+        ))).scalar() or 0
+        return {"status": "searching", "queue_count": int(n)}
 
     # Review HIGH: the decider MUST be a member of the lobby it locks. Pick the
     # lobby (3 earliest joiners) FIRST, then elect the decider from exactly those
@@ -13235,7 +13924,11 @@ async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     lowest = min(lobby_numeric, key=int) if lobby_numeric else lobby[0]["steam_id"]
     if steam_id != lowest:
         await db.commit()
-        return {"status": "searching", "queue_count": len(rows)}
+        n = (await db.execute(text(
+            "SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"
+            "   AND last_polled > NOW() - INTERVAL '75 seconds'"
+        ))).scalar() or 0
+        return {"status": "searching", "queue_count": int(n)}
     # Assign sides: first player who wants solo (pref 1) takes solo, else the
     # first by join order; the other two are the duo.
     solo = next((r for r in lobby if r["preferred_side"] == 1), None) or lobby[0]
@@ -13532,9 +14225,16 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         return xp, gold_delta
 
     solo_won_game = report.winner_side == 1
-    sx, sg = await _award(solo_id, solo_won_game)
-    ax, ag = await _award(duo_a_id, not solo_won_game)
-    bx, bg = await _award(duo_b_id, not solo_won_game)
+    # Award in canonical str(pid) order, not solo/duo slot order — players-row
+    # tuple locks must follow one global order across concurrent completions
+    # (learning #197 / review find).
+    _award_results = {}
+    for _pid in sorted([solo_id, duo_a_id, duo_b_id], key=str):
+        _won = solo_won_game if _pid == solo_id else (not solo_won_game)
+        _award_results[_pid] = await _award(_pid, _won)
+    sx, sg = _award_results[solo_id]
+    ax, ag = _award_results[duo_a_id]
+    bx, bg = _award_results[duo_b_id]
     await db.execute(text("""
         UPDATE ovt_series SET
             solo_series_wins=:sw, duo_series_wins=:dw,
@@ -13578,6 +14278,8 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         await db.execute(text(
             "UPDATE ovt_series SET status='completed', winner_side=:ws, completed_at=NOW() WHERE id=:sid"
         ), {"ws": winner_side, "sid": series_uuid})
+        await _lock_queue_rows_ordered(
+            db, "ovt_queue", [solo_id, duo_a_id, duo_b_id])
         await db.execute(text("DELETE FROM ovt_queue WHERE series_id = :sid"), {"sid": series_uuid})
 
     await db.commit()
@@ -13957,31 +14659,38 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         # Settle 2v2 bets. Winning bets pay amount × odds; losing bets close
         # with payout=0. Mirrors the 1v1 bet settlement that runs on
         # ranked_series completion (in submit_match elsewhere).
+        # SAVEPOINT (learning #187): without begin_nested a failed statement
+        # here aborts the whole transaction and the match write dies with it —
+        # the old comment's promise was not actually true. flush() runs the
+        # ORM adds inside the savepoint.
         try:
-            unsettled = (await db.execute(text("""
-                SELECT b.id, b.player_id, b.amount, b.odds_multiplier, b.bet_on_team
-                  FROM team_bets b
-                 WHERE b.team_series_id = :sid AND b.settled_at IS NULL
-            """), {"sid": series_uuid})).mappings().all()
-            for b in unsettled:
-                won = (b["bet_on_team"] == winner_team)
-                payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
-                await db.execute(text("""
-                    UPDATE team_bets
-                       SET settled_at = NOW(), payout = :p
-                     WHERE id = :id
-                """), {"p": payout, "id": b["id"]})
-                if payout > 0:
-                    # Credit the bettor's gold.
+            async with db.begin_nested():
+                unsettled = (await db.execute(text("""
+                    SELECT b.id, b.player_id, b.amount, b.odds_multiplier, b.bet_on_team
+                      FROM team_bets b
+                     WHERE b.team_series_id = :sid AND b.settled_at IS NULL
+                     ORDER BY b.player_id::text, b.id
+                """), {"sid": series_uuid})).mappings().all()
+                for b in unsettled:
+                    won = (b["bet_on_team"] == winner_team)
+                    payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
                     await db.execute(text("""
-                        UPDATE players
-                           SET gold_earned = COALESCE(gold_earned, 0) + :p
-                         WHERE id = :pid
-                    """), {"p": payout, "pid": b["player_id"]})
-                    db.add(GoldTransaction(
-                        player_id=b["player_id"], amount=payout,
-                        reason="team_bet_payout", reference_id=str(series_uuid),
-                    ))
+                        UPDATE team_bets
+                           SET settled_at = NOW(), payout = :p
+                         WHERE id = :id
+                    """), {"p": payout, "id": b["id"]})
+                    if payout > 0:
+                        # Credit the bettor's gold.
+                        await db.execute(text("""
+                            UPDATE players
+                               SET gold_earned = COALESCE(gold_earned, 0) + :p
+                             WHERE id = :pid
+                        """), {"p": payout, "pid": b["player_id"]})
+                        db.add(GoldTransaction(
+                            player_id=b["player_id"], amount=payout,
+                            reason="team_bet_payout", reference_id=str(series_uuid),
+                        ))
+                await db.flush()
         except Exception as bex:
             # Don't let bet settlement failures block the team-match write.
             print(f"[TEAM-BET-SETTLE] error settling for series {series_uuid}: {bex}")
@@ -13992,9 +14701,17 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         team1_won = (winner_team == 1)
         # Snapshot current ratings before any update.
         gids = [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id]
+        # Canonical-order lock pass (learning #197 / review find): mirrors the
+        # DC-helper — two completions can share players across different
+        # series, and ANY(...) FOR UPDATE locks in planner order (ABBA edge).
+        for _pid in sorted(gids, key=str):
+            await db.execute(
+                text("SELECT 1 FROM glicko_ratings_2v2 WHERE player_id = :pid FOR UPDATE"),
+                {"pid": _pid},
+            )
         gres = await db.execute(
             text("SELECT player_id, rating, rating_deviation, volatility, peak_rating, completed_series "
-                 "FROM glicko_ratings_2v2 WHERE player_id = ANY(:ids) FOR UPDATE"),
+                 "FROM glicko_ratings_2v2 WHERE player_id = ANY(:ids)"),
             {"ids": gids},
         )
         existing = {r["player_id"]: dict(r) for r in gres.mappings().all()}
@@ -14093,45 +14810,57 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         # the team_series per-slot gold accumulator so the F5 panel can
         # render "+Ng / +Nxp" beside each player.
         bonus_by_pid = {}
+        # SAVEPOINT (learning #187): contains a mid-loop failure to this block —
+        # without it, a failed statement aborts the whole transaction and the
+        # match write above is lost too. flush() runs the ORM adds inside the
+        # savepoint so a rollback actually discards them.
         try:
-            for p in (p_t1a, p_t1b, p_t2a, p_t2b):
-                player_team = 1 if p.id in (p_t1a.id, p_t1b.id) else 2
-                won_series = (player_team == winner_team)
-                _s_mult, _ = _tier_mult_for(_t2_avg_rating if player_team == 1 else _t1_avg_rating)
-                bonus = int((TEAM_SERIES_WIN_GOLD if won_series else TEAM_SERIES_LOSS_GOLD) * _s_mult)
-                await db.execute(
-                    text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, "
-                         "team_gold_earned = COALESCE(team_gold_earned,0) + :g WHERE id = :pid"),
-                    {"g": bonus, "pid": p.id},
-                )
-                db.add(GoldTransaction(
-                    player_id=p.id, amount=bonus,
-                    reason=("team_series_win" if won_series else "team_series_loss"),
-                    reference_id=str(series_uuid),
-                ))
-                bonus_by_pid[p.id] = bonus
-            slot_pid = {
-                "t1a": series["t1a_id"], "t1b": series["t1b_id"],
-                "t2a": series["t2a_id"], "t2b": series["t2b_id"],
-            }
-            await db.execute(text(
-                "UPDATE team_series SET "
-                "t1a_gold_earned = COALESCE(t1a_gold_earned,0) + :t1a_g, "
-                "t1b_gold_earned = COALESCE(t1b_gold_earned,0) + :t1b_g, "
-                "t2a_gold_earned = COALESCE(t2a_gold_earned,0) + :t2a_g, "
-                "t2b_gold_earned = COALESCE(t2b_gold_earned,0) + :t2b_g "
-                "WHERE id = :sid"
-            ), {
-                "sid": series_uuid,
-                "t1a_g": bonus_by_pid.get(slot_pid["t1a"], 0),
-                "t1b_g": bonus_by_pid.get(slot_pid["t1b"], 0),
-                "t2a_g": bonus_by_pid.get(slot_pid["t2a"], 0),
-                "t2b_g": bonus_by_pid.get(slot_pid["t2b"], 0),
-            })
+            async with db.begin_nested():
+                # sorted(key=str(id)): canonical players-row lock order —
+                # slot order differs per series (review find, ABBA edge).
+                for p in sorted((p_t1a, p_t1b, p_t2a, p_t2b), key=lambda x: str(x.id)):
+                    player_team = 1 if p.id in (p_t1a.id, p_t1b.id) else 2
+                    won_series = (player_team == winner_team)
+                    _s_mult, _ = _tier_mult_for(_t2_avg_rating if player_team == 1 else _t1_avg_rating)
+                    bonus = int((TEAM_SERIES_WIN_GOLD if won_series else TEAM_SERIES_LOSS_GOLD) * _s_mult)
+                    await db.execute(
+                        text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, "
+                             "team_gold_earned = COALESCE(team_gold_earned,0) + :g WHERE id = :pid"),
+                        {"g": bonus, "pid": p.id},
+                    )
+                    db.add(GoldTransaction(
+                        player_id=p.id, amount=bonus,
+                        reason=("team_series_win" if won_series else "team_series_loss"),
+                        reference_id=str(series_uuid),
+                    ))
+                    bonus_by_pid[p.id] = bonus
+                slot_pid = {
+                    "t1a": series["t1a_id"], "t1b": series["t1b_id"],
+                    "t2a": series["t2a_id"], "t2b": series["t2b_id"],
+                }
+                await db.execute(text(
+                    "UPDATE team_series SET "
+                    "t1a_gold_earned = COALESCE(t1a_gold_earned,0) + :t1a_g, "
+                    "t1b_gold_earned = COALESCE(t1b_gold_earned,0) + :t1b_g, "
+                    "t2a_gold_earned = COALESCE(t2a_gold_earned,0) + :t2a_g, "
+                    "t2b_gold_earned = COALESCE(t2b_gold_earned,0) + :t2b_g "
+                    "WHERE id = :sid"
+                ), {
+                    "sid": series_uuid,
+                    "t1a_g": bonus_by_pid.get(slot_pid["t1a"], 0),
+                    "t1b_g": bonus_by_pid.get(slot_pid["t1b"], 0),
+                    "t2a_g": bonus_by_pid.get(slot_pid["t2a"], 0),
+                    "t2b_g": bonus_by_pid.get(slot_pid["t2b"], 0),
+                })
+                await db.flush()
         except Exception as gex:
             print(f"[TEAM-ECON] series-bonus gold failed for {series_uuid}: {gex}")
 
         # Free the queue rows so all 4 can re-queue.
+        await _lock_queue_rows_ordered(
+            db, "team_queue",
+            [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id],
+        )
         await db.execute(
             text("DELETE FROM team_queue WHERE series_id = :sid"),
             {"sid": series_uuid},
@@ -14150,98 +14879,111 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         # plays with reshuffled teams. The rebalance only applies to the NEXT
         # match — the client gets a `rebalance_assignments` payload on the
         # response and updates each player's TeamID before round 1 starts.
+        # SAVEPOINT (learning #187): this block writes team_series AND
+        # team_queue — a failure between the two used to be swallowed with the
+        # slot rewrite already applied (queue rows never updated, clients never
+        # told), and worse, the failed statement aborted the whole transaction
+        # so the match write died too. begin_nested makes the block atomic:
+        # both writes land or neither does, and rebalance_assignments only
+        # survives when they landed.
         try:
-            was_auto = bool(series["was_auto_balanced"]) if "was_auto_balanced" in series else True
-            margin = abs(int(report.t1_points_total or 0) - int(report.t2_points_total or 0))
-            if was_auto and margin >= AUTO_BALANCE_SWAP_MARGIN:
-                # Pull each player's current effective rating (2v2 if trusted, else 1v1 fallback).
-                pids = [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id]
-                rate_q = await db.execute(
-                    text("""
-                        SELECT p.id AS pid,
-                               COALESCE(g2.rating, 1500.0) AS r2,
-                               COALESCE(g2.rating_deviation, 350.0) AS rd2,
-                               COALESCE(g2.completed_series, 0) AS cs,
-                               COALESCE(g1.rating, 1500.0) AS r1
-                          FROM players p
-                          LEFT JOIN glicko_ratings_2v2 g2 ON g2.player_id = p.id
-                          LEFT JOIN glicko_ratings    g1 ON g1.player_id = p.id
-                         WHERE p.id = ANY(:ids)
-                    """),
-                    {"ids": pids},
-                )
-                rate_by_pid = {r["pid"]: _team_balance_rating(
-                    float(r["r2"]), int(r["cs"]), float(r["r1"]), float(r["rd2"])
-                ) for r in rate_q.mappings().all()}
+            async with db.begin_nested():
+                was_auto = bool(series["was_auto_balanced"]) if "was_auto_balanced" in series else True
+                margin = abs(int(report.t1_points_total or 0) - int(report.t2_points_total or 0))
+                if was_auto and margin >= AUTO_BALANCE_SWAP_MARGIN:
+                    # Pull each player's current effective rating (2v2 if trusted, else 1v1 fallback).
+                    pids = [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id]
+                    rate_q = await db.execute(
+                        text("""
+                            SELECT p.id AS pid,
+                                   COALESCE(g2.rating, 1500.0) AS r2,
+                                   COALESCE(g2.rating_deviation, 350.0) AS rd2,
+                                   COALESCE(g2.completed_series, 0) AS cs,
+                                   COALESCE(g1.rating, 1500.0) AS r1
+                              FROM players p
+                              LEFT JOIN glicko_ratings_2v2 g2 ON g2.player_id = p.id
+                              LEFT JOIN glicko_ratings    g1 ON g1.player_id = p.id
+                             WHERE p.id = ANY(:ids)
+                        """),
+                        {"ids": pids},
+                    )
+                    rate_by_pid = {r["pid"]: _team_balance_rating(
+                        float(r["r2"]), int(r["cs"]), float(r["r1"]), float(r["rd2"])
+                    ) for r in rate_q.mappings().all()}
 
-                winner_team_match = report.winner_team
-                if winner_team_match == 1:
-                    winners = [(p_t1a.id, rate_by_pid.get(p_t1a.id, 1500.0)),
-                               (p_t1b.id, rate_by_pid.get(p_t1b.id, 1500.0))]
-                    losers  = [(p_t2a.id, rate_by_pid.get(p_t2a.id, 1500.0)),
-                               (p_t2b.id, rate_by_pid.get(p_t2b.id, 1500.0))]
-                else:
-                    winners = [(p_t2a.id, rate_by_pid.get(p_t2a.id, 1500.0)),
-                               (p_t2b.id, rate_by_pid.get(p_t2b.id, 1500.0))]
-                    losers  = [(p_t1a.id, rate_by_pid.get(p_t1a.id, 1500.0)),
-                               (p_t1b.id, rate_by_pid.get(p_t1b.id, 1500.0))]
-                # Weakest winner + strongest loser swap.
-                weakest_winner = min(winners, key=lambda t: t[1])[0]
-                strongest_loser = max(losers, key=lambda t: t[1])[0]
+                    winner_team_match = report.winner_team
+                    if winner_team_match == 1:
+                        winners = [(p_t1a.id, rate_by_pid.get(p_t1a.id, 1500.0)),
+                                   (p_t1b.id, rate_by_pid.get(p_t1b.id, 1500.0))]
+                        losers  = [(p_t2a.id, rate_by_pid.get(p_t2a.id, 1500.0)),
+                                   (p_t2b.id, rate_by_pid.get(p_t2b.id, 1500.0))]
+                    else:
+                        winners = [(p_t2a.id, rate_by_pid.get(p_t2a.id, 1500.0)),
+                                   (p_t2b.id, rate_by_pid.get(p_t2b.id, 1500.0))]
+                        losers  = [(p_t1a.id, rate_by_pid.get(p_t1a.id, 1500.0)),
+                                   (p_t1b.id, rate_by_pid.get(p_t1b.id, 1500.0))]
+                    # Weakest winner + strongest loser swap.
+                    weakest_winner = min(winners, key=lambda t: t[1])[0]
+                    strongest_loser = max(losers, key=lambda t: t[1])[0]
 
-                # Build the new (post-swap) team rosters.
-                t1_ids = [p_t1a.id, p_t1b.id]
-                t2_ids = [p_t2a.id, p_t2b.id]
-                new_t1 = [pid for pid in t1_ids if pid != weakest_winner and pid != strongest_loser]
-                new_t2 = [pid for pid in t2_ids if pid != weakest_winner and pid != strongest_loser]
-                if winner_team_match == 1:
-                    # weakest_winner was on t1, strongest_loser was on t2 → swap them.
-                    new_t1.append(strongest_loser); new_t2.append(weakest_winner)
-                else:
-                    new_t2.append(strongest_loser); new_t1.append(weakest_winner)
+                    # Build the new (post-swap) team rosters.
+                    t1_ids = [p_t1a.id, p_t1b.id]
+                    t2_ids = [p_t2a.id, p_t2b.id]
+                    new_t1 = [pid for pid in t1_ids if pid != weakest_winner and pid != strongest_loser]
+                    new_t2 = [pid for pid in t2_ids if pid != weakest_winner and pid != strongest_loser]
+                    if winner_team_match == 1:
+                        # weakest_winner was on t1, strongest_loser was on t2 → swap them.
+                        new_t1.append(strongest_loser); new_t2.append(weakest_winner)
+                    else:
+                        new_t2.append(strongest_loser); new_t1.append(weakest_winner)
 
-                # Canonicalize within-team order by steam_id (matches lock-time sort).
-                pid_to_steam = {
-                    p_t1a.id: p_t1a.steam_id, p_t1b.id: p_t1b.steam_id,
-                    p_t2a.id: p_t2a.steam_id, p_t2b.id: p_t2b.steam_id,
-                }
-                new_t1.sort(key=lambda pid: pid_to_steam[pid])
-                new_t2.sort(key=lambda pid: pid_to_steam[pid])
+                    # Canonicalize within-team order by steam_id (matches lock-time sort).
+                    pid_to_steam = {
+                        p_t1a.id: p_t1a.steam_id, p_t1b.id: p_t1b.steam_id,
+                        p_t2a.id: p_t2a.steam_id, p_t2b.id: p_t2b.steam_id,
+                    }
+                    new_t1.sort(key=lambda pid: pid_to_steam[pid])
+                    new_t2.sort(key=lambda pid: pid_to_steam[pid])
 
-                # Persist new slot order on team_series.
-                await db.execute(
-                    text("""UPDATE team_series
-                              SET t1a_id = :t1a, t1b_id = :t1b,
-                                  t2a_id = :t2a, t2b_id = :t2b,
-                                  rebalance_count = COALESCE(rebalance_count, 0) + 1
-                            WHERE id = :sid"""),
-                    {"t1a": new_t1[0], "t1b": new_t1[1],
-                     "t2a": new_t2[0], "t2b": new_t2[1],
-                     "sid": series_uuid},
-                )
-                # Update queue rows so /poll reflects the new team_assigned.
-                await db.execute(
-                    text("""UPDATE team_queue
-                              SET team_assigned = CASE
-                                                    WHEN player_id = ANY(:t1) THEN 1
-                                                    ELSE 2
-                                                  END
-                            WHERE series_id = :sid"""),
-                    {"t1": new_t1, "sid": series_uuid},
-                )
+                    # Persist new slot order on team_series.
+                    await db.execute(
+                        text("""UPDATE team_series
+                                  SET t1a_id = :t1a, t1b_id = :t1b,
+                                      t2a_id = :t2a, t2b_id = :t2b,
+                                      rebalance_count = COALESCE(rebalance_count, 0) + 1
+                                WHERE id = :sid"""),
+                        {"t1a": new_t1[0], "t1b": new_t1[1],
+                         "t2a": new_t2[0], "t2b": new_t2[1],
+                         "sid": series_uuid},
+                    )
+                    # Update queue rows so /poll reflects the new team_assigned.
+                    await _lock_queue_rows_ordered(
+                        db, "team_queue",
+                        [p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id],
+                    )
+                    await db.execute(
+                        text("""UPDATE team_queue
+                                  SET team_assigned = CASE
+                                                        WHEN player_id = ANY(:t1) THEN 1
+                                                        ELSE 2
+                                                      END
+                                WHERE series_id = :sid"""),
+                        {"t1": new_t1, "sid": series_uuid},
+                    )
 
-                # Build rebalance_assignments keyed by Steam ID (the client
-                # uses the Steam ID it knows for each peer to look up the new
-                # team and update its local Player.TeamID + spawn / body color).
-                steam_to_pid = {v: k for k, v in pid_to_steam.items()}
-                rebalance_assignments = {}
-                for pid in new_t1:
-                    rebalance_assignments[pid_to_steam[pid]] = 1
-                for pid in new_t2:
-                    rebalance_assignments[pid_to_steam[pid]] = 2
-                print(f"[TEAM-REBALANCE] series={series_uuid} margin={margin} swapped: "
-                      f"weakest_winner={pid_to_steam[weakest_winner]} ↔ strongest_loser={pid_to_steam[strongest_loser]}")
+                    # Build rebalance_assignments keyed by Steam ID (the client
+                    # uses the Steam ID it knows for each peer to look up the new
+                    # team and update its local Player.TeamID + spawn / body color).
+                    steam_to_pid = {v: k for k, v in pid_to_steam.items()}
+                    rebalance_assignments = {}
+                    for pid in new_t1:
+                        rebalance_assignments[pid_to_steam[pid]] = 1
+                    for pid in new_t2:
+                        rebalance_assignments[pid_to_steam[pid]] = 2
+                    print(f"[TEAM-REBALANCE] series={series_uuid} margin={margin} swapped: "
+                          f"weakest_winner={pid_to_steam[weakest_winner]} ↔ strongest_loser={pid_to_steam[strongest_loser]}")
         except Exception as rex:
+            rebalance_assignments = None
             print(f"[TEAM-REBALANCE] error: {rex}")
 
     await db.commit()

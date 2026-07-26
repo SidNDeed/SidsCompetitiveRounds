@@ -38,6 +38,12 @@ namespace CompetitiveRounds
 
         // Config entries
         internal static ConfigEntry<string> ApiBaseUrl;
+        // Security A2: admin HMAC secret — NEVER compiled into the DLL. Empty
+        // for every normal player; a server admin pastes the value (delivered
+        // out-of-band, matches the server's ADMIN_HMAC_SECRET) into their own
+        // BepInEx cfg. Signing admin actions with the shipped mod secret let
+        // anyone who unzipped the mod forge admin requests.
+        internal static ConfigEntry<string> AdminHmacSecret;
         internal static ConfigEntry<bool> HttpsMigrationDone;
         internal static ConfigEntry<bool> RankedEnabled;
         internal static ConfigEntry<bool> RankedDisabledByConsent;
@@ -193,6 +199,15 @@ namespace CompetitiveRounds
                 "API", "BaseUrl",
                 DefaultApiUrl,
                 "Base URL of the Competitive ROUNDS API server"
+            );
+
+            AdminHmacSecret = Config.Bind(
+                "API", "AdminSecret",
+                "",
+                "Admin HMAC secret. Leave empty unless you are a server admin - " +
+                "admins receive the value out-of-band and it must match the " +
+                "server's ADMIN_HMAC_SECRET. Admin menu actions are rejected " +
+                "without it."
             );
 
             // One-time HTTPS migration. Config.Bind writes its default to

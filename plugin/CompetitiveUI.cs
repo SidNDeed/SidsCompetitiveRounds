@@ -160,7 +160,10 @@ namespace CompetitiveRounds
                            || flagEvidenceOpen
                           || adminPromptOpen || NativeUI.LfpPromptOpen;
             NativeUI.SetClickBlocker(anyModal);
-            ClickHandler.ModalBlockInput = anyModal || !Plugin.DataConsentAsked;
+            // InfoPopupOpen: the uGUI info popup's backdrop absorbs EventSystem
+            // clicks itself, but raw-polling ClickHandlers behind it need this
+            // flag (learning #141); its own backdrop sets bypassModalBlock.
+            ClickHandler.ModalBlockInput = anyModal || NativeUI.InfoPopupOpen || !Plugin.DataConsentAsked;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
         }
@@ -2362,6 +2365,9 @@ namespace CompetitiveRounds
         private static string cosTestName = "", cosTestSlot = "";
         private static float cosTestScale = 1.30f;
         private static Vector2 cosTestOffset = Vector2.zero;
+        // The offset the item CAME IN with — what Submit sends back out,
+        // regardless of any preview dragging (item 5: drags are never saved).
+        private static Vector2 cosTestInitialOffset = Vector2.zero;
         private static bool cosTestDragging = false;
         private static Vector2 cosTestLastMouse = Vector2.zero;
         private static string cosTestSubmitLabel = "Submit";
@@ -2407,8 +2413,18 @@ namespace CompetitiveRounds
             cosTestName = name ?? "Cosmetic";
             cosTestSlot = slot ?? "detail";
             cosTestScale = Mathf.Clamp(initialScale, 0.50f, 2.25f);
-            cosTestOffset = Vector2.ClampMagnitude(
+            // July 26 (Sid item 5) + adversarial-review correction: the DRAG is
+            // a preview-only visual aid and is never persisted — the modal
+            // submits the item's INITIAL offset back unchanged (see
+            // CloseCosmeticTestPreview). New submissions open and submit
+            // centered (callers pass 0,0), so new cosmetics spawn centered for
+            // player customization; revisions of EXISTING items carry their
+            // stored placement through untouched (zeroing them would have
+            // recentered Crown/Halo/etc. at the next release — offsets are
+            // load-bearing at render time, CustomCosmetics.cs item.offset).
+            cosTestInitialOffset = Vector2.ClampMagnitude(
                 new Vector2(initialOffsetX, initialOffsetY), 4.50f);
+            cosTestOffset = cosTestInitialOffset;
             cosTestDragging = false;
             cosTestSubmitLabel = string.IsNullOrEmpty(submitLabel) ? "Submit" : submitLabel;
             cosTestIsRevision = isRevision;
@@ -2420,7 +2436,6 @@ namespace CompetitiveRounds
         {
             var cb = submit ? cosTestOnSubmit : null;
             float scale = Mathf.Clamp(cosTestScale, 0.50f, 2.25f);
-            Vector2 offset = Vector2.ClampMagnitude(cosTestOffset, 4.50f);
             cosTestOpen = false;
             cosTestDragging = false;
             cosTestOnSubmit = null;
@@ -2429,9 +2444,16 @@ namespace CompetitiveRounds
             cosTestName = "";
             cosTestSlot = "";
             cosTestOffset = Vector2.zero;
+            Vector2 initialOffset = cosTestInitialOffset;
+            cosTestInitialOffset = Vector2.zero;
             if (cb != null)
             {
-                try { cb(scale, offset.x, offset.y); }
+                // The drag is a visual aid only (Sid item 5): submit the
+                // INITIAL offset unchanged. New submissions came in at 0,0 and
+                // stay centered; placement revisions of shipped items keep
+                // their load-bearing stored offset. Scale is the only number
+                // the modal actually edits.
+                try { cb(scale, initialOffset.x, initialOffset.y); }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] preview submit: {ex.Message}"); }
             }
         }
@@ -2519,7 +2541,7 @@ namespace CompetitiveRounds
                 $"Placement preview: '{cosTestName}' ({cosTestSlot})",
                 new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
             GUI.Label(new Rect(x + 12, y + 40, w - 24, 38),
-                "Orange circle = player body. Drag the cosmetic in the preview; the white square is its 512x512 canvas.",
+                "Orange circle = player body. Drag to preview positions (visual aid only - position is never saved; items spawn centered and players drag them in the character editor). White square = your 512x512 canvas.",
                 new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
 
             float previewSize = Mathf.Min(h - 142f, w - 330f);
@@ -2549,7 +2571,7 @@ namespace CompetitiveRounds
             cosTestScale = Mathf.Clamp(cosTestScale, 0.50f, 2.25f);
 
             GUI.Label(new Rect(rx, y + 218, rw, 22),
-                $"Offset: {cosTestOffset.x:F2}, {cosTestOffset.y:F2}", adminLabelStyle);
+                $"Preview offset: {cosTestOffset.x:F2}, {cosTestOffset.y:F2} (not saved)", adminLabelStyle);
             GUI.Label(new Rect(rx, y + 244, rw, 22), "Useful scale presets:", adminLabelStyle);
             float bw = (rw - 8f) / 2f;
             if (GUI.Button(new Rect(rx, y + 268, bw, 28), "1.00  compact")) cosTestScale = 1.00f;
@@ -2576,6 +2598,10 @@ namespace CompetitiveRounds
         private static string cosReviewStatus = "";
         private static string cosReviewDenialReason = "";
         private static bool cosReviewDragging = false;
+        // Local, per-submission preview drag state — visual aid only, never
+        // written back to the submission or sent to the server (item 5).
+        private static Vector2 cosReviewPreviewOffset = Vector2.zero;
+        private static int cosReviewPreviewSubId = -1;
         private static Vector2 cosReviewLastMouse = Vector2.zero;
         private static GUIStyle cosReviewReasonStyle;
         private static readonly Dictionary<int, Texture2D> cosReviewTex = new Dictionary<int, Texture2D>();
@@ -2688,12 +2714,20 @@ namespace CompetitiveRounds
             Rect prev = new Rect(x + 12, y + 192, prevSize, prevSize);
             var tex = CosReviewTexture(s);
             if (s.render_scale <= 0f) s.render_scale = 1f;
-            Vector2 reviewOffset = new Vector2(s.render_offset_x, s.render_offset_y);
-            DrawCosmeticScalePreview(prev, tex, s.render_scale, reviewOffset);
+            // Adversarial-review correction (item 5): the drag lives in a LOCAL
+            // preview offset and is never written back onto the submission —
+            // Approve/Deny send the STORED proposal offset untouched. (The old
+            // write-back meant an admin's idle drag became the approved
+            // placement; combined with zeroing it would have recentered
+            // shipped items like Crown at their next revision.)
+            if (cosReviewPreviewSubId != s.id)
+            {
+                cosReviewPreviewSubId = s.id;
+                cosReviewPreviewOffset = new Vector2(s.render_offset_x, s.render_offset_y);
+            }
+            DrawCosmeticScalePreview(prev, tex, s.render_scale, cosReviewPreviewOffset);
             HandleCosmeticPlacementDrag(
-                prev, ref reviewOffset, ref cosReviewDragging, ref cosReviewLastMouse);
-            s.render_offset_x = reviewOffset.x;
-            s.render_offset_y = reviewOffset.y;
+                prev, ref cosReviewPreviewOffset, ref cosReviewDragging, ref cosReviewLastMouse);
             if (tex == null)
                 GUI.Label(new Rect(prev.x, prev.center.y - 15, prev.width, 30), "  (preview failed to decode)", adminLabelStyle);
 
@@ -2708,17 +2742,16 @@ namespace CompetitiveRounds
             if (GUI.Button(new Rect(rx + 50, y + 248, 42, 27), "+")) s.render_scale += 0.05f;
             if (GUI.Button(new Rect(rx + 100, y + 248, Mathf.Max(64f, rw - 100f), 27), "Center"))
             {
-                s.render_offset_x = 0f;
-                s.render_offset_y = 0f;
+                cosReviewPreviewOffset = Vector2.zero;  // visual only, never saved
             }
             s.render_scale = Mathf.Clamp(s.render_scale, 0.50f, 2.25f);
-            // Offset is only the item's DEFAULT starting position — every player
-            // can drag face items freely in ROUNDS' own character editor — so it
-            // does not decide whether a cosmetic FITS. Scale does. The numeric
-            // offset is therefore not surfaced here; drag the preview if you want
-            // to nudge the default, and judge approval on the scale line below.
+            // July 26 (Sid item 5): the drag is a preview-only visual aid — the
+            // dragged position is NEVER saved (Approve sends offset 0,0, and
+            // cosmetics always spawn centered). Players position items with
+            // ROUNDS' own character-editor drag; artists compose placement
+            // into the 512px canvas itself. Scale is the only reviewed number.
             GUI.Label(new Rect(rx, y + 282, rw, 38),
-                "Drag in the preview to nudge the default position (players can\nreposition it themselves in the character editor).",
+                "Drag to preview positions (visual aid only - the position is\nnever saved; items spawn centered and players drag them).",
                 new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
             // Re-placements: show the ORIGINAL (currently approved) scale beside
             // the proposed one so the change being reviewed is explicit.
@@ -2747,7 +2780,7 @@ namespace CompetitiveRounds
                 int sid = s.id; string nm = s.name;
                 ApiClient.AdminReviewCosmetic(
                     MatchTracker.LocalSteamId, sid, true, s.placement_revision,
-                    s.render_scale, s.render_offset_x, s.render_offset_y, "", (ok, resp) =>
+                    s.render_scale, s.render_offset_x, s.render_offset_y, "", (ok, resp) =>  // stored proposal offset — the drag is never saved (item 5)
                 {
                     cosReviewBusy = false;
                     if (!cosReviewOpen) return;
@@ -2768,7 +2801,7 @@ namespace CompetitiveRounds
                     cosReviewBusy = true;
                     ApiClient.AdminReviewCosmetic(
                         MatchTracker.LocalSteamId, sid, false, s.placement_revision,
-                        s.render_scale, s.render_offset_x, s.render_offset_y, note, (ok, resp) =>
+                        s.render_scale, s.render_offset_x, s.render_offset_y, note, (ok, resp) =>  // stored proposal offset — the drag is never saved (item 5)
                     {
                         cosReviewBusy = false;
                         if (!cosReviewOpen) return;
@@ -4083,7 +4116,7 @@ namespace CompetitiveRounds
 
         private static float matchStatusCacheUntil = 0f;
         private static bool matchStatusCachedRanked = false;
-        private static string matchStatusSeries = "", matchStatusSession = "", matchStatusH2H = "";
+        private static string matchStatusSeries = "", matchStatusH2H = "";
         private static Color matchStatusH2HTint = new Color(0.7f, 0.7f, 0.7f);
 
         private static void RefreshMatchStatusCache(bool isRanked)
@@ -4091,21 +4124,34 @@ namespace CompetitiveRounds
             matchStatusCacheUntil = Time.unscaledTime + 0.25f;
             matchStatusCachedRanked = isRanked;
             matchStatusSeries = "";
-            matchStatusSession = "";
+
             matchStatusH2H = "";
 
             if (isRanked)
             {
-                // The old "Session: N-N games (N-N series)" line was dropped —
-                // the games tally wasn't a metric anyone used. The session
-                // SERIES record is the part worth keeping, so it rides on the
-                // Series line instead of owning a row of its own.
-                int ssw = GameStateWatcher.SessionRankedSeriesWins;
-                int ssl = GameStateWatcher.SessionRankedSeriesLosses;
+                // July 26 (Sid item 4): "(session X-X)" was a rolling 3h-window
+                // tally across ALL opponents — confusing and reading as wrong.
+                // Replaced with the lifetime head-to-head SERIES record vs the
+                // CURRENT opponent, served by GET /players/{opp}?viewer_steam_id=
+                // (h2h_series_wins/losses, already computed server-side) and
+                // kept live locally by OnSeriesCompletedVsOpponent. Until the
+                // fetch lands (or when the opponent has no real Steam ID) the
+                // line shows just the series score — never a wrong number.
                 matchStatusSeries =
-                    $"Series: {GameStateWatcher.CurrentSeriesGamesWon} - {GameStateWatcher.CurrentSeriesGamesLost}"
-                    + $"   (session {ssw}-{ssl})";
-                matchStatusSession = "";
+                    $"Series Score: {GameStateWatcher.CurrentSeriesGamesWon} - {GameStateWatcher.CurrentSeriesGamesLost}";
+                try
+                {
+                    string sid = GameStateWatcher.OpponentSteamId;
+                    if (!string.IsNullOrEmpty(sid) && !sid.StartsWith("photon_"))
+                    {
+                        ApiClient.FetchOpponentLifetime(sid);  // no-op after first call per opponent
+                        int[] h2h;
+                        if (ApiClient.CachedOppLifetime.TryGetValue(sid, out h2h)
+                            && h2h != null && h2h.Length >= 4)
+                            matchStatusSeries += $"   (Total Series {h2h[2]} - {h2h[3]})";
+                    }
+                }
+                catch { }
             }
 
             try

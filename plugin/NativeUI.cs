@@ -117,7 +117,8 @@ namespace CompetitiveRounds
                 string[] installed;
                 try { installed = Font.GetOSInstalledFontNames(); } catch { installed = new string[0]; }
                 var installedSet = new HashSet<string>(installed, StringComparer.OrdinalIgnoreCase);
-                // One candidate list per script family — first installed name wins.
+                // One candidate list per script family — first installed face that
+                // successfully builds a TMP asset wins; failed faces fall through.
                 string[][] families = new string[][]
                 {
                     new[] { "Segoe UI", "Arial", "Tahoma" },                        // Latin-ext / Cyrillic / Greek
@@ -126,27 +127,41 @@ namespace CompetitiveRounds
                     new[] { "Malgun Gothic", "Gulim" },                             // Korean
                 };
                 var created = new List<object>();
+                var tried = new List<string>();
                 foreach (var fam in families)
                 {
                     foreach (var name in fam)
                     {
                         if (!installedSet.Contains(name)) continue;
+                        tried.Add(name);
+                        bool built = false;
                         try
                         {
                             var osFont = Font.CreateDynamicFontFromOSFont(name, 48);
-                            if (osFont == null) continue;
+                            if (osFont == null)
+                            {
+                                Plugin.Log.LogWarning($"[FONT] fallback build failed for '{name}': CreateDynamicFontFromOSFont returned null");
+                                continue;
+                            }
                             var asset = mCreate.Invoke(null, new object[] { osFont });
                             if (asset != null)
                             {
                                 created.Add(asset);
+                                built = true;
                                 Plugin.Log.LogInfo($"[FONT] built dynamic fallback font asset from OS font '{name}'");
                             }
+                            else Plugin.Log.LogWarning($"[FONT] fallback build failed for '{name}': CreateFontAsset returned null");
                         }
                         catch (Exception fx) { Plugin.Log.LogWarning($"[FONT] fallback build failed for '{name}': {fx.Message}"); }
-                        break; // one per family, whether it worked or not
+                        if (built) break; // one successful asset per script family
                     }
                 }
-                if (created.Count == 0) { Plugin.Log.LogWarning("[FONT] no OS fallback fonts available"); return; }
+                if (created.Count == 0)
+                {
+                    string triedFaces = tried.Count > 0 ? string.Join(", ", tried.ToArray()) : "(no candidates installed)";
+                    Plugin.Log.LogWarning($"[FONT] no OS fallback fonts available; tried: {triedFaces}");
+                    return;
+                }
 
                 // (a) Gravity's instance fallback table. TMP 2.x: fallbackFontAssetTable;
                 // TMP 1.x: fallbackFontAssets. Try property then field, both names.
@@ -298,6 +313,10 @@ namespace CompetitiveRounds
         // CompetitiveUI sets this whenever any IMGUI modal is open, the same
         // condition that drives the uGUI blocker.
         public static bool ModalBlockInput;
+        // Set on handlers that belong to the CURRENT modal itself (e.g. the
+        // info-popup's click-anywhere-to-close backdrop) so they keep working
+        // while ModalBlockInput suppresses every handler BEHIND the modal.
+        public bool bypassModalBlock;
         private bool ContainsScreenPoint(RectTransform target, Vector3 point)
         {
             if (target == null) return false;
@@ -342,7 +361,7 @@ namespace CompetitiveRounds
         private void Update()
         {
             if(rt==null||onClick==null||!gameObject.activeInHierarchy)return;
-            if(ModalBlockInput)return;
+            if(ModalBlockInput&&!bypassModalBlock)return;
             if(!Input.GetMouseButtonDown(0))return;
             if(!cameraResolved)ResolveCamera();
             Vector3 mp=Input.mousePosition;
@@ -593,7 +612,7 @@ namespace CompetitiveRounds
             isOpen=true;dirty=true;RefreshData();ApiClient.ResetQueueCountTimer();Plugin.Log.LogInfo($"[NATIVE] Opened competitive page (inGame={inGameMode})");
         }
 
-        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}SetClickBlocker(false);Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}SetClickBlocker(false);Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
         // Bug batch item 6: while a player-effect preview runs, the aura is a WORLD
         // particle system, and a ScreenSpaceOverlay canvas composites above ALL
@@ -1758,7 +1777,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             { "buckshot",        new[] { CST(true,"+4","BULLETS"), CST(true,"+5","AMMO"), CST(false,"-60%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
             { "burst",           new[] { CST(true,"+2","BULLETS"), CST(true,"+3","AMMO"), CST(false,"-60%","DAMAGE"), CST(false,"+0.25s","RELOAD") } },
             { "carefulplanning", new[] { CST(true,"+100%","DAMAGE"), CST(false,"-150%","ATKSPD"), CST(false,"+0.5s","RELOAD") } },
-            { "chase",           new[] { CST(true,"+30%","HEALTH") } },
+            // July 26 item 2: the vanilla card's "+30% Health" line is dead
+            // serialized data (orphaned second CharacterStatModifiers the game
+            // never applies — see VanillaFixes ChaseCardTextPatch). The card's
+            // REAL effect is +60% move speed while heading toward a visible
+            // opponent; show that instead of repeating vanilla's phantom stat.
+            { "chase",           new[] { CST(true,"+60%","MOVE SPD (chasing)") } },
             { "chillingpresence",new[] { CST(true,"+25%","HP") } },
             { "coldbullets",     new[] { CST(true,"+70%","BULLET SLOW"), CST(false,"+0.25s","RELOAD") } },
             { "combine",         new[] { CST(true,"+100%","DAMAGE"), CST(false,"-2","AMMO"), CST(false,"+0.5s","RELOAD") } },
@@ -2167,6 +2191,87 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[CARD-PREVIEW] destroy: {ex.Message}"); }
+        }
+
+        // ── Generic scrollable info popup (July 26 item 1) ─────────────────
+        // Hosts the Tournaments tab's "How It Works" / "Prizes" content (and any
+        // future long-form help text) as an on-demand overlay instead of a
+        // permanent 600-unit text stack that overflows small windows. Modeled on
+        // ShowCardPreview: dim click-anywhere-to-close backdrop + centered panel.
+        // While open, InfoPopupOpen feeds CompetitiveUI's ModalBlockInput OR so
+        // raw-input ClickHandlers behind the backdrop can't fire (learning #141);
+        // the backdrop's own handler carries bypassModalBlock so closing works.
+        private static GameObject infoPopupGO;
+        public static bool InfoPopupOpen => infoPopupGO != null;
+        public static void ShowInfoPopup(string title, string body)
+        {
+            try
+            {
+                HideInfoPopup();
+                EnsureOverlayCanvas();
+                infoPopupGO = new GameObject("CR_InfoPopup");
+                infoPopupGO.hideFlags = HideFlags.HideAndDontSave;
+                infoPopupGO.transform.SetParent(overlayCanvasGO.transform, false);
+                var rt = infoPopupGO.AddComponent<RectTransform>();
+                rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
+                rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+
+                var bd = UIFactory.CreatePanel("BD", infoPopupGO.transform, new Color(0f, 0f, 0f, 0.55f));
+                var bdRT = bd.GetComponent<RectTransform>();
+                bdRT.anchorMin = Vector2.zero; bdRT.anchorMax = Vector2.one;
+                bdRT.offsetMin = Vector2.zero; bdRT.offsetMax = Vector2.zero;
+                var bdImg = bd.GetComponent(UIFactory.tImage);
+                if (bdImg != null) UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(bdImg, true);
+                var bdClick = bd.AddComponent<ClickHandler>();
+                bdClick.bypassModalBlock = true;
+                bdClick.onClick = () => { if (ClickGuard.Claim(bd)) HideInfoPopup(); };
+
+                var box = UIFactory.CreatePanel("Box", infoPopupGO.transform, new Color(0.10f, 0.12f, 0.16f, 0.97f));
+                var boxRT = box.GetComponent<RectTransform>();
+                boxRT.anchorMin = new Vector2(0.5f, 0.5f);
+                boxRT.anchorMax = new Vector2(0.5f, 0.5f);
+                boxRT.pivot = new Vector2(0.5f, 0.5f);
+                // Clamp to the live canvas height (Codex review find): the
+                // width-matched scaler gives a 32:9 window only ~540 vertical
+                // units, so a fixed 640 box would clip top and bottom — the
+                // very overflow class this popup exists to fix. The body
+                // ScrollView absorbs the lost height.
+                float popupH = 640f;
+                try
+                {
+                    var canvasRT = overlayCanvasGO.GetComponent<RectTransform>();
+                    if (canvasRT != null && canvasRT.rect.height > 200f)
+                        popupH = Mathf.Min(640f, canvasRT.rect.height - 40f);
+                }
+                catch { }
+                boxRT.sizeDelta = new Vector2(560, popupH);
+                UIFactory.AddVLG(box, spacing: 6, padL: 18, padR: 18, padT: 14, padB: 12);
+
+                UIFactory.CreateText("IPTitle", box.transform, title ?? "",
+                    20f, C_GOLD, UIFactory.AlignMidCenter, sizeDelta: new Vector2(510, 28));
+                var sv = UIFactory.CreateScrollView("IPScroll", box.transform, spacing: 0);
+                UIFactory.AddLE(sv.scrollGO, flexH: 1, prefH: 540);
+                var bodyTxt = UIFactory.CreateText("IPBody", sv.content.transform, body ?? "",
+                    14f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(505, 500));
+                UIFactory.SetWordWrap(bodyTxt, true);
+                UIFactory.SetTextAutoHeight(bodyTxt);
+                UIFactory.CreateText("IPHint", box.transform, "<color=#888>click anywhere to close</color>",
+                    13f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(510, 20));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[INFO-POPUP] show: {ex.Message}"); }
+        }
+
+        public static void HideInfoPopup()
+        {
+            try
+            {
+                if (infoPopupGO != null)
+                {
+                    UnityEngine.Object.Destroy(infoPopupGO);
+                    infoPopupGO = null;
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[INFO-POPUP] destroy: {ex.Message}"); }
         }
 
         // Filters (0=All,1=Ranked,2=Casual) whose tier fetch has COMPLETED this
@@ -4682,6 +4787,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return btn;
         }
 
+        // Bug 87 + July 26 item 3: one SETTING = one tight [button + caption
+        // BELOW it] group. Descriptions used to sit ABOVE their button with the
+        // same 4px sibling spacing as everything else, plus dead space at the
+        // bottom of their fixed-height boxes — so a caption visually attached
+        // to the PREVIOUS toggle. Grouping makes the association unambiguous;
+        // the section box's wider spacing (10) separates whole settings.
+        private static GameObject SettingsToggle(Transform parent, string name, Vector2 size,
+            UnityEngine.Events.UnityAction onClick, string desc = null, float descH = 18f)
+        {
+            var group = new GameObject(name + "_grp");
+            group.transform.SetParent(parent, false);
+            group.AddComponent<RectTransform>();
+            UIFactory.AddVLG(group, spacing: 1);
+            UIFactory.AddLE(group, flexH: 0);
+            var btn = SettingsButton(group.transform, name, "", C_WHITE, C_BTN, size, onClick);
+            if (!string.IsNullOrEmpty(desc))
+                UIFactory.CreateText(name + "_d", group.transform, desc, 13f, C_DIM,
+                    sizeDelta: new Vector2(700, descH));
+            return btn;
+        }
+
         private static GameObject BuildSettingsTab(Transform parent)
         {
             // Outer fills the tab area; scroll view eats all extra height so the
@@ -4709,17 +4835,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.CreateText("SH", panel.transform, "Settings", 22f, C_GOLD,
                 UIFactory.AlignTopCenter, sizeDelta: new Vector2(600, 30));
 
-            // -- Data consent (top) --
+            // -- Data & Privacy --
+            // July 26 item 3 (ties to bug 87): the old layout was one giant
+            // "Display" box with 15 controls and desc-above-button captions.
+            // Now: Data & Privacy / Interface / Visuals & Effects sections,
+            // each setting a SettingsToggle group (caption BELOW its button).
             var consentBox = UIFactory.CreatePanel("SCB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(consentBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);
+            UIFactory.AddVLG(consentBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
             UIFactory.AddLE(consentBox, flexH: 0);
             UIFactory.CreateText("SCL", consentBox.transform,
-                "Data Consent", 17f, new Color(0.7f, 0.85f, 1f),
+                "Data & Privacy", 17f, new Color(0.7f, 0.85f, 1f),
                 sizeDelta: new Vector2(700, 24));
             txtConsentStatus = UIFactory.CreateText("SCS", consentBox.transform, "",
                 15f, C_LABEL, sizeDelta: new Vector2(700, 22));
-            consentToggleBtn = SettingsButton(consentBox.transform, "SCT", "Revoke consent",
-                C_WHITE, C_BTN, new Vector2(220, 28),
+            consentToggleBtn = SettingsToggle(consentBox.transform, "SCT", new Vector2(220, 28),
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Consent toggle clicked");
@@ -4733,31 +4862,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     }
                     ApiClient.OnConsentChanged();
                     dirty = true;
-                });
+                },
+                "Allow the mod to report your match results and stats to the community server.");
             consentToggleTxt = UIFactory.GetButtonText(consentToggleBtn);
-
-            // -- Display toggles --
-            var dispBox = UIFactory.CreatePanel("SDispB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(dispBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(dispBox, flexH: 0);
-            UIFactory.CreateText("SDispL", dispBox.transform,
-                "Display", 17f, new Color(0.7f, 0.85f, 1f),
-                sizeDelta: new Vector2(700, 24));
-            fpsToggleBtn = SettingsButton(dispBox.transform, "SFPS", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] FPS toggled");
-                    Plugin.ShowFps.Value = !Plugin.ShowFps.Value;
-                    dirty = true;
-                });
-            fpsToggleTxt = UIFactory.GetButtonText(fpsToggleBtn);
             /* Appear-offline (v1.33): server-synced privacy toggle — hides the
              * player from the Home tab's online / recently-online lists.
              * Optimistic flip on the cached stats; FetchPlayerStats in the
              * SetAppearOffline callback reconciles with the server truth. */
-            appearOfflineBtn = SettingsButton(dispBox.transform, "SAppOff", "",
-                C_WHITE, C_BTN, new Vector2(340, 28),
+            appearOfflineBtn = SettingsToggle(consentBox.transform, "SAppOff", new Vector2(340, 28),
                 () =>
                 {
                     var st = ApiClient.CachedPlayerStats;
@@ -4771,12 +4883,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         if (!ok) CompetitiveUI.ShowNotification("Appear-offline update failed - try again", Color.yellow, 3f);
                         dirty = true;
                     });
-                });
+                },
+                "Hides you from the Home tab's online and recently-online lists.");
             appearOfflineTxt = UIFactory.GetButtonText(appearOfflineBtn);
             /* July 22 item 8: opt-IN "show my Discord on the leaderboard" —
              * server-synced like appear-offline, default OFF. */
-            showDiscordBtn = SettingsButton(dispBox.transform, "SShowDc", "",
-                C_WHITE, C_BTN, new Vector2(340, 28),
+            showDiscordBtn = SettingsToggle(consentBox.transform, "SShowDc", new Vector2(340, 28),
                 () =>
                 {
                     var st = ApiClient.CachedPlayerStats;
@@ -4795,33 +4907,86 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         if (!ok) CompetitiveUI.ShowNotification("Show-Discord update failed - try again", Color.yellow, 3f);
                         dirty = true;
                     });
-                });
+                },
+                "Shows your Discord name on the leaderboard (opt-in; link Discord on the Home tab first).");
             showDiscordTxt = UIFactory.GetButtonText(showDiscordBtn);
-            pingToggleBtn = SettingsButton(dispBox.transform, "SPing", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
+
+            // -- Interface --
+            var intBox = UIFactory.CreatePanel("SIntB", panel.transform, C_PANEL);
+            UIFactory.AddVLG(intBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
+            UIFactory.AddLE(intBox, flexH: 0);
+            UIFactory.CreateText("SIntL", intBox.transform,
+                "Interface", 17f, new Color(0.7f, 0.85f, 1f),
+                sizeDelta: new Vector2(700, 24));
+            fpsToggleBtn = SettingsToggle(intBox.transform, "SFPS", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] FPS toggled");
+                    Plugin.ShowFps.Value = !Plugin.ShowFps.Value;
+                    dirty = true;
+                },
+                "FPS counter in the corner of the screen.");
+            fpsToggleTxt = UIFactory.GetButtonText(fpsToggleBtn);
+            pingToggleBtn = SettingsToggle(intBox.transform, "SPing", new Vector2(260, 28),
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Ping/region toggled");
                     Plugin.ShowRegionPing.Value = !Plugin.ShowRegionPing.Value;
                     dirty = true;
-                });
+                },
+                "Shows the current Photon region and your ping to it.");
             pingToggleTxt = UIFactory.GetButtonText(pingToggleBtn);
-            ingameChatToggleBtn = SettingsButton(dispBox.transform, "SIgChat", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
+            ingameChatToggleBtn = SettingsToggle(intBox.transform, "SIgChat", new Vector2(260, 28),
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] In-game chat overlay toggled");
                     Plugin.ShowIngameChat.Value = !Plugin.ShowIngameChat.Value;
                     dirty = true;
-                });
+                },
+                "Shows community chat messages on-screen while you play.");
             ingameChatToggleTxt = UIFactory.GetButtonText(ingameChatToggleBtn);
+            // Chat pop-up notifications (moved from its own box, July 26 item 3).
+            notifToggleBtn = SettingsToggle(intBox.transform, "SNT", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Notifications toggled");
+                    Plugin.ShowNotifications.Value = !Plugin.ShowNotifications.Value;
+                    dirty = true;
+                },
+                "On-screen pop-ups for incoming chat + XP / level notifications. Chat log on the Home tab still updates either way.", 34f);
+            notifToggleTxt = UIFactory.GetButtonText(notifToggleBtn);
+            inputOverlayToggleBtn = SettingsToggle(intBox.transform, "SInpOv", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Input overlay toggled");
+                    Plugin.ShowInputOverlay.Value = !Plugin.ShowInputOverlay.Value;
+                    dirty = true;
+                },
+                "Input overlay (bottom-left): shows W/A/S/D/Space and L/R click. Keys glow red when pressed. Useful for streams or diagnosing missed inputs.", 34f);
+            inputOverlayToggleTxt = UIFactory.GetButtonText(inputOverlayToggleBtn);
+            blockDbgToggleBtn = SettingsToggle(intBox.transform, "SBlkDbg", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Block debug overlay toggled");
+                    Plugin.ShowBlockDebug.Value = !Plugin.ShowBlockDebug.Value;
+                    dirty = true;
+                },
+                "Block debug overlay (corner): live act/succ counters + per-hit timing (too early / too slow / unblockable).", 34f);
+            blockDbgToggleTxt = UIFactory.GetButtonText(blockDbgToggleBtn);
             // Cursor shape cycler (local-only). Combines with the equipped cursor color.
-            cursorShapeBtn = SettingsButton(dispBox.transform, "SCursor", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
-                () => { CursorColorCosmetic.CycleShape(); dirty = true; });
+            cursorShapeBtn = SettingsToggle(intBox.transform, "SCursor", new Vector2(260, 28),
+                () => { CursorColorCosmetic.CycleShape(); dirty = true; },
+                "Cycles the menu cursor shape; combines with an equipped cursor color.");
             cursorShapeTxt = UIFactory.GetButtonText(cursorShapeBtn);
-            trailToggleBtn = SettingsButton(dispBox.transform, "STrail", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
+
+            // -- Visuals & Effects --
+            var dispBox = UIFactory.CreatePanel("SDispB", panel.transform, C_PANEL);
+            UIFactory.AddVLG(dispBox, spacing: 10, padL: 12, padR: 12, padT: 8, padB: 8);
+            UIFactory.AddLE(dispBox, flexH: 0);
+            UIFactory.CreateText("SDispL", dispBox.transform,
+                "Visuals & Effects", 17f, new Color(0.7f, 0.85f, 1f),
+                sizeDelta: new Vector2(700, 24));
+            trailToggleBtn = SettingsToggle(dispBox.transform, "STrail", new Vector2(260, 28),
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Trails toggled");
@@ -4836,29 +5001,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         TrailCosmetic.OnMatchEnd();
                     }
                     dirty = true;
-                });
+                },
+                "Renders cosmetic trails on you and other modded players.");
             trailToggleTxt = UIFactory.GetButtonText(trailToggleBtn);
-
-            // -- Block Debug overlay --
-            UIFactory.CreateText("SBlkDbgL", dispBox.transform,
-                "Block debug overlay (corner): live act/succ counters + per-hit timing (too early / too slow / unblockable).",
-                13f, C_DIM, sizeDelta: new Vector2(700, 34));
-            blockDbgToggleBtn = SettingsButton(dispBox.transform, "SBlkDbg", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Block debug overlay toggled");
-                    Plugin.ShowBlockDebug.Value = !Plugin.ShowBlockDebug.Value;
-                    dirty = true;
-                });
-            blockDbgToggleTxt = UIFactory.GetButtonText(blockDbgToggleBtn);
-
-            // -- Custom player body colors --
-            UIFactory.CreateText("SPColorL", dispBox.transform,
-                "Custom player body colors: render shop-purchased Body Colors on yourself + other modded players. Off = everyone falls back to default orange/blue.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 34));
-            playerColorToggleBtn = SettingsButton(dispBox.transform, "SPColor", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
+            playerColorToggleBtn = SettingsToggle(dispBox.transform, "SPColor", new Vector2(260, 28),
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Custom player colors toggled");
@@ -4866,96 +5012,58 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     try { PlayerColorCosmetic.OnShowPlayerColorsToggled(); } catch { }
                     try { PlayerEffectCosmetic.OnShowPlayerColorsToggled(); } catch { }
                     dirty = true;
-                });
+                },
+                "Custom player body colors: render shop-purchased Body Colors on yourself + other modded players. Off = everyone falls back to default orange/blue.", 34f);
             playerColorToggleTxt = UIFactory.GetButtonText(playerColorToggleBtn);
-
-            // -- Input overlay (WASD + Space + mouse buttons) --
-            UIFactory.CreateText("SInpOvL", dispBox.transform,
-                "Input overlay (bottom-left): shows W/A/S/D/Space and L/R click. Keys glow red when pressed. Useful for streams or diagnosing missed inputs.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 34));
-            inputOverlayToggleBtn = SettingsButton(dispBox.transform, "SInpOv", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Input overlay toggled");
-                    Plugin.ShowInputOverlay.Value = !Plugin.ShowInputOverlay.Value;
-                    dirty = true;
-                });
-            inputOverlayToggleTxt = UIFactory.GetButtonText(inputOverlayToggleBtn);
-
-            // -- Screen shake (v1.32 item 7) --
-            UIFactory.CreateText("SShakeL", dispBox.transform,
-                "Camera screen shake on shots/hits/deaths. Off = a perfectly steady camera (local only).",
-                13f, C_DIM, sizeDelta: new Vector2(700, 20));
-            screenShakeToggleBtn = SettingsButton(dispBox.transform, "SShake", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Screen shake toggled");
-                    Plugin.ScreenShakeEnabled.Value = !Plugin.ScreenShakeEnabled.Value;
-                    dirty = true;
-                });
-            screenShakeToggleTxt = UIFactory.GetButtonText(screenShakeToggleBtn);
-
-            // -- Map lighting (v1.32 item 7) --
-            UIFactory.CreateText("SLightL", dispBox.transform,
-                "Map lighting: the per-frame lightmap render. Off = flat full-bright scene, skips the whole pass for extra FPS.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 20));
-            mapLightingToggleBtn = SettingsButton(dispBox.transform, "SLight", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Map lighting toggled");
-                    Plugin.MapLightingEnabled.Value = !Plugin.MapLightingEnabled.Value;
-                    try { MapPhysicalColorPatch.RenderPerfSettings.Apply(); MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop(); } catch { }
-                    dirty = true;
-                });
-            mapLightingToggleTxt = UIFactory.GetButtonText(mapLightingToggleBtn);
-
-            // -- Map shadows (v1.32 item 7) --
-            UIFactory.CreateText("SShadL", dispBox.transform,
-                "Soft shadow beams cast by map lighting. Off = skips the shadow render pass (lighting stays) for extra FPS.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 20));
-            mapShadowsToggleBtn = SettingsButton(dispBox.transform, "SShad", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Map shadows toggled");
-                    Plugin.MapShadowsEnabled.Value = !Plugin.MapShadowsEnabled.Value;
-                    try { MapPhysicalColorPatch.RenderPerfSettings.Apply(); MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop(); } catch { }
-                    dirty = true;
-                });
-            mapShadowsToggleTxt = UIFactory.GetButtonText(mapShadowsToggleBtn);
-
-            // -- Animated cosmetics (v1.32 item 8) --
-            UIFactory.CreateText("SAnimCosL", dispBox.transform,
-                "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = all freeze to a static frame instantly.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 34));
-            animCosToggleBtn = SettingsButton(dispBox.transform, "SAnimCos", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
+            animCosToggleBtn = SettingsToggle(dispBox.transform, "SAnimCos", new Vector2(260, 28),
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Animated cosmetics toggled");
                     Plugin.AnimatedCosmetics.Value = !Plugin.AnimatedCosmetics.Value;
                     try { PlayerEffectCosmetic.OnAnimatedCosmeticsToggled(); } catch { }
                     dirty = true;
-                });
+                },
+                "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = all freeze to a static frame instantly.", 34f);
             animCosToggleTxt = UIFactory.GetButtonText(animCosToggleBtn);
-
-            // -- Chromatic aberration (July 20 item 8) --
-            UIFactory.CreateText("SChromAbL", dispBox.transform,
-                "Chromatic aberration: the RGB color-fringing that pulses on shots/hits/deaths. Off = crisp edges, tiny FPS gain. Visual only, local only.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 20));
-            chromAbToggleBtn = SettingsButton(dispBox.transform, "SChromAb", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
+            screenShakeToggleBtn = SettingsToggle(dispBox.transform, "SShake", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Screen shake toggled");
+                    Plugin.ScreenShakeEnabled.Value = !Plugin.ScreenShakeEnabled.Value;
+                    dirty = true;
+                },
+                "Camera screen shake on shots/hits/deaths. Off = a perfectly steady camera (local only).");
+            screenShakeToggleTxt = UIFactory.GetButtonText(screenShakeToggleBtn);
+            chromAbToggleBtn = SettingsToggle(dispBox.transform, "SChromAb", new Vector2(260, 28),
                 () =>
                 {
                     Plugin.Log.LogInfo("[SETTINGS] Chromatic aberration toggled");
                     Plugin.ChromaticAberrationEnabled.Value = !Plugin.ChromaticAberrationEnabled.Value;
                     try { MapPhysicalColorPatch.ChromaticAberrationSetting.Apply(); } catch { }
                     dirty = true;
-                });
+                },
+                "Chromatic aberration: the RGB color-fringing that pulses on shots/hits/deaths. Off = crisp edges, tiny FPS gain. Visual only, local only.", 34f);
             chromAbToggleTxt = UIFactory.GetButtonText(chromAbToggleBtn);
+            mapLightingToggleBtn = SettingsToggle(dispBox.transform, "SLight", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Map lighting toggled");
+                    Plugin.MapLightingEnabled.Value = !Plugin.MapLightingEnabled.Value;
+                    try { MapPhysicalColorPatch.RenderPerfSettings.Apply(); MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop(); } catch { }
+                    dirty = true;
+                },
+                "Map lighting: the per-frame lightmap render. Off = flat full-bright scene, skips the whole pass for extra FPS.");
+            mapLightingToggleTxt = UIFactory.GetButtonText(mapLightingToggleBtn);
+            mapShadowsToggleBtn = SettingsToggle(dispBox.transform, "SShad", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Map shadows toggled");
+                    Plugin.MapShadowsEnabled.Value = !Plugin.MapShadowsEnabled.Value;
+                    try { MapPhysicalColorPatch.RenderPerfSettings.Apply(); MapPhysicalColorPatch.RenderPerfSettings.ApplyBackdrop(); } catch { }
+                    dirty = true;
+                },
+                "Soft shadow beams cast by map lighting. Off = skips the shadow render pass (lighting stays) for extra FPS.");
+            mapShadowsToggleTxt = UIFactory.GetButtonText(mapShadowsToggleBtn);
 
             // ── Performance toggles (v1.26.8) ──
             // Collapsible — header is the click-to-expand line. Each row maps
@@ -5021,25 +5129,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // "CardPickPart" row removed v1.28.3 — pausing the pick-phase skin
             // particles made the picker's body invisible (bug #29).
 
-            // -- Chat pop-up notifications --
-            var notifBox = UIFactory.CreatePanel("SNB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(notifBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(notifBox, flexH: 0);
-            UIFactory.CreateText("SNL", notifBox.transform,
-                "Chat log notifications", 17f, new Color(0.7f, 0.85f, 1f),
-                sizeDelta: new Vector2(700, 24));
-            UIFactory.CreateText("SND", notifBox.transform,
-                "On-screen pop-ups for incoming chat + XP / level notifications. Chat log on the Home tab still updates either way.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 34));
-            notifToggleBtn = SettingsButton(notifBox.transform, "SNT", "",
-                C_WHITE, C_BTN, new Vector2(260, 28),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[SETTINGS] Notifications toggled");
-                    Plugin.ShowNotifications.Value = !Plugin.ShowNotifications.Value;
-                    dirty = true;
-                });
-            notifToggleTxt = UIFactory.GetButtonText(notifToggleBtn);
+            // (Chat notifications toggle moved into the Interface box above —
+            // July 26 item 3 reorg.)
 
             // -- Bug report --
             var bugBox = UIFactory.CreatePanel("SBugB", panel.transform, C_PANEL);
@@ -8426,7 +8517,16 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // while the local player has a ready match and the local ready state
         // is stale >45s.
 
-        private static object txtTState, txtTWhen, txtTInstructions, txtTPenalty, txtTForceCount, txtTMyMatch, txtTDiscordGate, txtTMyHistory, txtTRoomCode, txtTTzNow;
+        private static object txtTState, txtTWhen, txtTPenalty, txtTForceCount, txtTMyMatch, txtTDiscordGate, txtTMyHistory, txtTRoomCode, txtTTzNow;
+        // July 26 item 1: instructions + prizes render in the on-demand info
+        // popup instead of the column; RefreshTournaments rebuilds these
+        // strings, the popup buttons read them at click time. Defaults are the
+        // sync text (a compile-time const), NOT "" — the buttons are clickable
+        // before the tournament fetch lands (or when the API is unreachable,
+        // exactly when a player would consult the help), and an empty popup
+        // reads as broken (review find).
+        private static string _tInfoTitle = "How It Works - Sync (weekly)",
+            _tInfoInstructions = _SYNC_INSTRUCTIONS, _tInfoPrizes = "";
         private static GameObject txtTSignupBtn, txtTUnsignupBtn, txtTReadyBtn, txtTForceBtn, txtTTzButton, txtTDateFmtButton, txtTReconnectBtn, tSubTabSyncBtn, tSubTabAsyncBtn;
         private static GameObject tTimeVoteRow, tSignupList, tBracketList, tMyMatchPanel, tHistoryList, tVoteBoxPanel;
         // Item 3: mandatory time voting — slots are pickable BEFORE signup (the
@@ -8435,7 +8535,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static object txtTVoteHdr;
         // July 17 round 2: live prize block (scales with signups) + the
         // between-rounds Play Now button.
-        private static object txtTPrizes;
         private static GameObject tPlayNowBtn;
         private static List<GameObject> tHistoryRowPool = new List<GameObject>();
         private static List<object> tHistoryRowTexts = new List<object>();
@@ -8498,9 +8597,26 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddLE(panel, flexH: 1);
 
             // -- LEFT column: status, signup, voting, ready --
-            var left = new GameObject("TLeft"); left.transform.SetParent(panel.transform, false);
+            // July 26 item 1 (low-res overlap): this was the only long-text
+            // stack in the menu with no scroll protection. At aspect ratios
+            // wider than 16:9 the width-matched CanvasScaler yields <1080
+            // vertical units, the VLG compressed children to zero-height rects
+            // (no minH anywhere) and TMP's Overflow mode painted the full glyph
+            // runs over the "VOTING / SIGNUPS OPEN" header (screenshot bug).
+            // Fix is structural: (a) the two ~600-unit static text blocks moved
+            // into on-demand info popups (buttons below), (b) the whole column
+            // scrolls — Settings-tab pattern, learning #63 (inner content
+            // flexH:0, children keep their prefH). flexW:0 per learning #132:
+            // rows inside carry flexW:1 spacers which would otherwise stretch
+            // this fixed column.
+            var leftOuter = new GameObject("TLeftOuter"); leftOuter.transform.SetParent(panel.transform, false);
+            leftOuter.AddComponent<RectTransform>(); UIFactory.AddVLG(leftOuter, spacing: 0);
+            UIFactory.AddLE(leftOuter, prefW: 430, minW: 360, flexW: 0, flexH: 1);
+            var leftSv = UIFactory.CreateScrollView("TLeftSV", leftOuter.transform, spacing: 0);
+            UIFactory.AddLE(leftSv.scrollGO, flexH: 1);
+            var left = new GameObject("TLeft"); left.transform.SetParent(leftSv.content.transform, false);
             left.AddComponent<RectTransform>(); UIFactory.AddVLG(left, spacing: 6);
-            UIFactory.AddLE(left, prefW: 430, minW: 360);
+            UIFactory.AddLE(left, flexH: 0);
 
             // Sync / Async sub-tab bar. Switches ApiClient.TournamentKind and
             // refetches. Layout lives at the top of the left column so it's
@@ -8536,28 +8652,26 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // the voting phase ("Default start ... Signups close ...") but the
             // baked LayoutElement only allotted its one-line 26px — the second
             // line painted straight over the instructions block (screenshot-
-            // verified overlap). Same prefH-zeroing as txtTInstructions below.
+            // verified overlap). prefH released so TMP's own height drives layout.
             { var wle = (txtTWhen as Component)?.gameObject.GetComponent(UIFactory.tLE);
               if (wle != null) UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(wle, -1f); }
-            txtTInstructions = UIFactory.CreateText("TI", hdrBox.transform,
-                _SYNC_INSTRUCTIONS,
-                14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 560));
-            UIFactory.SetWordWrap(txtTInstructions, true);
-            // Zero out the baked LayoutElement prefH so the TMP text's own ILayoutElement
-            // (which reports actual rendered height) drives the parent panel size. Without
-            // this, the hdrBox sizes to the baked 560 even if content fits in less - and,
-            // more importantly, the panel stops clamping content that WOULD overflow.
-            // Same pattern the chat log uses (see RefreshMyStats for the precedent).
-            { var le = (txtTInstructions as Component)?.gameObject.GetComponent(UIFactory.tLE);
-              if (le != null) UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, -1f); }
-            // Item 2: prizes moved out of the static instructions into a live
-            // block — amounts scale with the confirmed signup count, so the
-            // text is rebuilt every refresh (RefreshTournaments).
-            txtTPrizes = UIFactory.CreateText("TPrz", hdrBox.transform, "",
-                14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 90));
-            UIFactory.SetWordWrap(txtTPrizes, true);
-            { var ple = (txtTPrizes as Component)?.gameObject.GetComponent(UIFactory.tLE);
-              if (ple != null) UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(ple, -1f); }
+            // July 26 item 1: the ~25-line instructions block and the live
+            // prizes block no longer render inline — they were ~600 canvas
+            // units of the column's ~950-unit total, the direct cause of the
+            // low-res overlap. Each now opens in a scrollable info popup;
+            // content strings are rebuilt every refresh (RefreshTournaments)
+            // and read at CLICK time so the popup always shows live numbers.
+            var infoRow = new GameObject("TInfoRow"); infoRow.transform.SetParent(hdrBox.transform, false);
+            infoRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(infoRow, spacing: 6, forceExpandH: true);
+            UIFactory.AddLE(infoRow, prefH: 30, flexH: 0);
+            var howBtn = UIFactory.CreateButton("TInfoHow", infoRow.transform, "How It Works", 14f, C_WHITE, C_BTN,
+                () => ShowInfoPopup(_tInfoTitle, _tInfoInstructions), sizeDelta: new Vector2(150, 26));
+            UIFactory.AddLE(howBtn, prefW: 150, prefH: 26, flexW: 0, flexH: 0);
+            var przBtn = UIFactory.CreateButton("TInfoPrz", infoRow.transform, "Prizes & Rules", 14f, C_WHITE, C_BTN,
+                () => ShowInfoPopup("Prizes", string.IsNullOrEmpty(_tInfoPrizes)
+                    ? "Prizes are announced when signups open." : _tInfoPrizes), sizeDelta: new Vector2(150, 26));
+            UIFactory.AddLE(przBtn, prefW: 150, prefH: 26, flexW: 0, flexH: 0);
 
             // Timezone selector - tap to cycle through presets.
             var tzRow = new GameObject("TZRow"); tzRow.transform.SetParent(left.transform, false);
@@ -8618,7 +8732,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             var voteBox = tVoteBoxPanel;
             UIFactory.AddVLG(voteBox, spacing: 2, padL: 10, padR: 10, padT: 6, padB: 6);
             UIFactory.AddLE(voteBox, flexH: 0);
-            txtTVoteHdr = UIFactory.CreateText("TVH", voteBox.transform, "Pick Your Start Times (multi-select)", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+            // 410 (not 440): the header must fit INSIDE the 430-pref/360-min
+            // column — at 440 it spilled past the column edge (July 26 item 1).
+            txtTVoteHdr = UIFactory.CreateText("TVH", voteBox.transform, "Pick Your Start Times (multi-select)", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(410, 22));
             tTimeVoteRow = new GameObject("TVR"); tTimeVoteRow.transform.SetParent(voteBox.transform, false);
             tTimeVoteRow.AddComponent<RectTransform>(); UIFactory.AddVLG(tTimeVoteRow, spacing: 2);
             // Item 2 (July 17 round 2): 8 slots in TWO columns of 4 — half the
@@ -9392,33 +9508,29 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
             // Sub-tab highlight.
             bool isAsync = ApiClient.TournamentKind == "async";
-            // Swap instruction text per mode.
-            if (txtTInstructions != null)
+            // Swap instruction popup content per mode (July 26 item 1 — the
+            // text now lives behind the "How It Works" button, read at click).
+            _tInfoTitle = isAsync ? "How It Works - Async (6-week)" : "How It Works - Sync (weekly)";
+            _tInfoInstructions = isAsync ? _ASYNC_INSTRUCTIONS : _SYNC_INSTRUCTIONS;
+            // Live prize popup content (item 2): amounts scale with confirmed
+            // signups — server-computed (single source of truth), growth
+            // spelled out so every extra signup visibly raises the pot.
+            if (t.prize_gold_1 > 0)
             {
-                UIFactory.SetText(txtTInstructions, isAsync ? _ASYNC_INSTRUCTIONS : _SYNC_INSTRUCTIONS);
+                int pp = Math.Max(8, t.prize_players);
+                string growth = t.status == "voting"
+                    ? (t.prize_players < 16
+                        ? $"\n  <color=#7FE8C3>Every signup past 8 grows the pot - 16 players doubles it! (now: {t.prize_players})</color>"
+                        : "\n  <color=#7FE8C3>Max pot - 16 players!</color>")
+                    : "";
+                _tInfoPrizes =
+                    $"<b><color=#FFD94D>PRIZES</color></b> <color=#888>(at {pp} players{(t.status == "voting" ? ", live" : "")})</color>\n"
+                    + $"  * <color=#FFE580>1st</color> - {t.prize_gold_1}g / {t.prize_xp_1} XP / Winner role\n"
+                    + $"  * <color=#C8C8C8>2nd</color> - {t.prize_gold_2}g / {t.prize_xp_2} XP / Runner Up role\n"
+                    + $"  * <color=#D4894A>3rd</color> - {t.prize_gold_3}g / {t.prize_xp_3} XP / 3rd Place role (loser of LB final)"
+                    + growth;
             }
-            // Live prize block (item 2): amounts scale with confirmed signups —
-            // server-computed (single source of truth), growth spelled out so
-            // every extra signup visibly raises the pot.
-            if (txtTPrizes != null)
-            {
-                if (t.prize_gold_1 > 0)
-                {
-                    int pp = Math.Max(8, t.prize_players);
-                    string growth = t.status == "voting"
-                        ? (t.prize_players < 16
-                            ? $"\n  <color=#7FE8C3>Every signup past 8 grows the pot - 16 players doubles it! (now: {t.prize_players})</color>"
-                            : "\n  <color=#7FE8C3>Max pot - 16 players!</color>")
-                        : "";
-                    UIFactory.SetText(txtTPrizes,
-                        $"<b><color=#FFD94D>PRIZES</color></b> <color=#888>(at {pp} players{(t.status == "voting" ? ", live" : "")})</color>\n"
-                        + $"  * <color=#FFE580>1st</color> - {t.prize_gold_1}g / {t.prize_xp_1} XP / Winner role\n"
-                        + $"  * <color=#C8C8C8>2nd</color> - {t.prize_gold_2}g / {t.prize_xp_2} XP / Runner Up role\n"
-                        + $"  * <color=#D4894A>3rd</color> - {t.prize_gold_3}g / {t.prize_xp_3} XP / 3rd Place role (loser of LB final)"
-                        + growth);
-                }
-                else UIFactory.SetText(txtTPrizes, "");
-            }
+            else _tInfoPrizes = "";
             if (tSubTabSyncBtn != null) { UIFactory.SetImageColor(tSubTabSyncBtn, isAsync ? C_TAB : C_TABACT); UIFactory.SetColor(UIFactory.GetButtonText(tSubTabSyncBtn), isAsync ? C_LABEL : C_WHITE); UIFactory.SetBold(UIFactory.GetButtonText(tSubTabSyncBtn), !isAsync); }
             if (tSubTabAsyncBtn != null) { UIFactory.SetImageColor(tSubTabAsyncBtn, isAsync ? C_TABACT : C_TAB); UIFactory.SetColor(UIFactory.GetButtonText(tSubTabAsyncBtn), isAsync ? C_WHITE : C_LABEL); UIFactory.SetBold(UIFactory.GetButtonText(tSubTabAsyncBtn), isAsync); }
             // Show the current time in the selected tz so players can verify their pick is

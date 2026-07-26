@@ -136,9 +136,26 @@ namespace CompetitiveRounds
             return string.IsNullOrWhiteSpace(cfg) ? Plugin.DefaultApiUrl : cfg;
         }
 
+        /// <summary>True while this session's chat runs on the plaintext ws://
+        /// fallback (see the connect-failure counter in RunLoop). Diagnostic
+        /// only — mirrors ApiClient.UsingLegacyFallback's style.</summary>
+        public static bool UsingWsFallback { get; private set; }
+
         private static async Task RunLoop(CancellationToken token)
         {
             int backoffSec = 2;
+            // Chat-specific TLS fallback (learning #194): UnityWebRequest and
+            // Mono's ClientWebSocket use DIFFERENT trust stores and TLS stacks
+            // (the WS one is hardcoded <= TLS 1.2 and ignores
+            // ServicePointManager), so ApiClient's REST probe can succeed while
+            // every wss handshake fails — and Send() local-echoes regardless,
+            // so the player is told their message sent while nobody receives
+            // it. After N consecutive failed wss CONNECTs, fall back to the
+            // legacy plaintext endpoint for this session only (never
+            // persisted; TLS is retried next launch). DELETE THIS along with
+            // Plugin.LegacyApiUrl in the same release that drops the
+            // plaintext 8443 port-forward.
+            int wssConnectFailures = 0;
 
             while (running && !token.IsCancellationRequested)
             {
@@ -146,11 +163,14 @@ namespace CompetitiveRounds
                 string baseHttp = ResolveBaseHttp().TrimEnd('/');
                 string wsUrl = baseHttp.Replace("https://", "wss://").Replace("http://", "ws://") + "/api/v1/ws/chat";
                 Task senderTask = null;
+                bool connected = false;
                 try
                 {
                     socket = new ClientWebSocket();
                     socket.Options.SetRequestHeader("X-Mod-Version", Plugin.ModVersion ?? "0.0.0");
                     await socket.ConnectAsync(new Uri(wsUrl), token);
+                    connected = true;
+                    wssConnectFailures = 0;
                     Plugin.Log.LogInfo($"[CHAT] WS connected: {wsUrl}");
                     backoffSec = 2;
 
@@ -193,6 +213,24 @@ namespace CompetitiveRounds
                 catch (Exception ex) when (!token.IsCancellationRequested)
                 {
                     Plugin.Log.LogWarning($"[CHAT] WS error: {ex.Message} (reconnect in {backoffSec}s)");
+                    // Count only failed CONNECTs (post-connect throws are a
+                    // different failure class), only for wss, only while on the
+                    // compiled default base (a custom/LAN BaseUrl was chosen
+                    // deliberately — mirror ApiClient.Initialize's probe gate),
+                    // and only if ApiClient's own REST fallback hasn't already
+                    // retargeted us (overrideBase composes the two mechanisms).
+                    if (!connected
+                        && overrideBase == null
+                        && wsUrl.StartsWith("wss://")
+                        && string.Equals(baseHttp, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)
+                        && ++wssConnectFailures >= 3)
+                    {
+                        overrideBase = Plugin.LegacyApiUrl;
+                        UsingWsFallback = true;
+                        Plugin.Log.LogWarning(
+                            $"[CHAT] wss unreachable after {wssConnectFailures} attempts — session fallback to plaintext ws ({Plugin.LegacyApiUrl}). " +
+                            "Config untouched; TLS is retried next launch.");
+                    }
                 }
                 finally
                 {

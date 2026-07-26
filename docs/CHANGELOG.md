@@ -1,5 +1,32 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased — base-game bug fixes, menu overhaul, security batch
+
+### Base-game bugs (yes, the game's own bugs — fixed by the mod, active in competitive rooms and sandbox)
+- **Demonic Pact no longer breaks Spray in later games.** The game copies Demonic Pact's "no holding the trigger" flag onto your gun and never clears it between games in the same room — so picking Spray in any later game fired one shot per click instead of spraying. The flag is now reset between games.
+- **Poison "ghost damage" fix.** Occasionally a poisoned player's own health bar stopped tracking ticks that everyone else saw land (you could still hear them). Cause: each player's copy of the game decides separately whether a tick lands during a block window, and the copies can disagree. Poison ticks now land consistently on every screen. Players holding Decay are exempt so blocking mid-spread still works exactly like the base game.
+- **Drill bullets fired against a wall are no longer invisible to the other players.** The game corrected the wrong object's position when a drilled bullet came out the far side; the mod now moves the actual bullet on everyone else's screen.
+- **Killing your opponent during the end screen no longer corrupts the next game** (the missing map / undespawned body / death-to-nothing sequence). Kills and damage-over-time ticks that happen after the game has already ended are ignored.
+- **Chase's card text no longer advertises "+30% Health".** The bonus is dead data inside the game files — it was never actually applied. The card's real effect (a speed boost while heading at a visible opponent) is unchanged; only the phantom line is removed.
+
+### Menus
+- **Tournaments tab no longer paints text over itself on smaller/wider windows.** The long "How It Works" and prize blocks moved behind two buttons that open a scrollable popup, and the whole left column scrolls now.
+- **Settings tab reorganized** into Data & Privacy / Interface / Visuals & Effects, and every description now sits directly UNDER the setting it describes (bug #87 — they used to hug the button above them).
+- **The in-match ranked line now reads "Series Score: X - X (Total Series X - X)"** where Total Series is your lifetime series record against the CURRENT opponent — replacing the confusing rolling "session" tally.
+
+### Cosmetics
+- **The placement drag in the artist/admin preview is now a visual aid only — it is never saved.** New cosmetics spawn centered and players position them in the character editor; already-shipped items keep their approved placements.
+
+### Chat
+- If secure chat can't connect on your network, chat falls back for that session instead of silently eating your messages (the rest of the mod already did this).
+
+### Server & security
+- Fixed a matchmaking deadlock where two players polling at the same instant could briefly wedge the 1v1 queue, plus a batch of queue-lock hardening across 1v1/2v2/1v2.
+- Admin actions now use a separate secret that does not ship inside the mod — previously anyone who unpacked the DLL could forge admin requests.
+- Session checks extended across cosmetic equips, privacy toggles, blocks, and queue actions; bans now also revoke live sessions and stop new ones from being minted.
+- Deleting your data now also clears 2v2/1v2 queue entries and login sessions, and declining a match is validated against who you're actually matched with.
+- The API's public documentation pages were turned off and the minimum supported mod version was raised to 1.33.0 (older clients get the update prompt).
+
 ## v1.34.4 — 2026-07-26 — 1v2 extra-pick crash fix + HTTPS endpoint
 
 ### 1v2

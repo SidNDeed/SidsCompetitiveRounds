@@ -1090,6 +1090,38 @@ namespace CompetitiveRounds
             catch { return ""; }
         }
 
+        // Security A2: admin canonicals sign with the SEPARATE admin secret
+        // from the local BepInEx config (never compiled into the DLL). Empty
+        // secret -> empty signature -> clean server-side 403; the one-time log
+        // line tells an admin why their admin menu suddenly stopped working.
+        private static bool _adminSecretWarned = false;
+        private static string ComputeAdminHmacHex(string message)
+        {
+            string secret = null;
+            try { secret = Plugin.AdminHmacSecret?.Value; } catch { }
+            if (string.IsNullOrWhiteSpace(secret))
+            {
+                if (!_adminSecretWarned)
+                {
+                    _adminSecretWarned = true;
+                    Plugin.Log.LogWarning(
+                        "[ADMIN] AdminSecret is not set in the config — admin actions will be rejected by the server (security A2).");
+                }
+                return "";
+            }
+            try
+            {
+                using (var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret.Trim())))
+                {
+                    byte[] hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(message));
+                    var sb = new StringBuilder(hash.Length * 2);
+                    foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                    return sb.ToString();
+                }
+            }
+            catch { return ""; }
+        }
+
         private static string ComputeSha256Hex(string value)
         {
             try
@@ -1688,10 +1720,16 @@ namespace CompetitiveRounds
             using (var request = UnityWebRequest.Delete(url))
             {
                 request.downloadHandler = new DownloadHandlerBuffer();
+                string sentToken = SteamAuth.SessionToken;
                 StampVersionHeader(request);
                 request.timeout = 20;
                 yield return request.SendWebRequest();
                 bool success = request.result == UnityWebRequest.Result.Success;
+                // Codex review find: the delete endpoint is now session-gated;
+                // a 401 here must invalidate the stale token like every other
+                // gated call so the next attempt re-mints instead of failing
+                // with the same dead token until natural expiry.
+                if (!success) HandleSessionReject(request, sentToken);
                 callback(success, success ? (request.downloadHandler?.text ?? "") : request.error);
             }
         }
@@ -2175,7 +2213,7 @@ namespace CompetitiveRounds
 
         public static void FetchCosmeticSubmissionsAdmin(string adminSteamId, Action<bool, List<CosmeticSubmission>> callback)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:cosmetic-subs:list");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:cosmetic-subs:list");
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/admin/cosmetic-submissions?admin_steam_id={Escape(adminSteamId)}&sig={sig}",
                 (ok, resp) =>
@@ -2282,7 +2320,7 @@ namespace CompetitiveRounds
         public static void FetchCosmeticReleaseCandidatesAdmin(
             string adminSteamId, Action<bool, List<CosmeticReleaseCandidate>, string> callback)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:cosmetic-releases:list");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:cosmetic-releases:list");
             string url = $"{baseUrl}/api/v1/admin/cosmetic-release-candidates"
                        + $"?admin_steam_id={Escape(adminSteamId)}&sig={sig}";
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
@@ -2342,7 +2380,7 @@ namespace CompetitiveRounds
                 out scaleCenti, out offsetXMilli, out offsetYMilli);
             string target = $"{submissionId}:{action}:{expectedRevision}:"
                           + $"{scaleCenti}:{offsetXMilli}:{offsetYMilli}";
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:cosmetic-review:{target}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:cosmetic-review:{target}");
             string url = $"{baseUrl}/api/v1/admin/cosmetic-review?admin_steam_id={Escape(adminSteamId)}"
                        + $"&submission_id={submissionId}&action={action}"
                        + $"&expected_revision={expectedRevision}&scale_centi={scaleCenti}"
@@ -2385,7 +2423,7 @@ namespace CompetitiveRounds
         // ── Admin ↔ artist management (v1.30, item 1) ─────────
         public static void AdminSetArtist(string adminSteamId, string targetSteamId, bool grant, Action<bool, string> callback = null)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:artist-set:{targetSteamId}:{(grant ? 1 : 0)}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:artist-set:{targetSteamId}:{(grant ? 1 : 0)}");
             string url = $"{baseUrl}/api/v1/admin/artists/set?admin_steam_id={Escape(adminSteamId)}&target_steam_id={Escape(targetSteamId)}&grant={(grant ? "true" : "false")}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
@@ -2396,7 +2434,7 @@ namespace CompetitiveRounds
 
         public static void AdminSetItemArtist(string adminSteamId, string sku, string artistSteamId, Action<bool, string> callback = null)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:item-artist:{sku}:{artistSteamId ?? ""}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:item-artist:{sku}:{artistSteamId ?? ""}");
             string url = $"{baseUrl}/api/v1/admin/shop/set-artist?admin_steam_id={Escape(adminSteamId)}&sku={Escape(sku)}&artist_steam_id={Escape(artistSteamId ?? "")}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
@@ -2409,7 +2447,7 @@ namespace CompetitiveRounds
         public static void FetchFlaggedMatches(string adminSteamId, bool includeReviewed = false, Action<bool> callback = null)
         {
             if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:list_flagged:");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:list_flagged:");
             string url = $"{baseUrl}/api/v1/admin/flagged-matches?admin_steam_id={adminSteamId}&hmac_signature={sig}&include_reviewed={(includeReviewed?"true":"false")}&limit=50";
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
             {
@@ -2427,7 +2465,7 @@ namespace CompetitiveRounds
         public static void FetchBannedUsers(string adminSteamId, Action<bool> callback = null)
         {
             if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:list_bans:");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:list_bans:");
             string url = $"{baseUrl}/api/v1/admin/banned-users?admin_steam_id={adminSteamId}&hmac_signature={sig}";
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
             {
@@ -2439,28 +2477,28 @@ namespace CompetitiveRounds
 
         public static void AdminBan(string adminSteamId, string targetSteamId, string reason, Action<bool, string> callback = null)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:ban:{targetSteamId}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:ban:{targetSteamId}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"target_steam_id\":\"{Escape(targetSteamId)}\",\"reason\":\"{Escape(reason)}\",\"hmac_signature\":\"{sig}\"}}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/ban", body, (ok, resp) => callback?.Invoke(ok, resp)));
         }
 
         public static void AdminUnban(string adminSteamId, string targetSteamId, Action<bool, string> callback = null)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:unban:{targetSteamId}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:unban:{targetSteamId}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"target_steam_id\":\"{Escape(targetSteamId)}\",\"hmac_signature\":\"{sig}\"}}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/unban", body, (ok, resp) => callback?.Invoke(ok, resp)));
         }
 
         public static void AdminGrantAchievement(string adminSteamId, string targetSteamId, string achievementKey, Action<bool, string> callback = null)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:grant_achievement:{targetSteamId}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:grant_achievement:{targetSteamId}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"target_steam_id\":\"{Escape(targetSteamId)}\",\"achievement_key\":\"{Escape(achievementKey)}\",\"hmac_signature\":\"{sig}\"}}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/grant-achievement", body, (ok, resp) => callback?.Invoke(ok, resp)));
         }
 
         public static void AdminReverseSeries(string adminSteamId, string seriesId, string reason, Action<bool, string> callback = null)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:reverse_series:{seriesId}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:reverse_series:{seriesId}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"series_id\":\"{Escape(seriesId)}\",\"reason\":\"{Escape(reason)}\",\"hmac_signature\":\"{sig}\"}}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/reverse-series", body, (ok, resp) => callback?.Invoke(ok, resp)));
         }
@@ -2477,7 +2515,7 @@ namespace CompetitiveRounds
             // Bind the verdict as well as the flag. Otherwise a captured request
             // can be replayed with the opposite action. Bind the evidence revision
             // too, so an admin cannot close evidence that changed after opening it.
-            string sig = ComputeHmacHex(
+            string sig = ComputeAdminHmacHex(
                 $"admin:{adminSteamId}:review_flag:{flagId}:{action}:{evidenceRevision}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"flag_id\":\"{Escape(flagId)}\",\"review_action\":\"{Escape(action)}\",\"evidence_revision\":{evidenceRevision},\"signature_version\":3,\"hmac_signature\":\"{sig}\"}}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/review-flag", body, (ok, resp) => callback?.Invoke(ok, resp)));
@@ -2486,7 +2524,7 @@ namespace CompetitiveRounds
         public static void AdminResolveFlagRestoration(
             string adminSteamId, string flagId, Action<bool, string> callback = null)
         {
-            string sig = ComputeHmacHex(
+            string sig = ComputeAdminHmacHex(
                 $"admin:{adminSteamId}:resolve_flag_restoration:{flagId}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\","
                         + $"\"flag_id\":\"{Escape(flagId)}\","
@@ -2516,7 +2554,7 @@ namespace CompetitiveRounds
         public static void FetchAdminRecentSeries(string adminSteamId, Action<bool> callback = null)
         {
             if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:list_recent_series:");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:list_recent_series:");
             string url = $"{baseUrl}/api/v1/admin/recent-series?admin_steam_id={adminSteamId}&hmac_signature={sig}&limit=40";
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
             {
@@ -2532,7 +2570,7 @@ namespace CompetitiveRounds
         public static void AdminResolveTeamSeries(string adminSteamId, string seriesId, string action, int winnerTeam, Action<bool, string> callback = null)
         {
             string tgt = $"{seriesId}:{action}:{winnerTeam}";
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:resolve_team_series:{tgt}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:resolve_team_series:{tgt}");
             string q = $"action={action}&admin_steam_id={adminSteamId}&hmac_signature={sig}";
             if (action == "complete") q += $"&winner_team={winnerTeam}";
             string url = $"{baseUrl}/api/v1/admin/team/series/{seriesId}/resolve?{q}";
@@ -2542,7 +2580,7 @@ namespace CompetitiveRounds
         /// <summary>Reverse a COMPLETED 2v2 series (undo ratings/gold, cancel it).</summary>
         public static void AdminReverseTeamSeries(string adminSteamId, string seriesId, string reason, Action<bool, string> callback = null)
         {
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:reverse_team_series:{seriesId}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:reverse_team_series:{seriesId}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"series_id\":\"{Escape(seriesId)}\",\"reason\":\"{Escape(reason)}\",\"hmac_signature\":\"{sig}\"}}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/team/reverse-series", body, (ok, resp) => callback?.Invoke(ok, resp)));
         }
@@ -2644,7 +2682,7 @@ namespace CompetitiveRounds
         public static void FetchBugReports(string adminSteamId, Action<bool> callback = null)
         {
             if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:bug_reports:list");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:bug_reports:list");
             string url = $"{baseUrl}/api/v1/bug-reports?admin_steam_id={adminSteamId}&hmac_signature={sig}&limit=100";
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
             {
@@ -2661,7 +2699,7 @@ namespace CompetitiveRounds
         public static void FetchBugReportDetail(string adminSteamId, string reportId, Action<bool> callback = null)
         {
             if (string.IsNullOrEmpty(adminSteamId) || string.IsNullOrEmpty(reportId)) { callback?.Invoke(false); return; }
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:bug_reports:{reportId}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:bug_reports:{reportId}");
             string url = $"{baseUrl}/api/v1/bug-reports/{reportId}?admin_steam_id={adminSteamId}&hmac_signature={sig}&include_log=true";
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
             {
@@ -2801,7 +2839,7 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(adminSteamId) || string.IsNullOrEmpty(reportId))
             { callback?.Invoke(false, "missing args"); return; }
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:bug_reports_comment:{reportId}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:bug_reports_comment:{reportId}");
             string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\",\"hmac_signature\":\"{sig}\",\"comment\":\"{Escape(comment ?? "")}\"}}";
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/bug-reports/{reportId}/comment", body,
@@ -2812,7 +2850,7 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(adminSteamId) || string.IsNullOrEmpty(reportId) || string.IsNullOrEmpty(newStatus))
             { callback?.Invoke(false, "missing args"); return; }
-            string sig = ComputeHmacHex($"admin:{adminSteamId}:bug_reports_status:{reportId}");
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:bug_reports_status:{reportId}");
             var sb = new System.Text.StringBuilder();
             sb.Append("{");
             sb.Append($"\"admin_steam_id\":\"{Escape(adminSteamId)}\"");
@@ -4277,14 +4315,53 @@ namespace CompetitiveRounds
         // Session Info's "vs Name: XW-YL lifetime" used to scan the full local
         // history; with lazy loading the window may not reach old opponents, so
         // the counts now come from the server's H2H (whole matches table).
-        // steam_id -> [my wins, my losses]; fetched once per opponent per session.
+        // steam_id -> [my wins, my losses, my SERIES wins, my SERIES losses]
+        // (series = completed ranked BO3s vs that opponent — feeds the in-match
+        // "Total Series" HUD). Fetched once per opponent per session; a series
+        // completing re-arms the fetch (OnSeriesCompletedVsOpponent).
         public static readonly Dictionary<string, int[]> CachedOppLifetime = new Dictionary<string, int[]>();
         private static readonly HashSet<string> _oppLifetimeRequested = new HashSet<string>();
+        // Earliest Time.realtimeSinceStartup at which a re-fetch for this
+        // opponent may fire. Two jobs (both review finds): (a) a FAILED fetch
+        // must not be retried on the HUD's 0.25s cache cadence (4 req/s loop
+        // while the server is down) — 10s backoff; (b) after a series-complete
+        // bump, an immediate refetch could race the reporter's in-flight
+        // /matches POST and overwrite the +1 with the server's PRE-commit
+        // count — 20s quiet window before reconciling.
+        private static readonly Dictionary<string, float> _oppLifetimeRefetchAfter = new Dictionary<string, float>();
+
+        /// <summary>Called by GameStateWatcher the moment a ranked BO3 vs this
+        /// opponent completes — from the local BO3-decision path (the one that
+        /// actually runs on both clients) or, for DC/server-confirmed-only
+        /// completions, from IncrementSessionRankedSeries; sessionSeriesCounted
+        /// guarantees exactly one call per series. Bumps the cached H2H series
+        /// tally instantly so the HUD's "Total Series" updates without a
+        /// round-trip, and re-arms the fetch (after a quiet window) so a later
+        /// FetchOpponentLifetime reconciles with the server's count.</summary>
+        public static void OnSeriesCompletedVsOpponent(string oppSteamId, bool won)
+        {
+            if (string.IsNullOrEmpty(oppSteamId) || oppSteamId.StartsWith("photon_")) return;
+            int[] v;
+            if (CachedOppLifetime.TryGetValue(oppSteamId, out v) && v != null && v.Length >= 4)
+            {
+                if (won) v[2]++; else v[3]++;
+            }
+            // 90s, not 20 (Codex review find): the deciding /matches report can
+            // sit in the retry outbox past 30s during an API blip — a refetch
+            // inside that window reads the PRE-commit count and overwrites the
+            // +1 bump for the rest of the session. Stale-for-90s beats
+            // wrong-forever; the bump itself keeps the HUD correct meanwhile.
+            _oppLifetimeRefetchAfter[oppSteamId] = Time.realtimeSinceStartup + 90f;
+            _oppLifetimeRequested.Remove(oppSteamId);
+        }
 
         public static void FetchOpponentLifetime(string oppSteamId)
         {
             string me = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(oppSteamId) || string.IsNullOrEmpty(me) || me == "unknown" || oppSteamId == me) return;
+            float refetchAfter;
+            if (_oppLifetimeRefetchAfter.TryGetValue(oppSteamId, out refetchAfter)
+                && Time.realtimeSinceStartup < refetchAfter) return;
             if (!_oppLifetimeRequested.Add(oppSteamId)) return;
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/players/{oppSteamId}?viewer_steam_id={me}",
@@ -4292,13 +4369,19 @@ namespace CompetitiveRounds
                 {
                     if (!ok || string.IsNullOrEmpty(resp))
                     {
-                        _oppLifetimeRequested.Remove(oppSteamId);  // allow a retry later
+                        // Allow a retry later — but on a BACKOFF, not on the
+                        // HUD's 0.25s cache cadence (review find: a failing
+                        // fetch became a 4 req/s loop for the whole match).
+                        _oppLifetimeRefetchAfter[oppSteamId] = Time.realtimeSinceStartup + 10f;
+                        _oppLifetimeRequested.Remove(oppSteamId);
                         return;
                     }
                     // h2h_*_wins are the VIEWER's wins (main.py H2H orientation).
                     int w = ExtractJsonInt(resp, "h2h_ranked_wins") + ExtractJsonInt(resp, "h2h_casual_wins");
                     int l = ExtractJsonInt(resp, "h2h_ranked_losses") + ExtractJsonInt(resp, "h2h_casual_losses");
-                    CachedOppLifetime[oppSteamId] = new[] { w, l };
+                    int sw = ExtractJsonInt(resp, "h2h_series_wins");
+                    int sl = ExtractJsonInt(resp, "h2h_series_losses");
+                    CachedOppLifetime[oppSteamId] = new[] { w, l, sw, sl };
                     NativeUI.MarkDirty();
                 }));
         }

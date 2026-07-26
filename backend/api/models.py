@@ -94,6 +94,12 @@ class Player(Base):
     # leaderboard player-detail view so testers can tell at a glance
     # whether a player is running a build that has a given fix.
     mod_version = Column(String(16), nullable=True)
+    # Monotonic steam-auth arming (security A4): stamped once at the account's
+    # first VERIFIED steam session mint, never cleared. While set, session
+    # enforcement cannot be bypassed by claiming an old X-Mod-Version.
+    # steam_sessions rows are pruned ~1 day after expiry, so this column is
+    # the durable record. Migration 151.
+    steam_auth_seen_at = Column(DateTime(timezone=True), nullable=True)
 
     glicko = relationship("GlickoRating", back_populates="player", uselist=False)
     rating_history = relationship("RatingHistory", back_populates="player")
