@@ -4704,7 +4704,7 @@ namespace CompetitiveRounds
 
         // ── Ranked Queue ──────────────────────────────────────
 
-        public enum QueueState { Idle, Searching, Matched, ReadySent }
+        public enum QueueState { Idle, Searching, Matched, ReadySent, Leaving }
 
         [Serializable]
         public class QueuePollData
@@ -4731,9 +4731,28 @@ namespace CompetitiveRounds
         public static bool IsQueuePolling { get; private set; } = false;
         private static float queuePollTimer = 0f;
         private static float queuePollInterval = 3f;
+        // Leaving-state safety timeout (learning #33): the leave callback always
+        // fires (success, terminal failure, consent-block, or version-gate), but
+        // if the coroutine host dies the join guards force-recover past this age
+        // so a stuck Leaving state can never deadlock re-joining. Must exceed
+        // the retry worst case (3 attempts × 10s timeout + 2 × 2s delay = 34s).
+        private const float LEAVE_STUCK_TIMEOUT = 45f;
+        private static float rankedLeavingSince = -999f;
 
         public static void JoinQueue(string steamId, string displayName, string region, bool rankedOnly)
         {
+            // A join landing while a leave retry is still in flight could get
+            // its fresh row deleted by that retry — suppress until the leave
+            // resolves (review finding), force-recover if stuck.
+            if (CurrentQueueState == QueueState.Leaving)
+            {
+                if (Time.realtimeSinceStartup - rankedLeavingSince < LEAVE_STUCK_TIMEOUT)
+                {
+                    CompetitiveUI.ShowNotification("Still leaving the queue — try again in a moment.", new Color(1f, 0.6f, 0.2f));
+                    return;
+                }
+                CurrentQueueState = QueueState.Idle;
+            }
             // Use current Photon region if not specified
             if (string.IsNullOrEmpty(region))
             {
@@ -4767,19 +4786,39 @@ namespace CompetitiveRounds
 
         public static void LeaveQueue(string steamId)
         {
+            if (CurrentQueueState == QueueState.Leaving) return; // leave already in flight
             if (CurrentQueueState == QueueState.Idle && !IsQueuePolling) return; // Already idle
-            CurrentQueueState = QueueState.Idle;
+            // Hold in Leaving (not Idle) until the server confirms: a 401/503
+            // on the leave endpoint used to strand our row server-side while
+            // the client showed Idle, ghost-locking other queuers until the
+            // janitor sweep (review finding). The request is
+            // idempotent, so retries are safe; Idle is finalized only in the
+            // callback, which fires on every path.
+            CurrentQueueState = QueueState.Leaving;
+            rankedLeavingSince = Time.realtimeSinceStartup;
             IsQueuePolling = false;
             LastPollData = null;
             NativeUI.MarkDirty();
 
-            Plugin.Instance.StartCoroutine(PostRequest(
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/queue/leave?steam_id={Escape(steamId)}",
                 "",
                 (success, response) =>
                 {
-                    Plugin.Log.LogInfo("[QUEUE] Left ranked queue");
-                }
+                    if (success)
+                        Plugin.Log.LogInfo("[QUEUE] Left ranked queue");
+                    else
+                    {
+                        // Can't fix the row from here — the queue janitor prunes
+                        // non-polling rows, so surface it and release the UI.
+                        Plugin.Log.LogWarning($"[QUEUE] Leave failed after retries: {response} — server will prune the stale row");
+                        CompetitiveUI.ShowNotification("Couldn't confirm queue leave — the server will clear you shortly.", new Color(1f, 0.6f, 0.2f), 5f);
+                    }
+                    if (CurrentQueueState == QueueState.Leaving)
+                        CurrentQueueState = QueueState.Idle;
+                    NativeUI.MarkDirty();
+                },
+                maxRetries: 3, retryDelay: 2f
             ));
         }
 
@@ -4800,18 +4839,10 @@ namespace CompetitiveRounds
 
             if (string.IsNullOrEmpty(oppSteamId))
             {
-                // No opponent data — just leave queue as fallback
-                CurrentQueueState = QueueState.Idle;
-                IsQueuePolling = false;
-                Plugin.Instance.StartCoroutine(PostRequest(
-                    $"{baseUrl}/api/v1/queue/leave?steam_id={Escape(steamId)}",
-                    "",
-                    (success, response) =>
-                    {
-                        Plugin.Log.LogInfo("[QUEUE] Left ranked queue (decline fallback)");
-                    }
-                ));
-                NativeUI.MarkDirty();
+                // No opponent data — just leave queue as fallback (shares
+                // LeaveQueue's Leaving-state + retry hardening)
+                Plugin.Log.LogInfo("[QUEUE] Decline without opponent data — leaving queue as fallback");
+                LeaveQueue(steamId);
                 return;
             }
 
@@ -5476,7 +5507,7 @@ namespace CompetitiveRounds
         // 2v2 RANKED (Phase 2 — client side)
         // ════════════════════════════════════════════════════════════
 
-        public enum TeamQueueState { Idle, Searching, Matched, ReadySent }
+        public enum TeamQueueState { Idle, Searching, Matched, ReadySent, Leaving }
 
         [Serializable]
         public class TeamQueueMember
@@ -5541,6 +5572,7 @@ namespace CompetitiveRounds
         private const float TEAM_QUEUE_LIST_INTERVAL = 2f;
 
         public static TeamQueueState CurrentTeamQueueState { get; private set; } = TeamQueueState.Idle;
+        private static float teamLeavingSince = -999f;
         public static TeamQueuePollData LastTeamPollData { get; private set; }
         public static string ActiveTeamSeriesId { get; set; }
         public static bool IsTeamQueuePolling { get; private set; } = false;
@@ -5558,6 +5590,17 @@ namespace CompetitiveRounds
 
         public static void JoinTeamQueue(string steamId, string displayName, string region, string queueType = "auto")
         {
+            // Suppress joining while a leave retry is in flight (same rationale
+            // as JoinQueue); force-recover past the safety timeout.
+            if (CurrentTeamQueueState == TeamQueueState.Leaving)
+            {
+                if (Time.realtimeSinceStartup - teamLeavingSince < LEAVE_STUCK_TIMEOUT)
+                {
+                    CompetitiveUI.ShowNotification("Still leaving the 2v2 queue — try again in a moment.", new Color(1f, 0.6f, 0.2f));
+                    return;
+                }
+                CurrentTeamQueueState = TeamQueueState.Idle;
+            }
             if (string.IsNullOrEmpty(region))
             {
                 try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
@@ -5591,16 +5634,35 @@ namespace CompetitiveRounds
 
         public static void LeaveTeamQueue(string steamId)
         {
+            if (CurrentTeamQueueState == TeamQueueState.Leaving) return; // leave already in flight
             if (CurrentTeamQueueState == TeamQueueState.Idle && !IsTeamQueuePolling) return;
-            CurrentTeamQueueState = TeamQueueState.Idle;
+            // Leaving until the server confirms — a failed leave (401/503
+            // queue_contended) with local state already Idle strands our row
+            // and can ghost-lock the other three (review finding).
+            // Idempotent request; Idle finalized only in the callback.
+            CurrentTeamQueueState = TeamQueueState.Leaving;
+            teamLeavingSince = Time.realtimeSinceStartup;
             IsTeamQueuePolling = false;
             LastTeamPollData = null;
             ActiveTeamSeriesId = null;
             Plugin.ClearPending2v2Slot();
             NativeUI.MarkDirty();
-            Plugin.Instance.StartCoroutine(PostRequest(
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/team/queue/leave?steam_id={Escape(steamId)}", "",
-                (success, response) => { Plugin.Log.LogInfo("[TEAM-QUEUE] Left 2v2 queue"); }
+                (success, response) =>
+                {
+                    if (success)
+                        Plugin.Log.LogInfo("[TEAM-QUEUE] Left 2v2 queue");
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[TEAM-QUEUE] Leave failed after retries: {response} — server will prune the stale row");
+                        CompetitiveUI.ShowNotification("Couldn't confirm 2v2 queue leave — the server will clear you shortly.", new Color(1f, 0.6f, 0.2f), 5f);
+                    }
+                    if (CurrentTeamQueueState == TeamQueueState.Leaving)
+                        CurrentTeamQueueState = TeamQueueState.Idle;
+                    NativeUI.MarkDirty();
+                },
+                maxRetries: 3, retryDelay: 2f
             ));
         }
 
@@ -6777,7 +6839,7 @@ namespace CompetitiveRounds
         public static int CachedOvtLeaderboardTotal = 0;
 
         // Live queue state (drives the 1v2 tab + auto room-join).
-        public static string OvtQueueStatus = "";        // ""/searching/ready_join
+        public static string OvtQueueStatus = "";        // ""/searching/ready_join/leaving
         public static int OvtQueueCount = 0;
         public static string ActiveOvt1v2SeriesId = null;
         public static int OvtMySide = 0;                 // 1 solo, 2 duo
@@ -6804,11 +6866,23 @@ namespace CompetitiveRounds
         private static int _ovtLastPreferredSide = 0;
         private static bool _ovtLastSoloExtraPick = false;
         private static float _ovtLastAutoRejoinAt = -999f;
+        private static float _ovtLeavingSince = -999f;
 
         public static void OvtJoinQueue(int preferredSide, bool soloExtraPick)
         {
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            // Suppress joining while a leave retry is in flight (same rationale
+            // as JoinQueue); force-recover past the safety timeout.
+            if (OvtQueueStatus == "leaving")
+            {
+                if (Time.realtimeSinceStartup - _ovtLeavingSince < LEAVE_STUCK_TIMEOUT)
+                {
+                    CompetitiveUI.ShowNotification("Still leaving the 1v2 queue — try again in a moment.", new Color(1f, 0.6f, 0.2f));
+                    return;
+                }
+                OvtQueueStatus = "";
+            }
             // The 1v2 queue has NO ready-up consent step (joining IS consent,
             // learning #127) — so unlike 1v1/2v2, a lock fires whenever a 3rd
             // player shows up, possibly hours later. Queueing from inside a
@@ -6842,7 +6916,8 @@ namespace CompetitiveRounds
         public static void OvtLeaveQueue()
         {
             string sid = MatchTracker.LocalSteamId;
-            IsOvtQueuePolling = false; OvtQueueStatus = ""; OvtQueueCount = 0;
+            if (OvtQueueStatus == "leaving") return; // leave already in flight
+            IsOvtQueuePolling = false; OvtQueueCount = 0;
             OvtLockedSoloName = null; OvtLockedDuo = null;
             // Leaving the queue abandons any husk lock along with it — the
             // server dissolves a zero-game lock (canceling the series and
@@ -6851,9 +6926,31 @@ namespace CompetitiveRounds
             // Leave while inside an ovt_ room).
             ActiveOvt1v2SeriesId = null;
             Plugin.ClearPendingOvtSlot();
-            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
-            Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/ovt/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}", "", (ok, resp) => { UpdateOvtQueueList(force: true); NativeUI.MarkDirty(); }));
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") { OvtQueueStatus = ""; return; }
+            // "leaving" holds until the server confirms — a failed leave with
+            // local state already cleared strands our row (and any husk lock)
+            // server-side, ghost-locking the other two until the 75s janitor
+            // (review finding). Idempotent request; "" finalized only
+            // in the callback.
+            OvtQueueStatus = "leaving";
+            _ovtLeavingSince = Time.realtimeSinceStartup;
+            NativeUI.MarkDirty();
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                $"{baseUrl}/api/v1/ovt/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}", "",
+                (ok, resp) =>
+                {
+                    if (ok)
+                        Plugin.Log.LogInfo("[1v2] Left 1v2 queue");
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[1v2] Leave failed after retries: {resp} — server will prune the stale row");
+                        CompetitiveUI.ShowNotification("Couldn't confirm 1v2 queue leave — the server will clear you shortly.", new Color(1f, 0.6f, 0.2f), 5f);
+                    }
+                    if (OvtQueueStatus == "leaving") OvtQueueStatus = "";
+                    UpdateOvtQueueList(force: true);
+                    NativeUI.MarkDirty();
+                },
+                maxRetries: 3, retryDelay: 2f));
         }
 
         /// <summary>Throttled queue poll. Ticked from BOTH the plugin-level
