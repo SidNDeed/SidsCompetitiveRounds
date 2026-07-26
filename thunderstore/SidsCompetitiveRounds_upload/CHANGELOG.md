@@ -1,3 +1,19 @@
+## v1.34.4 — 2026-07-26 — 1v2 extra-pick crash fix + HTTPS endpoint
+
+### 1v2
+- **Fixed the Solo Extra Pick hang.** With the option on, the solo player picked their first card and the round froze — the solo was then dropped and the other two saw "opponent disconnected". Cause was in the base game: it clears the current picker the instant a card is chosen, and the follow-up deal then looked that picker up with the cleared value and threw. Nothing ever hit it before because the extra pick is the only mode that asks for a second card. Reported by Stan (#86) and NotNic (#85), whose logs together pinned it down.
+- The second card is also now selectable at all — the same cleared value disabled card selection, so even without the crash the extra pick could not have been used.
+
+### Connection
+- **The mod now talks to the server over HTTPS.** Traffic used to be plain HTTP, so anything on the network path (public wifi, a hostile ISP) could read your session, chat, and Steam ID. Existing installs are moved over automatically on first launch; a custom server address is left alone.
+- If the secure endpoint cannot be reached from your network, the mod falls back to the old one for that session and retries the secure one next launch, so nobody gets stranded.
+
+### Cosmetics
+- **Crown and Dark Aura now use their approved placement.** Both had adjustments signed off in the artist review flow that never made it into a build (#84); they now render at the size and position that were approved.
+
+### Server
+- Hardened an unauthenticated stats endpoint that could be used to read the database, and closed two internal endpoints that trusted the caller's network address instead of a key. Both fixed server-side already — no action needed.
+
 ## v1.34.3 — 2026-07-24 — First community cosmetic ships + gambler ping fix
 
 ### Cosmetics
