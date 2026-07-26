@@ -1,0 +1,62 @@
+# TLS overlay — apply ONLY after the certificate exists on the LXC at
+# /opt/competitive-rounds/certs/{fullchain,privkey}.pem (see the acme.sh
+# DNS-01 step in docs/https-migration.md, Appendix A2).
+#
+# Deliberately a SEPARATE file rather than an edit to docker-compose.yml: the
+# nginx container will not start without the cert files, so keeping it out of
+# the base compose means a routine `/deploy-backend` can never bring it up
+# prematurely and take the API down with it.
+#
+# Bring up:
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --build
+# Roll back (instantly, 8443 was never touched):
+#   docker compose stop nginx && docker compose up -d --build api
+
+networks:
+  edge:
+    driver: bridge
+    ipam:
+      config:
+        # Static subnet so nginx can hold a FIXED address. uvicorn's
+        # --forwarded-allow-ips matches exact IPs (no CIDR), so a
+        # compose-assigned dynamic address would silently stop being trusted
+        # after any recreate — and the symptom would be the whole community
+        # sharing one rate-limit bucket, not an obvious error.
+        - subnet: 172.30.0.0/24
+
+services:
+
+  api:
+    # Trust X-Forwarded-For ONLY from the nginx container.
+    #
+    # Both entry paths stay correct simultaneously:
+    #   - via nginx (8444): source == 172.30.0.10, trusted -> real client IP
+    #   - direct  (8443):   source == the player, untrusted -> XFF ignored,
+    #                       real IP used (unchanged from today)
+    #   - forged XFF straight at 8443: ignored, same reason
+    #
+    # NEVER set this to "*" while 8443 is publicly reachable — that turns the
+    # raw port into a source-IP spoofing primitive that defeats the rate
+    # limiter. Still exactly ONE worker (learning #125).
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "172.30.0.10"]
+    networks:
+      - default
+      - edge
+
+  nginx:
+    image: nginx:alpine
+    container_name: comp-rounds-nginx
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "8444:8444"
+    volumes:
+      - ./nginx/app.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/certs:ro
+    networks:
+      edge:
+        ipv4_address: 172.30.0.10
+    security_opt:
+      - apparmor:unconfined

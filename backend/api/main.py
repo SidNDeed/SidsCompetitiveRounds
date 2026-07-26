@@ -1160,7 +1160,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.34.3"
+LATEST_MOD_VERSION = "1.34.4"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -4319,9 +4319,22 @@ async def set_player_card_tier(
     return {"status": "ok", "card_name": card_name, "filter": f, "tier": t or None}
 
 
+# Allowlist: request value -> fixed SQL fragment. The `enum=` kwarg on Query is
+# OpenAPI METADATA ONLY — it validates nothing, so before this map an arbitrary
+# sort_by reached the ORDER BY interpolation below verbatim (unauthenticated
+# blind SQLi; proven with sort_by=zzz_not_a_column returning a Postgres error).
+# Same shape as team_leaderboard's sort_map. Unknown values fall back to the
+# default rather than 422 so no client can ever be broken by a new value.
+_CARD_SORT_MAP = {
+    "times_picked": "times_picked",
+    "win_rate": "win_rate",
+    "card_name": "card_name",
+}
+
+
 @app.get("/api/v1/cards", response_model=list[CardStatEntry], tags=["Cards"])
 async def get_card_stats(
-    sort_by: str = Query("times_picked", enum=["times_picked", "win_rate", "card_name"]),
+    sort_by: str = Query("times_picked"),
     order: str = Query("desc", enum=["asc", "desc"]),
     limit: int = Query(50, ge=1, le=200),
     min_picks: int = Query(5, ge=0, description="Minimum times picked to appear"),
@@ -4384,7 +4397,7 @@ async def get_card_stats(
         WHERE 1=1 {player_filter} {ranked_filter}
         GROUP BY mc.card_name, mc.card_rarity, o.times_offered, o.pass_rate
         HAVING COUNT(*) >= :min_picks
-        ORDER BY {sort_by} {"DESC" if order == "desc" else "ASC"}
+        ORDER BY {_CARD_SORT_MAP.get(sort_by, "times_picked")} {"DESC" if order == "desc" else "ASC"}
         LIMIT :limit
     """)
 
@@ -10501,16 +10514,20 @@ async def internal_comment_on_bug_report(
     report_id: str,
     req: BugReportInternalCommentRequest,
     request: Request,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Internal-only commenting endpoint for the assistant. No HMAC; gated to
-    localhost so only processes inside the LXC (or via ssh tunnel) can post.
+    """Internal-only commenting endpoint for the assistant. Requires
+    X-Internal-Key like every other /internal/ route (see below).
     actor_name is free-form ('Claude', 'System', 'cron')."""
-    client_host = (request.client.host if request.client else "") or ""
-    # Accept loopback + the Docker bridge gateway range (172.16.0.0/12).
-    if not (client_host in ("127.0.0.1", "::1", "localhost")
-            or client_host.startswith("172.")):
-        raise HTTPException(403, f"Internal endpoint — local-only (saw {client_host})")
+    # Was source-IP-only: loopback OR client_host.startswith("172."). Two
+    # problems. (1) "172." matches all of 172.0.0.0/8, most of which is public
+    # routable space, not just the Docker bridge. (2) The moment a TLS reverse
+    # proxy sits in front, EVERY external request arrives from the proxy's
+    # bridge address and satisfies the check — this endpoint takes a free-form
+    # actor_name and the bot DMs the result to the reporter, so that would mean
+    # attacker-authored Discord DMs attributed to staff. Key-only closes both.
+    _require_internal_key(x_internal_key)
     try:
         rid = UUID(report_id)
     except (ValueError, TypeError):
@@ -10532,17 +10549,17 @@ async def user_comment_on_bug_report(
     bug_number: int,
     req: BugReportUserCommentRequest,
     request: Request,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
     """A reporter adds a comment to their OWN ticket via a Discord DM, relayed
-    by the bot. Local-network gated (only the in-cluster bot reaches this);
+    by the bot. Bot-key gated (only the in-cluster bot reaches this);
     ownership is verified by matching the requester's Discord id to the
     report's reporter. 403 if it isn't their ticket / their Discord isn't
     linked, 404 if the bug number doesn't exist."""
-    client_host = (request.client.host if request.client else "") or ""
-    if not (client_host in ("127.0.0.1", "::1", "localhost")
-            or client_host.startswith("172.")):
-        raise HTTPException(403, f"Internal endpoint — local-only (saw {client_host})")
+    # Key-gated, not source-IP-gated — same reasoning as
+    # internal_comment_on_bug_report above. The bot already holds the key.
+    _require_internal_key(x_internal_key)
     comment = (req.comment or "").strip()
     if not comment:
         raise HTTPException(400, "Comment cannot be empty")
@@ -10608,6 +10625,14 @@ def _verify_admin_hmac(admin_steam_id: str, action: str, target: str, signature)
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(signature, expected)
+
+
+def _require_internal_key(x_internal_key: str | None) -> None:
+    """Shared gate for /internal/ routes. Fails CLOSED when API_SECRET_KEY is
+    unset — an empty expected value must never make every request pass."""
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or x_internal_key != expected:
+        raise HTTPException(status_code=403, detail="Invalid internal key")
 
 
 async def _is_admin(db: AsyncSession, steam_id: str) -> bool:

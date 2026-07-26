@@ -114,7 +114,7 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_eyes_hearts",  DisplayName = "Heart Eyes",     Slot = CharacterItemType.Eyes,   PngFile = "eyes_hearts.png",  Scale = 1.0f, Offset = new Vector2(0f, 0.10f) },
             new CosmeticDef { Sku = "face_mouth_stache", DisplayName = "Moustache",      Slot = CharacterItemType.Mouth,  PngFile = "mouth_stache.png", Scale = 0.9f, Offset = new Vector2(0f, -0.15f) },
             new CosmeticDef { Sku = "face_mouth_stitch", DisplayName = "Stitched Grin",  Slot = CharacterItemType.Mouth,  PngFile = "mouth_stitch.png", Scale = 0.8f, Offset = new Vector2(0f, -0.15f) },
-            new CosmeticDef { Sku = "face_detail_crown", DisplayName = "Crown",          Slot = CharacterItemType.Detail, PngFile = "detail_crown.png", Scale = 1.1f, Offset = new Vector2(0f, 0.55f) },
+            new CosmeticDef { Sku = "face_detail_crown", DisplayName = "Crown",          Slot = CharacterItemType.Detail, PngFile = "detail_crown.png", Scale = 1.6f, Offset = new Vector2(-0.028f, 4.499f) },
             new CosmeticDef { Sku = "face_detail_halo",  DisplayName = "Halo",           Slot = CharacterItemType.Detail, PngFile = "detail_halo.png",  Scale = 1.1f, Offset = new Vector2(0f, 0.75f) },
             // July 12 round 3: first community-artist cosmetics (lopidav / Nix).
             new CosmeticDef { Sku = "face_detail_sprout",   DisplayName = "Sprout",        Slot = CharacterItemType.Detail, PngFile = "detail_sprout.png",   Scale = 1.1f, Offset = new Vector2(0f, 0.55f) },
@@ -138,7 +138,7 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_detail_sun_halo",      DisplayName = "Sunburst Halo",    Slot = CharacterItemType.Detail, PngFile = "detail_sun_halo.png",      Scale = 1.1f, Offset = new Vector2(0f, 0.10f) },
             new CosmeticDef { Sku = "face_detail_knight_helm",   DisplayName = "Knight Great-Helm",Slot = CharacterItemType.Detail, PngFile = "detail_knight_helm.png",   Scale = 1.55f, Offset = new Vector2(0f, 0.05f) },
             new CosmeticDef { Sku = "face_detail_mini_flags",    DisplayName = "Rally Flags",      Slot = CharacterItemType.Detail, PngFile = "detail_mini_flags.png",    Scale = 1.0f, Offset = new Vector2(0f, 0.15f) },
-            new CosmeticDef { Sku = "face_detail_dark_aura",     DisplayName = "Dark Aura",        Slot = CharacterItemType.Detail, PngFile = "detail_dark_aura.png",     Scale = 1.45f, Offset = new Vector2(0f, 0.05f), Fps = 7f },
+            new CosmeticDef { Sku = "face_detail_dark_aura",     DisplayName = "Dark Aura",        Slot = CharacterItemType.Detail, PngFile = "detail_dark_aura.png",     Scale = 2.25f, Offset = new Vector2(0.032f, 1.17f), Fps = 7f },
             new CosmeticDef { Sku = "face_detail_energy_orbs",   DisplayName = "Energy Orbs",      Slot = CharacterItemType.Detail, PngFile = "detail_energy_orbs.png",   Scale = 1.0f, Offset = new Vector2(0f, 0.05f), Fps = 7f },
             new CosmeticDef { Sku = "face_detail_tattered_cape", DisplayName = "Tattered Cape",    Slot = CharacterItemType.Detail, PngFile = "detail_tattered_cape.png", Scale = 1.7f, Offset = new Vector2(0f, -0.10f) },
             // July 15: Nix's animated crown — 13 frames @ 3.6fps (twinkling lights +

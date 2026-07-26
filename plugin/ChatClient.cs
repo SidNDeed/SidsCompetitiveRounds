@@ -106,14 +106,45 @@ namespace CompetitiveRounds
             try { OnMessage?.Invoke(echo); } catch { }
         }
 
+        /// <summary>Set by ApiClient when its TLS probe fails and it falls back to
+        /// the legacy plaintext endpoint. Read inside the reconnect loop rather than
+        /// captured once, so an in-flight loop picks it up on its next iteration.
+        /// Session-scoped; never persisted.</summary>
+        private static volatile string overrideBase;
+
+        /// <summary>Point chat at a different base URL for the rest of the session and
+        /// drop the current socket so the loop re-derives its ws/wss URL immediately.
+        /// Without this, a loop that started against a dead wss:// host would retry
+        /// that same dead host forever — the URL used to be computed once at entry.</summary>
+        public static void Retarget(string newBaseHttp)
+        {
+            if (string.IsNullOrWhiteSpace(newBaseHttp)) return;
+            overrideBase = newBaseHttp;
+            Plugin.Log.LogInfo($"[CHAT] retargeting to {newBaseHttp}");
+            try { socket?.Abort(); } catch { }   // wakes the loop; it reconnects on backoff
+        }
+
+        private static string ResolveBaseHttp()
+        {
+            // Precedence: session override (TLS fallback) > configured value >
+            // compiled default. IsNullOrWhiteSpace rather than `?? ` because a
+            // player who "resets" the key by blanking the line leaves an empty
+            // STRING, which Config.Bind treats as a valid value and will not
+            // replace — that would make `new Uri()` throw on every reconnect.
+            if (!string.IsNullOrWhiteSpace(overrideBase)) return overrideBase;
+            string cfg = Plugin.ApiBaseUrl?.Value;
+            return string.IsNullOrWhiteSpace(cfg) ? Plugin.DefaultApiUrl : cfg;
+        }
+
         private static async Task RunLoop(CancellationToken token)
         {
             int backoffSec = 2;
-            string baseHttp = Plugin.ApiBaseUrl?.Value ?? "http://competitive-rounds.duckdns.org:8443";
-            string wsUrl = baseHttp.Replace("https://", "wss://").Replace("http://", "ws://") + "/api/v1/ws/chat";
 
             while (running && !token.IsCancellationRequested)
             {
+                // Re-derived every iteration so a mid-session Retarget takes effect.
+                string baseHttp = ResolveBaseHttp().TrimEnd('/');
+                string wsUrl = baseHttp.Replace("https://", "wss://").Replace("http://", "ws://") + "/api/v1/ws/chat";
                 Task senderTask = null;
                 try
                 {

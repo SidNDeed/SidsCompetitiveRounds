@@ -22,8 +22,15 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.34.3";   // July 24: bundles the first workflow-reviewed community cosmetic; gates stay at 1.34.0
+        public const string ModVersion = "1.34.4";   // July 26: 1v2 extra-pick crash fix, HTTPS endpoint migration, crown/dark-aura placement
         public const string RequiredGameVersion = "1.1.2";
+
+        // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
+        // every pre-TLS install has written into its BepInEx config; it is matched
+        // literally by the one-time migration in Awake and must NEVER change. Plain
+        // 8443 keeps serving until MIN_MOD_VERSION is raised past this release.
+        internal const string LegacyApiUrl  = "http://competitive-rounds.duckdns.org:8443";
+        internal const string DefaultApiUrl = "https://competitive-rounds.duckdns.org:8444";
 
         internal static ManualLogSource Log;
         internal static CompetitiveRoundsBehaviour Instance;
@@ -31,6 +38,7 @@ namespace CompetitiveRounds
 
         // Config entries
         internal static ConfigEntry<string> ApiBaseUrl;
+        internal static ConfigEntry<bool> HttpsMigrationDone;
         internal static ConfigEntry<bool> RankedEnabled;
         internal static ConfigEntry<bool> RankedDisabledByConsent;
         internal static ConfigEntry<bool> ShowNotifications;
@@ -177,11 +185,67 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
 
+            // TLS is served on 8444 (80/443 on this WAN IP belong to an unrelated
+            // device, so the cert is issued via DNS-01 and served on a high port —
+            // a cert is port-agnostic). Plain 8443 stays up until MIN_MOD_VERSION
+            // is raised past this release, so an un-migrated client keeps working.
             ApiBaseUrl = Config.Bind(
                 "API", "BaseUrl",
-                "http://competitive-rounds.duckdns.org:8443",
+                DefaultApiUrl,
                 "Base URL of the Competitive ROUNDS API server"
             );
+
+            // One-time HTTPS migration. Config.Bind writes its default to
+            // BepInEx/config/com.competitiverounds.mod.cfg on FIRST run and never
+            // revisits it, so changing the default alone migrates nobody — every
+            // existing install would stay pinned to plaintext forever.
+            //
+            // Only the EXACT pre-TLS default is rewritten. A user (or Sid) pointing
+            // at a LAN IP or any other host chose that deliberately and is left
+            // alone. Comparison is trim + trailing-slash tolerant because the value
+            // is hand-editable; assigning .Value persists it back to the .cfg.
+            // Gated on a ONE-SHOT flag, not just the value comparison. Without it
+            // the rewrite re-runs every Awake, which would silently undo the only
+            // per-player support lever there is ("set BaseUrl back to the old
+            // endpoint") on the very next launch.
+            HttpsMigrationDone = Config.Bind(
+                "API", "HttpsMigrationDone", false,
+                "Internal: set once the one-time HTTPS endpoint migration has run. " +
+                "Clear it only if you also want BaseUrl re-migrated on next launch."
+            );
+            try
+            {
+                if (!HttpsMigrationDone.Value)
+                {
+                    string cur = (ApiBaseUrl.Value ?? "").Trim().TrimEnd('/');
+                    if (string.Equals(cur, LegacyApiUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        ApiBaseUrl.Value = DefaultApiUrl;
+                        Log.LogInfo($"[API] BaseUrl migrated to HTTPS: {DefaultApiUrl}");
+                    }
+                    HttpsMigrationDone.Value = true;
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[API] BaseUrl migration skipped: {ex.Message}"); }
+
+            // Adds TLS 1.2 to the ServicePointManager protocol set for the two
+            // System.Net.WebClient art downloads (CardImageLoader, CustomCosmetics),
+            // which previously each set it themselves inside code paths that only
+            // run when art is missing — so a normal session never executed it.
+            //
+            // It does NOT affect the API or chat, despite the obvious assumption:
+            // UnityWebRequest uses Unity's native TLS stack, and ROUNDS' Mono
+            // ClientWebSocket hardcodes `SslProtocols.Tls|Tls11|Tls12` when it
+            // builds its SslStream (verified by decompiling ROUNDS_Data/Managed/
+            // System.dll, WebSocketHandle.ConnectAsyncCore) — it never reads
+            // ServicePointManager. Do not "fix" a chat TLS problem by changing
+            // this line; it cannot be the cause.
+            try
+            {
+                System.Net.ServicePointManager.SecurityProtocol |=
+                    System.Net.SecurityProtocolType.Tls12;
+            }
+            catch (Exception ex) { Log.LogWarning($"[API] TLS 1.2 enable failed: {ex.Message}"); }
 
             RankedEnabled = Config.Bind(
                 "Ranked", "Enabled",
@@ -3186,8 +3250,14 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(CardChoice), "StartPick")]
     class OvtExtraPickPatch
     {
+        /// <summary>PlayerID we granted the extra pick to, or -1. Read by
+        /// OvtExtraPickRestorePickerPatch.</summary>
+        internal static int ActivePickerId = -1;
+
         static void Prefix(ref int picksToSet, int pickerIDToSet)
         {
+            // Any new pick sequence invalidates a previous grant.
+            ActivePickerId = -1;
             try
             {
                 if (picksToSet != 1) return;
@@ -3215,12 +3285,63 @@ namespace CompetitiveRounds
                     if (po != null && po.TeamID == picker.TeamID) teamSize++;
                 if (teamSize != 1) return;
                 picksToSet = 2;
+                // Remember who we granted it to — OvtExtraPickRestorePickerPatch
+                // needs it to undo vanilla's mid-sequence pickrID wipe. Cleared
+                // when the pick sequence ends.
+                ActivePickerId = pickerIDToSet;
                 Plugin.Log.LogInfo($"[1v2-EXTRAPICK] solo picker {pickerIDToSet} (team {picker.TeamID}) gets 2 initial picks");
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[1v2-EXTRAPICK] prefix failed: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>THE 1v2 extra-pick crash fix (bugs #85/#86).
+    ///
+    /// Vanilla clears the picker the instant a card is chosen:
+    ///     Pick(spawnedCards[currentlySelectedCard]);
+    ///     pickrID = -1;                       // CardChoice.DoPlayerSelect
+    /// With vanilla's picks==1 that is harmless — the follow-up ReplaceCards
+    /// takes the `picks &lt;= 0` branch and just RPCs RPCA_DonePicking. Our extra
+    /// pick is the ONLY online path that ever leaves picks &gt; 0 here, so it is
+    /// the first thing to run the next branch, which calls SpawnUniqueCard:
+    ///     player = PlayerManager.instance.players[pickrID];   // pickrID == -1
+    ///     for (...) { if (pickrID != -1) {                    // guard, 4 lines too late
+    /// -&gt; ArgumentOutOfRangeException ("Must be NON-NEGATIVE and less than the
+    /// size of the collection" — the wording is the tell, it is index -1, not an
+    /// ordering problem). The throw kills the ReplaceCards coroutine before
+    /// RPCA_DonePicking, so IsPicking stays true, DoPick never returns, the round
+    /// never advances, and the solo eventually gets dropped — which the other two
+    /// see as "opponent disconnected".
+    ///
+    /// Restoring pickrID is also what makes the second pick SELECTABLE at all:
+    /// CardChoice.Update only calls DoPlayerSelect when `pickrID != -1`, so
+    /// without this the player could not choose the second card even if the cards
+    /// spawned.
+    ///
+    /// Scope: only fires when WE granted an extra pick (ActivePickerId >= 0) and
+    /// vanilla has picks left, so no vanilla 1v1/2v2 flow is touched.</summary>
+    [HarmonyPatch(typeof(CardChoice), "ReplaceCards")]
+    class OvtExtraPickRestorePickerPatch
+    {
+        static void Prefix(CardChoice __instance)
+        {
+            try
+            {
+                if (OvtExtraPickPatch.ActivePickerId < 0) return;
+                // picks > 0 means another deal is coming (the branch that calls
+                // SpawnUniqueCard). picks == 0 means this call only sends
+                // RPCA_DonePicking, which does not need a picker.
+                if (__instance.picks <= 0) { OvtExtraPickPatch.ActivePickerId = -1; return; }
+                if (__instance.pickrID != -1) return;      // vanilla state still intact
+                __instance.pickrID = OvtExtraPickPatch.ActivePickerId;
+                Plugin.Log.LogInfo(
+                    $"[1v2-EXTRAPICK] restored pickrID={__instance.pickrID} for the extra deal " +
+                    $"(vanilla cleared it to -1 on pick; picks left={__instance.picks})");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[1v2-EXTRAPICK] restore failed: {ex.Message}"); }
         }
     }
 

@@ -373,11 +373,29 @@ namespace CompetitiveRounds
 
         // ── Initialization ────────────────────────────────────
 
+        /// <summary>True when the TLS endpoint was unreachable this session and we
+        /// fell back to the legacy plaintext one. Session-scoped on purpose — never
+        /// persisted — so the client re-probes TLS every launch and self-heals the
+        /// moment the network or trust store is fixed.</summary>
+        public static bool UsingLegacyFallback { get; private set; }
+
         public static void Initialize(string url)
         {
             baseUrl = url.TrimEnd('/');
             Plugin.Log.LogInfo($"API client initialized: {baseUrl}");
-            CheckModVersion();
+            // The HTTPS migration rewrites the config to the TLS endpoint and
+            // Config.Bind never revisits a written value, so a player for whom
+            // :8444 does not work (port-filtering network, TLS-intercepting
+            // proxy, stale root store) would be stuck there permanently — and
+            // every channel that could tell them why, or ship them a fix, rides
+            // this same baseUrl: DoCheckModVersion wraps its whole body in
+            // `if (Success)` with no else, so LatestModVersion stays null, the
+            // F5 Update button stays hidden, and the auto-updater never fires.
+            // Probe first and fall back for the session if TLS can't connect.
+            if (string.Equals(baseUrl, Plugin.DefaultApiUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+                Plugin.Instance.StartCoroutine(ProbeEndpointThenStart());
+            else
+                CheckModVersion();
             // Start the tournament heartbeat loop. This runs forever and fires
             // ready-up heartbeats any time the player has an active tournament
             // match — regardless of which UI tab is open or whether the
@@ -695,6 +713,60 @@ namespace CompetitiveRounds
                     _heartbeatDispatchedMatches.RemoveWhere(id => !stillActive.Contains(id));
                 }
             }
+        }
+
+        /// <summary>Probe the TLS endpoint before committing to it for the session.
+        /// Falls back to the legacy plaintext endpoint ONLY on a transport-level
+        /// failure — never on an HTTP status, because any 4xx/5xx proves the port
+        /// and the TLS handshake both worked and the problem is elsewhere.
+        /// Deliberately does NOT write to config: this must re-evaluate every launch.
+        /// DELETE THIS along with Plugin.LegacyApiUrl in the same release that drops
+        /// the plaintext port-forward, or a broken TLS path is forgiven forever.</summary>
+        private static IEnumerator ProbeEndpointThenStart()
+        {
+            const int attempts = 2;
+            bool reachable = false;
+            for (int i = 0; i < attempts && !reachable; i++)
+            {
+                using (var probe = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version"))
+                {
+                    probe.timeout = 8;
+                    StampVersionHeader(probe);
+                    yield return probe.SendWebRequest();
+                    // "Reachable" must mean USABLE, not merely "something answered".
+                    // An earlier version accepted anything that wasn't a
+                    // ConnectionError, on the reasoning that an HTTP status proves
+                    // the port and TLS handshake worked. True — but useless to the
+                    // player: nginx up with the api container down returns 502, and
+                    // a captive portal or TLS-intercepting middlebox returns an
+                    // HTML 200. Both would pin the client to an endpoint it cannot
+                    // actually use, and because every recovery channel rides this
+                    // same baseUrl there would be no way back. Require a parseable
+                    // mod-version payload instead.
+                    string body = probe.result == UnityWebRequest.Result.Success
+                        ? (probe.downloadHandler?.text ?? "") : "";
+                    if (!string.IsNullOrEmpty(ExtractJsonString(body, "version")))
+                        reachable = true;
+                    else
+                        Plugin.Log.LogWarning(
+                            $"[API] TLS endpoint probe {i + 1}/{attempts} unusable: " +
+                            $"result={probe.result} code={probe.responseCode} err={probe.error}");
+                }
+            }
+
+            if (!reachable)
+            {
+                baseUrl = Plugin.LegacyApiUrl.TrimEnd('/');
+                UsingLegacyFallback = true;
+                Plugin.Log.LogWarning(
+                    $"[API] {Plugin.DefaultApiUrl} unreachable — falling back to {baseUrl} for this session. " +
+                    "Config is left untouched, so TLS is retried on next launch.");
+                // Chat computes its wss:// URL once at RunLoop entry, so a socket
+                // already looping on the dead TLS host has to be pointed at the
+                // fallback explicitly — otherwise chat stays dark all session.
+                try { ChatClient.Retarget(baseUrl); } catch (Exception ex) { Plugin.Log.LogWarning($"[API] chat retarget failed: {ex.Message}"); }
+            }
+            CheckModVersion();
         }
 
         public static void CheckModVersion()
