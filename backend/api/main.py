@@ -2060,7 +2060,67 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         print(f"[MATCH] rejected misrouted 2v2 match: room={report.photon_room_id} reporter={report.reported_by_steam_id}")
         raise HTTPException(status_code=400, detail="2v2 matches must use /team/matches endpoint")
 
-    # Get or create both players
+    # Get or create both players.
+    # Lock protocol — 1v1 counterpart of the 2v2 submit fix (learning #197):
+    # canonical sorted players pass BEFORE resolving/dirtying either Player.
+    # get_or_create_player mutates display_name/last_seen and the next
+    # statement's autoflush takes those players tuple locks in REPORT order,
+    # which is invertible between two concurrent reports of the same pair and
+    # against every sorted-pass path (2v2 completion helper, admin reverses).
+    # Unlike 2v2, the series row CANNOT be locked first here: 1v1 reports
+    # carry no series_id — the series is discovered (or created) via the
+    # player ids below, and casual matches have no series at all. So the 1v1
+    # order is players → ranked_series → glicko; any two transactions on the
+    # same series share BOTH players, so serializing here also closes the
+    # unlocked series-advance race (two game reports of one BO3 reading the
+    # same p*_series_wins). Cross-ladder: 2v2 locks its series first, but
+    # ranked_series/team_series are disjoint tables — the only rows shared
+    # across ladders are players, taken in this same sorted order everywhere.
+    # FOR NO KEY UPDATE, not FOR UPDATE: it is the mode every later non-key
+    # players UPDATE takes anyway, and it does not conflict with the
+    # FOR KEY SHARE RI locks of concurrent FK inserts naming these players
+    # (matches, dc_events, gold_transactions, bets).
+    # Serialize on the STEAM IDs, not on the rows (Codex cold review).
+    # Unlike 2v2 — whose members always have a players row from queue join —
+    # this is the endpoint where genuinely NEW players first appear, so a row
+    # committed by a third request between our discovery read and
+    # get_or_create_player's own SELECT is invisible to ANY row-lock pass:
+    # get_or_create dirties it and its tuple lock then lands at the next
+    # autoflush, out of canonical order. A post-lock recount cannot close
+    # that — under READ COMMITTED no earlier statement can prove absence for
+    # a later one (an earlier revision of this block tried exactly that).
+    # An advisory lock keyed on the steam_id exists whether or not the row
+    # does, so taking both in sorted steam_id order makes the whole
+    # discover-then-create sequence atomic against a competing match report.
+    # Advisory locks live in their own lock space (they never conflict with
+    # tuple locks) and are taken FIRST here, so they cannot invert against
+    # the row order below; xact-scoped, so they release on commit/rollback
+    # with nothing to unlock by hand.
+    # Residual, honestly: a NON-report path that creates players without this
+    # advisory lock (/mod/check auto-registration, first presence touch) can
+    # still commit a row inside the window, leaving the pre-existing
+    # autoflush-order residual for that row. Closing that needs the advisory
+    # gate factored into get_or_create_player itself so every creator shares
+    # it — deliberately not done here (it touches every caller); see TODO.
+    _sids = [report.player1.steam_id, report.player2.steam_id]
+    # CAST spelled out: hashtext() has a single text signature, but an explicit
+    # cast keeps asyncpg from having to infer the parameter type at all. A hash
+    # collision between two different steam_ids is harmless — it costs one
+    # needless serialization, never a missed lock.
+    for _sid in sorted(_sids):
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
+            {"sid": _sid},
+        )
+    _known_pids = (await db.execute(
+        text("SELECT id FROM players WHERE steam_id = ANY(:sids)"),
+        {"sids": _sids},
+    )).scalars().all()
+    for _pid in sorted(_known_pids, key=str):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": _pid},
+        )
     p1 = await get_or_create_player(db, report.player1.steam_id, report.player1.display_name)
     p2 = await get_or_create_player(db, report.player2.steam_id, report.player2.display_name)
     # Server-side ranked enforcement (bug #42). ranked_enabled defaults TRUE
@@ -2675,7 +2735,18 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 ))
 
             # Settle all pending bets on this series.
-            await _settle_series_bets(db, series)
+            # SAVEPOINT (learning #187, parity with the 2v2 settle blocks):
+            # bettor gold UPDATEs touch players rows OUTSIDE this
+            # transaction's held lock set — the one write class here that can
+            # deadlock against a wide locker — and without a savepoint any
+            # settle failure rolls back the entire match report with it.
+            # flush() inside so the ORM writes land under the savepoint.
+            try:
+                async with db.begin_nested():
+                    await _settle_series_bets(db, series)
+                    await db.flush()
+            except Exception as bex:
+                print(f"[BET-SETTLE] error settling for series {series.id}: {bex}")
         else:
             series_status = "active"
 
@@ -2708,15 +2779,55 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # Trigger Glicko recalculation only when a series completes
     # (for non-ranked matches, Glicko is not affected)
     if series_completed:
+        # Set before the try so the post-rating blocks below can never NameError
+        # on it if the rating pass throws before the authoritative re-read.
+        _series_still_valid = True
         # Inline recalculation for the two series players
         try:
+            # This is a NEW transaction (the match write committed above), so
+            # it holds no locks. Its old shape — glicko reads, ORM updates,
+            # then players achievement-gold UPDATEs — acquired glicko-then-
+            # players in report order, invertible against admin_reverse_series
+            # (players-then-glicko, sorted). Same canonical pass first; it
+            # also serializes two completions sharing a player, whose
+            # unlocked glicko read-modify-writes could otherwise clobber
+            # each other's rating update.
+            for _pid in sorted([p1.id, p2.id], key=str):
+                await db.execute(
+                    text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+                    {"pid": _pid},
+                )
+            # AUTHORITATIVE RE-READ under the locks (learning #197's own rule,
+            # which the first version of this block invoked and then skipped —
+            # Codex cold review). `series` is a pre-commit ORM object and
+            # expire_on_commit=False, so its attributes are a snapshot from
+            # BEFORE the commit above. An admin_reverse_series that wins these
+            # locks in the gap between the two transactions invalidates the
+            # series and claws its gold/XP back — and this block would then
+            # happily apply a FORWARD Glicko period, rating achievements,
+            # slayer/streak titles and a tournament advance to a series that
+            # no longer exists. Re-read the row and bail if it is gone,
+            # invalidated, or no longer completed.
+            _live = (await db.execute(
+                text("SELECT status, invalidated_at, winner_id FROM ranked_series WHERE id = :sid"),
+                {"sid": series.id},
+            )).mappings().first()
+            _series_still_valid = (
+                _live is not None
+                and _live["invalidated_at"] is None
+                and _live["status"] == "completed"
+            )
+            if not _series_still_valid:
+                print(f"[MATCH] series {series.id} was invalidated/changed between the match "
+                      f"commit and the rating pass — skipping Glicko, achievements and "
+                      f"tournament advance for it")
             # Read both ratings BEFORE any updates (avoids ordering bug)
             g1_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p1.id))
             g1 = g1_r.scalar_one_or_none()
             g2_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p2.id))
             g2 = g2_r.scalar_one_or_none()
 
-            if g1 and g2:
+            if g1 and g2 and _series_still_valid:
                 p1_won_series = (series.winner_id == p1.id)
 
                 # Calculate both new ratings using pre-update opponent values
@@ -2781,38 +2892,45 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # ── Auto-grant slayer achievements (Sid Slayer / Stan Slayer) ──
         # Beat one of the SLAYER_TARGETS players in a ranked series → unlock.
         # _grant_achievement_inline also grants the matching equippable title.
+        # Gated on the authoritative re-read above: these grant permanent
+        # titles + gold off `series.winner_id`, which is stale ORM state, so a
+        # series reversed in the gap must not hand out a slayer title for a
+        # win that no longer stands (Codex cold review).
         try:
-            winner_steam = (await db.execute(
-                select(Player.steam_id).where(Player.id == series.winner_id)
-            )).scalar_one_or_none()
-            loser_id = series.player2_id if series.winner_id == series.player1_id else series.player1_id
-            loser_steam = (await db.execute(
-                select(Player.steam_id).where(Player.id == loser_id)
-            )).scalar_one_or_none()
-            slayer_key = SLAYER_TARGETS.get(loser_steam or "")
-            if slayer_key and winner_steam and winner_steam != loser_steam:
-                if await _grant_achievement_inline(db, series.winner_id, slayer_key):
-                    await db.commit()
-                    print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
-            # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
-            if winner_steam:
-                streak = await get_ranked_streak(winner_steam)
-                granted_streak = False
-                if streak >= 25:
-                    granted_streak |= await _grant_achievement_inline(db, series.winner_id, "on_fire")
-                if streak >= 50:
-                    granted_streak |= await _grant_achievement_inline(db, series.winner_id, "unstoppable")
-                if streak >= 100:
-                    granted_streak |= await _grant_achievement_inline(db, series.winner_id, "immortal")
-                if granted_streak:
-                    await db.commit()
-                    print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
+            if _series_still_valid:
+                winner_steam = (await db.execute(
+                    select(Player.steam_id).where(Player.id == series.winner_id)
+                )).scalar_one_or_none()
+                loser_id = series.player2_id if series.winner_id == series.player1_id else series.player1_id
+                loser_steam = (await db.execute(
+                    select(Player.steam_id).where(Player.id == loser_id)
+                )).scalar_one_or_none()
+                slayer_key = SLAYER_TARGETS.get(loser_steam or "")
+                if slayer_key and winner_steam and winner_steam != loser_steam:
+                    if await _grant_achievement_inline(db, series.winner_id, slayer_key):
+                        await db.commit()
+                        print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
+                # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
+                if winner_steam:
+                    streak = await get_ranked_streak(winner_steam)
+                    granted_streak = False
+                    if streak >= 25:
+                        granted_streak |= await _grant_achievement_inline(db, series.winner_id, "on_fire")
+                    if streak >= 50:
+                        granted_streak |= await _grant_achievement_inline(db, series.winner_id, "unstoppable")
+                    if streak >= 100:
+                        granted_streak |= await _grant_achievement_inline(db, series.winner_id, "immortal")
+                    if granted_streak:
+                        await db.commit()
+                        print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
         except Exception as ex:
             print(f"Slayer auto-grant error: {ex}")
 
         # Tournament bracket advancement. Noop for non-tournament series.
+        # Also gated: advancing a bracket off a reversed series would promote
+        # the wrong player and is not self-correcting.
         try:
-            if series.is_tournament:
+            if series.is_tournament and _series_still_valid:
                 from tournaments import advance_tournament_match
                 await advance_tournament_match(db, series.id)
                 await db.commit()
@@ -11475,7 +11593,33 @@ class _AdminReverseSeriesReq(BaseModel):
 @app.post("/api/v1/admin/reverse-series", tags=["Admin"])
 async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = Depends(get_db)):
     await _require_admin(db, req.admin_steam_id, "reverse_series", req.series_id, req.hmac_signature)
-    series = (await db.execute(select(RankedSeries).where(RankedSeries.id == req.series_id))).scalar_one_or_none()
+    try:
+        _sid = UUID(req.series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+    # Lock protocol (1v1: players → ranked_series → glicko, matching
+    # submit_match — see its comment). The pair is discovered UNLOCKED first
+    # (player1_id/player2_id are immutable for a 1v1 series, so this read
+    # cannot go stale), then the canonical sorted players pass, then the
+    # authoritative FOR UPDATE load of the series row. Everything mutable is
+    # re-checked after the lock (learning #197 discovery pattern). The locked
+    # load also closes this endpoint's own double-reversal race: two
+    # concurrent reverses previously both passed the unlocked
+    # invalidated_at check and clawed back gold twice.
+    _pair = (await db.execute(
+        text("SELECT player1_id, player2_id FROM ranked_series WHERE id = :sid"),
+        {"sid": _sid},
+    )).first()
+    if _pair is None:
+        raise HTTPException(404, "Series not found")
+    for _pid in sorted([_pair[0], _pair[1]], key=str):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": _pid},
+        )
+    series = (await db.execute(
+        select(RankedSeries).where(RankedSeries.id == _sid).with_for_update()
+    )).scalar_one_or_none()
     if series is None:
         raise HTTPException(404, "Series not found")
     if series.invalidated_at is not None:
@@ -12843,13 +12987,35 @@ async def _complete_team_series_with_ratings(
         {"wt": winner_team, "rsn": reason, "sid": series_uuid, "dpid": dc_pid},
     )
 
+    # Canonical players-row lock pass BEFORE any glicko access (adversarial
+    # review of the submit_team_match lock-order fix): the players row is the
+    # only reliable cross-series gate — every member has one from queue join,
+    # while glicko_ratings_2v2 rows don't exist until a player's first
+    # completion, so for first-series players the glicko pass below matches
+    # zero rows and locks nothing. Without this pass, this helper's first
+    # players tuple locks came from _grant_rating_achievements' gold UPDATEs
+    # in SLOT order — an ABBA edge against submit_team_match's sorted pass
+    # when the shared players have no glicko rows — and two first-completion
+    # transactions could race duplicate-PK glicko INSERTs. FOR NO KEY UPDATE:
+    # the mode every later non-key players UPDATE takes anyway, and unlike
+    # FOR UPDATE it does not conflict with the FOR KEY SHARE RI locks a
+    # caller may already hold from INSERTing a team_matches row naming these
+    # players (report-dc's synthetic forfeit row).
+    for _pid in sorted(gids, key=str):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": _pid},
+        )
+
     # ── Glicko-2 (mirrors submit_team_match:7232-7306) ──
     # Canonical-order lock pass first (learning #197 / review find): two
     # completions can share players across DIFFERENT series (dc_incomplete
     # husk resolved while the same four play a new series), and each series'
     # slot order differs — an ANY(...) FOR UPDATE locks in planner order, an
     # ABBA edge. One indexed lock per row, ascending str(pid), same rule as
-    # _lock_queue_rows_ordered.
+    # _lock_queue_rows_ordered. (Cross-series serialization itself is
+    # guaranteed by the players pass above; this keeps glicko row access
+    # ordered among completers whose rows already exist.)
     for _pid in sorted(gids, key=str):
         await db.execute(
             text("SELECT 1 FROM glicko_ratings_2v2 WHERE player_id = :pid FOR UPDATE"),
@@ -13228,9 +13394,18 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
 
     slots = [(s["t1a_id"], s["t1a_rating_change"]), (s["t1b_id"], s["t1b_rating_change"]),
              (s["t2a_id"], s["t2a_rating_change"]), (s["t2b_id"], s["t2b_rating_change"])]
-    for pid, rc in slots:
-        if pid is None:
-            continue
+    # Lock protocol (same as _complete_team_series_with_ratings: series row
+    # first — held above — then players sorted str(pid) FOR NO KEY UPDATE,
+    # then glicko in the same sorted order). This endpoint previously took
+    # glicko tuple locks in SLOT order with no players pass at all — a
+    # glicko-before-players inversion that could ABBA against a concurrent
+    # completion sharing players (dc_incomplete husk scenario).
+    for _pid in sorted((pid for pid, _ in slots if pid is not None), key=str):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": _pid},
+        )
+    for pid, rc in sorted((sl for sl in slots if sl[0] is not None), key=lambda sl: str(sl[0])):
         await db.execute(text("""
             UPDATE glicko_ratings_2v2
                SET rating = rating - :rc,
@@ -13240,11 +13415,15 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
         """), {"rc": float(rc or 0), "pid": pid})
 
     # Reverse series-completion gold (win/loss bonus + bet payouts). Win/loss bonus also
-    # bumped team_gold_earned; bet payouts only gold_earned.
+    # bumped team_gold_earned; bet payouts only gold_earned. Bettor rows sit
+    # outside the four held member locks (same accepted class as live bet
+    # settlement); ORDER BY player_id::text matches the settle path's order so
+    # the two can't invert against each other.
     for tx in (await db.execute(text("""
         SELECT player_id, amount, reason FROM gold_transactions
          WHERE reference_id = :ref
            AND reason IN ('team_series_win', 'team_series_loss', 'team_bet_payout')
+         ORDER BY player_id::text, id
     """), {"ref": str(sid)})).mappings().all():
         await db.execute(text(
             "UPDATE players SET gold_earned = GREATEST(0, COALESCE(gold_earned,0) - :amt) WHERE id = :pid"
@@ -13293,30 +13472,41 @@ async def admin_rebuild_team_glicko(
     if not expected or x_internal_key != expected:
         raise HTTPException(403, "Internal endpoint")
 
-    series_rows = (await db.execute(text("""
-        SELECT id, t1a_id, t1b_id, t2a_id, t2b_id, winner_team, completed_at
-          FROM team_series
-         WHERE status='completed' AND winner_team IN (1,2)
-           AND t1a_id IS NOT NULL AND t1b_id IS NOT NULL
-           AND t2a_id IS NOT NULL AND t2b_id IS NOT NULL
-         ORDER BY completed_at ASC NULLS LAST
-    """))).mappings().all()
+    async def _read_completed_series():
+        return (await db.execute(text("""
+            SELECT id, t1a_id, t1b_id, t2a_id, t2b_id, winner_team, completed_at
+              FROM team_series
+             WHERE status='completed' AND winner_team IN (1,2)
+               AND t1a_id IS NOT NULL AND t1b_id IS NOT NULL
+               AND t2a_id IS NOT NULL AND t2b_id IS NOT NULL
+             ORDER BY completed_at ASC NULLS LAST
+        """))).mappings().all()
+
+    series_rows = await _read_completed_series()
 
     # In-memory rating state per player; seed defaults on first appearance.
+    # sids_by_pid: the exact SET of series ids replayed for each player —
+    # the recheck below compares sets, not counts, because a count can alias
+    # (a reversal cancelling one series while a new one completes leaves the
+    # count equal with the membership changed). len(set) is also the correct
+    # completed_series value even for a degenerate row carrying the same
+    # player in two slots (which a raw count would tally twice, making the
+    # recheck permanently mismatch and the player unfixable).
     state: dict = {}
-    counts: dict = {}
+    sids_by_pid: dict = {}
 
     def seed(pid):
         if pid not in state:
             state[pid] = {"rating": GLICKO2_DEFAULT_RATING, "rating_deviation": GLICKO2_DEFAULT_RD,
                           "volatility": GLICKO2_DEFAULT_VOLATILITY, "peak": GLICKO2_DEFAULT_RATING}
-            counts[pid] = 0
+            sids_by_pid[pid] = set()
 
     for s in series_rows:
         t1 = [s["t1a_id"], s["t1b_id"]]
         t2 = [s["t2a_id"], s["t2b_id"]]
         for pid in t1 + t2:
             seed(pid)
+            sids_by_pid[pid].add(s["id"])
         team1_won = (s["winner_team"] == 1)
         snap = {pid: dict(state[pid]) for pid in t1 + t2}
 
@@ -13328,16 +13518,68 @@ async def admin_rebuild_team_glicko(
             nr, nrd, nv = calc(pid, t2, team1_won)
             state[pid] = {"rating": nr, "rating_deviation": nrd, "volatility": nv,
                           "peak": max(state[pid]["peak"], nr)}
-            counts[pid] += 1
         for pid in t2:
             nr, nrd, nv = calc(pid, t1, not team1_won)
             state[pid] = {"rating": nr, "rating_deviation": nrd, "volatility": nv,
                           "peak": max(state[pid]["peak"], nr)}
-            counts[pid] += 1
 
-    # Persist: upsert every participant's rebuilt rating + count.
+    # Universe = replayed participants UNION everyone who ALREADY has a 2v2
+    # rating row (Codex cold review). If a player's only completed series was
+    # reversed they vanish from `state` entirely, and their existing row would
+    # keep a stale rating/RD/peak and a nonzero completed_series forever —
+    # visible on the 2v2 leaderboard, which filters `completed_series >= 1`.
+    # Seeding them gives defaults and zero series, so this really is a replay
+    # of history rather than a replay of whoever currently appears in one.
+    for _pid in (await db.execute(text("SELECT player_id FROM glicko_ratings_2v2"))).scalars().all():
+        seed(_pid)
+
+    # Persist via one SHORT transaction per player: lock that player's row
+    # (canonical FOR NO KEY UPDATE), re-verify the history generation, upsert,
+    # commit. Why not one big sorted lock pass over every participant
+    # (adversarial review find): bettor gold UPDATEs in the live paths are
+    # outside every writer's sorted lock set, and a pass this wide is
+    # near-guaranteed to hold some bettor's row while waiting on a row a live
+    # report holds, whose bet settle then wants the bettor — an ABBA no
+    # ordering discipline covers. A mini-transaction holds at most one players
+    # row (+ that player's glicko row, which any live writer only takes AFTER
+    # holding the same players row), so no hold-and-wait chain can form.
+    #
+    # The guard is GLOBAL, not per-player (Codex cold review): Glicko is a
+    # chain, so a reversal in an OPPONENT's history changes the correct result
+    # for this player even though this player's own series set is untouched —
+    # a per-player check passes and writes a silently stale rating. Any change
+    # to the completed-series set therefore invalidates the whole replay: stop,
+    # report every not-yet-written player as contended, and let the admin
+    # re-run (idempotent). One extra indexed read per player on a small table
+    # is a fine price for not writing wrong ratings.
+    #
+    # KNOWN TRADE, accepted: committing per player means readers can observe a
+    # MIXED generation mid-run (`place_team_bet` stores durable odds from the
+    # 2v2 ratings it reads). The alternative — one transaction — is the wide
+    # lock pass that deadlocks live match reports. Run this when nobody is
+    # playing; it is an admin repair tool, not a live-safe operation.
+    _snapshot_sids = {r["id"] for r in series_rows}
+    _ordered = sorted(state.items(), key=lambda kv: str(kv[0]))
     written = 0
-    for pid, st in state.items():
+    contended: list = []
+    for _idx, (pid, st) in enumerate(_ordered):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": pid},
+        )
+        live_sids = set((await db.execute(text("""
+            SELECT id FROM team_series
+             WHERE status='completed' AND winner_team IN (1,2)
+               AND t1a_id IS NOT NULL AND t1b_id IS NOT NULL
+               AND t2a_id IS NOT NULL AND t2b_id IS NOT NULL
+        """))).scalars().all())
+        if live_sids != _snapshot_sids:
+            contended = [str(p) for p, _ in _ordered[_idx:]]
+            await db.commit()
+            print(f"[REBUILD-2V2] completed-series history changed under the rebuild after "
+                  f"{written} player(s); STOPPING with {len(contended)} unwritten. The replay is "
+                  f"stale for everyone downstream of the change — re-run when play has settled.")
+            break
         await db.execute(text("""
             INSERT INTO glicko_ratings_2v2
                 (player_id, rating, rating_deviation, volatility, peak_rating,
@@ -13348,10 +13590,12 @@ async def admin_rebuild_team_glicko(
                 peak_rating=:peak, completed_series=:cs,
                 last_calculated=NOW(), updated_at=NOW()
         """), {"pid": pid, "r": st["rating"], "rd": st["rating_deviation"],
-               "v": st["volatility"], "peak": st["peak"], "cs": counts[pid]})
+               "v": st["volatility"], "peak": st["peak"], "cs": len(sids_by_pid[pid])})
+        await db.commit()
         written += 1
-    await db.commit()
-    return {"status": "rebuilt", "series_replayed": len(series_rows), "players_written": written}
+    return {"status": ("rebuilt" if not contended else "incomplete_rerun_needed"),
+            "series_replayed": len(series_rows),
+            "players_written": written, "players_contended": contended}
 
 
 def _verify_team_dc_hmac(steam_id: str, series_id: str, dc_player_steam_id: str, signature: str) -> bool:
@@ -14397,13 +14641,15 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     if report.photon_room_id and "offline" in report.photon_room_id.lower():
         raise HTTPException(400, "Offline matches are not recorded")
 
-    # Resolve players.
-    p_t1a = await get_or_create_player(db, report.t1a.steam_id, report.t1a.display_name)
-    p_t1b = await get_or_create_player(db, report.t1b.steam_id, report.t1b.display_name)
-    p_t2a = await get_or_create_player(db, report.t2a.steam_id, report.t2a.display_name)
-    p_t2b = await get_or_create_player(db, report.t2b.steam_id, report.t2b.display_name)
-
     # Series must exist and be active. Lock to prevent advance races.
+    # Lock order (learning #197 / Codex batch finding 5): this FOR UPDATE must
+    # run BEFORE any Player row is resolved or dirtied. get_or_create_player
+    # mutates display_name/last_seen on existing rows and the next statement's
+    # autoflush takes those players tuple locks — resolving players first made
+    # this path lock players→series, while every DC/grace-expiry/admin
+    # completion locks series→players via _complete_team_series_with_ratings,
+    # so a final-game submit racing a concurrent completion of the SAME series
+    # could deadlock. Locking the series row first serializes those callers.
     s_q = await db.execute(
         text("""SELECT * FROM team_series WHERE id = :sid FOR UPDATE"""),
         {"sid": series_uuid},
@@ -14413,6 +14659,45 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         raise HTTPException(404, "team_series not found")
     if series["status"] != "active":
         raise HTTPException(400, f"team_series is {series['status']}")
+
+    # Cross-series edge: two live series CAN share players (dc_incomplete husk
+    # resolved while the same four play a fresh series), and different series
+    # rows don't serialize. The players row is the one reliable cross-series
+    # gate: every series member has one from queue join, whereas a
+    # glicko_ratings_2v2 row doesn't exist until the player's first series
+    # COMPLETION — a "lock glicko first" pass matches zero rows for
+    # first-series players and locks nothing. So: lock the players rows,
+    # ascending str(pid), one indexed statement per row (same rule as
+    # _lock_queue_rows_ordered); the completion helper takes the same pass
+    # before its glicko access, so any two transactions sharing a member
+    # serialize here before either touches glicko rows (which also closes the
+    # first-completion duplicate-PK INSERT race on glicko_ratings_2v2).
+    # FOR NO KEY UPDATE, deliberately NOT FOR UPDATE (adversarial review
+    # find): every later players write in this handler (autoflush of the
+    # dirtied Player objects, XP loop, W/L counters, achievement gold) is a
+    # non-key UPDATE, which takes exactly this lock — and unlike FOR UPDATE
+    # it does not conflict with the FOR KEY SHARE RI locks held by concurrent
+    # FK inserts naming these players (report-dc INSERTs its synthetic
+    # forfeit team_matches row before calling the helper; FOR UPDATE here
+    # formed a fresh deadlock edge with that). Discovery read is deliberately
+    # unlocked: legitimate members always exist by queue join, and a steam_id
+    # with no row yet has nothing to lock (its INSERT below cannot form a
+    # lock edge on an existing tuple).
+    _known_pids = (await db.execute(
+        text("SELECT id FROM players WHERE steam_id = ANY(:sids)"),
+        {"sids": list(steams)},
+    )).scalars().all()
+    for _pid in sorted(_known_pids, key=str):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": _pid},
+        )
+
+    # Resolve players — now safely under the series + canonical row locks.
+    p_t1a = await get_or_create_player(db, report.t1a.steam_id, report.t1a.display_name)
+    p_t1b = await get_or_create_player(db, report.t1b.steam_id, report.t1b.display_name)
+    p_t2a = await get_or_create_player(db, report.t2a.steam_id, report.t2a.display_name)
+    p_t2b = await get_or_create_player(db, report.t2b.steam_id, report.t2b.display_name)
 
     # Reporter
     by_steam = {report.t1a.steam_id: p_t1a, report.t1b.steam_id: p_t1b,

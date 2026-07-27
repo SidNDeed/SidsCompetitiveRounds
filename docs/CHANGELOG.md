@@ -22,6 +22,9 @@
 
 ### Server & security
 - Fixed a matchmaking deadlock where two players polling at the same instant could briefly wedge the 1v1 queue, plus a batch of queue-lock hardening across 1v1/2v2/1v2.
+- **A match result is no longer wedged by a disconnect forfeit or an admin correction arriving at the same moment.** If the last game of a series was reported at the same instant something else finished that same series, the two could block each other and one would lose — and when that was the match report, a real game silently didn't count. The result-writing paths (match reports, forfeits, admin resolve/reverse, the ratings rebuild) now claim their records in one consistent order in both 1v1 and 2v2, so they wait their turn instead of colliding.
+- **An admin correction can no longer be half-undone by a match report landing at the same time.** Reversing a series while its final game was still being processed could leave the rating change applied anyway, and could hand out a title for a win that had just been taken back. The rating step now re-checks that the series still stands before it applies anything.
+- **A problem paying out bets can no longer take the match result down with it.** Bet settlement is now isolated in 1v1 the way it already was in 2v2: if it fails, the game still counts and the ratings still apply.
 - Admin actions now use a separate secret that does not ship inside the mod — previously anyone who unpacked the DLL could forge admin requests.
 - Session checks extended across cosmetic equips, privacy toggles, blocks, and queue actions; bans now also revoke live sessions and stop new ones from being minted.
 - Deleting your data now also clears 2v2/1v2 queue entries and login sessions, and declining a match is validated against who you're actually matched with.
