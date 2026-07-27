@@ -976,6 +976,13 @@ namespace CompetitiveRounds
                 catch { }
             }
 
+            // Stuck-Leaving watchdog (Codex verify finding 1): must live HERE,
+            // in the persistent loop — the Leaving UI hides the very buttons
+            // whose handlers used to be the only recovery path, and the leave
+            // callback dies with its coroutine host on NetworkRestart.
+            try { ApiClient.TickLeaveRecovery(); }
+            catch { }
+
             // Poll 1v2 queue if searching. Must run here (not just from the
             // F5 tab ticker) — a player who queues and closes the menu would
             // otherwise never receive ready_join, and their stale row would

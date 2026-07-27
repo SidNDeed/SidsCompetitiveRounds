@@ -1183,7 +1183,7 @@ namespace CompetitiveRounds
             bool ovtLocked=Plugin.PendingOvtSlot>=0||!string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId);
             bool inOvtRoom=false;
             try{inOvtRoom=PhotonNetwork.InRoom&&(PhotonNetwork.CurrentRoom?.Name??"").StartsWith("ovt_");}catch{}
-            if(ovtJoinBtn!=null)ovtJoinBtn.SetActive(!polling&&!ovtLocked&&!inOvtRoom);
+            if(ovtJoinBtn!=null)ovtJoinBtn.SetActive(!polling&&!ovtLocked&&!inOvtRoom&&ApiClient.OvtQueueStatus!="leaving");
             if(ovtLeaveBtn!=null)ovtLeaveBtn.SetActive((polling||ovtLocked)&&!inOvtRoom);
             if(txtOvtStatus!=null)
             {
@@ -1200,6 +1200,7 @@ namespace CompetitiveRounds
                     msg=$"<color=#66DD66>Match found! Joining…</color>  <color=#FFB347>{solo}</color> <color=#888>vs</color> <color=#88AAFF>{duoNames}</color>"
                         +(ApiClient.OvtSoloExtraPick?"  <color=#888>(solo extra pick)</color>":"");
                 }
+                else if(st=="leaving")msg="<color=#888>Leaving queue…</color>";
                 else if(ovtLocked)msg="<color=#FFB347>1v2 lobby pending</color> — Leave to dissolve it if nothing happens.";
                 else msg="Not in queue.";
                 UIFactory.SetText(txtOvtStatus,msg);
@@ -8054,7 +8055,7 @@ try{
         if(_lbt!=null)UIFactory.SetText(_lbt,_rem>0f?$"RLFP ({(int)(_rem/60)+1}m)":"RLFP Ping");
     }
 }catch{}
-qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCancelBtn.SetActive(ranked&&qs==ApiClient.QueueState.Searching);if(qs==ApiClient.QueueState.Searching){var poll=ApiClient.LastPollData;string line="Searching...";if(poll!=null&&poll.status=="searching"){int m=poll.wait_time/60,sec=poll.wait_time%60;line=$"Searching... {(m>0?$"{m}m ":"")}{sec}s  +/-{poll.elo_range}"+(poll.queue_size>1?$"  ({poll.queue_size} in queue)":"");}line+=OnlineSuffix();UIFactory.SetText(txtQueueInfo,line);UIFactory.SetColor(txtQueueInfo,C_BLUE);((txtQueueInfo as Component)?.gameObject)?.SetActive(true);}else if(qs==ApiClient.QueueState.Idle&&ranked){int qc=ApiClient.CachedQueueSearching;if(qc>0){UIFactory.SetText(txtQueueInfo,$"{qc} searching"+OnlineSuffix());UIFactory.SetColor(txtQueueInfo,C_GREEN);}else{UIFactory.SetText(txtQueueInfo,"0 in queue"+OnlineSuffix());UIFactory.SetColor(txtQueueInfo,C_DIM);}((txtQueueInfo as Component)?.gameObject)?.SetActive(true);}else{UIFactory.SetText(txtQueueInfo,"");((txtQueueInfo as Component)?.gameObject)?.SetActive(false);}if(qs==ApiClient.QueueState.Matched||qs==ApiClient.QueueState.ReadySent){qMatchPanel.SetActive(true);var poll=ApiClient.LastPollData;if(poll!=null){string oppInfo=$"MATCH FOUND!  vs {poll.opponent_name} ({poll.opponent_rating:F0})";if(qs==ApiClient.QueueState.ReadySent&&poll.opponent_ready)oppInfo+="  [Opponent Ready]";UIFactory.SetText(txtMatchFound,oppInfo);}bool readySent=qs==ApiClient.QueueState.ReadySent;readyBtn.SetActive(!readySent);connectLabel.SetActive(readySent);if(readySent&&txtConnectLabel!=null&&poll!=null){string waitTxt=!string.IsNullOrEmpty(poll.opponent_name)?$"Waiting for {poll.opponent_name} ({poll.opponent_rating:F0})...":"Waiting for opponent...";if(poll.opponent_ready)waitTxt=$"{poll.opponent_name} ready! Joining...";UIFactory.SetText(txtConnectLabel,waitTxt);}declineBtn.SetActive(true);}else qMatchPanel.SetActive(false);}
+qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCancelBtn.SetActive(ranked&&qs==ApiClient.QueueState.Searching);if(qs==ApiClient.QueueState.Searching){var poll=ApiClient.LastPollData;string line="Searching...";if(poll!=null&&poll.status=="searching"){int m=poll.wait_time/60,sec=poll.wait_time%60;line=$"Searching... {(m>0?$"{m}m ":"")}{sec}s  +/-{poll.elo_range}"+(poll.queue_size>1?$"  ({poll.queue_size} in queue)":"");}line+=OnlineSuffix();UIFactory.SetText(txtQueueInfo,line);UIFactory.SetColor(txtQueueInfo,C_BLUE);((txtQueueInfo as Component)?.gameObject)?.SetActive(true);}else if(qs==ApiClient.QueueState.Idle&&ranked){int qc=ApiClient.CachedQueueSearching;if(qc>0){UIFactory.SetText(txtQueueInfo,$"{qc} searching"+OnlineSuffix());UIFactory.SetColor(txtQueueInfo,C_GREEN);}else{UIFactory.SetText(txtQueueInfo,"0 in queue"+OnlineSuffix());UIFactory.SetColor(txtQueueInfo,C_DIM);}((txtQueueInfo as Component)?.gameObject)?.SetActive(true);}else if(qs==ApiClient.QueueState.Leaving&&ranked){UIFactory.SetText(txtQueueInfo,"Leaving queue...");UIFactory.SetColor(txtQueueInfo,C_DIM);((txtQueueInfo as Component)?.gameObject)?.SetActive(true);}else{UIFactory.SetText(txtQueueInfo,"");((txtQueueInfo as Component)?.gameObject)?.SetActive(false);}if(qs==ApiClient.QueueState.Matched||qs==ApiClient.QueueState.ReadySent){qMatchPanel.SetActive(true);var poll=ApiClient.LastPollData;if(poll!=null){string oppInfo=$"MATCH FOUND!  vs {poll.opponent_name} ({poll.opponent_rating:F0})";if(qs==ApiClient.QueueState.ReadySent&&poll.opponent_ready)oppInfo+="  [Opponent Ready]";UIFactory.SetText(txtMatchFound,oppInfo);}bool readySent=qs==ApiClient.QueueState.ReadySent;readyBtn.SetActive(!readySent);connectLabel.SetActive(readySent);if(readySent&&txtConnectLabel!=null&&poll!=null){string waitTxt=!string.IsNullOrEmpty(poll.opponent_name)?$"Waiting for {poll.opponent_name} ({poll.opponent_rating:F0})...":"Waiting for opponent...";if(poll.opponent_ready)waitTxt=$"{poll.opponent_name} ready! Joining...";UIFactory.SetText(txtConnectLabel,waitTxt);}declineBtn.SetActive(true);}else qMatchPanel.SetActive(false);}
 
         // "N online" suffix for the queue-status line (v1.29). Rich-text grey so it
         // reads as secondary info next to the queue count. Empty until the first
@@ -10754,6 +10755,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(true);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     members = BuildTeamMembersString(poll);
+                    break;
+                case ApiClient.TeamQueueState.Leaving:
+                    status = "<color=#888>Leaving queue…</color>";
+                    if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
+                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
+                    if (teamLeaveBtn != null) teamLeaveBtn.SetActive(false);
+                    if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     break;
                 default:
                     status = "";
