@@ -4738,6 +4738,48 @@ namespace CompetitiveRounds
         // the retry worst case (3 attempts × 10s timeout + 2 × 2s delay = 34s).
         private const float LEAVE_STUCK_TIMEOUT = 45f;
         private static float rankedLeavingSince = -999f;
+        // Lifecycle generation (Codex verify findings 2-4): bumped synchronously
+        // on EVERY lifecycle edge (join send, leave start, stuck-recovery).
+        // Every async queue callback captures the value at send time and applies
+        // only if still current — otherwise a delayed join ack can restore
+        // Searching after a leave, a delayed ready ack can post a dissolved
+        // room as pending, and a 20s-old poll response from a PREVIOUS
+        // lifecycle can auto-join a dead room after a rejoin. One counter per
+        // queue; int overflow is a non-issue at click cadence.
+        private static int queueGen = 0;
+
+        /// <summary>Stuck-Leaving watchdog (Codex verify finding 1) — ticked
+        /// from the persistent poll loop, NOT from the join buttons: the
+        /// Leaving views hide those buttons, and the leave callback dies with
+        /// its coroutine host (NetworkRestart destroys + respawns the plugin
+        /// GO), which would otherwise leave the queue tab unusable until
+        /// relaunch. Bumps the generation so a zombie leave callback that
+        /// somehow fires later cannot touch the recovered state.</summary>
+        public static void TickLeaveRecovery()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (CurrentQueueState == QueueState.Leaving && now - rankedLeavingSince > LEAVE_STUCK_TIMEOUT)
+            {
+                queueGen++;
+                CurrentQueueState = QueueState.Idle;
+                Plugin.Log.LogWarning("[QUEUE] Leaving state stuck past timeout -- recovered to Idle");
+                NativeUI.MarkDirty();
+            }
+            if (CurrentTeamQueueState == TeamQueueState.Leaving && now - teamLeavingSince > LEAVE_STUCK_TIMEOUT)
+            {
+                teamGen++;
+                CurrentTeamQueueState = TeamQueueState.Idle;
+                Plugin.Log.LogWarning("[TEAM-QUEUE] Leaving state stuck past timeout -- recovered to Idle");
+                NativeUI.MarkDirty();
+            }
+            if (OvtQueueStatus == "leaving" && now - _ovtLeavingSince > LEAVE_STUCK_TIMEOUT)
+            {
+                ovtGen++;
+                OvtQueueStatus = "";
+                Plugin.Log.LogWarning("[1v2] Leaving state stuck past timeout -- recovered");
+                NativeUI.MarkDirty();
+            }
+        }
 
         public static void JoinQueue(string steamId, string displayName, string region, bool rankedOnly)
         {
@@ -4761,11 +4803,17 @@ namespace CompetitiveRounds
             string safeName = Escape(displayName ?? steamId);
             string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"ranked_only\":{(rankedOnly ? "true" : "false")}}}";
 
+            int gen = ++queueGen;  // new lifecycle starts at SEND, not at the ack
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/queue/join",
                 json,
                 (success, response) =>
                 {
+                    if (gen != queueGen)
+                    {
+                        Plugin.Log.LogInfo("[QUEUE] stale join ack ignored (lifecycle moved on)");
+                        return;
+                    }
                     if (success)
                     {
                         CurrentQueueState = QueueState.Searching;
@@ -4794,6 +4842,7 @@ namespace CompetitiveRounds
             // janitor sweep (review finding). The request is
             // idempotent, so retries are safe; Idle is finalized only in the
             // callback, which fires on every path.
+            int gen = ++queueGen;
             CurrentQueueState = QueueState.Leaving;
             rankedLeavingSince = Time.realtimeSinceStartup;
             IsQueuePolling = false;
@@ -4805,6 +4854,7 @@ namespace CompetitiveRounds
                 "",
                 (success, response) =>
                 {
+                    if (gen != queueGen) return;  // watchdog recovered / new lifecycle
                     if (success)
                         Plugin.Log.LogInfo("[QUEUE] Left ranked queue");
                     else
@@ -4873,11 +4923,16 @@ namespace CompetitiveRounds
             NativeUI.MarkDirty();
             Plugin.Log.LogInfo("[QUEUE] Ready Up sent");
 
+            int gen = queueGen;  // captured, not bumped: ready is not a lifecycle edge
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/queue/ready?steam_id={Escape(steamId)}",
                 "",
                 (success, response) =>
                 {
+                    // Codex verify finding 3: a delayed ready ack landing after a
+                    // leave/rejoin must not post a dissolved room as pending or
+                    // knock the state around. Same-lifecycle + still-ReadySent only.
+                    if (gen != queueGen || CurrentQueueState != QueueState.ReadySent) return;
                     if (success)
                     {
                         // Check if both ready already (instant room)
@@ -4939,11 +4994,16 @@ namespace CompetitiveRounds
             if (queuePollTimer < queuePollInterval) return;
             queuePollTimer = 0f;
 
+            int gen = queueGen;
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/queue/poll/{steamId}",
                 (success, response) =>
                 {
-                    if (!success || !IsQueuePolling) return;
+                    // gen check (Codex verify finding 4): IsQueuePolling is a
+                    // reusable boolean — a 20s-delayed response from a PREVIOUS
+                    // lifecycle passes it after a leave+rejoin and could
+                    // auto-join a dissolved room. The generation cannot be reused.
+                    if (!success || !IsQueuePolling || gen != queueGen) return;
 
                     try
                     {
@@ -5573,6 +5633,7 @@ namespace CompetitiveRounds
 
         public static TeamQueueState CurrentTeamQueueState { get; private set; } = TeamQueueState.Idle;
         private static float teamLeavingSince = -999f;
+        private static int teamGen = 0;  // lifecycle generation — see queueGen
         public static TeamQueuePollData LastTeamPollData { get; private set; }
         public static string ActiveTeamSeriesId { get; set; }
         public static bool IsTeamQueuePolling { get; private set; } = false;
@@ -5608,10 +5669,16 @@ namespace CompetitiveRounds
             string qt = (queueType == "manual") ? "manual" : "auto";
             string safeName = Escape(displayName ?? steamId);
             string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"queue_type\":\"{qt}\"}}";
+            int gen = ++teamGen;
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/team/queue/join", json,
                 (success, response) =>
                 {
+                    if (gen != teamGen)
+                    {
+                        Plugin.Log.LogInfo("[TEAM-QUEUE] stale join ack ignored (lifecycle moved on)");
+                        return;
+                    }
                     if (success)
                     {
                         CurrentTeamQueueState = TeamQueueState.Searching;
@@ -5640,6 +5707,7 @@ namespace CompetitiveRounds
             // queue_contended) with local state already Idle strands our row
             // and can ghost-lock the other three (review finding).
             // Idempotent request; Idle finalized only in the callback.
+            int gen = ++teamGen;
             CurrentTeamQueueState = TeamQueueState.Leaving;
             teamLeavingSince = Time.realtimeSinceStartup;
             IsTeamQueuePolling = false;
@@ -5651,6 +5719,7 @@ namespace CompetitiveRounds
                 $"{baseUrl}/api/v1/team/queue/leave?steam_id={Escape(steamId)}", "",
                 (success, response) =>
                 {
+                    if (gen != teamGen) return;  // watchdog recovered / new lifecycle
                     if (success)
                         Plugin.Log.LogInfo("[TEAM-QUEUE] Left 2v2 queue");
                     else
@@ -5672,10 +5741,15 @@ namespace CompetitiveRounds
             CurrentTeamQueueState = TeamQueueState.ReadySent;
             NativeUI.MarkDirty();
             Plugin.Log.LogInfo("[TEAM-QUEUE] Ready Up sent");
+            int gen = teamGen;  // captured, not bumped: ready is not a lifecycle edge
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
                 $"{baseUrl}/api/v1/team/queue/ready?steam_id={Escape(steamId)}", "",
                 (success, response) =>
                 {
+                    // Same-lifecycle + still-ReadySent only (Codex verify
+                    // finding 3): a delayed failure ack after a leave must not
+                    // restore Matched with polling off.
+                    if (gen != teamGen || CurrentTeamQueueState != TeamQueueState.ReadySent) return;
                     if (!success)
                     {
                         Plugin.Log.LogWarning($"[TEAM-QUEUE] Ready failed after retries: {response}");
@@ -5694,11 +5768,13 @@ namespace CompetitiveRounds
             teamQueuePollTimer += Time.deltaTime;
             if (teamQueuePollTimer < TEAM_QUEUE_POLL_INTERVAL) return;
             teamQueuePollTimer = 0f;
+            int gen = teamGen;
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/team/queue/poll/{steamId}",
                 (success, response) =>
                 {
-                    if (!success || !IsTeamQueuePolling) return;
+                    // gen check: see UpdateQueuePoll (Codex verify finding 4).
+                    if (!success || !IsTeamQueuePolling || gen != teamGen) return;
                     try { ParseTeamQueuePoll(response); }
                     catch (Exception ex) { Plugin.Log.LogError($"[TEAM-QUEUE] poll parse: {ex.Message}"); }
                 }
@@ -6867,6 +6943,7 @@ namespace CompetitiveRounds
         private static bool _ovtLastSoloExtraPick = false;
         private static float _ovtLastAutoRejoinAt = -999f;
         private static float _ovtLeavingSince = -999f;
+        private static int ovtGen = 0;  // lifecycle generation — see queueGen
 
         public static void OvtJoinQueue(int preferredSide, bool soloExtraPick)
         {
@@ -6906,8 +6983,10 @@ namespace CompetitiveRounds
             try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
             string body = $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"," +
                           $"\"preferred_side\":{preferredSide},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}}}";
+            int gen = ++ovtGen;
             Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ovt/queue/join", body, (ok, resp) =>
             {
+                if (gen != ovtGen) { Plugin.Log.LogInfo("[1v2] stale join ack ignored (lifecycle moved on)"); return; }
                 if (ok) { IsOvtQueuePolling = true; OvtQueueStatus = "searching"; UpdateOvtQueueList(force: true); NativeUI.MarkDirty(); }
                 else Plugin.Log.LogWarning($"[1v2] join failed: {resp}");
             }));
@@ -6932,6 +7011,7 @@ namespace CompetitiveRounds
             // server-side, ghost-locking the other two until the 75s janitor
             // (review finding). Idempotent request; "" finalized only
             // in the callback.
+            int gen = ++ovtGen;
             OvtQueueStatus = "leaving";
             _ovtLeavingSince = Time.realtimeSinceStartup;
             NativeUI.MarkDirty();
@@ -6939,6 +7019,7 @@ namespace CompetitiveRounds
                 $"{baseUrl}/api/v1/ovt/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}", "",
                 (ok, resp) =>
                 {
+                    if (gen != ovtGen) return;  // watchdog recovered / new lifecycle
                     if (ok)
                         Plugin.Log.LogInfo("[1v2] Left 1v2 queue");
                     else
@@ -6966,10 +7047,12 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
             if (!force && Time.unscaledTime - _ovtLastPollAt < 2f) return;
             _ovtLastPollAt = Time.unscaledTime;
+            int gen = ovtGen;
             Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/queue/poll/{sid}", (ok, resp) =>
             {
                 if (!ok || string.IsNullOrEmpty(resp)) return;
                 if (!IsOvtQueuePolling) return;   // left/locked while the request was in flight
+                if (gen != ovtGen) return;        // stale lifecycle (Codex verify finding 4)
                 string status = ExtractJsonString(resp, "status") ?? "";
                 OvtQueueStatus = status;
                 OvtQueueCount = ExtractJsonInt(resp, "queue_count");
