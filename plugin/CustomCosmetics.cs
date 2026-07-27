@@ -160,6 +160,14 @@ namespace CompetitiveRounds
             // verbatim from cosmetic_submissions so the render matches exactly
             // what was reviewed in-game (learning #164/#165).
             new CosmeticDef { Sku = "face_detail_spooky_head_bouncers", DisplayName = "Spooky Head-Bouncers", Slot = CharacterItemType.Detail, PngFile = "detail_spooky_head_bouncers.png", Scale = 1.3f, Offset = new Vector2(0.113f, 3.665f) },
+            // v1.34.5 — two community submissions, same workflow. Scale/Offset
+            // are the ADMIN-APPROVED values (approved_placement_revision 1),
+            // copied verbatim from cosmetic_submissions.approved_render_* and
+            // guarded by migration 153, which refuses to publish if the
+            // artist revised the placement after this bundle was cut.
+            // PNGs were pulled from png_data with md5 verification.
+            new CosmeticDef { Sku = "face_detail_ballooniphones", DisplayName = "Ballooniphones", Slot = CharacterItemType.Detail, PngFile = "Ballooniphones.png", Scale = 1.7f, Offset = new Vector2(-0.192f, 2.112f) },
+            new CosmeticDef { Sku = "face_detail_soda_helm",      DisplayName = "Soda Helm",      Slot = CharacterItemType.Detail, PngFile = "SodaHelm.png",      Scale = 1.3f, Offset = new Vector2(-0.096f, 2.4f) },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

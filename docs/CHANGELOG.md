@@ -1,20 +1,29 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased — base-game bug fixes, menu overhaul, security batch
+## v1.34.5 — 2026-07-27 — attempted base-game bug fixes, menu overhaul, security batch
 
-### Base-game bugs (yes, the game's own bugs — fixed by the mod, active in competitive rooms and sandbox)
-- **Demonic Pact no longer breaks Spray in later games.** The game copies Demonic Pact's "no holding the trigger" flag onto your gun and never clears it between games in the same room — so picking Spray in any later game fired one shot per click instead of spraying. The flag is now reset between games.
-- **Poison "ghost damage" fix.** Occasionally a poisoned player's own health bar stopped tracking ticks that everyone else saw land (you could still hear them). Cause: each player's copy of the game decides separately whether a tick lands during a block window, and the copies can disagree. Poison ticks now land consistently on every screen. Players holding Decay are exempt so blocking mid-spread still works exactly like the base game.
-- **Drill bullets fired against a wall are no longer invisible to the other players.** The game corrected the wrong object's position when a drilled bullet came out the far side; the mod now moves the actual bullet on everyone else's screen.
-- **Killing your opponent during the end screen no longer corrupts the next game** (the missing map / undespawned body / death-to-nothing sequence). Kills and damage-over-time ticks that happen after the game has already ended are ignored.
-- **Chase's card text no longer advertises "+30% Health".** The bonus is dead data inside the game files — it was never actually applied. The card's real effect (a speed boost while heading at a visible opponent) is unchanged; only the phantom line is removed.
+### Base-game bugs — ATTEMPTED FIXES, PLEASE REPORT BACK
+These target bugs in ROUNDS itself, found by reading the game's own code. They are
+**not confirmed fixed in live play yet** — they have had almost no play-testing, so
+treat every one as "should be better, tell us if it isn't". They only apply in
+competitive rooms and sandbox, never in public quickplay. If you still hit any of
+these (or see something NEW go wrong around them), please file a bug report from the
+Settings tab with your log attached — that is what turns these into confirmed fixes.
+- **Demonic Pact should stop breaking Spray in later games.** The game copies Demonic Pact's "no holding the trigger" flag onto your gun and never clears it between games in the same room — so picking Spray in any later game fired one shot per click instead of spraying. The flag is now reset between games. *(Cause confirmed in the game's files; the fix itself still needs play-testing.)*
+- **Poison "ghost damage" attempt.** Occasionally a poisoned player's own health bar stopped tracking ticks that everyone else saw land (you could still hear them). Best theory: each player's copy of the game decides separately whether a tick lands during a block window, and the copies can disagree. Ticks should now land consistently on every screen. Players holding Decay are deliberately exempt so blocking mid-spread still works exactly like the base game.
+- **Drill bullets fired against a wall should no longer be invisible to other players.** The game moves the wrong object when a drilled bullet comes out the far side; the mod now moves the actual bullet on everyone else's screen. *(Lowest confidence of the five — please report whether it still happens.)*
+- **Killing your opponent during the end screen should no longer corrupt the next game** (the missing map / undespawned body / death-to-nothing sequence). Kills and damage-over-time ticks that arrive after the game has already ended are now ignored.
+- **Chase's card text no longer advertises "+30% Health".** The bonus is dead data inside the game files — it was never actually applied to anyone. The card's real effect (a speed boost while heading at a visible opponent) is unchanged; only the phantom line is removed. *(This one is a display-only change and is safe.)*
+
+### Cosmetics — new community art
+- **Ballooniphones** and **Soda Helm**, both by their artist through the full upload → placement review → release pipeline. They ship at the exact scale and position that were approved in-game. The artist opens sales from the Artist tab when ready.
 
 ### Menus
 - **Tournaments tab no longer paints text over itself on smaller/wider windows.** The long "How It Works" and prize blocks moved behind two buttons that open a scrollable popup, and the whole left column scrolls now.
 - **Settings tab reorganized** into Data & Privacy / Interface / Visuals & Effects, and every description now sits directly UNDER the setting it describes (bug #87 — they used to hug the button above them).
 - **The in-match ranked line now reads "Series Score: X - X (Total Series X - X)"** where Total Series is your lifetime series record against the CURRENT opponent — replacing the confusing rolling "session" tally.
 
-### Cosmetics
+### Cosmetics — artist workflow
 - **The placement drag in the artist/admin preview is now a visual aid only — it is never saved.** New cosmetics spawn centered and players position them in the character editor; already-shipped items keep their approved placements.
 
 ### Chat
@@ -34,6 +43,7 @@
 ### Schema changes
 - `151_steam_auth_arming.sql` — adds `players.steam_auth_seen_at` (monotonic steam-auth arming) with a backfill from surviving verified sessions. Applied 2026-07-27.
 - `152_ban_session_cleanup.sql` — one-time revocation of sessions held by already-banned accounts. Applied 2026-07-27.
+- `153_release_ballooniphones_soda_helm.sql` — publishes the two community face cosmetics bundled in this release, guarded against a post-bundle placement revision. Applied 2026-07-27.
 
 ## v1.34.4 — 2026-07-26 — 1v2 extra-pick crash fix + HTTPS endpoint
 

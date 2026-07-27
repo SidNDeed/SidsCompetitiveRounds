@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.34.4";   // July 26: 1v2 extra-pick crash fix, HTTPS endpoint migration, crown/dark-aura placement
+        public const string ModVersion = "1.34.5";   // July 27: attempted base-game bug fixes, menu overhaul, security batch, queue-lock hardening
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
