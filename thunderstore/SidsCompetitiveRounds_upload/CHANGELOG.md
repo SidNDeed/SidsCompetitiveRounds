@@ -1,3 +1,48 @@
+## v1.34.5 — 2026-07-27 — attempted base-game bug fixes, menu overhaul, security batch
+
+### Base-game bugs — ATTEMPTED FIXES, PLEASE REPORT BACK
+These target bugs in ROUNDS itself, found by reading the game's own code. They are
+**not confirmed fixed in live play yet** — they have had almost no play-testing, so
+treat every one as "should be better, tell us if it isn't". They only apply in
+competitive rooms and sandbox, never in public quickplay. If you still hit any of
+these (or see something NEW go wrong around them), please file a bug report from the
+Settings tab with your log attached — that is what turns these into confirmed fixes.
+- **Demonic Pact should stop breaking Spray in later games.** The game copies Demonic Pact's "no holding the trigger" flag onto your gun and never clears it between games in the same room — so picking Spray in any later game fired one shot per click instead of spraying. The flag is now reset between games. *(Cause confirmed in the game's files; the fix itself still needs play-testing.)*
+- **Poison "ghost damage" attempt.** Occasionally a poisoned player's own health bar stopped tracking ticks that everyone else saw land (you could still hear them). Best theory: each player's copy of the game decides separately whether a tick lands during a block window, and the copies can disagree. Ticks should now land consistently on every screen. Players holding Decay are deliberately exempt so blocking mid-spread still works exactly like the base game.
+- **Drill bullets fired against a wall should no longer be invisible to other players.** The game moves the wrong object when a drilled bullet comes out the far side; the mod now moves the actual bullet on everyone else's screen. *(Lowest confidence of the five — please report whether it still happens.)*
+- **Killing your opponent during the end screen should no longer corrupt the next game** (the missing map / undespawned body / death-to-nothing sequence). Kills and damage-over-time ticks that arrive after the game has already ended are now ignored.
+- **Chase's card text no longer advertises "+30% Health".** The bonus is dead data inside the game files — it was never actually applied to anyone. The card's real effect (a speed boost while heading at a visible opponent) is unchanged; only the phantom line is removed. *(This one is a display-only change and is safe.)*
+
+### Cosmetics — new community art
+- **Ballooniphones** and **Soda Helm**, both by their artist through the full upload → placement review → release pipeline. They ship at the exact scale and position that were approved in-game. The artist opens sales from the Artist tab when ready.
+
+### Menus
+- **Tournaments tab no longer paints text over itself on smaller/wider windows.** The long "How It Works" and prize blocks moved behind two buttons that open a scrollable popup, and the whole left column scrolls now.
+- **Settings tab reorganized** into Data & Privacy / Interface / Visuals & Effects, and every description now sits directly UNDER the setting it describes (bug #87 — they used to hug the button above them).
+- **The in-match ranked line now reads "Series Score: X - X (Total Series X - X)"** where Total Series is your lifetime series record against the CURRENT opponent — replacing the confusing rolling "session" tally.
+
+### Cosmetics — artist workflow
+- **The placement drag in the artist/admin preview is now a visual aid only — it is never saved.** New cosmetics spawn centered and players position them in the character editor; already-shipped items keep their approved placements.
+
+### Chat
+- If secure chat can't connect on your network, chat falls back for that session instead of silently eating your messages (the rest of the mod already did this).
+
+### Server & security
+- Fixed a matchmaking deadlock where two players polling at the same instant could briefly wedge the 1v1 queue, plus a batch of queue-lock hardening across 1v1/2v2/1v2.
+- **Leaving a queue now waits for the server to confirm.** If the leave request failed (bad connection, a busy moment), the mod used to show you as out while your slot stayed live server-side — which could lock other players into a lobby with a ghost. All three queues (1v1, 2v2, 1v2) now show "Leaving queue...", retry the request, and only then finish; joining again is held off for the moment it takes the leave to resolve.
+- **A match result is no longer wedged by a disconnect forfeit or an admin correction arriving at the same moment.** If the last game of a series was reported at the same instant something else finished that same series, the two could block each other and one would lose — and when that was the match report, a real game silently didn't count. The result-writing paths (match reports, forfeits, admin resolve/reverse, the ratings rebuild) now claim their records in one consistent order in both 1v1 and 2v2, so they wait their turn instead of colliding.
+- **An admin correction can no longer be half-undone by a match report landing at the same time.** Reversing a series while its final game was still being processed could leave the rating change applied anyway, and could hand out a title for a win that had just been taken back. The rating step now re-checks that the series still stands before it applies anything.
+- **A problem paying out bets can no longer take the match result down with it.** Bet settlement is now isolated in 1v1 the way it already was in 2v2: if it fails, the game still counts and the ratings still apply.
+- Admin actions now use a separate secret that does not ship inside the mod — previously anyone who unpacked the DLL could forge admin requests.
+- Session checks extended across cosmetic equips, privacy toggles, blocks, and queue actions; bans now also revoke live sessions and stop new ones from being minted.
+- Deleting your data now also clears 2v2/1v2 queue entries and login sessions, and declining a match is validated against who you're actually matched with.
+- The API's public documentation pages were turned off and the minimum supported mod version was raised to 1.33.0 (older clients get the update prompt).
+
+### Schema changes
+- `151_steam_auth_arming.sql` — adds `players.steam_auth_seen_at` (monotonic steam-auth arming) with a backfill from surviving verified sessions. Applied 2026-07-27.
+- `152_ban_session_cleanup.sql` — one-time revocation of sessions held by already-banned accounts. Applied 2026-07-27.
+- `153_release_ballooniphones_soda_helm.sql` — publishes the two community face cosmetics bundled in this release, guarded against a post-bundle placement revision. Applied 2026-07-27.
+
 ## v1.34.4 — 2026-07-26 — 1v2 extra-pick crash fix + HTTPS endpoint
 
 ### 1v2
