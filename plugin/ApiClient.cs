@@ -7266,7 +7266,14 @@ namespace CompetitiveRounds
                     // Auto-rejoin once per minute with the same preferences;
                     // a voluntary Leave can't reach here (it stops polling
                     // and the in-flight guard drops late responses).
+                    // Online-room gate (Codex post-release finds 1 + C): the
+                    // server now EVICTS other-mode searching rows when a match
+                    // locks — rejoining from inside a game would recreate the
+                    // ghost the eviction just removed. OFFLINE sandbox rooms
+                    // linger at the menu (learning #122) and stay eligible for
+                    // the normal ghost-prune recovery.
                     if (status == "not_in_queue"
+                        && (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode)
                         && Time.unscaledTime - _ovtLastAutoRejoinAt > 60f)
                     {
                         _ovtLastAutoRejoinAt = Time.unscaledTime;
@@ -7949,7 +7956,11 @@ namespace CompetitiveRounds
                             "Removed from FFA queue after 30 minutes of searching - rejoin if you're still here!",
                             Color.yellow, 7f);
                     // Ghost-prune recovery: auto-rejoin once per minute (#150).
+                    // Online-room gate (finds 1 + C): never recreate a row the
+                    // cross-queue eviction removed while we're in a real game;
+                    // offline sandbox rooms (learning #122) keep the recovery.
                     if (status == "not_in_queue"
+                        && (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode)
                         && Time.unscaledTime - _ffaLastAutoRejoinAt > 60f)
                     {
                         _ffaLastAutoRejoinAt = Time.unscaledTime;

@@ -1953,8 +1953,35 @@ async def _faq_ingame_task(data: dict) -> None:
 @bot.hybrid_command(name="faq", description="Look up an FAQ answer (or list all topics)")
 @app_commands.describe(topic="Your question, or leave empty to list topics")
 async def cmd_faq(ctx, *, topic: str = ""):
-    """Manual FAQ trigger — same matcher as the auto-responder, no cooldowns.
-    Handy for mods pointing someone at an answer."""
+    """Manual FAQ trigger - title-first, then the auto-responder matcher."""
+    title_matches = []
+
+    def _faq_find_by_title(text):
+        """Resolve exact or uniquely partial FAQ titles for the manual command."""
+        def normalize_title(value):
+            collapsed = _faq_re.sub(r"\s+", " ", (value or "").casefold()).strip()
+            return _faq_re.sub(r"^[\W_]+|[\W_]+$", "", collapsed)
+
+        title_matches.clear()
+        query = normalize_title(text)
+        if not query:
+            return None
+
+        normalized = [
+            (entry, normalize_title(entry.get("title") or ""))
+            for entry in FAQ_ENTRIES
+        ]
+        for entry, title in normalized:
+            if title == query:
+                title_matches.append(entry)
+                return entry
+
+        title_matches.extend(
+            entry for entry, title in normalized
+            if title and (query in title or title in query)
+        )
+        return title_matches[0] if len(title_matches) == 1 else None
+
     if not topic.strip():
         lines = "\n".join(f"• **{e.get('title')}**" for e in FAQ_ENTRIES)
         embed = discord.Embed(title="💡 FAQ topics",
@@ -1963,9 +1990,16 @@ async def cmd_faq(ctx, *, topic: str = ""):
                               color=0x5865F2)
         await ctx.send(embed=embed)
         return
-    entry = _faq_find_match(topic) or _faq_find_match(topic + "?")
+    entry = _faq_find_by_title(topic) or _faq_find_match(topic) or _faq_find_match(topic + "?")
     if entry is None:
-        await ctx.send("No FAQ matches that — try `/faq` for the topic list.")
+        if len(title_matches) > 1:
+            suggestions = ", ".join(
+                f"**{_faq_plainify(e.get('title') or '', cap=200)}**"
+                for e in title_matches
+            )
+            await ctx.send(f"Did you mean: {suggestions}")
+        else:
+            await ctx.send("No FAQ matches that - try `/faq` for the topic list.")
         return
     await _maybe_defer(ctx)
     # Hybrid slash contexts can expose a truthy synthetic Message whose

@@ -1,5 +1,32 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased — post-release queue + report fixes
+
+### Queues
+- **Locked-in players leave every other queue** (the "ghost in 1v1 Search
+  Ranked" report): a player who queued 1v1 and then got locked into an FFA /
+  2v2 / 1v2 lobby kept heartbeating their 1v1 row from inside the game —
+  showing as "1 searching" to everyone for the whole sitting and even able to
+  receive a mid-game MATCH FOUND. Now the moment any mode issues a room, the
+  locked players' still-searching rows in the other queues are removed
+  server-side — and the client itself leaves the 1v1 queue when you enter any
+  online game room (with a notice), covering casual/custom rooms too.
+- **FFA/1v2 rejoin resets your queue timer** (bug #109): rejoining after a
+  game restart used to inherit the old row's clock ("in queue 18 minutes
+  already") and a stale rating snapshot; a rejoin while still unlocked now
+  starts fresh.
+- **FFA gather window extends while people join** (bug #111): lobbies no
+  longer hard-start 25s after the 3rd joiner — every new joiner guarantees
+  20 more seconds of pile-in time (capped at 120s total), so 5-10 player
+  lobbies can actually form. Full lobbies still start instantly.
+
+### Reports & Discord
+- **Admins are exempt from the 10-reports-per-day limit** (session-verified,
+  so a spoofed admin Steam ID in the request body still pays the normal cap).
+- **`/faq topic:<title>` now matches topic titles** (bug #110): typing a
+  title from the `/faq` list used to fail for every topic because the matcher
+  only understood natural questions.
+
 ## v1.35.0 — 2026-07-28 — NEW MODE: Free-For-All, rank ladder reorganization, 1v2 overhaul
 
 ### Rank reorganization (July 28, round 3)

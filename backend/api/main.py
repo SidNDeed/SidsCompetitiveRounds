@@ -5025,6 +5025,28 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
             "verified": verified}
 
 
+async def _strict_steam_session_ok(request, steam_id: str, db: AsyncSession) -> bool:
+    """Fail-CLOSED session validity — for privilege checks (admin rate-limit
+    exemption), NOT the compatibility write-path gate below. Every failure
+    (missing token, unknown/expired/unverified row, id mismatch, infra error)
+    returns False; there are no soft/grace carve-outs here by design."""
+    try:
+        token = request.headers.get("X-Session-Token") if request is not None else None
+        if not token:
+            return False
+        row = (await db.execute(text(
+            "SELECT steam_id, verified, expires_at FROM steam_sessions "
+            "WHERE token_hash = :th"
+        ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
+        if row is None or not row["verified"]:
+            return False
+        if row["expires_at"] is not None and row["expires_at"] < datetime.now(timezone.utc):
+            return False
+        return row["steam_id"] == steam_id
+    except Exception:
+        return False
+
+
 async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None:
     """Session enforcement for the mutating endpoints. Reads X-Session-Token,
     matches it (sha256, single indexed SELECT) against steam_sessions for the
@@ -5203,6 +5225,166 @@ async def _lock_queue_rows_ordered(db: AsyncSession, table: str, player_ids) -> 
         )
 
 
+_CROSS_QUEUE_TABLES = ("ranked_queue", "team_queue", "ovt_queue", "ffa_queue")
+
+
+async def _evict_other_queue_searching(db: AsyncSession, player_ids, keep_table: str, reason: str) -> None:
+    """A player locked into one mode's match is no longer available to the
+    other queues — delete their still-'searching' rows everywhere else.
+
+    July 28 (Sid's ghost report): an FFA player who had also hit Search Ranked
+    kept heartbeating their ranked_queue row from inside the FFA game, so the
+    1v1 tab showed "1 searching" all sitting long and the ghost could even
+    receive a mid-game MATCH FOUND. The client now also leaves the 1v1 queue
+    on room join; this server-side eviction covers older clients and every
+    other mode pair.
+
+    Runs AFTER the lock transaction commits, in its own transaction — a
+    failure here must never unwind a formed match (#187's failure-domain
+    rule). SKIP LOCKED keeps it nonblocking: a row a concurrent lock holds is
+    that lock's to evict (#197's nonblocking clause — no cross-mode wait
+    edges, so no new ABBA risk between simultaneous locks of the same
+    player).
+    """
+    if not player_ids:
+        return
+    import asyncio as _aio
+    pids = list(player_ids)
+    other_tables = [t for t in _CROSS_QUEUE_TABLES if t != keep_table]
+    try:
+        # Up to 3 passes (Codex post-release find 2): SKIP LOCKED can skip the
+        # exact ghost row while its own 3s poll briefly holds the tuple, and
+        # no later actor ever retries — so after each pass, re-count eligible
+        # rows with a PLAIN select (sees locked rows too) and sweep again
+        # after a beat. Leftovers after the final pass are logged loudly.
+        for attempt in range(3):
+            for table in other_tables:
+                res = await db.execute(
+                    text(f"""DELETE FROM {table} WHERE player_id IN (
+                                SELECT player_id FROM {table}
+                                 WHERE player_id = ANY(:pids) AND status = 'searching'
+                                 FOR UPDATE SKIP LOCKED)
+                            RETURNING steam_id"""),
+                    {"pids": pids},
+                )
+                for r in res.fetchall():
+                    print(f"[QUEUE-EVICT] {r[0]} removed from {table} (locked into {reason})")
+            # Codex re-review find A: a pre-room 1v1 MATCHED pair (ready-up,
+            # no room yet) dissolves too when one side locks into another
+            # mode: innocent partner back to searching, locked player's row
+            # deleted. Both writes are SKIP LOCKED-guarded (no wait edges —
+            # a contended row retries next pass; a partner left pointing at
+            # a deleted opponent self-heals on its next poll). Room-issued
+            # pairs are past the point of no return: the ranked no-show
+            # watchdogs own a half-abandoned room.
+            if "ranked_queue" in other_tables:
+                rows_m = (await db.execute(
+                    text("""SELECT player_id, matched_with FROM ranked_queue
+                             WHERE player_id = ANY(:pids) AND status = 'matched'
+                               AND room_name IS NULL
+                             FOR UPDATE SKIP LOCKED"""),
+                    {"pids": pids},
+                )).mappings().all()
+                for rm in rows_m:
+                    if rm["matched_with"] is not None:
+                        await db.execute(
+                            text("""UPDATE ranked_queue
+                                       SET status='searching', matched_with=NULL,
+                                           ready=false, matched_at=NULL
+                                     WHERE matched_with = :me
+                                       AND player_id IN (
+                                           SELECT player_id FROM ranked_queue
+                                            WHERE player_id = :partner
+                                            FOR UPDATE SKIP LOCKED)"""),
+                            {"me": rm["player_id"], "partner": rm["matched_with"]},
+                        )
+                    await db.execute(
+                        text("DELETE FROM ranked_queue WHERE player_id = :pid"),
+                        {"pid": rm["player_id"]},
+                    )
+                    print(f"[QUEUE-EVICT] pre-room 1v1 match dissolved (locked into {reason})")
+            await db.commit()
+            remaining = 0
+            for table in other_tables:
+                cond = "status = 'searching'"
+                if table == "ranked_queue":
+                    # Pre-room matched rows are eviction targets too (find A)
+                    # — count them so a skipped one triggers another pass.
+                    cond = "(status = 'searching' OR (status = 'matched' AND room_name IS NULL))"
+                remaining += (await db.execute(
+                    text(f"SELECT COUNT(*) FROM {table}"
+                         f" WHERE player_id = ANY(:pids) AND {cond}"),
+                    {"pids": pids},
+                )).scalar() or 0
+            await db.commit()
+            if remaining == 0:
+                return
+            await _aio.sleep(0.15)
+        print(f"[QUEUE-EVICT] WARNING: rows survived 3 passes ({reason}) — join-guard is the backstop")
+    except Exception as ex:
+        print(f"[QUEUE-EVICT] eviction failed ({reason}): {ex}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+
+# Per-table "is this locked row a LIVE commitment?" predicates (Codex
+# post-release re-review find B): ovt/ffa clients STOP queue-polling once
+# ready_join fires (the lobby flow takes over), so a bare last_polled
+# freshness test expires ~90s into a normal sitting and the guard evaporates.
+# Instead: ranked ready-up clients DO poll every 3s (freshness works there);
+# team_series has a 60s stale-cancel so plain 'active' self-cleans; ovt/ffa
+# lobbies count as live only while their series/lobby is ACTIVE and shows
+# recent life (fresh assembly, or a game reported in the last 15 minutes — a
+# between-games gap in a real sitting is far shorter). The recency clause
+# keeps a crashed-out assembly from join-blocking its players for hours; the
+# dead-lock janitors own those husks.
+_QUEUE_LOCK_LIVENESS_SQL = {
+    "ranked_queue": (
+        "SELECT 1 FROM ranked_queue WHERE player_id = :pid"
+        " AND status != 'searching'"
+        " AND last_polled > NOW() - INTERVAL '90 seconds'"),
+    "team_queue": (
+        "SELECT 1 FROM team_queue q JOIN team_series s ON s.id = q.series_id"
+        " WHERE q.player_id = :pid AND q.status != 'searching'"
+        " AND s.status = 'active'"),
+    "ovt_queue": (
+        "SELECT 1 FROM ovt_queue q JOIN ovt_series s ON s.id = q.series_id"
+        " WHERE q.player_id = :pid AND q.status != 'searching'"
+        " AND s.status = 'active'"
+        " AND (s.created_at > NOW() - INTERVAL '15 minutes'"
+        "      OR EXISTS (SELECT 1 FROM ovt_matches m WHERE m.series_id = s.id"
+        "                  AND m.ended_at > NOW() - INTERVAL '15 minutes'))"),
+    "ffa_queue": (
+        "SELECT 1 FROM ffa_queue q JOIN ffa_lobbies l ON l.id = q.series_id"
+        " WHERE q.player_id = :pid AND q.status != 'searching'"
+        " AND l.status = 'active'"
+        " AND (l.created_at > NOW() - INTERVAL '15 minutes'"
+        "      OR EXISTS (SELECT 1 FROM ffa_matches m WHERE m.lobby_id = l.id"
+        "                  AND m.ended_at > NOW() - INTERVAL '15 minutes'))"),
+}
+
+
+async def _locked_in_other_queue(db: AsyncSession, player_id, joining_table: str) -> str | None:
+    """Name of another queue table where this player holds a LIVE locked row
+    (per _QUEUE_LOCK_LIVENESS_SQL), else None.
+
+    Backstop for the eviction above (Codex post-release find 1): the 1v2/FFA
+    clients auto-rejoin on not_in_queue, so a bare eviction would be undone by
+    the very next rejoin tick — the JOIN itself must refuse while the player
+    is genuinely mid-lobby elsewhere."""
+    for table in _CROSS_QUEUE_TABLES:
+        if table == joining_table:
+            continue
+        row = (await db.execute(
+            text(_QUEUE_LOCK_LIVENESS_SQL[table]), {"pid": player_id},
+        )).first()
+        if row is not None:
+            return table
+    return None
+
+
 async def _lock_queue_group_for_player(
     db: AsyncSession, table: str, steam_id: str, max_attempts: int = 3
 ):
@@ -5339,6 +5521,14 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
         raise HTTPException(
             status_code=409,
             detail="Your tournament match is up next - play it first (F5 -> Tournaments)")
+
+    # Cross-queue guard (Codex post-release find 1): a player actively locked
+    # into another mode's lobby must not (re)enter this queue — same #150
+    # family as the tournament block above.
+    _other = await _locked_in_other_queue(db, player.id, "ranked_queue")
+    if _other:
+        raise HTTPException(status_code=409,
+                            detail="You're in a live match in another mode - finish it first")
 
     # Get their current rating
     rating_result = await db.execute(
@@ -5864,6 +6054,7 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
         # Both ready — generate room if not already done
         if my_ready and opp_ready:
+            room_just_generated = not room_name
             if not room_name:
                 room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
                 # Pick region: use our region (first poller), fallback to opponent's, fallback to "us"
@@ -5889,6 +6080,13 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 db.add(series)
                 await db.flush()
             await db.commit()
+            # Room JUST issued (gated — this both-ready branch replays every
+            # poll until the clients join, Codex find 6) — both players are
+            # committed to a 1v1 game; drop their searching rows in the other
+            # queues. Post-commit, own transaction.
+            if room_just_generated:
+                await _evict_other_queue_searching(
+                    db, [my_pid, opp["player_id"]], "ranked_queue", "a 1v1 match")
             return QueuePollResponse(
                 status="ready_join",
                 wait_time=wait_seconds,
@@ -6106,8 +6304,10 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     if opp and opp["ready"]:
         # Both ready — generate room if not already done
         room_name = entry["room_name"] or opp["room_name"]
+        room_generated = False
         if not room_name:
             room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
+            room_generated = True
             chosen_region = entry["region"] or (opp["region"] if opp else None) or "us"
             for pid in [player.id, opp["player_id"]]:
                 await db.execute(
@@ -6135,6 +6335,12 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
             await db.flush()  # get the new series_id
 
         await db.commit()
+        # Room just issued — the pair is committed to a 1v1 game; drop their
+        # searching rows in the other queues. Post-commit, own transaction;
+        # gated so re-polls of an already-issued room don't re-run it.
+        if room_generated:
+            await _evict_other_queue_searching(
+                db, [player.id, opp["player_id"]], "ranked_queue", "a 1v1 match")
         return {
             "status": "both_ready",
             "room_name": room_name,
@@ -6174,12 +6380,19 @@ async def queue_decline(req: QueueDeclineRequest, request: Request, db: AsyncSes
     # inserting attacker<->victim blocks, repeatably. Validate under the locks;
     # a mismatch writes nothing.
     entry = (await db.execute(
-        text("SELECT status, matched_with FROM ranked_queue WHERE player_id = :pid"),
+        text("SELECT status, matched_with, room_name FROM ranked_queue WHERE player_id = :pid"),
         {"pid": p1.id},
     )).mappings().first()
     if entry is None or entry["status"] != "matched" or entry["matched_with"] != p2.id:
         await db.commit()
         raise HTTPException(status_code=409, detail="not_matched_with_that_player")
+    # Room issuance is a terminal boundary (Codex post-release find 6): once
+    # both readied and the room exists, the pair's other-queue rows are gone
+    # and the series row is live — a straggler Decline arriving in that window
+    # must not dissolve a formed match.
+    if entry["room_name"]:
+        await db.commit()
+        raise HTTPException(status_code=409, detail="match_already_formed")
 
     expires = datetime.now(timezone.utc) + timedelta(minutes=QUEUE_BLOCK_MINUTES)
 
@@ -10921,7 +11134,7 @@ def _bug_report_log_path(report_id: str) -> _pathlib.Path:
 
 
 @app.post("/api/v1/bug-reports", tags=["Bug Reports"])
-async def submit_bug_report(req: BugReportRequest, db: AsyncSession = Depends(get_db)):
+async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Player-submitted bug report. Idempotent only on (steam_id, description)
     dupes — sliding window rate-limits flooding."""
     severity = req.severity.lower() if req.severity else "medium"
@@ -10939,14 +11152,25 @@ async def submit_bug_report(req: BugReportRequest, db: AsyncSession = Depends(ge
         await _mark_mod_seen(db, player)
 
     # Rate limit: 10 reports per 24h per Steam ID. Returns 429 so the client
-    # can show a "slow down" toast.
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    recent = await db.execute(
-        text("SELECT COUNT(*) FROM bug_reports WHERE steam_id = :sid AND created_at >= :cutoff"),
-        {"sid": req.steam_id, "cutoff": cutoff},
-    )
-    if (recent.scalar() or 0) >= BUG_REPORT_PER_STEAM_PER_DAY:
-        raise HTTPException(status_code=429, detail=f"Limit is {BUG_REPORT_PER_STEAM_PER_DAY} reports per 24h — try again later")
+    # can show a "slow down" toast. Admins are exempt (July 28, Sid hit the
+    # cap mid-playtest) — but ONLY with a STRICTLY valid Steam session for
+    # that id. _check_steam_session is deliberately soft (unarmed accounts /
+    # infra blips pass), so it cannot be the oracle here (Codex find 3): a
+    # spoofed admin steam_id in the unauthenticated body must pay the normal
+    # limit. _strict_steam_session_ok fails CLOSED on every path.
+    admin_exempt = False
+    if await _is_admin(db, req.steam_id):
+        admin_exempt = await _strict_steam_session_ok(request, req.steam_id, db)
+        if not admin_exempt:
+            print(f"[BUG-REPORT] admin-claim without strict session for {req.steam_id} — normal limit applies")
+    if not admin_exempt:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        recent = await db.execute(
+            text("SELECT COUNT(*) FROM bug_reports WHERE steam_id = :sid AND created_at >= :cutoff"),
+            {"sid": req.steam_id, "cutoff": cutoff},
+        )
+        if (recent.scalar() or 0) >= BUG_REPORT_PER_STEAM_PER_DAY:
+            raise HTTPException(status_code=429, detail=f"Limit is {BUG_REPORT_PER_STEAM_PER_DAY} reports per 24h — try again later")
 
     log_filename: str | None = None
     log_bytes_stored: int | None = None
@@ -12107,6 +12331,12 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
     if not player.ranked_enabled:
         player.ranked_enabled = True
 
+    # Cross-queue guard (Codex post-release find 1) — see /queue/join.
+    _other = await _locked_in_other_queue(db, player.id, "team_queue")
+    if _other:
+        raise HTTPException(status_code=409,
+                            detail="You're in a live match in another mode - finish it first")
+
     # Snapshot 2v2 rating (default if no row yet)
     g2_r = await db.execute(select(GlickoRating2v2).where(GlickoRating2v2.player_id == player.id))
     g2 = g2_r.scalar_one_or_none()
@@ -12473,6 +12703,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
         if all_ready:
             # Generate room if not yet set (any one of the 4 can establish it).
+            room_generated_2v2 = not me["room_name"]
             if not me["room_name"]:
                 room_name = f"team_{uuid_mod.uuid4().hex[:12]}"
                 # Pick region by mode of the 4 region values; fallback to 'us'.
@@ -12504,6 +12735,12 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 region_out = me["room_region"]
 
             await db.commit()
+            # Room just issued — all four are committed to a 2v2 game; drop
+            # their searching rows in the other queues. Post-commit, own
+            # transaction; gated to the one poll that generated the room.
+            if room_generated_2v2:
+                await _evict_other_queue_searching(
+                    db, [p["player_id"] for p in all_4], "team_queue", "a 2v2 match")
             return TeamQueuePollResponse(
                 status="ready_join",
                 series_id=str(me["series_id"]),
@@ -14086,6 +14323,12 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
     player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(404, "Player not registered")
+    # Cross-queue guard (Codex post-release find 1): the auto-rejoin path must
+    # not recreate a row the lock-time eviction removed — see /queue/join.
+    _other = await _locked_in_other_queue(db, player.id, "ovt_queue")
+    if _other:
+        raise HTTPException(status_code=409,
+                            detail="You're in a live match in another mode - finish it first")
     # Snapshot ratings (1v2 rating if it exists, else 1v1 as fallback ordering hint).
     g = (await db.execute(text(
         "SELECT rating, rating_deviation, completed_series FROM glicko_ratings_1v2 WHERE player_id = :pid"
@@ -14108,7 +14351,20 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
         ON CONFLICT (player_id) DO UPDATE SET
             display_name = EXCLUDED.display_name, region = EXCLUDED.region,
             preferred_side = EXCLUDED.preferred_side, solo_extra_pick = EXCLUDED.solo_extra_pick,
-            last_polled = NOW()
+            -- Bug #109 (same contract as the FFA join): rejoin of a SEARCHING
+            -- row resets the search clock and rating snapshot; LOCKED rows
+            -- keep both (Codex find 7 — the lock owns its snapshot).
+            rating = CASE WHEN ovt_queue.status = 'searching'
+                          THEN EXCLUDED.rating ELSE ovt_queue.rating END,
+            rating_deviation = CASE WHEN ovt_queue.status = 'searching'
+                          THEN EXCLUDED.rating_deviation ELSE ovt_queue.rating_deviation END,
+            completed_series = CASE WHEN ovt_queue.status = 'searching'
+                          THEN EXCLUDED.completed_series ELSE ovt_queue.completed_series END,
+            fallback_rating = CASE WHEN ovt_queue.status = 'searching'
+                          THEN EXCLUDED.fallback_rating ELSE ovt_queue.fallback_rating END,
+            last_polled = NOW(),
+            joined_at = CASE WHEN ovt_queue.status = 'searching'
+                             THEN NOW() ELSE ovt_queue.joined_at END
     """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64], "r": rating,
            "rd": rd, "cs": cs, "fr": fallback, "reg": (req.region or "")[:8] or None,
            "side": side, "sep": req.solo_extra_pick})
@@ -14401,6 +14657,9 @@ async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                "pid": r["player_id"]})
     await db.commit()
     print(f"[OVT-LOCK] series {series_id} room {room} solo={solo['steam_id']} extra_pick={extra_pick}")
+    # Post-commit, own transaction: a locked trio is out of every other queue.
+    await _evict_other_queue_searching(
+        db, [r["player_id"] for r in lobby], "ovt_queue", "a 1v2 lobby")
     return await _ovt_poll_locked_payload(db, series_id, steam_id)
 
 
@@ -15023,6 +15282,27 @@ FFA_MAX_PLAYERS = 10
 # viable — anchoring on the EARLIEST would fire instantly for any pool whose
 # first member had been waiting alone.
 FFA_GATHER_SECONDS = 25
+# Bug #111: each NEW joiner guarantees this much additional pile-in time
+# (window extends while people keep arriving), bounded by the hard cap below
+# so the first 3 are never held hostage by a slow trickle.
+FFA_GATHER_EXTEND_SECONDS = 20
+FFA_GATHER_CAP_SECONDS = 120
+# Gather timing state (Codex post-release finds 4+5): timing must come from
+# authoritative monotonic state — NOT from the SKIP LOCKED candidate slice (a
+# joiner's own in-flight poll briefly hides its fresh row from the scan) and
+# NOT from resettable joined_at values (a rejoin at second 110 must not
+# restart the 120s cap — joined_at legally resets on rejoin per bug #109).
+# In-memory is safe: single uvicorn worker is enforced (#125); an API restart
+# merely restarts the window.
+_ffa_gather_started_mono: float | None = None
+_ffa_gather_last_join_mono: float = 0.0
+# Last time any poll OBSERVED a >=3 fresh pool via the PLAIN count (re-review
+# find 4: the SKIP LOCKED slice hides in-flight rows, so slice-driven resets
+# false-fire; and a fully-abandoned pool leaves nobody to reset the window, so
+# a later trio would inherit a stale start and cap instantly). Live searchers
+# poll every ~2s, so an observation gap >15s means the pool collapsed or the
+# process restarted — either way the next gather starts a fresh window.
+_ffa_gather_pool_seen_mono: float = 0.0
 FFA_MATCH_XP_BASE = 300
 FFA_XP_PER_BEATEN = 60      # + per opponent placed STRICTLY below you
 
@@ -15106,6 +15386,12 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(404, "Player not registered")
+    # Cross-queue guard (Codex post-release find 1): the auto-rejoin path must
+    # not recreate a row the lock-time eviction removed — see /queue/join.
+    _other = await _locked_in_other_queue(db, player.id, "ffa_queue")
+    if _other:
+        raise HTTPException(status_code=409,
+                            detail="You're in a live match in another mode - finish it first")
     g = (await db.execute(text(
         "SELECT rating, rating_deviation, games_played FROM glicko_ratings_ffa WHERE player_id = :pid"
     ), {"pid": player.id})).mappings().first()
@@ -15116,15 +15402,38 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
         "SELECT rating FROM glicko_ratings WHERE player_id = :pid"
     ), {"pid": player.id})).mappings().first()
     fallback = float(g1["rating"]) if g1 and g1["rating"] is not None else 1500.0
-    await db.execute(text("""
+    _res = await db.execute(text("""
         INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating_deviation,
                                games_played, fallback_rating, region, status, joined_at, last_polled)
         VALUES (:pid, :sid, :dn, :r, :rd, :gp, :fr, :reg, 'searching', NOW(), NOW())
         ON CONFLICT (player_id) DO UPDATE SET
             display_name = EXCLUDED.display_name, region = EXCLUDED.region,
-            last_polled = NOW()
+            -- Bug #109: a rejoin after quitting the game found the old ghost
+            -- row and kept its joined_at ("in queue 18 minutes already").
+            -- A SEARCHING row is a fresh search — reset the clock and the
+            -- rating snapshot. A LOCKED row keeps BOTH (Codex find 7): its
+            -- lifecycle — and its lock-time snapshot the whole lobby shares —
+            -- belong to the lock.
+            rating = CASE WHEN ffa_queue.status = 'searching'
+                          THEN EXCLUDED.rating ELSE ffa_queue.rating END,
+            rating_deviation = CASE WHEN ffa_queue.status = 'searching'
+                          THEN EXCLUDED.rating_deviation ELSE ffa_queue.rating_deviation END,
+            games_played = CASE WHEN ffa_queue.status = 'searching'
+                          THEN EXCLUDED.games_played ELSE ffa_queue.games_played END,
+            fallback_rating = CASE WHEN ffa_queue.status = 'searching'
+                          THEN EXCLUDED.fallback_rating ELSE ffa_queue.fallback_rating END,
+            last_polled = NOW(),
+            joined_at = CASE WHEN ffa_queue.status = 'searching'
+                             THEN NOW() ELSE ffa_queue.joined_at END
+        RETURNING status
     """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64], "r": rating,
            "rd": rd, "gp": games, "fr": fallback, "reg": (req.region or "")[:8] or None})
+    _row_status = _res.scalar_one_or_none()
+    if _row_status == "searching":
+        # Authoritative arrival stamp for the gather window (Codex find 5):
+        # the poll's SKIP LOCKED slice can momentarily miss this row, so the
+        # join itself records the arrival. Locked rows never extend a gather.
+        globals()["_ffa_gather_last_join_mono"] = time.monotonic()
     await db.commit()
     n = (await db.execute(text("SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"))).scalar() or 0
     return {"status": "ok", "queue_count": int(n)}
@@ -15378,21 +15687,55 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         "   AND last_polled > NOW() - INTERVAL '75 seconds'"
     ))).scalar() or 0
 
+    # Authoritative pool size: PLAIN count (sees rows the SKIP LOCKED slice
+    # hides while their own poll briefly holds them — re-review find 4).
+    pool10 = (await db.execute(text(
+        "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
+        "   AND last_polled > NOW() - INTERVAL '10 seconds'"
+    ))).scalar() or 0
+    if pool10 < FFA_MIN_PLAYERS:
+        # Pool genuinely below the minimum — the gather window restarts when
+        # it next reaches 3 (module state, see the FFA_GATHER constants).
+        globals()["_ffa_gather_started_mono"] = None
     if len(rows) < FFA_MIN_PLAYERS:
         await db.commit()
         return {"status": "searching", "queue_count": int(fresh_count),
                 "players_needed": FFA_MIN_PLAYERS, "gather_seconds_left": -1}
 
-    # Gather window: countdown anchored on the MIN-th earliest fresh join.
-    now = datetime.now(timezone.utc)
-    anchor = rows[FFA_MIN_PLAYERS - 1]["joined_at"]
-    waited = (now - anchor).total_seconds() if anchor else 0
+    # Gather window (bug #111 rework): the old fixed 25s from the 3rd joiner
+    # meant "FFAs auto begin at 3 unless everyone joins very quickly" — a 4th
+    # player arriving at second 24 got 1 second of pile-in time for everyone
+    # behind them. Now every NEW joiner extends the window: start when full,
+    # OR when both the base window (25s since gathering began) and the quiet
+    # period (20s since the newest join) have run, OR at the hard cap (120s)
+    # so a trickle of joiners can't gather forever. Timing lives in module
+    # monotonic state (see the constants' comment): the join endpoint stamps
+    # arrivals, the pool dropping below 3 resets the window, and a lock
+    # clears it for the next lobby.
+    global _ffa_gather_started_mono, _ffa_gather_pool_seen_mono
+    _mono = time.monotonic()
+    # Staleness fence: if no poll has OBSERVED a live >=3 pool for >15s, any
+    # started-window value predates a pool collapse (or restart) that had no
+    # poller left to reset it — start fresh rather than capping instantly.
+    if _ffa_gather_started_mono is not None and _mono - _ffa_gather_pool_seen_mono > 15.0:
+        _ffa_gather_started_mono = None
+    if pool10 >= FFA_MIN_PLAYERS:
+        _ffa_gather_pool_seen_mono = _mono
+    if _ffa_gather_started_mono is None:
+        _ffa_gather_started_mono = _mono
+    waited = _mono - _ffa_gather_started_mono
+    since_newest = _mono - _ffa_gather_last_join_mono
     full = len(rows) >= FFA_MAX_PLAYERS
-    if not full and waited < FFA_GATHER_SECONDS:
+    base_done = waited >= FFA_GATHER_SECONDS
+    quiet_done = since_newest >= FFA_GATHER_EXTEND_SECONDS
+    capped = waited >= FFA_GATHER_CAP_SECONDS
+    if not full and not capped and not (base_done and quiet_done):
+        left = max(FFA_GATHER_SECONDS - waited, FFA_GATHER_EXTEND_SECONDS - since_newest)
+        left = min(left, FFA_GATHER_CAP_SECONDS - waited)
         await db.commit()
         return {"status": "searching", "queue_count": int(fresh_count),
                 "players_needed": FFA_MIN_PLAYERS,
-                "gather_seconds_left": max(0, int(FFA_GATHER_SECONDS - waited))}
+                "gather_seconds_left": max(0, int(left))}
 
     # Decider election: lowest steam id WITHIN the locked set (must be a member).
     lobby_rows = list(rows)
@@ -15422,6 +15765,12 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                "pid": r["player_id"]})
     await db.commit()
     print(f"[FFA-LOCK] lobby {lobby_id} room {room} n={len(ordered)} decider={steam_id}")
+    # This gather is consumed — the next trio starts a fresh window.
+    globals()["_ffa_gather_started_mono"] = None
+    # Post-commit, own transaction: a locked lobby is out of every other queue
+    # (Sid's ghost report — an FFA player left counting as '1 searching' in 1v1).
+    await _evict_other_queue_searching(
+        db, [r["player_id"] for r in ordered], "ffa_queue", "an FFA lobby")
     return await _ffa_poll_locked_payload(db, lobby_id, steam_id)
 
 

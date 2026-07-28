@@ -1793,6 +1793,50 @@ namespace CompetitiveRounds
                 photonRoomId = PhotonNetwork.CurrentRoom?.Name ?? "";
                 photonRegion = PhotonNetwork.CloudRegion ?? "";
                 roomJoinTime = DateTime.UtcNow;
+                try
+                {
+                    string pendingRoom = Plugin.PendingRankedRoom ?? "";
+                    bool joinedOwnPendingRoom =
+                        !string.IsNullOrEmpty(pendingRoom)
+                        && string.Equals(photonRoomId, pendingRoom, StringComparison.Ordinal);
+                    if (!PhotonNetwork.OfflineMode
+                        && ApiClient.CurrentQueueState == ApiClient.QueueState.Searching
+                        && !joinedOwnPendingRoom)
+                    {
+                        ApiClient.LeaveQueue(GameStateWatcher.LocalSteamId);
+                        CompetitiveUI.ShowNotification(
+                            "Left 1v1 queue - you joined a game",
+                            Color.yellow,
+                            5f);
+                        Plugin.Log.LogInfo(
+                            $"[QUEUE] Left 1v1 queue after joining online room '{photonRoomId}'");
+                    }
+                    // Codex re-review find A: a PRE-ROOM 1v1 match (ready-up
+                    // phase) must dissolve too, or the player holds two live
+                    // commitments (1v1 popup + this game). Decline is the
+                    // existing machinery: it resets both sides to searching
+                    // server-side, and once a room was actually issued the
+                    // server refuses it (match_already_formed) - a harmless
+                    // failed call in that already-lost race.
+                    else if (!PhotonNetwork.OfflineMode
+                             && (ApiClient.CurrentQueueState == ApiClient.QueueState.Matched
+                                 || ApiClient.CurrentQueueState == ApiClient.QueueState.ReadySent)
+                             && !joinedOwnPendingRoom)
+                    {
+                        ApiClient.DeclineMatch(GameStateWatcher.LocalSteamId);
+                        CompetitiveUI.ShowNotification(
+                            "Declined 1v1 match - you joined a game",
+                            Color.yellow,
+                            5f);
+                        Plugin.Log.LogInfo(
+                            $"[QUEUE] Auto-declined pre-room 1v1 match after joining online room '{photonRoomId}'");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning(
+                        $"[QUEUE] Failed to leave 1v1 queue on room join: {ex.Message}");
+                }
                 IdentifyLocalPlayer();
                 // Capability negotiation keeps mixed-version rooms on the
                 // local-time report-ID fallback. A shared token is advertised
