@@ -14689,7 +14689,7 @@ async def ovt_leaderboard(
                sc.games, sc.wins, sc.solo_games, sc.duo_games,
                sc.solo_wins, sc.duo_wins, sc.scoped_games, sc.scoped_wins,
                sc.last_played,
-               si.name AS title_name, si.color AS title_color, si.sku AS title_sku,
+               si.name AS title_name, si.preview_color AS title_color, si.sku AS title_sku,
                gr.rating AS rating_1v1
           FROM scoped sc
           JOIN players p ON p.id = sc.pid
@@ -15581,7 +15581,7 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
         SELECT p.id AS player_id, p.steam_id, p.display_name, p.total_xp, p.hide_gold,
                p.ffa_gold_earned, p.ffa_xp_earned,
                g.rating, g.rating_deviation, g.games_played, g.wins, g.top3, g.placement_sum,
-               si.name AS title_name, si.color AS title_color, si.sku AS title_sku,
+               si.name AS title_name, si.preview_color AS title_color, si.sku AS title_sku,
                gr.rating AS rating_1v1
           FROM glicko_ratings_ffa g
           JOIN players p ON p.id = g.player_id
