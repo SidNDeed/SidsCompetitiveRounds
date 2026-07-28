@@ -1,99 +1,95 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased — FFA mode (first playtest build), 1v2 history + split boards, bug batch
+## Unreleased — FFA mode, 1v2 overhaul, menu pass
 
 ### NEW MODE: Free-For-All (3-10 players) — RANKED, first playtest build
-The FFA tab (under Multiplayer) is now live. Everything below is built and the server
-side is fully tested, but the in-game 3-10 player play path has had NO live playtest
-yet — expect rough edges in the first sessions and please file bug reports with logs.
-- **Queue**: consent-at-join like the 1v2 lobby — no rating gate, no ready-up. With
-  3+ people searching, the lobby locks after a short gather window (25s) so more can
-  still make it in, up to 10; at 10 it locks instantly.
-- **The game**: everyone is their own team. Last player standing takes the point,
-  2 points takes the round, first to 3 rounds wins. Leavers don't end the game —
-  the survivors play on.
-- **Simultaneous card picks**: after each round, everyone who didn't win the round
-  picks a card AT THE SAME TIME on their own screen (no more waiting through a
-  pick parade). Picks are synced and applied identically on every client.
-- **Rolling 5-card cap**: your 6th pick pushes your oldest card out, Rolling
-  Card Bar style. Your card bar shows your live deck; hold Tab for everyone's.
-- **Ranked from day one**: each match moves a real FFA Glicko rating (bounded so a
-  10-player game can't swing your rating 5x as hard as a 3-player one). Placement
-  earns XP/gold (more players beaten = more XP; winner bonus).
-- **FFA leaderboard** (sortable: rating, wins, top-3s, average placement, games,
-  win rate) and a **Recent Ranked FFAs** panel with per-player placements, rounds,
-  rating changes, cards, and the same telemetry depth 1v1/2v2 record.
+The FFA tab (under Multiplayer) is live. The server side is deployed and tested;
+the in-game play path has had **no live playtest yet**, so expect rough edges in
+the first sessions and please file bug reports with logs attached.
+- **Queue:** joining is consent — no rating band, no ready-up. Once 3 people are
+  searching a 25-second gather window opens so more can pile in, up to 10; a full
+  lobby starts immediately.
+- **The game:** everyone is their own team. Last player standing takes the point,
+  2 points take the round, first to 3 rounds wins. A player leaving does not end
+  the match — the survivors play on.
+- **Live standings:** an in-match strip shows every player's rounds and current
+  points. The outright leader wears the crown; tied leaders do not.
+- **Simultaneous card picks:** everyone picks at the same time during the opening
+  draw, and after each round everyone who did not win the round picks together
+  again — no more sitting through a 10-player pick queue. Picks are synchronised
+  so every client applies the same cards.
+- **Rolling 5-card cap:** your 6th pick pushes out your oldest card, Rolling Card
+  Bar style. Your own card bar shows your live deck; hold Tab for everyone's.
+- **Ranked from day one:** every match moves a real FFA rating, bounded so a
+  10-player game cannot swing your rating several times harder than a 3-player one.
+  Placement earns XP and gold — more players beaten, more XP, plus a winner bonus.
+- **FFA leaderboard** (sortable by rating, games, wins, top-3s, average placement,
+  win rate) and a **Recent Ranked FFAs** panel showing every player's placement,
+  rounds, points and rating change, plus cards for the top three finishers.
 
 ### 1v2
-- **New "Recent 1v2 Games" panel** on the 1v2 tab: recent series with per-game
-  scores, per-player cards, and gold/XP earned.
-- **Solo and Duo leaderboards are now separate** — 20 solo wins and 20 duo wins are
-  different achievements and no longer share one board. Titles now show on the 1v2
-  boards too. (1v2 stays unranked/beta.)
-- The 1v1-shaped "opponent ranked" check no longer runs inside 1v2/2v2/FFA rooms
-  (it logged a bogus "Match ranked: False" and could confuse ranked-state logic).
-- The end-of-game log line now names BOTH duo members, not just one.
+- **Separate Solo and Duo leaderboards.** 20 solo wins and 20 duo wins are not the
+  same achievement, so they no longer share a board — and you only appear on a
+  board for a role you have actually played. Each board's W-L counts only that
+  role's games, sorted by wins, then win rate, then games played.
+- **New "Recent 1v2 Games" panel:** recent series with per-game scores, per-player
+  cards, and the gold/XP each player earned.
+- **The duo now spawns together.** One duo member was spawning next to the solo —
+  in the spot a 2v2 teammate takes — while their partner stood alone across the
+  map. The solo now gets one side to themselves and the duo share the other.
+- **The second duo player gets their character back at the card-pick screen.** The
+  base game only ever shows one character per round pick, which is fine for 1v1;
+  with two losers, the second person picked in front of an empty stage. Everyone
+  picking now gets their own body, face and colour. *(This also fixes 2v2, where
+  the first picker was being shown the wrong player's character entirely.)*
+- **My Stats lists your 1v2 opponents** instead of a bare "Casual 2W-0L". 1v2 games
+  were being counted as casual with no opponent rows at all; they now have their
+  own 1v2 line in Session Info and list everyone you played, with your duo partner
+  shown as "w/ Name" the way 2v2 does.
+- **The in-game top line no longer claims a 1v2 is RANKED** and no longer names just
+  one opponent. It reads "1v2 BETA - Unranked" with the real 1v2 series score and
+  every player in the room.
+- Equipped title colours now tint player names on the 1v2 boards.
 
 ### Menus
-- **Mouse-wheel scrolling is 3x faster everywhere in the menu.** Scrolling was slow
-  enough that people resorted to click-dragging every list.
+- **Mouse-wheel scrolling is 3x faster everywhere.** It was slow enough that people
+  were click-dragging every list instead.
 - **Leaderboard click-drag scrolling should be smoother.** The scroll views were
-  using a stencil mask, which forced an extra render pass and broke batching across
-  ~100 leaderboard rows; they now use rect clipping instead.
-- **Non-Latin names should render properly instead of empty boxes.** The old fallback
-  could never work on this version of the game (the text engine refuses to build a
-  font from a system font handle), so the mod now builds fallback font atlases from
-  the font FILES on disk - Latin-extended, Greek and Cyrillic up front, plus Chinese,
-  Japanese and Korean atlases when those fonts are installed, filling in extra
-  characters as they appear.
-- **New Info buttons on the 2v2, 1v2 and FFA tabs** explaining exactly how each mode
-  works and what every leaderboard column means (including FFA's AvgPl and 2v2's
-  Gold / XP / Avg Mate Elo). The info popup - including the Tournaments one - is now
-  twice the size with twice the text.
-- **1v2 tab text is roughly double the size**, and the FFA tab text is now in line
-  with the rest of the menus. Buttons, rows and columns were resized to match.
+  using a stencil mask, which forces an extra render pass and breaks batching
+  across ~100 leaderboard rows; they now use rect clipping.
+- **Non-Latin name support has been rebuilt, but the new path has not been tested
+  in-game yet.** The old one could never have worked on this version of the game.
+  The replacement loads fonts directly from your system: Latin-extended, Greek and
+  Cyrillic are prepared up front, Chinese, Japanese and Korean are added when those
+  fonts are installed, and anything else is filled in as it appears. Please report
+  any names still showing as empty boxes.
+- **New Info buttons on the 2v2, 1v2 and FFA tabs** explaining how each mode works
+  and what every leaderboard column means — including FFA's AvgPl and 2v2's Gold,
+  XP and Avg Mate Elo. The info popup, Tournaments included, is bigger with
+  bigger text.
+- **1v2 and FFA tab text enlarged** to match the rest of the menus, with rows,
+  buttons and columns resized to suit.
 
-### 1v2 fixes from Sid's play session (bug #91 comments)
-- **The duo now spawns together.** One duo member was spawning next to the solo
-  (in the spot a 2v2 teammate would take) while their partner stood alone across
-  the map. The solo now gets one side to themselves and the duo pair share the
-  other.
-- **The second duo player gets their character back at the card-pick screen.**
-  The base game only ever shows one character per round pick — fine for 1v1,
-  but with two losers the second person picked in front of an empty stage. They
-  now get their own body, face and colour. (This also fixes 2v2, where the first
-  picker was being shown the *wrong* player's character.)
-- **My Stats now lists your 1v2 opponents** instead of a bare "Casual 2W-0L".
-  1v2 games were being counted as casual with no opponent rows at all; they now
-  have their own "1v2" line in Session Info and list everyone you played, with
-  your duo partner shown as "w/ Name" the way 2v2 does.
-- **The in-game top line no longer claims a 1v2 is RANKED**, and it names every
-  player instead of just one. It now reads "1v2 BETA - Unranked" with the real
-  1v2 series score and "w/ teammate vs both opponents".
-
-### Bug fixes (from bug reports #86 and #91)
-- **Card-effect cleanup between games now runs a second, correctly-timed pass** —
-  the old sweep ran before the game actually tore down the previous game's card
-  objects, so broken card effects (Shield Charge class) could stay broken for one
+### Base-game bug fixes
+- **Post-death knockback and damage-over-time no longer spam console errors.** The
+  base game fires those at players it has already deactivated; harmless, but it
+  buried real errors in every log.
+- **Cosmetic auras and colour tints no longer silently skip a round** when their
+  refresh landed while you were still dead between rounds.
+- **Card-effect cleanup between games now runs a second, correctly-timed pass.**
+  The old sweep ran before the game tore down the previous game's card objects, so
+  a broken card effect (the Shield Charge class of bug) could stay broken for a
   full game after a rematch.
-- **Non-ASCII names should render again** (Cyrillic, Japanese, kaomoji) — the OS
-  font fallback broke when ROUNDS updated to Unity 2022 and every non-Latin glyph
-  became a square. Rebuilt against the new text API.
-- **Cosmetic auras/tints no longer silently skip a round** when their refresh
-  landed while the player was still dead between rounds — the refresh now waits
-  for the respawn.
-- Silenced ~14-per-session vanilla console errors (post-death knockback and
-  DOT ticks aimed at already-dead players, and a card-visuals hide call on an
-  already-hidden screen).
-- Clearer log wording for a card-pick diagnostic that read like a failure but is
-  normal ordering.
 
-### Server (migration 154 — NOT yet applied)
-- New FFA schema: queue, lobbies, matches, per-player match rows (full stat
-  parity), cards, FFA Glicko table, per-mode gold/XP columns.
-- New endpoints: FFA queue join/leave/poll/list, match report (new HMAC format,
-  pairwise Glicko inline), leaderboard, recent matches; 1v2 recent-series feed
-  and role-split leaderboards.
+### Server
+- The server now records FFA queues and lobbies, match results, each player's stats
+  and cards, FFA ratings, and FFA-specific Gold/XP totals.
+- It now powers FFA matchmaking, result reporting, leaderboards and recent games,
+  plus 1v2's recent-games panel and the separate Solo/Duo boards.
+- FFA reports must match the active lobby's locked players, player count and slots.
+  The server also requires one unique winner at exactly 3 rounds and rejects round
+  or point totals above the mode's ceilings, so a result cannot silently drop the
+  players who beat you.
 
 ## v1.34.5 — 2026-07-27 — attempted base-game bug fixes, menu overhaul, security batch
 
