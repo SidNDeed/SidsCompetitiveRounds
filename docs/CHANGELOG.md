@@ -34,6 +34,24 @@ yet — expect rough edges in the first sessions and please file bug reports wit
   (it logged a bogus "Match ranked: False" and could confuse ranked-state logic).
 - The end-of-game log line now names BOTH duo members, not just one.
 
+### 1v2 fixes from Sid's play session (bug #91 comments)
+- **The duo now spawns together.** One duo member was spawning next to the solo
+  (in the spot a 2v2 teammate would take) while their partner stood alone across
+  the map. The solo now gets one side to themselves and the duo pair share the
+  other.
+- **The second duo player gets their character back at the card-pick screen.**
+  The base game only ever shows one character per round pick — fine for 1v1,
+  but with two losers the second person picked in front of an empty stage. They
+  now get their own body, face and colour. (This also fixes 2v2, where the first
+  picker was being shown the *wrong* player's character.)
+- **My Stats now lists your 1v2 opponents** instead of a bare "Casual 2W-0L".
+  1v2 games were being counted as casual with no opponent rows at all; they now
+  have their own "1v2" line in Session Info and list everyone you played, with
+  your duo partner shown as "w/ Name" the way 2v2 does.
+- **The in-game top line no longer claims a 1v2 is RANKED**, and it names every
+  player instead of just one. It now reads "1v2 BETA - Unranked" with the real
+  1v2 series score and "w/ teammate vs both opponents".
+
 ### Bug fixes (from bug reports #86 and #91)
 - **Card-effect cleanup between games now runs a second, correctly-timed pass** —
   the old sweep ran before the game actually tore down the previous game's card

@@ -237,6 +237,11 @@ namespace CompetitiveRounds
         // the 1v1 currentSeriesGames* counters deliberately skip ovt rooms).
         private static int ovtSoloWins = 0;
         private static int ovtDuoWins = 0;
+        // Bug #91 comment 2: 1v2 games used to fall through to the CASUAL
+        // session counters (the ovt guard made the ranked branch false, so the
+        // else ran) and recorded no opponents at all. They get their own bucket.
+        private static int sessionOvtWins = 0;
+        private static int sessionOvtLosses = 0;
         private static int currentSeriesGamesWon = 0;
         private static int currentSeriesGamesLost = 0;
         private static int sessionCasualWins = 0;
@@ -510,6 +515,15 @@ namespace CompetitiveRounds
         public static int SessionRankedSeriesLosses => sessionRankedSeriesLosses;
         public static int CurrentSeriesGamesWon => currentSeriesGamesWon;
         public static int CurrentSeriesGamesLost => currentSeriesGamesLost;
+        // 1v2 series tally (kept separate from the 1v1 BO3 counters above,
+        // which deliberately never move in an ovt_ room). Surfaced so the
+        // in-match HUD can show the real 1v2 score instead of a dead 0-0.
+        public static int OvtSoloWins => ovtSoloWins;
+        public static int OvtDuoWins => ovtDuoWins;
+        // 1v2 session record (its own bucket — 1v2 is an unranked parallel
+        // mode and must not move the 1v1 ranked or casual lines).
+        public static int SessionOvtWins => sessionOvtWins;
+        public static int SessionOvtLosses => sessionOvtLosses;
         // One tally per series, whichever path observes the completion first.
         // The server-confirmed path only runs on the REPORTER (lower Steam ID
         // reports), so the other player's session series count sat at 0-0 all
@@ -606,7 +620,14 @@ namespace CompetitiveRounds
         private const string PP_SESSION_RSL           = "cr_session_rseries_losses";
         private const string PP_SESSION_T2W           = "cr_session_tseries_wins";
         private const string PP_SESSION_T2L           = "cr_session_tseries_losses";
+        private const string PP_SESSION_OVW           = "cr_session_ovt_wins";
+        private const string PP_SESSION_OVL           = "cr_session_ovt_losses";
         private const string PP_SESSION_WL_BY_OPP     = "cr_session_wl_by_opp";
+        // The 1v2 half of each per-opponent record lives in its OWN key rather
+        // than widening the line format above (review find 2): an older build
+        // parses that key with a strict 4-field check, so a 6-field write would
+        // make it DROP every opponent row and then save the loss back.
+        private const string PP_SESSION_WL_BY_OPP_1V2 = "cr_session_wl_by_opp_1v2";
         private const string PP_SESSION_TIME_BY_OPP   = "cr_session_time_by_opp";
 
         private static long _DtToUnix(DateTime utc)
@@ -634,10 +655,15 @@ namespace CompetitiveRounds
                 PlayerPrefs.SetInt(PP_SESSION_RSL, sessionRankedSeriesLosses);
                 PlayerPrefs.SetInt(PP_SESSION_T2W, sessionTeamSeriesWins);
                 PlayerPrefs.SetInt(PP_SESSION_T2L, sessionTeamSeriesLosses);
-                // Encode WL dict: "name1=rW,rL,cW,cL|name2=rW,rL,cW,cL|..."
+                PlayerPrefs.SetInt(PP_SESSION_OVW, sessionOvtWins);
+                PlayerPrefs.SetInt(PP_SESSION_OVL, sessionOvtLosses);
+                // Encode WL dict: "name1=rW,rL,cW,cL|name2=..." — EXACTLY four
+                // fields, unchanged, so an older build can still read it. The
+                // 1v2 pair rides a separate key below.
                 // Replace | = , in display names with safe placeholders before joining.
                 var sbWl = new System.Text.StringBuilder();
-                bool firstWl = true;
+                var sbWlV = new System.Text.StringBuilder();
+                bool firstWl = true, firstWlV = true;
                 foreach (var kv in sessionWLByOpponent)
                 {
                     if (kv.Value == null || kv.Value.Length < 4) continue;
@@ -649,8 +675,17 @@ namespace CompetitiveRounds
                         .Append(kv.Value[2]).Append(',')
                         .Append(kv.Value[3]);
                     firstWl = false;
+                    int vw = kv.Value.Length > 4 ? kv.Value[4] : 0;
+                    int vl = kv.Value.Length > 5 ? kv.Value[5] : 0;
+                    if (vw != 0 || vl != 0)
+                    {
+                        if (!firstWlV) sbWlV.Append('|');
+                        sbWlV.Append(name).Append('=').Append(vw).Append(',').Append(vl);
+                        firstWlV = false;
+                    }
                 }
                 PlayerPrefs.SetString(PP_SESSION_WL_BY_OPP, sbWl.ToString());
+                PlayerPrefs.SetString(PP_SESSION_WL_BY_OPP_1V2, sbWlV.ToString());
                 var sbT = new System.Text.StringBuilder();
                 bool firstT = true;
                 foreach (var kv in sessionTimeByOpponent)
@@ -701,6 +736,8 @@ namespace CompetitiveRounds
                 sessionRankedSeriesLosses= PlayerPrefs.GetInt(PP_SESSION_RSL, 0);
                 sessionTeamSeriesWins    = PlayerPrefs.GetInt(PP_SESSION_T2W, 0);
                 sessionTeamSeriesLosses  = PlayerPrefs.GetInt(PP_SESSION_T2L, 0);
+                sessionOvtWins           = PlayerPrefs.GetInt(PP_SESSION_OVW, 0);
+                sessionOvtLosses         = PlayerPrefs.GetInt(PP_SESSION_OVL, 0);
                 sessionWLByOpponent.Clear();
                 foreach (var entry in (PlayerPrefs.GetString(PP_SESSION_WL_BY_OPP, "") ?? "").Split('|'))
                 {
@@ -709,12 +746,40 @@ namespace CompetitiveRounds
                     if (eq <= 0) continue;
                     string name = entry.Substring(0, eq);
                     var parts = entry.Substring(eq + 1).Split(',');
-                    if (parts.Length != 4) continue;
+                    // Tolerate 6 as well: a build between this one and v1.34.5
+                    // briefly wrote the 1v2 pair inline before it moved to its
+                    // own key.
+                    if (parts.Length != 4 && parts.Length != 6) continue;
                     if (int.TryParse(parts[0], out int rw) && int.TryParse(parts[1], out int rl)
                         && int.TryParse(parts[2], out int cw) && int.TryParse(parts[3], out int cl))
                     {
-                        sessionWLByOpponent[name] = new int[] { rw, rl, cw, cl };
+                        int vw = 0, vl = 0;
+                        if (parts.Length == 6)
+                        {
+                            int.TryParse(parts[4], out vw);
+                            int.TryParse(parts[5], out vl);
+                        }
+                        sessionWLByOpponent[name] = new int[] { rw, rl, cw, cl, vw, vl };
                     }
+                }
+                // 1v2 half, keyed by the same (sanitized) display name.
+                foreach (var entry in (PlayerPrefs.GetString(PP_SESSION_WL_BY_OPP_1V2, "") ?? "").Split('|'))
+                {
+                    if (string.IsNullOrEmpty(entry)) continue;
+                    int eq = entry.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string name = entry.Substring(0, eq);
+                    var parts = entry.Substring(eq + 1).Split(',');
+                    if (parts.Length != 2) continue;
+                    if (!int.TryParse(parts[0], out int vw2) || !int.TryParse(parts[1], out int vl2)) continue;
+                    int[] rec;
+                    if (!sessionWLByOpponent.TryGetValue(name, out rec) || rec == null || rec.Length < 6)
+                    {
+                        var grown = new int[6];
+                        if (rec != null) Array.Copy(rec, grown, Math.Min(rec.Length, 6));
+                        sessionWLByOpponent[name] = rec = grown;
+                    }
+                    rec[4] = vw2; rec[5] = vl2;
                 }
                 sessionTimeByOpponent.Clear();
                 foreach (var entry in (PlayerPrefs.GetString(PP_SESSION_TIME_BY_OPP, "") ?? "").Split('|'))
@@ -3202,7 +3267,19 @@ namespace CompetitiveRounds
                 var rp = PhotonNetwork.CurrentRoom?.CustomProperties;
                 sessionRoomIsCrFf = rp != null && rp.ContainsKey("cr_ff");
             } catch { }
-            if (sessionRoomIsCrFf && PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length >= 4)
+            // Bug #91 comment 2: 1v2 recorded NO opponents ("just Casual W2-0").
+            // The per-opponent builder was 2v2-only, so a 1v2 game fell back to
+            // the single 1v1 opponentDisplayName and was then skipped entirely.
+            // The body below already does the right thing for 1v2 unmodified:
+            // t_id is published identically by the ovt pre-join (solo=0, both
+            // duo=1), so the solo sees two plain opponent keys and a duo member
+            // sees the solo as an opponent plus "w/ Partner". Only the gate
+            // needed widening. >= 2 (not 3) so a DC-decided game still names
+            // whoever is left.
+            bool buildMultiKeys =
+                   (sessionRoomIsCrFf && PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length >= 4)
+                || (sessionRoomIsOvt && PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length >= 2);
+            if (buildMultiKeys)
             {
                 foreach (var pp in PhotonNetwork.PlayerList)
                 {
@@ -3219,33 +3296,48 @@ namespace CompetitiveRounds
                     }
                     catch { }
                     bool isTeammate = ppTeam >= 0 && localTeamId >= 0 && ppTeam == localTeamId;
-                    oppKeys.Add(isTeammate ? "w/ " + nm : nm);
+                    string key = isTeammate ? "w/ " + nm : nm;
+                    // Review find 3: the dict is keyed by DISPLAY NAME, so two
+                    // opponents both called e.g. "Player" would collapse into a
+                    // single row that this one game increments TWICE ("2W-0L"
+                    // after one game). Disambiguate the duplicate instead.
+                    if (oppKeys.Contains(key))
+                    {
+                        int dup = 2;
+                        while (oppKeys.Contains($"{key} ({dup})")) dup++;
+                        key = $"{key} ({dup})";
+                    }
+                    oppKeys.Add(key);
                 }
             }
             if (oppKeys.Count == 0)
                 oppKeys.Add(opponentDisplayName ?? "Unknown");
 
-            // 1v2 games skip the 1v1 session W/L-by-opponent dict + the counters
-            // below (they're 1v1-panel data). The 1v2 tab has its own leaderboard.
-            if (!sessionRoomIsOvt)
+            // Per-opponent session record. Six slots: [rW, rL, cW, cL, vW, vL]
+            // — 1v2 games land in their OWN pair (4/5) so they neither vanish
+            // (the old `if (!sessionRoomIsOvt)` skip) nor get mislabelled as
+            // casual. Records restored from PlayerPrefs may still be 4 long;
+            // grow them in place rather than dropping the history.
             foreach (var oppKey in oppKeys)
             {
-                if (!sessionWLByOpponent.ContainsKey(oppKey))
-                    sessionWLByOpponent[oppKey] = new int[] { 0, 0, 0, 0 }; // [rW, rL, cW, cL]
-
-                if (matchIsRanked)
+                int[] rec;
+                if (!sessionWLByOpponent.TryGetValue(oppKey, out rec) || rec == null || rec.Length < 6)
                 {
-                    if (localWon) sessionWLByOpponent[oppKey][0]++;
-                    else sessionWLByOpponent[oppKey][1]++;
+                    var grown = new int[6];
+                    if (rec != null) Array.Copy(rec, grown, Math.Min(rec.Length, 6));
+                    sessionWLByOpponent[oppKey] = rec = grown;
                 }
-                else
-                {
-                    if (localWon) sessionWLByOpponent[oppKey][2]++;
-                    else sessionWLByOpponent[oppKey][3]++;
-                }
+                int bucket = sessionRoomIsOvt ? 4 : (matchIsRanked ? 0 : 2);
+                if (localWon) rec[bucket]++; else rec[bucket + 1]++;
             }
 
-            if (matchIsRanked && !sessionRoomIsOvt)
+            if (sessionRoomIsOvt)
+            {
+                // 1v2 is its own unranked mode: never the 1v1 ranked ladder
+                // counters, never the BO3 HUD, and (bug #91) never "Casual".
+                if (localWon) sessionOvtWins++; else sessionOvtLosses++;
+            }
+            else if (matchIsRanked)
             {
                 if (localWon) sessionRankedWins++; else sessionRankedLosses++;
                 // BO3 in-progress: bump the per-series game counter so the HUD
@@ -5041,7 +5133,7 @@ namespace CompetitiveRounds
             return false;
         }
 
-        private static string StripRichText(string input)
+        internal static string StripRichText(string input)
         {
             if (string.IsNullOrEmpty(input)) return input;
             return Regex.Replace(input, "<.*?>", "").Trim();

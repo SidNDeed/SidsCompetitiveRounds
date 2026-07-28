@@ -2864,8 +2864,48 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(CardChoiceVisuals), "Show")]
     class CardChoiceVisuals_Show_Competitive_Patch
     {
+        /// <summary>players[] index the visualizer is currently displaying
+        /// (-1 = none). Read by MultiPickerShowVisualsPatch so a sequential
+        /// picker is only re-Shown when the body on screen isn't already
+        /// theirs. Recorded in EVERY room so the value can't go stale.</summary>
+        internal static int LastShownPickerIndex = -1;
+
+        /// <summary>Review find 1: PointVisualizer.DoWinSequence runs CONCURRENTLY
+        /// with RoundTransition and is never awaited, so its
+        /// `Show(orangeWinner ? 1 : 0)` can land AFTER we corrected the body for
+        /// the real picker — destroying that skin and re-showing players[teamId]
+        /// (in 2v2, a player from the wrong team) for the rest of the pick.
+        /// Re-Showing in the StartPick prefix alone can't win that race. So:
+        /// while a pick is actually in progress, ANY incoming Show is retargeted
+        /// to the active picker. Outside a live pick (notably DoStartGame's own
+        /// per-picker Show, which runs before StartPick) this is a no-op.</summary>
+        static void Prefix(ref int pickerID)
+        {
+            try
+            {
+                if (PhotonNetwork.OfflineMode) return;
+                if (!Diag2v2.IsActive() || Diag2v2.IsFfa()) return;
+                var cc = CardChoice.instance;
+                if (cc == null || !cc.IsPicking) return;
+                int activePid = cc.pickrID;          // PlayerID, not an index
+                if (activePid < 0) return;
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return;
+                int idx = -1;
+                for (int i = 0; i < pm.players.Count; i++)
+                    if (pm.players[i] != null && pm.players[i].PlayerID == activePid) { idx = i; break; }
+                if (idx < 0 || idx == pickerID) return;
+                var p = pm.players[idx];
+                if (p.data == null || p.data.view == null) return;
+                Plugin.Log.LogInfo($"[CARDPICK-BODY] retargeted a late Show({pickerID}) to the active picker idx={idx} pid={activePid}");
+                pickerID = idx;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-BODY] Show retarget failed: {ex.Message}"); }
+        }
+
         static void Postfix(CardChoiceVisuals __instance, int pickerID)
         {
+            LastShownPickerIndex = pickerID;
             try
             {
                 if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
@@ -3184,6 +3224,21 @@ namespace CompetitiveRounds
                 if (!Diag2v2.IsActive()) return;
                 Array.Sort(__result, (a, b) =>
                     (a == null ? 0f : a.localStartPos.x).CompareTo(b == null ? 0f : b.localStartPos.x));
+                // 1v2 (bug #91 comment 1: "the second duo person kept spawning
+                // where my teammate would, next to me, instead of next to his
+                // ally"). PlayerManager.MovePlayers pairs spawnPoints[i] with
+                // players[i], and players is slot-indexed (0=solo, 1=duo_a,
+                // 2=duo_b), so a plain left-to-right sort hands the solo AND
+                // duo_a the two LEFT-half points and strands duo_b alone on the
+                // right. Every vanilla map ships exactly 4 points, two per half
+                // (verified across all 70 map scenes), so give the solo the
+                // outer-left point and the duo the whole right half. The unused
+                // inner-left point is parked at the tail to keep the length.
+                if (Diag2v2.IsOvt() && __result.Length >= 4)
+                {
+                    var s = __result;
+                    __result = new[] { s[0], s[2], s[3], s[1] };
+                }
                 // FFA: maps ship ~2-4 spawn points; PlayerManager.MovePlayers
                 // indexes spawnPoints[i] per player, so an N-player lobby on a
                 // smaller map would IndexOutOfRange mid-transition. Pad by
@@ -3403,6 +3458,61 @@ namespace CompetitiveRounds
                 catch { }
             }
             return __exception;  // rethrow normally — don't swallow
+        }
+    }
+
+    /// <summary>Bug #91 comment 4: "when duos picked cards, the second person
+    /// to pick did not have a player avatar/character during their turn".
+    ///
+    /// Vanilla only ever Shows the card-pick body in two places. GM_ArmsRace.
+    /// DoStartGame Shows once PER PICKER inside its loop, so game-start picks
+    /// are fine. But RoundTransition's pick loop Shows NOTHING — the only
+    /// round-pick Show is PointVisualizer.DoWinSequence's single
+    /// `Show(orangeWinner ? 1 : 0)`, which passes the losing TEAM id as a
+    /// players[] INDEX. With a one-player losing team (vanilla 1v1) that's
+    /// correct by luck. With a 2-player losing team (a 1v2 duo), picker B
+    /// never gets a Show, and picker A's DoPick already ran
+    /// CardChoiceVisuals.Hide() — whose DelayHide deactivates
+    /// transform.GetChild(0) — so B picks in front of an empty stage.
+    /// (Same root cause makes 2v2's first picker render the WRONG body: when
+    /// team 1 loses, Show(1) displays players[1], a team-0 player.)
+    ///
+    /// Fix: re-issue vanilla's own Show for each incoming picker, exactly as
+    /// DoStartGame does, unless the visualizer is already showing them. Show
+    /// calls StopAllCoroutines + re-activates the child, so it also cancels
+    /// the previous picker's in-flight DelayHide.</summary>
+    [HarmonyPatch(typeof(CardChoice), "StartPick")]
+    class MultiPickerShowVisualsPatch
+    {
+        static void Prefix(int pickerIDToSet)
+        {
+            try
+            {
+                // 2v2 + 1v2 only. 1v1/quickplay never has a multi-player losing
+                // team; FFA replaces the pick phase and never calls StartPick.
+                // Offline is excluded because vanilla Show takes a different
+                // branch there (CharacterCreatorHandler.selectedPlayerFaces
+                // indexed by pickerID), and a stale pending slot can leave
+                // IsActive() true at the menu after Sandbox (learning #122).
+                if (PhotonNetwork.OfflineMode) return;
+                if (!Diag2v2.IsActive() || Diag2v2.IsFfa()) return;
+                var vis = CardChoiceVisuals.instance;
+                var pm = PlayerManager.instance;
+                if (vis == null || pm == null || pm.players == null) return;
+                // Show's parameter is a players[] INDEX (it dereferences
+                // players[pickerID].data.view.IsMine). Resolve PlayerID -> index
+                // rather than assuming they match.
+                int idx = -1;
+                for (int i = 0; i < pm.players.Count; i++)
+                    if (pm.players[i] != null && pm.players[i].PlayerID == pickerIDToSet) { idx = i; break; }
+                if (idx < 0) return;
+                if (CardChoiceVisuals_Show_Competitive_Patch.LastShownPickerIndex == idx) return;
+                var p = pm.players[idx];
+                if (p.data == null || p.data.view == null) return;   // Show would NRE
+                vis.Show(idx, animateIn: true);
+                Plugin.Log.LogInfo($"[CARDPICK-BODY] re-Show for sequential picker idx={idx} pid={pickerIDToSet}");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CARDPICK-BODY] re-Show failed: {ex.Message}"); }
         }
     }
 

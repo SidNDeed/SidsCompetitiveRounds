@@ -4159,6 +4159,9 @@ namespace CompetitiveRounds
 
         private static float matchStatusCacheUntil = 0f;
         private static bool matchStatusCachedRanked = false;
+        // Set by RefreshMatchStatusCache: this match is 1v2 (unranked beta), so
+        // the banner/series/participant lines use the 1v2 shape.
+        private static bool matchStatusIsOvt = false;
         private static string matchStatusSeries = "", matchStatusH2H = "";
         private static Color matchStatusH2HTint = new Color(0.7f, 0.7f, 0.7f);
 
@@ -4169,6 +4172,56 @@ namespace CompetitiveRounds
             matchStatusSeries = "";
 
             matchStatusH2H = "";
+
+            // ── 1v2 (bug #91 comments 2/3) ────────────────────────────────
+            // The whole line below is 1v1-shaped: it reads matchIsRanked (which
+            // is forced true for ANY mod-issued room, 1v2 included, so the HUD
+            // claimed "RANKED - Recording" in an unranked beta mode), the 1v1
+            // BO3 counters (deliberately frozen at 0-0 in ovt rooms), and a
+            // single opponentDisplayName (so a 3-player game read "vs <one
+            // player>"). Give 1v2 its own honest line. This changes only what
+            // is DISPLAYED — matchIsRanked itself is load-bearing for report
+            // routing and stays exactly as it is.
+            matchStatusIsOvt = false;
+            string ovtRoom = "";
+            try { ovtRoom = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+            if (ovtRoom.StartsWith("ovt_", StringComparison.Ordinal))
+            {
+                matchStatusIsOvt = true;
+                int solo = GameStateWatcher.OvtSoloWins, duo = GameStateWatcher.OvtDuoWins;
+                bool localIsSolo = GameStateWatcher.LocalTeamId == 0;
+                matchStatusSeries = localIsSolo
+                    ? $"1v2 Series: You {solo} - {duo} Duo"
+                    : $"1v2 Series: Duo {duo} - {solo} Solo";
+
+                var mates = new List<string>();
+                var foes = new List<string>();
+                try
+                {
+                    int myTeam = -1;
+                    var mp = Photon.Pun.PhotonNetwork.LocalPlayer?.CustomProperties;
+                    if (mp != null && mp.ContainsKey("t_id"))
+                        int.TryParse(mp["t_id"]?.ToString(), out myTeam);
+                    foreach (var pp in Photon.Pun.PhotonNetwork.PlayerList)
+                    {
+                        if (pp == null || pp.IsLocal) continue;
+                        string nm = GameStateWatcher.StripRichText(pp.NickName ?? "?");
+                        if (string.IsNullOrEmpty(nm)) nm = "?";
+                        if (nm.Length > 14) nm = nm.Substring(0, 14);
+                        int t = -1;
+                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("t_id"))
+                            int.TryParse(pp.CustomProperties["t_id"]?.ToString(), out t);
+                        // Missing t_id => treat as opponent (same convention the
+                        // leaver banner uses); self-corrects on the next refresh.
+                        if (t >= 0 && myTeam >= 0 && t == myTeam) mates.Add(nm); else foes.Add(nm);
+                    }
+                }
+                catch { }
+                matchStatusH2HTint = new Color(0.82f, 0.82f, 0.82f);
+                matchStatusH2H = (mates.Count > 0 ? $"w/ {string.Join(" + ", mates.ToArray())}   " : "")
+                               + (foes.Count > 0 ? $"vs {string.Join(" + ", foes.ToArray())}" : "");
+                return;
+            }
 
             if (isRanked)
             {
@@ -4237,6 +4290,11 @@ namespace CompetitiveRounds
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (!MatchTracker.IsInMatch) return;
+            // FFA draws its own per-player score strip at the very top
+            // (DrawFfaScoreStrip). This 1v1-shaped block would paint a "RANKED -
+            // Recording" banner straight over it — ffa_ rooms force
+            // matchIsRanked true like every mod-issued room.
+            try { if (FfaMode.EngineActive()) return; } catch { }
             bool isRanked = GameStateWatcher.MatchIsRanked;
             if (statusStyle == null)
             {
@@ -4256,13 +4314,17 @@ namespace CompetitiveRounds
                 RefreshMatchStatusCache(isRanked);
             var oc = GUI.contentColor;
 
-            // Top banner: "RANKED - Recording" only on ranked. Casual gets no banner —
-            // the score line below floats up so it sits where the banner would have.
+            // Top banner: "RANKED - Recording" only on ranked; 1v2 gets its own
+            // honest label (unranked beta). Casual gets no banner — the score
+            // line below floats up so it sits where the banner would have.
+            bool ovt = matchStatusIsOvt;
+            bool showBanner = ovt || isRanked;
             float scoreY;
-            if (isRanked)
+            if (showBanner)
             {
-                GUI.contentColor = Color.green;
-                GUI.Label(new Rect((Screen.width - 140) / 2f, 8, 140, 18), "RANKED - Recording", statusStyle);
+                GUI.contentColor = ovt ? new Color(0.55f, 0.8f, 1f) : Color.green;
+                GUI.Label(new Rect((Screen.width - 220) / 2f, 8, 220, 18),
+                    ovt ? "1v2 BETA - Unranked" : "RANKED - Recording", statusStyle);
                 scoreY = 28;
             }
             else
@@ -4277,7 +4339,7 @@ namespace CompetitiveRounds
             // mid-match. Casual matches still get the per-opponent H2H
             // line (the only useful stat for a casual queue).
             float nextLineY = scoreY;
-            if (isRanked)
+            if (showBanner && !string.IsNullOrEmpty(matchStatusSeries))
             {
                 // Wider rect: the Series line now carries the session series
                 // record too. The old blue "Session:" row is gone, so the H2H
@@ -4290,8 +4352,10 @@ namespace CompetitiveRounds
 
             if (!string.IsNullOrEmpty(matchStatusH2H))
             {
+                // 1v2 names up to three players on this line — needs the room.
+                float hw = ovt ? 560f : 360f;
                 GUI.contentColor = matchStatusH2HTint;
-                GUI.Label(new Rect((Screen.width - 360) / 2f, nextLineY, 360, 20),
+                GUI.Label(new Rect((Screen.width - hw) / 2f, nextLineY, hw, 20),
                     matchStatusH2H, scoreStyle);
             }
             GUI.contentColor = oc;
