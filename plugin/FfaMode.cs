@@ -76,7 +76,12 @@ namespace CompetitiveRounds
         private static bool isTransitioning = false;
         private static bool pointLatched = false;      // master's point-resolution latch (find 17)
         private static bool gameOverFired = false;
+        private static bool freshGameCancelFired = false;
         private static float matchStartRealtime = 0f;
+        // A rolling rebuild applies card stats silently, then publishes one
+        // authoritative card-bar/currentCards snapshot at the end. Suppress
+        // the incremental AddCard calls while that snapshot is being built.
+        private static readonly HashSet<int> deckViewRebuilds = new HashSet<int>();
         // Pick-window state for the HUD countdown (CompetitiveUI reads these).
         private static bool pickPhaseActive = false;
         private static float pickDeadlineRealtime = 0f;
@@ -276,6 +281,8 @@ namespace CompetitiveRounds
             isTransitioning = false;
             pointLatched = false;
             gameOverFired = false;
+            freshGameCancelFired = false;
+            deckViewRebuilds.Clear();
             matchStartRealtime = Time.realtimeSinceStartup;
             // Review find 1 (critical): FFA can't ride the vanilla match-start
             // path (it keys on a log marker + the vanilla p1/p2 fields, which
@@ -306,6 +313,8 @@ namespace CompetitiveRounds
             Leavers.Clear();
             isTransitioning = false;
             gameOverFired = false;
+            freshGameCancelFired = false;
+            deckViewRebuilds.Clear();
             pickPhaseActive = false;
             pickDeadlineRealtime = 0f;
             localPickOpen = false;
@@ -385,10 +394,29 @@ namespace CompetitiveRounds
             int remaining = 0;
             try { remaining = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { }
 
+            bool battle = false;
+            try { battle = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
+
+            // Bug #114 item 2: a fresh game that loses quorum before two
+            // half-points have been scored has no meaningful placement yet.
+            // Cancel before HandlePlayerDied can award the survivor a point.
+            // battleOngoing keeps this out of the game-over/rematch flow,
+            // whose own below-minimum checks already own the sitting.
+            int scored = TotalPointsScored();
+            if (!gameOverFired && battle && remaining > 0 && remaining < 3 && scored < 2)
+            {
+                if (!freshGameCancelFired)
+                {
+                    freshGameCancelFired = true;
+                    LeaveBelowMinimum(
+                        $"[FFA] fresh game cancelled - {remaining} player(s), {scored} half-point(s) scored",
+                        "FFA cancelled - not enough players for a fresh game.");
+                }
+                yield break;
+            }
+
             if (!gameOverFired)
             {
-                bool battle = false;
-                try { battle = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
                 // Last player standing: nobody else can die, so no PlayerDied
                 // ever fires — resolve the round from the alive count.
                 if (battle)
@@ -633,6 +661,31 @@ namespace CompetitiveRounds
         private static int RoomCount()
         {
             try { return PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { return 0; }
+        }
+
+        private static int TotalPointsScored()
+        {
+            int total = 0;
+            try
+            {
+                foreach (var value in pointsTotal.Values) total += value;
+            }
+            catch { }
+            return total;
+        }
+
+        private static void LeaveBelowMinimum(string logMessage, string notification)
+        {
+            Plugin.Log.LogInfo(logMessage);
+            try
+            {
+                CompetitiveUI.ShowNotification(notification,
+                    new Color(1f, 0.8f, 0.4f), 7f);
+            }
+            catch { }
+            try { ApiClient.FfaLeaveQueue(); } catch { }
+            try { NetworkConnectionHandler.instance.NetworkRestart(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
         }
 
         private static IEnumerator EndSittingBelowMinimum()
@@ -1246,6 +1299,11 @@ namespace CompetitiveRounds
 
         private static IEnumerator ApplyManifestPick(int pid, string cardName, int cycle)
         {
+            // Self-heal a stale bar-suppression flag (Claude review of the
+            // rebuild change): if a prior cycle's replay coroutine died
+            // between Add and Remove, this pid's card-bar adds would stay
+            // suppressed for the rest of the game — clear on every new apply.
+            deckViewRebuilds.Remove(pid);
             var player = PlayerManager.instance?.GetPlayerWithID(pid);
             if (player == null || player.gameObject == null || player.data == null)
             {
@@ -1265,6 +1323,7 @@ namespace CompetitiveRounds
             }
             CaptureBaselineIfNeeded(player);
 
+            bool rebuiltDeck = false;
             if (deck.Count >= CardCap)
             {
                 // Rolling Card Bar: the oldest card rolls off. No inverse-stats
@@ -1283,6 +1342,8 @@ namespace CompetitiveRounds
                             if (!h.Rolled && h.CardName == droppedCanon) { h.Rolled = true; break; }
                 }
                 catch { }
+                deckViewRebuilds.Add(pid);
+                rebuiltDeck = true;
                 yield return RollingResetAndReplay(player, survivors);
                 deck.Clear();
                 deck.AddRange(survivors);
@@ -1290,6 +1351,16 @@ namespace CompetitiveRounds
 
             ApplyCardTo(player, prefab);
             deck.Add(prefab);
+
+            if (rebuiltDeck)
+            {
+                // Let the final card's player-hosted components and the old
+                // card-bar button destroys finish, then publish the exact
+                // five-card deck to both display sources in one operation.
+                yield return null;
+                RebuildDeckViews(player, deck);
+                deckViewRebuilds.Remove(pid);
+            }
 
             if (!pickHistory.TryGetValue(pid, out var hist))
             {
@@ -1330,6 +1401,19 @@ namespace CompetitiveRounds
             GameObject clone = null;
             try
             {
+                // bug113.txt:5529 shows the rematch sweep firing BEFORE the
+                // old ShieldCharge.OnDestroy failure at :5539. Its stale
+                // ShieldChargeCollide key therefore survived until the next
+                // ShieldCharge.Start hit Dictionary.Add at :5851 and aborted
+                // before SuperFirstBlockAction registration. ShieldCharge's
+                // Unity Start runs after OFFLINE_Pick, outside this method's
+                // catch, which is why no ApplyCardTo error named it. Scrub the
+                // target player immediately before every FFA apply; rolling
+                // replay and fresh/rematch picks now share the safe boundary.
+                int stale = BlockReflect.ScrubPlayerDelegates(player);
+                if (stale > 0)
+                    Plugin.Log.LogWarning($"[FFA] pre-apply scrub removed {stale} stale handler(s) for pid {player.PlayerID}");
+
                 clone = UnityEngine.Object.Instantiate(prefab.gameObject,
                     new Vector3(2000f, 2000f, 0f), Quaternion.identity);
                 var info = clone.GetComponent<CardInfo>();
@@ -1350,6 +1434,91 @@ namespace CompetitiveRounds
             finally
             {
                 try { if (clone != null) UnityEngine.Object.Destroy(clone); } catch { }
+            }
+        }
+
+        /// <summary>After a rolling reset, make the authoritative deck visible
+        /// all at once. bug114.txt:8480/8486/8502 proves the sixth pick removed
+        /// Quick Reload in the SAME cycle; :8886 then removed Wind up, proving
+        /// the reducer had already advanced. The lag was display-only: the bar
+        /// and currentCards were rebuilt incrementally during replay. deck[0]
+        /// is the oldest card; CardBar.AddCard inserts at visual index zero, so
+        /// chronological replay leaves the oldest card at the visual tail and
+        /// drops that tail, never the newest slot.</summary>
+        private static void RebuildDeckViews(Player player, List<CardInfo> deck)
+        {
+            try
+            {
+                var current = player?.data?.currentCards;
+                if (current != null)
+                {
+                    current.Clear();
+                    // TabStatsOverlay interprets this count as "pre-game
+                    // cards to skip". Record zero before restoring the live
+                    // FFA deck so the hold-Tab source shows all five now.
+                    TabStatsOverlay.RecordCardBaseline(player);
+                    foreach (var card in deck)
+                        if (card != null) current.Add(card);
+                }
+
+                if (player?.data?.view != null && player.data.view.IsMine)
+                {
+                    var bars = CardBarHandler.instance != null ? CardBarHandler.instance.cardBars : null;
+                    if (bars != null && bars.Length > 0)
+                    {
+                        bars[0].ClearBar();
+                        foreach (var card in deck)
+                            if (card != null) bars[0].AddCard(card);
+                    }
+                }
+                Plugin.Log.LogInfo($"[FFA] deck views rebuilt for pid {player.PlayerID}: {deck.Count} card(s)");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] deck-view rebuild: {ex.Message}"); }
+        }
+
+        internal static bool SuppressCardBarAdd(int playerId)
+        {
+            return deckViewRebuilds.Contains(playerId);
+        }
+
+        /// <summary>Deterministic per-half-point seed for spawn assignment.
+        /// FNV-1a mixes the server-issued room name, game number, and the
+        /// fixed 0..9 score vector. pointsTotal is monotonic within a game, so
+        /// every awarded half point changes the seed; gameNumber separates
+        /// rematches. Fixed slot order avoids dictionary iteration variance.</summary>
+        internal static uint SpawnShuffleSeed()
+        {
+            unchecked
+            {
+                uint hash = 2166136261u;
+                string room = "";
+                try { room = PhotonNetwork.CurrentRoom?.Name ?? ""; } catch { }
+                foreach (char ch in room)
+                {
+                    hash = (hash ^ (byte)(ch & 0xFF)) * 16777619u;
+                    hash = (hash ^ (byte)(ch >> 8)) * 16777619u;
+                }
+                MixSeedInt(ref hash, gameNumber);
+                for (int slot = 0; slot < 10; slot++)
+                {
+                    MixSeedInt(ref hash, RoundsFor(slot));
+                    MixSeedInt(ref hash, PointsFor(slot));
+                    MixSeedInt(ref hash, PointsTotalFor(slot));
+                }
+                return hash == 0u ? 0x9E3779B9u : hash;
+            }
+        }
+
+        private static void MixSeedInt(ref uint hash, int value)
+        {
+            unchecked
+            {
+                uint v = (uint)value;
+                for (int i = 0; i < 4; i++)
+                {
+                    hash = (hash ^ (byte)(v & 0xFF)) * 16777619u;
+                    v >>= 8;
+                }
             }
         }
 
@@ -1557,6 +1726,7 @@ namespace CompetitiveRounds
             if (!FfaMode.EngineActive()) return true;
             try
             {
+                if (FfaMode.SuppressCardBarAdd(teamId)) return false;
                 var local = PlayerManager.instance?.players?.FirstOrDefault(
                     p => p != null && p.gameObject != null && p.data?.view != null && p.data.view.IsMine);
                 if (local == null || teamId != local.PlayerID) return false;  // skip others silently
@@ -1566,6 +1736,47 @@ namespace CompetitiveRounds
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] card bar add: {ex.Message}"); }
             return false;
+        }
+    }
+
+    /// <summary>FFA spawn variety without mutating PlayerManager.players.
+    /// Plugin.cs first sorts/pads MapManager.GetSpawnPoints at default Harmony
+    /// priority. Priority.Last runs this postfix second over that final array.
+    /// HarmonyX orders priorities high-to-low; the length guard also fails
+    /// visibly if that ordering ever changes. A fixed xorshift32 Fisher-Yates
+    /// avoids UnityEngine.Random and runtime-dependent Random state.</summary>
+    [HarmonyPatch(typeof(MapManager), "GetSpawnPoints")]
+    class MapManager_GetSpawnPoints_FfaShuffle_Patch
+    {
+        [HarmonyPriority(Priority.Last)]
+        static void Postfix(ref SpawnPoint[] __result)
+        {
+            try
+            {
+                if (!FfaMode.EngineActive() || __result == null || __result.Length < 2) return;
+                int needed = Diag2v2.PlayersNeeded();
+                if (__result.Length < needed)
+                {
+                    Plugin.Log.LogWarning(
+                        $"[FFA] spawn shuffle saw {__result.Length}/{needed} points - sort/pad postfix did not run first");
+                    return;
+                }
+
+                var shuffled = (SpawnPoint[])__result.Clone();
+                uint state = FfaMode.SpawnShuffleSeed();
+                for (int i = shuffled.Length - 1; i > 0; i--)
+                {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    int j = (int)(state % (uint)(i + 1));
+                    var tmp = shuffled[i];
+                    shuffled[i] = shuffled[j];
+                    shuffled[j] = tmp;
+                }
+                __result = shuffled;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] spawn shuffle: {ex.Message}"); }
         }
     }
 

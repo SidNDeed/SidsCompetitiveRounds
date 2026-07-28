@@ -79,7 +79,9 @@ namespace CompetitiveRounds
 
         private static readonly StatRow[] ROWS = new[]
         {
-            new StatRow("HP",          p => $"{p.data.health:F0}/{p.data.MaxHealth:F0}"),
+            // Clamp at 0 — a dead player's health goes negative internally
+            // and "-39/100" on the board reads as a bug (July 28 screenshot).
+            new StatRow("HP",          p => $"{Mathf.Max(0f, p.data.health):F0}/{p.data.MaxHealth:F0}"),
             new StatRow("Lives",       p => $"{p.data.stats.remainingRespawns + 1:F0}"),
             // Infoholic's damage formula: gun.damage x bulletDamageMultiplier x 55
             // (55 = vanilla base bullet damage).
@@ -168,11 +170,13 @@ namespace CompetitiveRounds
                 float cardWidth = colW - 8f;
                 if (cardLayoutDirty || Mathf.Abs(cachedCardLayoutWidth - cardWidth) > 0.5f)
                 {
-                    float lineH = Mathf.Max(12f, stCards.lineHeight);
+                    // +3px per line and extra tail slack: the skin's real glyph
+                    // height exceeds lineHeight (#143) — see stCards.clipping.
+                    float lineH = Mathf.Max(15f, stCards.lineHeight + 3f);
                     int maxLines = 1;
                     for (int i = 0; i < cachedPlayerCount; i++)
                         maxLines = Mathf.Max(maxLines, PrepareCardRowLayout(cachedCards[i], cardWidth, 4));
-                    cachedCardsHeight = maxLines * lineH + 4f;
+                    cachedCardsHeight = maxLines * lineH + 8f;
                     cachedCardLayoutWidth = cardWidth;
                     cardLayoutDirty = false;
                 }
@@ -243,6 +247,11 @@ namespace CompetitiveRounds
             stCell = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
             stCards = new GUIStyle(GUI.skin.label)
             { fontSize = 11, fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperCenter, wordWrap = true, richText = true };
+            // Bug #114 item 5: ROUNDS' IMGUI skin has taller glyph metrics
+            // than lineHeight reports (learning #143) — with default Clip the
+            // bottom card line rendered only its top half. Overflow + the
+            // taller line budget below let full glyphs draw.
+            stCards.clipping = TextClipping.Overflow;
             stCards.normal.textColor = new Color(0.7f, 0.78f, 0.9f);
             cardSeparatorWidth = stCards.CalcSize(CARD_SEPARATOR).x;
         }

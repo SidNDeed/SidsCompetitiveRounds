@@ -1799,7 +1799,19 @@ namespace CompetitiveRounds
                     bool joinedOwnPendingRoom =
                         !string.IsNullOrEmpty(pendingRoom)
                         && string.Equals(photonRoomId, pendingRoom, StringComparison.Ordinal);
+                    // Bug #112: only MOD-ISSUED competitive rooms end a 1v1
+                    // search. Vanilla quickmatch/casual rooms (numeric Steam
+                    // ids, constant region churn — learning #82) must NOT:
+                    // searching ranked while playing casual is a supported
+                    // pattern (LeavingForRanked yanks you out when it pops).
+                    var joinProps = PhotonNetwork.CurrentRoom?.CustomProperties;
+                    bool joinedCompetitiveRoom =
+                        photonRoomId.StartsWith("ranked_") || photonRoomId.StartsWith("sct-")
+                        || photonRoomId.StartsWith("ovt_") || photonRoomId.StartsWith("ffa_")
+                        || photonRoomId.StartsWith("team_")
+                        || (joinProps != null && joinProps.ContainsKey("cr_ff"));
                     if (!PhotonNetwork.OfflineMode
+                        && joinedCompetitiveRoom
                         && ApiClient.CurrentQueueState == ApiClient.QueueState.Searching
                         && !joinedOwnPendingRoom)
                     {
@@ -1819,6 +1831,7 @@ namespace CompetitiveRounds
                     // server refuses it (match_already_formed) - a harmless
                     // failed call in that already-lost race.
                     else if (!PhotonNetwork.OfflineMode
+                             && joinedCompetitiveRoom
                              && (ApiClient.CurrentQueueState == ApiClient.QueueState.Matched
                                  || ApiClient.CurrentQueueState == ApiClient.QueueState.ReadySent)
                              && !joinedOwnPendingRoom)

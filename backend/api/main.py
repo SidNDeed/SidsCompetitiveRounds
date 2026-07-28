@@ -725,20 +725,35 @@ async def queue_cleanup_loop():
                 # uses that spelling and the continuation prior-series lookup
                 # filters on it; the janitor's original 'cancelled' made its
                 # rows invisible to that lookup (July 22 forensics).
-                dead_result = await db.execute(
-                    text("""UPDATE ovt_series s
-                        SET status = 'canceled',
-                            invalidated_at = NOW(),
-                            invalidation_reason = 'janitor_dead_lock'
-                        WHERE s.status = 'active'
-                          AND s.created_at < NOW() - INTERVAL '30 minutes'
-                          AND NOT EXISTS (SELECT 1 FROM ovt_matches m
-                                          WHERE m.series_id = s.id)
-                          AND NOT EXISTS (SELECT 1 FROM ovt_queue q
-                                          WHERE q.series_id = s.id
-                                            AND q.last_polled >= NOW() - INTERVAL '15 minutes')
-                        RETURNING s.id"""))
-                dead_series_ids = [r[0] for r in dead_result.fetchall()]
+                # Presence-gated (bug #114 item 3): a zero-game 30-min lock is
+                # only dead when NO member's always-on presence ping is live —
+                # queue polls stop once a lobby locks, so poll staleness alone
+                # says nothing about a long game 1 still being played.
+                dead_cand = (await db.execute(
+                    text("""SELECT s.id,
+                                   (SELECT array_agg(p.steam_id) FROM players p
+                                     WHERE p.id IN (s.solo_id, s.duo_a_id, s.duo_b_id)) AS sids
+                              FROM ovt_series s
+                             WHERE s.status = 'active'
+                               AND s.created_at < NOW() - INTERVAL '30 minutes'
+                               AND NOT EXISTS (SELECT 1 FROM ovt_matches m
+                                               WHERE m.series_id = s.id)
+                               AND NOT EXISTS (SELECT 1 FROM ovt_queue q
+                                               WHERE q.series_id = s.id
+                                                 AND q.last_polled >= NOW() - INTERVAL '15 minutes')"""))
+                ).mappings().all()
+                dead_series_ids = []
+                for c in dead_cand:
+                    if any(_presence_is_online(s) for s in (c["sids"] or [])):
+                        continue
+                    upd = await db.execute(
+                        text("""UPDATE ovt_series
+                                   SET status = 'canceled', invalidated_at = NOW(),
+                                       invalidation_reason = 'janitor_dead_lock'
+                                 WHERE id = :sid AND status = 'active'
+                                RETURNING id"""), {"sid": c["id"]})
+                    if upd.fetchall():
+                        dead_series_ids.append(c["id"])
                 for sid in dead_series_ids:
                     print(f"[OVT-CLEANUP] Zero-game dead lock canceled: series {sid}")
                 # Clear the canceled locks' queue rows in the same tick instead
@@ -809,19 +824,33 @@ async def queue_cleanup_loop():
                 # Zero-game dead lobbies cancel; lobbies WITH games close as
                 # 'completed' once every member has stopped polling for long
                 # enough that no rematch can still be in flight.
-                ffa_dead = await db.execute(
-                    text("""UPDATE ffa_lobbies l
-                        SET status = 'canceled',
-                            invalidated_at = NOW(),
-                            invalidation_reason = 'janitor_dead_lock'
-                        WHERE l.status = 'active'
-                          AND l.created_at < NOW() - INTERVAL '30 minutes'
-                          AND l.games_played = 0
-                          AND NOT EXISTS (SELECT 1 FROM ffa_queue q
-                                          WHERE q.series_id = l.id
-                                            AND q.last_polled >= NOW() - INTERVAL '15 minutes')
-                        RETURNING l.id"""))
-                ffa_dead_ids = [r[0] for r in ffa_dead.fetchall()]
+                # Presence-gated, same rule as the ovt sweep above (bug #114
+                # item 3 — tonight's live 4-player lobby must never be
+                # cancellable by staleness heuristics while clients ping).
+                ffa_dead_cand = (await db.execute(
+                    text("""SELECT l.id,
+                                   (SELECT array_agg(p.steam_id) FROM players p
+                                     WHERE p.id = ANY(l.member_ids)) AS sids
+                              FROM ffa_lobbies l
+                             WHERE l.status = 'active'
+                               AND l.created_at < NOW() - INTERVAL '30 minutes'
+                               AND l.games_played = 0
+                               AND NOT EXISTS (SELECT 1 FROM ffa_queue q
+                                               WHERE q.series_id = l.id
+                                                 AND q.last_polled >= NOW() - INTERVAL '15 minutes')"""))
+                ).mappings().all()
+                ffa_dead_ids = []
+                for c in ffa_dead_cand:
+                    if any(_presence_is_online(s) for s in (c["sids"] or [])):
+                        continue
+                    upd = await db.execute(
+                        text("""UPDATE ffa_lobbies
+                                   SET status = 'canceled', invalidated_at = NOW(),
+                                       invalidation_reason = 'janitor_dead_lock'
+                                 WHERE id = :lid AND status = 'active'
+                                RETURNING id"""), {"lid": c["id"]})
+                    if upd.fetchall():
+                        ffa_dead_ids.append(c["id"])
                 for lid in ffa_dead_ids:
                     print(f"[FFA-CLEANUP] Zero-game dead lobby canceled: {lid}")
                 if ffa_dead_ids:
@@ -14564,8 +14593,21 @@ async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         ), {"sid": me["series_id"]})).mappings().first()
         lock_age = ((datetime.now(timezone.utc) - me["matched_at"]).total_seconds()
                     if me["matched_at"] is not None else 0)
+        # Presence gate — same rule as the FFA dead-check (bug #114 item 3):
+        # a zero-game old lock is only dead when NO member's always-on
+        # presence ping has landed within its 3-minute TTL. A live 1v2 game 1
+        # longer than 10 minutes must never be cancelled out from under the
+        # players again.
+        zero_game_stale = (srow is not None and srow["status"] == "active"
+                           and int(srow["games"] or 0) == 0 and lock_age > 600)
+        members_online = False
+        if zero_game_stale:
+            mem_sids = (await db.execute(text(
+                "SELECT steam_id FROM ovt_queue WHERE series_id = :sid"
+            ), {"sid": me["series_id"]})).scalars().all()
+            members_online = any(_presence_is_online(s) for s in mem_sids)
         dead = (srow is None or srow["status"] != "active"
-                or (int(srow["games"] or 0) == 0 and lock_age > 600))
+                or (zero_game_stale and not members_online))
         if dead:
             if srow is not None and srow["status"] == "active":
                 await db.execute(text(
@@ -15644,8 +15686,24 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         ), {"lid": me["series_id"]})).mappings().first()
         lock_age = ((datetime.now(timezone.utc) - me["matched_at"]).total_seconds()
                     if me["matched_at"] is not None else 0)
+        # Presence gate (bug #114 item 3, learning #150's rule the hard way):
+        # a first-to-5 FFA game 1 routinely outlasts 10 minutes, and reports
+        # only land at game END — "no games yet + old lock" alone cancelled a
+        # LIVE 4-player lobby mid-game tonight (assembly_timeout) and every
+        # report after it 409'd. Queue polls stop at ready_join, but the
+        # always-on presence ping keeps firing from a running game — so a
+        # zero-game old lock is only DEAD when no member has pinged presence
+        # in the last 3 minutes (all clients gone/crashed).
+        zero_game_stale = (lrow is not None and lrow["status"] == "active"
+                           and int(lrow["games_played"] or 0) == 0 and lock_age > 600)
+        members_online = False
+        if zero_game_stale:
+            mem_sids = (await db.execute(text(
+                "SELECT steam_id FROM ffa_queue WHERE series_id = :lid"
+            ), {"lid": me["series_id"]})).scalars().all()
+            members_online = any(_presence_is_online(s) for s in mem_sids)
         dead = (lrow is None or lrow["status"] != "active"
-                or (int(lrow["games_played"] or 0) == 0 and lock_age > 600))
+                or (zero_game_stale and not members_online))
         if dead:
             if lrow is not None and lrow["status"] == "active":
                 await db.execute(text(
@@ -16122,8 +16180,12 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # rolled back on a deadlock) against their own recorded matches, so a
     # failed settle self-heals on the next report instead of stranding.
     # SAVEPOINT so a betting problem can never take the report down (#187).
-    game_no = _ffa_room_game_no(report.photon_room_id) or (int(lobby["games_played"] or 0) + 1)
+    # Bug #114 item 3: game_no used to be computed OUTSIDE this try — the
+    # bare-`re` NameError in _ffa_room_game_no therefore 500'd the whole
+    # report instead of being swallowed here. Every statement of the bet
+    # block lives inside the guard now.
     try:
+        game_no = _ffa_room_game_no(report.photon_room_id) or (int(lobby["games_played"] or 0) + 1)
         async with db.begin_nested():
             winner_pid = id_by_steam[report.winner_steam_id]
             await _settle_ffa_bets_for_game(db, lobby_uuid, game_no, winner_pid)
@@ -16377,8 +16439,15 @@ async def _ffa_lobby_field(db: AsyncSession, member_ids: list) -> list[dict]:
 
 
 def _ffa_room_game_no(room_id: str | None) -> int | None:
-    """Game number from the per-game report room id ('..._rN', HMAC-covered)."""
-    m = re.search(r"_r(\d+)$", room_id or "")
+    """Game number from the per-game report room id ('..._rN', HMAC-covered).
+
+    July 28 bug #114 item 3: this said bare `re.` while the module imports
+    `re as _re` — a NameError that 500'd EVERY FFA match report whose lobby
+    had bets (the only caller is the bet-settle branch), which then left
+    games_played at 0 so the 10-minute dead-lock heuristic cancelled the live
+    lobby mid-game and the whole session went unrecorded (learning #135's
+    untested-branch import trap, again)."""
+    m = _re.search(r"_r(\d+)$", room_id or "")
     return int(m.group(1)) if m else None
 
 
