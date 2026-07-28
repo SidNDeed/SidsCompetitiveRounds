@@ -4043,6 +4043,12 @@ namespace CompetitiveRounds
                 ResetPerMatchCombatCounters();
                 if (string.IsNullOrEmpty(localSteamId) || localSteamId == "unknown")
                     IdentifyLocalPlayer();
+                // Sid2 in-game menu bleed: a rematch can start while someone
+                // is still browsing the F5 page. Snapshot the overlay state
+                // BEFORE closing (Codex review find 8 — Close() normalizes
+                // the very state under investigation), then close.
+                try { NativeUI.LogOverlayState($"ffa game {FfaMode.GameNumber} start (pre-close)"); } catch { }
+                try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
                 Plugin.Log.LogInfo($"[FFA] === Game {FfaMode.GameNumber} started === (tracking armed)");
             }
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] OnFfaMatchStarted: {ex.Message}"); }
@@ -4099,15 +4105,26 @@ namespace CompetitiveRounds
             int myPlace = 1;
             try
             {
-                int myR = FfaMode.RoundsFor(myTeam), myP = FfaMode.PointsTotalFor(myTeam);
+                // Competition ranking via the shared comparator (points, then
+                // total half points, then kills — Sid's item 3 tie-breaks).
+                // Leavers count too (Codex review find 7): their tallies stay
+                // in the score dicts for the game they left, so a leaver who
+                // outscored you still places above you — matching the
+                // server's placement, which includes every roster member.
+                var counted = new HashSet<int> { myTeam };
                 var pmL2 = PlayerManager.instance;
                 if (pmL2?.players != null)
                     foreach (var po in pmL2.players)
                     {
                         if (po == null || po.gameObject == null || po.TeamID == myTeam) continue;
-                        int r = FfaMode.RoundsFor(po.TeamID), pt = FfaMode.PointsTotalFor(po.TeamID);
-                        if (r > myR || (r == myR && pt > myP)) myPlace++;
+                        if (!counted.Add(po.TeamID)) continue;
+                        if (FfaMode.ComparePlacement(po.TeamID, myTeam) < 0) myPlace++;
                     }
+                foreach (var kvL in FfaMode.Leavers)
+                {
+                    if (!counted.Add(kvL.Value.slot)) continue;
+                    if (FfaMode.ComparePlacement(kvL.Value.slot, myTeam) < 0) myPlace++;
+                }
             }
             catch { }
             Plugin.Log.LogInfo($"[POLL] === FFA Match Over === Winner: team {winnerTeam} " +
@@ -4223,6 +4240,7 @@ namespace CompetitiveRounds
                     steamId = sid, displayName = name, slot = teamId,
                     rounds = FfaMode.RoundsFor(teamId),
                     points = FfaMode.PointsTotalFor(teamId),
+                    kills = FfaMode.KillsFor(teamId),
                     leftEarly = false, fps = fps,
                     cards = FfaMode.PickHistoryFor(teamId),
                     telemetry = tele,
@@ -4242,11 +4260,21 @@ namespace CompetitiveRounds
                     slot = kv.Value.slot,
                     rounds = kv.Value.roundsWon,
                     points = kv.Value.pointsTotal,
+                    kills = kv.Value.kills,
                     leftEarly = true, fps = 0,
                     cards = FfaMode.PickHistoryFor(kv.Value.slot),
                     telemetry = null,
                 });
             }
+
+            // Codex review find 6: a player who clinches the game and closes
+            // the app before the report runs exists only in the Leavers set —
+            // the PlayerList loop above never saw them, and an unresolved
+            // winner aborted the whole report. Any entry (present or leaver)
+            // whose slot matches the winning team is the winner.
+            if (string.IsNullOrEmpty(winnerSteam))
+                foreach (var e in entries)
+                    if (e.slot == winnerTeam) { winnerSteam = e.steamId; break; }
 
             if (entries.Count < 2 || string.IsNullOrEmpty(winnerSteam))
             {

@@ -49,7 +49,6 @@ namespace CompetitiveRounds
 
 <color=#FFD94D><b>GOTCHAS</b></color>
 
-- The lowest Steam ID reports the result, so it is sent once.
 - Leaving mid-game is recorded.";
 
         public const string OvtTitle = "1v2 - How It Works";
@@ -89,7 +88,6 @@ namespace CompetitiveRounds
 
 <color=#FFD94D><b>GOTCHAS</b></color>
 
-- The lowest Steam ID reports the result, so it is sent once.
 - Leaving mid-game is recorded.";
 
         public const string FfaTitle = "FFA - How It Works";
@@ -100,18 +98,21 @@ namespace CompetitiveRounds
 - The queue has no Elo band. Joining is consent to play.
 - At 3 players, a 25-second gather window begins.
   Up to 10 players can join. A full lobby starts at once.
-- The last player alive wins a point.
-  2 points win a round. The first to 3 rounds wins the game.
-- Round losers pick cards at the same time.
-  At 25 seconds, your highlighted card is auto-picked.
-  At 30 seconds, the host finalizes all submitted picks.
+- The last player alive wins a half point.
+  2 half points make a point. The first to 5 points wins.
+- After each point, everyone except the point winner
+  picks a card at the same time.
+- Nothing is ever picked for you. The pick window stays
+  open at least 45 seconds and extends while picks come
+  in (90 seconds max). Miss it and you get no card.
 - You can hold 5 cards.
   Picking a 6th removes your oldest card.
 
 <color=#FFD94D><b>SCORING</b></color>
 
 - FFA is ranked with its own Glicko rating.
-- Placement uses rounds won, then total points.
+- Placement uses points, then all half points earned
+  (spent ones included), then total kills.
 - Ties share a place using competition order: 1, 2, 2, 4.
 - Rating compares you with up to 4 placement-adjacent players.
   A tied placement counts as a draw.
@@ -137,7 +138,7 @@ namespace CompetitiveRounds
 
 <color=#FFD94D><b>GOTCHAS</b></color>
 
-- The lowest Steam ID reports the result, so it is sent once.
-- Leaving mid-game is recorded.";
+- Leaving mid-game is recorded.
+- A leaver keeps their tallies for placement.";
     }
 }

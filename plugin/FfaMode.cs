@@ -20,18 +20,29 @@ namespace CompetitiveRounds
     /// rooms are untouched.
     ///
     /// Scoring: every player is their own team (TeamID = slot). Last player
-    /// alive wins the point; 2 points = a round (all points reset); first to
-    /// 3 rounds wins the game. Losers of each round pick a card — ALL AT THE
-    /// SAME TIME (see the pick-phase section) — with a hard 5-card cap:
+    /// alive wins a HALF POINT; 2 half points = a point (halves reset); first
+    /// to 5 points wins the game. (Player-facing language is half point /
+    /// point; the internal names stay points/rounds to match vanilla's.)
+    /// After each point, everyone but the point winner picks a card — ALL AT
+    /// THE SAME TIME (see the pick-phase section) — with a hard 5-card cap:
     /// picking a 6th erases the oldest ("Rolling Card Bar", reset+replay).
     /// </summary>
     internal static class FfaMode
     {
-        public const int RoundsToWin = 3;
+        public const int RoundsToWin = 5;
         public const int PointsToWinRound = 2;
         public const int CardCap = 5;
-        private const float PickAutoSeconds = 25f;    // picker's own client auto-picks
-        private const float PickFinalizeSeconds = 30f; // master finalizes without stragglers
+        // Pick window (bug #92-#98): the old 25s CLIENT auto-pick silently
+        // confirmed card 0 for anyone who hadn't picked yet — with one human
+        // testing three seats it fired seconds after his own pick+key-spam,
+        // which read as "spamming space forces everyone's first card". Picks
+        // are NEVER made for a player now. The master closes the window
+        // adaptively instead: at least PickBase, extended by PickGrace after
+        // each received pick, hard-capped at PickCap; whoever hasn't picked
+        // by then simply gets no card that cycle.
+        private const float PickBaseSeconds = 45f;
+        private const float PickGraceSeconds = 20f;
+        private const float PickCapSeconds = 90f;
         private const float ManifestWaitSeconds = 8f;
 
         // Photon property keys (FFA pick-sync protocol; all values ASCII).
@@ -49,6 +60,7 @@ namespace CompetitiveRounds
         private static readonly Dictionary<int, int> points = new Dictionary<int, int>();       // live points, by TeamID
         private static readonly Dictionary<int, int> rounds = new Dictionary<int, int>();       // round wins
         private static readonly Dictionary<int, int> pointsTotal = new Dictionary<int, int>();  // cumulative point wins
+        private static readonly Dictionary<int, int> kills = new Dictionary<int, int>();        // kill credits (placement tiebreak)
         private static readonly Dictionary<int, List<CardInfo>> decks = new Dictionary<int, List<CardInfo>>();  // live rolling deck
         private static readonly Dictionary<int, List<MatchTracker.CardPickData>> pickHistory =
             new Dictionary<int, List<MatchTracker.CardPickData>>();  // ALL picks incl. rolled-off
@@ -62,11 +74,22 @@ namespace CompetitiveRounds
         private static bool pointLatched = false;      // master's point-resolution latch (find 17)
         private static bool gameOverFired = false;
         private static float matchStartRealtime = 0f;
+        // Pick-window state for the HUD countdown (CompetitiveUI reads these).
+        private static bool pickPhaseActive = false;
+        private static float pickDeadlineRealtime = 0f;
+        private static bool localPickOpen = false;     // local player's own pick UI is up
+
+        public static bool PickPhaseActive => pickPhaseActive;
+        public static bool LocalPickOpen => localPickOpen;
+        /// <summary>Seconds until the pick window closes (display only — the
+        /// master's own copy of the same rule is what actually closes it).</summary>
+        public static float PickSecondsLeft =>
+            pickPhaseActive ? Mathf.Max(0f, pickDeadlineRealtime - Time.realtimeSinceStartup) : 0f;
 
         public class FfaLeaver
         {
             public string displayName;
-            public int slot, roundsWon, pointsTotal;
+            public int slot, roundsWon, pointsTotal, kills;
         }
 
         private class FfaBaseline
@@ -107,6 +130,59 @@ namespace CompetitiveRounds
         public static int RoundsFor(int teamId) { return rounds.TryGetValue(teamId, out var v) ? v : 0; }
         public static int PointsFor(int teamId) { return points.TryGetValue(teamId, out var v) ? v : 0; }
         public static int PointsTotalFor(int teamId) { return pointsTotal.TryGetValue(teamId, out var v) ? v : 0; }
+        public static int KillsFor(int teamId) { return kills.TryGetValue(teamId, out var v) ? v : 0; }
+
+        /// <summary>Placement order (Sid's item 3): points (rounds) desc, then
+        /// ALL half points earned incl. spent ones (pointsTotal) desc, then
+        /// total kills desc, then slot for stability. 0 = tied placement
+        /// (shares a place, competition ranking). Used by the game-over
+        /// placement, the report payload ordering and the score HUD.</summary>
+        public static int ComparePlacement(int teamA, int teamB)
+        {
+            int c = RoundsFor(teamB).CompareTo(RoundsFor(teamA));
+            if (c != 0) return c;
+            c = PointsTotalFor(teamB).CompareTo(PointsTotalFor(teamA));
+            if (c != 0) return c;
+            return KillsFor(teamB).CompareTo(KillsFor(teamA));
+        }
+
+        /// <summary>Kill credit at death time: the victim's
+        /// lastSourceOfDamage (vanilla sets it in HealthHandler.TakeDamage on
+        /// every client) unless it's the victim themselves or already gone.
+        /// Suicides with no prior damager credit nobody.</summary>
+        public static void RecordKillFor(Player killed)
+        {
+            try
+            {
+                // End-screen kills don't count (the report snapshot was
+                // already taken at game over).
+                if (gameOverFired) return;
+                if (killed == null || killed.data == null) return;
+                var src = killed.data.lastSourceOfDamage;
+                if (src == null || src.gameObject == null || src.data == null) return;
+                if (src.TeamID == killed.TeamID) return;
+                kills[src.TeamID] = KillsFor(src.TeamID) + 1;
+            }
+            catch { }
+        }
+
+        /// <summary>lastSourceOfDamage persists across rounds (nothing vanilla
+        /// clears it), so an untouched fall in round N would credit round
+        /// N-1's damager. Cleared at every round/battle start.</summary>
+        private static void ClearLastDamageSources()
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm?.players == null) return;
+                foreach (var p in pm.players)
+                {
+                    if (p == null || p.gameObject == null || p.data == null) continue;
+                    p.data.lastSourceOfDamage = null;
+                }
+            }
+            catch { }
+        }
         public static List<MatchTracker.CardPickData> PickHistoryFor(int teamId)
         {
             return pickHistory.TryGetValue(teamId, out var v) ? v : new List<MatchTracker.CardPickData>();
@@ -175,9 +251,20 @@ namespace CompetitiveRounds
         {
             gameNumber++;
             cycleNumber = 0;
-            points.Clear(); rounds.Clear(); pointsTotal.Clear();
+            points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
             decks.Clear(); pickHistory.Clear(); baselines.Clear();
-            Leavers.Clear();
+            // Leavers PERSIST across rematches in the same room (Codex review
+            // find 3): the server froze the roster at lock, so every game's
+            // report must still cover the departed member or it 403s. Their
+            // tallies zero out per game — the server "ghosts" all-zero
+            // left_early entries (no rating/XP), they just hold their roster
+            // slot. Cleared only in OnRoomLeft.
+            foreach (var kv in Leavers)
+            {
+                kv.Value.roundsWon = 0;
+                kv.Value.pointsTotal = 0;
+                kv.Value.kills = 0;
+            }
             isTransitioning = false;
             pointLatched = false;
             gameOverFired = false;
@@ -205,11 +292,14 @@ namespace CompetitiveRounds
             catch { }
             matchStartRealtime = 0f;
             gameNumber = 0;
-            points.Clear(); rounds.Clear(); pointsTotal.Clear();
+            points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
             decks.Clear(); pickHistory.Clear(); baselines.Clear();
             Leavers.Clear();
             isTransitioning = false;
             gameOverFired = false;
+            pickPhaseActive = false;
+            pickDeadlineRealtime = 0f;
+            localPickOpen = false;
         }
 
         /// <summary>Capture a leaver's tallies before Photon destroys their
@@ -223,11 +313,35 @@ namespace CompetitiveRounds
                 slot = teamId,
                 roundsWon = RoundsFor(teamId),
                 pointsTotal = PointsTotalFor(teamId),
+                kills = KillsFor(teamId),
             };
             Plugin.Log.LogInfo($"[FFA] leaver recorded: {steamId} slot={teamId} r={RoundsFor(teamId)}");
         }
 
         // ── Death handling / round accounting ──
+
+        /// <summary>Bug #99: vanilla keeps a departed player's DESTROYED
+        /// Player in PlayerManager.players — vanilla never needed cleanup
+        /// because any leave tears the whole room down, which FFA suppresses.
+        /// Every later vanilla pass over the list (MovePlayers, Move,
+        /// RevivePlayers) then NREs; the RevivePlayers throw landed inside
+        /// FfaTransition and killed the coroutine before DoSpeedUp — stuck
+        /// slow motion, nobody respawning. Purge fake-null entries instead.
+        /// Every client runs the same purge, so the positional
+        /// spawnPoints[i]-players[i] pairing stays identical everywhere.</summary>
+        public static void PurgeDepartedPlayers(string reason)
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm?.players == null) return;
+                int removed = pm.players.RemoveAll(p => p == null || p.gameObject == null || p.data == null);
+                try { PlayerAssigner.instance?.players?.RemoveAll(cd => cd == null || cd.gameObject == null); } catch { }
+                if (removed > 0)
+                    Plugin.Log.LogInfo($"[FFA] purged {removed} departed player entry(ies) ({reason})");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] purge failed: {ex.Message}"); }
+        }
 
         /// <summary>Alive = not dead, object alive, owner still connected.</summary>
         private static List<Player> AlivePlayers()
@@ -252,6 +366,7 @@ namespace CompetitiveRounds
         {
             yield return new WaitForSecondsRealtime(0.7f);
             if (!EngineActive()) yield break;
+            PurgeDepartedPlayers("after leave");
             int remaining = 0;
             try { remaining = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { }
 
@@ -357,6 +472,10 @@ namespace CompetitiveRounds
             isTransitioning = true;
             pointLatched = false;
             GameManager.instance.battleOngoing = false;
+            // A leave in the same physics step as the decisive death would
+            // otherwise reach GetPlayersInTeam below with a corpse entry
+            // still in the list (the CheckRoundAfterLeave purge is 0.7s out).
+            PurgeDepartedPlayers("next round");
             try { PlayerManager.instance.SetPlayersSimulated(false); } catch { }
 
             bool roundOver = false, gameOver = false;
@@ -414,31 +533,69 @@ namespace CompetitiveRounds
 
         private static IEnumerator FfaTransition(GM_ArmsRace gm, int winnerTeam, bool roundOver)
         {
+            PurgeDepartedPlayers("transition start");
             yield return new WaitForSecondsRealtime(1f);
-            MapManager.instance.LoadNextLevel();
+            try { MapManager.instance.LoadNextLevel(); }
+            catch (Exception ex) { Plugin.Log.LogError($"[FFA] LoadNextLevel: {ex.Message}"); }
             yield return new WaitForSecondsRealtime(roundOver ? 1.3f : 0.5f);
-            yield return gm.StartCoroutine(gm.WaitForSyncUp());
+            yield return BoundedSyncUp(gm, 10f);
 
             if (roundOver && gm.pickPhase)
             {
-                PlayerManager.instance.SetPlayersVisible(false);
+                try { PlayerManager.instance.SetPlayersVisible(false); } catch { }
                 yield return FfaPickPhase(gm, winnerTeam);
-                PlayerManager.instance.SetPlayersVisible(true);
+                try { PlayerManager.instance.SetPlayersVisible(true); } catch { }
             }
 
-            yield return gm.StartCoroutine(gm.WaitForSyncUp());
-            MapManager.instance.CallInNewMapAndMovePlayers(MapManager.instance.currentLevelID);
-            PlayerManager.instance.RevivePlayers();
+            yield return BoundedSyncUp(gm, 10f);
+            PurgeDepartedPlayers("pre-move");
+            // Bug #99: any vanilla throw from here on used to kill this
+            // coroutine, so DoSpeedUp/battleOngoing never ran and the whole
+            // lobby sat in permanent slow motion. The recovery lines below
+            // must run no matter what the vanilla calls do.
+            try { MapManager.instance.CallInNewMapAndMovePlayers(MapManager.instance.currentLevelID); }
+            catch (Exception ex) { Plugin.Log.LogError($"[FFA] CallInNewMap: {ex.Message}"); }
+            try { PlayerManager.instance.RevivePlayers(); }
+            catch (Exception ex) { Plugin.Log.LogError($"[FFA] RevivePlayers: {ex.Message}"); }
+            ClearLastDamageSources();
             yield return new WaitForSecondsRealtime(0.3f);
-            TimeHandler.instance.DoSpeedUp();
+            try { TimeHandler.instance.DoSpeedUp(); } catch { }
             isTransitioning = false;
             GameManager.instance.battleOngoing = true;
+        }
+
+        /// <summary>Vanilla WaitForSyncUp waits for any one peer's reply with
+        /// NO timeout — alone in the room (everyone else left mid-transition)
+        /// it waits forever. Same handshake, bounded, skipped with no peers.</summary>
+        private static IEnumerator BoundedSyncUp(GM_ArmsRace gm, float maxSeconds)
+        {
+            if (PhotonNetwork.OfflineMode) yield break;
+            int others = 0;
+            try { others = (PhotonNetwork.CurrentRoom?.PlayerCount ?? 1) - 1; } catch { }
+            if (others <= 0) yield break;
+            float start = Time.realtimeSinceStartup;
+            gm.isWaiting = true;
+            try { gm.view.RPC("RPCO_RequestSyncUp", RpcTarget.Others); }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[FFA] sync-up RPC failed: {ex.Message}");
+                gm.isWaiting = false;
+                yield break;
+            }
+            while (gm.isWaiting && Time.realtimeSinceStartup - start < maxSeconds)
+                yield return null;
+            if (gm.isWaiting)
+            {
+                gm.isWaiting = false;
+                Plugin.Log.LogWarning($"[FFA] sync-up timed out after {maxSeconds:0}s — continuing");
+            }
         }
 
         /// <summary>DoStartGame replacement body — game 1 and every rematch.</summary>
         public static IEnumerator FfaDoStartGame(GM_ArmsRace gm)
         {
             OnGameStart();
+            PurgeDepartedPlayers("game start");
             GameManager.instance.battleOngoing = false;
             yield return new WaitForSeconds(0.25f);
             try { UIHandler.instance.HideJoinGameText(); } catch { }
@@ -452,12 +609,19 @@ namespace CompetitiveRounds
                 // Initial draw: EVERYONE picks one card, simultaneously.
                 yield return FfaPickPhase(gm, -1);
             }
-            MapManager.instance.CallInNewMapAndMovePlayers(MapManager.instance.currentLevelID);
+            // Same leave-race fencing as FfaTransition (Codex review find 5):
+            // a picker leaving as the opening draw resolves would otherwise
+            // NRE the move/visibility passes and strand the game start.
+            PurgeDepartedPlayers("pre-move start");
+            try { MapManager.instance.CallInNewMapAndMovePlayers(MapManager.instance.currentLevelID); }
+            catch (Exception ex) { Plugin.Log.LogError($"[FFA] CallInNewMap(start): {ex.Message}"); }
+            ClearLastDamageSources();
             TimeHandler.instance.DoSpeedUp();
             TimeHandler.instance.StartGame();
             GameManager.instance.battleOngoing = true;
-            PlayerManager.instance.SetPlayersVisible(true);
-            CompetitiveUI.ShowNotification($"FFA - {Diag2v2.PlayersNeeded()} players - first to {RoundsToWin} rounds!",
+            try { PlayerManager.instance.SetPlayersVisible(true); }
+            catch (Exception ex) { Plugin.Log.LogError($"[FFA] SetPlayersVisible(start): {ex.Message}"); }
+            CompetitiveUI.ShowNotification($"FFA - {Diag2v2.PlayersNeeded()} players - first to {RoundsToWin} points!",
                 new Color(0.7f, 1f, 0.7f), 5f);
         }
 
@@ -488,6 +652,7 @@ namespace CompetitiveRounds
             // exact marker. Emit it for parity or pick-phase keystrokes count
             // as combat input (#28 class).
             UnityEngine.Debug.Log("PICK PHASE");
+            PurgeDepartedPlayers("pick phase");
 
             // Local picker computation (master publishes; others use as fallback).
             var pickerIds = new List<int>();
@@ -527,35 +692,68 @@ namespace CompetitiveRounds
             if (iPick)
                 localUi = gm.StartCoroutine(FfaLocalPickUI(gm, localPlayer, game, cycle));
 
-            // Master: wait for all picks, then publish the result manifest.
-            // Everyone: wait for the result.
+            // Master: collect picks and close the window adaptively — at
+            // least PickBase, extended by PickGrace whenever a pick arrives
+            // (someone is clearly still at the keyboard), capped at PickCap.
+            // Every client mirrors the rule so the HUD countdown matches.
+            // Nobody is ever picked FOR (bug #92-#98) — a picker who misses
+            // the window gets no card this cycle.
+            float deadline = phaseStart + PickBaseSeconds;
+            int lastGotCount = 0;
+            float lastCollect = -999f;
+            bool wasMaster = PhotonNetwork.IsMasterClient;
+            pickPhaseActive = true;
+            pickDeadlineRealtime = deadline;
             Dictionary<int, string> result = null;
             while (true)
             {
                 result = ReadCycleResult(game, cycle);
                 if (result != null) break;
-                if (PhotonNetwork.IsMasterClient)
+                float now = Time.realtimeSinceStartup;
+                if (now - lastCollect > 0.25f)   // prop-table reads throttled
                 {
+                    lastCollect = now;
                     var got = CollectPicks(manifest, game, cycle);
-                    bool allIn = got.Count >= CountStillPresent(manifest);
-                    bool timeUp = Time.realtimeSinceStartup - phaseStart > PickFinalizeSeconds;
-                    if (allIn || timeUp)
+                    if (got.Count > lastGotCount)
                     {
-                        var sb = new System.Text.StringBuilder();
-                        sb.Append(game).Append(':').Append(cycle).Append(':');
-                        bool first = true;
-                        foreach (var kv in got.OrderBy(k => k.Key))
+                        lastGotCount = got.Count;
+                        deadline = Mathf.Min(phaseStart + PickCapSeconds,
+                                             Mathf.Max(deadline, now + PickGraceSeconds));
+                    }
+                    // Master migration mid-cycle (Codex review find 4): the
+                    // new master's local deadline can already be past (its
+                    // phase clock started later/earlier than the old
+                    // master's). Grant one grace window before finalizing so
+                    // an in-flight pick isn't discarded on the handover.
+                    if (PhotonNetwork.IsMasterClient && !wasMaster)
+                    {
+                        wasMaster = true;
+                        deadline = Mathf.Min(phaseStart + PickCapSeconds,
+                                             Mathf.Max(deadline, now + PickGraceSeconds));
+                        Plugin.Log.LogInfo($"[FFA] pick cycle {cycle}: became master mid-cycle — extending window");
+                    }
+                    pickDeadlineRealtime = deadline;
+                    if (PhotonNetwork.IsMasterClient)
+                    {
+                        bool allIn = got.Count >= CountStillPresent(manifest);
+                        if (allIn || now > deadline)
                         {
-                            if (!first) sb.Append('|');
-                            sb.Append(kv.Key).Append('=').Append(kv.Value);
-                            first = false;
+                            var sb = new System.Text.StringBuilder();
+                            sb.Append(game).Append(':').Append(cycle).Append(':');
+                            bool first = true;
+                            foreach (var kv in got.OrderBy(k => k.Key))
+                            {
+                                if (!first) sb.Append('|');
+                                sb.Append(kv.Key).Append('=').Append(kv.Value);
+                                first = false;
+                            }
+                            SetRoomProp(PropResult, sb.ToString());
+                            if (!allIn)
+                                Plugin.Log.LogWarning($"[FFA] pick cycle {cycle} closed with {got.Count}/{manifest.Count} picks (window ended)");
                         }
-                        SetRoomProp(PropResult, sb.ToString());
-                        if (timeUp && !allIn)
-                            Plugin.Log.LogWarning($"[FFA] pick cycle {cycle} finalized with {got.Count}/{manifest.Count} picks (timeout)");
                     }
                 }
-                if (Time.realtimeSinceStartup - phaseStart > PickFinalizeSeconds + 10f)
+                if (now - phaseStart > PickCapSeconds + 15f)
                 {
                     // Belt-and-suspenders: master gone AND no result — proceed cardless.
                     Plugin.Log.LogWarning($"[FFA] pick cycle {cycle}: no result manifest — proceeding without picks");
@@ -564,9 +762,24 @@ namespace CompetitiveRounds
                 }
                 yield return null;
             }
+            pickPhaseActive = false;
+            pickDeadlineRealtime = 0f;
 
             if (localUi != null) { try { gm.StopCoroutine(localUi); } catch { } }
             CleanupLocalPickUI();
+
+            // The result is ground truth: a manifest picker missing from it
+            // missed the window (their UI just got torn down above).
+            if (iPick && localPlayer != null && !result.ContainsKey(localPlayer.PlayerID))
+            {
+                Plugin.Log.LogInfo($"[FFA] cycle {cycle}: local pick missed the window — no card this cycle");
+                try
+                {
+                    CompetitiveUI.ShowNotification("Pick window closed - no card this round.",
+                        new Color(1f, 0.75f, 0.4f), 5f);
+                }
+                catch { }
+            }
 
             // Apply the result — the ONLY apply site, identical on all clients.
             foreach (var kv in result.OrderBy(k => k.Key))
@@ -734,15 +947,16 @@ namespace CompetitiveRounds
             int lastDir = 0;
             float started = Time.realtimeSinceStartup;
             int chosen = -1;
+            localPickOpen = true;
+            // No auto-pick, ever (bug #92-#98: the old 25s auto-confirm of
+            // card 0 was every "forced first card" report). If the window
+            // closes first, the outer phase stops this coroutine and the
+            // player simply gets no card this cycle. The 0.35s arm delay
+            // keeps a jump pressed during the transition (or any queued
+            // press on the very first frame) from insta-confirming card 0.
+            const float armDelay = 0.35f;
             while (chosen < 0)
             {
-                // Auto-pick for AFK pickers so the master never times the
-                // whole lobby out on our account.
-                if (Time.realtimeSinceStartup - started > PickAutoSeconds)
-                {
-                    chosen = selected;
-                    break;
-                }
                 var actions = localPlayer?.data?.playerActions;
                 if (actions != null)
                 {
@@ -756,7 +970,12 @@ namespace CompetitiveRounds
                     if (dir != lastDir && dir != 0)
                         selected = Mathf.Clamp(selected + dir, 0, candidateObjs.Count - 1);
                     lastDir = dir;
-                    try { if (actions.Jump.WasPressed) chosen = selected; } catch { }
+                    try
+                    {
+                        if (Time.realtimeSinceStartup - started > armDelay && actions.Jump.WasPressed)
+                            chosen = selected;
+                    }
+                    catch { }
                 }
                 for (int i = 0; i < candidateObjs.Count; i++)
                 {
@@ -770,6 +989,7 @@ namespace CompetitiveRounds
                 yield return null;
             }
 
+            localPickOpen = false;
             string cardName = candidates[chosen].gameObject.name.Replace("(Clone)", "");
             // Publish BEFORE any local application — application happens only
             // from the result manifest, identically on every client.
@@ -800,6 +1020,7 @@ namespace CompetitiveRounds
 
         private static void CleanupLocalPickUI()
         {
+            localPickOpen = false;
             foreach (var go in localCardObjects)
             {
                 try { if (go != null) UnityEngine.Object.Destroy(go); } catch { }
@@ -1084,7 +1305,36 @@ namespace CompetitiveRounds
         static bool Prefix(GM_ArmsRace __instance, Player killedPlayer, int playersAlive)
         {
             if (!FfaMode.EngineActive()) return true;
+            // Every death funnels through here (vanilla invokes PlayerDied
+            // per victim), so this is the kill-credit tally point.
+            FfaMode.RecordKillFor(killedPlayer);
             FfaMode.HandlePlayerDied(__instance);
+            return false;
+        }
+    }
+
+    /// <summary>Alive-count relay: vanilla PlayerManager.PlayerDied does
+    /// players[i].data.dead with NO null guard, so a death landing in the
+    /// short window between a leave and the 0.7s purge would NRE and swallow
+    /// the death event entirely (GM_ArmsRace.PlayerDied never invoked).
+    /// FFA-gated fake-null-safe replacement of the same 4 lines.</summary>
+    [HarmonyPatch(typeof(PlayerManager), "PlayerDied")]
+    class PlayerManager_PlayerDied_Ffa_Patch
+    {
+        static bool Prefix(PlayerManager __instance, Player player)
+        {
+            if (!FfaMode.EngineActive()) return true;
+            try
+            {
+                int num = 0;
+                foreach (var p in __instance.players)
+                {
+                    if (p == null || p.gameObject == null || p.data == null) continue;
+                    if (!p.data.dead) num++;
+                }
+                __instance.PlayerDiedAction?.Invoke(player, num);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] PlayerDied relay: {ex.Message}"); }
             return false;
         }
     }

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Text;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -26,11 +25,44 @@ namespace CompetitiveRounds
         private static GUIStyle stTitle, stName, stLabel, stCell, stCards;
         private static readonly List<Player> cachedPlayers = new List<Player>(4);
         private static readonly List<string> cachedNames = new List<string>(4);
-        private static readonly List<string> cachedCards = new List<string>(4);
+        private static readonly List<CardRow> cachedCards = new List<CardRow>(4);
         private static readonly List<Color> cachedColors = new List<Color>(4);
         private static readonly List<string[]> cachedValues = new List<string[]>(4);
+        private static readonly Dictionary<string, Texture2D> cardTextures =
+            new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, float> cardTexRetryAt =
+            new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
         private static int cachedPlayerCount;
         private static float nextSnapshotAt;
+
+        private const int MAX_SHOWN_CARDS = 8;
+        private const int MAX_CARD_TOKENS = MAX_SHOWN_CARDS + 1;
+        private static readonly GUIContent CARD_SEPARATOR = new GUIContent(", ");
+
+        private sealed class CardDisplay
+        {
+            public string canonicalName;
+            public readonly GUIContent content = new GUIContent();
+        }
+
+        private sealed class CardRow
+        {
+            public readonly CardDisplay[] cards = new CardDisplay[MAX_SHOWN_CARDS];
+            public readonly GUIContent message = new GUIContent();
+            public readonly GUIContent tail = new GUIContent();
+            public readonly float[] nameWidths = new float[MAX_CARD_TOKENS];
+            public readonly float[] tokenWidths = new float[MAX_CARD_TOKENS];
+            public readonly float[] lineWidths = new float[MAX_CARD_TOKENS];
+            public readonly float[] lineX = new float[MAX_CARD_TOKENS];
+            public readonly int[] tokenLines = new int[MAX_CARD_TOKENS];
+            public int count;
+            public bool hasTail;
+
+            public CardRow()
+            {
+                for (int i = 0; i < cards.Length; i++) cards[i] = new CardDisplay();
+            }
+        }
 
         // Stat row description: label + per-player value resolver.
         private struct StatRow
@@ -88,7 +120,7 @@ namespace CompetitiveRounds
             cachedPlayerCount = cachedPlayers.Count;
 
             while (cachedNames.Count < cachedPlayerCount) cachedNames.Add("");
-            while (cachedCards.Count < cachedPlayerCount) cachedCards.Add("");
+            while (cachedCards.Count < cachedPlayerCount) cachedCards.Add(new CardRow());
             while (cachedColors.Count < cachedPlayerCount) cachedColors.Add(Color.white);
             while (cachedValues.Count < cachedPlayerCount) cachedValues.Add(new string[ROWS.Length]);
 
@@ -96,7 +128,7 @@ namespace CompetitiveRounds
             {
                 var p = cachedPlayers[i];
                 cachedNames[i] = Trunc(PlayerName(p), 16);
-                cachedCards[i] = CardLine(p);
+                RefreshCardRow(cachedCards[i], p);
                 cachedColors[i] = TeamColor(p);
                 var values = cachedValues[i];
                 for (int r = 0; r < ROWS.Length; r++)
@@ -169,11 +201,17 @@ namespace CompetitiveRounds
                 ry += 4f;
                 GUI.Label(new Rect(x + 12, ry, labelW, cardsH), "Cards", stLabel);
                 cx = x + 12 + labelW;
+                Vector2 mousePosition = Event.current.mousePosition;
+                Texture2D hoveredCardTexture = null;
                 for (int i = 0; i < cachedPlayerCount; i++)
                 {
-                    GUI.Label(new Rect(cx, ry, colW - 8, cardsH), cachedCards[i], stCards);
+                    hoveredCardTexture = DrawCardRow(
+                        cachedCards[i], new Rect(cx, ry, colW - 8, cardsH),
+                        mousePosition, hoveredCardTexture);
                     cx += colW;
                 }
+                if (hoveredCardTexture != null)
+                    DrawHoveredCardArt(hoveredCardTexture, mousePosition);
             }
             catch { /* overlay must never break gameplay */ }
         }
@@ -236,7 +274,7 @@ namespace CompetitiveRounds
             cardBaseline.Clear();
         }
 
-        private static string CardLine(Player p)
+        private static void RefreshCardRow(CardRow row, Player p)
         {
             try
             {
@@ -244,20 +282,141 @@ namespace CompetitiveRounds
                 int skip = 0;
                 if (cards != null && cardBaseline.TryGetValue(p, out int b) && b > 0 && b <= cards.Count)
                     skip = b;
-                if (cards == null || cards.Count - skip <= 0) return "<color=#666>no cards</color>";
-                var sb = new StringBuilder();
-                int shown = 0;
-                for (int i = skip; i < cards.Count && shown < 8; i++)
+                row.count = 0;
+                row.hasTail = false;
+                if (cards == null || cards.Count - skip <= 0)
+                {
+                    row.message.text = "<color=#666>no cards</color>";
+                    return;
+                }
+                row.message.text = "";
+                for (int i = skip; i < cards.Count && row.count < MAX_SHOWN_CARDS; i++)
                 {
                     if (cards[i] == null) continue;
-                    if (shown > 0) sb.Append(", ");
-                    sb.Append(Trunc(cards[i].cardName ?? "?", 12));
-                    shown++;
+                    string rawName = cards[i].cardName ?? "?";
+                    string canonicalName = CardRarityLookup.GetCanonicalName(rawName) ?? rawName;
+                    var display = row.cards[row.count++];
+                    // Uppercase only the cached GUI text; lookup identity stays canonical.
+                    display.canonicalName = canonicalName;
+                    display.content.text = Trunc(rawName, 12).ToUpperInvariant();
                 }
-                if (cards.Count - skip > shown) sb.Append($" <color=#888>+{cards.Count - skip - shown}</color>");
-                return sb.ToString();
+                int hidden = cards.Count - skip - row.count;
+                if (hidden > 0)
+                {
+                    row.hasTail = true;
+                    row.tail.text = $" <color=#888>+{hidden}</color>";
+                }
             }
-            catch { return "-"; }
+            catch
+            {
+                row.count = 0;
+                row.hasTail = false;
+                row.message.text = "-";
+            }
+        }
+
+        private static Texture2D GetCardTexture(string canonicalName)
+        {
+            if (string.IsNullOrEmpty(canonicalName)) return null;
+            if (cardTextures.TryGetValue(canonicalName, out var texture))
+            {
+                // Misses are cached, but only for a few seconds — on the
+                // build flavor that fetches the art pack on first launch,
+                // an early hover would otherwise blank that card's art for
+                // the whole session.
+                if (texture != null) return texture;
+                if (cardTexRetryAt.TryGetValue(canonicalName, out float at) &&
+                    Time.realtimeSinceStartup < at)
+                    return null;
+            }
+            Sprite sprite = CardImageLoader.GetSprite(canonicalName);
+            texture = sprite != null ? sprite.texture : null;
+            cardTextures[canonicalName] = texture;
+            if (texture == null) cardTexRetryAt[canonicalName] = Time.realtimeSinceStartup + 5f;
+            return texture;
+        }
+
+        private static Texture2D DrawCardRow(CardRow row, Rect rect, Vector2 mousePosition,
+                                             Texture2D hoveredTexture)
+        {
+            if (!string.IsNullOrEmpty(row.message.text))
+            {
+                GUI.Label(rect, row.message, stCards);
+                return hoveredTexture;
+            }
+
+            int tokenCount = row.count + (row.hasTail ? 1 : 0);
+            if (tokenCount == 0) return hoveredTexture;
+
+            float separatorW = stCards.CalcSize(CARD_SEPARATOR).x;
+            int line = 0;
+            float lineW = 0f;
+            for (int t = 0; t < tokenCount; t++)
+            {
+                GUIContent content = t < row.count ? row.cards[t].content : row.tail;
+                float nameW = stCards.CalcSize(content).x;
+                float tokenW = nameW + (t < row.count - 1 ? separatorW : 0f);
+                if (lineW > 0f && lineW + tokenW > rect.width)
+                {
+                    row.lineWidths[line] = lineW;
+                    line++;
+                    lineW = 0f;
+                }
+                row.nameWidths[t] = nameW;
+                row.tokenWidths[t] = tokenW;
+                row.tokenLines[t] = line;
+                lineW += tokenW;
+            }
+            row.lineWidths[line] = lineW;
+            int lineCount = line + 1;
+            for (int l = 0; l < lineCount; l++)
+                row.lineX[l] = rect.x + Mathf.Max(0f, (rect.width - row.lineWidths[l]) * 0.5f);
+
+            float lineH = Mathf.Max(12f, stCards.lineHeight);
+            for (int t = 0; t < tokenCount; t++)
+            {
+                line = row.tokenLines[t];
+                float y = rect.y + line * lineH;
+                if (y >= rect.yMax) continue;
+                float drawX = row.lineX[line];
+                float nameW = row.nameWidths[t];
+                if (t < row.count)
+                {
+                    var nameRect = new Rect(drawX, y, nameW, lineH);
+                    GUI.Label(nameRect, row.cards[t].content, stCards);
+                    if (nameRect.Contains(mousePosition))
+                        hoveredTexture = GetCardTexture(row.cards[t].canonicalName);
+                    drawX += nameW;
+                    if (t < row.count - 1)
+                        GUI.Label(new Rect(drawX, y, separatorW, lineH), CARD_SEPARATOR, stCards);
+                }
+                else
+                {
+                    GUI.Label(new Rect(drawX, y, nameW, lineH), row.tail, stCards);
+                }
+                row.lineX[line] += row.tokenWidths[t];
+            }
+            return hoveredTexture;
+        }
+
+        private static void DrawHoveredCardArt(Texture2D texture, Vector2 mousePosition)
+        {
+            const float baseW = 180f;
+            const float baseH = 270f;
+            const float edge = 4f;
+            const float gap = 16f;
+            float scale = Mathf.Min(1f, Mathf.Min(
+                Mathf.Max(1f, Screen.width - edge * 2f) / baseW,
+                Mathf.Max(1f, Screen.height - edge * 2f) / baseH));
+            float w = baseW * scale;
+            float h = baseH * scale;
+            float x = mousePosition.x + gap;
+            float y = mousePosition.y + gap;
+            if (x + w > Screen.width - edge) x = mousePosition.x - w - gap;
+            if (y + h > Screen.height - edge) y = mousePosition.y - h - gap;
+            x = Mathf.Clamp(x, edge, Mathf.Max(edge, Screen.width - w - edge));
+            y = Mathf.Clamp(y, edge, Mathf.Max(edge, Screen.height - h - edge));
+            GUI.DrawTexture(new Rect(x, y, w, h), texture, ScaleMode.ScaleToFit, true);
         }
 
         private static string Trunc(string s, int n)

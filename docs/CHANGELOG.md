@@ -9,15 +9,21 @@ the first sessions and please file bug reports with logs attached.
 - **Queue:** joining is consent — no rating band, no ready-up. Once 3 people are
   searching a 25-second gather window opens so more can pile in, up to 10; a full
   lobby starts immediately.
-- **The game:** everyone is their own team. Last player standing takes the point,
-  2 points take the round, first to 3 rounds wins. A player leaving does not end
-  the match — the survivors play on.
-- **Live standings:** an in-match strip shows every player's rounds and current
-  points. The outright leader wears the crown; tied leaders do not.
+- **The game:** everyone is their own team. Last player standing takes a half
+  point, 2 half points make a point, first to 5 points wins. A player leaving
+  does not end the match — the survivors play on, and the leaver keeps their
+  tallies for placement.
+- **Live standings:** a vanilla-style top-left scoreboard — one row per player
+  in their colour, a full dot per point and a half dot for a held half point.
+  The outright leader wears the crown; tied leaders do not.
 - **Simultaneous card picks:** everyone picks at the same time during the opening
-  draw, and after each round everyone who did not win the round picks together
+  draw, and after each point everyone who did not take it picks together
   again — no more sitting through a 10-player pick queue. Picks are synchronised
-  so every client applies the same cards.
+  so every client applies the same cards. Nothing is ever picked FOR you: the
+  window stays open at least 45 seconds, extends while picks come in (90s cap),
+  shows a live countdown, and missing it just means no card that cycle.
+- **Placement tie-breaks:** points, then all half points earned across the game
+  (spent ones included), then total kills.
 - **Rolling 5-card cap:** your 6th pick pushes out your oldest card, Rolling Card
   Bar style. Your own card bar shows your live deck; hold Tab for everyone's.
 - **Ranked from day one:** every match moves a real FFA rating, bounded so a
@@ -87,9 +93,33 @@ the first sessions and please file bug reports with logs attached.
 - It now powers FFA matchmaking, result reporting, leaderboards and recent games,
   plus 1v2's recent-games panel and the separate Solo/Duo boards.
 - FFA reports must match the active lobby's locked players, player count and slots.
-  The server also requires one unique winner at exactly 3 rounds and rejects round
-  or point totals above the mode's ceilings, so a result cannot silently drop the
-  players who beat you.
+  The server also requires one unique winner at exactly 5 points and rejects
+  totals above the mode's ceilings, so a result cannot silently drop the players
+  who beat you. Kill counts are stored per player and break placement ties.
+
+### FFA — first-playtest fixes (July 28)
+- **Nobody's card is ever force-picked again.** The first build auto-picked your
+  highlighted (first) card after 25 seconds, which looked exactly like "someone
+  spamming space picks everyone's first card" (reports 92-98). Auto-pick is gone;
+  see the pick-window rules above.
+- **A leaver no longer strands the survivors in slow motion** (reports 99/100).
+  The base game keeps the departed player's destroyed object in its player list
+  and the next transition crashed on it before restoring game speed or reviving
+  anyone. Departed players are now cleanly removed on every client, the
+  transition survives errors, and the sync-up wait can no longer hang forever.
+- **Hold-Tab board:** card names render in consistent CAPS, and hovering a card
+  name shows its card art.
+- The mode info popups no longer describe reporter internals, and the in-game
+  language is half points / points everywhere.
+- **Cross-review hardening** (adversarial review of the fix batch): the server
+  no longer rejects honest long games (the half-point ceiling ignored that
+  everyone's banked half is wiped when any player converts a point); a member
+  quitting mid-sitting no longer closes the lobby out from under the
+  survivors' reports; rematch reports after a hard disconnect still cover the
+  frozen roster, with the departed member held as a zero-tally "ghost" who is
+  neither rated nor rewarded for games they never played; a winner who closes
+  the game instantly after clinching still gets the match reported; and the
+  end-of-game placement toast now counts leavers you didn't beat.
 
 ## v1.34.5 — 2026-07-27 — attempted base-game bug fixes, menu overhaul, security batch
 

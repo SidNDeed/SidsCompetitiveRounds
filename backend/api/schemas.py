@@ -962,6 +962,9 @@ class FfaPlayerEntry(BaseModel):
     slot: int = Field(0, ge=0, le=15)
     rounds_won: int = Field(0, ge=0, le=20)
     points_total: int = Field(0, ge=0, le=200)
+    # Placement tie-break only (rounds, then points, then kills). Rides
+    # OUTSIDE the frozen ffa: HMAC canonical; 0 from pre-kills clients.
+    kills: int = Field(0, ge=0, le=500)
     left_early: bool = False
     fps: int | None = Field(None, ge=0, le=10000)
     cards: list[CardPick] = Field(default_factory=list)

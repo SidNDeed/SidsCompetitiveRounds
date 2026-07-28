@@ -14916,11 +14916,22 @@ FFA_WIN_MULT = 1.5
 FFA_MAX_RATED_OPPONENTS = 4
 # Engine constants — MUST match plugin/FfaMode.cs (RoundsToWin/PointsToWinRound).
 # Reports are validated against them so a crafted body can't invent a score.
-FFA_ROUNDS_TO_WIN = 3
+# 3 -> 5 after the first playtest (Sid: games ended too fast for the rolling
+# card bar to ever engage).
+FFA_ROUNDS_TO_WIN = 5
 FFA_POINTS_TO_WIN_ROUND = 2
-# Max points a player can have banked in one game: every round they won is
-# worth PointsToWinRound, plus at most PointsToWinRound-1 unconverted points.
-FFA_MAX_POINTS = FFA_ROUNDS_TO_WIN * FFA_POINTS_TO_WIN_ROUND + (FFA_POINTS_TO_WIN_ROUND - 1)
+# Max points_total one player can honestly bank in one game. points_total is
+# CUMULATIVE while the engine's points.Clear() wipes everyone's live half
+# whenever ANY player converts a round — so besides their own
+# rounds*PointsToWinRound + (PointsToWinRound-1) unconverted, a player can
+# lose up to PointsToWinRound-1 banked halves to EACH conversion by each of
+# the other n-1 players (Codex review 2026-07-28 find 1: the old flat cap of
+# 11 rejected honest long games outright — e.g. 18 halves in a 3-player
+# first-to-5). Bound each opponent's conversions by ROUNDS_TO_WIN.
+def _ffa_max_points(n_players: int) -> int:
+    own = FFA_ROUNDS_TO_WIN * FFA_POINTS_TO_WIN_ROUND + (FFA_POINTS_TO_WIN_ROUND - 1)
+    cleared = (FFA_POINTS_TO_WIN_ROUND - 1) * FFA_ROUNDS_TO_WIN * max(0, n_players - 1)
+    return own + cleared
 # A lobby is one sitting; this bounds a compromised client's fabrication rate.
 FFA_MAX_GAMES_PER_LOBBY = 40
 
@@ -15007,8 +15018,19 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
     that room (Codex design find 4 — leaving them 'ready_join' would re-feed
     a dead room forever). Everyone's rows are deleted; they requeue fresh."""
     await _check_steam_session(request, steam_id, db)
+    # Housekeeping: played lobbies now outlive member leaves (find 2 above),
+    # so sweep any active lobby whose last recorded game is >2h old — the
+    # sitting is over, nobody is left to report against it.
+    await db.execute(text("""
+        UPDATE ffa_lobbies l SET status='completed', completed_at=NOW()
+         WHERE l.status='active' AND COALESCE(l.games_played, 0) > 0
+           AND NOT EXISTS (SELECT 1 FROM ffa_matches m
+                            WHERE m.lobby_id = l.id
+                              AND m.ended_at > NOW() - INTERVAL '2 hours')
+    """))
     me = await _lock_queue_group_for_player(db, "ffa_queue", steam_id)
     if me is None:
+        await db.commit()
         return {"status": "ok"}
     dissolved = False
     lobby_id = me["series_id"]
@@ -15029,17 +15051,18 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
             dissolved = True
             print(f"[FFA-LOCK] lobby dissolved by leave (lobby {lobby_id}, leaver {steam_id})")
         elif lrow is not None and lrow["status"] == "active":
-            # Played lobby: close it for everyone. Peer rows are deleted (not
-            # reset to searching — auto-requeueing people who just finished a
-            # sitting would fire surprise locks at them, #150).
-            await db.execute(text(
-                "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
-                " WHERE id=:lid AND status='active'"
-            ), {"lid": lobby_id})
+            # Played lobby: the lobby STAYS ACTIVE (Codex review 2026-07-28
+            # find 2: closing it here made the survivors' final report 409 —
+            # the leaver's own client fires this call the moment they quit
+            # mid-game, while the remaining players are still finishing the
+            # game and will keep rematching in the room). Peer queue rows are
+            # still deleted (not reset to searching — auto-requeueing people
+            # mid-sitting would fire surprise locks at them, #150); the
+            # stale-lobby sweep below is what eventually completes the row.
             await db.execute(text(
                 "DELETE FROM ffa_queue WHERE series_id = :lid AND player_id != :pid"
             ), {"lid": lobby_id, "pid": me["player_id"]})
-            print(f"[FFA-LOCK] played lobby closed by leave (lobby {lobby_id}, leaver {steam_id})")
+            print(f"[FFA-LOCK] member left played lobby {lobby_id} (leaver {steam_id}) — lobby stays active for the survivors' reports")
     await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"), {"pid": me["player_id"]})
     await db.commit()
     return {"status": "ok", "lock_dissolved": dissolved}
@@ -15340,10 +15363,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # "I won 20-0" body is rejected outright rather than rated.
     if max_rounds != FFA_ROUNDS_TO_WIN:
         raise HTTPException(400, f"winner must hold exactly {FFA_ROUNDS_TO_WIN} rounds")
+    max_pts = _ffa_max_points(len(report.players))
     for p in report.players:
         if p.rounds_won > FFA_ROUNDS_TO_WIN:
             raise HTTPException(400, "round tally above the game limit")
-        if p.points_total > FFA_MAX_POINTS:
+        if p.points_total > max_pts:
             raise HTTPException(400, "point tally above the game limit")
     # Rate ceiling: a lobby's games are real matches taking minutes each. This
     # bounds a compromised client's fabrication rate even inside a live lobby
@@ -15358,22 +15382,40 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
         ), {"pid": pid})
 
-    # Server-side placements: (rounds desc, points desc); ties share the same
-    # placement, COMPETITION style (1,2,2,4 — not dense; Codex design find 15).
+    # Server-side placements: (rounds desc, points desc, kills desc); ties
+    # share the same placement, COMPETITION style (1,2,2,4 — not dense; Codex
+    # design find 15). kills is the Sid-item-3 tie-break: total kill credits
+    # across the game, reported by the client outside the frozen HMAC
+    # canonical (learning #213), 0 from pre-kills clients.
     entries = sorted(report.players,
-                     key=lambda p: (-p.rounds_won, -p.points_total, _ffa_sort_key(p.steam_id)))
+                     key=lambda p: (-p.rounds_won, -p.points_total,
+                                    -int(getattr(p, "kills", 0) or 0),
+                                    _ffa_sort_key(p.steam_id)))
     placements: dict[str, int] = {}
     prev_key = None
     prev_place = 0
     for i, p in enumerate(entries):
-        k = (p.rounds_won, p.points_total)
+        k = (p.rounds_won, p.points_total, int(getattr(p, "kills", 0) or 0))
         place = prev_place if k == prev_key else i + 1
         placements[p.steam_id] = place
         prev_key, prev_place = k, place
+    # GHOSTS: a member who left in an EARLIER game of the sitting still rides
+    # every rematch report so the frozen-roster check holds (Codex review
+    # 2026-07-28 find 3 — clearing them made game 2+ reports 403), but with
+    # left_early and all-zero tallies. They keep their roster row + last
+    # placement, and are excluded from rating, XP/gold, and everyone else's
+    # beaten counts — one leave must not keep costing them (or feeding
+    # everyone else) across games they never played.
+    ghosts = {
+        p.steam_id for p in report.players
+        if p.left_early and p.rounds_won == 0 and p.points_total == 0
+        and int(getattr(p, "kills", 0) or 0) == 0
+    }
     # Strictly-beaten counts drive XP (a tied pair didn't beat each other).
     beaten_count = {
         p.steam_id: sum(1 for q in report.players
-                        if placements[q.steam_id] > placements[p.steam_id])
+                        if q.steam_id not in ghosts
+                        and placements[q.steam_id] > placements[p.steam_id])
         for p in report.players
     }
 
@@ -15450,9 +15492,12 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # comparisons. Deterministic: sorted by |placement gap| then the
         # canonical steam ordering.
         for p in report.players:
+            if p.steam_id in ghosts:
+                continue   # not in this game — no rating period for them
             my_place = placements[p.steam_id]
             ranked_opps = sorted(
-                (q for q in report.players if q.steam_id != p.steam_id),
+                (q for q in report.players
+                 if q.steam_id != p.steam_id and q.steam_id not in ghosts),
                 key=lambda q: (abs(placements[q.steam_id] - my_place),
                                _ffa_sort_key(q.steam_id)))
             opponents = []
@@ -15486,6 +15531,8 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     by_steam = {p.steam_id: p for p in report.players}
     for pid in sorted(reported_ids, key=str):
         sid_ = next(s for s, i2 in id_by_steam.items() if i2 == pid)
+        if sid_ in ghosts:
+            continue   # no XP/gold for games they never played
         place = placements[sid_]
         xp = FFA_MATCH_XP_BASE + FFA_XP_PER_BEATEN * beaten_count.get(sid_, 0)
         if place == 1:
@@ -15517,13 +15564,14 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         chg = rating_changes.get(p.steam_id)
         await db.execute(text("""
             INSERT INTO ffa_match_players (match_id, player_id, slot, rounds_won, points_total,
-                placement, left_early, rating_before, rating_after, rating_change,
+                kills, placement, left_early, rating_before, rating_after, rating_change,
                 xp_gained, gold_gained, fps_avg, ping_avg, bullets_fired, bullets_hit,
                 blocks_activated, blocks_successful, keys_pressed, active_seconds,
                 fps_timeline, ping_timeline, hit_timeline, block_timeline)
-            VALUES (:m, :p, :slot, :rw, :pt, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,
+            VALUES (:m, :p, :slot, :rw, :pt, :k, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,
                     :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt)
         """), {"m": match_id, "p": pid, "slot": p.slot, "rw": p.rounds_won, "pt": p.points_total,
+               "k": int(getattr(p, "kills", 0) or 0),
                "pl": placements[p.steam_id], "le": bool(p.left_early),
                "rb": old_r, "ra": (old_r + chg) if (old_r is not None and chg is not None) else None,
                "rc": chg, "xp": xp_g, "g": gold_g,

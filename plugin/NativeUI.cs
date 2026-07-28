@@ -689,7 +689,38 @@ namespace CompetitiveRounds
             isOpen=true;dirty=true;RefreshData();ApiClient.ResetQueueCountTimer();Plugin.Log.LogInfo($"[NATIVE] Opened competitive page (inGame={inGameMode})");
         }
 
-        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}SetClickBlocker(false);Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+
+        /// <summary>Sid2's screenshot shows the page title/footer over live
+        /// gameplay on his 16:10 monitor while 16:9 machines never see it.
+        /// The mechanism is still unproven, so log the full layer state at
+        /// every match start until his next report pins it (page active?
+        /// fade alpha? canvas size vs window?).</summary>
+        public static void LogOverlayState(string context)
+        {
+            try
+            {
+                bool pageActive = pageGO != null && pageGO.activeInHierarchy;
+                float alpha = -1f;
+                try
+                {
+                    var aProp = menuFadeCG?.GetType().GetProperty("alpha", BindingFlags.Public | BindingFlags.Instance);
+                    if (aProp != null) alpha = (float)aProp.GetValue(menuFadeCG);
+                }
+                catch { }
+                Vector2 canvasSize = Vector2.zero;
+                try
+                {
+                    var crt = overlayCanvasGO?.GetComponent<RectTransform>();
+                    if (crt != null) canvasSize = crt.rect.size;
+                }
+                catch { }
+                Plugin.Log.LogInfo($"[OVERLAY-DIAG] {context}: window={Screen.width}x{Screen.height} " +
+                                   $"canvas={canvasSize.x:0}x{canvasSize.y:0} pageActive={pageActive} " +
+                                   $"isOpen={isOpen} fadeAlpha={alpha:0.00} fullscreen={Screen.fullScreen}");
+            }
+            catch { }
+        }
 
         // Bug batch item 6: while a player-effect preview runs, the aura is a WORLD
         // particle system, and a ScreenSpaceOverlay canvas composites above ALL
@@ -1448,7 +1479,9 @@ namespace CompetitiveRounds
                     elo=$" <color={ec}>{(p.rating_change>=0?"+":"")}{p.rating_change:F0}</color>";
                 }
                 string left=p.left_early?" <color=#888>(left)</color>":"";
-                sb.Append($"  <color=#888>#{p.placement}</color> <color={nameCol}>{Trunc(p.display_name,16)}</color> <color=#AAAAAA>{p.rounds_won}R {p.points_total}P</color>{elo}{left}\n");
+                // Display language (Sid item 3): a round win = "point" (pt),
+                // a point = "half" — server field names stay rounds/points.
+                sb.Append($"  <color=#888>#{p.placement}</color> <color={nameCol}>{Trunc(p.display_name,16)}</color> <color=#AAAAAA>{p.rounds_won}pt {p.points_total}half</color>{elo}{left}\n");
                 lines++;
             }
             foreach(var p in ps)

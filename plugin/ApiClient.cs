@@ -8054,7 +8054,7 @@ namespace CompetitiveRounds
         public class FfaReportPlayer
         {
             public string steamId, displayName;
-            public int slot, rounds, points, fps;
+            public int slot, rounds, points, kills, fps;
             public bool leftEarly;
             public List<MatchTracker.CardPickData> cards;
             public TeamTelemetry telemetry;
@@ -8093,8 +8093,11 @@ namespace CompetitiveRounds
                 if (i > 0) sb.Append(",");
                 sb.Append("{");
                 sb.Append($"\"steam_id\":\"{Escape(p.steamId)}\",\"display_name\":\"{Escape(p.displayName ?? "Player")}\",");
+                // kills is a placement TIE-BREAK only and rides OUTSIDE the
+                // frozen ffa: HMAC canonical (learning #213 — never extend it).
                 sb.Append($"\"slot\":{p.slot},\"rounds_won\":{p.rounds}," +
-                          $"\"points_total\":{p.points},\"left_early\":{(p.leftEarly ? "true" : "false")},");
+                          $"\"points_total\":{p.points},\"kills\":{Math.Max(0, p.kills)}," +
+                          $"\"left_early\":{(p.leftEarly ? "true" : "false")},");
                 sb.Append($"\"fps\":{Math.Max(0, p.fps)},");
                 sb.Append("\"cards\":[");
                 AppendCards(sb, p.cards ?? new List<MatchTracker.CardPickData>());

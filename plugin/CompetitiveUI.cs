@@ -169,44 +169,360 @@ namespace CompetitiveRounds
             DrawConsentModal();
         }
 
-        // ── FFA score strip ───────────────────────────────────────────────
-        // Vanilla's small round counter is 2-team (hidden in FFA — the FFA
-        // DoStartGame replacement never shows it). This compact top-center
-        // strip is the per-player rounds/points readout during FFA matches.
-        // Repaint-gated + 2 Hz string cache (learning #162).
-        private static string ffaStripCache = "";
-        private static float ffaStripCachedAt = -999f;
-        private static GUIStyle ffaStripStyle;   // built once (learning #162: no per-Repaint allocs)
+        // -- FFA score HUD --------------------------------------------------
+        // Fixed slot rows mirror vanilla's small dot counter without relying
+        // on its two-team object. Slow state is cached; Repaint only draws
+        // cached strings, colors, positions and textures (learning #162).
+        private const int FfaHudMaxRows = 10;
+        private const int FfaHudNameChars = 12;
+        private struct FfaHudRow
+        {
+            public bool active;
+            public bool dead;
+            public bool halfDot;
+            public string name;
+            public Color nameColor;
+            public Color dotColor;
+            public int fullDots;
+            public Rect nameRect;
+            public float dotX;
+            public float dotY;
+        }
+
+        private static readonly FfaHudRow[] ffaHudRows = new FfaHudRow[FfaHudMaxRows];
+        private static readonly char[] ffaHudNameBuffer = new char[FfaHudNameChars];
+        private static readonly string[] ffaHudFallbackNames =
+            { "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10" };
+        private static int ffaHudRowExtent;
+        private static int ffaHudLayoutExtent = -1;
+        private static int ffaHudScreenWidth = -1;
+        private static int ffaHudScreenHeight = -1;
+        private static float ffaHudRowsCachedAt = -999f;
+        private static float ffaVanillaCounterCheckedAt = -999f;
+        private static float ffaHudScale = 1f;
+        private static float ffaHudDotSize;
+        private static float ffaHudDotPitch;
+        private static Rect ffaHudBackingRect;
+        private static Rect ffaPickBannerRect;
+        private static GUIStyle ffaHudNameStyle;
+        private static GUIStyle ffaPickBannerStyle;
+        private static Texture2D ffaFullDotTexture;
+        private static Texture2D ffaHalfDotTexture;
+        private static string ffaPickBannerText = "";
+        private static float ffaPickBannerCachedAt = -999f;
+        private static int ffaPickBannerSeconds = -1;
+        private static bool ffaPickBannerLocal;
 
         private static void DrawFfaScoreStrip()
         {
-            if (Event.current != null && Event.current.type != EventType.Repaint) return;
+            if (Event.current == null) return;
             try
             {
-                if (!FfaMode.InFfaMatch) { ffaStripCache = ""; return; }
-                if (Time.realtimeSinceStartup - ffaStripCachedAt > 0.5f)
+                bool inMatch = FfaMode.InFfaMatch;
+                bool pickActive = FfaMode.PickPhaseActive;
+                if (!inMatch && !pickActive)
                 {
-                    ffaStripCachedAt = Time.realtimeSinceStartup;
-                    string line = FfaMode.ScoreLine();
-                    ffaStripCache = string.IsNullOrEmpty(line)
-                        ? ""
-                        : $"FFA to {FfaMode.RoundsToWin}R   {line}";
+                    ffaHudRowsCachedAt = -999f;
+                    ffaHudRowExtent = 0;
+                    ffaPickBannerText = "";
+                    ffaPickBannerSeconds = -1;
+                    return;
                 }
-                if (string.IsNullOrEmpty(ffaStripCache)) return;
-                if (ffaStripStyle == null)
+
+                float now = Time.realtimeSinceStartup;
+                // Refresh on Layout so the following Repaint performs no
+                // string or row-cache allocations.
+                if (Event.current.type == EventType.Layout)
                 {
-                    ffaStripStyle = new GUIStyle(GUI.skin.label)
+                    if (inMatch)
                     {
-                        alignment = TextAnchor.MiddleCenter,
-                        fontSize = 12,
-                        clipping = TextClipping.Overflow,
-                    };
-                    ffaStripStyle.normal.textColor = new Color(1f, 1f, 1f, 0.92f);
+                        SuppressFfaVanillaCounter(now);
+                        if (now - ffaHudRowsCachedAt >= 0.5f)
+                        {
+                            ffaHudRowsCachedAt = now;
+                            RefreshFfaHudRows();
+                        }
+                    }
+                    else ffaHudRowExtent = 0;
+                    RefreshFfaPickBanner(now, pickActive);
+                    return;
                 }
-                float w = Mathf.Min(Screen.width - 40f, 60f + ffaStripCache.Length * 7.5f);
-                var rect = new Rect((Screen.width - w) / 2f, 4f, w, 24f);
-                GUI.Box(rect, "");
-                GUI.Label(rect, ffaStripCache, ffaStripStyle);
+                if (Event.current.type != EventType.Repaint) return;
+
+                EnsureFfaHudResources();
+                RefreshFfaHudLayout();
+                if (inMatch) DrawFfaScoreRows();
+                DrawFfaPickBanner(now);
+            }
+            catch { }
+        }
+
+        private static void EnsureFfaHudResources()
+        {
+            if (ffaHudNameStyle == null)
+            {
+                ffaHudNameStyle = new GUIStyle(GUI.skin.label)
+                {
+                    alignment = TextAnchor.MiddleLeft,
+                    fontStyle = FontStyle.Bold,
+                    richText = false,
+                    clipping = TextClipping.Clip,
+                };
+                ffaHudNameStyle.normal.textColor = Color.white;
+            }
+            if (ffaPickBannerStyle == null)
+            {
+                ffaPickBannerStyle = new GUIStyle(GUI.skin.label)
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontStyle = FontStyle.Bold,
+                    richText = false,
+                    clipping = TextClipping.Clip,
+                };
+                ffaPickBannerStyle.normal.textColor = Color.white;
+            }
+            if (ffaFullDotTexture == null)
+                ffaFullDotTexture = BuildFfaDotTexture(false, "CR_FFA_FullDot");
+            if (ffaHalfDotTexture == null)
+                ffaHalfDotTexture = BuildFfaDotTexture(true, "CR_FFA_HalfDot");
+        }
+
+        private static Texture2D BuildFfaDotTexture(bool half, string textureName)
+        {
+            const int size = 32;
+            var texture = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            texture.name = textureName;
+            texture.hideFlags = HideFlags.HideAndDontSave;
+            texture.filterMode = FilterMode.Bilinear;
+            texture.wrapMode = TextureWrapMode.Clamp;
+            var pixels = new Color32[size * size];
+            float center = size * 0.5f;
+            float radius = center - 1f;
+            for (int y = 0; y < size; y++)
+            {
+                float py = y + 0.5f - center;
+                for (int x = 0; x < size; x++)
+                {
+                    float px = x + 0.5f - center;
+                    float alpha = Mathf.Clamp01(radius + 0.5f - Mathf.Sqrt(px * px + py * py));
+                    if (half && px > 0f) alpha = 0f; // left half filled
+                    pixels[y * size + x] = new Color32(255, 255, 255,
+                        (byte)Mathf.RoundToInt(alpha * 255f));
+                }
+            }
+            texture.SetPixels32(pixels);
+            texture.Apply(false, true);
+            return texture;
+        }
+
+        private static void RefreshFfaHudRows()
+        {
+            for (int i = 0; i < FfaHudMaxRows; i++)
+            {
+                var empty = ffaHudRows[i];
+                empty.active = false;
+                empty.name = null;
+                ffaHudRows[i] = empty;
+            }
+            ffaHudRowExtent = 0;
+
+            var pm = PlayerManager.instance;
+            if (pm == null || pm.players == null) return;
+            foreach (var p in pm.players)
+            {
+                if (p == null || p.gameObject == null || p.data == null) continue;
+                int slot = p.TeamID;
+                if (slot < 0 || slot >= FfaHudMaxRows) continue;
+
+                string rawName = null;
+                try { rawName = p.data.view?.Owner?.NickName; } catch { }
+                Color rawColor = Color.white;
+                try
+                {
+                    var skin = PlayerSkinBank.GetPlayerSkinColors(slot);
+                    if (skin != null) rawColor = skin.color;
+                }
+                catch { }
+
+                var row = ffaHudRows[slot];
+                row.active = true;
+                row.dead = p.data.dead;
+                row.name = StripFfaHudName(rawName, slot);
+                row.nameColor = FfaHudReadableNameColor(rawColor);
+                row.dotColor = rawColor;
+                row.fullDots = Mathf.Clamp(FfaMode.RoundsFor(slot), 0, FfaMode.RoundsToWin);
+                row.halfDot = row.fullDots < FfaMode.RoundsToWin
+                              && FfaMode.PointsFor(slot) >= 1;
+                ffaHudRows[slot] = row;
+                if (slot + 1 > ffaHudRowExtent) ffaHudRowExtent = slot + 1;
+            }
+        }
+
+        private static string StripFfaHudName(string input, int slot)
+        {
+            if (string.IsNullOrEmpty(input)) return ffaHudFallbackNames[slot];
+            int count = 0;
+            bool inTag = false;
+            for (int i = 0; i < input.Length && count < FfaHudNameChars; i++)
+            {
+                char c = input[i];
+                if (c == '<') { inTag = true; continue; }
+                if (inTag)
+                {
+                    if (c == '>') inTag = false;
+                    continue;
+                }
+                ffaHudNameBuffer[count++] = c < ' ' ? ' ' : c;
+            }
+            while (count > 0 && ffaHudNameBuffer[count - 1] == ' ') count--;
+            int start = 0;
+            while (start < count && ffaHudNameBuffer[start] == ' ') start++;
+            return start >= count
+                ? ffaHudFallbackNames[slot]
+                : new string(ffaHudNameBuffer, start, count - start);
+        }
+
+        private static Color FfaHudReadableNameColor(Color raw)
+        {
+            float max = Mathf.Max(raw.r, Mathf.Max(raw.g, raw.b));
+            float min = Mathf.Min(raw.r, Mathf.Min(raw.g, raw.b));
+            if (max <= 0.2f || min >= 0.82f) return Color.white;
+            return new Color(raw.r, raw.g, raw.b, 1f);
+        }
+
+        private static void RefreshFfaHudLayout()
+        {
+            int width = Screen.width;
+            int height = Screen.height;
+            if (width == ffaHudScreenWidth && height == ffaHudScreenHeight
+                && ffaHudLayoutExtent == ffaHudRowExtent) return;
+
+            ffaHudScreenWidth = width;
+            ffaHudScreenHeight = height;
+            ffaHudLayoutExtent = ffaHudRowExtent;
+            ffaHudScale = height / 1080f;
+            float paddingX = 6f * ffaHudScale;
+            float paddingY = 4f * ffaHudScale;
+            float nameWidth = 100f * ffaHudScale;
+            float nameToDots = 8f * ffaHudScale;
+            float rowPitch = 18f * ffaHudScale;
+            ffaHudDotSize = 12f * ffaHudScale;
+            ffaHudDotPitch = 16f * ffaHudScale;
+            float x = 16f * ffaHudScale;
+            float y = 46f * ffaHudScale;
+            float dotsWidth = FfaMode.RoundsToWin * ffaHudDotSize
+                              + (FfaMode.RoundsToWin - 1) * 4f * ffaHudScale;
+            ffaHudBackingRect = new Rect(x, y,
+                paddingX + nameWidth + nameToDots + dotsWidth + paddingX,
+                paddingY * 2f + ffaHudRowExtent * rowPitch);
+
+            for (int slot = 0; slot < FfaHudMaxRows; slot++)
+            {
+                var row = ffaHudRows[slot];
+                float rowY = y + paddingY + slot * rowPitch;
+                row.nameRect = new Rect(x + paddingX, rowY, nameWidth, rowPitch);
+                row.dotX = x + paddingX + nameWidth + nameToDots;
+                row.dotY = rowY + (rowPitch - ffaHudDotSize) * 0.5f;
+                ffaHudRows[slot] = row;
+            }
+
+            float bannerW = 260f * ffaHudScale;
+            ffaPickBannerRect = new Rect((width - bannerW) * 0.5f, 6f * ffaHudScale,
+                bannerW, 28f * ffaHudScale);
+            ffaHudNameStyle.fontSize = Mathf.Max(1, Mathf.RoundToInt(12f * ffaHudScale));
+            ffaPickBannerStyle.fontSize = Mathf.Max(1, Mathf.RoundToInt(14f * ffaHudScale));
+        }
+
+        private static void DrawFfaScoreRows()
+        {
+            if (ffaHudRowExtent <= 0) return;
+            Color previous = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.42f);
+            GUI.DrawTexture(ffaHudBackingRect, Texture2D.whiteTexture);
+
+            for (int slot = 0; slot < ffaHudRowExtent; slot++)
+            {
+                var row = ffaHudRows[slot];
+                if (!row.active) continue;
+                GUI.color = new Color(row.nameColor.r, row.nameColor.g, row.nameColor.b,
+                    row.dead ? 0.5f : 1f);
+                GUI.Label(row.nameRect, row.name, ffaHudNameStyle);
+
+                GUI.color = row.dotColor;
+                for (int dot = 0; dot < row.fullDots; dot++)
+                    GUI.DrawTexture(new Rect(row.dotX + dot * ffaHudDotPitch, row.dotY,
+                        ffaHudDotSize, ffaHudDotSize), ffaFullDotTexture);
+                if (row.halfDot)
+                    GUI.DrawTexture(new Rect(row.dotX + row.fullDots * ffaHudDotPitch, row.dotY,
+                        ffaHudDotSize, ffaHudDotSize), ffaHalfDotTexture);
+            }
+            GUI.color = previous;
+        }
+
+        private static void RefreshFfaPickBanner(float now, bool active)
+        {
+            if (!active)
+            {
+                ffaPickBannerText = "";
+                ffaPickBannerSeconds = -1;
+                return;
+            }
+
+            bool localOpen = FfaMode.LocalPickOpen;
+            if (string.IsNullOrEmpty(ffaPickBannerText)
+                || now - ffaPickBannerCachedAt >= 0.25f
+                || localOpen != ffaPickBannerLocal)
+            {
+                ffaPickBannerCachedAt = now;
+                ffaPickBannerLocal = localOpen;
+                ffaPickBannerSeconds = Mathf.CeilToInt(FfaMode.PickSecondsLeft);
+                ffaPickBannerText = localOpen
+                    ? $"PICK YOUR CARD - {ffaPickBannerSeconds}s"
+                    : $"Card picks close in {ffaPickBannerSeconds}s";
+            }
+        }
+
+        private static void DrawFfaPickBanner(float now)
+        {
+            if (string.IsNullOrEmpty(ffaPickBannerText)) return;
+            Color background;
+            Color foreground;
+            if (!ffaPickBannerLocal)
+            {
+                background = new Color(0.08f, 0.08f, 0.09f, 0.66f);
+                foreground = new Color(0.62f, 0.62f, 0.64f, 0.9f);
+            }
+            else if (ffaPickBannerSeconds <= 5)
+            {
+                float pulse = 0.5f + 0.5f * Mathf.Sin(now * 7f);
+                background = Color.Lerp(new Color(0.78f, 0.08f, 0.04f, 0.92f),
+                    new Color(0.92f, 0.55f, 0.04f, 0.94f), pulse);
+                foreground = Color.Lerp(new Color(1f, 0.78f, 0.16f, 1f), Color.white, pulse);
+            }
+            else
+            {
+                background = new Color(0.12f, 0.20f, 0.31f, 0.88f);
+                foreground = new Color(1f, 0.86f, 0.30f, 1f);
+            }
+
+            Color previous = GUI.color;
+            GUI.color = background;
+            GUI.DrawTexture(ffaPickBannerRect, Texture2D.whiteTexture);
+            GUI.color = foreground;
+            GUI.Label(ffaPickBannerRect, ffaPickBannerText, ffaPickBannerStyle);
+            GUI.color = previous;
+        }
+
+        private static void SuppressFfaVanillaCounter(float now)
+        {
+            if (now - ffaVanillaCounterCheckedAt < 1f) return;
+            ffaVanillaCounterCheckedAt = now;
+            try
+            {
+                var ui = UIHandler.instance;
+                var counter = ui != null ? ui.roundCounterSmall : null;
+                if (counter != null && counter.gameObject.activeSelf)
+                    counter.gameObject.SetActive(false);
             }
             catch { }
         }
