@@ -39,7 +39,7 @@ namespace CompetitiveRounds
     {
         internal static Type tImage, tButton, tCanvas, tLE;
         internal static Type tCanvasGroup;
-        internal static Type tScrollRect;internal static Type tMask;private static Type tVLG, tHLG, tCSF;
+        internal static Type tScrollRect;internal static Type tMask;internal static Type tRectMask2D;private static Type tVLG, tHLG, tCSF;
         internal static Type tGR, tCanvasScaler;
         private static Type tTMP;
         private static bool typesReady = false;
@@ -61,7 +61,7 @@ namespace CompetitiveRounds
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
                 if(tImage==null)tImage=asm.GetType("UnityEngine.UI.Image"); if(tButton==null)tButton=asm.GetType("UnityEngine.UI.Button");
-                if(tScrollRect==null)tScrollRect=asm.GetType("UnityEngine.UI.ScrollRect"); if(tMask==null)tMask=asm.GetType("UnityEngine.UI.Mask");
+                if(tScrollRect==null)tScrollRect=asm.GetType("UnityEngine.UI.ScrollRect"); if(tMask==null)tMask=asm.GetType("UnityEngine.UI.Mask");if(tRectMask2D==null)tRectMask2D=asm.GetType("UnityEngine.UI.RectMask2D");
                 if(tVLG==null)tVLG=asm.GetType("UnityEngine.UI.VerticalLayoutGroup"); if(tHLG==null)tHLG=asm.GetType("UnityEngine.UI.HorizontalLayoutGroup");
                 if(tCSF==null)tCSF=asm.GetType("UnityEngine.UI.ContentSizeFitter"); if(tLE==null)tLE=asm.GetType("UnityEngine.UI.LayoutElement");
                 if(tGR==null)tGR=asm.GetType("UnityEngine.UI.GraphicRaycaster"); if(tTMP==null)tTMP=asm.GetType("TMPro.TextMeshProUGUI");
@@ -88,7 +88,7 @@ namespace CompetitiveRounds
         public static bool InitFont()
         {
             if(fontReady)return true;if(!typesReady)return false;
-            foreach(var tmp in UnityEngine.Object.FindObjectsOfType(tTMP)){try{var f=pTmpFont?.GetValue(tmp);if(f!=null){tmpFont=f;fontReady=true;TryInstallUnicodeFallback();return true;}}catch{}}
+            foreach(var tmp in UnityEngine.Object.FindObjectsOfType(tTMP)){try{var f=pTmpFont?.GetValue(tmp);if(f!=null){tmpFont=f;fontReady=true;/* UnicodeFallback replaces the old TryInstallUnicodeFallback path entirely: this TMP build only ships CreateFontAsset(Font) overloads, both of which return null for a dynamic OS font, so that path could never produce an asset (verified in the shipped Unity.TextMeshPro.dll). The new builder goes through the TextCore FontEngine with a font FILE instead. */try{UnicodeFallback.Install();}catch(Exception ex){Plugin.Log.LogWarning("[FONT] UnicodeFallback.Install: "+ex.Message);}return true;}}catch{}}
             return false;
         }
 
@@ -306,7 +306,7 @@ namespace CompetitiveRounds
         }
 
         public static object CreateText(string name,Transform parent,string text,float fontSize,Color color,int alignment=AlignTopLeft,Vector2? sizeDelta=null,bool richText=true,bool raycastTarget=false)
-        {var go=new GameObject(name);go.transform.SetParent(parent,false);var rt=go.AddComponent<RectTransform>();Vector2 sz=sizeDelta??new Vector2(200,24);rt.sizeDelta=sz;if(sz.x>0&&sz.y>0)AddLE(go,prefW:sz.x,prefH:sz.y);var tmp=go.AddComponent(tTMP);pTmpText?.SetValue(tmp,richText?_BoldWrap(text):text);/* Bug batch item 12: global floor — below ~12pt the Gravity SDF font drops thin glyphs (l, i, -) even in bold. */fontSize=Mathf.Max(fontSize,12f);pTmpFontSize?.SetValue(tmp,fontSize);pTmpColor?.SetValue(tmp,color);pTmpRichText?.SetValue(tmp,richText);pTmpRaycastTarget?.SetValue(tmp,raycastTarget);if(tmpFont!=null)pTmpFont?.SetValue(tmp,tmpFont);pTmpCharSpacing?.SetValue(tmp,1.0f);try{pTmpFontStyle?.SetValue(tmp,Enum.ToObject(pTmpFontStyle.PropertyType,1));}catch{}try{var at=pTmpAlignment?.PropertyType;if(at!=null)pTmpAlignment.SetValue(tmp,Enum.ToObject(at,alignment));}catch{}return tmp;}
+        {var go=new GameObject(name);go.transform.SetParent(parent,false);var rt=go.AddComponent<RectTransform>();Vector2 sz=sizeDelta??new Vector2(200,24);rt.sizeDelta=sz;if(sz.x>0&&sz.y>0)AddLE(go,prefW:sz.x,prefH:sz.y);var tmp=go.AddComponent(tTMP);try{UnicodeFallback.EnsureCharacters(text);}catch{}pTmpText?.SetValue(tmp,richText?_BoldWrap(text):text);/* Bug batch item 12: global floor — below ~12pt the Gravity SDF font drops thin glyphs (l, i, -) even in bold. */fontSize=Mathf.Max(fontSize,12f);pTmpFontSize?.SetValue(tmp,fontSize);pTmpColor?.SetValue(tmp,color);pTmpRichText?.SetValue(tmp,richText);pTmpRaycastTarget?.SetValue(tmp,raycastTarget);if(tmpFont!=null)pTmpFont?.SetValue(tmp,tmpFont);pTmpCharSpacing?.SetValue(tmp,1.0f);try{pTmpFontStyle?.SetValue(tmp,Enum.ToObject(pTmpFontStyle.PropertyType,1));}catch{}try{var at=pTmpAlignment?.PropertyType;if(at!=null)pTmpAlignment.SetValue(tmp,Enum.ToObject(at,alignment));}catch{}return tmp;}
 
         public static GameObject CreateButton(string name,Transform parent,string label,float fontSize,Color textColor,Color bgColor,UnityEngine.Events.UnityAction onClick,Vector2? sizeDelta=null)
         {
@@ -321,7 +321,11 @@ namespace CompetitiveRounds
         }
 
         public static ScrollViewRefs CreateScrollView(string name,Transform parent,float spacing=2f,bool childForceExpandWidth=true)
-        {var refs=new ScrollViewRefs();var sGO=new GameObject(name);sGO.transform.SetParent(parent,false);var sRT=sGO.AddComponent<RectTransform>();sRT.anchorMin=Vector2.zero;sRT.anchorMax=Vector2.one;sRT.offsetMin=Vector2.zero;sRT.offsetMax=Vector2.zero;var vp=new GameObject("Viewport");vp.transform.SetParent(sGO.transform,false);var vpRT=vp.AddComponent<RectTransform>();vpRT.anchorMin=Vector2.zero;vpRT.anchorMax=Vector2.one;vpRT.offsetMin=Vector2.zero;vpRT.offsetMax=Vector2.zero;var vpImg=vp.AddComponent(tImage);pImgColor?.SetValue(vpImg,new Color(0,0,0,0.01f));/* raycastTarget so the mouse wheel scrolls anywhere over the viewport — including empty space below/around the rows, not just when hovering a row button. */tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(vpImg,true);if(tMask!=null){var m=vp.AddComponent(tMask);tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(m,false);}var cnt=new GameObject("Content");cnt.transform.SetParent(vp.transform,false);var cRT=cnt.AddComponent<RectTransform>();cRT.anchorMin=new Vector2(0,1);cRT.anchorMax=new Vector2(1,1);cRT.pivot=new Vector2(0.5f,1f);cRT.sizeDelta=Vector2.zero;if(tVLG!=null){var v=cnt.AddComponent(tVLG);pVLGSpacing?.SetValue(v,spacing);pVLGChildForceW?.SetValue(v,childForceExpandWidth);pVLGChildForceH?.SetValue(v,false);pVLGChildControlW?.SetValue(v,true);pVLGChildControlH?.SetValue(v,true);}if(tCSF!=null){var csf=cnt.AddComponent(tCSF);var ft=pCSFFit?.PropertyType;if(ft!=null)pCSFFit.SetValue(csf,Enum.ToObject(ft,2));}var sr=sGO.AddComponent(tScrollRect);pSRContent?.SetValue(sr,cRT);pSRViewport?.SetValue(sr,vpRT);pSRVertical?.SetValue(sr,true);pSRHorizontal?.SetValue(sr,false);pSRScrollSensitivity?.SetValue(sr,25f);var mt=pSRMovementType?.PropertyType;if(mt!=null)pSRMovementType.SetValue(sr,Enum.ToObject(mt,1));refs.scrollGO=sGO;refs.content=cnt;refs.contentRT=cRT;return refs;}
+        {var refs=new ScrollViewRefs();var sGO=new GameObject(name);sGO.transform.SetParent(parent,false);var sRT=sGO.AddComponent<RectTransform>();sRT.anchorMin=Vector2.zero;sRT.anchorMax=Vector2.one;sRT.offsetMin=Vector2.zero;sRT.offsetMax=Vector2.zero;var vp=new GameObject("Viewport");vp.transform.SetParent(sGO.transform,false);var vpRT=vp.AddComponent<RectTransform>();vpRT.anchorMin=Vector2.zero;vpRT.anchorMax=Vector2.one;vpRT.offsetMin=Vector2.zero;vpRT.offsetMax=Vector2.zero;var vpImg=vp.AddComponent(tImage);pImgColor?.SetValue(vpImg,new Color(0,0,0,0.01f));/* raycastTarget so the mouse wheel scrolls anywhere over the viewport — including empty space below/around the rows, not just when hovering a row button. */tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(vpImg,true);/* RectMask2D, not Mask: Mask needs a stencil pass and breaks batching, so a 100-row
+           leaderboard re-rendered ~800 text meshes per drag frame (Sid: "click and drag is a bit
+           laggy"). RectMask2D clips by rect on the CPU with no extra draw calls and is what
+           uGUI ScrollRects normally use. Falls back to Mask if the type is missing. */
+        if(tRectMask2D!=null){vp.AddComponent(tRectMask2D);}else if(tMask!=null){var m=vp.AddComponent(tMask);tMask.GetProperty("showMaskGraphic",BindingFlags.Public|BindingFlags.Instance)?.SetValue(m,false);}var cnt=new GameObject("Content");cnt.transform.SetParent(vp.transform,false);var cRT=cnt.AddComponent<RectTransform>();cRT.anchorMin=new Vector2(0,1);cRT.anchorMax=new Vector2(1,1);cRT.pivot=new Vector2(0.5f,1f);cRT.sizeDelta=Vector2.zero;if(tVLG!=null){var v=cnt.AddComponent(tVLG);pVLGSpacing?.SetValue(v,spacing);pVLGChildForceW?.SetValue(v,childForceExpandWidth);pVLGChildForceH?.SetValue(v,false);pVLGChildControlW?.SetValue(v,true);pVLGChildControlH?.SetValue(v,true);}if(tCSF!=null){var csf=cnt.AddComponent(tCSF);var ft=pCSFFit?.PropertyType;if(ft!=null)pCSFFit.SetValue(csf,Enum.ToObject(ft,2));}var sr=sGO.AddComponent(tScrollRect);pSRContent?.SetValue(sr,cRT);pSRViewport?.SetValue(sr,vpRT);pSRVertical?.SetValue(sr,true);pSRHorizontal?.SetValue(sr,false);pSRScrollSensitivity?.SetValue(sr,75f);/* Sid: wheel scrolling was 'entirely tedious', forcing click-drag everywhere. 25 -> 75 (x3) across every scroll view in the menu, since they all come from this factory. */var mt=pSRMovementType?.PropertyType;if(mt!=null)pSRMovementType.SetValue(sr,Enum.ToObject(mt,1));refs.scrollGO=sGO;refs.content=cnt;refs.contentRT=cRT;return refs;}
         public struct ScrollViewRefs{public GameObject scrollGO,content;public RectTransform contentRT;}
 
         public static void AddVLG(GameObject go,float spacing=2,int padL=0,int padR=0,int padT=0,int padB=0,bool forceExpandW=true,bool forceExpandH=false){if(tVLG==null)return;var v=go.AddComponent(tVLG);pVLGSpacing?.SetValue(v,spacing);pVLGPadding?.SetValue(v,new RectOffset(padL,padR,padT,padB));pVLGChildForceW?.SetValue(v,forceExpandW);pVLGChildForceH?.SetValue(v,forceExpandH);pVLGChildControlW?.SetValue(v,true);pVLGChildControlH?.SetValue(v,true);}
@@ -341,7 +345,7 @@ namespace CompetitiveRounds
         }
         public static Component CreateFillBar(string name,Transform parent,Color bgColor,Color fillColor,float height=8f){var bgGO=new GameObject(name+"_BG");bgGO.transform.SetParent(parent,false);bgGO.AddComponent<RectTransform>();AddLE(bgGO,prefH:height,flexH:0);bgGO.AddComponent(tImage);pImgColor?.SetValue(bgGO.GetComponent(tImage),bgColor);var fGO=new GameObject(name+"_Fill");fGO.transform.SetParent(bgGO.transform,false);var fRT=fGO.AddComponent<RectTransform>();fRT.anchorMin=Vector2.zero;fRT.anchorMax=new Vector2(0f,1f);fRT.offsetMin=Vector2.zero;fRT.offsetMax=Vector2.zero;fGO.AddComponent(tImage);pImgColor?.SetValue(fGO.GetComponent(tImage),fillColor);return fRT;}
         public static void SetFill(Component f,float a){if(f==null)return;var rt=f as RectTransform;if(rt!=null)rt.anchorMax=new Vector2(Mathf.Clamp01(a),1f);}
-        public static void SetText(object t,string s){if(t!=null)pTmpText?.SetValue(t,_BoldWrap(s??""));}
+        public static void SetText(object t,string s){if(t==null)return;/* Make sure any non-ASCII glyph in this string exists in the runtime fallback atlas before TMP lays it out, else it renders as a box (Sid: "several players have boxes for their names"). No-ops for pure-ASCII text. */try{UnicodeFallback.EnsureCharacters(s);}catch{}pTmpText?.SetValue(t,_BoldWrap(s??""));}
         public static void SetColor(object t,Color c){if(t!=null)pTmpColor?.SetValue(t,c);}
         public static void SetBold(object t,bool b){if(t==null)return;try{var tp=pTmpFontStyle?.PropertyType;if(tp!=null)pTmpFontStyle.SetValue(t,Enum.ToObject(tp,b?1:0));}catch{}}
         public static void SetWordWrap(object t,bool on){if(t==null||tTMP==null)return;try{var p=tTMP.GetProperty("enableWordWrapping",BindingFlags.Public|BindingFlags.Instance);p?.SetValue(t,on);}catch{}}
@@ -411,14 +415,19 @@ namespace CompetitiveRounds
             // but this component polls Input directly. Enforce every ancestor
             // mask here too so clipped rows cannot be clicked through panels
             // that visually cover them.
-            if (UIFactory.tMask == null) return true;
+            // Both clip types matter: scroll viewports now use RectMask2D (the
+            // stencil Mask was the drag-scroll cost), and some panels still use
+            // Mask. Missing either would let a clipped row be clicked through
+            // the panel covering it (learning #185).
+            if (UIFactory.tMask == null && UIFactory.tRectMask2D == null) return true;
             Transform cursor = transform.parent;
             while (cursor != null)
             {
                 try
                 {
-                    if (cursor.GetComponent(UIFactory.tMask) != null
-                        && !ContainsScreenPoint(cursor as RectTransform, point))
+                    bool clips = (UIFactory.tMask != null && cursor.GetComponent(UIFactory.tMask) != null)
+                              || (UIFactory.tRectMask2D != null && cursor.GetComponent(UIFactory.tRectMask2D) != null);
+                    if (clips && !ContainsScreenPoint(cursor as RectTransform, point))
                         return false;
                 }
                 catch { }
@@ -1155,7 +1164,10 @@ namespace CompetitiveRounds
         private static readonly List<FfaLBRow> ffaLbRows = new List<FfaLBRow>();
         // Column widths — shared by header buttons + rows; sum (634) + spacing
         // (7*4) + padL/R (16) = 678, inside the 690 column (learning #199).
-        private static readonly int[] FFA_LB_COL_W = new int[] { 36, 190, 80, 70, 64, 64, 70, 60 };
+        // Widened alongside the FFA font bump (Sid: "make the text larger in-line with
+        // the rest of the menus"). Sum = 734, inside the 793-wide leaderboard column,
+        // so wider cells can't push the last column out of view.
+        private static readonly int[] FFA_LB_COL_W = new int[] { 42, 220, 92, 80, 74, 74, 82, 70 };
         private static readonly List<object> ffaRecentRows = new List<object>();
         public static int ffaRecentPageReq = 0;
 
@@ -1174,40 +1186,43 @@ namespace CompetitiveRounds
             var panel=new GameObject("FfaInner");panel.transform.SetParent(scroll.content.transform,false);panel.AddComponent<RectTransform>();
             UIFactory.AddVLG(panel,spacing:8,padL:10,padR:10,padT:8,padB:8);
 
-            UIFactory.CreateText("FfaH",panel.transform,"<b>FREE-FOR-ALL (3-10 players) - RANKED</b>",20f,C_GOLD,UIFactory.AlignMidLeft,sizeDelta:new Vector2(900,28));
-            UIFactory.CreateText("FfaNote",panel.transform,"<color=#FFCC44>New mode - first playtest build.</color> <color=#888>Games are ranked from day one.</color>",14f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(900,22));
+            var ffaHdrRow=new GameObject("FfaHdrRow");ffaHdrRow.transform.SetParent(panel.transform,false);ffaHdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(ffaHdrRow,spacing:10);UIFactory.AddLE(ffaHdrRow,prefH:38,flexH:0);
+            UIFactory.CreateText("FfaH",ffaHdrRow.transform,"<b>FREE-FOR-ALL (3-10 players) - RANKED</b>",26f,C_GOLD,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,36));
+            UIFactory.CreateButton("FfaInfo",ffaHdrRow.transform,"Info",20f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.FfaTitle,ModeInfoText.Ffa),sizeDelta:new Vector2(110,34));
+            UIFactory.CreateText("FfaNote",panel.transform,"<color=#FFCC44>New mode - first playtest build.</color> <color=#888>Games are ranked from day one.</color>",18f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
 
             // Queue controls row.
             var ctl=new GameObject("FfaCtl");ctl.transform.SetParent(panel.transform,false);ctl.AddComponent<RectTransform>();
-            UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:34,flexH:0);
-            ffaJoinBtn=UIFactory.CreateButton("FfaJoin",ctl.transform,"Join FFA Queue",14f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.FfaJoinQueue();dirty=true;},sizeDelta:new Vector2(160,28));
-            ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",14f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(90,28));
-            txtFfaStatus=UIFactory.CreateText("FfaSt",panel.transform,"Not in queue.",15f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(900,24));
+            UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:44,flexH:0);
+            ffaJoinBtn=UIFactory.CreateButton("FfaJoin",ctl.transform,"Join FFA Queue",18f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.FfaJoinQueue();dirty=true;},sizeDelta:new Vector2(184,36));
+            ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",18f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(103,36));
+            txtFfaStatus=UIFactory.CreateText("FfaSt",panel.transform,"Not in queue.",20f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,31));
 
             // In-lobby panel (who's queueing) — RenderFfaLobbySection body.
             var lobbyPanel=UIFactory.CreatePanel("FfaQL",panel.transform,C_PANEL);
             UIFactory.AddVLG(lobbyPanel,spacing:2,padL:10,padR:10,padT:6,padB:6);
             UIFactory.AddLE(lobbyPanel,flexH:0);
-            txtFfaLobbyHeader=UIFactory.CreateText("FfaQLH",lobbyPanel.transform,"<b>FFA Lobby</b>",16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(900,22));
-            txtFfaLobbyBody=UIFactory.CreateText("FfaQLB",lobbyPanel.transform,"<color=#888>Loading...</color>",14f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(900,22));
+            txtFfaLobbyHeader=UIFactory.CreateText("FfaQLH",lobbyPanel.transform,"<b>FFA Lobby</b>",21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
+            txtFfaLobbyBody=UIFactory.CreateText("FfaQLB",lobbyPanel.transform,"<color=#888>Loading...</color>",18f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1035,29));
             var qlbC=txtFfaLobbyBody as Component;
-            if(qlbC!=null)UIFactory.AddLE(qlbC.gameObject,prefH:22,minH:22,flexH:0);
+            if(qlbC!=null)UIFactory.AddLE(qlbC.gameObject,prefH:29,minH:29,flexH:0);
             UIFactory.SetWordWrap(txtFfaLobbyBody,true);
 
             // Bottom row: leaderboard (left, fixed width) + recent matches
             // (right, flex). Fixed prefH inside the outer scroll — never
             // flexH:1 (learning #63).
             var bottom=new GameObject("FfaBot");bottom.transform.SetParent(panel.transform,false);bottom.AddComponent<RectTransform>();
-            UIFactory.AddHLG(bottom,spacing:8);UIFactory.AddLE(bottom,prefH:720,minH:400,flexH:0);
+            UIFactory.AddHLG(bottom,spacing:8);UIFactory.AddLE(bottom,prefH:936,minH:520,flexH:0);
 
             var lbCol=new GameObject("FfaLBCol");lbCol.transform.SetParent(bottom.transform,false);lbCol.AddComponent<RectTransform>();
             UIFactory.AddVLG(lbCol,spacing:4);
             // flexW:0 explicit + load-bearing (learning #132 — rows inside
             // would otherwise bubble flexW up and stretch the column).
-            UIFactory.AddLE(lbCol,prefW:690,minW:640,flexW:0,flexH:1);
-            txtFfaLbHeader=UIFactory.CreateText("FfaLBH",lbCol.transform,"<b>FFA Leaderboard</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,24));
+            UIFactory.AddLE(lbCol,prefW:793,minW:736,flexW:0,flexH:1);
+            txtFfaLbHeader=UIFactory.CreateText("FfaLBH",lbCol.transform,"<b>FFA Leaderboard</b>",23f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(575,31));
             var lbHdrRow=new GameObject("FfaLBHR");lbHdrRow.transform.SetParent(lbCol.transform,false);lbHdrRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(lbHdrRow,spacing:4,padL:8,padR:8);UIFactory.AddLE(lbHdrRow,prefH:24,minH:24,flexH:0);
+            UIFactory.AddHLG(lbHdrRow,spacing:4,padL:8,padR:8);UIFactory.AddLE(lbHdrRow,prefH:31,minH:31,flexH:0);
             string[] hdrLabels=new[]{"#","Player","Rating","Games","Wins","Top3","AvgPl","WR"};
             string[] hdrSortKey=new[]{null,null,"rating","games","wins","top3","avg_placement","win_rate"};
             ffaLbSortBtns=new List<GameObject>();ffaLbSortKeys=hdrSortKey;ffaLbHeaderTexts=new object[hdrLabels.Length];
@@ -1216,12 +1231,12 @@ namespace CompetitiveRounds
                 int idx=hi;
                 if(hdrSortKey[hi]==null)
                 {
-                    var lbl=UIFactory.CreateText($"FfaLBH_{hi}",lbHdrRow.transform,hdrLabels[hi],13f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(FFA_LB_COL_W[hi],24));
+                    var lbl=UIFactory.CreateText($"FfaLBH_{hi}",lbHdrRow.transform,hdrLabels[hi],17f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(FFA_LB_COL_W[hi],24));
                     ffaLbHeaderTexts[hi]=lbl;ffaLbSortBtns.Add(null);
                 }
                 else
                 {
-                    var b=UIFactory.CreateButton($"FfaLBS_{hdrSortKey[hi]}",lbHdrRow.transform,hdrLabels[hi],13f,C_LABEL,new Color(0.18f,0.20f,0.24f,0.85f),
+                    var b=UIFactory.CreateButton($"FfaLBS_{hdrSortKey[hi]}",lbHdrRow.transform,hdrLabels[hi],17f,C_LABEL,new Color(0.18f,0.20f,0.24f,0.85f),
                         ()=>{ffaLbSortReq=hdrSortKey[idx];ApiClient.FetchFfaLeaderboard(200,hdrSortKey[idx]);},
                         sizeDelta:new Vector2(FFA_LB_COL_W[hi],24));
                     ffaLbSortBtns.Add(b);ffaLbHeaderTexts[hi]=UIFactory.GetButtonText(b);
@@ -1237,14 +1252,14 @@ namespace CompetitiveRounds
             var rCol=new GameObject("FfaRCol");rCol.transform.SetParent(bottom.transform,false);rCol.AddComponent<RectTransform>();
             UIFactory.AddVLG(rCol,spacing:4);UIFactory.AddLE(rCol,flexW:1,flexH:1);
             var rHdrRow=new GameObject("FfaRHR");rHdrRow.transform.SetParent(rCol.transform,false);rHdrRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:26,minH:26,flexH:0);
-            txtFfaRecentHeader=UIFactory.CreateText("FfaRH",rHdrRow.transform,"<b>Recent Ranked FFAs</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(300,26));
+            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:34,minH:34,flexH:0);
+            txtFfaRecentHeader=UIFactory.CreateText("FfaRH",rHdrRow.transform,"<b>Recent Ranked FFAs</b>",23f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(345,34));
             var rSp=new GameObject("FfaRSp");rSp.transform.SetParent(rHdrRow.transform,false);rSp.AddComponent<RectTransform>();UIFactory.AddLE(rSp,flexW:1);
-            ffaRecentPrevBtn=UIFactory.CreateButton("FfaRP",rHdrRow.transform,"<",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ffaRecentPageReq=Math.Max(0,ffaRecentPageReq-1);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(28,22));
-            txtFfaRecentPage=UIFactory.CreateText("FfaRPI",rHdrRow.transform,"1/1",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(48,22));
-            ffaRecentNextBtn=UIFactory.CreateButton("FfaRN",rHdrRow.transform,">",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ffaRecentPageReq+=1;ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(28,22));
+            ffaRecentPrevBtn=UIFactory.CreateButton("FfaRP",rHdrRow.transform,"<",17f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ffaRecentPageReq=Math.Max(0,ffaRecentPageReq-1);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(32,29));
+            txtFfaRecentPage=UIFactory.CreateText("FfaRPI",rHdrRow.transform,"1/1",17f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(55,29));
+            ffaRecentNextBtn=UIFactory.CreateButton("FfaRN",rHdrRow.transform,">",17f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ffaRecentPageReq+=1;ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(32,29));
             var rScroll=UIFactory.CreateScrollView("FfaRSV",rCol.transform,spacing:2);
             UIFactory.AddLE(rScroll.scrollGO,flexH:1);
             ffaRecentContainer=rScroll.content;
@@ -1257,16 +1272,16 @@ namespace CompetitiveRounds
             var row=new FfaLBRow();
             row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();
             UIFactory.AddHLG(row.root,spacing:4,padL:8,padR:8);
-            UIFactory.AddLE(row.root,prefH:22,minH:22,flexH:0);
-            row.txtRank  =UIFactory.CreateText("r", row.root.transform,"",15f,C_GOLD, UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[0],22));
-            row.txtName  =UIFactory.CreateText("n", row.root.transform,"",15f,C_WHITE,UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[1],22));
-            row.txtRating=UIFactory.CreateText("rt",row.root.transform,"",15f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[2],22));
+            UIFactory.AddLE(row.root,prefH:29,minH:29,flexH:0);
+            row.txtRank  =UIFactory.CreateText("r", row.root.transform,"",20f,C_GOLD, UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[0],22));
+            row.txtName  =UIFactory.CreateText("n", row.root.transform,"",20f,C_WHITE,UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[1],22));
+            row.txtRating=UIFactory.CreateText("rt",row.root.transform,"",20f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[2],22));
             UIFactory.SetBold(row.txtRating,true);
-            row.txtGames =UIFactory.CreateText("g", row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[3],22));
-            row.txtWins  =UIFactory.CreateText("w", row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[4],22));
-            row.txtTop3  =UIFactory.CreateText("t3",row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[5],22));
-            row.txtAvgPl =UIFactory.CreateText("ap",row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[6],22));
-            row.txtWR    =UIFactory.CreateText("wr",row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[7],22));
+            row.txtGames =UIFactory.CreateText("g", row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[3],22));
+            row.txtWins  =UIFactory.CreateText("w", row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[4],22));
+            row.txtTop3  =UIFactory.CreateText("t3",row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[5],22));
+            row.txtAvgPl =UIFactory.CreateText("ap",row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[6],22));
+            row.txtWR    =UIFactory.CreateText("wr",row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[7],22));
             row.root.SetActive(false);
             return row;
         }
@@ -1373,7 +1388,7 @@ namespace CompetitiveRounds
                 UIFactory.SetText(txtFfaLbHeader,lb.Count==0
                     ?"<b>FFA Leaderboard</b>  <color=#888>- no ranked FFAs yet</color>"
                     :$"<b>FFA Leaderboard</b>  <color=#888>({lb.Count} ranked)</color>");
-            ToggleInnerScroll(ffaLbScrollRect,Math.Min(lb.Count,ffaLbRows.Count)*23f);
+            ToggleInnerScroll(ffaLbScrollRect,Math.Min(lb.Count,ffaLbRows.Count)*30f);
 
             // Recent ranked FFAs — pooled multi-line texts, honest prefH.
             if(ffaRecentContainer!=null)
@@ -1381,7 +1396,7 @@ namespace CompetitiveRounds
                 var rec=ApiClient.CachedFfaRecent??new List<ApiClient.FfaRecentMatch>();
                 while(ffaRecentRows.Count<Math.Min(rec.Count,10))
                 {
-                    var t=UIFactory.CreateText($"FfaRR{ffaRecentRows.Count}",ffaRecentContainer.transform,"",13f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(900,20));
+                    var t=UIFactory.CreateText($"FfaRR{ffaRecentRows.Count}",ffaRecentContainer.transform,"",17f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1035,26));
                     UIFactory.SetWordWrap(t,false);
                     ffaRecentRows.Add(t);
                 }
@@ -1392,7 +1407,7 @@ namespace CompetitiveRounds
                     if(i>=rec.Count){comp.gameObject.SetActive(false);continue;}
                     int lines;
                     UIFactory.SetText(ffaRecentRows[i],BuildFfaRecentRowText(rec[i],out lines));
-                    int h=lines*18+8;
+                    int h=lines*23+10;
                     UIFactory.SetPrefH(comp.gameObject,h);
                     var rt=comp.GetComponent<RectTransform>();
                     if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,h);
@@ -1456,13 +1471,13 @@ namespace CompetitiveRounds
             if(txtFfaLobbyHeader==null||txtFfaLobbyBody==null)return;
             var list=ApiClient.CachedFfaQueueList;
             int n=list!=null?list.Count:0;
-            float perRow=18f;
+            float perRow=23f;
             int newH;
             if(n==0)
             {
                 UIFactory.SetText(txtFfaLobbyHeader,"<b>FFA Lobby</b>  <color=#888>(empty)</color>");
                 UIFactory.SetText(txtFfaLobbyBody,list==null?"<color=#888>Loading...</color>":"<color=#888>No one in the FFA queue right now.</color>");
-                newH=22;
+                newH=29;
             }
             else
             {
@@ -1524,51 +1539,54 @@ namespace CompetitiveRounds
             UIFactory.AddLE(o1Scroll.scrollGO,flexH:1);
             var panel=new GameObject("OneVTwo");panel.transform.SetParent(o1Scroll.content.transform,false);panel.AddComponent<RectTransform>();
             UIFactory.AddVLG(panel,spacing:8,padL:20,padR:10,padT:8,padB:14);
-            UIFactory.CreateText("O1H",panel.transform,"1v2 — Solo vs Duo",24f,C_GOLD,sizeDelta:new Vector2(700,32));
-            UIFactory.CreateText("O1Beta",panel.transform,"<color=#FFCC44>UNRANKED BETA</color> — single games, no series rating yet. Stats are tracked and will count once ranked launches.",14f,C_DIM,sizeDelta:new Vector2(760,22));
+            var o1HdrRow=new GameObject("O1HdrRow");o1HdrRow.transform.SetParent(panel.transform,false);o1HdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(o1HdrRow,spacing:10);UIFactory.AddLE(o1HdrRow,prefH:64,flexH:0);
+            UIFactory.CreateText("O1H",o1HdrRow.transform,"1v2 — Solo vs Duo",46f,C_GOLD,sizeDelta:new Vector2(1015,61));
+            UIFactory.CreateButton("O1Info",o1HdrRow.transform,"Info",30f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.OvtTitle,ModeInfoText.Ovt),sizeDelta:new Vector2(150,54));
+            UIFactory.CreateText("O1Beta",panel.transform,"<color=#FFCC44>UNRANKED BETA</color> — single games, no series rating yet. Stats are tracked and will count once ranked launches.",27f,C_DIM,sizeDelta:new Vector2(1102,42));
 
             // Queue controls row.
             var ctl=new GameObject("O1Ctl");ctl.transform.SetParent(panel.transform,false);ctl.AddComponent<RectTransform>();
-            UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:34,flexH:0);
-            ovtSideBtn=UIFactory.CreateButton("O1Side",ctl.transform,"Side: Any",13f,C_WHITE,C_BTN,()=>{ovtPreferredSide=(ovtPreferredSide+1)%3;dirty=true;},sizeDelta:new Vector2(120,28));
-            ovtExtraBtn=UIFactory.CreateButton("O1Extra",ctl.transform,"Solo Extra Initial Pick: OFF",13f,C_WHITE,C_BTN,()=>{ovtSoloExtraPick=!ovtSoloExtraPick;dirty=true;},sizeDelta:new Vector2(235,28));
-            ovtJoinBtn=UIFactory.CreateButton("O1Join",ctl.transform,"Join 1v2 Lobby",14f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.OvtJoinQueue(ovtPreferredSide,ovtSoloExtraPick);dirty=true;},sizeDelta:new Vector2(150,28));
-            ovtLeaveBtn=UIFactory.CreateButton("O1Leave",ctl.transform,"Leave",14f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.OvtLeaveQueue();dirty=true;},sizeDelta:new Vector2(90,28));
+            UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:65,flexH:0);
+            ovtSideBtn=UIFactory.CreateButton("O1Side",ctl.transform,"Side: Any",25f,C_WHITE,C_BTN,()=>{ovtPreferredSide=(ovtPreferredSide+1)%3;dirty=true;},sizeDelta:new Vector2(174,53));
+            ovtExtraBtn=UIFactory.CreateButton("O1Extra",ctl.transform,"Solo Extra Initial Pick: OFF",25f,C_WHITE,C_BTN,()=>{ovtSoloExtraPick=!ovtSoloExtraPick;dirty=true;},sizeDelta:new Vector2(341,53));
+            ovtJoinBtn=UIFactory.CreateButton("O1Join",ctl.transform,"Join 1v2 Lobby",27f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.OvtJoinQueue(ovtPreferredSide,ovtSoloExtraPick);dirty=true;},sizeDelta:new Vector2(218,53));
+            ovtLeaveBtn=UIFactory.CreateButton("O1Leave",ctl.transform,"Leave",27f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.OvtLeaveQueue();dirty=true;},sizeDelta:new Vector2(130,53));
             // How the toggle actually resolves (server ORs it across the
             // lobby) + honest status: recorded but not yet applied in-game.
-            var ovtNote=UIFactory.CreateText("O1Note",panel.transform,"<color=#888>Solo Extra Initial Pick: the solo gets one extra card in the game's FIRST draw only. It's ON for the match if ANY of the three lobby members turned it on.  <color=#7FDF7F>Active in-game</color> <color=#888>— the solo's first pick screen deals twice.</color>",12f,C_DIM,sizeDelta:new Vector2(760,34));
+            var ovtNote=UIFactory.CreateText("O1Note",panel.transform,"<color=#888>Solo Extra Initial Pick: the solo gets one extra card in the game's FIRST draw only. It's ON for the match if ANY of the three lobby members turned it on.  <color=#7FDF7F>Active in-game</color> <color=#888>— the solo's first pick screen deals twice.</color>",23f,C_DIM,sizeDelta:new Vector2(1102,65));
             UIFactory.SetWordWrap(ovtNote,true);
-            txtOvtStatus=UIFactory.CreateText("O1St",panel.transform,"Not in queue.",15f,C_LABEL,sizeDelta:new Vector2(760,24));
+            txtOvtStatus=UIFactory.CreateText("O1St",panel.transform,"Not in queue.",28f,C_LABEL,sizeDelta:new Vector2(1102,46));
 
             // In-lobby panel (2v2 "In Queue" parity): who's queueing, their
             // 1v1/2v2 elo, side preference, wait time, status.
             var lobbyPanel=UIFactory.CreatePanel("O1QL",panel.transform,C_PANEL);
             UIFactory.AddVLG(lobbyPanel,spacing:2,padL:10,padR:10,padT:6,padB:6);
             UIFactory.AddLE(lobbyPanel,flexH:0);
-            txtOvtLobbyHeader=UIFactory.CreateText("O1QLH",lobbyPanel.transform,"<b>1v2 Lobby</b>",16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(740,22));
-            txtOvtLobbyBody=UIFactory.CreateText("O1QLB",lobbyPanel.transform,"<color=#888>Loading…</color>",14f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(740,22));
+            txtOvtLobbyHeader=UIFactory.CreateText("O1QLH",lobbyPanel.transform,"<b>1v2 Lobby</b>",30f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1073,42));
+            txtOvtLobbyBody=UIFactory.CreateText("O1QLB",lobbyPanel.transform,"<color=#888>Loading…</color>",27f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1073,42));
             var qlbComp=txtOvtLobbyBody as Component;
-            if(qlbComp!=null)UIFactory.AddLE(qlbComp.gameObject,prefH:22,minH:22,flexH:0);
+            if(qlbComp!=null)UIFactory.AddLE(qlbComp.gameObject,prefH:42,minH:42,flexH:0);
             UIFactory.SetWordWrap(txtOvtLobbyBody,true);
 
             // Bottom row: split solo/duo activity boards (left, fixed width)
             // + recent 1v2 games (right, flex). Fixed prefH inside the outer
             // scroll — never flexH:1 (learning #63).
             var o1Bot=new GameObject("O1Bot");o1Bot.transform.SetParent(panel.transform,false);o1Bot.AddComponent<RectTransform>();
-            UIFactory.AddHLG(o1Bot,spacing:8);UIFactory.AddLE(o1Bot,prefH:700,minH:400,flexH:0);
+            UIFactory.AddHLG(o1Bot,spacing:8);UIFactory.AddLE(o1Bot,prefH:1330,minH:760,flexH:0);
 
             // Left column — stacked Solo + Duo boards. flexW:0 explicit +
             // load-bearing (learning #132).
             var lcol=new GameObject("O1LCol");lcol.transform.SetParent(o1Bot.transform,false);lcol.AddComponent<RectTransform>();
-            UIFactory.AddVLG(lcol,spacing:4);UIFactory.AddLE(lcol,prefW:460,minW:420,flexW:0,flexH:1);
-            txtOvtSoloLbHeader=UIFactory.CreateText("O1SLH",lcol.transform,"<b><color=#FFB347>Solo Leaderboard</color></b>  <color=#888>(unranked beta)</color>",16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(440,22));
+            UIFactory.AddVLG(lcol,spacing:4);UIFactory.AddLE(lcol,prefW:667,minW:609,flexW:0,flexH:1);
+            txtOvtSoloLbHeader=UIFactory.CreateText("O1SLH",lcol.transform,"<b><color=#FFB347>Solo Leaderboard</color></b>  <color=#888>(unranked beta)</color>",30f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(638,42));
             var ssv=UIFactory.CreateScrollView("O1SLSV",lcol.transform,spacing:1);
-            UIFactory.AddLE(ssv.scrollGO,prefH:300,minH:150,flexH:0);
+            UIFactory.AddLE(ssv.scrollGO,prefH:570,minH:285,flexH:0);
             ovtSoloLbContainer=ssv.content;
             ovtSoloScrollRect=ssv.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
-            txtOvtDuoLbHeader=UIFactory.CreateText("O1DLH",lcol.transform,"<b><color=#88AAFF>Duo Leaderboard</color></b>  <color=#888>(unranked beta)</color>",16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(440,22));
+            txtOvtDuoLbHeader=UIFactory.CreateText("O1DLH",lcol.transform,"<b><color=#88AAFF>Duo Leaderboard</color></b>  <color=#888>(unranked beta)</color>",30f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(638,42));
             var dsv=UIFactory.CreateScrollView("O1DLSV",lcol.transform,spacing:1);
-            UIFactory.AddLE(dsv.scrollGO,prefH:300,minH:150,flexH:0);
+            UIFactory.AddLE(dsv.scrollGO,prefH:570,minH:285,flexH:0);
             ovtDuoLbContainer=dsv.content;
             ovtDuoScrollRect=dsv.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
 
@@ -1576,14 +1594,14 @@ namespace CompetitiveRounds
             var rcol=new GameObject("O1RCol");rcol.transform.SetParent(o1Bot.transform,false);rcol.AddComponent<RectTransform>();
             UIFactory.AddVLG(rcol,spacing:4);UIFactory.AddLE(rcol,flexW:1,flexH:1);
             var rHdrRow=new GameObject("O1RHR");rHdrRow.transform.SetParent(rcol.transform,false);rHdrRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:26,minH:26,flexH:0);
-            txtOvtRecentHeader=UIFactory.CreateText("O1RH",rHdrRow.transform,"<b>Recent 1v2 Games</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));
+            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:49,minH:49,flexH:0);
+            txtOvtRecentHeader=UIFactory.CreateText("O1RH",rHdrRow.transform,"<b>Recent 1v2 Games</b>",34f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(406,49));
             var rSp=new GameObject("O1RSp");rSp.transform.SetParent(rHdrRow.transform,false);rSp.AddComponent<RectTransform>();UIFactory.AddLE(rSp,flexW:1);
-            ovtRecentPrevBtn=UIFactory.CreateButton("O1RP",rHdrRow.transform,"<",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ovtRecentPageReq=Math.Max(0,ovtRecentPageReq-1);ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(28,22));
-            txtOvtRecentPage=UIFactory.CreateText("O1RPI",rHdrRow.transform,"1/1",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(48,22));
-            ovtRecentNextBtn=UIFactory.CreateButton("O1RN",rHdrRow.transform,">",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
-                ()=>{ovtRecentPageReq+=1;ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(28,22));
+            ovtRecentPrevBtn=UIFactory.CreateButton("O1RP",rHdrRow.transform,"<",25f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ovtRecentPageReq=Math.Max(0,ovtRecentPageReq-1);ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(41,42));
+            txtOvtRecentPage=UIFactory.CreateText("O1RPI",rHdrRow.transform,"1/1",25f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(70,42));
+            ovtRecentNextBtn=UIFactory.CreateButton("O1RN",rHdrRow.transform,">",25f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ovtRecentPageReq+=1;ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(41,42));
             var rsv=UIFactory.CreateScrollView("O1RSV",rcol.transform,spacing:2);
             UIFactory.AddLE(rsv.scrollGO,flexH:1);
             ovtRecentContainer=rsv.content;
@@ -1656,8 +1674,8 @@ namespace CompetitiveRounds
             // Split activity boards (server-ordered; role-scoped W/L).
             FillOvtRoleBoard(ovtSoloLbContainer,ovtSoloLbRows,ApiClient.CachedOvtLeaderboardSolo,txtOvtSoloLbHeader,"Solo Leaderboard","#FFB347");
             FillOvtRoleBoard(ovtDuoLbContainer,ovtDuoLbRows,ApiClient.CachedOvtLeaderboardDuo,txtOvtDuoLbHeader,"Duo Leaderboard","#88AAFF");
-            ToggleInnerScroll(ovtSoloScrollRect,(ApiClient.CachedOvtLeaderboardSolo?.Count??0)*19f);
-            ToggleInnerScroll(ovtDuoScrollRect,(ApiClient.CachedOvtLeaderboardDuo?.Count??0)*19f);
+            ToggleInnerScroll(ovtSoloScrollRect,(ApiClient.CachedOvtLeaderboardSolo?.Count??0)*35f);
+            ToggleInnerScroll(ovtDuoScrollRect,(ApiClient.CachedOvtLeaderboardDuo?.Count??0)*35f);
             RefreshOvtRecent();
         }
 
@@ -1676,7 +1694,7 @@ namespace CompetitiveRounds
                 :$"<b><color={accent}>{label}</color></b>  <color=#888>(unranked beta - {lb.Count} players)</color>");
             while(pool.Count<lb.Count&&pool.Count<100)
             {
-                var t=UIFactory.CreateText($"{container.name}R{pool.Count}",container.transform,"",13f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(430,18));
+                var t=UIFactory.CreateText($"{container.name}R{pool.Count}",container.transform,"",25f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(624,34));
                 pool.Add(t);
             }
             for(int i=0;i<pool.Count;i++)
@@ -1699,7 +1717,7 @@ namespace CompetitiveRounds
             var list=ApiClient.CachedOvtRecent??new List<ApiClient.OvtRecentSeries>();
             while(ovtRecentRows.Count<Math.Min(list.Count,10))
             {
-                var t=UIFactory.CreateText($"O1RR{ovtRecentRows.Count}",ovtRecentContainer.transform,"",13f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(900,20));
+                var t=UIFactory.CreateText($"O1RR{ovtRecentRows.Count}",ovtRecentContainer.transform,"",25f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1080,38));
                 UIFactory.SetWordWrap(t,false);
                 ovtRecentRows.Add(t);
             }
@@ -1710,7 +1728,7 @@ namespace CompetitiveRounds
                 if(i>=list.Count){comp.gameObject.SetActive(false);continue;}
                 int lines;
                 UIFactory.SetText(ovtRecentRows[i],BuildOvtRecentRowText(list[i],out lines));
-                int h=lines*18+8;
+                int h=lines*34+15;
                 UIFactory.SetPrefH(comp.gameObject,h);
                 var rt=comp.GetComponent<RectTransform>();
                 if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,h);
@@ -1776,13 +1794,13 @@ namespace CompetitiveRounds
             if(txtOvtLobbyHeader==null||txtOvtLobbyBody==null)return;
             var list=ApiClient.CachedOvtQueueList;
             int n=list!=null?list.Count:0;
-            float perRow=18f;
+            float perRow=34f;
             int newH;
             if(n==0)
             {
                 UIFactory.SetText(txtOvtLobbyHeader,"<b>1v2 Lobby</b>  <color=#888>(empty)</color>");
                 UIFactory.SetText(txtOvtLobbyBody,list==null?"<color=#888>Loading…</color>":"<color=#888>No one in the 1v2 lobby right now.</color>");
-                newH=22;
+                newH=42;
             }
             else
             {
@@ -2779,27 +2797,30 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // units, so a fixed 640 box would clip top and bottom — the
                 // very overflow class this popup exists to fix. The body
                 // ScrollView absorbs the lost height.
-                float popupH = 640f;
+                // x2 pass (Sid): the popup and its text were half this size. Height is
+                // still clamped to the live canvas — a width-matched scaler leaves a 32:9
+                // window only ~540 vertical units, and the body ScrollView absorbs the rest.
+                float popupH = 1180f;
                 try
                 {
                     var canvasRT = overlayCanvasGO.GetComponent<RectTransform>();
                     if (canvasRT != null && canvasRT.rect.height > 200f)
-                        popupH = Mathf.Min(640f, canvasRT.rect.height - 40f);
+                        popupH = Mathf.Min(1180f, canvasRT.rect.height - 40f);
                 }
                 catch { }
-                boxRT.sizeDelta = new Vector2(560, popupH);
-                UIFactory.AddVLG(box, spacing: 6, padL: 18, padR: 18, padT: 14, padB: 12);
+                boxRT.sizeDelta = new Vector2(1120, popupH);
+                UIFactory.AddVLG(box, spacing: 10, padL: 30, padR: 30, padT: 22, padB: 20);
 
                 UIFactory.CreateText("IPTitle", box.transform, title ?? "",
-                    20f, C_GOLD, UIFactory.AlignMidCenter, sizeDelta: new Vector2(510, 28));
+                    40f, C_GOLD, UIFactory.AlignMidCenter, sizeDelta: new Vector2(1050, 54));
                 var sv = UIFactory.CreateScrollView("IPScroll", box.transform, spacing: 0);
-                UIFactory.AddLE(sv.scrollGO, flexH: 1, prefH: 540);
+                UIFactory.AddLE(sv.scrollGO, flexH: 1, prefH: 1040);
                 var bodyTxt = UIFactory.CreateText("IPBody", sv.content.transform, body ?? "",
-                    14f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(505, 500));
+                    28f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(1040, 1000));
                 UIFactory.SetWordWrap(bodyTxt, true);
                 UIFactory.SetTextAutoHeight(bodyTxt);
                 UIFactory.CreateText("IPHint", box.transform, "<color=#888>click anywhere to close</color>",
-                    13f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(510, 20));
+                    26f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(1050, 40));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[INFO-POPUP] show: {ex.Message}"); }
         }
@@ -10671,9 +10692,17 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             panel = inner; // route subsequent children into this padded inner panel
 
             // Header
-            txtTeamHeader = UIFactory.CreateText("THdr", panel.transform,
+            var thdrRow = new GameObject("THdrRow");
+            thdrRow.transform.SetParent(panel.transform, false);
+            thdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(thdrRow, spacing: 8);
+            UIFactory.AddLE(thdrRow, prefH: 30, flexH: 0);
+            txtTeamHeader = UIFactory.CreateText("THdr", thdrRow.transform,
                 "<b>2v2 Ranked</b>  <color=#888>(separate Glicko, FF on, BO3 series)</color>",
                 20f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 28));
+            UIFactory.CreateButton("THdrInfo", thdrRow.transform, "Info", 14f, C_WHITE, C_BTN,
+                () => ShowInfoPopup(ModeInfoText.TeamTitle, ModeInfoText.Team),
+                sizeDelta: new Vector2(84, 28));
 
             // Status / queue panel — height is sum of children. Don't fix it; let VLG
             // size naturally so the button row below isn't clipped off-screen (the

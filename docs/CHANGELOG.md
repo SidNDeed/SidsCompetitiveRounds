@@ -34,6 +34,25 @@ yet — expect rough edges in the first sessions and please file bug reports wit
   (it logged a bogus "Match ranked: False" and could confuse ranked-state logic).
 - The end-of-game log line now names BOTH duo members, not just one.
 
+### Menus
+- **Mouse-wheel scrolling is 3x faster everywhere in the menu.** Scrolling was slow
+  enough that people resorted to click-dragging every list.
+- **Leaderboard click-drag scrolling should be smoother.** The scroll views were
+  using a stencil mask, which forced an extra render pass and broke batching across
+  ~100 leaderboard rows; they now use rect clipping instead.
+- **Non-Latin names should render properly instead of empty boxes.** The old fallback
+  could never work on this version of the game (the text engine refuses to build a
+  font from a system font handle), so the mod now builds fallback font atlases from
+  the font FILES on disk - Latin-extended, Greek and Cyrillic up front, plus Chinese,
+  Japanese and Korean atlases when those fonts are installed, filling in extra
+  characters as they appear.
+- **New Info buttons on the 2v2, 1v2 and FFA tabs** explaining exactly how each mode
+  works and what every leaderboard column means (including FFA's AvgPl and 2v2's
+  Gold / XP / Avg Mate Elo). The info popup - including the Tournaments one - is now
+  twice the size with twice the text.
+- **1v2 tab text is roughly double the size**, and the FFA tab text is now in line
+  with the rest of the menus. Buttons, rows and columns were resized to match.
+
 ### 1v2 fixes from Sid's play session (bug #91 comments)
 - **The duo now spawns together.** One duo member was spawning next to the solo
   (in the spot a 2v2 teammate would take) while their partner stood alone across
