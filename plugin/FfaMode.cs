@@ -61,6 +61,9 @@ namespace CompetitiveRounds
         private static readonly Dictionary<int, int> rounds = new Dictionary<int, int>();       // round wins
         private static readonly Dictionary<int, int> pointsTotal = new Dictionary<int, int>();  // cumulative point wins
         private static readonly Dictionary<int, int> kills = new Dictionary<int, int>();        // kill credits (placement tiebreak)
+        private static readonly List<string> timelineEvents = new List<string>();               // "slot[R][G]" per half point
+
+        public static string TimelineString => string.Join(",", timelineEvents.ToArray());
         private static readonly Dictionary<int, List<CardInfo>> decks = new Dictionary<int, List<CardInfo>>();  // live rolling deck
         private static readonly Dictionary<int, List<MatchTracker.CardPickData>> pickHistory =
             new Dictionary<int, List<MatchTracker.CardPickData>>();  // ALL picks incl. rolled-off
@@ -90,6 +93,10 @@ namespace CompetitiveRounds
         {
             public string displayName;
             public int slot, roundsWon, pointsTotal, kills;
+            // Which game they left DURING — distinguishes "played part of
+            // this game" (rated, even at zero score) from "absent ghost
+            // carried for the roster check" (never rated).
+            public int leftGameNumber;
         }
 
         private class FfaBaseline
@@ -252,6 +259,7 @@ namespace CompetitiveRounds
             gameNumber++;
             cycleNumber = 0;
             points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
+            timelineEvents.Clear();
             decks.Clear(); pickHistory.Clear(); baselines.Clear();
             // Leavers PERSIST across rematches in the same room (Codex review
             // find 3): the server froze the roster at lock, so every game's
@@ -293,6 +301,7 @@ namespace CompetitiveRounds
             matchStartRealtime = 0f;
             gameNumber = 0;
             points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
+            timelineEvents.Clear();
             decks.Clear(); pickHistory.Clear(); baselines.Clear();
             Leavers.Clear();
             isTransitioning = false;
@@ -306,7 +315,11 @@ namespace CompetitiveRounds
         /// player object. Called from GameStateWatcher's OnPlayerLeftRoom.</summary>
         public static void RecordLeaver(string steamId, string displayName, int teamId)
         {
-            if (string.IsNullOrEmpty(steamId) || Leavers.ContainsKey(steamId)) return;
+            if (string.IsNullOrEmpty(steamId)) return;
+            // Overwrite, never early-return (review find 11): a player who
+            // left, rejoined and left AGAIN must snapshot their CURRENT
+            // tallies — the stale first record would misplace them. A
+            // duplicate callback for the same leave writes identical data.
             Leavers[steamId] = new FfaLeaver
             {
                 displayName = displayName ?? "Player",
@@ -314,6 +327,7 @@ namespace CompetitiveRounds
                 roundsWon = RoundsFor(teamId),
                 pointsTotal = PointsTotalFor(teamId),
                 kills = KillsFor(teamId),
+                leftGameNumber = gameNumber,
             };
             Plugin.Log.LogInfo($"[FFA] leaver recorded: {steamId} slot={teamId} r={RoundsFor(teamId)}");
         }
@@ -490,6 +504,12 @@ namespace CompetitiveRounds
                     roundOver = true;
                     gameOver = rounds[winnerTeam] >= RoundsToWin;
                 }
+                // Score timeline for the Recent panel's hover graph: one
+                // token per half point, "slot[R][G]" (R = converted a point,
+                // G = won the game). Deterministic on every client; only the
+                // reporter's copy ships.
+                if (timelineEvents.Count < 400)
+                    timelineEvents.Add($"{winnerTeam}{(roundOver ? "R" : "")}{(gameOver ? "G" : "")}");
             }
             Plugin.Log.LogInfo($"[FFA] point over: winner team={winnerTeam} " +
                                $"roundOver={roundOver} gameOver={gameOver} scores=[{ScoreLine()}]");
@@ -501,6 +521,16 @@ namespace CompetitiveRounds
                     gameOverFired = true;
                     try { GameStateWatcher.OnFfaGameOver(winnerTeam); }
                     catch (Exception ex) { Plugin.Log.LogError($"[FFA] game-over report hook: {ex.Message}"); }
+                    // Bug #104: with fewer than 3 members left the sitting
+                    // ends after this game — a 2-player "FFA" rematch is
+                    // below the mode minimum (server FFA_MIN_PLAYERS).
+                    try
+                    {
+                        int remaining = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0;
+                        if (remaining < 3 && Plugin.Instance != null)
+                            Plugin.Instance.StartCoroutine(EndSittingBelowMinimum());
+                    }
+                    catch { }
                 }
                 // Vanilla victory text + rematch popup (the competitive
                 // auto-confirm patch answers Yes for everyone). Skips vanilla
@@ -591,11 +621,102 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Bug #104: after the game-over screen, if leavers took the
+        /// room below the 3-player mode minimum, everyone returns to the
+        /// menu instead of rematching as a 2-player "FFA". The report for
+        /// the finished game already went out.</summary>
+        private static int RoomCount()
+        {
+            try { return PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { return 0; }
+        }
+
+        private static IEnumerator EndSittingBelowMinimum()
+        {
+            yield return new WaitForSecondsRealtime(4f);   // let the victory screen play
+            if (!EngineActive()) yield break;
+            int remaining = RoomCount();
+            // Someone reconnected: stand down — the rematch's DoStartGame
+            // runs its own inline below-minimum check (review find 12), so
+            // nothing is stranded by this early exit.
+            if (remaining >= 3) yield break;
+            Plugin.Log.LogInfo($"[FFA] {remaining} player(s) left in the room (<3) — ending the sitting");
+            try
+            {
+                CompetitiveUI.ShowNotification("Not enough players to continue the FFA - returning to menu.",
+                    new Color(1f, 0.8f, 0.4f), 7f);
+            }
+            catch { }
+            try { ApiClient.FfaLeaveQueue(); } catch { }
+            try { NetworkConnectionHandler.instance.NetworkRestart(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
+        }
+
+        /// <summary>Bug #102: re-send the local player's face (vanilla RPC,
+        /// custom cosmetic ids included — they resolve through the GetItem
+        /// prefix on every client) once everyone is definitely in the room.
+        /// Idempotent: EquipFace just re-equips.</summary>
+        private static IEnumerator ResyncLocalFace()
+        {
+            yield return new WaitForSecondsRealtime(2.5f);
+            if (!EngineActive()) yield break;
+            try
+            {
+                var lp = LocalPlayer();
+                if (lp == null || lp.data == null || lp.data.view == null) yield break;
+                var face = CharacterCreatorHandler.instance.selectedPlayerFaces[0];
+                // Review find 13: an account that never opened the character
+                // creator has an all-zero face — re-sending that WIPES the
+                // stock face on every other screen (the cr_face publisher
+                // rejects this exact payload; mirror it).
+                if (face.eyeID == 0 && face.mouthID == 0 && face.detailID == 0 && face.detail2ID == 0)
+                {
+                    Plugin.Log.LogInfo("[FFA] face resync skipped — all-zero default face");
+                    yield break;
+                }
+                lp.data.view.RPC("RPCA_SetFace", RpcTarget.Others,
+                    face.eyeID, face.eyeOffset, face.mouthID, face.mouthOffset,
+                    face.detailID, face.detailOffset, face.detail2ID, face.detail2Offset);
+                Plugin.Log.LogInfo("[FFA] face resync sent (bug #102)");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] face resync: {ex.Message}"); }
+        }
+
         /// <summary>DoStartGame replacement body — game 1 and every rematch.</summary>
         public static IEnumerator FfaDoStartGame(GM_ArmsRace gm)
         {
             OnGameStart();
             PurgeDepartedPlayers("game start");
+            // Bug #104 + review find 12: below the 3-player minimum, wait
+            // briefly IN PLACE (a reconnect can restore the count), then
+            // either proceed or end the sitting right here. The old shape —
+            // abort the start and hand the decision to a separate coroutine —
+            // stranded the room when a third player reconnected inside the
+            // window: the decider saw >=3 and stood down, but nothing
+            // restarted the aborted game.
+            if (gameNumber > 1)
+            {
+                float waitUntil = Time.realtimeSinceStartup + 4f;
+                int remaining0 = RoomCount();
+                while (remaining0 > 0 && remaining0 < 3 && Time.realtimeSinceStartup < waitUntil)
+                {
+                    yield return new WaitForSecondsRealtime(0.5f);
+                    remaining0 = RoomCount();
+                }
+                if (remaining0 > 0 && remaining0 < 3)
+                {
+                    Plugin.Log.LogInfo($"[FFA] rematch aborted — {remaining0} player(s) (<3) — ending the sitting");
+                    try
+                    {
+                        CompetitiveUI.ShowNotification("Not enough players to continue the FFA - returning to menu.",
+                            new Color(1f, 0.8f, 0.4f), 7f);
+                    }
+                    catch { }
+                    try { ApiClient.FfaLeaveQueue(); } catch { }
+                    try { NetworkConnectionHandler.instance.NetworkRestart(); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
+                    yield break;
+                }
+            }
             GameManager.instance.battleOngoing = false;
             yield return new WaitForSeconds(0.25f);
             try { UIHandler.instance.HideJoinGameText(); } catch { }
@@ -623,6 +744,12 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] SetPlayersVisible(start): {ex.Message}"); }
             CompetitiveUI.ShowNotification($"FFA - {Diag2v2.PlayersNeeded()} players - first to {RoundsToWin} points!",
                 new Color(0.7f, 1f, 0.7f), 5f);
+            // Bug #102: vanilla sends each player's face via an UNBUFFERED
+            // RpcTarget.All at AssignPlayerID time — clients still joining
+            // drop it forever, so late joiners saw default faces/cosmetics on
+            // early spawners (the room creator, in longest, saw everyone).
+            // Everyone re-sends their own face once the game is actually on.
+            try { if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(ResyncLocalFace()); } catch { }
         }
 
         // ── Simultaneous pick phase ──
@@ -1136,6 +1263,17 @@ namespace CompetitiveRounds
                 // replay the survivors, then apply the new card.
                 var survivors = deck.Skip(deck.Count - (CardCap - 1)).ToList();
                 Plugin.Log.LogInfo($"[FFA] rolling removal for pid {pid}: dropping '{deck[0].gameObject.name}'");
+                // Mark the earliest un-rolled history entry for this card so
+                // the Recent panel can paint it red (Sid round-2 item 2).
+                try
+                {
+                    string droppedCanon = CardRarityLookup.GetCanonicalName(
+                        deck[0].gameObject.name.Replace("(Clone)", ""));
+                    if (pickHistory.TryGetValue(pid, out var hist0))
+                        foreach (var h in hist0)
+                            if (!h.Rolled && h.CardName == droppedCanon) { h.Rolled = true; break; }
+                }
+                catch { }
                 yield return RollingResetAndReplay(player, survivors);
                 deck.Clear();
                 deck.AddRange(survivors);
@@ -1269,6 +1407,25 @@ namespace CompetitiveRounds
                     catch { }
                 }
                 player.data.currentCards.Clear();
+                // Codex audit find 2: ApplyCardStats stacks CardAudioModifiers
+                // (Cold bullets' ColdStack) onto PlayerAudioModifyers and the
+                // reset trio never removes them — replaying a surviving Cold
+                // bullets would then increment the stack a second time.
+                // Cleared here, BEFORE the replay rebuilds the real stacks.
+                try
+                {
+                    var pam = player.GetComponent<PlayerAudioModifyers>();
+                    if (pam != null && pam.modifyers != null)
+                    {
+                        foreach (var m in pam.modifyers)
+                        {
+                            // The static list holds the wrapper's .modifier.
+                            try { if (m != null) PlayerAudioModifyers.activeModifyer?.Remove(m.modifier); } catch { }
+                        }
+                        pam.modifyers.Clear();
+                    }
+                }
+                catch { }
                 TabStatsOverlay.RecordCardBaseline(player);   // baseline = 0 for the rebuilt list
                 // Local player's own card bar rebuilds below via OFFLINE_Pick.
                 if (player.data.view != null && player.data.view.IsMine)
@@ -1291,7 +1448,19 @@ namespace CompetitiveRounds
             try { GMArmsRaceStartGameBlockResetPatch.RunSweep("FFA rolling removal"); } catch { }
 
             foreach (var card in survivors)
+            {
                 ApplyCardTo(player, card);
+                // Codex audit find 1 (HIGH): two copies of the same
+                // AttackLevel-stacking card applied in ONE frame each see the
+                // OTHER unstarted copy, and both hosts get destroyed — the
+                // bar shows the cards but the behavior is gone (16 cards:
+                // Shield Charge, Supernova, Frost slam...). One frame between
+                // applies lets the first host finish Start(), so a duplicate
+                // levels it up exactly like a normal round-by-round pick.
+                // This also puts a frame between the last survivor and the
+                // caller's new-card apply.
+                yield return null;
+            }
         }
     }
 

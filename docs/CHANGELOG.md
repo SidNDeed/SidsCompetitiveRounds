@@ -97,6 +97,42 @@ the first sessions and please file bug reports with logs attached.
   totals above the mode's ceilings, so a result cannot silently drop the players
   who beat you. Kill counts are stored per player and break placement ties.
 
+### FFA — second-playtest round (July 28, round 2)
+- **Recent Ranked FFAs got the full treatment:** per-player rows with score
+  dots (points as full dots, leftover half points as half dots with a count),
+  kills, gold/XP earned, equipped titles, each player's cards on their own
+  line with rolled-off cards in red, a game-ID copy button, and a
+  score-progression graph on hover (new games record a half-point timeline).
+- **Winner rewards scale with lobby size:** the winner's XP/gold multiplier
+  is x1.5 in a 3-player game growing to x5 in a full 10-player lobby.
+- **FFA betting:** spectators can bet gold on any active FFA lobby from the
+  FFA tab. Field odds come from FFA Glicko ratings (RD-aware); payouts scale
+  with lobby size up to x5; uncertain ratings restrict betting, stakes are
+  refunded if a lobby dies before the game reports.
+- **Discord bot finally knows FFA exists:** queue beacon pings, a result
+  embed per ranked FFA (placements, points, kills, rating moves), and the
+  FAQ no longer claims FFA is "in design".
+- **Player profiles show every mode:** clicking a leaderboard player now has
+  1v2, 2v2 and FFA history sections alongside the 1v1 one (FFA rows carry
+  player count, placement, rating move, date and the field).
+- **Session Info records FFAs** (bug #106) — games, placements and
+  per-opponent tallies.
+- **Cross-machine cosmetics fix** (bug #102): the base game sends faces via
+  an unbuffered network event at spawn time, so clients still loading missed
+  early spawners' faces/cosmetics forever. Everyone re-sends theirs once the
+  FFA game starts.
+- **No more 2-player "FFAs"** (bug #104): leavers dropping the room below 3
+  end the sitting after the current game.
+- **Achievements only evaluate in competitive rooms** (bug #101): public
+  quickplay could award input-tracked achievements (Instinct and friends)
+  because the violation detectors never ran there. The one confirmed-false
+  unlock was revoked.
+- **Hold-Tab board no longer clips wrapped card lists** (bug #107), and the
+  FFA leaderboard highlights the active sort column (the sorts themselves
+  were working — with three players the order just rarely changes).
+- Names using math-symbol Unicode (the boxes on leaderboard #47) render now:
+  the font fallback chain gained Segoe UI Symbol / Cambria Math.
+
 ### FFA — first-playtest fixes (July 28)
 - **Nobody's card is ever force-picked again.** The first build auto-picked your
   highlighted (first) card after 25 seconds, which looked exactly like "someone

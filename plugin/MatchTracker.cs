@@ -14,6 +14,9 @@ namespace CompetitiveRounds
             public string CardRarity;
             public int PickOrder;
             public int RoundNumber;
+            // FFA only: pushed out by the rolling 5-card cap (red in the
+            // Recent panel). Always false in the other modes.
+            public bool Rolled;
         }
 
         public class CardOfferData

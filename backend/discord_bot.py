@@ -247,6 +247,8 @@ async def on_ready():
     if not poll_queue_beacon.is_running(): poll_queue_beacon.start()
     if not poll_team_queue_beacon.is_running(): poll_team_queue_beacon.start()
     if not poll_ovt_queue_beacon.is_running(): poll_ovt_queue_beacon.start()
+    if not poll_ffa_queue_beacon.is_running(): poll_ffa_queue_beacon.start()
+    if not poll_ffa_recent_matches.is_running(): poll_ffa_recent_matches.start()
     if not poll_team_recent_series.is_running(): poll_team_recent_series.start()
     if not poll_anticheat_flags.is_running(): poll_anticheat_flags.start()
     if not poll_new_bans.is_running(): poll_new_bans.start()
@@ -933,8 +935,10 @@ FAQ_ENTRIES = [
         "answer": ("• **1v2** (solo vs duo) is live as an **unranked beta** — queue from **F5 → Multiplayer → 1v2**. "
                    "One player fights a team of two; stats are tracked so games can be rated retroactively once "
                    "the mode graduates.\n"
-                   "• **FFA** (4-player free-for-all) is **in design** — the Multiplayer → FFA tab shows the current "
-                   "plan, but it isn't playable yet."),
+                   "• **FFA** (3-10 player free-for-all) is **live and RANKED** — queue from **F5 → Multiplayer → FFA**. "
+                   "Last player standing takes a half point, two halves make a point, first to 5 points wins. "
+                   "Everyone picks cards at the same time, you hold at most 5 cards (a 6th pick replaces your "
+                   "oldest), and it has its own rating and leaderboard."),
     },
     {
         "key": "tournaments",
@@ -3687,6 +3691,128 @@ async def poll_ovt_queue_beacon():
             )
     except Exception as e:
         print(f"1v2 queue beacon error: {e}")
+
+
+# ── FFA queue beacon + result posting (Sid round-2 item 4: FFA had no bot
+# coverage at all). Same shapes as the 1v2 beacon and the 2v2 series log. ──
+seen_ffa_queue_joins = {}  # steam_id -> timestamp
+
+@tasks.loop(seconds=15)
+async def poll_ffa_queue_beacon():
+    if not QUEUE_BEACON_CHANNEL_ID:
+        return
+    try:
+        now = datetime.utcnow()
+        expired = [k for k, v in seen_ffa_queue_joins.items() if (now - v).total_seconds() > 300]
+        for k in expired:
+            del seen_ffa_queue_joins[k]
+
+        data = await api_get("/ffa/queue/recent-joins?seconds=20")
+        if not data or not data.get("joins"):
+            return
+        qsize = data.get("queue_size", 0)
+        for j in data["joins"]:
+            sid = j["steam_id"]
+            if sid in seen_ffa_queue_joins:
+                continue
+            name = j["display_name"] or sid
+            rating = j.get("rating", 1500)
+            channel = bot.get_channel(QUEUE_BEACON_CHANNEL_ID)
+            if not channel:
+                try:
+                    channel = await bot.fetch_channel(QUEUE_BEACON_CHANNEL_ID)
+                except:
+                    continue
+            await channel.send(
+                f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **FFA** — "
+                f"**{qsize}** in the queue (starts at 3, up to 10)!"
+                + _beacon_discord_suffix(j),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            # Marked seen only AFTER a successful send (round-2 review find
+            # 17): a transient Discord error must retry on the next poll.
+            seen_ffa_queue_joins[sid] = now
+    except Exception as e:
+        print(f"FFA queue beacon error: {e}")
+
+
+seen_ffa_matches = set()
+
+@tasks.loop(seconds=30)
+async def poll_ffa_recent_matches():
+    """Posts an embed in SERIES_LOG_CHANNEL for each completed ranked FFA.
+    In-memory de-dupe via seen_ffa_matches, pre-loaded in before_loop so a
+    restart doesn't spam history (same pattern as the 2v2 series log)."""
+    try:
+        data = await api_get("/ffa/recent?page=0&page_size=5")
+        if not data or not data.get("matches"):
+            return
+        for m in data["matches"]:
+            mid = m["match_id"]
+            if mid in seen_ffa_matches:
+                continue
+            posted_any = False
+            failed_any = False
+            for guild in bot.guilds:
+                try:
+                    await log_ffa_match_result(guild, m)
+                    posted_any = True
+                except Exception as e:
+                    failed_any = True
+                    print(f"FFA match log error: {e}")
+            # Round-2 review find 17: only mark seen once delivery succeeded
+            # somewhere (a transient error retries next poll). Find 18: on
+            # overflow, rebuild the set from the current page instead of
+            # clearing (a bare clear immediately reposted the other four).
+            if posted_any and not failed_any:
+                seen_ffa_matches.add(mid)
+                if len(seen_ffa_matches) > 500:
+                    seen_ffa_matches.clear()
+                    for m2 in data["matches"]:
+                        seen_ffa_matches.add(m2["match_id"])
+    except Exception as ex:
+        print(f"poll_ffa_recent_matches error: {ex}")
+
+
+@poll_ffa_recent_matches.before_loop
+async def before_ffa_matches_poll():
+    await bot.wait_until_ready()
+    data = await api_get("/ffa/recent?page=0&page_size=10")
+    if data and data.get("matches"):
+        for m in data["matches"]:
+            seen_ffa_matches.add(m["match_id"])
+    print(f"Pre-loaded {len(seen_ffa_matches)} recent FFA matches")
+
+
+async def log_ffa_match_result(guild, m):
+    if SERIES_LOG_CHANNEL_ID <= 0:
+        return
+    ch = guild.get_channel(SERIES_LOG_CHANNEL_ID)
+    if not ch:
+        return
+    players = m.get("players") or []
+    n = m.get("player_count", len(players))
+    dur = m.get("duration_seconds") or 0
+    lines = []
+    for p in sorted(players, key=lambda q: q.get("placement", 99)):
+        rc = p.get("rating_change")
+        rc_s = "" if rc is None else (f" (+{rc:.1f})" if rc > 0 else f" ({rc:.1f})")
+        left = " *(left)*" if p.get("left_early") else ""
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(p.get("placement", 0), f"#{p.get('placement', '?')}")
+        nm = discord.utils.escape_markdown(str(p.get("display_name") or p.get("steam_id")))
+        lines.append(f"{medal} **{nm}** — {p.get('rounds_won', 0)}pt "
+                     f"{p.get('kills', 0)}k{rc_s}{left}")
+    embed = discord.Embed(title=f"🎯 Ranked FFA Complete — {n} players",
+                          color=discord.Color.purple())
+    embed.description = "\n".join(lines[:12]) or "(no players?)"
+    if dur:
+        embed.set_footer(text=f"{dur // 60}m{dur % 60:02d}s")
+    try:
+        if m.get("ended_at"):
+            embed.timestamp = datetime.fromisoformat(m["ended_at"].replace("Z", "+00:00"))
+    except Exception:
+        pass
+    await ch.send(embed=embed)
 
 
 # ── Bug Report Posting ────────────────────────────────────────────

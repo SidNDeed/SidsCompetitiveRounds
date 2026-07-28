@@ -3351,6 +3351,7 @@ namespace CompetitiveRounds
                 sb.Append($"\"card_rarity\":\"{Escape(c.CardRarity ?? "Unknown")}\",");
                 sb.Append($"\"pick_order\":{c.PickOrder},");
                 sb.Append($"\"round_number\":{c.RoundNumber}");
+                if (c.Rolled) sb.Append(",\"rolled\":true");
                 sb.Append("}");
             }
         }
@@ -4559,6 +4560,7 @@ namespace CompetitiveRounds
         // Public alias so CompetitiveUI can reuse the helper without exposing
         // every parser internal. Same semantics as ExtractJsonInt.
         public static int ExtractJsonIntPublic(string json, string key) => ExtractJsonInt(json, key);
+        public static float ExtractJsonFloatPublic(string json, string key) => ExtractJsonFloat(json, key);
 
         private static int ExtractJsonInt(string json, string key)
         {
@@ -7685,22 +7687,79 @@ namespace CompetitiveRounds
 
         public class FfaRecentPlayer
         {
-            public string steam_id, display_name;
-            public int slot, placement, rounds_won, points_total, fps_avg, xp_gained, gold_gained;
+            public string steam_id, display_name, title, title_color;
+            public int slot, placement, rounds_won, points_total, kills, fps_avg, xp_gained, gold_gained;
             public bool left_early;
             public float rating_change;
             public bool has_rating_change;
-            public List<string> cards = new List<string>();
+            public List<FfaRecentCard> cards = new List<FfaRecentCard>();
+        }
+        public class FfaRecentCard
+        {
+            public string name;
+            public bool rolled;
         }
         public class FfaRecentMatch
         {
-            public string match_id, photon_room_id, ended_at, winner_steam_id;
+            public string match_id, photon_room_id, ended_at, winner_steam_id, timeline;
             public int player_count, duration_seconds;
+            public bool is_ranked;
             public List<FfaRecentPlayer> players = new List<FfaRecentPlayer>();
         }
         public static List<FfaRecentMatch> CachedFfaRecent = null;
         public static int CachedFfaRecentTotal = 0;
         public static int CachedFfaRecentPages = 0;
+
+        // Per-player mode history for the Leaderboard detail panel. These
+        // endpoints carry nested arrays of user-authored display names, so
+        // every slice is string-aware (learnings #25/#156).
+        public class PlayerTeamHistoryEntry
+        {
+            public string series_id, score, mate, completed_at;
+            public bool won, has_rating_change;
+            public float rating_change;
+            public List<string> opponents = new List<string>();
+        }
+        public class PlayerOvtHistoryEntry
+        {
+            public string match_id, role, score, solo, ended_at;
+            public bool won;
+            public List<string> duo = new List<string>();
+        }
+        public class PlayerFfaHistoryEntry
+        {
+            public string match_id, ended_at;
+            public int player_count, placement, kills, rounds_won, points_total;
+            public bool has_rating_change;
+            public float rating_change;
+            public List<string> participants = new List<string>();
+        }
+        public static readonly Dictionary<string, List<PlayerTeamHistoryEntry>> CachedPlayerTeamHistory
+            = new Dictionary<string, List<PlayerTeamHistoryEntry>>();
+        public static readonly Dictionary<string, List<PlayerOvtHistoryEntry>> CachedPlayerOvtHistory
+            = new Dictionary<string, List<PlayerOvtHistoryEntry>>();
+        public static readonly Dictionary<string, List<PlayerFfaHistoryEntry>> CachedPlayerFfaHistory
+            = new Dictionary<string, List<PlayerFfaHistoryEntry>>();
+        private static readonly HashSet<string> _playerTeamHistoryInFlight = new HashSet<string>();
+        private static readonly HashSet<string> _playerOvtHistoryInFlight = new HashSet<string>();
+        private static readonly HashSet<string> _playerFfaHistoryInFlight = new HashSet<string>();
+
+        public class FfaBettablePlayer
+        {
+            public string steam_id, display_name;
+            public int rating;
+            public float odds_multiplier;
+            public bool bettable;
+        }
+        public class FfaBettableLobby
+        {
+            public string lobby_id;
+            public int player_count, game_number;
+            public bool is_member, already_bet;
+            public List<FfaBettablePlayer> players = new List<FfaBettablePlayer>();
+        }
+        public static List<FfaBettableLobby> CachedFfaBettable = null;
+        private static bool _ffaBettableInFlight;
 
         // Live queue state (drives the FFA tab + auto room-join).
         public static string FfaQueueStatus = "";        // ""/searching/ready_join/leaving
@@ -7989,6 +8048,8 @@ namespace CompetitiveRounds
                                 winner_steam_id = ExtractJsonString(mObj, "winner_steam_id"),
                                 player_count = ExtractJsonInt(mObj, "player_count"),
                                 duration_seconds = ExtractJsonInt(mObj, "duration_seconds"),
+                                is_ranked = ExtractJsonBool(mObj, "is_ranked"),
+                                timeline = ExtractJsonString(mObj, "timeline"),
                             };
                             int pStart = mObj.IndexOf("\"players\"");
                             int pArr = pStart >= 0 ? mObj.IndexOf('[', pStart) : -1;
@@ -8002,10 +8063,13 @@ namespace CompetitiveRounds
                                     {
                                         steam_id = ExtractJsonString(pObj, "steam_id"),
                                         display_name = ExtractJsonString(pObj, "display_name"),
+                                        title = ExtractJsonString(pObj, "title"),
+                                        title_color = ExtractJsonString(pObj, "title_color"),
                                         slot = ExtractJsonInt(pObj, "slot"),
                                         placement = ExtractJsonInt(pObj, "placement"),
                                         rounds_won = ExtractJsonInt(pObj, "rounds_won"),
                                         points_total = ExtractJsonInt(pObj, "points_total"),
+                                        kills = ExtractJsonInt(pObj, "kills"),
                                         fps_avg = ExtractJsonInt(pObj, "fps_avg"),
                                         xp_gained = ExtractJsonInt(pObj, "xp_gained"),
                                         gold_gained = ExtractJsonInt(pObj, "gold_gained"),
@@ -8014,7 +8078,13 @@ namespace CompetitiveRounds
                                     try
                                     {
                                         // rating_change may be null (unranked rows)
-                                        if (pObj.Contains("\"rating_change\":") && !pObj.Contains("\"rating_change\":null"))
+                                        int rcKey = pObj.IndexOf("\"rating_change\"", StringComparison.Ordinal);
+                                        int rcColon = rcKey >= 0 ? pObj.IndexOf(':', rcKey + 15) : -1;
+                                        int rcValue = rcColon + 1;
+                                        while (rcValue > 0 && rcValue < pObj.Length &&
+                                               (pObj[rcValue] == ' ' || pObj[rcValue] == '\t'))
+                                            rcValue++;
+                                        if (rcColon >= 0 && rcValue < pObj.Length && pObj[rcValue] != 'n')
                                         {
                                             rp.rating_change = ExtractJsonFloat(pObj, "rating_change");
                                             rp.has_rating_change = true;
@@ -8026,13 +8096,18 @@ namespace CompetitiveRounds
                                     int cEnd = cArr >= 0 ? FindMatchingBracketStringAware(pObj, cArr) : -1;
                                     if (cArr >= 0 && cEnd > cArr)
                                     {
-                                        // Review find 13: card names are NOT
-                                        // guaranteed bracket/comma-free — they come
-                                        // from the report payload (a modded card
-                                        // called "Push, Pull" would split into two)
-                                        // and aren't HMAC-covered. String-aware
-                                        // element parse, never a comma split.
-                                        rp.cards.AddRange(ParseJsonStringArray(pObj, cArr, cEnd));
+                                        // Card names are user-authored mod data and
+                                        // may contain commas or braces. Slice the
+                                        // object array string-aware; never comma-split.
+                                        foreach (string cObj in SliceTopLevelObjects(
+                                            pObj.Substring(cArr + 1, cEnd - cArr - 1)))
+                                        {
+                                            rp.cards.Add(new FfaRecentCard
+                                            {
+                                                name = ExtractJsonString(cObj, "n"),
+                                                rolled = ExtractJsonBool(cObj, "r"),
+                                            });
+                                        }
                                     }
                                     m.players.Add(rp);
                                 }
@@ -8050,12 +8125,287 @@ namespace CompetitiveRounds
             }));
         }
 
+        private static bool TryExtractNullableJsonFloat(string json, string key, out float value)
+        {
+            value = 0f;
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return false;
+            int keyAt = json.IndexOf("\"" + key + "\"", StringComparison.Ordinal);
+            int colon = keyAt >= 0 ? json.IndexOf(':', keyAt + key.Length + 2) : -1;
+            int pos = colon + 1;
+            while (pos > 0 && pos < json.Length && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+            if (colon < 0 || pos >= json.Length || json[pos] == 'n') return false;
+            value = ExtractJsonFloat(json, key);
+            return true;
+        }
+
+        private static int FindJsonArrayStartStringAware(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return -1;
+            for (int i = 0; i < json.Length; i++)
+            {
+                if (json[i] != '"') continue;
+                int start = i + 1;
+                int end = start;
+                while (end < json.Length)
+                {
+                    if (json[end] == '\\') { end += 2; continue; }
+                    if (json[end] == '"') break;
+                    end++;
+                }
+                if (end >= json.Length) return -1;
+                bool matches = end - start == key.Length
+                    && string.CompareOrdinal(json, start, key, 0, key.Length) == 0;
+                int pos = end + 1;
+                while (pos < json.Length && char.IsWhiteSpace(json[pos])) pos++;
+                if (matches && pos < json.Length && json[pos] == ':')
+                {
+                    pos++;
+                    while (pos < json.Length && char.IsWhiteSpace(json[pos])) pos++;
+                    if (pos < json.Length && json[pos] == '[') return pos;
+                }
+                i = end;
+            }
+            return -1;
+        }
+
+        private static List<string> ExtractStringListStringAware(string json, string key)
+        {
+            var values = new List<string>();
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return values;
+            int open = FindJsonArrayStartStringAware(json, key);
+            int close = open >= 0 ? FindMatchingBracketStringAware(json, open) : -1;
+            if (open < 0 || close <= open) return values;
+            int pos = open + 1;
+            while (pos < close)
+            {
+                while (pos < close && json[pos] != '"') pos++;
+                if (pos >= close) break;
+                int quote = pos++;
+                bool escaped = false;
+                while (pos < close)
+                {
+                    char c = json[pos];
+                    if (escaped) escaped = false;
+                    else if (c == '\\') escaped = true;
+                    else if (c == '"') break;
+                    pos++;
+                }
+                if (pos >= close) break;
+                string token = json.Substring(quote, pos - quote + 1);
+                values.Add(ExtractJsonString(":" + token, ""));
+                pos++;
+            }
+            return values;
+        }
+
+        public static void FetchPlayerModeHistories(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            FetchPlayerTeamHistory(steamId);
+            FetchPlayerOvtHistory(steamId);
+            FetchPlayerFfaHistory(steamId);
+        }
+
+        private static void FetchPlayerTeamHistory(string steamId)
+        {
+            if (CachedPlayerTeamHistory.ContainsKey(steamId) || !_playerTeamHistoryInFlight.Add(steamId)) return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/{Escape(steamId)}/team-history?limit=10",
+                (ok, resp) =>
+                {
+                    _playerTeamHistoryInFlight.Remove(steamId);
+                    if (!ok || string.IsNullOrEmpty(resp)) return;
+                    try
+                    {
+                        var list = new List<PlayerTeamHistoryEntry>();
+                        int open = FindJsonArrayStartStringAware(resp, "series");
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (open >= 0 && close > open)
+                        {
+                            foreach (string obj in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
+                            {
+                                var entry = new PlayerTeamHistoryEntry
+                                {
+                                    series_id = ExtractJsonString(obj, "series_id"),
+                                    won = ExtractJsonBool(obj, "won"),
+                                    score = ExtractJsonString(obj, "score"),
+                                    mate = ExtractJsonString(obj, "mate"),
+                                    completed_at = ExtractJsonString(obj, "completed_at"),
+                                    opponents = ExtractStringListStringAware(obj, "opponents"),
+                                };
+                                entry.has_rating_change = TryExtractNullableJsonFloat(
+                                    obj, "rating_change", out entry.rating_change);
+                                list.Add(entry);
+                            }
+                        }
+                        CachedPlayerTeamHistory[steamId] = list;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[LB-MODE-HIST] 2v2 parse: {ex.Message}"); }
+                }));
+        }
+
+        private static void FetchPlayerOvtHistory(string steamId)
+        {
+            if (CachedPlayerOvtHistory.ContainsKey(steamId) || !_playerOvtHistoryInFlight.Add(steamId)) return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/{Escape(steamId)}/ovt-history?limit=10",
+                (ok, resp) =>
+                {
+                    _playerOvtHistoryInFlight.Remove(steamId);
+                    if (!ok || string.IsNullOrEmpty(resp)) return;
+                    try
+                    {
+                        var list = new List<PlayerOvtHistoryEntry>();
+                        int open = FindJsonArrayStartStringAware(resp, "games");
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (open >= 0 && close > open)
+                        {
+                            foreach (string obj in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
+                            {
+                                list.Add(new PlayerOvtHistoryEntry
+                                {
+                                    match_id = ExtractJsonString(obj, "match_id"),
+                                    role = ExtractJsonString(obj, "role"),
+                                    won = ExtractJsonBool(obj, "won"),
+                                    score = ExtractJsonString(obj, "score"),
+                                    solo = ExtractJsonString(obj, "solo"),
+                                    duo = ExtractStringListStringAware(obj, "duo"),
+                                    ended_at = ExtractJsonString(obj, "ended_at"),
+                                });
+                            }
+                        }
+                        CachedPlayerOvtHistory[steamId] = list;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[LB-MODE-HIST] 1v2 parse: {ex.Message}"); }
+                }));
+        }
+
+        private static void FetchPlayerFfaHistory(string steamId)
+        {
+            if (CachedPlayerFfaHistory.ContainsKey(steamId) || !_playerFfaHistoryInFlight.Add(steamId)) return;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/{Escape(steamId)}/ffa-history?limit=15",
+                (ok, resp) =>
+                {
+                    _playerFfaHistoryInFlight.Remove(steamId);
+                    if (!ok || string.IsNullOrEmpty(resp)) return;
+                    try
+                    {
+                        var list = new List<PlayerFfaHistoryEntry>();
+                        int open = FindJsonArrayStartStringAware(resp, "games");
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (open >= 0 && close > open)
+                        {
+                            foreach (string obj in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
+                            {
+                                var entry = new PlayerFfaHistoryEntry
+                                {
+                                    match_id = ExtractJsonString(obj, "match_id"),
+                                    player_count = ExtractJsonInt(obj, "player_count"),
+                                    placement = ExtractJsonInt(obj, "placement"),
+                                    kills = ExtractJsonInt(obj, "kills"),
+                                    rounds_won = ExtractJsonInt(obj, "rounds_won"),
+                                    points_total = ExtractJsonInt(obj, "points_total"),
+                                    ended_at = ExtractJsonString(obj, "ended_at"),
+                                    participants = ExtractStringListStringAware(obj, "participants"),
+                                };
+                                entry.has_rating_change = TryExtractNullableJsonFloat(
+                                    obj, "rating_change", out entry.rating_change);
+                                list.Add(entry);
+                            }
+                        }
+                        CachedPlayerFfaHistory[steamId] = list;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[LB-MODE-HIST] FFA parse: {ex.Message}"); }
+                }));
+        }
+
+        public static void FetchFfaBettable(string steamId)
+        {
+            if (_ffaBettableInFlight || string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            _ffaBettableInFlight = true;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/ffa/bettable?steam_id={Escape(steamId)}",
+                (ok, resp) =>
+                {
+                    _ffaBettableInFlight = false;
+                    if (!ok || string.IsNullOrEmpty(resp)) return;
+                    try
+                    {
+                        var lobbies = new List<FfaBettableLobby>();
+                        int open = FindJsonArrayStartStringAware(resp, "lobbies");
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (open >= 0 && close > open)
+                        {
+                            foreach (string obj in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
+                            {
+                                var lobby = new FfaBettableLobby
+                                {
+                                    lobby_id = ExtractJsonString(obj, "lobby_id"),
+                                    player_count = ExtractJsonInt(obj, "player_count"),
+                                    game_number = ExtractJsonInt(obj, "game_number"),
+                                    is_member = ExtractJsonBool(obj, "is_member"),
+                                    already_bet = ExtractJsonBool(obj, "already_bet"),
+                                };
+                                int playersOpen = FindJsonArrayStartStringAware(obj, "players");
+                                int playersClose = playersOpen >= 0
+                                    ? FindMatchingBracketStringAware(obj, playersOpen) : -1;
+                                if (playersOpen >= 0 && playersClose > playersOpen)
+                                {
+                                    foreach (string pObj in SliceTopLevelObjects(
+                                        obj.Substring(playersOpen + 1, playersClose - playersOpen - 1)))
+                                    {
+                                        lobby.players.Add(new FfaBettablePlayer
+                                        {
+                                            steam_id = ExtractJsonString(pObj, "steam_id"),
+                                            display_name = ExtractJsonString(pObj, "display_name"),
+                                            rating = ExtractJsonInt(pObj, "rating"),
+                                            odds_multiplier = ExtractJsonFloat(pObj, "odds_multiplier"),
+                                            bettable = ExtractJsonBool(pObj, "bettable"),
+                                        });
+                                    }
+                                }
+                                lobbies.Add(lobby);
+                            }
+                        }
+                        CachedFfaBettable = lobbies;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[FFA-BET] bettable parse: {ex.Message}"); }
+                }));
+        }
+
+        public static void PlaceFfaBet(string bettorSteamId, string lobbyId,
+            string betOnSteamId, int amount, int gameNumber, Action<bool, string> callback)
+        {
+            // game_number is INSIDE the signature (server review find 2) so a
+            // lost-response retry can never be replayed onto a later game.
+            string sig = ComputeHmacHex($"ffa-bet:{bettorSteamId}:{lobbyId}:{betOnSteamId}:{amount}:{gameNumber}");
+            string url = $"{baseUrl}/api/v1/ffa/bets?steam_id={Escape(bettorSteamId)}" +
+                         $"&lobby_id={Escape(lobbyId)}&bet_on_steam_id={Escape(betOnSteamId)}" +
+                         $"&amount={amount}&game_number={gameNumber}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[FFA-BET] place {amount} on {betOnSteamId}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok)
+                {
+                    FetchPlayerStats(bettorSteamId);
+                    FetchFfaBettable(bettorSteamId);
+                }
+            }));
+        }
+
         /// <summary>One participant's payload for an FFA match report.</summary>
         public class FfaReportPlayer
         {
             public string steamId, displayName;
             public int slot, rounds, points, kills, fps;
             public bool leftEarly;
+            public bool absent;   // left in an EARLIER game of the sitting
             public List<MatchTracker.CardPickData> cards;
             public TeamTelemetry telemetry;
         }
@@ -8075,7 +8425,8 @@ namespace CompetitiveRounds
         /// domain-separated HMAC canonical (see schemas.py FfaMatchReport).</summary>
         public static void ReportFfaMatch(
             string lobbyId, string room, string region, int durationSeconds,
-            List<FfaReportPlayer> players, string winnerSteam, string reporterSteam)
+            List<FfaReportPlayer> players, string winnerSteam, string reporterSteam,
+            string timeline = null)
         {
             if (players == null || players.Count < 2)
             {
@@ -8097,7 +8448,8 @@ namespace CompetitiveRounds
                 // frozen ffa: HMAC canonical (learning #213 — never extend it).
                 sb.Append($"\"slot\":{p.slot},\"rounds_won\":{p.rounds}," +
                           $"\"points_total\":{p.points},\"kills\":{Math.Max(0, p.kills)}," +
-                          $"\"left_early\":{(p.leftEarly ? "true" : "false")},");
+                          $"\"left_early\":{(p.leftEarly ? "true" : "false")}," +
+                          $"\"absent\":{(p.absent ? "true" : "false")},");
                 sb.Append($"\"fps\":{Math.Max(0, p.fps)},");
                 sb.Append("\"cards\":[");
                 AppendCards(sb, p.cards ?? new List<MatchTracker.CardPickData>());
@@ -8127,6 +8479,9 @@ namespace CompetitiveRounds
             sb.Append($"\"region\":\"{Escape(region)}\",\"match_duration\":{durationSeconds},");
             sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
             sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteam)}\",");
+            // Score-progression timeline (outside the frozen canonical).
+            if (!string.IsNullOrEmpty(timeline))
+                sb.Append($"\"timeline\":\"{Escape(timeline.Length > 1900 ? timeline.Substring(0, 1900) : timeline)}\",");
             // Canonical: ffa:{lobby}:{room}:{reporter}:{is_ranked}:{winner}:{n}
             // then per player sorted by (len, ordinal): :{steam}:{rounds}:{points}
             var sorted = new List<FfaReportPlayer>(players);

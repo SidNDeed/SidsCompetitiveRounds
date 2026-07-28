@@ -487,6 +487,7 @@ namespace CompetitiveRounds
         }
         private static object txtRating,txtRD,txtLevel,txtXPProg,txtTotalXP,txtTopLeftName;private static Component xpFill;
         private static object txtRankedRec,txtRankedStrk,txtCasualRec,txtCasualStrk,txtSweeps,txtTotalRec,txtAccuracy,txtSessionSum,txtSessionSplit,txtSessionSweeps,txtOppSummary,txtSessionOppLifetime,txtTeam2v2Rec,txtTeam2v2Strk;
+        private static object sessionSplitLayoutTarget;
         private static GameObject sessionOppContainer;private static List<object> sessionOppTexts=new List<object>();
         private static object txtLinkCode;private static GameObject linkCodeBtn;
         // Discord ID/username click-to-reveal. Starts hidden for streamer safety.
@@ -1170,7 +1171,8 @@ namespace CompetitiveRounds
         }
         // ── FFA tab (live — first playtest build, ranked from day one) ─────
         private static object txtFfaStatus, txtFfaLobbyHeader, txtFfaLobbyBody, txtFfaLbHeader, txtFfaRecentHeader, txtFfaRecentPage;
-        private static GameObject ffaJoinBtn, ffaLeaveBtn, ffaLbContainer, ffaRecentContainer, ffaRecentPrevBtn, ffaRecentNextBtn;
+        private static GameObject ffaJoinBtn, ffaLeaveBtn, ffaBetPanel, ffaBetContainer;
+        private static GameObject ffaLbContainer, ffaRecentContainer, ffaRecentPrevBtn, ffaRecentNextBtn;
         private static List<GameObject> ffaLbSortBtns; private static string[] ffaLbSortKeys; private static object[] ffaLbHeaderTexts;
         private static string ffaLbSortReq = "rating";   // last requested sort — highlights the header
         // Bug #76 parity: inner ScrollRects must be disabled while their
@@ -1199,7 +1201,65 @@ namespace CompetitiveRounds
         // the rest of the menus"). Sum = 734, inside the 793-wide leaderboard column,
         // so wider cells can't push the last column out of view.
         private static readonly int[] FFA_LB_COL_W = new int[] { 42, 220, 92, 80, 74, 74, 82, 70 };
-        private static readonly List<object> ffaRecentRows = new List<object>();
+        private const int FFA_HALF_DOT_CAP = 8;
+        private static readonly Color[] FFA_PLAYER_FALLBACK = new Color[]
+        {
+            new Color(0.96f,0.55f,0.23f),
+            new Color(0.35f,0.60f,0.95f),
+            new Color(0.90f,0.30f,0.30f),
+            new Color(0.40f,0.85f,0.45f),
+        };
+        private sealed class FfaRecentPlayerRow
+        {
+            public GameObject root, cardsGO, fullDotsGO, halfDotsGO, halfOverflowGO;
+            public object txtPlacement, txtIdentity, txtPoints, txtHalfOverflow;
+            public object txtHalves, txtKills, txtRewards, txtElo, txtCards;
+            public readonly List<GameObject> fullDots = new List<GameObject>();
+            public readonly List<GameObject> halfDots = new List<GameObject>();
+        }
+        private sealed class FfaTimelineGraph
+        {
+            public int eventCount;
+            public float maxScore;
+            public string title, eventLabel, maxLabel;
+            public string[] names;
+            public Color[] colors;
+            public float[][] values;
+        }
+        private sealed class FfaRecentMatchRow
+        {
+            public GameObject root, btnId;
+            public RectTransform headerRect;
+            public object txtHeader;
+            public string currentMatchId, timelineSource, timelineMatchId;
+            public FfaTimelineGraph graph;
+            public readonly List<FfaRecentPlayerRow> players = new List<FfaRecentPlayerRow>();
+        }
+        private sealed class FfaBetPlayerRow
+        {
+            public GameObject root, betBtn;
+            public object txtName, txtRating, txtOdds;
+            public string lobbyId, steamId, displayName;
+            public int gameNumber;
+        }
+        private sealed class FfaBetLobbyRow
+        {
+            public GameObject root;
+            public object txtHeader;
+            public readonly List<FfaBetPlayerRow> players = new List<FfaBetPlayerRow>();
+        }
+        private static readonly List<FfaBetLobbyRow> ffaBetLobbyRows = new List<FfaBetLobbyRow>();
+        private sealed class FfaRecentGraphDrawer : MonoBehaviour
+        {
+            private void OnGUI() { DrawFfaRecentHoverGraph(); }
+        }
+        private static readonly List<FfaRecentMatchRow> ffaRecentRows = new List<FfaRecentMatchRow>();
+        private static RectTransform ffaRecentViewport;
+        private static Sprite ffaFullDotSprite, ffaHalfDotSprite;
+        private static readonly Vector3[] ffaHoverCorners = new Vector3[4];
+        private static GUIStyle ffaGraphTitleStyle, ffaGraphLegendStyle, ffaGraphAxisStyle;
+        private static Func<Camera,Vector3,Vector2> ffaWorldToScreenPoint;
+        private static bool ffaWorldToScreenPointResolved;
         public static int ffaRecentPageReq = 0;
 
         private static GameObject BuildFfaTab(Transform parent,int tabIdx)
@@ -1208,6 +1268,8 @@ namespace CompetitiveRounds
             // in an UNPADDED outer so the Multiplayer sub-tab bar sits at the
             // identical top position on all three tabs.
             var outer=new GameObject("FfaOuter");outer.transform.SetParent(parent,false);outer.AddComponent<RectTransform>();
+            outer.AddComponent<FfaRecentGraphDrawer>();
+            EnsureFfaWorldToScreenPoint();
             UIFactory.AddVLG(outer,spacing:0);UIFactory.AddLE(outer,flexH:1);
             MakeSubTabAnchor(tabIdx,outer.transform,true);
             // Whole tab in a ScrollView (2v2 pattern) so the bottom row stays
@@ -1240,6 +1302,20 @@ namespace CompetitiveRounds
             if(qlbC!=null)UIFactory.AddLE(qlbC.gameObject,prefH:29,minH:29,flexH:0);
             UIFactory.SetWordWrap(txtFfaLobbyBody,true);
 
+            // Live FFA betting. Hidden until /ffa/bettable returns at least
+            // one active lobby; lobby/player rows are pooled and rebound.
+            ffaBetPanel=UIFactory.CreatePanel("FfaBetPanel",panel.transform,C_PANEL);
+            UIFactory.AddVLG(ffaBetPanel,spacing:3,padL:10,padR:10,padT:6,padB:7);
+            UIFactory.AddLE(ffaBetPanel,flexH:0);
+            UIFactory.CreateText("FfaBetHeader",ffaBetPanel.transform,
+                "<b>Live FFA Lobbies - Betting</b>",21f,C_SUB,UIFactory.AlignMidLeft,
+                sizeDelta:new Vector2(1035,29));
+            ffaBetContainer=new GameObject("FfaBetLobbies");
+            ffaBetContainer.transform.SetParent(ffaBetPanel.transform,false);
+            ffaBetContainer.AddComponent<RectTransform>();
+            UIFactory.AddVLG(ffaBetContainer,spacing:4);
+            ffaBetPanel.SetActive(false);
+
             // Bottom row: leaderboard (left, fixed width) + recent matches
             // (right, flex). Fixed prefH inside the outer scroll — never
             // flexH:1 (learning #63).
@@ -1268,7 +1344,7 @@ namespace CompetitiveRounds
                 else
                 {
                     var b=UIFactory.CreateButton($"FfaLBS_{hdrSortKey[hi]}",lbHdrRow.transform,hdrLabels[hi],17f,C_LABEL,new Color(0.18f,0.20f,0.24f,0.85f),
-                        ()=>{ffaLbSortReq=hdrSortKey[idx];ApiClient.FetchFfaLeaderboard(200,hdrSortKey[idx]);},
+                        ()=>{ffaLbSortReq=hdrSortKey[idx];dirty=true;ApiClient.FetchFfaLeaderboard(200,hdrSortKey[idx]);},
                         sizeDelta:new Vector2(FFA_LB_COL_W[hi],24));
                     ffaLbSortBtns.Add(b);ffaLbHeaderTexts[hi]=UIFactory.GetButtonText(b);
                 }
@@ -1294,6 +1370,7 @@ namespace CompetitiveRounds
             var rScroll=UIFactory.CreateScrollView("FfaRSV",rCol.transform,spacing:2);
             UIFactory.AddLE(rScroll.scrollGO,flexH:1);
             ffaRecentContainer=rScroll.content;
+            ffaRecentViewport=rScroll.content.transform.parent as RectTransform;
             ffaRecentScrollRect=rScroll.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
             return outer;
         }
@@ -1317,8 +1394,604 @@ namespace CompetitiveRounds
             return row;
         }
 
-        // 2s queue traffic rides the internal throttles; recent 10s, board 30s.
-        private static float ffaLbRefreshAt, ffaRecentRefreshAt;
+        private static void SetFfaLayoutWidth(GameObject go,float preferred,float flexible,float minimum=-1f)
+        {
+            if(go==null||UIFactory.tLE==null)return;
+            try
+            {
+                var le=go.GetComponent(UIFactory.tLE);
+                if(le==null){UIFactory.AddLE(go,prefW:preferred,flexW:flexible);le=go.GetComponent(UIFactory.tLE);}
+                var bf=BindingFlags.Public|BindingFlags.Instance;
+                UIFactory.tLE.GetProperty("preferredWidth",bf)?.SetValue(le,preferred);
+                UIFactory.tLE.GetProperty("flexibleWidth",bf)?.SetValue(le,flexible);
+                if(minimum>=0f)UIFactory.tLE.GetProperty("minWidth",bf)?.SetValue(le,minimum);
+            }
+            catch{}
+        }
+
+        private static object CreateFfaTextCell(string name,Transform parent,float width,int align,float fontSize,Color color,bool flexible=false,float minWidth=-1f)
+        {
+            var txt=UIFactory.CreateText(name,parent,"",fontSize,color,align,sizeDelta:new Vector2(width,25));
+            var comp=txt as Component;
+            if(comp!=null)SetFfaLayoutWidth(comp.gameObject,width,flexible?1f:0f,minWidth);
+            return txt;
+        }
+
+        private static FfaBetPlayerRow CreateFfaBetPlayerRow(Transform parent,string name)
+        {
+            var row=new FfaBetPlayerRow();
+            row.root=new GameObject(name);
+            row.root.transform.SetParent(parent,false);
+            row.root.AddComponent<RectTransform>();
+            UIFactory.AddHLG(row.root,spacing:6,padL:6,padR:6,forceExpandH:false);
+            UIFactory.AddLE(row.root,prefH:27,minH:27,flexH:0);
+            row.txtName=CreateFfaTextCell("Name",row.root.transform,420,UIFactory.AlignMidLeft,17f,C_WHITE,true,180);
+            row.txtRating=CreateFfaTextCell("Rating",row.root.transform,100,UIFactory.AlignMidRight,16f,C_LABEL);
+            row.txtOdds=CreateFfaTextCell("Odds",row.root.transform,82,UIFactory.AlignMidRight,16f,C_GOLD);
+            row.betBtn=UIFactory.CreateButton("Bet",row.root.transform,"Bet",15f,C_WHITE,
+                new Color(0.42f,0.31f,0.08f,0.95f),
+                ()=>OpenCustomFfaBetPrompt(row.lobbyId,row.steamId,row.displayName,row.gameNumber),
+                sizeDelta:new Vector2(64,23));
+            SetFfaLayoutWidth(row.betBtn,64f,0f,64f);
+            row.root.SetActive(false);
+            return row;
+        }
+
+        private static FfaBetLobbyRow CreateFfaBetLobbyRow(Transform parent,string name)
+        {
+            var row=new FfaBetLobbyRow();
+            row.root=UIFactory.CreatePanel(name,parent,new Color(0.13f,0.14f,0.18f,0.88f));
+            UIFactory.AddVLG(row.root,spacing:1,padL:4,padR:4,padT:3,padB:4);
+            UIFactory.AddLE(row.root,prefH:34,minH:34,flexH:0);
+            row.txtHeader=UIFactory.CreateText("Header",row.root.transform,"",18f,C_WHITE,
+                UIFactory.AlignMidLeft,sizeDelta:new Vector2(1000,27));
+            row.root.SetActive(false);
+            return row;
+        }
+
+        private static void SetFfaBetLobbyHeight(FfaBetLobbyRow row,int playerCount)
+        {
+            if(row?.root==null)return;
+            float height=34f+Math.Max(0,playerCount)*28f;
+            var le=UIFactory.tLE!=null?row.root.GetComponent(UIFactory.tLE):null;
+            if(le==null)return;
+            var bf=BindingFlags.Public|BindingFlags.Instance;
+            UIFactory.tLE.GetProperty("preferredHeight",bf)?.SetValue(le,height);
+            UIFactory.tLE.GetProperty("minHeight",bf)?.SetValue(le,height);
+        }
+
+        private static Sprite CreateFfaDotSprite(bool half)
+        {
+            const int size=32;
+            var tex=new Texture2D(size,size,TextureFormat.ARGB32,false);
+            tex.name=half?"CR_FfaHalfDot":"CR_FfaFullDot";
+            tex.hideFlags=HideFlags.HideAndDontSave;
+            tex.filterMode=FilterMode.Bilinear;
+            tex.wrapMode=TextureWrapMode.Clamp;
+            var pixels=new Color[size*size];
+            float center=(size-1)*0.5f;
+            float radius=center-1f;
+            float radiusSq=radius*radius;
+            for(int y=0;y<size;y++)
+            {
+                for(int x=0;x<size;x++)
+                {
+                    float dx=x-center,dy=y-center;
+                    bool filled=dx*dx+dy*dy<=radiusSq&&(!half||x<=center);
+                    pixels[y*size+x]=filled?Color.white:new Color(0f,0f,0f,0f);
+                }
+            }
+            tex.SetPixels(pixels);
+            tex.Apply(false,true);
+            var sprite=Sprite.Create(tex,new Rect(0,0,size,size),new Vector2(0.5f,0.5f),size);
+            sprite.name=tex.name;
+            sprite.hideFlags=HideFlags.HideAndDontSave;
+            return sprite;
+        }
+
+        private static void EnsureFfaDotSprites()
+        {
+            if(ffaFullDotSprite==null)ffaFullDotSprite=CreateFfaDotSprite(false);
+            if(ffaHalfDotSprite==null)ffaHalfDotSprite=CreateFfaDotSprite(true);
+        }
+
+        private static GameObject CreateFfaDot(Transform parent,string name,Sprite sprite)
+        {
+            var go=new GameObject(name);
+            go.transform.SetParent(parent,false);
+            go.AddComponent<RectTransform>();
+            UIFactory.AddLE(go,prefW:10,prefH:10,flexW:0,flexH:0);
+            var img=go.AddComponent(UIFactory.tImage);
+            try
+            {
+                var bf=BindingFlags.Public|BindingFlags.Instance;
+                UIFactory.tImage.GetProperty("sprite",bf)?.SetValue(img,sprite);
+                UIFactory.tImage.GetProperty("preserveAspect",bf)?.SetValue(img,true);
+                UIFactory.tImage.GetProperty("raycastTarget",bf)?.SetValue(img,false);
+            }
+            catch{}
+            return go;
+        }
+
+        private static FfaRecentPlayerRow CreateFfaRecentPlayerRow(Transform parent,string name)
+        {
+            var row=new FfaRecentPlayerRow();
+            row.root=new GameObject(name);
+            row.root.transform.SetParent(parent,false);
+            row.root.AddComponent<RectTransform>();
+            UIFactory.AddVLG(row.root,spacing:0,padL:4,padR:4);
+
+            var line=new GameObject("Line");
+            line.transform.SetParent(row.root.transform,false);
+            line.AddComponent<RectTransform>();
+            UIFactory.AddHLG(line,spacing:4,forceExpandH:false);
+            UIFactory.AddLE(line,prefH:25,minH:25,flexH:0);
+            row.txtPlacement=CreateFfaTextCell("Place",line.transform,36,UIFactory.AlignMidLeft,16f,C_DIM);
+            row.txtIdentity=CreateFfaTextCell("Identity",line.transform,260,UIFactory.AlignMidLeft,16f,C_WHITE,true,150);
+
+            row.fullDotsGO=new GameObject("PointDots");
+            row.fullDotsGO.transform.SetParent(line.transform,false);
+            row.fullDotsGO.AddComponent<RectTransform>();
+            UIFactory.AddHLG(row.fullDotsGO,spacing:2,padT:7,padB:7,forceExpandH:false);
+            UIFactory.AddLE(row.fullDotsGO,prefW:0,prefH:25,flexW:0,flexH:0);
+            row.txtPoints=CreateFfaTextCell("Points",line.transform,48,UIFactory.AlignMidLeft,15f,C_LABEL);
+
+            row.halfDotsGO=new GameObject("HalfDots");
+            row.halfDotsGO.transform.SetParent(line.transform,false);
+            row.halfDotsGO.AddComponent<RectTransform>();
+            UIFactory.AddHLG(row.halfDotsGO,spacing:2,padT:7,padB:7,forceExpandH:false);
+            UIFactory.AddLE(row.halfDotsGO,prefW:0,prefH:25,flexW:0,flexH:0);
+            row.txtHalfOverflow=CreateFfaTextCell("HalfMore",line.transform,32,UIFactory.AlignMidLeft,14f,C_DIM);
+            row.halfOverflowGO=(row.txtHalfOverflow as Component)?.gameObject;
+            row.txtHalves=CreateFfaTextCell("Halves",line.transform,50,UIFactory.AlignMidLeft,15f,C_LABEL);
+            row.txtKills=CreateFfaTextCell("Kills",line.transform,42,UIFactory.AlignMidLeft,15f,C_LABEL);
+            row.txtRewards=CreateFfaTextCell("Rewards",line.transform,128,UIFactory.AlignMidRight,15f,C_BLUE);
+            row.txtElo=CreateFfaTextCell("Elo",line.transform,62,UIFactory.AlignMidRight,15f,C_LABEL);
+
+            row.txtCards=UIFactory.CreateText("Cards",row.root.transform,"",15f,new Color(0.4f,0.47f,0.55f),
+                UIFactory.AlignTopLeft,sizeDelta:new Vector2(0,20));
+            UIFactory.SetWordWrap(row.txtCards,true);
+            UIFactory.SetTextAutoHeight(row.txtCards,20);
+            row.cardsGO=(row.txtCards as Component)?.gameObject;
+            if(row.cardsGO!=null)row.cardsGO.SetActive(false);
+            row.root.SetActive(false);
+            return row;
+        }
+
+        private static FfaRecentMatchRow CreateFfaRecentMatchRow(Transform parent,string name)
+        {
+            var row=new FfaRecentMatchRow();
+            row.root=UIFactory.CreatePanel(name,parent,new Color(0.13f,0.14f,0.18f,0.88f));
+            UIFactory.AddVLG(row.root,spacing:2,padL:6,padR:6,padT:4,padB:5);
+            UIFactory.AddLE(row.root,minH:38,flexH:0);
+            var header=new GameObject("Header");
+            header.transform.SetParent(row.root.transform,false);
+            row.headerRect=header.AddComponent<RectTransform>();
+            UIFactory.AddHLG(header,spacing:6,forceExpandH:false);
+            UIFactory.AddLE(header,prefH:29,minH:29,flexH:0);
+            row.txtHeader=CreateFfaTextCell("HeaderText",header.transform,520,UIFactory.AlignMidLeft,17f,C_WHITE,true,260);
+            row.btnId=UIFactory.CreateButton("ID",header.transform,"ID",12f,C_DIM,C_BTN,
+                ()=>CopyFfaMatchId(row.currentMatchId),sizeDelta:new Vector2(30,21));
+            SetFfaLayoutWidth(row.btnId,30f,0f,30f);
+            row.root.SetActive(false);
+            return row;
+        }
+
+        private static void CopyFfaMatchId(string matchId)
+        {
+            if(string.IsNullOrEmpty(matchId))return;
+            GUIUtility.systemCopyBuffer=matchId;
+            CompetitiveUI.ShowNotification("Match ID copied",new Color(0.6f,0.9f,1f),2f);
+        }
+
+        private static Color FfaPlayerColor(int slot)
+        {
+            int skin=((slot%4)+4)%4;
+            try
+            {
+                var colors=PlayerSkinBank.GetPlayerSkinColors(skin);
+                if(colors!=null)return colors.color;
+            }
+            catch{}
+            return FFA_PLAYER_FALLBACK[skin];
+        }
+
+        private static string FfaSafeRich(string value)
+        {
+            if(string.IsNullOrEmpty(value))return "";
+            return value.Replace("&","&amp;").Replace("<","&lt;").Replace(">","&gt;");
+        }
+
+        private static string FfaTitleHex(string value)
+        {
+            if(string.IsNullOrEmpty(value))return "#FFD94D";
+            try
+            {
+                if(ColorUtility.TryParseHtmlString(value,out Color parsed))
+                    return "#"+ColorUtility.ToHtmlStringRGB(parsed);
+            }
+            catch{}
+            return "#FFD94D";
+        }
+
+        private static int FfaGameNumber(string room)
+        {
+            if(string.IsNullOrEmpty(room))return -1;
+            int marker=room.LastIndexOf("_r",StringComparison.Ordinal);
+            if(marker<0||marker+2>=room.Length)return -1;
+            if(int.TryParse(room.Substring(marker+2),System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,out int game)&&game>0)return game;
+            return -1;
+        }
+
+        private static string BuildFfaCardsText(ApiClient.FfaRecentPlayer player)
+        {
+            if(player?.cards==null||player.cards.Count==0)return "";
+            var sb=new StringBuilder("    <color=#667788>Cards:</color> ");
+            for(int i=0;i<player.cards.Count;i++)
+            {
+                var card=player.cards[i];
+                if(i>0)sb.Append("<color=#667788>, </color>");
+                string color=card!=null&&card.rolled?"#FF6666":"#667788";
+                string name=FfaSafeRich(card?.name??"?");
+                sb.Append("<color=").Append(color).Append(">")
+                  .Append(name).Append("</color>");
+            }
+            return sb.ToString();
+        }
+
+        private static void FillFfaDotPool(List<GameObject> pool,GameObject group,int count,Sprite sprite,Color color,string prefix)
+        {
+            count=Math.Max(0,count);
+            while(pool.Count<count)pool.Add(CreateFfaDot(group.transform,prefix+pool.Count,sprite));
+            for(int i=0;i<pool.Count;i++)
+            {
+                bool show=i<count;
+                pool[i].SetActive(show);
+                if(show)UIFactory.SetImageColor(pool[i],color);
+            }
+            float width=count>0?count*10f+(count-1)*2f:0f;
+            SetFfaLayoutWidth(group,width,0f);
+        }
+
+        private static FfaTimelineGraph ParseFfaTimeline(ApiClient.FfaRecentMatch match,List<ApiClient.FfaRecentPlayer> players)
+        {
+            if(match==null||string.IsNullOrEmpty(match.timeline)||players==null||players.Count==0)return null;
+            string[] tokens=match.timeline.Split(',');
+            int n=players.Count;
+            var graph=new FfaTimelineGraph
+            {
+                names=new string[n],
+                colors=new Color[n],
+                values=new float[n][],
+            };
+            var fullPoints=new int[n];
+            var liveHalves=new int[n];
+            for(int i=0;i<n;i++)
+            {
+                graph.names[i]=Trunc(players[i]?.display_name??"?",18);
+                graph.colors[i]=FfaPlayerColor(players[i]?.slot??i);
+                graph.values[i]=new float[tokens.Length+1];
+            }
+            int eventIndex=0;
+            for(int t=0;t<tokens.Length;t++)
+            {
+                string token=tokens[t];
+                int pos=0;
+                while(pos<token.Length&&(token[pos]==' '||token[pos]=='\t'))pos++;
+                int digitStart=pos;
+                int slot=0;
+                while(pos<token.Length&&char.IsDigit(token[pos]))
+                {
+                    slot=slot*10+(token[pos]-'0');
+                    pos++;
+                }
+                if(pos==digitStart)continue;
+                int line=-1;
+                for(int i=0;i<n;i++)if(players[i]!=null&&players[i].slot==slot){line=i;break;}
+                if(line<0)continue;
+                bool converted=false;
+                for(int i=pos;i<token.Length;i++)if(token[i]=='R'){converted=true;break;}
+                liveHalves[line]++;
+                if(converted)
+                {
+                    fullPoints[line]++;
+                    Array.Clear(liveHalves,0,liveHalves.Length);
+                }
+                eventIndex++;
+                for(int i=0;i<n;i++)
+                {
+                    float score=fullPoints[i]+liveHalves[i]*0.5f;
+                    graph.values[i][eventIndex]=score;
+                    if(score>graph.maxScore)graph.maxScore=score;
+                }
+            }
+            if(eventIndex==0)return null;
+            graph.eventCount=eventIndex;
+            graph.maxScore=Mathf.Max(1f,Mathf.Ceil(graph.maxScore*2f)*0.5f);
+            int game=FfaGameNumber(match.photon_room_id);
+            graph.title=game>0?$"Game {game} score progression":"Score progression";
+            graph.eventLabel=$"{eventIndex} half-point events";
+            graph.maxLabel=graph.maxScore.ToString("0.#",System.Globalization.CultureInfo.InvariantCulture);
+            return graph;
+        }
+
+        private static void BuildFfaRecentRowText(ApiClient.FfaRecentMatch match,FfaRecentMatchRow row)
+        {
+            if(match==null||row==null)return;
+            row.currentMatchId=match.match_id;
+            if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(match.match_id));
+            string date="";
+            if(!string.IsNullOrEmpty(match.ended_at)&&DateTime.TryParse(match.ended_at,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal,out DateTime parsed))
+                date=parsed.ToString("M/d",System.Globalization.CultureInfo.InvariantCulture);
+            string duration=match.duration_seconds>0
+                ?$"{match.duration_seconds/60}m{match.duration_seconds%60:00}s":"?";
+            int game=FfaGameNumber(match.photon_room_id);
+            int playerCount=match.player_count>0?match.player_count:(match.players?.Count??0);
+            string gameText=game>0?$"Game {game}":"Game ?";
+            string hover=!string.IsNullOrEmpty(match.timeline)
+                ?"  <color=#777>(hover for score graph)</color>":"";
+            UIFactory.SetText(row.txtHeader,
+                $"<color=#DDDDDD>{date}</color> <color=#777>-</color> {playerCount} players"+
+                $" <color=#777>-</color> <color=#8FA3B8>{duration}</color>"+
+                $" <color=#777>-</color> {gameText}{hover}");
+
+            var players=new List<ApiClient.FfaRecentPlayer>(match.players??new List<ApiClient.FfaRecentPlayer>());
+            players.Sort((a,b)=>(a?.placement>0?a.placement:99).CompareTo(b?.placement>0?b.placement:99));
+            while(row.players.Count<players.Count)
+                row.players.Add(CreateFfaRecentPlayerRow(row.root.transform,"Player"+row.players.Count));
+            EnsureFfaDotSprites();
+            for(int i=0;i<row.players.Count;i++)
+            {
+                var ui=row.players[i];
+                if(i>=players.Count){ui.root.SetActive(false);continue;}
+                var player=players[i];
+                if(player==null){ui.root.SetActive(false);continue;}
+                int placement=player.placement;
+                bool winner=(!string.IsNullOrEmpty(match.winner_steam_id)&&player.steam_id==match.winner_steam_id)
+                            ||(string.IsNullOrEmpty(match.winner_steam_id)&&placement==1);
+                Color dotColor=FfaPlayerColor(player.slot);
+                UIFactory.SetText(ui.txtPlacement,placement>0?$"#{placement}":"#?");
+                string title=string.IsNullOrEmpty(player.title)?""
+                    :$"<color={FfaTitleHex(player.title_color)}>[{FfaSafeRich(Trunc(player.title,14))}]</color> ";
+                string nameColor=winner?"#FFD700":"#FFFFFF";
+                string left=player.left_early?" <color=#888888>(left)</color>":"";
+                UIFactory.SetText(ui.txtIdentity,
+                    $"{title}<color={nameColor}>{FfaSafeRich(Trunc(player.display_name??"?",18))}</color>{left}");
+
+                int points=Math.Max(0,player.rounds_won);
+                int leftover=Math.Max(0,player.points_total-points*2);
+                int shownHalves=Math.Min(FFA_HALF_DOT_CAP,leftover);
+                FillFfaDotPool(ui.fullDots,ui.fullDotsGO,points,ffaFullDotSprite,dotColor,"P");
+                FillFfaDotPool(ui.halfDots,ui.halfDotsGO,shownHalves,ffaHalfDotSprite,dotColor,"H");
+                UIFactory.SetText(ui.txtPoints,$"{points}(P)");
+                int hiddenHalves=leftover-shownHalves;
+                if(ui.halfOverflowGO!=null)ui.halfOverflowGO.SetActive(hiddenHalves>0);
+                if(hiddenHalves>0)UIFactory.SetText(ui.txtHalfOverflow,$"+{hiddenHalves}");
+                UIFactory.SetText(ui.txtHalves,$"{leftover}(H)");
+                UIFactory.SetText(ui.txtKills,$"{Math.Max(0,player.kills)}k");
+                UIFactory.SetText(ui.txtRewards,player.xp_gained==0&&player.gold_gained==0?""
+                    :$"+{player.xp_gained}xp <color=#FFD94D>+{player.gold_gained}g</color>");
+                if(player.has_rating_change)
+                {
+                    string elo=player.rating_change.ToString("+0;-0;0",
+                        System.Globalization.CultureInfo.InvariantCulture);
+                    UIFactory.SetText(ui.txtElo,$"<color={(player.rating_change>=0?"#00FF00":"#FF6666")}>{elo}</color>");
+                }
+                else UIFactory.SetText(ui.txtElo,"");
+
+                string cards=BuildFfaCardsText(player);
+                if(ui.cardsGO!=null)ui.cardsGO.SetActive(!string.IsNullOrEmpty(cards));
+                if(!string.IsNullOrEmpty(cards))UIFactory.SetText(ui.txtCards,cards);
+                ui.root.SetActive(true);
+            }
+            if(row.timelineMatchId!=match.match_id||row.timelineSource!=match.timeline)
+            {
+                row.timelineMatchId=match.match_id;
+                row.timelineSource=match.timeline;
+                row.graph=ParseFfaTimeline(match,players);
+            }
+            row.root.SetActive(true);
+        }
+
+        private static float EstimateFfaRecentHeight(ApiClient.FfaRecentMatch match)
+        {
+            float height=38f;
+            if(match?.players==null)return height;
+            foreach(var player in match.players)
+            {
+                height+=27f;
+                if(player?.cards==null||player.cards.Count==0)continue;
+                int chars=11;
+                foreach(var card in player.cards)chars+=(card?.name?.Length??1)+2;
+                height+=Math.Max(1,(chars+89)/90)*20f;
+            }
+            return height+8f;
+        }
+
+        private static void EnsureFfaWorldToScreenPoint()
+        {
+            if(ffaWorldToScreenPointResolved)return;
+            ffaWorldToScreenPointResolved=true;
+            try
+            {
+                foreach(var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    var type=asm.GetType("UnityEngine.RectTransformUtility");
+                    if(type==null)continue;
+                    var method=type.GetMethod("WorldToScreenPoint",BindingFlags.Public|BindingFlags.Static,
+                        null,new Type[]{typeof(Camera),typeof(Vector3)},null);
+                    if(method==null)continue;
+                    ffaWorldToScreenPoint=(Func<Camera,Vector3,Vector2>)Delegate.CreateDelegate(
+                        typeof(Func<Camera,Vector3,Vector2>),method);
+                    break;
+                }
+            }
+            catch{ffaWorldToScreenPoint=null;}
+        }
+
+        private static bool TryGetFfaScreenRect(RectTransform target,out Rect rect)
+        {
+            rect=default(Rect);
+            if(target==null||!target.gameObject.activeInHierarchy)return false;
+            target.GetWorldCorners(ffaHoverCorners);
+            float minX=float.PositiveInfinity,minY=float.PositiveInfinity;
+            float maxX=float.NegativeInfinity,maxY=float.NegativeInfinity;
+            for(int i=0;i<4;i++)
+            {
+                Vector2 point=ffaWorldToScreenPoint!=null
+                    ?ffaWorldToScreenPoint(null,ffaHoverCorners[i])
+                    :new Vector2(ffaHoverCorners[i].x,ffaHoverCorners[i].y);
+                minX=Mathf.Min(minX,point.x);maxX=Mathf.Max(maxX,point.x);
+                minY=Mathf.Min(minY,point.y);maxY=Mathf.Max(maxY,point.y);
+            }
+            if(maxX<=minX||maxY<=minY)return false;
+            rect=new Rect(minX,Screen.height-maxY,maxX-minX,maxY-minY);
+            return true;
+        }
+
+        private static bool TryGetFfaHeaderHoverRect(FfaRecentMatchRow row,out Rect rect)
+        {
+            rect=default(Rect);
+            if(row==null||row.graph==null||!TryGetFfaScreenRect(row.headerRect,out Rect header))return false;
+            if(ffaRecentViewport!=null&&TryGetFfaScreenRect(ffaRecentViewport,out Rect clip))
+            {
+                float xMin=Mathf.Max(header.xMin,clip.xMin);
+                float xMax=Mathf.Min(header.xMax,clip.xMax);
+                float yMin=Mathf.Max(header.yMin,clip.yMin);
+                float yMax=Mathf.Min(header.yMax,clip.yMax);
+                if(xMax<=xMin||yMax<=yMin)return false;
+                rect=new Rect(xMin,yMin,xMax-xMin,yMax-yMin);
+            }
+            else rect=header;
+            return true;
+        }
+
+        private static void EnsureFfaGraphStyles()
+        {
+            if(ffaGraphTitleStyle!=null)return;
+            ffaGraphTitleStyle=new GUIStyle(GUI.skin.label)
+            {
+                fontSize=15,fontStyle=FontStyle.Bold,alignment=TextAnchor.MiddleLeft,
+                clipping=TextClipping.Overflow
+            };
+            ffaGraphTitleStyle.normal.textColor=Color.white;
+            ffaGraphLegendStyle=new GUIStyle(GUI.skin.label)
+            {
+                fontSize=12,fontStyle=FontStyle.Bold,alignment=TextAnchor.MiddleLeft,
+                clipping=TextClipping.Overflow
+            };
+            ffaGraphLegendStyle.normal.textColor=Color.white;
+            ffaGraphAxisStyle=new GUIStyle(GUI.skin.label)
+            {
+                fontSize=11,fontStyle=FontStyle.Bold,alignment=TextAnchor.MiddleLeft,
+                clipping=TextClipping.Overflow
+            };
+            ffaGraphAxisStyle.normal.textColor=new Color(0.65f,0.68f,0.74f);
+        }
+
+        private static void DrawFfaGraphSegment(Vector2 start,Vector2 end,Color color,float thickness)
+        {
+            float dx=end.x-start.x,dy=end.y-start.y;
+            float length=Mathf.Sqrt(dx*dx+dy*dy);
+            if(length<0.1f)return;
+            Matrix4x4 previous=GUI.matrix;
+            Color previousColor=GUI.color;
+            GUI.color=color;
+            GUIUtility.RotateAroundPivot(Mathf.Atan2(dy,dx)*Mathf.Rad2Deg,start);
+            GUI.DrawTexture(new Rect(start.x,start.y-thickness*0.5f,length,thickness),Texture2D.whiteTexture);
+            GUI.matrix=previous;
+            GUI.color=previousColor;
+        }
+
+        private static void DrawFfaTimelineGraph(FfaTimelineGraph graph,Vector2 mouse)
+        {
+            if(graph==null||graph.eventCount<=0||graph.values==null)return;
+            EnsureFfaGraphStyles();
+            int legendRows=(graph.names.Length+1)/2;
+            float width=470f,height=218f+legendRows*18f;
+            float x=mouse.x+18f,y=mouse.y+18f;
+            if(x+width>Screen.width-6f)x=mouse.x-width-18f;
+            if(y+height>Screen.height-6f)y=mouse.y-height-18f;
+            x=Mathf.Clamp(x,6f,Mathf.Max(6f,Screen.width-width-6f));
+            y=Mathf.Clamp(y,6f,Mathf.Max(6f,Screen.height-height-6f));
+            var panel=new Rect(x,y,width,height);
+            GUI.DrawTexture(panel,Texture2D.whiteTexture,ScaleMode.StretchToFill,true,0,
+                new Color(0.025f,0.03f,0.045f,0.97f),0,0);
+            GUI.Label(new Rect(x+14f,y+8f,width-28f,24f),graph.title,ffaGraphTitleStyle);
+
+            var plot=new Rect(x+42f,y+38f,width-60f,142f);
+            Color grid=new Color(0.35f,0.38f,0.45f,0.42f);
+            DrawFfaGraphSegment(new Vector2(plot.x,plot.y),new Vector2(plot.x,plot.yMax),grid,1f);
+            DrawFfaGraphSegment(new Vector2(plot.x,plot.yMax),new Vector2(plot.xMax,plot.yMax),grid,1f);
+            DrawFfaGraphSegment(new Vector2(plot.x,plot.y+plot.height*0.5f),new Vector2(plot.xMax,plot.y+plot.height*0.5f),grid,1f);
+            GUI.Label(new Rect(x+8f,plot.y-8f,32f,22f),graph.maxLabel,ffaGraphAxisStyle);
+            GUI.Label(new Rect(x+22f,plot.yMax-12f,18f,22f),"0",ffaGraphAxisStyle);
+            GUI.Label(new Rect(plot.x,plot.yMax+3f,plot.width,20f),graph.eventLabel,ffaGraphAxisStyle);
+
+            float xStep=graph.eventCount>0?plot.width/graph.eventCount:plot.width;
+            for(int line=0;line<graph.values.Length;line++)
+            {
+                float[] values=graph.values[line];
+                if(values==null)continue;
+                Color color=graph.colors[line];
+                for(int e=0;e<graph.eventCount;e++)
+                {
+                    float v1=values[e],v2=values[e+1];
+                    Vector2 p1=new Vector2(plot.x+e*xStep,plot.yMax-v1/graph.maxScore*plot.height);
+                    Vector2 p2=new Vector2(plot.x+(e+1)*xStep,plot.yMax-v2/graph.maxScore*plot.height);
+                    DrawFfaGraphSegment(p1,p2,color,2f);
+                }
+            }
+
+            float legendY=plot.yMax+28f;
+            float legendW=(width-28f)*0.5f;
+            for(int i=0;i<graph.names.Length;i++)
+            {
+                int col=i&1,row=i/2;
+                float lx=x+14f+col*legendW;
+                float ly=legendY+row*18f;
+                GUI.DrawTexture(new Rect(lx,ly+7f,20f,3f),Texture2D.whiteTexture,
+                    ScaleMode.StretchToFill,true,0,graph.colors[i],0,0);
+                GUI.Label(new Rect(lx+26f,ly,legendW-30f,19f),graph.names[i],ffaGraphLegendStyle);
+            }
+        }
+
+        private static void DrawFfaRecentHoverGraph()
+        {
+            try
+            {
+                if(Event.current==null||Event.current.type!=EventType.Repaint)return;
+                if(!isOpen||currentTab!=12)return;
+                Vector2 mouse=Event.current.mousePosition;
+                FfaTimelineGraph hit=null;
+                for(int i=0;i<ffaRecentRows.Count;i++)
+                {
+                    var row=ffaRecentRows[i];
+                    if(row?.root==null||!row.root.activeInHierarchy)continue;
+                    if(TryGetFfaHeaderHoverRect(row,out Rect hover)&&hover.Contains(mouse))
+                    {
+                        hit=row.graph;
+                        break;
+                    }
+                }
+                if(hit==null)return;
+                int previousDepth=GUI.depth;
+                try
+                {
+                    GUI.depth=-20000;
+                    DrawFfaTimelineGraph(hit,mouse);
+                }
+                finally{GUI.depth=previousDepth;}
+            }
+            catch{}
+        }
+
+        // 2s queue traffic rides the internal throttles; recent + bets 10s,
+        // board 30s.
+        private static float ffaLbRefreshAt, ffaRecentRefreshAt, ffaBetRefreshAt;
         private static void MaybeRefreshFfaTab()
         {
             if(currentTab!=12)return;
@@ -1328,6 +2001,11 @@ namespace CompetitiveRounds
             {
                 ffaRecentRefreshAt=Time.unscaledTime+10f;
                 ApiClient.FetchFfaRecent(ffaRecentPageReq,5);
+            }
+            if(Time.unscaledTime>=ffaBetRefreshAt)
+            {
+                ffaBetRefreshAt=Time.unscaledTime+10f;
+                ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);
             }
             if(Time.unscaledTime>=ffaLbRefreshAt)
             {
@@ -1371,6 +2049,7 @@ namespace CompetitiveRounds
                 UIFactory.SetText(txtFfaStatus,msg);
             }
             RenderFfaLobbySection();
+            RenderFfaBettingSection();
 
             // Leaderboard — active-sort header highlight + pooled rows.
             var lb=ApiClient.CachedFfaLeaderboard??new List<ApiClient.FfaLeaderboardEntry>();
@@ -1381,8 +2060,9 @@ namespace CompetitiveRounds
                 {
                     bool active=ffaLbSortKeys[hi]!=null&&ffaLbSortKeys[hi]==ffaLbSortReq;
                     UIFactory.SetText(ffaLbHeaderTexts[hi],active?baseLabels[hi]+" v":baseLabels[hi]);
+                    UIFactory.SetColor(ffaLbHeaderTexts[hi],active?C_GOLD:C_LABEL);
                     if(ffaLbSortBtns[hi]!=null)
-                        UIFactory.SetImageColor(ffaLbSortBtns[hi],active?new Color(0.30f,0.40f,0.55f,0.95f):new Color(0.18f,0.20f,0.24f,0.85f));
+                        UIFactory.SetImageColor(ffaLbSortBtns[hi],active?new Color(0.38f,0.30f,0.10f,0.98f):new Color(0.18f,0.20f,0.24f,0.85f));
                 }
             }
             for(int i=0;i<ffaLbRows.Count;i++)
@@ -1421,29 +2101,20 @@ namespace CompetitiveRounds
                     :$"<b>FFA Leaderboard</b>  <color=#888>({lb.Count} ranked)</color>");
             ToggleInnerScroll(ffaLbScrollRect,Math.Min(lb.Count,ffaLbRows.Count)*30f);
 
-            // Recent ranked FFAs — pooled multi-line texts, honest prefH.
+            // Recent ranked FFAs: one pooled container per match, with pooled
+            // player rows and procedural score-dot Images.
             if(ffaRecentContainer!=null)
             {
                 var rec=ApiClient.CachedFfaRecent??new List<ApiClient.FfaRecentMatch>();
                 while(ffaRecentRows.Count<Math.Min(rec.Count,10))
-                {
-                    var t=UIFactory.CreateText($"FfaRR{ffaRecentRows.Count}",ffaRecentContainer.transform,"",17f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1035,26));
-                    UIFactory.SetWordWrap(t,false);
-                    ffaRecentRows.Add(t);
-                }
+                    ffaRecentRows.Add(CreateFfaRecentMatchRow(ffaRecentContainer.transform,$"FfaRR{ffaRecentRows.Count}"));
                 float recTotalH=0f;
                 for(int i=0;i<ffaRecentRows.Count;i++)
                 {
-                    var comp=ffaRecentRows[i] as Component;if(comp==null)continue;
-                    if(i>=rec.Count){comp.gameObject.SetActive(false);continue;}
-                    int lines;
-                    UIFactory.SetText(ffaRecentRows[i],BuildFfaRecentRowText(rec[i],out lines));
-                    int h=lines*23+10;
-                    UIFactory.SetPrefH(comp.gameObject,h);
-                    var rt=comp.GetComponent<RectTransform>();
-                    if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,h);
-                    comp.gameObject.SetActive(true);
-                    recTotalH+=h+2;
+                    var row=ffaRecentRows[i];
+                    if(i>=rec.Count){row.root.SetActive(false);continue;}
+                    BuildFfaRecentRowText(rec[i],row);
+                    recTotalH+=EstimateFfaRecentHeight(rec[i])+2f;
                 }
                 ToggleInnerScroll(ffaRecentScrollRect,recTotalH);
                 if(txtFfaRecentHeader!=null)
@@ -1457,43 +2128,54 @@ namespace CompetitiveRounds
             }
         }
 
-        // One match = one multi-line rich text: header, per-player placement
-        // lines (winner gold), then cards lines for the top-3 placements only
-        // (compactness — the full board is a click away on Card Stats).
-        private static string BuildFfaRecentRowText(ApiClient.FfaRecentMatch m,out int lines)
+        private static void RenderFfaBettingSection()
         {
-            var sb=new StringBuilder();lines=1;
-            string dt="";
-            try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateTime.Parse(m.ended_at).ToString("M/d");}catch{}
-            string dur=m.duration_seconds>0?$"{m.duration_seconds/60}m{m.duration_seconds%60:D2}s":"?";
-            sb.Append($"<color=#DDDDDD><b>{dt}</b></color> <color=#888>-</color> {m.player_count} players <color=#888>-</color> <color=#8FA3B8>{dur}</color>\n");
-            var ps=new List<ApiClient.FfaRecentPlayer>(m.players??new List<ApiClient.FfaRecentPlayer>());
-            ps.Sort((a,b)=>(a.placement<=0?99:a.placement).CompareTo(b.placement<=0?99:b.placement));
-            foreach(var p in ps)
+            if(ffaBetPanel==null||ffaBetContainer==null)return;
+            var lobbies=ApiClient.CachedFfaBettable;
+            bool show=lobbies!=null&&lobbies.Count>0;
+            ffaBetPanel.SetActive(show);
+            if(!show)
             {
-                string nameCol=p.placement==1?"#FFD700":"#FFFFFF";
-                string elo="";
-                if(p.has_rating_change)
+                for(int i=0;i<ffaBetLobbyRows.Count;i++)ffaBetLobbyRows[i].root.SetActive(false);
+                return;
+            }
+            while(ffaBetLobbyRows.Count<lobbies.Count)
+                ffaBetLobbyRows.Add(CreateFfaBetLobbyRow(
+                    ffaBetContainer.transform,$"FfaBetLobby{ffaBetLobbyRows.Count}"));
+            for(int i=0;i<ffaBetLobbyRows.Count;i++)
+            {
+                var ui=ffaBetLobbyRows[i];
+                if(i>=lobbies.Count){ui.root.SetActive(false);continue;}
+                var lobby=lobbies[i];
+                var players=lobby.players;
+                int playerRows=players!=null?players.Count:0;
+                int count=lobby.player_count>0?lobby.player_count:playerRows;
+                string note=lobby.is_member
+                    ?"  <color=#777>(your lobby)</color>"
+                    :lobby.already_bet?"  <color=#777>(bet placed)</color>":"";
+                UIFactory.SetText(ui.txtHeader,$"Game {lobby.game_number} - {count} players{note}");
+                while(ui.players.Count<playerRows)
+                    ui.players.Add(CreateFfaBetPlayerRow(ui.root.transform,$"Player{ui.players.Count}"));
+                for(int p=0;p<ui.players.Count;p++)
                 {
-                    string ec=p.rating_change>=0?"#00FF00":"#FF6666";
-                    elo=$" <color={ec}>{(p.rating_change>=0?"+":"")}{p.rating_change:F0}</color>";
+                    var playerUi=ui.players[p];
+                    if(p>=playerRows){playerUi.root.SetActive(false);continue;}
+                    var player=players[p];
+                    playerUi.lobbyId=lobby.lobby_id;
+                    playerUi.steamId=player.steam_id;
+                    playerUi.displayName=player.display_name??"Player";
+                    playerUi.gameNumber=lobby.game_number;
+                    UIFactory.SetText(playerUi.txtName,FfaSafeRich(Trunc(playerUi.displayName,28)));
+                    UIFactory.SetText(playerUi.txtRating,$"{player.rating}");
+                    UIFactory.SetText(playerUi.txtOdds,"x"+player.odds_multiplier.ToString(
+                        "0.00",System.Globalization.CultureInfo.InvariantCulture));
+                    UIFactory.SetColor(playerUi.txtOdds,player.bettable?C_GOLD:C_DIM);
+                    playerUi.betBtn.SetActive(player.bettable&&!lobby.is_member&&!lobby.already_bet);
+                    playerUi.root.SetActive(true);
                 }
-                string left=p.left_early?" <color=#888>(left)</color>":"";
-                // Display language (Sid item 3): a round win = "point" (pt),
-                // a point = "half" — server field names stay rounds/points.
-                sb.Append($"  <color=#888>#{p.placement}</color> <color={nameCol}>{Trunc(p.display_name,16)}</color> <color=#AAAAAA>{p.rounds_won}pt {p.points_total}half</color>{elo}{left}\n");
-                lines++;
+                SetFfaBetLobbyHeight(ui,playerRows);
+                ui.root.SetActive(true);
             }
-            foreach(var p in ps)
-            {
-                if(p.placement<1||p.placement>3)continue;
-                if(p.cards==null||p.cards.Count==0)continue;
-                string joined=string.Join(", ",p.cards.ToArray());
-                if(joined.Length>90)joined=joined.Substring(0,90)+"...";
-                sb.Append($"    <color=#667788>#{p.placement} cards: {joined}</color>\n");
-                lines++;
-            }
-            return sb.ToString();
         }
 
         // Same shape as RenderOvtLobbySection: text-line body with a dynamic
@@ -1874,7 +2556,7 @@ namespace CompetitiveRounds
                 if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
             }
         }
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -2207,7 +2889,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         ((Component)txtLBSteamId).gameObject.SetActive(false);
         return panel;}
 
-        private static LBRow CreateLBRow(Transform parent,string name,int rowIndex){var row=new LBRow();row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:0,forceExpandH:true);UIFactory.AddLE(row.root,prefH:28);/* Round 4 item 4: no centering spacers — rows align flush with the header. */row.hlWrap=new GameObject("W");row.hlWrap.transform.SetParent(row.root.transform,false);row.hlWrap.AddComponent<RectTransform>();UIFactory.AddHLG(row.hlWrap,spacing:2,forceExpandH:true);if(UIFactory.tImage!=null){var img=row.hlWrap.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,new Color(0.15f,0.15f,0.2f,0.01f));UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,true);}row.txtRank=UIFactory.CreateText("r",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[0],25));row.txtLv=UIFactory.CreateText("l",row.hlWrap.transform,"",15f,C_BLUE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[1],25));row.txtName=UIFactory.CreateText("n",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(LB_COL_W[2],25));row.txtRating=UIFactory.CreateText("rt",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[3],25));UIFactory.SetBold(row.txtRating,true);row.txtW=UIFactory.CreateText("w",row.hlWrap.transform,"",15f,C_GREEN,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[4],25));row.txtL=UIFactory.CreateText("ls",row.hlWrap.transform,"",15f,C_RED,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[5],25));row.txtWL=UIFactory.CreateText("wl",row.hlWrap.transform,"",15f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[6],25));row.txtGold=UIFactory.CreateText("gd",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[7],25));UIFactory.SetBold(row.txtGold,true);int idx=rowIndex;var ch=row.root.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()&&idx>=0&&idx<lbRows.Count&&!string.IsNullOrEmpty(lbRows[idx].steamId)){string sid=lbRows[idx].steamId;h2hSeriesPage=0;if(selectedSteamId==sid){selectedSteamId="";selectedStats=null;selectedViewHistory=null;}else{selectedSteamId=sid;selectedStats=null;selectedViewHistory=null;ApiClient.FetchPlayerStatsForView(sid,(d)=>{selectedStats=d;dirty=true;});ApiClient.FetchAchievementsForView(sid);ApiClient.FetchPlayerTournaments(sid);ApiClient.FetchMatchHistoryForView(sid,(h)=>{if(selectedSteamId==sid){selectedViewHistory=h;dirty=true;}});}dirty=true;}};row.root.SetActive(false);return row;}
+        private static LBRow CreateLBRow(Transform parent,string name,int rowIndex){var row=new LBRow();row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();UIFactory.AddHLG(row.root,spacing:0,forceExpandH:true);UIFactory.AddLE(row.root,prefH:28);/* Round 4 item 4: no centering spacers — rows align flush with the header. */row.hlWrap=new GameObject("W");row.hlWrap.transform.SetParent(row.root.transform,false);row.hlWrap.AddComponent<RectTransform>();UIFactory.AddHLG(row.hlWrap,spacing:2,forceExpandH:true);if(UIFactory.tImage!=null){var img=row.hlWrap.AddComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,new Color(0.15f,0.15f,0.2f,0.01f));UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,true);}row.txtRank=UIFactory.CreateText("r",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[0],25));row.txtLv=UIFactory.CreateText("l",row.hlWrap.transform,"",15f,C_BLUE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[1],25));row.txtName=UIFactory.CreateText("n",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(LB_COL_W[2],25));row.txtRating=UIFactory.CreateText("rt",row.hlWrap.transform,"",16f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[3],25));UIFactory.SetBold(row.txtRating,true);row.txtW=UIFactory.CreateText("w",row.hlWrap.transform,"",15f,C_GREEN,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[4],25));row.txtL=UIFactory.CreateText("ls",row.hlWrap.transform,"",15f,C_RED,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[5],25));row.txtWL=UIFactory.CreateText("wl",row.hlWrap.transform,"",15f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[6],25));row.txtGold=UIFactory.CreateText("gd",row.hlWrap.transform,"",15f,C_GOLD,UIFactory.AlignMidCenter,sizeDelta:new Vector2(LB_COL_W[7],25));UIFactory.SetBold(row.txtGold,true);int idx=rowIndex;var ch=row.root.AddComponent<ClickHandler>();ch.onClick=()=>{if(ClickGuard.Claim()&&idx>=0&&idx<lbRows.Count&&!string.IsNullOrEmpty(lbRows[idx].steamId)){string sid=lbRows[idx].steamId;h2hSeriesPage=0;if(selectedSteamId==sid){selectedSteamId="";selectedStats=null;selectedViewHistory=null;}else{selectedSteamId=sid;selectedStats=null;selectedViewHistory=null;ApiClient.FetchPlayerStatsForView(sid,(d)=>{selectedStats=d;dirty=true;});ApiClient.FetchAchievementsForView(sid);ApiClient.FetchPlayerTournaments(sid);ApiClient.FetchPlayerModeHistories(sid);ApiClient.FetchMatchHistoryForView(sid,(h)=>{if(selectedSteamId==sid){selectedViewHistory=h;dirty=true;}});}dirty=true;}};row.root.SetActive(false);return row;}
 
         private static GameObject BuildCardStatsTab(Transform parent){var panel=new GameObject("CardStats");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddVLG(panel,spacing:4);UIFactory.AddLE(panel,flexH:1);/* v1.33 item 4: Card Stats is a My Stats sub-tab — anchor row up top (the
         panel is an unpadded VLG, so the bar lands at the standard position). */MakeSubTabAnchor(2,panel.transform,true);var fBar=new GameObject("Filt");fBar.transform.SetParent(panel.transform,false);fBar.AddComponent<RectTransform>();UIFactory.AddHLG(fBar,spacing:4,padL:12,forceExpandH:true);UIFactory.AddLE(fBar,prefH:34,minH:34,flexH:0);
@@ -4109,7 +4791,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         public static string CustomBetTargetLabel { get; private set; } = "";
         private static string customBetSeriesId, customBetOnSteamId;
         private static int customBetTeam;
-        private static bool customBetIsTeam;
+        private static bool customBetIsTeam, customBetIsFfa;
 
         public static void OpenCustomBetPrompt(string seriesId, string betOnSteamId, int team, bool isTeam, string targetLabel)
         {
@@ -4117,9 +4799,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             customBetOnSteamId = betOnSteamId;
             customBetTeam = team;
             customBetIsTeam = isTeam;
+            customBetIsFfa = false;
             CustomBetTargetLabel = targetLabel ?? "";
             CustomBetAmountText = "";
             CustomBetPromptOpen = true;
+        }
+
+        private static int customBetFfaGameNumber;
+        private static void OpenCustomFfaBetPrompt(string lobbyId,string betOnSteamId,string targetLabel,int gameNumber)
+        {
+            customBetSeriesId=lobbyId;
+            customBetOnSteamId=betOnSteamId;
+            customBetTeam=0;
+            customBetIsTeam=false;
+            customBetIsFfa=true;
+            // Signed into the bet request (server review find 2): a retried
+            // request can then never silently land on a LATER game.
+            customBetFfaGameNumber=gameNumber;
+            CustomBetTargetLabel=targetLabel??"";
+            CustomBetAmountText="";
+            CustomBetPromptOpen=true;
         }
 
         public static void CancelCustomBet() { CustomBetPromptOpen = false; }
@@ -4136,7 +4835,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
             string id = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(id) || id == "unknown") return;
-            if (customBetIsTeam)
+            if (customBetIsFfa)
+            {
+                Plugin.Log.LogInfo($"[FFA-BET] Placing CUSTOM {amount}g on {customBetOnSteamId} (lobby {customBetSeriesId})");
+                ApiClient.PlaceFfaBet(id, customBetSeriesId, customBetOnSteamId, amount, customBetFfaGameNumber, (ok, resp) =>
+                {
+                    var col = ok ? new Color(0.4f, 1f, 0.4f) : new Color(1f, 0.5f, 0.5f);
+                    if(ok)
+                    {
+                        float odds=ApiClient.ExtractJsonFloatPublic(resp,"odds_multiplier");
+                        int payout=ApiClient.ExtractJsonIntPublic(resp,"potential_payout");
+                        string oddsText=odds>0f
+                            ?" at x"+odds.ToString("0.00",System.Globalization.CultureInfo.InvariantCulture)
+                            :"";
+                        string payoutText=payout>0?$" (pays {payout}g)":"";
+                        CompetitiveUI.ShowNotification($"Bet placed: {amount}g{oddsText}{payoutText}",col,3f);
+                    }
+                    else CompetitiveUI.ShowNotification($"Bet failed: {resp}",col,3f);
+                });
+            }
+            else if (customBetIsTeam)
             {
                 Plugin.Log.LogInfo($"[TEAM-BET] Placing CUSTOM {amount}g on team {customBetTeam} (series {customBetSeriesId})");
                 ApiClient.PlaceTeamBet(id, customBetSeriesId, customBetTeam, amount, (ok, resp) =>
@@ -6321,11 +7039,149 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             return $"{nm} <b><color={col}>[{m.opponent_title}]</color></b>";
         }
 
-        private static void RefreshSession(){int games=GameStateWatcher.SessionMatchCount;bool inRoom=GameStateWatcher.IsInRoom;string oppSteamId=GameStateWatcher.OpponentSteamId;string oppName=GameStateWatcher.OpponentDisplayName;var history=ApiClient.CachedMatchHistory;/* Show opponent lifetime record when in room. v1.33: the counts come from
- * the SERVER's H2H (whole matches table) — the lazily-loaded local history
- * window may not reach an old opponent (item 8). The local scan renders as
- * the interim value until the fetch lands; last-played date still comes from
- * the loaded window when present. */if(inRoom&&!string.IsNullOrEmpty(oppSteamId)&&!oppSteamId.StartsWith("photon_")){ApiClient.FetchOpponentLifetime(oppSteamId);int ltW=0,ltL=0;string lastPlayed="";if(history!=null)foreach(var m in history){if(m.opponent_steam_id==oppSteamId){if(m.won)ltW++;else ltL++;if(string.IsNullOrEmpty(lastPlayed)){try{lastPlayed=DateTime.Parse(m.ended_at).ToString("M/d/yyyy");}catch{}}}}if(ApiClient.CachedOppLifetime.TryGetValue(oppSteamId,out var _lt)){ltW=_lt[0];ltL=_lt[1];}if(ltW+ltL>0){string col=ltW>ltL?"#00FF00":ltW<ltL?"#FF6666":"#AAAAAA";string lastStr=string.IsNullOrEmpty(lastPlayed)?"":$"  (last: {lastPlayed})";UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  <color={col}>{ltW}W-{ltL}L lifetime</color>{lastStr}");}else{UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  First time playing!");}UIFactory.SetColor(txtSessionOppLifetime,new Color(0.6f,0.75f,1f));}else if(inRoom&&!string.IsNullOrEmpty(oppName)&&oppName!="Opponent"){UIFactory.SetText(txtSessionOppLifetime,$"  In room with {oppName}");UIFactory.SetColor(txtSessionOppLifetime,C_DIM);}else{UIFactory.SetText(txtSessionOppLifetime,"");}if(games<=0){UIFactory.SetText(txtSessionSum,inRoom?"In game - no results yet":"No games this session");UIFactory.SetColor(txtSessionSum,C_DIM);UIFactory.SetText(txtSessionSplit,"");UIFactory.SetText(txtSessionSweeps,"");return;}int mins=(int)(DateTime.UtcNow-GameStateWatcher.SessionStartTime).TotalMinutes;string time=mins>=60?$"{mins/60}h {mins%60}m":$"{mins}m";int rw=GameStateWatcher.SessionRankedWins,rl=GameStateWatcher.SessionRankedLosses,cw=GameStateWatcher.SessionCasualWins,cl=GameStateWatcher.SessionCasualLosses;int t2w=GameStateWatcher.SessionTeamSeriesWins,t2l=GameStateWatcher.SessionTeamSeriesLosses;int ovw=GameStateWatcher.SessionOvtWins,ovl=GameStateWatcher.SessionOvtLosses;int sesSweepG=0,sesSweepT=0;if(history!=null){var sesStart=GameStateWatcher.SessionStartTime;foreach(var m in history){DateTime mTime=DateTime.UtcNow;try{if(!string.IsNullOrEmpty(m.ended_at))mTime=DateTime.Parse(m.ended_at).ToUniversalTime();}catch{}if(mTime<sesStart)continue;if(m.won&&m.opponent_rounds_won==0)sesSweepG++;if(!m.won&&m.player_rounds_won==0)sesSweepT++;}}UIFactory.SetText(txtSessionSum,$"{games} games    {rw+cw+ovw}W - {rl+cl+ovl}L    {time}");UIFactory.SetColor(txtSessionSum,C_WHITE);string splitLine="";var splitParts=new List<string>();if(rw+rl>0)splitParts.Add($"<color=#FFD94D>Ranked:</color> {rw}W/{rl}L");if(t2w+t2l>0)splitParts.Add($"<color=#FFB347>2v2:</color> {t2w}W/{t2l}L");if(ovw+ovl>0)splitParts.Add($"<color=#7FD4FF>1v2:</color> {ovw}W/{ovl}L");if(cw+cl>0)splitParts.Add($"Casual: {cw}W/{cl}L");if(splitParts.Count>0)splitLine="  "+string.Join("    ",splitParts.ToArray());UIFactory.SetText(txtSessionSplit,splitLine);if(sesSweepG+sesSweepT>0)UIFactory.SetText(txtSessionSweeps,$"  Sweeps: <color=#00FF00>5-0 x{sesSweepG}</color>  <color=#FF6666>0-5 x{sesSweepT}</color>");else UIFactory.SetText(txtSessionSweeps,"");var wl=GameStateWatcher.SessionWLByOpponent;var st=GameStateWatcher.SessionTimeByOpponent;int idx=0;if(wl!=null)foreach(var kvp in wl){int[]a=kvp.Value;if(a==null||a.Length<4)continue;int av=a.Length>4?a[4]:0,avl=a.Length>5?a[5]:0;int ow=a[0]+a[2]+av,ol=a[1]+a[3]+avl;/* 2v2 teammates are keyed "w/ Name" (bug #56) - render as-is, no "vs" */string line=kvp.Key.StartsWith("w/ ")?$"  {kvp.Key}:  {ow}W-{ol}L":$"  vs {kvp.Key}:  {ow}W-{ol}L";var brk=new List<string>();if(a[0]+a[1]>0)brk.Add($"R:{a[0]}-{a[1]}");if(a[2]+a[3]>0)brk.Add($"C:{a[2]}-{a[3]}");if(av+avl>0)brk.Add($"1v2:{av}-{avl}");if(brk.Count>1)line+="  ("+string.Join(" ",brk.ToArray())+")";if(st!=null&&st.ContainsKey(kvp.Key)){int m=(int)st[kvp.Key];line+=m>=60?$"   {m/60}h {m%60}m":$"   {m}m";}while(sessionOppTexts.Count<=idx)sessionOppTexts.Add(UIFactory.CreateText($"so{sessionOppTexts.Count}",sessionOppContainer.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22)));UIFactory.SetText(sessionOppTexts[idx],line);UIFactory.SetColor(sessionOppTexts[idx],ow>ol?C_GREEN:ow<ol?C_RED:C_DIM);var go=(sessionOppTexts[idx]as Component)?.gameObject;if(go)go.SetActive(true);idx++;}for(int i=idx;i<sessionOppTexts.Count;i++){var go=(sessionOppTexts[i]as Component)?.gameObject;if(go)go.SetActive(false);}}
+        private static void RefreshSession()
+        {
+            if(!ReferenceEquals(sessionSplitLayoutTarget,txtSessionSplit))
+            {
+                sessionSplitLayoutTarget=txtSessionSplit;
+                UIFactory.SetTextAutoHeight(txtSessionSplit);
+                UIFactory.SetWordWrap(txtSessionSplit,true);
+            }
+            int games=GameStateWatcher.SessionMatchCount;
+            bool inRoom=GameStateWatcher.IsInRoom;
+            string oppSteamId=GameStateWatcher.OpponentSteamId;
+            string oppName=GameStateWatcher.OpponentDisplayName;
+            var history=ApiClient.CachedMatchHistory;
+            // Show opponent lifetime record when in room. The server carries
+            // the complete H2H; the local window supplies the last-played date.
+            if(inRoom&&!string.IsNullOrEmpty(oppSteamId)&&!oppSteamId.StartsWith("photon_"))
+            {
+                ApiClient.FetchOpponentLifetime(oppSteamId);
+                int ltW=0,ltL=0;
+                string lastPlayed="";
+                if(history!=null)foreach(var m in history)
+                {
+                    if(m.opponent_steam_id!=oppSteamId)continue;
+                    if(m.won)ltW++;else ltL++;
+                    if(string.IsNullOrEmpty(lastPlayed))
+                    {
+                        try{lastPlayed=DateTime.Parse(m.ended_at).ToString("M/d/yyyy");}catch{}
+                    }
+                }
+                if(ApiClient.CachedOppLifetime.TryGetValue(oppSteamId,out var lifetime))
+                {ltW=lifetime[0];ltL=lifetime[1];}
+                if(ltW+ltL>0)
+                {
+                    string col=ltW>ltL?"#00FF00":ltW<ltL?"#FF6666":"#AAAAAA";
+                    string lastStr=string.IsNullOrEmpty(lastPlayed)?"":$"  (last: {lastPlayed})";
+                    UIFactory.SetText(txtSessionOppLifetime,
+                        $"  vs {oppName}:  <color={col}>{ltW}W-{ltL}L lifetime</color>{lastStr}");
+                }
+                else UIFactory.SetText(txtSessionOppLifetime,$"  vs {oppName}:  First time playing!");
+                UIFactory.SetColor(txtSessionOppLifetime,new Color(0.6f,0.75f,1f));
+            }
+            else if(inRoom&&!string.IsNullOrEmpty(oppName)&&oppName!="Opponent")
+            {
+                UIFactory.SetText(txtSessionOppLifetime,$"  In room with {oppName}");
+                UIFactory.SetColor(txtSessionOppLifetime,C_DIM);
+            }
+            else UIFactory.SetText(txtSessionOppLifetime,"");
+
+            if(games<=0)
+            {
+                UIFactory.SetText(txtSessionSum,inRoom?"In game - no results yet":"No games this session");
+                UIFactory.SetColor(txtSessionSum,C_DIM);
+                UIFactory.SetText(txtSessionSplit,"");
+                UIFactory.SetText(txtSessionSweeps,"");
+                return;
+            }
+
+            int mins=(int)(DateTime.UtcNow-GameStateWatcher.SessionStartTime).TotalMinutes;
+            string time=mins>=60?$"{mins/60}h {mins%60}m":$"{mins}m";
+            int rw=GameStateWatcher.SessionRankedWins,rl=GameStateWatcher.SessionRankedLosses;
+            int cw=GameStateWatcher.SessionCasualWins,cl=GameStateWatcher.SessionCasualLosses;
+            int t2w=GameStateWatcher.SessionTeamSeriesWins,t2l=GameStateWatcher.SessionTeamSeriesLosses;
+            int ovw=GameStateWatcher.SessionOvtWins,ovl=GameStateWatcher.SessionOvtLosses;
+            int ffw=GameStateWatcher.SessionFfaWins,ffl=GameStateWatcher.SessionFfaLosses;
+            int sesSweepG=0,sesSweepT=0;
+            if(history!=null)
+            {
+                var sesStart=GameStateWatcher.SessionStartTime;
+                foreach(var m in history)
+                {
+                    DateTime mTime=DateTime.UtcNow;
+                    try{if(!string.IsNullOrEmpty(m.ended_at))mTime=DateTime.Parse(m.ended_at).ToUniversalTime();}catch{}
+                    if(mTime<sesStart)continue;
+                    if(m.won&&m.opponent_rounds_won==0)sesSweepG++;
+                    if(!m.won&&m.player_rounds_won==0)sesSweepT++;
+                }
+            }
+            UIFactory.SetText(txtSessionSum,
+                $"{games} games    {rw+cw+ovw+ffw}W - {rl+cl+ovl+ffl}L    {time}");
+            UIFactory.SetColor(txtSessionSum,C_WHITE);
+            var splitParts=new List<string>();
+            if(rw+rl>0)splitParts.Add($"<color=#FFD94D>Ranked:</color> {rw}W/{rl}L");
+            if(t2w+t2l>0)splitParts.Add($"<color=#FFB347>2v2:</color> {t2w}W/{t2l}L");
+            if(ovw+ovl>0)splitParts.Add($"<color=#7FD4FF>1v2:</color> {ovw}W/{ovl}L");
+            if(ffw+ffl>0)
+            {
+                string places=GameStateWatcher.SessionFfaPlacementsCsv;
+                splitParts.Add($"<color=#D8A7FF>FFA:</color> {ffw}W-{ffl}L"+
+                    (string.IsNullOrEmpty(places)?"":$" (placements {places})"));
+            }
+            if(cw+cl>0)splitParts.Add($"Casual: {cw}W/{cl}L");
+            UIFactory.SetText(txtSessionSplit,
+                splitParts.Count>0?"  "+string.Join("    ",splitParts.ToArray()):"");
+            if(sesSweepG+sesSweepT>0)
+                UIFactory.SetText(txtSessionSweeps,
+                    $"  Sweeps: <color=#00FF00>5-0 x{sesSweepG}</color>  <color=#FF6666>0-5 x{sesSweepT}</color>");
+            else UIFactory.SetText(txtSessionSweeps,"");
+
+            var wl=GameStateWatcher.SessionWLByOpponent;
+            var st=GameStateWatcher.SessionTimeByOpponent;
+            int idx=0;
+            if(wl!=null)foreach(var kvp in wl)
+            {
+                int[] a=kvp.Value;
+                if(a==null||a.Length<4)continue;
+                int av=a.Length>4?a[4]:0,avl=a.Length>5?a[5]:0;
+                int fw=a.Length>6?a[6]:0,fl=a.Length>7?a[7]:0;
+                int ow=a[0]+a[2]+av+fw,ol=a[1]+a[3]+avl+fl;
+                // 2v2 teammates are keyed "w/ Name"; render that prefix as-is.
+                string line=kvp.Key.StartsWith("w/ ")
+                    ?$"  {kvp.Key}:  {ow}W-{ol}L"
+                    :$"  vs {kvp.Key}:  {ow}W-{ol}L";
+                var breakdown=new List<string>();
+                if(a[0]+a[1]>0)breakdown.Add($"R:{a[0]}-{a[1]}");
+                if(a[2]+a[3]>0)breakdown.Add($"C:{a[2]}-{a[3]}");
+                if(av+avl>0)breakdown.Add($"1v2:{av}-{avl}");
+                if(breakdown.Count>1)line+="  ("+string.Join(" ",breakdown.ToArray())+")";
+                if(fw+fl>0)line+=$"  FFA {fw}W-{fl}L";
+                if(st!=null&&st.ContainsKey(kvp.Key))
+                {
+                    int m=(int)st[kvp.Key];
+                    line+=m>=60?$"   {m/60}h {m%60}m":$"   {m}m";
+                }
+                while(sessionOppTexts.Count<=idx)
+                {
+                    var rowText=UIFactory.CreateText($"so{sessionOppTexts.Count}",
+                        sessionOppContainer.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));
+                    UIFactory.SetTextAutoHeight(rowText);
+                    UIFactory.SetWordWrap(rowText,true);
+                    sessionOppTexts.Add(rowText);
+                }
+                UIFactory.SetText(sessionOppTexts[idx],line);
+                UIFactory.SetColor(sessionOppTexts[idx],ow>ol?C_GREEN:ow<ol?C_RED:C_DIM);
+                var go=(sessionOppTexts[idx]as Component)?.gameObject;
+                if(go)go.SetActive(true);
+                idx++;
+            }
+            for(int i=idx;i<sessionOppTexts.Count;i++)
+            {
+                var go=(sessionOppTexts[i]as Component)?.gameObject;
+                if(go)go.SetActive(false);
+            }
+        }
 
         private static void RefreshLeaderboard(){_podiumLbRows.Clear();string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}/* July 22 item 8: search filter (whole board is client-side; ~500 cap). Reset to page 0 when the query changes. */if(lbSearchField!=null)UIFactory.SetText(lbSearchField,"");string lbQ=(lbSearch??"").Trim();if(lbQ!=lbSearchLast){lbSearchLast=lbQ;lbPage=0;}if(lbQ.Length>0)entries.RemoveAll(e=>e.display_name==null||e.display_name.IndexOf(lbQ,StringComparison.OrdinalIgnoreCase)<0);int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,20);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){_podiumLbRows.Add(new object[]{row.txtName,_lbName,e.title,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(e.title,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;/* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetText(txtLBCount,lbQ.Length>0?$"{entries.Count} of {board.total_players} players":$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?$"Rank: <b><color={(string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color)}>{ps.rank_name}</color></b>   ":"";string detail=$"\n{_rkLine}Rating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked (series): {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
  * earlier client-side iteration over CachedMatchHistory which was
@@ -7816,6 +8672,120 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         /// the "Ranked History" section (out param). Split into two strings (round 3 screenshot
         /// markup) so the Older/Newer pager GameObject can sit BETWEEN them — directly under
         /// the series list it pages — instead of below the whole blob.</summary>
+        private static string ModeHistoryDate(string iso)
+        {
+            if(string.IsNullOrEmpty(iso))return "";
+            if(DateTimeOffset.TryParse(iso,System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal,out DateTimeOffset parsed))
+                return parsed.ToLocalTime().ToString("M/d",System.Globalization.CultureInfo.InvariantCulture);
+            return "";
+        }
+
+        private static string ModeHistoryDelta(float value)
+        {
+            string color=value>0f?"#00FF00":value<0f?"#FF6666":"#AAAAAA";
+            return $"<color={color}>"+
+                value.ToString("+0.0;-0.0;0.0",System.Globalization.CultureInfo.InvariantCulture)+
+                "</color>";
+        }
+
+        private static string BuildPlayerModeHistoryText(string steamId)
+        {
+            var sb=new StringBuilder();
+            if(ApiClient.CachedPlayerTeamHistory.TryGetValue(steamId,out var team)&&team!=null&&team.Count>0)
+            {
+                sb.Append("\n<color=#FFB347>2v2 History</color>\n");
+                foreach(var entry in team)
+                {
+                    string result=entry.won?"<color=#00FF00>W</color>":"<color=#FF6666>L</color>";
+                    string oppA=entry.opponents!=null&&entry.opponents.Count>0
+                        ?FfaSafeRich(Trunc(entry.opponents[0]??"?",12)):"?";
+                    string oppB=entry.opponents!=null&&entry.opponents.Count>1
+                        ?FfaSafeRich(Trunc(entry.opponents[1]??"?",12)):"?";
+                    string delta=entry.has_rating_change?"  "+ModeHistoryDelta(entry.rating_change):"";
+                    sb.Append("  ").Append(result).Append(' ').Append(entry.score??"?")
+                      .Append(" w/ ").Append(FfaSafeRich(Trunc(entry.mate??"?",12)))
+                      .Append(" vs ").Append(oppA).Append(" + ").Append(oppB)
+                      .Append(delta).Append("  <color=#888>")
+                      .Append(ModeHistoryDate(entry.completed_at)).Append("</color>\n");
+                }
+            }
+            if(ApiClient.CachedPlayerOvtHistory.TryGetValue(steamId,out var ovt)&&ovt!=null&&ovt.Count>0)
+            {
+                sb.Append("\n<color=#7FD4FF>1v2 History</color>\n");
+                string viewedName=selectedStats?.display_name??"";
+                foreach(var entry in ovt)
+                {
+                    string result=entry.won?"<color=#00FF00>W</color>":"<color=#FF6666>L</color>";
+                    string matchup;
+                    if(string.Equals(entry.role,"solo",StringComparison.OrdinalIgnoreCase))
+                    {
+                        string duoA=entry.duo!=null&&entry.duo.Count>0
+                            ?FfaSafeRich(Trunc(entry.duo[0]??"?",12)):"?";
+                        string duoB=entry.duo!=null&&entry.duo.Count>1
+                            ?FfaSafeRich(Trunc(entry.duo[1]??"?",12)):"?";
+                        matchup=$"as SOLO vs {duoA} + {duoB}";
+                    }
+                    else
+                    {
+                        string partner="?";
+                        if(entry.duo!=null)
+                        {
+                            foreach(string duoName in entry.duo)
+                            {
+                                if(!string.Equals(duoName,viewedName,StringComparison.OrdinalIgnoreCase))
+                                {partner=duoName??"?";break;}
+                            }
+                        }
+                        matchup=$"as DUO (w/ {FfaSafeRich(Trunc(partner,12))}) vs "+
+                            FfaSafeRich(Trunc(entry.solo??"?",12));
+                    }
+                    sb.Append("  ").Append(result).Append(' ').Append(entry.score??"?")
+                      .Append(' ').Append(matchup).Append("  <color=#888>")
+                      .Append(ModeHistoryDate(entry.ended_at)).Append("</color>\n");
+                }
+            }
+            if(ApiClient.CachedPlayerFfaHistory.TryGetValue(steamId,out var ffa)&&ffa!=null&&ffa.Count>0)
+            {
+                sb.Append("\n<color=#D8A7FF>FFA History</color>\n");
+                foreach(var entry in ffa)
+                {
+                    string result=entry.placement==1?"<color=#00FF00>":"<color=#FF6666>";
+                    sb.Append("  ").Append(result).Append('#').Append(entry.placement)
+                      .Append("</color> of ").Append(entry.player_count);
+                    if(entry.has_rating_change)sb.Append("  ").Append(ModeHistoryDelta(entry.rating_change));
+                    else sb.Append("  <color=#888>--</color>");
+                    sb.Append("  ").Append(entry.kills).Append("k  <color=#888>")
+                      .Append(ModeHistoryDate(entry.ended_at)).Append("</color>");
+
+                    var participants=entry.participants;
+                    if(participants!=null&&participants.Count>1)
+                    {
+                        int selfAt=entry.placement>0&&entry.placement<=participants.Count
+                            ?entry.placement-1:-1;
+                        int otherTotal=participants.Count-(selfAt>=0?1:0);
+                        if(selfAt<0)
+                        {
+                            for(int p=0;p<participants.Count;p++)
+                                if(string.Equals(participants[p],selectedStats?.display_name,
+                                    StringComparison.OrdinalIgnoreCase)){selfAt=p;otherTotal--;break;}
+                        }
+                        int shown=0;
+                        for(int p=0;p<participants.Count&&shown<4;p++)
+                        {
+                            if(p==selfAt)continue;
+                            sb.Append(shown==0?"  vs ":", ");
+                            sb.Append(FfaSafeRich(Trunc(participants[p]??"?",12)));
+                            shown++;
+                        }
+                        if(otherTotal>shown)sb.Append(" +").Append(otherTotal-shown).Append(" more");
+                    }
+                    sb.Append('\n');
+                }
+            }
+            return sb.ToString();
+        }
+
         private static string BuildViewHistoryText(out string historyPart)
         {
             historyPart = "";
@@ -7926,6 +8896,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 hb.Append("\n<color=#99AAEE>Ranked History:</color> <color=#888><i>no ranked series yet</i></color>\n");
             }
 
+            hb.Append(BuildPlayerModeHistoryText(selectedSteamId));
             historyPart = hb.ToString();
             return sb.ToString();
         }

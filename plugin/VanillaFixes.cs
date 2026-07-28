@@ -116,6 +116,32 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>Codex FFA-audit find 3: RadarShot's block visual (VE_Radar)
+    /// is spawned unparented by SpawnObjects.Spawn with NO lifetime — its
+    /// 0.15s particle completes and the dead root stays forever (vanilla's
+    /// MapTransition.ClearObjects only removes RemoveAfterSeconds carriers).
+    /// Ten blocks = ten dead roots, unbounded over a long sitting. The
+    /// visual is a plain local Instantiate (not Photon/pooled — #94 safe);
+    /// give it the RemoveAfterSeconds vanilla forgot.</summary>
+    [HarmonyPatch(typeof(SpawnObjects), "Spawn")]
+    internal static class RadarVisualLifetimePatch
+    {
+        [HarmonyPostfix]
+        private static void AfterSpawn(SpawnObjects __instance)
+        {
+            try
+            {
+                if (!VanillaFixSupport.GameplayScope()) return;
+                var go = __instance.mostRecentlySpawnedObject;
+                if (go == null || !go.name.StartsWith("VE_Radar")) return;
+                if (go.GetComponent<RemoveAfterSeconds>() != null) return;
+                var ras = go.AddComponent<RemoveAfterSeconds>();
+                ras.seconds = 2f;
+            }
+            catch { }
+        }
+    }
+
     [HarmonyPatch(typeof(Gun), "ResetStats")]
     internal static class DemonicPactSprayPatch
     {

@@ -34,6 +34,10 @@ namespace CompetitiveRounds
             new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
         private static int cachedPlayerCount;
         private static float nextSnapshotAt;
+        private static bool cardLayoutDirty = true;
+        private static float cachedCardLayoutWidth = -1f;
+        private static float cachedCardsHeight = 24f;
+        private static float cardSeparatorWidth;
 
         private const int MAX_SHOWN_CARDS = 8;
         private const int MAX_CARD_TOKENS = MAX_SHOWN_CARDS + 1;
@@ -54,8 +58,9 @@ namespace CompetitiveRounds
             public readonly float[] tokenWidths = new float[MAX_CARD_TOKENS];
             public readonly float[] lineWidths = new float[MAX_CARD_TOKENS];
             public readonly float[] lineX = new float[MAX_CARD_TOKENS];
+            public readonly float[] tokenX = new float[MAX_CARD_TOKENS];
             public readonly int[] tokenLines = new int[MAX_CARD_TOKENS];
-            public int count;
+            public int count, totalCount, visibleCount, lineCount;
             public bool hasTail;
 
             public CardRow()
@@ -137,6 +142,7 @@ namespace CompetitiveRounds
                     catch { values[r] = "-"; }
                 }
             }
+            cardLayoutDirty = true;
         }
 
         public static void Draw()
@@ -159,10 +165,21 @@ namespace CompetitiveRounds
                 float colW = Mathf.Clamp((Screen.width * 0.62f - labelW) / cachedPlayerCount, 130f, 210f);
                 float w = labelW + colW * cachedPlayerCount + 24f;
                 float rowH = 21f;
-                float cardsH = 52f;
+                float cardWidth = colW - 8f;
+                if (cardLayoutDirty || Mathf.Abs(cachedCardLayoutWidth - cardWidth) > 0.5f)
+                {
+                    float lineH = Mathf.Max(12f, stCards.lineHeight);
+                    int maxLines = 1;
+                    for (int i = 0; i < cachedPlayerCount; i++)
+                        maxLines = Mathf.Max(maxLines, PrepareCardRowLayout(cachedCards[i], cardWidth, 4));
+                    cachedCardsHeight = maxLines * lineH + 4f;
+                    cachedCardLayoutWidth = cardWidth;
+                    cardLayoutDirty = false;
+                }
+                float cardsH = cachedCardsHeight;
                 float h = 34f + 26f + ROWS.Length * rowH + cardsH + 16f;
                 float x = (Screen.width - w) / 2f;
-                float y = Mathf.Max(24f, (Screen.height - h) * 0.42f);
+                float y = Mathf.Max(24f, (Screen.height - h) * 0.5f);
 
                 GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
                     ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.88f), 0, 0);
@@ -197,7 +214,7 @@ namespace CompetitiveRounds
                     ry += rowH;
                 }
 
-                // Card lists (2 lines per player, truncated with a +N tail).
+                // Card lists (up to 4 wrapped lines, then a +N tail).
                 ry += 4f;
                 GUI.Label(new Rect(x + 12, ry, labelW, cardsH), "Cards", stLabel);
                 cx = x + 12 + labelW;
@@ -225,8 +242,9 @@ namespace CompetitiveRounds
             stLabel.normal.textColor = new Color(0.75f, 0.78f, 0.85f);
             stCell = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
             stCards = new GUIStyle(GUI.skin.label)
-            { fontSize = 11, fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperCenter, wordWrap = true };
+            { fontSize = 11, fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperCenter, wordWrap = true, richText = true };
             stCards.normal.textColor = new Color(0.7f, 0.78f, 0.9f);
+            cardSeparatorWidth = stCards.CalcSize(CARD_SEPARATOR).x;
         }
 
         private static string PlayerName(Player p)
@@ -283,6 +301,9 @@ namespace CompetitiveRounds
                 if (cards != null && cardBaseline.TryGetValue(p, out int b) && b > 0 && b <= cards.Count)
                     skip = b;
                 row.count = 0;
+                row.totalCount = 0;
+                row.visibleCount = 0;
+                row.lineCount = 1;
                 row.hasTail = false;
                 if (cards == null || cards.Count - skip <= 0)
                 {
@@ -290,26 +311,26 @@ namespace CompetitiveRounds
                     return;
                 }
                 row.message.text = "";
-                for (int i = skip; i < cards.Count && row.count < MAX_SHOWN_CARDS; i++)
+                for (int i = skip; i < cards.Count; i++)
                 {
                     if (cards[i] == null) continue;
+                    row.totalCount++;
+                    if (row.count >= MAX_SHOWN_CARDS) continue;
                     string rawName = cards[i].cardName ?? "?";
                     string canonicalName = CardRarityLookup.GetCanonicalName(rawName) ?? rawName;
                     var display = row.cards[row.count++];
                     // Uppercase only the cached GUI text; lookup identity stays canonical.
                     display.canonicalName = canonicalName;
-                    display.content.text = Trunc(rawName, 12).ToUpperInvariant();
-                }
-                int hidden = cards.Count - skip - row.count;
-                if (hidden > 0)
-                {
-                    row.hasTail = true;
-                    row.tail.text = $" <color=#888>+{hidden}</color>";
+                    display.content.text = Trunc(rawName, 12).ToUpperInvariant()
+                        .Replace("<", "(").Replace(">", ")");
                 }
             }
             catch
             {
                 row.count = 0;
+                row.totalCount = 0;
+                row.visibleCount = 0;
+                row.lineCount = 1;
                 row.hasTail = false;
                 row.message.text = "-";
             }
@@ -336,6 +357,72 @@ namespace CompetitiveRounds
             return texture;
         }
 
+        private static int PrepareCardRowLayout(CardRow row, float width, int maxLines)
+        {
+            if (!string.IsNullOrEmpty(row.message.text))
+            {
+                row.visibleCount = 0;
+                row.hasTail = false;
+                row.lineCount = 1;
+                return 1;
+            }
+
+            float separatorW = cardSeparatorWidth;
+            int chosenLines = 1;
+            for (int visible = row.count; visible >= 0; visible--)
+            {
+                int hidden = Mathf.Max(0, row.totalCount - visible);
+                bool tail = hidden > 0;
+                if (tail) row.tail.text = $" <color=#888>+{hidden}</color>";
+                int tokenCount = visible + (tail ? 1 : 0);
+                if (tokenCount == 0)
+                {
+                    row.visibleCount = 0;
+                    row.hasTail = false;
+                    row.lineCount = 1;
+                    return 1;
+                }
+
+                int line = 0;
+                float lineW = 0f;
+                for (int t = 0; t < tokenCount; t++)
+                {
+                    GUIContent content = t < visible ? row.cards[t].content : row.tail;
+                    float nameW = stCards.CalcSize(content).x;
+                    float tokenW = nameW + (t < visible - 1 ? separatorW : 0f);
+                    if (lineW > 0f && lineW + tokenW > width)
+                    {
+                        row.lineWidths[line] = lineW;
+                        line++;
+                        lineW = 0f;
+                    }
+                    row.nameWidths[t] = nameW;
+                    row.tokenWidths[t] = tokenW;
+                    row.tokenLines[t] = line;
+                    lineW += tokenW;
+                }
+                row.lineWidths[line] = lineW;
+                chosenLines = line + 1;
+                if (chosenLines <= maxLines || visible == 0)
+                {
+                    row.visibleCount = visible;
+                    row.hasTail = tail;
+                    row.lineCount = Mathf.Min(chosenLines, maxLines);
+                    int finalTokens = visible + (tail ? 1 : 0);
+                    for (int l = 0; l < row.lineCount; l++)
+                        row.lineX[l] = Mathf.Max(0f, (width - row.lineWidths[l]) * 0.5f);
+                    for (int t = 0; t < finalTokens; t++)
+                    {
+                        int tokenLine = row.tokenLines[t];
+                        row.tokenX[t] = row.lineX[tokenLine];
+                        row.lineX[tokenLine] += row.tokenWidths[t];
+                    }
+                    return row.lineCount;
+                }
+            }
+            return Mathf.Min(chosenLines, maxLines);
+        }
+
         private static Texture2D DrawCardRow(CardRow row, Rect rect, Vector2 mousePosition,
                                              Texture2D hoveredTexture)
         {
@@ -345,56 +432,32 @@ namespace CompetitiveRounds
                 return hoveredTexture;
             }
 
-            int tokenCount = row.count + (row.hasTail ? 1 : 0);
+            int tokenCount = row.visibleCount + (row.hasTail ? 1 : 0);
             if (tokenCount == 0) return hoveredTexture;
 
-            float separatorW = stCards.CalcSize(CARD_SEPARATOR).x;
-            int line = 0;
-            float lineW = 0f;
-            for (int t = 0; t < tokenCount; t++)
-            {
-                GUIContent content = t < row.count ? row.cards[t].content : row.tail;
-                float nameW = stCards.CalcSize(content).x;
-                float tokenW = nameW + (t < row.count - 1 ? separatorW : 0f);
-                if (lineW > 0f && lineW + tokenW > rect.width)
-                {
-                    row.lineWidths[line] = lineW;
-                    line++;
-                    lineW = 0f;
-                }
-                row.nameWidths[t] = nameW;
-                row.tokenWidths[t] = tokenW;
-                row.tokenLines[t] = line;
-                lineW += tokenW;
-            }
-            row.lineWidths[line] = lineW;
-            int lineCount = line + 1;
-            for (int l = 0; l < lineCount; l++)
-                row.lineX[l] = rect.x + Mathf.Max(0f, (rect.width - row.lineWidths[l]) * 0.5f);
-
+            float separatorW = cardSeparatorWidth;
             float lineH = Mathf.Max(12f, stCards.lineHeight);
             for (int t = 0; t < tokenCount; t++)
             {
-                line = row.tokenLines[t];
+                int line = row.tokenLines[t];
                 float y = rect.y + line * lineH;
                 if (y >= rect.yMax) continue;
-                float drawX = row.lineX[line];
+                float drawX = rect.x + row.tokenX[t];
                 float nameW = row.nameWidths[t];
-                if (t < row.count)
+                if (t < row.visibleCount)
                 {
                     var nameRect = new Rect(drawX, y, nameW, lineH);
                     GUI.Label(nameRect, row.cards[t].content, stCards);
                     if (nameRect.Contains(mousePosition))
                         hoveredTexture = GetCardTexture(row.cards[t].canonicalName);
                     drawX += nameW;
-                    if (t < row.count - 1)
+                    if (t < row.visibleCount - 1)
                         GUI.Label(new Rect(drawX, y, separatorW, lineH), CARD_SEPARATOR, stCards);
                 }
                 else
                 {
                     GUI.Label(new Rect(drawX, y, nameW, lineH), row.tail, stCards);
                 }
-                row.lineX[line] += row.tokenWidths[t];
             }
             return hoveredTexture;
         }

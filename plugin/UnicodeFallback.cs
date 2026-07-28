@@ -76,6 +76,28 @@ namespace CompetitiveRounds
 
                 built.Add(BuildFontAsset(latinPath, GetAssetName(latinPath)));
 
+                // Round-2 item 5: a linked player's display name is
+                // Mathematical Alphanumeric Symbols (U+1D544 etc., astral
+                // plane) — no Latin/CJK pick carries that block, so every
+                // glyph fell into _missingCodepoints and the name boxed
+                // forever. Segoe UI Symbol (or Cambria Math) covers the
+                // math/letterlike/misc-symbol blocks. Own try: a broken
+                // symbol font must not roll back the whole install.
+                try
+                {
+                    string symbolPath = FindFirstExisting(fontsDirectory, new[]
+                    {
+                        "seguisym.ttf", "cambria.ttc"
+                    });
+                    if (symbolPath != null
+                        && !string.Equals(symbolPath, latinPath, StringComparison.OrdinalIgnoreCase))
+                        built.Add(BuildFontAsset(symbolPath, GetAssetName(symbolPath)));
+                }
+                catch (Exception symEx)
+                {
+                    Plugin.Log.LogWarning("[FONT] symbol fallback skipped: " + UnwrapMessage(symEx));
+                }
+
                 // Review find 1: one first-match CJK asset is not enough. Microsoft
                 // YaHei (Chinese) carries no Hangul, so a Korean name still rendered
                 // as boxes on a PC that also had Malgun Gothic installed. Build one

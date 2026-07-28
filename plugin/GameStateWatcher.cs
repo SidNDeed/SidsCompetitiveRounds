@@ -242,6 +242,13 @@ namespace CompetitiveRounds
         // else ran) and recorded no opponents at all. They get their own bucket.
         private static int sessionOvtWins = 0;
         private static int sessionOvtLosses = 0;
+        // Bug #106: FFA games reach neither the polled OnGameOver path (banned
+        // in ffa_ rooms) nor any session counter — Session Info showed nothing
+        // after a whole FFA sitting. FFA gets its own pair (win = placed #1)
+        // plus the placement list ("1,1,2,3") for the Session Info line.
+        private static int sessionFfaWins = 0;
+        private static int sessionFfaLosses = 0;
+        private static readonly List<int> sessionFfaPlacements = new List<int>();
         private static int currentSeriesGamesWon = 0;
         private static int currentSeriesGamesLost = 0;
         private static int sessionCasualWins = 0;
@@ -523,6 +530,16 @@ namespace CompetitiveRounds
         // 1v2 session record (its own bucket — 1v2 is an unranked parallel
         // mode and must not move the 1v1 ranked or casual lines).
         public static int SessionOvtWins => sessionOvtWins;
+        public static int SessionFfaWins => sessionFfaWins;
+        public static int SessionFfaLosses => sessionFfaLosses;
+        public static string SessionFfaPlacementsCsv
+        {
+            get
+            {
+                try { return string.Join(",", sessionFfaPlacements.ConvertAll(p => p.ToString()).ToArray()); }
+                catch { return ""; }
+            }
+        }
         public static int SessionOvtLosses => sessionOvtLosses;
         // One tally per series, whichever path observes the completion first.
         // The server-confirmed path only runs on the REPORTER (lower Steam ID
@@ -622,6 +639,10 @@ namespace CompetitiveRounds
         private const string PP_SESSION_T2L           = "cr_session_tseries_losses";
         private const string PP_SESSION_OVW           = "cr_session_ovt_wins";
         private const string PP_SESSION_OVL           = "cr_session_ovt_losses";
+        private const string PP_SESSION_FFW           = "cr_session_ffa_wins";
+        private const string PP_SESSION_FFL           = "cr_session_ffa_losses";
+        private const string PP_SESSION_FFA_PLACES    = "cr_session_ffa_places";
+        private const string PP_SESSION_WL_BY_OPP_FFA = "cr_session_wl_by_opp_ffa";
         private const string PP_SESSION_WL_BY_OPP     = "cr_session_wl_by_opp";
         // The 1v2 half of each per-opponent record lives in its OWN key rather
         // than widening the line format above (review find 2): an older build
@@ -657,13 +678,17 @@ namespace CompetitiveRounds
                 PlayerPrefs.SetInt(PP_SESSION_T2L, sessionTeamSeriesLosses);
                 PlayerPrefs.SetInt(PP_SESSION_OVW, sessionOvtWins);
                 PlayerPrefs.SetInt(PP_SESSION_OVL, sessionOvtLosses);
+                PlayerPrefs.SetInt(PP_SESSION_FFW, sessionFfaWins);
+                PlayerPrefs.SetInt(PP_SESSION_FFL, sessionFfaLosses);
+                PlayerPrefs.SetString(PP_SESSION_FFA_PLACES, SessionFfaPlacementsCsv);
                 // Encode WL dict: "name1=rW,rL,cW,cL|name2=..." — EXACTLY four
                 // fields, unchanged, so an older build can still read it. The
                 // 1v2 pair rides a separate key below.
                 // Replace | = , in display names with safe placeholders before joining.
                 var sbWl = new System.Text.StringBuilder();
                 var sbWlV = new System.Text.StringBuilder();
-                bool firstWl = true, firstWlV = true;
+                var sbWlF = new System.Text.StringBuilder();
+                bool firstWl = true, firstWlV = true, firstWlF = true;
                 foreach (var kv in sessionWLByOpponent)
                 {
                     if (kv.Value == null || kv.Value.Length < 4) continue;
@@ -683,9 +708,18 @@ namespace CompetitiveRounds
                         sbWlV.Append(name).Append('=').Append(vw).Append(',').Append(vl);
                         firstWlV = false;
                     }
+                    int fw = kv.Value.Length > 6 ? kv.Value[6] : 0;
+                    int fl = kv.Value.Length > 7 ? kv.Value[7] : 0;
+                    if (fw != 0 || fl != 0)
+                    {
+                        if (!firstWlF) sbWlF.Append('|');
+                        sbWlF.Append(name).Append('=').Append(fw).Append(',').Append(fl);
+                        firstWlF = false;
+                    }
                 }
                 PlayerPrefs.SetString(PP_SESSION_WL_BY_OPP, sbWl.ToString());
                 PlayerPrefs.SetString(PP_SESSION_WL_BY_OPP_1V2, sbWlV.ToString());
+                PlayerPrefs.SetString(PP_SESSION_WL_BY_OPP_FFA, sbWlF.ToString());
                 var sbT = new System.Text.StringBuilder();
                 bool firstT = true;
                 foreach (var kv in sessionTimeByOpponent)
@@ -738,6 +772,11 @@ namespace CompetitiveRounds
                 sessionTeamSeriesLosses  = PlayerPrefs.GetInt(PP_SESSION_T2L, 0);
                 sessionOvtWins           = PlayerPrefs.GetInt(PP_SESSION_OVW, 0);
                 sessionOvtLosses         = PlayerPrefs.GetInt(PP_SESSION_OVL, 0);
+                sessionFfaWins           = PlayerPrefs.GetInt(PP_SESSION_FFW, 0);
+                sessionFfaLosses         = PlayerPrefs.GetInt(PP_SESSION_FFL, 0);
+                sessionFfaPlacements.Clear();
+                foreach (var s in (PlayerPrefs.GetString(PP_SESSION_FFA_PLACES, "") ?? "").Split(','))
+                    if (int.TryParse(s, out int pl) && pl > 0) sessionFfaPlacements.Add(pl);
                 sessionWLByOpponent.Clear();
                 foreach (var entry in (PlayerPrefs.GetString(PP_SESSION_WL_BY_OPP, "") ?? "").Split('|'))
                 {
@@ -780,6 +819,25 @@ namespace CompetitiveRounds
                         sessionWLByOpponent[name] = rec = grown;
                     }
                     rec[4] = vw2; rec[5] = vl2;
+                }
+                // FFA half (bug #106), keyed by the same sanitized name.
+                foreach (var entry in (PlayerPrefs.GetString(PP_SESSION_WL_BY_OPP_FFA, "") ?? "").Split('|'))
+                {
+                    if (string.IsNullOrEmpty(entry)) continue;
+                    int eq = entry.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string name = entry.Substring(0, eq);
+                    var parts = entry.Substring(eq + 1).Split(',');
+                    if (parts.Length != 2) continue;
+                    if (!int.TryParse(parts[0], out int fw2) || !int.TryParse(parts[1], out int fl2)) continue;
+                    int[] rec;
+                    if (!sessionWLByOpponent.TryGetValue(name, out rec) || rec == null || rec.Length < 8)
+                    {
+                        var grown = new int[8];
+                        if (rec != null) Array.Copy(rec, grown, Math.Min(rec.Length, 8));
+                        sessionWLByOpponent[name] = rec = grown;
+                    }
+                    rec[6] = fw2; rec[7] = fl2;
                 }
                 sessionTimeByOpponent.Clear();
                 foreach (var entry in (PlayerPrefs.GetString(PP_SESSION_TIME_BY_OPP, "") ?? "").Split('|'))
@@ -4054,6 +4112,58 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] OnFfaMatchStarted: {ex.Message}"); }
         }
 
+        /// <summary>Bug #106: FFA session bookkeeping. Win = placed #1; every
+        /// other roster member (leavers included) gets a per-opponent entry in
+        /// slots 6/7 of the shared record. Placement list feeds the Session
+        /// Info line ("placements 1,1,2").</summary>
+        private static void RecordFfaSession(int myPlace, bool localWon)
+        {
+            if (localWon) sessionFfaWins++; else sessionFfaLosses++;
+            if (myPlace > 0 && sessionFfaPlacements.Count < 200) sessionFfaPlacements.Add(myPlace);
+            var names = new List<string>();
+            try
+            {
+                // Duplicate display names get the same "(2)" disambiguation
+                // as the 1v1 path (review find 16 — two opponents both named
+                // "Player" would double-increment one record).
+                void AddName(string raw)
+                {
+                    string nm = StripRichText(raw ?? "");
+                    if (string.IsNullOrEmpty(nm)) return;
+                    if (names.Contains(nm))
+                    {
+                        int dup = 2;
+                        while (names.Contains($"{nm} ({dup})")) dup++;
+                        nm = $"{nm} ({dup})";
+                    }
+                    names.Add(nm);
+                }
+                foreach (var pp in PhotonNetwork.PlayerList ?? new Photon.Realtime.Player[0])
+                {
+                    if (pp == null || pp.IsLocal) continue;
+                    AddName(pp.NickName);
+                }
+                foreach (var kvL in FfaMode.Leavers)
+                {
+                    string nm = StripRichText(kvL.Value.displayName ?? "");
+                    if (!string.IsNullOrEmpty(nm) && !names.Contains(nm)) AddName(nm);
+                }
+            }
+            catch { }
+            foreach (var raw in names)
+            {
+                string key = raw;
+                if (!sessionWLByOpponent.TryGetValue(key, out var rec) || rec == null || rec.Length < 8)
+                {
+                    var grown = new int[8];
+                    if (rec != null) Array.Copy(rec, grown, Math.Min(rec.Length, 8));
+                    sessionWLByOpponent[key] = rec = grown;
+                }
+                if (localWon) rec[6]++; else rec[7]++;
+            }
+            SaveSessionState();
+        }
+
         /// <summary>Own-pick bookkeeping for the FFA pick phase. The silent
         /// apply path deliberately bypasses vanilla's "Picking Card:" log, so
         /// the standard intercept never fires — FfaMode calls this at confirm
@@ -4129,6 +4239,10 @@ namespace CompetitiveRounds
             catch { }
             Plugin.Log.LogInfo($"[POLL] === FFA Match Over === Winner: team {winnerTeam} " +
                                $"(you placed #{myPlace}{(localWon ? " - VICTORY" : "")})");
+            // Session Info tally (bug #106): FFA never reaches the polled
+            // OnGameOver path, so its session bookkeeping lives here.
+            try { RecordFfaSession(myPlace, localWon); } catch (Exception ex)
+            { Plugin.Log.LogWarning($"[SESSION] ffa record failed: {ex.Message}"); }
             CompetitiveUI.ShowNotification(localWon
                 ? "FFA VICTORY!"
                 : $"FFA over - you placed #{myPlace}", localWon ? Color.green : new Color(0.7f, 0.85f, 1f), 6f);
@@ -4262,6 +4376,12 @@ namespace CompetitiveRounds
                     points = kv.Value.pointsTotal,
                     kills = kv.Value.kills,
                     leftEarly = true, fps = 0,
+                    // Absent = they left in an EARLIER game of the sitting;
+                    // they hold their roster slot but were never in this
+                    // game (server skips rating/XP). A leaver DURING this
+                    // game is absent=false and still gets rated — leaving
+                    // at 0 score must not dodge the loss.
+                    absent = kv.Value.leftGameNumber != FfaMode.GameNumber,
                     cards = FfaMode.PickHistoryFor(kv.Value.slot),
                     telemetry = null,
                 });
@@ -4295,7 +4415,7 @@ namespace CompetitiveRounds
             }
 
             ApiClient.ReportFfaMatch(lobbyId, reportRoomId, photonRegion, duration,
-                entries, winnerSteam, localSteamId);
+                entries, winnerSteam, localSteamId, FfaMode.TimelineString);
             Plugin.Log.LogInfo($"[FFA-REPORT] submitted lobby={lobbyId} n={entries.Count} winner={winnerSteam}");
             return true;
         }
@@ -4636,6 +4756,19 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Bug #101: a first-time user earned Instinct from PUBLIC
+                // QUICKPLAY despite scrolling — both violation detectors
+                // (Plugin's RPCA_SetCurrentSelected + pick postfixes) are
+                // gated on IsCompetitiveRoom, so outside competitive rooms
+                // the "untouched" flags can only ever look clean. The same
+                // asymmetry applies to every input-tracked achievement
+                // (Pacifist/Immovable/Grounded). Achievements are SCR feats:
+                // evaluate them only where the tracking actually runs.
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom())
+                {
+                    Plugin.Log.LogInfo("[ACH] Skipping — not a competitive room (public/sandbox games award nothing)");
+                    return;
+                }
                 int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
                 int oppR = localTeamId == 0 ? p2Rounds : p1Rounds;
 

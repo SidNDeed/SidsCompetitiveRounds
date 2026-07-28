@@ -114,14 +114,23 @@ namespace CompetitiveRounds
 - Placement uses points, then all half points earned
   (spent ones included), then total kills.
 - Ties share a place using competition order: 1, 2, 2, 4.
-- Rating compares you with up to 4 placement-adjacent players.
-  A tied placement counts as a draw.
+- Your rating is scored against the players placed nearest
+  to you (up to 4 of them), because beating or losing to a
+  neighbor says the most about your skill. This also keeps
+  one game from swinging your rating several times harder
+  in a 10-player lobby than in a 3-player one.
+- A tied placement counts as a draw. New ratings move fast
+  and settle down as you play more (standard Glicko).
 
 <color=#FFD94D><b>REWARDS</b></color>
 
 - XP starts at 300, plus 60 per player placed below you.
-- First place multiplies that total by x1.5.
+- Winning multiplies that total: x1.5 in a 3-player game,
+  growing with lobby size up to x5 in a full 10.
 - XP converts to Gold at 100 XP = 1 Gold.
+- Spectators can bet Gold on FFA lobbies from the FFA tab.
+  Payouts scale with lobby size (up to x5) and use FFA
+  ratings; uncertain ratings restrict betting.
 
 <color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>
 

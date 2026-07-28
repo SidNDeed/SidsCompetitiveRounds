@@ -12,11 +12,14 @@ from pydantic import BaseModel, Field, field_validator
 # ── Match Submission ───────────────────────────────────────────
 
 class CardPick(BaseModel):
-    """A single card picked during a match."""
+    """A single card picked during a match. `rolled` is FFA-only (pushed out
+    by the rolling 5-card cap; rendered red in the Recent panel) — additive
+    default so 1v1/2v2/1v2 payloads are untouched."""
     card_name: str = Field(..., max_length=64, examples=["Buckshot"])
     card_rarity: str | None = Field(None, max_length=16, examples=["Common"])
     pick_order: int = Field(..., ge=1, examples=[1])
     round_number: int = Field(..., ge=1, examples=[1])
+    rolled: bool = False
 
 
 class CardOfferEntry(BaseModel):
@@ -966,6 +969,11 @@ class FfaPlayerEntry(BaseModel):
     # OUTSIDE the frozen ffa: HMAC canonical; 0 from pre-kills clients.
     kills: int = Field(0, ge=0, le=500)
     left_early: bool = False
+    # True = left in an EARLIER game of the sitting (roster ghost: holds the
+    # slot for the frozen-roster check, never rated/rewarded). False +
+    # left_early = left DURING this game — still rated, so leaving at zero
+    # score can't dodge the loss.
+    absent: bool = False
     fps: int | None = Field(None, ge=0, le=10000)
     cards: list[CardPick] = Field(default_factory=list)
     telemetry: TeamPlayerTelemetry | None = None
@@ -990,6 +998,10 @@ class FfaMatchReport(BaseModel):
     hmac_signature: str | None = Field(None, max_length=160)
     is_ranked: bool = True
     reported_by_steam_id: str = Field(..., max_length=20)
+    # Compact half-point event list "slot[R][G],slot,..." from the reporter's
+    # engine (score-progression hover graph). Outside the frozen HMAC
+    # canonical; absent from pre-timeline clients.
+    timeline: str | None = Field(None, max_length=2000)
 
 
 class FfaMatchResponse(BaseModel):
