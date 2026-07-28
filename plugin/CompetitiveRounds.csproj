@@ -98,6 +98,13 @@
       <HintPath>$(ManagedDir)\UnityEngine.ParticleSystemModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- ForceMode2D for the FFA map-scale OutOfBounds replica (FfaMapScale.cs)
+         — the enum appears in HealthHandler.CallTakeForce's signature, so the
+         string-GetComponent trick can't cover it. Always loaded by the game. -->
+    <Reference Include="UnityEngine.Physics2DModule">
+      <HintPath>$(ManagedDir)\UnityEngine.Physics2DModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <!-- Unity Post-Processing Stack v2 — used by the custom map color profiles
          (CustomMapColors.cs) so we can author ColorGrading effects at runtime
          without bundling pre-made PostProcessProfile assets. -->

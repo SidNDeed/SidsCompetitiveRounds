@@ -7298,13 +7298,17 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             // 2000 green, 2400 red. Only lines inside the current y-range draw.
             if (useElo)
             {
-                float[] refVals = { 1500f, 1600f, 1800f, 2000f, 2400f };
+                // July 28 rank reorg: the reference lines are the rank-tier
+                // boundaries — 1139 is the TOP of Beginner I (per Sid's spec);
+                // 1500/1675/1980/2330 are the Intermediate/Advanced/Master/GM
+                // floors — colored to match the Discord rank families.
+                float[] refVals = { 1139f, 1500f, 1675f, 1980f, 2330f };
                 Color[] refCols = {
-                    new Color(0.63f, 0.42f, 0.84f),   // purple
-                    new Color(0.90f, 0.72f, 0.42f),   // light tan/orange
-                    new Color(0.35f, 0.60f, 0.90f),   // blue
-                    new Color(0.34f, 0.75f, 0.35f),   // green
-                    new Color(0.88f, 0.35f, 0.35f),   // red
+                    new Color(0.58f, 0.65f, 0.65f),   // Beginner grey
+                    new Color(0.90f, 0.49f, 0.13f),   // Intermediate orange
+                    new Color(0.20f, 0.60f, 0.86f),   // Advanced blue
+                    new Color(0.18f, 0.80f, 0.44f),   // Master green
+                    new Color(0.95f, 0.77f, 0.06f),   // Grand Master gold
                 };
                 float lastLabelY = -999f;
                 for (int ri = 0; ri < refVals.Length; ri++)

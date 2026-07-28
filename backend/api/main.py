@@ -119,32 +119,36 @@ SERIES_REUSE_WINDOW_MIN = int(os.getenv("SERIES_REUSE_WINDOW_MIN", "25"))
 # rank column, the dynamic 'Current Rank' title, and rank colors. Colors are
 # synced from the live Discord roles into rank_role_colors by the bot; the
 # fallback palette below covers names the bot hasn't pushed yet.
+# July 28 rank reorganization (Stan's proposal): base-tier floors move to
+# Beginner 0 / Intermediate 1500 / Advanced 1675 / Master 1980 / GM 2330,
+# with wider sub-tiers low and the numbered "I" spelled out on every tier.
+# Keep names in lockstep with the bot's RANK_ROLES (range suffix stripped).
 RANK_TIERS = [
     (2610, "Grand Master V"),
     (2540, "Grand Master IV"),
     (2470, "Grand Master III"),
     (2400, "Grand Master II"),
-    (2330, "Grand Master"),
-    (2270, "Master V"),
-    (2210, "Master IV"),
-    (2150, "Master III"),
-    (2090, "Master II"),
-    (2030, "Master"),
-    (1980, "Advanced V"),
-    (1930, "Advanced IV"),
-    (1880, "Advanced III"),
-    (1830, "Advanced II"),
-    (1780, "Advanced"),
-    (1740, "Intermediate V"),
-    (1700, "Intermediate IV"),
-    (1660, "Intermediate III"),
-    (1620, "Intermediate II"),
-    (1580, "Intermediate"),
-    (1564, "Beginner V"),
-    (1548, "Beginner IV"),
-    (1532, "Beginner III"),
-    (1516, "Beginner II"),
-    (0,    "Beginner"),
+    (2330, "Grand Master I"),
+    (2260, "Master V"),
+    (2190, "Master IV"),
+    (2120, "Master III"),
+    (2050, "Master II"),
+    (1980, "Master I"),
+    (1910, "Advanced V"),
+    (1845, "Advanced IV"),
+    (1780, "Advanced III"),
+    (1725, "Advanced II"),
+    (1675, "Advanced I"),
+    (1630, "Intermediate V"),
+    (1590, "Intermediate IV"),
+    (1555, "Intermediate III"),
+    (1525, "Intermediate II"),
+    (1500, "Intermediate I"),
+    (1440, "Beginner V"),
+    (1360, "Beginner IV"),
+    (1260, "Beginner III"),
+    (1140, "Beginner II"),
+    (0,    "Beginner I"),
 ]
 
 RANK_FALLBACK_COLORS = {
@@ -172,9 +176,9 @@ def _rank_name_for(rating: float | None) -> str:
 # series-reward doubling (see the series-completion block in submit_match).
 TIER_MULTIPLIERS = [
     (2330, 3.0, "Grand Master"),
-    (2030, 2.5, "Master"),
-    (1780, 2.0, "Advanced"),
-    (1580, 1.5, "Intermediate"),
+    (1980, 2.5, "Master"),
+    (1675, 2.0, "Advanced"),
+    (1500, 1.5, "Intermediate"),
     (0,    1.0, "Beginner"),
 ]
 
@@ -552,6 +556,17 @@ async def team_queue_cleanup_loop():
     while True:
         try:
             await _aio.sleep(60)
+        except Exception:
+            continue
+        # July 28: each sweep runs in its OWN transaction with its own guard.
+        # The previous single-try body meant one broken statement starved every
+        # sweep after it — the stale-poll DELETE below shipped with FOR UPDATE
+        # over a LEFT JOIN, asyncpg rejects locking the nullable side of an
+        # outer join, and the resulting per-tick exception killed BOTH deletes
+        # and rolled back the series-cancel for a full day (NotNic's ghost row
+        # sat in the 2v2 tab for 285 minutes; stale manual rows blocked the
+        # custom-lobby panels the same way).
+        try:
             async with async_session() as db:
                 stale_series = await db.execute(
                     text("""
@@ -570,7 +585,7 @@ async def team_queue_cleanup_loop():
                     # discovery SELECT above is unlocked — a poll can refresh a
                     # 61s-stale heartbeat between it and this UPDATE. Cancel
                     # only if NO member row is fresh right now.
-                    await db.execute(
+                    cancelled = await db.execute(
                         text("""UPDATE team_series ts
                                SET status='cancelled', invalidated_at=NOW(),
                                    invalidation_reason='stale_queue_rows'
@@ -580,9 +595,29 @@ async def team_queue_cleanup_loop():
                                  AND NOT EXISTS (
                                      SELECT 1 FROM team_queue tq2
                                       WHERE tq2.series_id = ts.id
-                                        AND tq2.last_polled >= NOW() - INTERVAL '60 seconds')"""),
+                                        AND tq2.last_polled >= NOW() - INTERVAL '60 seconds')
+                               RETURNING ts.id"""),
                         {"sid": sid},
                     )
+                    # Dispose the cancelled series' queue rows IN THE SAME
+                    # transaction (Codex round-3 find 1): committing the cancel
+                    # separately opened a window where a returning client's
+                    # poll — which never used to check series status — could
+                    # ready_join a cancelled, unreportable series, and its
+                    # freshly-refreshed rows then dodged the stale sweep
+                    # forever. Series-before-members lock order matches
+                    # _lock_queue_group_for_player, so no inversion.
+                    if cancelled.fetchall():
+                        await db.execute(
+                            text("DELETE FROM team_queue WHERE series_id = :sid"),
+                            {"sid": sid},
+                        )
+                        print(f"[TEAM-QUEUE-CLEANUP] stale series cancelled + rows cleared: {sid}")
+                await db.commit()
+        except Exception as e:
+            print(f"[TEAM-QUEUE-CLEANUP] series-cancel error: {e}")
+        try:
+            async with async_session() as db:
                 # Stale-poll cleanup, SPLIT by whether the row still references
                 # an ACTIVE series (Codex review find refining the 90s change):
                 # - Rows on an active series keep the 90s threshold — they must
@@ -594,40 +629,36 @@ async def team_queue_cleanup_loop():
                 #   30s — no cancel-ordering concern, and a cancelled lock's
                 #   clients recover as fast as before instead of polling a
                 #   dead matched state for up to 90s.
+                # FOR UPDATE OF tq: lock ONLY the team_queue side — plain
+                # FOR UPDATE here is an asyncpg FeatureNotSupportedError
+                # ("cannot be applied to the nullable side of an outer join").
+                # No join-age filter here: staleness is staleness. The old
+                # `joined_at >= 30 min` partition guard relied on the absolute
+                # timeout below catching EVERY older row; now that the timeout
+                # is searching-only, an old matched husk must still die here
+                # once its polls stop.
                 stale_q = await db.execute(
                     text("""DELETE FROM team_queue
                         WHERE player_id IN (
                             SELECT tq.player_id FROM team_queue tq
                             LEFT JOIN team_series ts ON ts.id = tq.series_id
-                            WHERE tq.joined_at >= NOW() - INTERVAL '30 minutes'
-                              AND (
-                                    tq.last_polled < NOW() - INTERVAL '90 seconds'
-                                 OR (tq.last_polled < NOW() - INTERVAL '30 seconds'
-                                     AND (tq.series_id IS NULL
-                                          OR ts.status IS DISTINCT FROM 'active'))
-                              )
-                            FOR UPDATE SKIP LOCKED
+                            WHERE tq.last_polled < NOW() - INTERVAL '90 seconds'
+                               OR (tq.last_polled < NOW() - INTERVAL '30 seconds'
+                                   AND (tq.series_id IS NULL
+                                        OR ts.status IS DISTINCT FROM 'active'))
+                            FOR UPDATE OF tq SKIP LOCKED
                         )
                         RETURNING steam_id, display_name, status, series_id""")
                 )
                 stale_rows = stale_q.fetchall()
-                # Absolute-timeout cleanup (joined > 30 min ago, never matched)
-                timeout_q = await db.execute(
-                    text("""DELETE FROM team_queue
-                        WHERE player_id IN (
-                            SELECT player_id FROM team_queue
-                            WHERE joined_at < NOW() - INTERVAL '30 minutes'
-                            FOR UPDATE SKIP LOCKED
-                        )
-                        RETURNING steam_id, display_name, status, series_id""")
-                )
-                timeout_rows = timeout_q.fetchall()
                 for r in stale_rows:
                     sid_part = f", series_id={r[3]}" if r[3] else ""
                     print(f"[TEAM-QUEUE-CLEANUP] Stale poll: {r[1]} status={r[2]}{sid_part}")
-                for r in timeout_rows:
-                    sid_part = f", series_id={r[3]}" if r[3] else ""
-                    print(f"[TEAM-QUEUE-CLEANUP] Absolute timeout: {r[1]} status={r[2]}{sid_part}")
+                # NOTE (Codex round-3 find 2): the 30-min cap for LIVE rows is
+                # team_queue_poll's job (explicit 'expired' -> client toast).
+                # A janitor-side absolute DELETE could race a live poller into
+                # a bare not_in_queue; non-polling rows already die in the
+                # 30/90s stale sweep above.
                 await db.commit()
         except Exception as e:
             print(f"[TEAM-QUEUE-CLEANUP] Error: {e}")
@@ -644,35 +675,43 @@ async def queue_cleanup_loop():
     while True:
         try:
             await _aio.sleep(60)
+        except Exception:
+            continue
+        # July 28: per-sweep transactions + guards, mirroring
+        # team_queue_cleanup_loop — one broken sweep must never starve the
+        # ovt/ffa janitors behind it (that failure shape killed the whole
+        # 2v2 loop for a day).
+        try:
             async with async_session() as db:
                 # Separate the two cleanup reasons so we can attribute each one.
+                # No join-age filter on the stale branch (staleness is
+                # staleness); the absolute cap below is searching-only so a
+                # match that forms at minute 29.9 can't have its live
+                # assembly deleted mid-ready-up.
                 stale_result = await db.execute(
                     text("""DELETE FROM ranked_queue
                         WHERE player_id IN (
                             SELECT player_id FROM ranked_queue
                             WHERE last_polled < NOW() - INTERVAL '30 seconds'
-                              AND joined_at >= NOW() - INTERVAL '30 minutes'
                             FOR UPDATE SKIP LOCKED
                         )
                         RETURNING steam_id, display_name, status, matched_with""")
                 )
                 stale_rows = stale_result.fetchall()
-                timeout_result = await db.execute(
-                    text("""DELETE FROM ranked_queue
-                        WHERE player_id IN (
-                            SELECT player_id FROM ranked_queue
-                            WHERE joined_at < NOW() - INTERVAL '30 minutes'
-                            FOR UPDATE SKIP LOCKED
-                        )
-                        RETURNING steam_id, display_name, status, matched_with""")
-                )
-                timeout_rows = timeout_result.fetchall()
                 for r in stale_rows:
                     partner = f", matched_with={r[3]}" if r[3] else ""
                     print(f"[QUEUE-CLEANUP] Stale poll (>30s no poll): {r[1]} status={r[2]}{partner}")
-                for r in timeout_rows:
-                    partner = f", matched_with={r[3]}" if r[3] else ""
-                    print(f"[QUEUE-CLEANUP] Absolute timeout (>30min in queue): {r[1]} status={r[2]}{partner}")
+                # NOTE (Codex round-3 find 2): the 30-min cap for LIVE rows is
+                # the poll endpoint's job (explicit 'expired' -> client toast).
+                # A janitor-side absolute DELETE could race a live poller and
+                # surface as a bare not_in_queue; non-polling rows already die
+                # in the 30s stale sweep above, so the old absolute-timeout
+                # branch was pure dead code with a race attached.
+                await db.commit()
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] 1v1 sweep error: {e}")
+        try:
+            async with async_session() as db:
                 # 1v2 orphan sweep (July 17 round 3): the ovt cleanup paths
                 # (ghost prune, husk sweep, dead-lock reset) all lived inside
                 # ovt_queue_poll — with ZERO 1v2 pollers nothing ever ran, so
@@ -753,6 +792,18 @@ async def queue_cleanup_loop():
                         RETURNING steam_id, status"""))
                 for r in husk_result.fetchall():
                     print(f"[OVT-CLEANUP] Husk row swept: {r[0]} status={r[1]}")
+                # NOTE (Codex round-3 find 2): the 30-min searching cap for
+                # 1v2 lives ONLY in ovt_queue_poll (which returns an explicit
+                # 'expired'). A janitor-side DELETE here would race the poll
+                # and surface as not_in_queue — which the client treats as
+                # ghost-prune recovery and AUTO-REJOINS, defeating the cap.
+                # Live rows are the poll's job; dead rows die in the sweeps
+                # above.
+                await db.commit()
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] ovt sweep error: {e}")
+        try:
+            async with async_session() as db:
                 # ── FFA janitor (same nobody-is-polling contract as the ovt
                 # sweeps above; fine-grained cleanup lives in ffa_queue_poll).
                 # Zero-game dead lobbies cancel; lobbies WITH games close as
@@ -805,9 +856,13 @@ async def queue_cleanup_loop():
                         RETURNING steam_id, status"""))
                 for r in ffa_husks.fetchall():
                     print(f"[FFA-CLEANUP] Husk row swept: {r[0]} status={r[1]}")
+                # NOTE (Codex round-3 find 2): the 30-min searching cap for
+                # FFA lives ONLY in ffa_queue_poll ('expired') — a janitor
+                # DELETE would race the poll into the client's auto-rejoin
+                # not_in_queue path and defeat the cap. See the ovt note.
                 await db.commit()
         except Exception as e:
-            print(f"[QUEUE-CLEANUP] Error: {e}")
+            print(f"[QUEUE-CLEANUP] ffa sweep error: {e}")
 
 
 app = FastAPI(
@@ -10381,7 +10436,7 @@ ACHIEVEMENT_DEFS = {
     "pacifist":             {"name": "Pacifist",            "desc": "Win a game without firing a single shot"},
     "immovable_object":     {"name": "Immovable Object",    "desc": "Win a game without moving or jumping"},
     # v1.26.7
-    "master_rank":          {"name": "Master",              "desc": "Reach 2030 rating in ranked (1v1 or 2v2)"},
+    "master_rank":          {"name": "Master",              "desc": "Reach 1980 rating in ranked (1v1 or 2v2)"},
     "team_sweep":           {"name": "Tag Team Sweep",      "desc": "Win a 2v2 game 5-0"},
     # v1.29
     "grand_master":         {"name": "Grand Master",        "desc": "Reach 2330 rating in ranked (1v1 or 2v2)"},
@@ -10432,7 +10487,9 @@ ACHIEVEMENT_DEFS = {
 }
 
 # Master rank threshold — applies to both 1v1 and 2v2 Glicko rating.
-MASTER_RANK_THRESHOLD = 2030.0
+# July 28: 2030 -> 1980 with the rank reorganization (Master I floor).
+# Migration 160 backfills the achievement for players already >= 1980.
+MASTER_RANK_THRESHOLD = 1980.0
 GRAND_MASTER_THRESHOLD = 2330.0
 
 # Slayer achievements: beat one of these players in a ranked series.
@@ -12160,8 +12217,13 @@ async def team_queue_leave(request: Request, steam_id: str = Query(...), db: Asy
 
 @app.get("/api/v1/team/queue/count", tags=["Team Queue"])
 async def team_queue_count(db: AsyncSession = Depends(get_db)):
-    """Lightweight: live queue size for the F5 tab "X searching" banner."""
-    result = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status = 'searching'"))
+    """Lightweight: live queue size for the F5 tab "X searching" banner.
+    90s freshness filter (July 28): a ghost row the janitor hasn't swept yet
+    must not inflate the banner — that's how a 285-minute-old husk read as a
+    live queuer on the 2v2 tab while the cleanup loop was down."""
+    result = await db.execute(text(
+        "SELECT COUNT(*) FROM team_queue WHERE status = 'searching'"
+        " AND last_polled > NOW() - INTERVAL '90 seconds'"))
     searching = result.scalar() or 0
     return {"searching": searching}
 
@@ -12172,6 +12234,11 @@ async def team_queue_list(db: AsyncSession = Depends(get_db)):
     "who else is queueing" panels on the F5 2v2 tab. Returns the unified
     `queuers` list (legacy) PLUS split `auto` / `manual` buckets so the
     client can render two side-by-side panels without re-filtering."""
+    # 90s freshness filter (July 28): only players whose client is actually
+    # polling belong on the panel. Ghost rows (crashed clients the janitor
+    # hasn't swept yet) showed as phantom queuers — NotNic's dead row sat on
+    # the tab reading "285 minutes" and made custom lobbies look fuller than
+    # they were.
     result = await db.execute(
         text("""
             SELECT tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation, tq.completed_series,
@@ -12180,6 +12247,7 @@ async def team_queue_list(db: AsyncSession = Depends(get_db)):
                    tq.manual_pick_enabled, tq.preferred_team, tq.queue_type
             FROM team_queue tq
             WHERE tq.status IN ('searching', 'matched', 'ready')
+              AND tq.last_polled > NOW() - INTERVAL '90 seconds'
             ORDER BY tq.joined_at ASC
         """),
     )
@@ -12243,7 +12311,9 @@ async def team_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = D
         """), {"secs": seconds},
     )
     rows = result.mappings().all()
-    cnt_q = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status='searching' AND queue_type='auto'"))
+    cnt_q = await db.execute(text(
+        "SELECT COUNT(*) FROM team_queue WHERE status='searching' AND queue_type='auto'"
+        " AND last_polled > NOW() - INTERVAL '90 seconds'"))
     cnt = cnt_q.scalar() or 0
     return {
         "joins": [
@@ -12309,6 +12379,27 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
 
     # ── MATCHED / READY state ────────────────────────────────
     if me["status"] in ("matched", "ready") and me["series_id"]:
+        # Authoritative series-status check (Codex round-3 find 1, ovt
+        # dead-lock-reset pattern): rows must never keep serving a series
+        # that is no longer active (janitor cancel, admin action). The group
+        # lock we hold covers the series row, so this read can't race a
+        # concurrent cancel.
+        srow_chk = (await db.execute(
+            text("SELECT status FROM team_series WHERE id = :sid"),
+            {"sid": me["series_id"]},
+        )).scalar_one_or_none()
+        if srow_chk != "active":
+            await db.execute(
+                text("""UPDATE team_queue
+                       SET status='searching', series_id=NULL, team_assigned=NULL,
+                           room_name=NULL, room_region=NULL, ready=false,
+                           matched_at=NULL, joined_at=NOW()
+                       WHERE series_id = :sid"""),
+                {"sid": me["series_id"]},
+            )
+            await db.commit()
+            print(f"[TEAM-QUEUE] non-active series {me['series_id']} ({srow_chk}) — group reset to searching")
+            return TeamQueuePollResponse(status="searching")
         # Pull the other 3 in this series
         peers_q = await db.execute(
             text("""
@@ -12568,8 +12659,12 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             )
 
     if len(others) < 3:
-        # Not enough — count searching, return.
-        cnt_q = await db.execute(text("SELECT COUNT(*) FROM team_queue WHERE status='searching'"))
+        # Not enough — count searching, return. Freshness-filtered so the
+        # "X searching" banner and the lock diagnostic below never count
+        # ghost rows the janitor hasn't swept yet.
+        cnt_q = await db.execute(text(
+            "SELECT COUNT(*) FROM team_queue WHERE status='searching'"
+            " AND last_polled > NOW() - INTERVAL '90 seconds'"))
         cnt = cnt_q.scalar() or 0
         # Diagnostic: when the searching queue has >= 4 players but our lock
         # only finds < 3 candidates from THIS poller's perspective, something
@@ -14184,6 +14279,17 @@ async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
              FOR UPDATE SKIP LOCKED)
     """))
 
+    # Absolute 30-min searching cap (July 28, Sid item 1 — parity with the
+    # 1v1/2v2 polls). Explicit 'expired' status so the client shows WHY the
+    # queue ended instead of auto-rejoining on a bare not_in_queue.
+    if me["status"] == "searching" and me["joined_at"] is not None:
+        _waited = (datetime.now(timezone.utc) - me["joined_at"]).total_seconds()
+        if _waited > 30 * 60:
+            await db.execute(text("DELETE FROM ovt_queue WHERE player_id = :pid"),
+                             {"pid": me["player_id"]})
+            await db.commit()
+            return {"status": "expired", "queue_count": 0}
+
     # Already locked → report my slot + lobby.
     if me["status"] in ("ready_join", "matched") and me["series_id"] is not None:
         # Self-heal a dead lock (learning #33 family — the state machine must
@@ -15210,6 +15316,17 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                AND matched_at < NOW() - INTERVAL '3 hours'
              FOR UPDATE SKIP LOCKED)
     """))
+
+    # Absolute 30-min searching cap (July 28, Sid item 1 — parity with the
+    # 1v1/2v2 polls). Explicit 'expired' status so the client shows WHY the
+    # queue ended instead of auto-rejoining on a bare not_in_queue.
+    if me["status"] == "searching" and me["joined_at"] is not None:
+        _waited = (datetime.now(timezone.utc) - me["joined_at"]).total_seconds()
+        if _waited > 30 * 60:
+            await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
+                             {"pid": me["player_id"]})
+            await db.commit()
+            return {"status": "expired", "queue_count": 0}
 
     # Already locked → self-heal dead locks, else report the lobby.
     if me["status"] == "ready_join" and me["series_id"] is not None:

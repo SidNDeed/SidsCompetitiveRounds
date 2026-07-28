@@ -78,34 +78,72 @@ TROPHY_ROLE_PART = os.getenv("TROPHY_ROLE_PARTICIPANT", "SCR Tournament Particip
 TROPHY_ROLE_PART2 = os.getenv("TROPHY_ROLE_PARTICIPANT2", "SCR Tournament Participant 2")
 TROPHY_X2_SUFFIX = " (x2)"
 
+# July 28 rank reorganization (Stan's proposal): base-tier floors move to
+# Intermediate 1500 / Advanced 1675 / Master 1980 (GM stays 2330), sub-tiers
+# widen toward the bottom, and tier I is spelled out on every rank. Must stay
+# in lockstep with main.py's RANK_TIERS (which strips the range suffix).
 RANK_ROLES = [
     (2610, "Grand Master V 2610+"),
     (2540, "Grand Master IV 2540-2609"),
     (2470, "Grand Master III 2470-2539"),
     (2400, "Grand Master II 2400-2469"),
-    (2330, "Grand Master 2330-2399"),
-    (2270, "Master V 2270-2329"),
-    (2210, "Master IV 2210-2269"),
-    (2150, "Master III 2150-2209"),
-    (2090, "Master II 2090-2149"),
-    (2030, "Master 2030-2089"),
-    (1980, "Advanced V 1980-2029"),
-    (1930, "Advanced IV 1930-1979"),
-    (1880, "Advanced III 1880-1929"),
-    (1830, "Advanced II 1830-1879"),
-    (1780, "Advanced 1780-1829"),
-    (1740, "Intermediate V 1740-1779"),
-    (1700, "Intermediate IV 1700-1739"),
-    (1660, "Intermediate III 1660-1699"),
-    (1620, "Intermediate II 1620-1659"),
-    (1580, "Intermediate 1580-1619"),
-    (1564, "Beginner V 1564-1579"),
-    (1548, "Beginner IV 1548-1563"),
-    (1532, "Beginner III 1532-1547"),
-    (1516, "Beginner II 1516-1531"),
-    (0,    "Beginner 1515>"),
+    (2330, "Grand Master I 2330-2399"),
+    (2260, "Master V 2260-2329"),
+    (2190, "Master IV 2190-2259"),
+    (2120, "Master III 2120-2189"),
+    (2050, "Master II 2050-2119"),
+    (1980, "Master I 1980-2049"),
+    (1910, "Advanced V 1910-1979"),
+    (1845, "Advanced IV 1845-1909"),
+    (1780, "Advanced III 1780-1844"),
+    (1725, "Advanced II 1725-1779"),
+    (1675, "Advanced I 1675-1724"),
+    (1630, "Intermediate V 1630-1674"),
+    (1590, "Intermediate IV 1590-1629"),
+    (1555, "Intermediate III 1555-1589"),
+    (1525, "Intermediate II 1525-1554"),
+    (1500, "Intermediate I 1500-1524"),
+    (1440, "Beginner V 1440-1499"),
+    (1360, "Beginner IV 1360-1439"),
+    (1260, "Beginner III 1260-1359"),
+    (1140, "Beginner II 1140-1259"),
+    (0,    "Beginner I 0-1139"),
 ]
 ALL_RANK_ROLE_NAMES = [n for _, n in RANK_ROLES]
+
+# Old guild role name -> new name, positionally (both ladders are the same
+# 25 rungs top-to-bottom). Drives !setup_rank_roles: RENAME existing roles in
+# place (keeps color, position, and members — the sync loop re-sorts members
+# onto their new rungs afterwards), create only what's missing. The GM tiers
+# II-V keep their exact old names, so their entries are identity mappings.
+_OLD_RANK_ROLE_NAMES = [
+    "Grand Master V 2610+",
+    "Grand Master IV 2540-2609",
+    "Grand Master III 2470-2539",
+    "Grand Master II 2400-2469",
+    "Grand Master 2330-2399",
+    "Master V 2270-2329",
+    "Master IV 2210-2269",
+    "Master III 2150-2209",
+    "Master II 2090-2149",
+    "Master 2030-2089",
+    "Advanced V 1980-2029",
+    "Advanced IV 1930-1979",
+    "Advanced III 1880-1929",
+    "Advanced II 1830-1879",
+    "Advanced 1780-1829",
+    "Intermediate V 1740-1779",
+    "Intermediate IV 1700-1739",
+    "Intermediate III 1660-1699",
+    "Intermediate II 1620-1659",
+    "Intermediate 1580-1619",
+    "Beginner V 1564-1579",
+    "Beginner IV 1548-1563",
+    "Beginner III 1532-1547",
+    "Beginner II 1516-1531",
+    "Beginner 1515>",
+]
+RANK_ROLE_RENAMES = list(zip(_OLD_RANK_ROLE_NAMES, ALL_RANK_ROLE_NAMES))
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -206,7 +244,7 @@ async def _handle_ticket_dm(message):
 def get_rank_name(rating):
     for threshold, name in RANK_ROLES:
         if rating >= threshold: return name
-    return "Beginner"
+    return RANK_ROLES[-1][1]
 
 def rank_emoji(name):
     if "Grand Master" in name: return "🏆"
@@ -222,8 +260,13 @@ def streak_str(streak):
 
 async def update_member_role(member, rating):
     target = get_rank_name(rating)
-    remove = [r for r in member.roles if r.name in ALL_RANK_ROLE_NAMES]
-    if remove: await member.remove_roles(*remove, reason="Rank update")
+    current = [r for r in member.roles if r.name in ALL_RANK_ROLE_NAMES]
+    # Already exactly right -> zero API calls. The old remove+re-add on every
+    # tick was 2 role edits per linked member per 30-min sync for members
+    # whose rank never changed.
+    if len(current) == 1 and current[0].name == target:
+        return target
+    if current: await member.remove_roles(*current, reason="Rank update")
     role = discord.utils.get(member.guild.roles, name=target)
     if role: await member.add_roles(role, reason=f"Rated {rating:.0f}")
     return target
@@ -479,7 +522,7 @@ _FAQ_ACHIEVEMENTS_TEXT = (
     "• **God Build** — win with Shields Up, exactly 1 ammo, and a lightning-fast reload\n"
     "• **Into the Deep End** — win with Abyssal Countdown as your FIRST pick, activating it every round\n"
     "• **Flawless** — five 5-0 wins in a row\n"
-    "• **Rising Star / Master / Grand Master** — reach 1700 / 2030 / 2330 rating (1v1 or 2v2)\n"
+    "• **Rising Star / Master / Grand Master** — reach 1700 / 1980 / 2330 rating (1v1 or 2v2)\n"
     "• **Tag Team Sweep** — win a 2v2 game 5-0\n"
     "• **On Fire / Unstoppable / Immortal** — win 25 / 50 / 100 ranked series in a row\n"
     "• **Century Club / Casual Conqueror / Touch Grass** — win 100 / 200 / 500 casual games in a row\n"
@@ -4334,6 +4377,88 @@ async def sync_roles_periodic():
 
 @sync_roles_periodic.before_loop
 async def before_sync(): await bot.wait_until_ready()
+
+
+@bot.hybrid_command(name="setup-rank-roles",
+                    description="One-time: rename/create the Discord rank roles for the July 28 rank reorganization")
+async def setup_rank_roles(ctx):
+    """Applies RANK_ROLE_RENAMES to the guild: renames existing rank roles in
+    place (keeps color, position, members), creates any that are missing
+    entirely. Members get re-sorted onto their new rungs by the regular
+    30-minute role sync. Requires the CALLER to have Manage Roles; the BOT
+    needs Manage Roles too, with its top role above the rank roles."""
+    perms = getattr(ctx.author, "guild_permissions", None)
+    if not perms or not perms.manage_roles:
+        await ctx.reply("This command requires Manage Roles.", ephemeral=True)
+        return
+    if ctx.guild is None:
+        await ctx.reply("Run this in the server, not a DM.", ephemeral=True)
+        return
+    await ctx.defer()
+    # Base-family colors for roles we have to create from scratch (renames
+    # keep whatever color the role already had). Mirrors main.py's fallback
+    # palette so a created role isn't colorless.
+    family_colors = [
+        ("Grand Master", 0xF1C40F),
+        ("Master",       0x2ECC71),
+        ("Advanced",     0x3498DB),
+        ("Intermediate", 0xE67E22),
+        ("Beginner",     0x95A5A6),
+    ]
+    def _color_for(name):
+        for prefix, val in family_colors:
+            if name.startswith(prefix):
+                return discord.Colour(val)
+        return discord.Colour(0x95A5A6)
+    renamed, created, kept, retired, failed = [], [], [], [], []
+    for old_name, new_name in RANK_ROLE_RENAMES:
+        try:
+            existing_new = discord.utils.get(ctx.guild.roles, name=new_name)
+            if existing_new is not None:
+                kept.append(new_name)
+                # Codex round-3 find 4: if the OLD-named role also survives
+                # (partial earlier run, manual creation), members keep it
+                # forever — the sync loop only strips names on the NEW
+                # ladder, and the skip-if-correct branch never revisits.
+                # Retire the obsolete role outright; identity mappings
+                # (GM II-V) are excluded by the name check.
+                if old_name != new_name:
+                    existing_old = discord.utils.get(ctx.guild.roles, name=old_name)
+                    if existing_old is not None:
+                        await existing_old.delete(reason="July 28 rank reorganization — superseded")
+                        retired.append(old_name)
+                        await asyncio.sleep(0.3)
+                continue
+            existing_old = discord.utils.get(ctx.guild.roles, name=old_name)
+            if existing_old is not None:
+                await existing_old.edit(name=new_name, reason="July 28 rank reorganization")
+                renamed.append(new_name)
+            else:
+                await ctx.guild.create_role(name=new_name, colour=_color_for(new_name),
+                                            hoist=False, mentionable=False,
+                                            reason="July 28 rank reorganization")
+                created.append(new_name)
+            await asyncio.sleep(0.3)
+        except discord.Forbidden:
+            failed.append(f"{new_name} (missing permission — is the bot's top role above the rank roles?)")
+        except Exception as ex:
+            failed.append(f"{new_name} ({ex})")
+    # Push the (possibly recolored-by-rename) roles into rank_role_colors
+    # right away so in-game rank titles pick up the new names without
+    # waiting for the 6-hour color loop.
+    try:
+        await push_rank_role_colors.coro()
+    except Exception as ex:
+        print(f"[RANK-SETUP] color push failed: {ex}")
+    lines = [f"Renamed **{len(renamed)}**, created **{len(created)}**, already-correct **{len(kept)}**"
+             + (f", retired **{len(retired)}** obsolete" if retired else "") + "."]
+    if created:
+        lines.append("Created roles land at the bottom of the role list — drag them into "
+                     "position if sidebar ordering matters.")
+    if failed:
+        lines.append("**Failed:** " + "; ".join(failed[:8]))
+    lines.append("Members re-sort onto their new rungs on the next role sync (within ~30 min).")
+    await ctx.reply("\n".join(lines))
 
 
 @tasks.loop(minutes=10)

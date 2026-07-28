@@ -334,7 +334,7 @@ namespace CompetitiveRounds
             {"stan_slayer",         new[]{"Stan Slayer",         "Win against Stan in a ranked series"}},
             {"pacifist",            new[]{"Pacifist",            "Win a game without firing a single shot"}},
             {"immovable_object",    new[]{"Immovable Object",    "Win a game without moving or jumping"}},
-            {"master_rank",         new[]{"Master",              "Reach 2030 rating in ranked (1v1 or 2v2)"}},
+            {"master_rank",         new[]{"Master",              "Reach 1980 rating in ranked (1v1 or 2v2)"}},
             {"team_sweep",          new[]{"Tag Team Sweep",      "Win a 2v2 game 5-0"}},
             {"grand_master",        new[]{"Grand Master",        "Reach 2330 rating in ranked (1v1 or 2v2)"}},
             // v1.30 expansion (item 5, revised July 12) — mirrors ACHIEVEMENT_DEFS in main.py.
@@ -5166,7 +5166,9 @@ namespace CompetitiveRounds
                             CurrentQueueState = QueueState.Idle;
                             IsQueuePolling = false;
                             LastPollData = null;
-                            CompetitiveUI.ShowNotification("Queue search expired", Color.yellow);
+                            CompetitiveUI.ShowNotification(status == "expired"
+                                ? "Removed from queue after 30 minutes of searching - rejoin if you're still here!"
+                                : "Queue search ended", Color.yellow, 7f);
                             NativeUI.MarkDirty();
                         }
                     }
@@ -6080,6 +6082,12 @@ namespace CompetitiveRounds
                 LastTeamPollData = null;
                 ActiveTeamSeriesId = null;
                 Plugin.ClearPending2v2Slot();
+                // 30-min server cap (July 28): tell the player WHY the queue
+                // ended — silently flipping to Idle looked like a mystery bug.
+                if (status == "expired")
+                    CompetitiveUI.ShowNotification(
+                        "Removed from 2v2 queue after 30 minutes of searching - rejoin if you're still here!",
+                        Color.yellow, 7f);
                 NativeUI.MarkDirty();
             }
         }
@@ -7244,6 +7252,12 @@ namespace CompetitiveRounds
                     IsOvtQueuePolling = false; OvtQueueStatus = "";
                     OvtLockedSoloName = null; OvtLockedDuo = null;
                     Plugin.ClearPendingOvtSlot();
+                    // 30-min server cap (July 28) — explicit reason, and no
+                    // auto-rejoin for this status (that would defeat the cap).
+                    if (status == "expired")
+                        CompetitiveUI.ShowNotification(
+                            "Removed from 1v2 queue after 30 minutes of searching - rejoin if you're still here!",
+                            Color.yellow, 7f);
                     // We believed we were searching but the server dropped our
                     // row — the ghost-prune fires on every queuer after any
                     // >75s API gap (backend redeploy, network blip). Silently
@@ -7928,6 +7942,12 @@ namespace CompetitiveRounds
                     IsFfaQueuePolling = false; FfaQueueStatus = "";
                     FfaLockedRoster = null;
                     Plugin.ClearPendingFfaSlot();
+                    // 30-min server cap (July 28) — explicit reason, and no
+                    // auto-rejoin for this status (that would defeat the cap).
+                    if (status == "expired")
+                        CompetitiveUI.ShowNotification(
+                            "Removed from FFA queue after 30 minutes of searching - rejoin if you're still here!",
+                            Color.yellow, 7f);
                     // Ghost-prune recovery: auto-rejoin once per minute (#150).
                     if (status == "not_in_queue"
                         && Time.unscaledTime - _ffaLastAutoRejoinAt > 60f)

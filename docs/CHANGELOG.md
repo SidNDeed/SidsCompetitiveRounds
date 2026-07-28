@@ -2,6 +2,49 @@
 
 ## Unreleased — FFA mode, 1v2 overhaul, menu pass
 
+### Rank reorganization (July 28, round 3)
+- **New rank ladder** (community proposal): tier-group floors move to
+  Intermediate **1500**, Advanced **1675**, Master **1980** — Grand Master stays
+  **2330** — and the sub-tiers widen toward the bottom so early ranks are
+  meaningful climbs (Beginner I is now 0-1139 instead of a 16-point sliver).
+  Every tier spells out its numeral: Beginner I-V, Intermediate I-V, Advanced
+  I-V, Master I-V, Grand Master I-V.
+- **Discord roles follow automatically** once the new `/setup-rank-roles`
+  command has been run (renames the existing 25 roles in place — colors,
+  position and members are preserved — then the regular role sync re-sorts
+  everyone onto their new rung within ~30 minutes).
+- **Rating-history graph** (Leaderboard tab, player detail): the reference
+  lines now sit on the tier boundaries — 1139 (top of Beginner I), then the
+  1500 / 1675 / 1980 / 2330 tier floors — colored to match the Discord rank
+  families.
+- **Master achievement** now unlocks at **1980** (the new Master I floor), and
+  everyone whose peak 1v1/2v2 rating already clears it gets it backfilled with
+  its full 500g reward.
+- **Opponent-tier reward multipliers** track the new floors (a 1990-rated
+  opponent now pays Master-tier gold/XP, matching their displayed rank).
+
+### FFA — bigger maps for bigger lobbies (July 28, round 3)
+- **Maps now scale up 3% per player above 4** (a 10-player lobby plays on a
+  ~18% larger arena). The whole world scales together — platforms spread out
+  and grow, the camera zooms to match, and the kill boundary moves out
+  proportionally — so the game feels identical, just roomier. The factor is
+  published by the lobby master each round, so every client plays the exact
+  same map. 4 or fewer players = exactly vanilla.
+
+### Queues — 30-minute cap + ghost cleanup (July 28, round 3)
+- **Queue searches now cap at 30 minutes** in every mode (1v1, 2v2, 1v2, FFA).
+  If you hit the cap you get a clear in-game notice — rejoin if you're still
+  around. No more all-afternoon phantom queue entries.
+- **Fixed the 2v2 queue cleanup crash**: the background sweeper had been dying
+  every tick since July 27 on a Postgres locking error, so crashed clients'
+  queue rows were never removed — that's how one player showed "285 minutes in
+  queue" on the 2v2 tab, and how stale rows made custom lobbies look fuller
+  than they were. The sweeper is fixed AND each cleanup now runs isolated so
+  one failure can never kill the others again.
+- **The 2v2 tab only lists players whose game is actually polling** — ghost
+  rows can no longer appear as live queuers (this is what made "4 people in a
+  custom lobby" not match: some of the four were ghosts).
+
 ### NEW MODE: Free-For-All (3-10 players) — RANKED, first playtest build
 The FFA tab (under Multiplayer) is live. The server side is deployed and tested;
 the in-game play path has had **no live playtest yet**, so expect rough edges in
@@ -96,6 +139,8 @@ the first sessions and please file bug reports with logs attached.
   The server also requires one unique winner at exactly 5 points and rejects
   totals above the mode's ceilings, so a result cannot silently drop the players
   who beat you. Kill counts are stored per player and break placement ties.
+- Schema: migration 160 backfills the Master achievement (+500g) for peak
+  ratings already at or above the new 1980 floor.
 
 ### FFA — second-playtest round (July 28, round 2)
 - **Recent Ranked FFAs got the full treatment:** per-player rows with score

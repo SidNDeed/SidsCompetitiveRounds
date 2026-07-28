@@ -309,6 +309,7 @@ namespace CompetitiveRounds
             pickPhaseActive = false;
             pickDeadlineRealtime = 0f;
             localPickOpen = false;
+            try { FfaMapScale.Reset(); } catch { }
         }
 
         /// <summary>Capture a leaver's tallies before Photon destroys their
@@ -469,6 +470,10 @@ namespace CompetitiveRounds
                     return;
                 }
                 int winnerTeam = alive.Count == 1 ? alive[0].TeamID : -1;
+                // Map-scale count rides ahead of the round RPC: Photon orders
+                // a sender's operations, so every client holds the fresh count
+                // before its transition loads the next map (FfaMapScale).
+                try { FfaMapScale.MasterPublishCount(); } catch { }
                 gm.view.RPC("RPCA_NextRound", RpcTarget.All, winnerTeam, winnerTeam, 0, 0, 0, 0);
             }
             catch (Exception ex)
@@ -722,6 +727,10 @@ namespace CompetitiveRounds
             try { UIHandler.instance.HideJoinGameText(); } catch { }
             PlayerManager.instance.SetPlayersSimulated(false);
             PlayerManager.instance.SetPlayersVisible(false);
+            // Publish the live count BEFORE the load RPC so every client's
+            // SetStartPos sees it (FfaMapScale; prop-before-RPC ordering).
+            if (PhotonNetwork.IsMasterClient)
+                try { FfaMapScale.MasterPublishCount(); } catch { }
             MapManager.instance.LoadNextLevel();
             TimeHandler.instance.DoSpeedUp();
             yield return new WaitForSecondsRealtime(1f);
