@@ -14519,11 +14519,20 @@ async def ovt_queue_list(db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/api/v1/ovt/queue/poll/{steam_id}", tags=["1v2 Queue"])
-async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
+async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Poll the 1v2 queue. When 3 searching players are present, the lowest
     Steam ID locks the match: assigns 1 solo + 2 duo (honoring preferences,
     else join order), creates the series + room, and flips all three to
-    'ready_join'. SELECT FOR UPDATE SKIP LOCKED (#34) prevents duplicate rooms."""
+    'ready_join'. SELECT FOR UPDATE SKIP LOCKED (#34) prevents duplicate rooms.
+
+    Session-bound (Codex sitting-over review find 1, FFA-poll parity): this
+    poll refreshes last_polled for the CLAIMED steam_id, and the new
+    all-members-polling inference makes that a destructive input — an
+    unauthenticated caller could forge freshness for a whole locked trio and
+    cancel their live series. Enforcement inherits the steam-auth arming
+    rollout; unarmed accounts remain soft (documented residual until
+    STEAM_AUTH_ENFORCE fully arms)."""
+    await _check_steam_session(request, steam_id, db)
     _presence_touch(steam_id)
     locked = await _lock_queue_group_for_player(db, "ovt_queue", steam_id)
     if locked is None:
@@ -14556,13 +14565,16 @@ async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
              WHERE status = 'searching' AND last_polled < NOW() - INTERVAL '75 seconds'
              FOR UPDATE SKIP LOCKED)
     """))
+    # Own-group exclusion — same rationale as the FFA poll's 3h sweep
+    # (Codex sitting-over review find 4).
     await db.execute(text("""
         DELETE FROM ovt_queue WHERE player_id IN (
             SELECT player_id FROM ovt_queue
              WHERE status != 'searching' AND matched_at IS NOT NULL
                AND matched_at < NOW() - INTERVAL '3 hours'
+               AND series_id IS DISTINCT FROM :my_series
              FOR UPDATE SKIP LOCKED)
-    """))
+    """), {"my_series": me["series_id"]})
 
     # Absolute 30-min searching cap (July 28, Sid item 1 — parity with the
     # 1v1/2v2 polls). Explicit 'expired' status so the client shows WHY the
@@ -14608,19 +14620,52 @@ async def ovt_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             members_online = any(_presence_is_online(s) for s in mem_sids)
         dead = (srow is None or srow["status"] != "active"
                 or (zero_game_stale and not members_online))
-        if dead:
+        # ── Sitting-over self-heal — same two rules as the FFA locked branch
+        # (July 28 trapped-lobby incident; also the bug #85 class, "1v2 keeps
+        # putting me back in the same match"). The queue-poll is the inverse
+        # in-game heartbeat: all members polling = nobody is in a game.
+        sitting_over = False
+        assembly_failed = False
+        if not dead and srow is not None and srow["status"] == "active":
+            mem_polls = (await db.execute(text(
+                "SELECT COUNT(*) AS total,"
+                "       COUNT(*) FILTER (WHERE last_polled > NOW() - INTERVAL '90 seconds') AS fresh"
+                "  FROM ovt_queue WHERE series_id = :sid"
+            ), {"sid": me["series_id"]})).mappings().first()
+            all_polling = (mem_polls is not None and int(mem_polls["total"] or 0) > 0
+                           and int(mem_polls["total"]) == int(mem_polls["fresh"]))
+            if all_polling and int(srow["games"] or 0) > 0:
+                last_game = (await db.execute(text(
+                    "SELECT MAX(ended_at) FROM ovt_matches WHERE series_id = :sid"
+                ), {"sid": me["series_id"]})).scalar()
+                if last_game is not None and (datetime.now(timezone.utc) - last_game).total_seconds() > 300:
+                    sitting_over = True
+            elif all_polling and int(srow["games"] or 0) == 0 and lock_age > 300:
+                assembly_failed = True
+        if sitting_over:
+            await db.execute(text(
+                "UPDATE ovt_series SET status='canceled', invalidation_reason='sitting_abandoned',"
+                "       invalidated_at=NOW() WHERE id=:sid AND status='active'"
+            ), {"sid": me["series_id"]})
+            await db.execute(text("DELETE FROM ovt_queue WHERE series_id = :sid"),
+                             {"sid": me["series_id"]})
+            await db.commit()
+            print(f"[OVT-LOCK] sitting over — series {me['series_id']} closed, members freed")
+            return {"status": "not_in_queue", "queue_count": 0}
+        if dead or assembly_failed:
             if srow is not None and srow["status"] == "active":
+                reason = "assembly_failed" if assembly_failed else "assembly_timeout"
                 await db.execute(text(
-                    "UPDATE ovt_series SET status='canceled', invalidation_reason='assembly_timeout',"
+                    "UPDATE ovt_series SET status='canceled', invalidation_reason=:rsn,"
                     "       invalidated_at=NOW() WHERE id=:sid AND status='active'"
-                ), {"sid": me["series_id"]})
+                ), {"sid": me["series_id"], "rsn": reason})
             await db.execute(text("""
                 UPDATE ovt_queue SET status='searching', series_id=NULL, side_assigned=NULL,
                        room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
                  WHERE series_id = :sid
             """), {"sid": me["series_id"]})
             await db.commit()
-            print(f"[OVT-LOCK] dead lock reset (series {me['series_id']}, age {int(lock_age)}s)")
+            print(f"[OVT-LOCK] dead lock reset (series {me['series_id']}, age {int(lock_age)}s, assembly_failed={assembly_failed})")
             n = (await db.execute(text("SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"))).scalar() or 0
             return {"status": "searching", "queue_count": int(n)}
         await db.commit()
@@ -15660,13 +15705,19 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
              WHERE status = 'searching' AND last_polled < NOW() - INTERVAL '75 seconds'
              FOR UPDATE SKIP LOCKED)
     """))
+    # Own-group exclusion (Codex sitting-over review find 4): SKIP LOCKED
+    # does not skip OUR transaction's locks, so a >3h wedged group's own
+    # poll would delete its grouped rows here and the sitting-over self-heal
+    # below would see zero members and never close the lobby. The caller's
+    # group is the self-heal's to dissolve; this sweep owns everyone else's.
     await db.execute(text("""
         DELETE FROM ffa_queue WHERE player_id IN (
             SELECT player_id FROM ffa_queue
              WHERE status != 'searching' AND matched_at IS NOT NULL
                AND matched_at < NOW() - INTERVAL '3 hours'
+               AND series_id IS DISTINCT FROM :my_series
              FOR UPDATE SKIP LOCKED)
-    """))
+    """), {"my_series": me["series_id"]})
 
     # Absolute 30-min searching cap (July 28, Sid item 1 — parity with the
     # 1v1/2v2 polls). Explicit 'expired' status so the client shows WHY the
@@ -15704,12 +15755,78 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
             members_online = any(_presence_is_online(s) for s in mem_sids)
         dead = (lrow is None or lrow["status"] != "active"
                 or (zero_game_stale and not members_online))
-        if dead:
+        # ── Sitting-over self-heal (July 28 "trapped in a dead lobby"
+        # incident, Sid's directive). The queue-poll is the INVERSE in-game
+        # heartbeat: clients only poll it from the MENU / assembly screens —
+        # a client actually playing a game does not poll. So "EVERY member's
+        # row is being polled right now" proves nobody is mid-game, and the
+        # server can free the group no matter how any client's loop wedged:
+        #   A) played lobby, newest game >5 min old, all members polling ->
+        #      the sitting is over. Close it (games kept), free everyone.
+        #   B) zero-game lobby, all members polling 5+ min after lock ->
+        #      the room never came together. Dissolve back to searching so
+        #      the group re-gathers fresh. (5 min, not less: the post-
+        #      ready_join cancel-detector polls THROUGH a slow assembly, and
+        #      a legitimate assembly never needs 5 minutes.)
+        sitting_over = False
+        assembly_failed = False
+        if not dead and lrow is not None and lrow["status"] == "active":
+            mem_polls = (await db.execute(text(
+                "SELECT COUNT(*) AS total,"
+                "       COUNT(*) FILTER (WHERE last_polled > NOW() - INTERVAL '90 seconds') AS fresh"
+                "  FROM ffa_queue WHERE series_id = :lid"
+            ), {"lid": me["series_id"]})).mappings().first()
+            all_polling = (mem_polls is not None and int(mem_polls["total"] or 0) > 0
+                           and int(mem_polls["total"]) == int(mem_polls["fresh"]))
+            if all_polling and int(lrow["games_played"] or 0) > 0:
+                last_game = (await db.execute(text(
+                    "SELECT MAX(ended_at) FROM ffa_matches WHERE lobby_id = :lid"
+                ), {"lid": me["series_id"]})).scalar()
+                if last_game is not None and (datetime.now(timezone.utc) - last_game).total_seconds() > 300:
+                    sitting_over = True
+            elif all_polling and int(lrow["games_played"] or 0) == 0 and lock_age > 300:
+                assembly_failed = True
+        if sitting_over:
+            await db.execute(text(
+                "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
+                " WHERE id=:lid AND status='active'"), {"lid": me["series_id"]})
+            # Reconcile-before-refund (Codex sitting-over review find 3): a
+            # report can commit while its bet-settlement savepoint rolled
+            # back (the deliberate #187 split) — those bets are unsettled
+            # but their game HAS a recorded winner. Settle them against the
+            # recorded result first (same game-number logic as the report
+            # path's catch-up); refund only wagers on games never played.
+            try:
+                unsettled_games = (await db.execute(text(
+                    "SELECT DISTINCT game_number FROM ffa_bets"
+                    " WHERE lobby_id = :lid AND settled_at IS NULL"
+                ), {"lid": me["series_id"]})).scalars().all()
+                for sg in unsettled_games:
+                    past_winner = (await db.execute(text(
+                        "SELECT winner_id FROM ffa_matches"
+                        " WHERE lobby_id = :lid AND photon_room_id LIKE :sfx ESCAPE '\\'"
+                        "   AND invalidated_at IS NULL ORDER BY ended_at LIMIT 1"
+                    ), {"lid": me["series_id"], "sfx": f"%\\_r{int(sg)}"})).scalar()
+                    if past_winner is not None:
+                        await _settle_ffa_bets_for_game(db, me["series_id"], int(sg), past_winner)
+            except Exception as _rex:
+                print(f"[FFA-BETS] closure reconcile failed (refund covers): {_rex}")
+            try:
+                await _refund_ffa_lobby_bets(db, me["series_id"], "sitting over (all members back at menu)")
+            except Exception as _rex:
+                print(f"[FFA-BETS] sitting-over refund failed: {_rex}")
+            await db.execute(text("DELETE FROM ffa_queue WHERE series_id = :lid"),
+                             {"lid": me["series_id"]})
+            await db.commit()
+            print(f"[FFA-LOCK] sitting over — lobby {me['series_id']} closed, members freed")
+            return {"status": "not_in_queue", "queue_count": 0}
+        if dead or assembly_failed:
             if lrow is not None and lrow["status"] == "active":
+                reason = "assembly_failed" if assembly_failed else "assembly_timeout"
                 await db.execute(text(
-                    "UPDATE ffa_lobbies SET status='canceled', invalidation_reason='assembly_timeout',"
+                    "UPDATE ffa_lobbies SET status='canceled', invalidation_reason=:rsn,"
                     "       invalidated_at=NOW() WHERE id=:lid AND status='active'"
-                ), {"lid": me["series_id"]})
+                ), {"lid": me["series_id"], "rsn": reason})
                 try:
                     await _refund_ffa_lobby_bets(db, me["series_id"], "dead lock reset")
                 except Exception as _rex:
@@ -15720,7 +15837,7 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                  WHERE series_id = :lid
             """), {"lid": me["series_id"]})
             await db.commit()
-            print(f"[FFA-LOCK] dead lock reset (lobby {me['series_id']}, age {int(lock_age)}s)")
+            print(f"[FFA-LOCK] dead lock reset (lobby {me['series_id']}, age {int(lock_age)}s, assembly_failed={assembly_failed})")
             n = (await db.execute(text(
                 "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
                 "   AND last_polled > NOW() - INTERVAL '75 seconds'"

@@ -7048,6 +7048,8 @@ namespace CompetitiveRounds
 
         public static void OvtJoinQueue(int preferredSide, bool soloExtraPick)
         {
+            // No loop-breaker reset on join — see FfaJoinQueue's comment
+            // (Codex sitting-over review find 2).
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
             // Suppress joining while a leave retry is in flight (same rationale
@@ -7203,6 +7205,21 @@ namespace CompetitiveRounds
 
                     if (!string.IsNullOrEmpty(room))
                     {
+                        // Loop-breaker — same contract as the FFA handler
+                        // (July 28 trapped-lobby incident; the bug #85 "keeps
+                        // putting me back in the same match" class): 3 fires
+                        // of the same dead room, then leave and free the trio.
+                        string ovtFireKey = (ActiveOvt1v2SeriesId ?? "") + "|" + room;
+                        if (ovtFireKey == _ovtLastReadyFireKey) _ovtReadyFireCount++;
+                        else { _ovtLastReadyFireKey = ovtFireKey; _ovtReadyFireCount = 1; }
+                        if (_ovtReadyFireCount > 3)
+                        {
+                            Plugin.Log.LogWarning($"[1v2] ready_join re-fired {_ovtReadyFireCount}x for '{room}' — giving up and leaving the 1v2 queue");
+                            CompetitiveUI.ShowNotification("Couldn't join the 1v2 room - left the queue. Please requeue.", Color.yellow, 8f);
+                            OvtLeaveQueue();
+                            NativeUI.MarkDirty();
+                            return;
+                        }
                         // Slot 0 = solo (team 0); slots 1/2 = duo (team 1) in
                         // payload order. Read by the CreatePlayer override so
                         // the 3 players land on the forced 1-vs-2 split instead
@@ -7801,6 +7818,14 @@ namespace CompetitiveRounds
         public static List<FfaQueueListEntry> CachedFfaQueueList = null;
         private static float _ffaListLastAt = -999f;
         private static float _ffaLastAutoRejoinAt = -999f;
+        // July 28 trapped-lobby loop-breaker: the same dead room re-firing
+        // ready_join forever (server wedge, join failure, any loop shape) —
+        // after 3 fires for one lobby+room, leave the queue instead of
+        // re-attempting. Reset on a fresh join intent. Mirrored for 1v2.
+        private static string _ffaLastReadyFireKey = null;
+        private static int _ffaReadyFireCount = 0;
+        private static string _ovtLastReadyFireKey = null;
+        private static int _ovtReadyFireCount = 0;
         private static float _ffaLeavingSince = -999f;
         private static int ffaGen = 0;  // lifecycle generation — see queueGen
 
@@ -7808,6 +7833,12 @@ namespace CompetitiveRounds
         {
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            // NO loop-breaker reset here (Codex sitting-over review find 2):
+            // the wedge loop travels THROUGH this method (auto-rejoin -> join
+            // -> poll -> dead ready_join), so resetting on join made the
+            // counter unable to ever exceed 1. A genuinely new assembly gets
+            // a new lobby UUID and therefore a new fire key on its own; the
+            // counter only survives across retries of the SAME dead room.
             if (FfaQueueStatus == "leaving")
             {
                 if (Time.realtimeSinceStartup - _ffaLeavingSince < LEAVE_STUCK_TIMEOUT)
@@ -7923,6 +7954,24 @@ namespace CompetitiveRounds
 
                     if (!string.IsNullOrEmpty(room))
                     {
+                        // Loop-breaker (July 28 trapped-lobby incident): if
+                        // this exact lobby+room keeps re-firing (dead room,
+                        // wedged server row, failed joins re-arming the
+                        // poll), stop after 3 attempts and LEAVE — the leave
+                        // endpoint dissolves/closes the lobby server-side,
+                        // freeing the whole group. The menu also stops being
+                        // slammed shut by the auto-close below.
+                        string fireKey = (ActiveFfaLobbyId ?? "") + "|" + room;
+                        if (fireKey == _ffaLastReadyFireKey) _ffaReadyFireCount++;
+                        else { _ffaLastReadyFireKey = fireKey; _ffaReadyFireCount = 1; }
+                        if (_ffaReadyFireCount > 3)
+                        {
+                            Plugin.Log.LogWarning($"[FFA] ready_join re-fired {_ffaReadyFireCount}x for '{room}' — giving up and leaving the FFA queue");
+                            CompetitiveUI.ShowNotification("Couldn't join the FFA room - left the queue. Please requeue.", Color.yellow, 8f);
+                            FfaLeaveQueue();
+                            NativeUI.MarkDirty();
+                            return;
+                        }
                         Plugin.SetPendingFfaSlot(FfaMySlot, FfaLobbyPlayerCount);
                         try
                         {
