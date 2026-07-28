@@ -1,6 +1,11 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased — post-release queue + report fixes
+## v1.35.1 — 2026-07-28 — queue single-ownership, FFA gather window, report fixes
+
+### Packaging
+- **Thunderstore changelog trimmed to recent releases** — the full-history file
+  crossed Thunderstore's 100KB upload limit and blocked the v1.35.0 package.
+  Older releases now live in the GitHub changelog (linked from the package).
 
 ### Queues
 - **Locked-in players leave every other queue** (the "ghost in 1v1 Search

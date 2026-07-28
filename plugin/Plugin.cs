@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.35.0";   // July 28: FFA mode (3-10 players, ranked), rank ladder reorg, queue caps + janitor fix, 1v2 overhaul
+        public const string ModVersion = "1.35.1";   // July 28: queue single-ownership (cross-mode ghost fix), FFA gather window, admin reports, /faq titles
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
