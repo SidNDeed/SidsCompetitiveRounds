@@ -59,6 +59,9 @@ Everything else records as **casual** (still tracked, no rating change). The mod
 
 - **1v1 ranked queue:** F5 → Ranked tab → Search Ranked. When a match is found, both players have 90 seconds to click Ready — then the mod auto-connects you into a private room. Don't press Escape while it's loading; that cancels the connection (the mod recovers, but it costs time).
 - **2v2:** F5 → 2v2 tab. Two queues: **Search Random** (auto-balanced teams by rating) and **Find Custom Lobby** (you pick your team — grab 3 friends). 2v2 has its own rating and leaderboard.
+- **1v2:** F5 → 1v2 tab. One solo against a duo — separate Solo and Duo leaderboards, and the solo can take an extra starting pick if the lobby enables it.
+- **FFA:** F5 → FFA tab. 3-10 players, everyone for themselves — last one standing scores, first to 5 points wins, everyone picks cards at the same time. Own rating and leaderboard.
+- Queue searches cap at **30 minutes** in every mode — you'll get an in-game notice if you hit it; just rejoin if you're still around.
 - **Tournaments:** F5 → Tournaments. A sync (same-time) tournament runs weekly — sign up, vote a time, the bracket auto-connects your matches. An async tournament runs every ~6 weeks with a week per round; coordinate with your opponent on Discord.
 - **Playing a friend directly?** Private-room games between two modded, ranked-enabled players count as ranked automatically.
 

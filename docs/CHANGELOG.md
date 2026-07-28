@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased — FFA mode, 1v2 overhaul, menu pass
+## v1.35.0 — 2026-07-28 — NEW MODE: Free-For-All, rank ladder reorganization, 1v2 overhaul
 
 ### Rank reorganization (July 28, round 3)
 - **New rank ladder** (community proposal): tier-group floors move to
@@ -45,10 +45,10 @@
   rows can no longer appear as live queuers (this is what made "4 people in a
   custom lobby" not match: some of the four were ghosts).
 
-### NEW MODE: Free-For-All (3-10 players) — RANKED, first playtest build
-The FFA tab (under Multiplayer) is live. The server side is deployed and tested;
-the in-game play path has had **no live playtest yet**, so expect rough edges in
-the first sessions and please file bug reports with logs attached.
+### NEW MODE: Free-For-All (3-10 players) — RANKED
+The FFA tab (under Multiplayer) is live, hardened across two July 28 playtest
+rounds (fix batches below). Big-lobby edge cases will still surface — please
+keep filing bug reports with logs attached.
 - **Queue:** joining is consent — no rating band, no ready-up. Once 3 people are
   searching a 25-second gather window opens so more can pile in, up to 10; a full
   lobby starts immediately.

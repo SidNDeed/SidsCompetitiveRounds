@@ -6,26 +6,31 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 
 ## Features
 
-### Ranked play
-- **Glicko-2 rating system** with RD-aware matchmaking
-- **Best-of-3 ranked series** — Elo changes apply on series completion
-- **Ranked matchmaking queue** with Elo-tiered matching, mutual ready-up, and ranked-only toggle
-- **In-game leaderboard** with player detail panel, rating history line graph, series-based recent form, head-to-head records, and achievements
-- **Match history** grouped by BO3 series, with card picks, opponent cards, XP, and gold earned
+### Four game modes — three ranked ladders
+- **Glicko-2 rating system** with RD-aware matchmaking; **best-of-3 ranked series** in 1v1 (Elo applies on series completion)
+- **2v2 ranked** — own Glicko ladder and leaderboard; queue solo into rating-balanced teams or open a **custom lobby** and pick teams with 3 friends
+- **Free-For-All (3-10 players), ranked** — last player standing scores, first to 5 points wins; simultaneous card picks, live per-player scoreboard with the leader crowned, rolling 5-card deck cap, maps that scale up with lobby size, and leaver-tolerant matches (survivors play on). Own FFA rating and leaderboard
+- **1v2 (unranked beta)** — one solo versus a duo, with separate Solo and Duo activity boards and an optional extra starting pick for the solo
+- **25 rank tiers** — Beginner I through Grand Master V, mirrored as auto-updating Discord roles
+- **Matchmaking queues** — Elo-tiered matching with mutual ready-up in 1v1/2v2; consent-based instant queues in 1v2/FFA; 30-minute search cap everywhere
+- **In-game leaderboards** with player detail panel, rating-history graph (rank-tier reference lines), series-based recent form, head-to-head records, and achievements — plus a **Compare** view charting up to 12 players side by side
+- **Match history** grouped by series, with card picks, opponent cards, per-game Hit% / Block%, XP, and gold earned
 - **Card stats** with pick counts, win rates, and pass rates, filterable by Ranked / Casual / All
+- **Tournaments** — weekly same-time brackets with auto-connected matches, plus long-running async tournaments, run through Discord
 - **Tier List Maker** — assign every card an S/A/B/C/D/E/F tier with click-to-cycle, three independent lists (Casual / Ranked / All) persisted server-side. Click any card to pop a full-color art preview. Export the whole tier list as a near-square PNG: the real ROUNDS card art for every card + your live `## played` / `##% won` underneath, color-coded by win band (≥55% green / ≤45% red). Output lands in `<ROUNDS>/CompetitiveRoundsTierLists/tierlist-<filter>-<timestamp>.png`.
 
 ### Economy & cosmetics
-- **Gold currency** — earn from matches, ranked wins, sweeps, and achievements (100g each)
-- **Shop** with titles, cosmetic trails, map color presets, and name styling
+- **Gold currency** — earn from matches, series wins, sweeps, and achievements; ranked rewards scale with your opponent's rank tier
+- **Shop** with titles, cosmetic trails, map color skins (premium animated ones included), body colors, cursor colors, player aura effects, and name styling
+- **Community character cosmetics** — artist-made faces and accessories (including animated ones) that render for everyone; artists submit, price, and manage their art entirely in-game
 - **Cosmetic trails** — Photon-synced so other modded players see your trail during matches, plus a local in-shop preview
-- **Map color presets** — ~30 variants including vanilla art swaps and 15+ custom ColorGrading + per-particle tinted presets (Forest, Rose, Amethyst, Mint, Sunset, …)
-- **Name styling** — stackable Bold / Italic / Underline / Strike plus single-active colors, sizes, font-style transforms, and a real SDF glow (glow is modded-only; non-modded players see an unstyled name with no visual artifacts)
+- **Map color presets** — ~30 variants including vanilla art swaps and custom-designed two-tone presets (Forest, Rose, Amethyst, Mint, Sunset, …)
+- **Name styling** — stackable Bold / Italic / Underline / Strike plus single-active colors, sizes, font-style transforms, and a real SDF glow (modded-only; non-modded players see an unstyled name)
 - **Titles** visible on the leaderboard, chat messages (in-game + Discord), and match history rows
 
 ### Betting
 - **Wager gold on live ranked series** with RD-aware odds via Glicko expectancy
-- Betting locks at **2 points scored in game 1** (preserves pre-series mystery) or once any game finishes
+- Betting locks once game 1 is underway; abandoned series auto-refund
 - One bet per series, can't bet on your own matches, payouts settle automatically
 
 ### Chat & Discord integration
@@ -37,14 +42,15 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 
 ### Anti-cheat & admin
 - **Sub-60s match-pattern detection** auto-flags and retroactively invalidates suspicious streaks (XP + gold reversed, series marked invalid)
-- **Too-many-cards, inactive-reporter heuristics** — flagged to a private admin channel for review
+- **Macro detection, too-many-cards, inactive-reporter heuristics** — flagged to a private admin channel for review
 - **In-game admin tab** (whitelisted Steam IDs only) for banning, achievement grants, series reversal, and flag triage — every action audit-logged
 - **HMAC-signed** match reports and admin endpoints prevent spoofing
 
 ### Quality of life
-- **11 achievements** — Untouchable, Silent Assassin, Total Mayhem, Fragile Perfection, No Escape, Rise from the Ashes, The Comeback Kid, Stacked Deck, Regicide, Pacifist, Immovable Object (each grants 100g)
-- **XP & leveling** with bonus XP for wins, sweeps, ranked play, and top-5 finishes
-- **Auto-update** — newer mod versions are downloaded and applied automatically on next launch
+- **41 achievements** (100-1000g by difficulty, several unlock exclusive titles) — card-build challenges, marathon streaks, rating milestones — with retroactive grants from your existing match history
+- **XP & leveling** with bonus XP for wins, sweeps, and ranked play, scaled by your opponent's rank tier
+- **Hold Tab: live match scoreboard** — every player's current build, stats, and card list at a glance mid-game
+- **Auto-update** — newer mod versions are downloaded and applied automatically on next launch (Thunderstore builds defer to the mod manager)
 - **Maintenance-mode banner** and reconnect indicator so short server restarts feel graceful
 - **FPS + ping + region** overlay, taskbar-flash + match-found sound for alt-tabbed players
 - **First-launch consent modal** with Revoke / Delete-my-data controls (GDPR-style)
