@@ -111,6 +111,7 @@ namespace CompetitiveRounds
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
             DrawNotification();
+            DrawFfaScoreStrip();
             DrawMatchStatus();
             DrawInGameChat();
             DrawChatInput();
@@ -166,6 +167,48 @@ namespace CompetitiveRounds
             ClickHandler.ModalBlockInput = anyModal || NativeUI.InfoPopupOpen || !Plugin.DataConsentAsked;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
+        }
+
+        // ── FFA score strip ───────────────────────────────────────────────
+        // Vanilla's small round counter is 2-team (hidden in FFA — the FFA
+        // DoStartGame replacement never shows it). This compact top-center
+        // strip is the per-player rounds/points readout during FFA matches.
+        // Repaint-gated + 2 Hz string cache (learning #162).
+        private static string ffaStripCache = "";
+        private static float ffaStripCachedAt = -999f;
+        private static GUIStyle ffaStripStyle;   // built once (learning #162: no per-Repaint allocs)
+
+        private static void DrawFfaScoreStrip()
+        {
+            if (Event.current != null && Event.current.type != EventType.Repaint) return;
+            try
+            {
+                if (!FfaMode.InFfaMatch) { ffaStripCache = ""; return; }
+                if (Time.realtimeSinceStartup - ffaStripCachedAt > 0.5f)
+                {
+                    ffaStripCachedAt = Time.realtimeSinceStartup;
+                    string line = FfaMode.ScoreLine();
+                    ffaStripCache = string.IsNullOrEmpty(line)
+                        ? ""
+                        : $"FFA to {FfaMode.RoundsToWin}R   {line}";
+                }
+                if (string.IsNullOrEmpty(ffaStripCache)) return;
+                if (ffaStripStyle == null)
+                {
+                    ffaStripStyle = new GUIStyle(GUI.skin.label)
+                    {
+                        alignment = TextAnchor.MiddleCenter,
+                        fontSize = 12,
+                        clipping = TextClipping.Overflow,
+                    };
+                    ffaStripStyle.normal.textColor = new Color(1f, 1f, 1f, 0.92f);
+                }
+                float w = Mathf.Min(Screen.width - 40f, 60f + ffaStripCache.Length * 7.5f);
+                var rect = new Rect((Screen.width - w) / 2f, 4f, w, 24f);
+                GUI.Box(rect, "");
+                GUI.Label(rect, ffaStripCache, ffaStripStyle);
+            }
+            catch { }
         }
 
         // ── Tournament banner (item 3, v1.30) ─────────────────────────────

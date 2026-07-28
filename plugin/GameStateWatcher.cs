@@ -1,4 +1,4 @@
-using ExitGames.Client.Photon;
+﻿using ExitGames.Client.Photon;
 using Photon.Pun;
 using Steamworks;
 using System;
@@ -844,6 +844,7 @@ namespace CompetitiveRounds
                     string rn = PhotonNetwork.CurrentRoom.Name ?? "";
                     var props = PhotonNetwork.CurrentRoom.CustomProperties;
                     bool modRoom = rn.StartsWith("ranked_") || rn.StartsWith("sct-") || rn.StartsWith("ovt_")
+                                   || rn.StartsWith("ffa_")
                                    || (props != null && props.ContainsKey("cr_ff"));
                     fullNoGame = !modRoom;
                 }
@@ -1638,7 +1639,8 @@ namespace CompetitiveRounds
                                 || rname.StartsWith("ranked_")
                                 || rname.StartsWith("team_")
                                 || rname.StartsWith("sct-")
-                                || rname.StartsWith("ovt_");
+                                || rname.StartsWith("ovt_")
+                                || FfaMode.EngineActive();
                     var pm = PlayerManager.instance;
                     playersSpawned = pm != null && pm.players != null && pm.players.Count >= 1;
                 }
@@ -1723,7 +1725,8 @@ namespace CompetitiveRounds
                                     || rname.StartsWith("ranked_")
                                     || rname.StartsWith("team_")
                                     || rname.StartsWith("sct-")
-                                || rname.StartsWith("ovt_");
+                                || rname.StartsWith("ovt_")
+                                || FfaMode.EngineActive();
                     if (isModIssued)
                     {
                         matchIsRanked = true;
@@ -1856,6 +1859,17 @@ namespace CompetitiveRounds
                     ApiClient.ActiveOvt1v2SeriesId = null;
                     try { Plugin.ClearPendingOvtSlot(); } catch { }
                 }
+                if ((photonRoomId ?? "").StartsWith("ffa_"))
+                {
+                    // Any member leaving ends the FFA lobby (fixed roster —
+                    // the group can never re-reach N; Codex design find 4).
+                    // FfaLeaveQueue closes/dissolves it server-side and clears
+                    // ActiveFfaLobbyId + the pending slot. Idempotent when
+                    // several members leave at sitting end.
+                    try { ApiClient.FfaLeaveQueue(); } catch { }
+                    try { Plugin.ClearPendingFfaSlot(); } catch { }
+                    try { FfaMode.OnRoomLeft(); } catch { }
+                }
                 // Dump per-match perf-patch hit counts so we can verify in the log
                 // which ported patches actually fired this match (and how often).
                 PerfGate.DumpAndReset();
@@ -1877,7 +1891,7 @@ namespace CompetitiveRounds
             // so no DC/leave penalty applies on either side.
             if (inRoom && !rankedRoomStallHandled
                 && (photonRoomId.StartsWith("ranked_") || photonRoomId.StartsWith("sct-")
-                    || photonRoomId.StartsWith("ovt_")))
+                    || photonRoomId.StartsWith("ovt_") || photonRoomId.StartsWith("ffa_")))
             {
                 // Tournament rooms get a much longer solo window: the opponent
                 // has a 5-10 min no-show grace server-side, so bailing at 60s
@@ -1891,9 +1905,11 @@ namespace CompetitiveRounds
                 // window since two other clients have to load in.
                 bool isTournamentRoom = photonRoomId.StartsWith("sct-");
                 bool isOvtRoom = photonRoomId.StartsWith("ovt_");
-                double bailAfter = isTournamentRoom ? 360 : (isOvtRoom ? 90 : 60);
-                double warnAfter = isTournamentRoom ? 90 : (isOvtRoom ? 35 : 25);
-                int fullAt = isOvtRoom ? 3 : 2;
+                bool isFfaRoom = FfaMode.EngineActive();
+                // FFA: up to 10 clients have to load in — the longest window.
+                double bailAfter = isTournamentRoom ? 360 : (isFfaRoom ? 120 : (isOvtRoom ? 90 : 60));
+                double warnAfter = isTournamentRoom ? 90 : (isFfaRoom ? 45 : (isOvtRoom ? 35 : 25));
+                int fullAt = isFfaRoom ? Diag2v2.PlayersNeeded() : (isOvtRoom ? 3 : 2);
                 int pc = 0;
                 try { pc = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { }
                 if (pc >= fullAt) rankedRoomEverFull = true;
@@ -1907,6 +1923,8 @@ namespace CompetitiveRounds
                             ? "Opponent hasn't connected yet — they have a few minutes of grace. Hang tight..."
                             : isOvtRoom
                             ? "Waiting for all 3 players to connect — hang tight..."
+                            : isFfaRoom
+                            ? $"Waiting for all {fullAt} players to connect — hang tight..."
                             : "Opponent hasn't connected yet — hang tight...", new Color(1f, 0.8f, 0.3f), 6f);
                     }
                     if (waited >= bailAfter)
@@ -1917,12 +1935,15 @@ namespace CompetitiveRounds
                             ? "Opponent never showed — their no-show forfeit should be recorded. Returning to menu."
                             : isOvtRoom
                             ? "1v2 lobby never filled — returning to menu. Requeue when ready."
+                            : isFfaRoom
+                            ? "FFA lobby never filled — returning to menu. Requeue when ready."
                             : "Opponent failed to join — returning to menu. Requeue when ready.", new Color(1f, 0.5f, 0.4f), 10f);
                         // Leaving the ovt queue dissolves the never-filled lock
                         // server-side (cancels the series, resets the other two
                         // rows to searching) and clears the local lock state —
                         // otherwise the husk re-feeds this dead room forever.
                         if (isOvtRoom) { try { ApiClient.OvtLeaveQueue(); } catch { } }
+                        if (isFfaRoom) { try { ApiClient.FfaLeaveQueue(); } catch { } }
                         try { NetworkConnectionHandler.instance.NetworkRestart(); }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[QUEUE-STALL] NetworkRestart failed: {ex.Message}"); }
                     }
@@ -1974,7 +1995,7 @@ namespace CompetitiveRounds
                 // preflight to exist before game 1 ends or they're born
                 // bet-locked. Server side is idempotent find-or-create.
                 bool is2v2Eager = inCrFfEager || rNameEager.StartsWith("team_")
-                    || rNameEager.StartsWith("ovt_");
+                    || rNameEager.StartsWith("ovt_") || FfaMode.EngineActive();
                 if (!is2v2Eager)
                 {
                     seriesPreflightSent = true;
@@ -1988,7 +2009,23 @@ namespace CompetitiveRounds
             // IF the previous check returned false but we can see they have the mod
             // (cr_* Photon props). That covers the race where their mod's startup
             // /toggle-ranked sync hasn't reached the server yet by the time we ask.
-            if (inRoom && opponentSteamIdResolved
+            //
+            // Bug #91 item 2: this whole block is 1v1-shaped — in a multi-player
+            // mode room (team_/cr_ff, ovt_, ffa_) it latched onto ONE arbitrary
+            // peer, logged a contradictory "Match ranked: False" against the
+            // forced-true room state, and its matchIsRanked write raced the
+            // room-join forcing. Those rooms are definitionally mode-ranked at
+            // join; skip the 1v1 check entirely there.
+            bool rankCheckIsMultiMode = false;
+            try
+            {
+                string rnRc = PhotonNetwork.CurrentRoom?.Name ?? "";
+                var rpRc = PhotonNetwork.CurrentRoom?.CustomProperties;
+                rankCheckIsMultiMode = rnRc.StartsWith("team_") || rnRc.StartsWith("ovt_")
+                    || FfaMode.EngineActive() || (rpRc != null && rpRc.ContainsKey("cr_ff"));
+            }
+            catch { }
+            if (inRoom && !rankCheckIsMultiMode && opponentSteamIdResolved
                 && !opponentSteamId.StartsWith("photon_"))
             {
                 bool firstCheck = !opponentRankChecked;
@@ -2065,7 +2102,8 @@ namespace CompetitiveRounds
                     // a phantom 1v1 leave incident. Those modes have their own DC
                     // handling; skip the 1v1 path entirely for them.
                     string rnDc = PhotonNetwork.CurrentRoom?.Name ?? "";
-                    bool multiPlayerMode = rnDc.StartsWith("team_") || rnDc.StartsWith("ovt_");
+                    bool multiPlayerMode = rnDc.StartsWith("team_") || rnDc.StartsWith("ovt_")
+                                           || FfaMode.EngineActive();
                     if (multiPlayerMode) { wasInRoom = inRoom; return; }
 
                     int playerCount = PhotonNetwork.PlayerList?.Length ?? 0;
@@ -2211,8 +2249,34 @@ namespace CompetitiveRounds
                 }
                 else if (midGame)
                 {
-                    text = $"{whoTag} disconnected or quit mid-game";
-                    red = true;
+                    bool ffaRoom = roomName.StartsWith("ffa_");
+                    if (ffaRoom)
+                    {
+                        // Capture the leaver's tallies for the FFA report
+                        // (left_early) before Photon destroys their objects.
+                        try
+                        {
+                            string luSid = null;
+                            if (p.CustomProperties != null && p.CustomProperties.ContainsKey("u_id"))
+                                luSid = p.CustomProperties["u_id"]?.ToString();
+                            int luTeam = -1;
+                            if (p.CustomProperties != null && p.CustomProperties.ContainsKey("t_id"))
+                                int.TryParse(p.CustomProperties["t_id"]?.ToString(), out luTeam);
+                            if (!string.IsNullOrEmpty(luSid) && luTeam >= 0)
+                                FfaMode.RecordLeaver(luSid, name, luTeam);
+                        }
+                        catch { }
+                        int remaining = (PhotonNetwork.CurrentRoom?.PlayerCount ?? 0);
+                        text = remaining >= 3
+                            ? $"{whoTag} left the FFA — the game continues"
+                            : $"{whoTag} disconnected or quit mid-game";
+                        red = remaining < 3;
+                    }
+                    else
+                    {
+                        text = $"{whoTag} disconnected or quit mid-game";
+                        red = true;
+                    }
                 }
                 else if (ovtSeriesInProgress)
                 {
@@ -2816,6 +2880,7 @@ namespace CompetitiveRounds
                     !PhotonNetwork.OfflineMode
                     && !roomName.StartsWith("ovt_", StringComparison.Ordinal)
                     && !roomName.StartsWith("team_", StringComparison.Ordinal)
+                    && !roomName.StartsWith("ffa_", StringComparison.Ordinal)
                     && !(roomProps?.ContainsKey("cr_ff") ?? false)
                     && PhotonNetwork.PlayerList != null
                     && PhotonNetwork.PlayerList.Length == 2;
@@ -2843,7 +2908,8 @@ namespace CompetitiveRounds
                                 || rname.StartsWith("ranked_")
                                 || rname.StartsWith("team_")
                                 || rname.StartsWith("sct-")
-                                || rname.StartsWith("ovt_");
+                                || rname.StartsWith("ovt_")
+                                || FfaMode.EngineActive();
                 if (isModIssued)
                 {
                     matchIsRanked = true;
@@ -2923,57 +2989,7 @@ namespace CompetitiveRounds
             abyssalActivatedThisRound = false;
             inPickPhase = false;
             pendingRegicideCheck = false;
-            LocalShotsThisMatch = 0;
-            LocalBlocksThisMatch = 0;
-            LocalKeysThisMatch = 0;
-            LocalMacroSuspectSeconds = 0;
-            LocalMacroPeakKeysPerSecond = 0;
-            LocalMacroPeakClicksPerSecond = 0;
-            LocalMacroPeakEventsPerSecond = 0;
-            inputSuspectWindows.Clear();
-            inputBucketTimer = 0f;
-            inputBucketCount = 0;
-            inputBucketKeyCount = 0;
-            inputBucketClickCount = 0;
-            inputBucketStartedAtMs = -1;
-            LocalActiveSecondsThisMatch = 0f;
-            LocalBulletsFiredThisMatch = 0;
-            LocalBulletsHitThisMatch = 0;
-            LocalBlocksActivatedThisMatch = 0;
-            LocalBlocksSuccessfulThisMatch = 0;
-            LocalBlockRawAbsorbs = 0;
-            LocalBlockDedupeDrops = 0;
-            LastBlockActivatedTime = -999f;
-            LastBlockSuccessfulTime = -999f;
-            LastBlockAbsorbTime = -999f;
-            LastLocalHitTime = -999f;
-            LastBlockMissTime = -999f;
-            LastBlockEventLabel = "";
-            fpsFrameCount = 0;
-            fpsTimeAccum = 0f;
-            fpsBroadcastTimer = 0f;
-            opponentAvgFps = 0;
-            // July 21 item 2: per-match telemetry resets.
-            localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
-            bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
-            oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f;
-            localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
-            pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
-            oppHbGapCount = 0; _oppHbGapOpen = false;
-            oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
-            _lastTickStopwatchMs = -1;
-            _hitsRemaining = 0;
-            _activationSuccessCredited = true;
-            BlockChain.Reset();
-            _loggedFirstFire = _loggedFirstHit = _loggedFirstBlockAct = _loggedFirstBlockOk = false;
-            _loggedHitBudgetDrop = false;
-            // July 22 item 1/7: hit/block timelines + point stamps + per-actor harvest.
-            localHitTimeline.Clear(); localBlockTimeline.Clear();
-            oppHitTimeline.Clear(); oppBlockTimeline.Clear();
-            localFps3sTimeline.Clear();
-            pointTimes.Clear();
-            LocalDamageTakenThisMatch = 0f;
-            peerTele.Clear();
+            ResetPerMatchCombatCounters();
 
             // Retry card rarity scan if it didn't work at startup
             if (CardRarityLookup.Count == 0)
@@ -3145,9 +3161,26 @@ namespace CompetitiveRounds
 
             string matchType = matchIsRanked ? "RANKED" : "CASUAL";
             Plugin.Log.LogInfo($"[POLL] === {matchType} Match Over === Winner: team {winnerTeam}");
+            // Bug #91 item 2 (cosmetic): in a 1v2 room the old line named only
+            // whichever single opponent the 1v1 poll latched onto ("YOU WON vs
+            // Spirit!" — Nix invisible). Name every non-local participant there.
+            string oppLabel = opponentDisplayName;
+            try
+            {
+                if ((PhotonNetwork.CurrentRoom?.Name ?? "").StartsWith("ovt_")
+                    && PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length >= 3)
+                {
+                    var others = new List<string>();
+                    foreach (var ppN in PhotonNetwork.PlayerList)
+                        if (ppN != null && !ppN.IsLocal)
+                            others.Add(StripRichText(ppN.NickName ?? "?"));
+                    if (others.Count > 0) oppLabel = string.Join(" + ", others);
+                }
+            }
+            catch { }
             Plugin.Log.LogInfo(localWon
-                ? $"[POLL] YOU WON vs {opponentDisplayName}!"
-                : $"[POLL] You lost to {opponentDisplayName}");
+                ? $"[POLL] YOU WON vs {oppLabel}!"
+                : $"[POLL] You lost to {oppLabel}");
             Plugin.Log.LogInfo($"[POLL] Final: P1 {p1Rounds}r - P2 {p2Rounds}r");
             // ── Update session W/L tracking ──
             // Build the opponent set: in 1v1 it's just opponentDisplayName; in
@@ -3409,6 +3442,20 @@ namespace CompetitiveRounds
             try
             {
                 string rn1 = PhotonNetwork.CurrentRoom?.Name ?? "";
+                // ANY ffa_ room bans every other report path outright. The FFA
+                // engine reports through OnFfaGameOver (its own pipeline) —
+                // this polled OnGameOver should never even fire in FFA (the
+                // vanilla p1/p2 fields stay 0 there), so reaching this line in
+                // an ffa_ room means some 1v1-shaped branch misfired; routing
+                // it anywhere would mint phantom 1v1/2v2 rows (#65/#106 class).
+                if (FfaMode.EngineActive())
+                {
+                    Plugin.Log.LogWarning("[FFA-REPORT-ROUTE] polled OnGameOver fired in an ffa_ room — all non-FFA report paths banned");
+                    EvaluateAchievements(localWon);
+                    isTracking = false;
+                    matchIsRanked = false;
+                    return;
+                }
                 // Review HIGH: ANY ovt_ room bans the 1v1 fallback — the guard must
                 // NOT be gated on PlayerList==3. An ovt_ room that (e.g. after a DC)
                 // has 2 players at report time would otherwise fall through to the
@@ -3798,6 +3845,338 @@ namespace CompetitiveRounds
                 soloRounds, duoRounds, soloPoints, duoPoints,
                 localSteamId, info[soloSid].fps, info[duoASid].fps, info[duoBSid].fps);
             Plugin.Log.LogInfo($"[1v2-REPORT] submitted solo={soloSid} duo={duoASid},{duoBSid} {soloRounds}-{duoRounds}");
+            return true;
+        }
+
+        // ── FFA reporting ────────────────────────────────────────────────
+
+        /// <summary>Per-GAME combat/telemetry counter reset. Extracted from
+        /// OnMatchStarted so the FFA game-start hook (which can't ride the
+        /// vanilla match-start path — see OnFfaMatchStarted) resets exactly
+        /// the same windows instead of a hand-copied subset that drifts.</summary>
+        private static void ResetPerMatchCombatCounters()
+        {
+            LocalShotsThisMatch = 0;
+            LocalBlocksThisMatch = 0;
+            LocalKeysThisMatch = 0;
+            LocalMacroSuspectSeconds = 0;
+            LocalMacroPeakKeysPerSecond = 0;
+            LocalMacroPeakClicksPerSecond = 0;
+            LocalMacroPeakEventsPerSecond = 0;
+            inputSuspectWindows.Clear();
+            inputBucketTimer = 0f;
+            inputBucketCount = 0;
+            inputBucketKeyCount = 0;
+            inputBucketClickCount = 0;
+            inputBucketStartedAtMs = -1;
+            LocalActiveSecondsThisMatch = 0f;
+            LocalBulletsFiredThisMatch = 0;
+            LocalBulletsHitThisMatch = 0;
+            LocalBlocksActivatedThisMatch = 0;
+            LocalBlocksSuccessfulThisMatch = 0;
+            LocalBlockRawAbsorbs = 0;
+            LocalBlockDedupeDrops = 0;
+            LastBlockActivatedTime = -999f;
+            LastBlockSuccessfulTime = -999f;
+            LastBlockAbsorbTime = -999f;
+            LastLocalHitTime = -999f;
+            LastBlockMissTime = -999f;
+            LastBlockEventLabel = "";
+            fpsFrameCount = 0;
+            fpsTimeAccum = 0f;
+            fpsBroadcastTimer = 0f;
+            opponentAvgFps = 0;
+            // July 21 item 2: per-match telemetry resets.
+            localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
+            bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
+            oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f;
+            localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
+            pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
+            oppHbGapCount = 0; _oppHbGapOpen = false;
+            oppFreezeCount = 0; oppFreezeFocusedCount = 0; oppRecvGapCount = 0;
+            _lastTickStopwatchMs = -1;
+            _hitsRemaining = 0;
+            _activationSuccessCredited = true;
+            BlockChain.Reset();
+            _loggedFirstFire = _loggedFirstHit = _loggedFirstBlockAct = _loggedFirstBlockOk = false;
+            _loggedHitBudgetDrop = false;
+            // July 22 item 1/7: hit/block timelines + point stamps + per-actor harvest.
+            localHitTimeline.Clear(); localBlockTimeline.Clear();
+            oppHitTimeline.Clear(); oppBlockTimeline.Clear();
+            localFps3sTimeline.Clear();
+            pointTimes.Clear();
+            LocalDamageTakenThisMatch = 0f;
+            peerTele.Clear();
+        }
+
+        /// <summary>FFA game START hook — called by FfaMode.OnGameStart for
+        /// EVERY game including same-room rematches.
+        ///
+        /// Review find 1 (critical): the vanilla-driven match-start path can't
+        /// serve FFA. OnMatchStarted is armed off the "MOVE PLAYERS END" log
+        /// marker and refuses to re-arm while isTracking is true, and its
+        /// score-based safety net reads the vanilla p1/p2 fields — which stay
+        /// 0 forever in FFA. Without this hook, game 2 of an FFA sitting kept
+        /// gameOverReported=true from game 1, so it was never reported at all
+        /// and its telemetry window never reset.</summary>
+        public static void OnFfaMatchStarted()
+        {
+            try
+            {
+                // Per-game latches (the ones OnFfaGameOver / the report path read).
+                isTracking = true;
+                gameOverReported = false;
+                matchStartTime = DateTime.UtcNow;
+                matchIsRanked = true;              // ffa_ rooms are mode-ranked
+                oneVOneMatchAtStart = false;       // never the 1v1 token path
+                macroEvidenceDispatched = false;
+                opponentDCReported = false;
+                inPickPhase = false;
+
+                // Per-game telemetry/card windows.
+                localCards.Clear();
+                localOffers.Clear();
+                broadcastCardNames.Clear();
+                preMatchCards.Clear();
+                preMatchPickCount = 0;
+                pickCountThisMatch = 0;
+                try
+                {
+                    var clearProps = new Hashtable();
+                    clearProps[CARD_PROP_KEY] = "";
+                    PhotonNetwork.LocalPlayer?.SetCustomProperties(clearProps);
+                }
+                catch { }
+
+                ResetPerMatchCombatCounters();
+                if (string.IsNullOrEmpty(localSteamId) || localSteamId == "unknown")
+                    IdentifyLocalPlayer();
+                Plugin.Log.LogInfo($"[FFA] === Game {FfaMode.GameNumber} started === (tracking armed)");
+            }
+            catch (Exception ex) { Plugin.Log.LogError($"[FFA] OnFfaMatchStarted: {ex.Message}"); }
+        }
+
+        /// <summary>Own-pick bookkeeping for the FFA pick phase. The silent
+        /// apply path deliberately bypasses vanilla's "Picking Card:" log, so
+        /// the standard intercept never fires — FfaMode calls this at confirm
+        /// time to keep localCards + the cr_cards broadcast (append-only pick
+        /// history) in sync for the report path.</summary>
+        public static void RecordFfaLocalPick(string cardName, int roundNumber)
+        {
+            try
+            {
+                string canonical = CardRarityLookup.GetCanonicalName(ToTitleCase(cardName));
+                if (string.IsNullOrEmpty(canonical)) canonical = cardName;
+                localCards.Add(new MatchTracker.CardPickData
+                {
+                    CardName = canonical,
+                    CardRarity = CardRarityLookup.GetRarity(canonical),
+                    PickOrder = localCards.Count + 1,
+                    RoundNumber = Math.Max(1, roundNumber),
+                });
+                BroadcastCardPick(cardName);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] RecordFfaLocalPick: {ex.Message}"); }
+        }
+
+        /// <summary>FFA game over — called by FfaMode's round engine (the
+        /// vanilla p1/p2 fields never move in FFA, so the polling game-over
+        /// path can't fire). One-shot per game via gameOverReported.</summary>
+        public static void OnFfaGameOver(int winnerTeam)
+        {
+            if (gameOverReported) return;
+            gameOverReported = true;
+            isTracking = false;    // the next game re-arms via OnFfaMatchStarted
+            sessionMatchCount++;
+
+            BroadcastGstatsImmediate();
+            try { PhotonNetwork.SendAllOutgoingCommands(); } catch { }
+
+            // Local slot/team: in FFA TeamID == slot == PlayerID.
+            int myTeam = -1;
+            try
+            {
+                var pmL = PlayerManager.instance;
+                if (pmL?.players != null)
+                    foreach (var po in pmL.players)
+                        if (po != null && po.gameObject != null && po.data?.view != null && po.data.view.IsMine)
+                        { myTeam = po.TeamID; break; }
+            }
+            catch { }
+            bool localWon = myTeam >= 0 && winnerTeam == myTeam;
+            int myPlace = 1;
+            try
+            {
+                int myR = FfaMode.RoundsFor(myTeam), myP = FfaMode.PointsTotalFor(myTeam);
+                var pmL2 = PlayerManager.instance;
+                if (pmL2?.players != null)
+                    foreach (var po in pmL2.players)
+                    {
+                        if (po == null || po.gameObject == null || po.TeamID == myTeam) continue;
+                        int r = FfaMode.RoundsFor(po.TeamID), pt = FfaMode.PointsTotalFor(po.TeamID);
+                        if (r > myR || (r == myR && pt > myP)) myPlace++;
+                    }
+            }
+            catch { }
+            Plugin.Log.LogInfo($"[POLL] === FFA Match Over === Winner: team {winnerTeam} " +
+                               $"(you placed #{myPlace}{(localWon ? " - VICTORY" : "")})");
+            CompetitiveUI.ShowNotification(localWon
+                ? "FFA VICTORY!"
+                : $"FFA over - you placed #{myPlace}", localWon ? Color.green : new Color(0.7f, 0.85f, 1f), 6f);
+            AccumulateSessionTime();
+            SaveSessionState();
+
+            int duration = (int)(DateTime.UtcNow - matchStartTime).TotalSeconds;
+            if (duration <= 0 || duration > 86400)
+                duration = (int)Math.Max(1f, Time.realtimeSinceStartup - FfaMode.MatchStartRealtime);
+            // Per-game report room id: same shape the other modes use — the
+            // per-game suffix is the server-side replay-dedup key.
+            string reportRoomId = $"{photonRoomId}_{matchStartTime:HHmmss}_r{FfaMode.GameNumber}";
+            try
+            {
+                if (!TryReportFfaMatch(reportRoomId, duration, winnerTeam))
+                    Plugin.Log.LogWarning("[FFA-REPORT] report path did not run (see above)");
+            }
+            catch (Exception ex) { Plugin.Log.LogError($"[FFA-REPORT] {ex.Message}"); }
+        }
+
+        private static bool TryReportFfaMatch(string reportRoomId, int duration, int winnerTeam)
+        {
+            var pm = PlayerManager.instance;
+            if (pm?.players == null) return false;
+            string lobbyId = ApiClient.ActiveFfaLobbyId;
+            if (string.IsNullOrEmpty(lobbyId))
+            {
+                Plugin.Log.LogWarning("[FFA-REPORT] no active lobby id — cannot report");
+                return false;
+            }
+
+            var entries = new List<ApiClient.FfaReportPlayer>();
+            var presentSteams = new List<string>();
+            string winnerSteam = null;
+
+            foreach (var pp in PhotonNetwork.PlayerList ?? new Photon.Realtime.Player[0])
+            {
+                if (pp == null) continue;
+                string sid = ResolvePhotonSteamId(pp);
+                if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_"))
+                {
+                    Plugin.Log.LogWarning($"[FFA-REPORT] couldn't resolve actor {pp.ActorNumber} — skipping them");
+                    continue;
+                }
+                string name = StripRichText(pp.NickName ?? sid);
+                if (string.IsNullOrEmpty(name)) name = sid;
+                if (name.Length > 60) name = name.Substring(0, 60);
+                int teamId = -1;
+                foreach (var po in pm.players)
+                {
+                    if (po == null || po.gameObject == null) continue;
+                    var pv = po.GetComponent<PhotonView>();
+                    if (pv?.Owner == null || pv.Owner.ActorNumber != pp.ActorNumber) continue;
+                    teamId = po.TeamID; break;
+                }
+                if (teamId < 0)
+                {
+                    Plugin.Log.LogWarning($"[FFA-REPORT] no in-game player for actor {pp.ActorNumber} — skipping");
+                    continue;
+                }
+                int fps = 0;
+                if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(FPS_PROP_KEY))
+                {
+                    try { fps = Convert.ToInt32(pp.CustomProperties[FPS_PROP_KEY]); } catch { }
+                }
+                ApiClient.TeamTelemetry tele = null;
+                if (pp.IsLocal)
+                {
+                    if (LocalAvgFps > 0) fps = LocalAvgFps;
+                    tele = new ApiClient.TeamTelemetry
+                    {
+                        fpsTimeline = string.Join(",", localFps3sTimeline),
+                        pingTimeline = string.Join(",", pingSamples),
+                        pingAvg = pingSamples.Count > 0 ? (int)Math.Round(pingSamples.Average()) : 0,
+                        hitTimeline = string.Join(",", localHitTimeline.ToArray()),
+                        blockTimeline = string.Join(",", localBlockTimeline.ToArray()),
+                        bulletsFired = LocalBulletsFiredThisMatch,
+                        bulletsHit = LocalBulletsHitThisMatch,
+                        blocksActivated = LocalBlocksActivatedThisMatch,
+                        blocksSuccessful = LocalBlocksSuccessfulThisMatch,
+                        keysPressed = LocalKeysThisMatch,
+                        activeSeconds = LocalActiveSecondsThisMatch,
+                    };
+                }
+                else if (TryGetPeerTelemetry(pp.ActorNumber,
+                             out string pFps, out string pPing, out string pHit, out string pBlock,
+                             out int[] pCounters))
+                {
+                    int pingAvg = 0;
+                    try
+                    {
+                        var pings = new List<int>();
+                        foreach (var s in (pPing ?? "").Split(','))
+                            if (int.TryParse(s, out int v) && v > 0) pings.Add(v);
+                        if (pings.Count > 0) pingAvg = (int)Math.Round(pings.Average());
+                    }
+                    catch { }
+                    tele = new ApiClient.TeamTelemetry
+                    {
+                        fpsTimeline = pFps, pingTimeline = pPing, pingAvg = pingAvg,
+                        hitTimeline = pHit, blockTimeline = pBlock,
+                        bulletsFired = pCounters[0], bulletsHit = pCounters[1],
+                        blocksActivated = pCounters[2], blocksSuccessful = pCounters[3],
+                        keysPressed = pCounters[4], activeSeconds = pCounters[5],
+                    };
+                }
+                entries.Add(new ApiClient.FfaReportPlayer
+                {
+                    steamId = sid, displayName = name, slot = teamId,
+                    rounds = FfaMode.RoundsFor(teamId),
+                    points = FfaMode.PointsTotalFor(teamId),
+                    leftEarly = false, fps = fps,
+                    cards = FfaMode.PickHistoryFor(teamId),
+                    telemetry = tele,
+                });
+                presentSteams.Add(sid);
+                if (teamId == winnerTeam) winnerSteam = sid;
+            }
+
+            // Leavers: recorded at leave time with their tallies (left_early).
+            foreach (var kv in FfaMode.Leavers)
+            {
+                if (presentSteams.Contains(kv.Key)) continue;
+                entries.Add(new ApiClient.FfaReportPlayer
+                {
+                    steamId = kv.Key,
+                    displayName = kv.Value.displayName,
+                    slot = kv.Value.slot,
+                    rounds = kv.Value.roundsWon,
+                    points = kv.Value.pointsTotal,
+                    leftEarly = true, fps = 0,
+                    cards = FfaMode.PickHistoryFor(kv.Value.slot),
+                    telemetry = null,
+                });
+            }
+
+            if (entries.Count < 2 || string.IsNullOrEmpty(winnerSteam))
+            {
+                Plugin.Log.LogWarning($"[FFA-REPORT] not reportable (entries={entries.Count}, winner={(winnerSteam ?? "unresolved")})");
+                return false;
+            }
+
+            // Reporter election: lowest Steam ID among PRESENT players (all FFA
+            // players carry the mod — the queue is the only entry path).
+            string lowest = null; long lowVal = long.MaxValue;
+            foreach (var sid in presentSteams)
+                if (long.TryParse(sid, out long v) && v < lowVal) { lowVal = v; lowest = sid; }
+            if (lowest == null) lowest = localSteamId;
+            if (lowest != localSteamId)
+            {
+                Plugin.Log.LogInfo($"[FFA-REPORT] reporter is {lowest}, not me — skipping");
+                return true;
+            }
+
+            ApiClient.ReportFfaMatch(lobbyId, reportRoomId, photonRegion, duration,
+                entries, winnerSteam, localSteamId);
+            Plugin.Log.LogInfo($"[FFA-REPORT] submitted lobby={lobbyId} n={entries.Count} winner={winnerSteam}");
             return true;
         }
 
@@ -4433,7 +4812,12 @@ namespace CompetitiveRounds
                         RoundNumber = currentRound,
                         WasPicked = true,
                     });
-                    Plugin.Log.LogInfo($"[POLL] Synthesized picked offer for {cardName} round={currentRound} (Harmony EndPick didn't fire)");
+                    // Bug #91 item 9: this is NORMAL ordering, not a failure —
+                    // the Unity-log intercept always runs before the Harmony
+                    // EndPick postfix, which then reconciles with this synth
+                    // row (target match). The old "(Harmony EndPick didn't
+                    // fire)" wording sent log readers hunting a phantom bug.
+                    Plugin.Log.LogInfo($"[POLL] Synthesized picked offer for {cardName} round={currentRound} (log intercept ran first; EndPick reconciles)");
                 }
 
                 // Broadcast to opponent via Photon custom properties

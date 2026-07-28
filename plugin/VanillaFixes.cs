@@ -538,4 +538,117 @@ namespace CompetitiveRounds
             return VanillaFixSupport.Cleanup("EndScreenKill", exception);
         }
     }
+
+    /// <summary>Bug #91 items 4/5 (July 27 log forensics): vanilla starts
+    /// coroutines on INACTIVE GameObjects and Unity refuses with a console
+    /// error each time (~14/session). Proven sites, all missing the
+    /// activeInHierarchy guard vanilla's own HealthHandler.Revive has:
+    /// RPCA_SendForceOverTime / RPCA_SendForceTowardsPointOverTime land from
+    /// the same hit-volley that just killed the player (RPCA_Die SetActive
+    /// false first), DamageOverTime.TakeDamageOverTime is the DOT-tick twin,
+    /// and CardChoiceVisuals.Hide fires while its GO is already hidden at
+    /// round->pick transitions. Skipping while inactive changes nothing —
+    /// Unity already refuses the StartCoroutine — it just stops the error
+    /// noise that muddies every log read.</summary>
+    [HarmonyPatch(typeof(HealthHandler), "RPCA_SendForceOverTime")]
+    internal static class DeadPlayerForcePatch
+    {
+        [HarmonyPrefix]
+        private static bool BeforeForceOverTime(HealthHandler __instance)
+        {
+            try
+            {
+                if (!VanillaFixSupport.GameplayScope()) return true;
+                if (__instance != null && !__instance.gameObject.activeInHierarchy)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "DeadPlayerForce-skip",
+                        "Skipped RPCA_SendForceOverTime on inactive player (post-death knockback)",
+                        4);
+                    return false;
+                }
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("DeadPlayerForce", ex); }
+            return true;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("DeadPlayerForce", exception);
+        }
+    }
+
+    [HarmonyPatch(typeof(HealthHandler), "RPCA_SendForceTowardsPointOverTime")]
+    internal static class DeadPlayerForcePointPatch
+    {
+        [HarmonyPrefix]
+        private static bool BeforeForceTowardsPoint(HealthHandler __instance)
+        {
+            try
+            {
+                if (!VanillaFixSupport.GameplayScope()) return true;
+                if (__instance != null && !__instance.gameObject.activeInHierarchy)
+                    return false;
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("DeadPlayerForcePoint", ex); }
+            return true;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("DeadPlayerForcePoint", exception);
+        }
+    }
+
+    [HarmonyPatch(typeof(DamageOverTime), "TakeDamageOverTime")]
+    internal static class DeadPlayerDotPatch
+    {
+        [HarmonyPrefix]
+        private static bool BeforeDotTick(DamageOverTime __instance)
+        {
+            try
+            {
+                if (!VanillaFixSupport.GameplayScope()) return true;
+                if (__instance != null && !__instance.gameObject.activeInHierarchy)
+                    return false;
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("DeadPlayerDot", ex); }
+            return true;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("DeadPlayerDot", exception);
+        }
+    }
+
+    [HarmonyPatch(typeof(CardChoiceVisuals), "Hide")]
+    internal static class InactiveVisualsHidePatch
+    {
+        [HarmonyPrefix]
+        private static bool BeforeHide(CardChoiceVisuals __instance)
+        {
+            try
+            {
+                if (!VanillaFixSupport.GameplayScope()) return true;
+                if (__instance != null && !__instance.gameObject.activeInHierarchy)
+                    return false;
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("InactiveVisualsHide", ex); }
+            return true;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("InactiveVisualsHide", exception);
+        }
+    }
 }

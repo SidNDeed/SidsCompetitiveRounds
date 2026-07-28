@@ -232,12 +232,72 @@ namespace CompetitiveRounds
                     if (p == null) continue;
                     var pv = p.GetComponent<PhotonView>();
                     if (pv == null || pv.OwnerActorNr != actor) continue;
-                    ApplyToPlayer(p.transform, actor, sku, colorHex);
-                    Plugin.Log.LogInfo($"[PCOLOR] Re-applied for actor={actor} (late props) sku={sku}");
+                    if (ApplyOrDefer(p.transform, actor, sku, colorHex))
+                        Plugin.Log.LogInfo($"[PCOLOR] Re-applied for actor={actor} (late props) sku={sku}");
                     return;
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] ReapplyForActor failed: {ex.Message}"); }
+        }
+
+        // ── Inactive-player defer ───────────────────────────────────
+        // Between rounds ROUNDS deactivates dead Player GOs (RPCA_Die →
+        // SetActive(false); Revive at next-round load reactivates them). A
+        // tint applied in that window runs against the mid-death state and
+        // gets partially clobbered by Revive() (which re-reads team colors,
+        // e.g. hpSprite). Defer the apply on Plugin.Instance (learning #85:
+        // never host coroutines on scene/player objects) until the body is
+        // active again, with a bail so a player who never revives doesn't
+        // leak a spinning coroutine. Returns true when applied immediately.
+        private static readonly HashSet<int> _pendingInactiveApplies = new HashSet<int>();
+
+        // Per-actor generation: every request supersedes an in-flight defer so
+        // a stale deferred apply can't overwrite a newer color/unequip on
+        // revive (review find 12, same shape as PlayerEffectCosmetic).
+        private static readonly Dictionary<int, int> _applyGen = new Dictionary<int, int>();
+
+        private static bool ApplyOrDefer(Transform playerRoot, int actor, string sku, string colorHex)
+        {
+            if (playerRoot == null) return false;
+            int g;
+            _applyGen.TryGetValue(actor, out g);
+            g++;
+            _applyGen[actor] = g;
+            if (playerRoot.gameObject.activeInHierarchy)
+            {
+                ApplyToPlayer(playerRoot, actor, sku, colorHex);
+                return true;
+            }
+            if (_pendingInactiveApplies.Add(actor))  // one defer in flight per actor
+            {
+                Plugin.Log.LogInfo($"[PCOLOR] deferred (player inactive) actor={actor}");
+                try { Plugin.Instance.StartCoroutine(ApplyWhenActive(playerRoot, actor, sku, colorHex, g)); }
+                catch (Exception ex)
+                {
+                    _pendingInactiveApplies.Remove(actor);
+                    Plugin.Log.LogWarning($"[PCOLOR] defer failed: {ex.Message}");
+                }
+            }
+            return false;
+        }
+
+        private static IEnumerator ApplyWhenActive(Transform playerRoot, int actor, string sku, string colorHex, int gen)
+        {
+            float deadline = Time.realtimeSinceStartup + 10f;
+            while (playerRoot != null && !playerRoot.gameObject.activeInHierarchy
+                   && Time.realtimeSinceStartup < deadline)
+                yield return null;
+            _pendingInactiveApplies.Remove(actor);
+            int cur;
+            if (_applyGen.TryGetValue(actor, out cur) && cur != gen)
+            {
+                Plugin.Log.LogInfo($"[PCOLOR] deferred apply superseded actor={actor}");
+                yield break;
+            }
+            // Destroyed (room/match ended) or still inactive at the bail → drop;
+            // the next OnRoundStart pass re-applies from live props anyway.
+            if (playerRoot == null || !playerRoot.gameObject.activeInHierarchy) yield break;
+            ApplyToPlayer(playerRoot, actor, sku, colorHex);
         }
 
         private static IEnumerator DelayedApplyAll()
@@ -277,7 +337,7 @@ namespace CompetitiveRounds
                     if (cp.ContainsKey(PROP_COLOR)) colorHex = cp[PROP_COLOR]?.ToString() ?? "";
                 }
                 if (string.IsNullOrEmpty(sku)) continue;
-                ApplyToPlayer(p.transform, actor, sku, colorHex);
+                ApplyOrDefer(p.transform, actor, sku, colorHex);
             }
 
             // Spin up the animation tick if any equipped sku is animated.

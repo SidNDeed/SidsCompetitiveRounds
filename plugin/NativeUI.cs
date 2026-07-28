@@ -110,9 +110,33 @@ namespace CompetitiveRounds
             try
             {
                 var fontAssetType = tmpFont.GetType();               // TMPro.TMP_FontAsset
-                var mCreate = fontAssetType.GetMethod("CreateFontAsset",
-                    BindingFlags.Public | BindingFlags.Static, null, new Type[] { typeof(Font) }, null);
-                if (mCreate == null) { Plugin.Log.LogWarning("[FONT] TMP_FontAsset.CreateFontAsset(Font) not found — unicode fallback disabled"); return; }
+                // Unity 2022.3.34 regression (bug #91 issue 3): the classic
+                // CreateFontAsset(Font) overload now returns null for dynamic
+                // OS fonts ("Unable to load font face" — the Font object no
+                // longer carries face data that path can use). Newer TMP adds
+                // a string-based overload that resolves the OS family by name
+                // directly; try that first, then the classic path, then the
+                // fully-parameterized overload. All resolved by reflection so
+                // any TMP version degrades to a graceful no-op.
+                MethodInfo mCreateByName = null, mCreateFromFont = null, mCreateFull = null;
+                foreach (var mi in fontAssetType.GetMethods(BindingFlags.Public | BindingFlags.Static))
+                {
+                    if (mi.Name != "CreateFontAsset") continue;
+                    var mps = mi.GetParameters();
+                    if (mps.Length == 3 && mps[0].ParameterType == typeof(string)
+                        && mps[1].ParameterType == typeof(string) && mps[2].ParameterType == typeof(int))
+                        mCreateByName = mi;
+                    else if (mps.Length == 1 && mps[0].ParameterType == typeof(Font))
+                        mCreateFromFont = mi;
+                    else if (mps.Length >= 7 && mps[0].ParameterType == typeof(Font)
+                             && mps[1].ParameterType == typeof(int) && mps[2].ParameterType == typeof(int)
+                             && mps[3].ParameterType.IsEnum && mps[4].ParameterType == typeof(int)
+                             && mps[5].ParameterType == typeof(int) && mps[6].ParameterType.IsEnum
+                             && (mCreateFull == null || mps.Length < mCreateFull.GetParameters().Length))
+                        mCreateFull = mi;   // shortest matching overload wins
+                }
+                if (mCreateByName == null && mCreateFromFont == null && mCreateFull == null)
+                { Plugin.Log.LogWarning("[FONT] no usable TMP_FontAsset.CreateFontAsset overload found — unicode fallback disabled"); return; }
 
                 string[] installed;
                 try { installed = Font.GetOSInstalledFontNames(); } catch { installed = new string[0]; }
@@ -135,24 +159,68 @@ namespace CompetitiveRounds
                         if (!installedSet.Contains(name)) continue;
                         tried.Add(name);
                         bool built = false;
-                        try
+                        object asset = null; string via = null;
+                        // (1) Newest TMP: resolve the OS family by name — no
+                        // Font object involved, dodges the 2022.3 face-data loss.
+                        if (mCreateByName != null)
                         {
-                            var osFont = Font.CreateDynamicFontFromOSFont(name, 48);
+                            try
+                            {
+                                asset = mCreateByName.Invoke(null, new object[] { name, "Regular", 90 });
+                                if (asset != null) via = "CreateFontAsset(family,style,size)";
+                            }
+                            catch (Exception fx) { Plugin.Log.LogWarning($"[FONT] by-name path failed for '{name}': {fx.Message}"); }
+                        }
+                        Font osFont = null;
+                        if (asset == null && (mCreateFromFont != null || mCreateFull != null))
+                        {
+                            try { osFont = Font.CreateDynamicFontFromOSFont(name, 48); } catch { osFont = null; }
                             if (osFont == null)
                             {
                                 Plugin.Log.LogWarning($"[FONT] fallback build failed for '{name}': CreateDynamicFontFromOSFont returned null");
                                 continue;
                             }
-                            var asset = mCreate.Invoke(null, new object[] { osFont });
-                            if (asset != null)
-                            {
-                                created.Add(asset);
-                                built = true;
-                                Plugin.Log.LogInfo($"[FONT] built dynamic fallback font asset from OS font '{name}'");
-                            }
-                            else Plugin.Log.LogWarning($"[FONT] fallback build failed for '{name}': CreateFontAsset returned null");
                         }
-                        catch (Exception fx) { Plugin.Log.LogWarning($"[FONT] fallback build failed for '{name}': {fx.Message}"); }
+                        // (2) Classic path (pre-2022 TMP).
+                        if (asset == null && mCreateFromFont != null)
+                        {
+                            try
+                            {
+                                asset = mCreateFromFont.Invoke(null, new object[] { osFont });
+                                if (asset != null) via = "CreateFontAsset(Font)";
+                            }
+                            catch (Exception fx) { Plugin.Log.LogWarning($"[FONT] classic path failed for '{name}': {fx.Message}"); }
+                        }
+                        // (3) Fully-parameterized: sampling 90, padding 9,
+                        // GlyphRenderMode.SDFAA (4165), 1024x1024 atlas,
+                        // AtlasPopulationMode.Dynamic (1) — enums resolved via
+                        // Enum.ToObject on the reflected parameter types.
+                        if (asset == null && mCreateFull != null)
+                        {
+                            try
+                            {
+                                var fps = mCreateFull.GetParameters();
+                                var args = new object[fps.Length];
+                                args[0] = osFont; args[1] = 90; args[2] = 9;
+                                args[3] = Enum.ToObject(fps[3].ParameterType, 4165);   // GlyphRenderMode.SDFAA
+                                args[4] = 1024; args[5] = 1024;
+                                args[6] = Enum.ToObject(fps[6].ParameterType, 1);      // AtlasPopulationMode.Dynamic
+                                for (int ai = 7; ai < fps.Length; ai++)                // e.g. enableMultiAtlasSupport
+                                    args[ai] = fps[ai].ParameterType == typeof(bool) ? (object)true
+                                             : fps[ai].HasDefaultValue ? fps[ai].DefaultValue
+                                             : fps[ai].ParameterType.IsValueType ? Activator.CreateInstance(fps[ai].ParameterType) : null;
+                                asset = mCreateFull.Invoke(null, args);
+                                if (asset != null) via = "CreateFontAsset(Font,size,pad,mode,w,h,population)";
+                            }
+                            catch (Exception fx) { Plugin.Log.LogWarning($"[FONT] full path failed for '{name}': {fx.Message}"); }
+                        }
+                        if (asset != null)
+                        {
+                            created.Add(asset);
+                            built = true;
+                            Plugin.Log.LogInfo($"[FONT] fallback built via {via} for '{name}'");
+                        }
+                        else Plugin.Log.LogWarning($"[FONT] fallback build failed for '{name}': all CreateFontAsset paths returned null");
                         if (built) break; // one successful asset per script family
                     }
                 }
@@ -677,6 +745,7 @@ namespace CompetitiveRounds
             MaybeRefreshTeamTab();
             MaybeRefreshLeaderboardTab();
             MaybeRefreshOvtTab();
+            MaybeRefreshFfaTab();
             MaybeRefreshHomeTab();
             TickAnimatedThumbnails();
         }
@@ -837,7 +906,7 @@ namespace CompetitiveRounds
 
         private static void BuildPage(Transform canvasParent)
         {
-            try{rankedRows.Clear();casualRows.Clear();lbRows.Clear();cardRows.Clear();sessionOppTexts.Clear();ovtLbRows.Clear();
+            try{rankedRows.Clear();casualRows.Clear();lbRows.Clear();cardRows.Clear();sessionOppTexts.Clear();ovtSoloLbRows.Clear();ovtDuoLbRows.Clear();ovtRecentRows.Clear();ffaLbRows.Clear();ffaRecentRows.Clear();
             pageGO=new GameObject("CompetitiveRoundsPage");pageGO.transform.SetParent(canvasParent,false);var rt=pageGO.AddComponent<RectTransform>();rt.anchorMin=Vector2.zero;rt.anchorMax=Vector2.one;rt.offsetMin=Vector2.zero;rt.offsetMax=Vector2.zero;pageGO.SetActive(false);
             var bgGO=UIFactory.CreatePanel("BG",pageGO.transform,C_BG);var bgImg=bgGO.GetComponent(UIFactory.tImage);if(bgImg!=null)UIFactory.tImage.GetProperty("raycastTarget",BindingFlags.Public|BindingFlags.Instance)?.SetValue(bgImg,true);
             var content=new GameObject("Content");content.transform.SetParent(pageGO.transform,false);var crt=content.AddComponent<RectTransform>();crt.anchorMin=Vector2.zero;crt.anchorMax=Vector2.one;crt.offsetMin=new Vector2(30,10);crt.offsetMax=new Vector2(-30,-10);UIFactory.AddVLG(content,spacing:4,padL:8,padR:8,padT:8,padB:8);
@@ -1059,11 +1128,37 @@ namespace CompetitiveRounds
                     }
                 }
         }
-        // ── FFA tab (design preview; the mode itself is NOT playable yet) ──
-        // The locked design (docs/design-1v2-ffa.md, Sid's July 13 decisions)
-        // rendered as a preview so testers know what's coming and why it's
-        // gated. No queue controls until the mode ships — a joinable queue
-        // that can't produce a playable game would be worse than none.
+        // ── FFA tab (live — first playtest build, ranked from day one) ─────
+        private static object txtFfaStatus, txtFfaLobbyHeader, txtFfaLobbyBody, txtFfaLbHeader, txtFfaRecentHeader, txtFfaRecentPage;
+        private static GameObject ffaJoinBtn, ffaLeaveBtn, ffaLbContainer, ffaRecentContainer, ffaRecentPrevBtn, ffaRecentNextBtn;
+        private static List<GameObject> ffaLbSortBtns; private static string[] ffaLbSortKeys; private static object[] ffaLbHeaderTexts;
+        private static string ffaLbSortReq = "rating";   // last requested sort — highlights the header
+        // Bug #76 parity: inner ScrollRects must be disabled while their
+        // content fits, or they capture the wheel and the OUTER tab scroll
+        // never sees it (same fix as teamLBScrollRect).
+        private static Component ffaLbScrollRect, ffaRecentScrollRect;
+        private static Component ovtSoloScrollRect, ovtDuoScrollRect, ovtRecentScrollRect;
+        private static void ToggleInnerScroll(Component scrollRect, float contentH)
+        {
+            try
+            {
+                var srBeh = scrollRect as Behaviour;
+                if (srBeh == null) return;
+                var srRT = srBeh.transform as RectTransform;
+                float viewH = srRT != null ? srRT.rect.height : 0f;
+                bool needs = viewH > 1f && contentH > viewH;
+                if (srBeh.enabled != needs) srBeh.enabled = needs;
+            }
+            catch { }
+        }
+        private class FfaLBRow { public GameObject root; public object txtRank, txtName, txtRating, txtGames, txtWins, txtTop3, txtAvgPl, txtWR; }
+        private static readonly List<FfaLBRow> ffaLbRows = new List<FfaLBRow>();
+        // Column widths — shared by header buttons + rows; sum (634) + spacing
+        // (7*4) + padL/R (16) = 678, inside the 690 column (learning #199).
+        private static readonly int[] FFA_LB_COL_W = new int[] { 36, 190, 80, 70, 64, 64, 70, 60 };
+        private static readonly List<object> ffaRecentRows = new List<object>();
+        public static int ffaRecentPageReq = 0;
+
         private static GameObject BuildFfaTab(Transform parent,int tabIdx)
         {
             // Same outer-wrapper pattern as 2v2/1v2: the sub-tab anchor lives
@@ -1072,43 +1167,346 @@ namespace CompetitiveRounds
             var outer=new GameObject("FfaOuter");outer.transform.SetParent(parent,false);outer.AddComponent<RectTransform>();
             UIFactory.AddVLG(outer,spacing:0);UIFactory.AddLE(outer,flexH:1);
             MakeSubTabAnchor(tabIdx,outer.transform,true);
-            var panel=new GameObject("Ffa");panel.transform.SetParent(outer.transform,false);panel.AddComponent<RectTransform>();
-            UIFactory.AddVLG(panel,spacing:8,padL:20,padR:20,padT:8,padB:14);UIFactory.AddLE(panel,flexH:1);
-            UIFactory.CreateText("FfaH",panel.transform,"FFA — Free For All",24f,C_GOLD,sizeDelta:new Vector2(700,32));
-            UIFactory.CreateText("FfaStatus",panel.transform,"<color=#FF6666><b>IN DEVELOPMENT — not playable yet.</b></color> <color=#888>This page previews the locked design. The queue will open here once the mode ships.</color>",14f,C_DIM,sizeDelta:new Vector2(820,22));
+            // Whole tab in a ScrollView (2v2 pattern) so the bottom row stays
+            // reachable at any aspect (learning #199).
+            var scroll=UIFactory.CreateScrollView("FfaScroll",outer.transform,spacing:6);
+            UIFactory.AddLE(scroll.scrollGO,flexH:1);
+            var panel=new GameObject("FfaInner");panel.transform.SetParent(scroll.content.transform,false);panel.AddComponent<RectTransform>();
+            UIFactory.AddVLG(panel,spacing:8,padL:10,padR:10,padT:8,padB:8);
 
-            var how=UIFactory.CreatePanel("FfaHow",panel.transform,C_PANEL);
-            UIFactory.AddVLG(how,spacing:3,padL:12,padR:12,padT:8,padB:8);UIFactory.AddLE(how,flexH:0);
-            UIFactory.CreateText("FfaHowH",how.transform,"How it will work",18f,C_SUB,sizeDelta:new Vector2(400,26));
-            string[] ffaRules={
-                "<color=#FFD94D>4 players</color>, everyone for themselves — each player is their own team. A lobby of 3 can start if a 4th doesn't show.",
-                "A round ends when <color=#FFD94D>one player is left standing</color>; the game goes to the first player with <color=#FFD94D>5 round wins</color>.",
-                "<color=#FFD94D>Single games only</color> — no BO3 series. Queue again for another game.",
-                "After each round the <color=#FFD94D>three non-winners pick a card</color>; the round winner doesn't.",
-                "<color=#FFD94D>Rolling 5-card bar</color> (the signature rule): you can only hold 5 cards — picking a 6th replaces your OLDEST card, so builds rotate instead of stacking.",
-                "<color=#FFD94D>Unranked at launch</color> — every game is recorded from day one, so ratings can be applied retroactively when ranked FFA lands.",
-            };
-            foreach(var r in ffaRules)
+            UIFactory.CreateText("FfaH",panel.transform,"<b>FREE-FOR-ALL (3-10 players) - RANKED</b>",20f,C_GOLD,UIFactory.AlignMidLeft,sizeDelta:new Vector2(900,28));
+            UIFactory.CreateText("FfaNote",panel.transform,"<color=#FFCC44>New mode - first playtest build.</color> <color=#888>Games are ranked from day one.</color>",14f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(900,22));
+
+            // Queue controls row.
+            var ctl=new GameObject("FfaCtl");ctl.transform.SetParent(panel.transform,false);ctl.AddComponent<RectTransform>();
+            UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:34,flexH:0);
+            ffaJoinBtn=UIFactory.CreateButton("FfaJoin",ctl.transform,"Join FFA Queue",14f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.FfaJoinQueue();dirty=true;},sizeDelta:new Vector2(160,28));
+            ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",14f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(90,28));
+            txtFfaStatus=UIFactory.CreateText("FfaSt",panel.transform,"Not in queue.",15f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(900,24));
+
+            // In-lobby panel (who's queueing) — RenderFfaLobbySection body.
+            var lobbyPanel=UIFactory.CreatePanel("FfaQL",panel.transform,C_PANEL);
+            UIFactory.AddVLG(lobbyPanel,spacing:2,padL:10,padR:10,padT:6,padB:6);
+            UIFactory.AddLE(lobbyPanel,flexH:0);
+            txtFfaLobbyHeader=UIFactory.CreateText("FfaQLH",lobbyPanel.transform,"<b>FFA Lobby</b>",16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(900,22));
+            txtFfaLobbyBody=UIFactory.CreateText("FfaQLB",lobbyPanel.transform,"<color=#888>Loading...</color>",14f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(900,22));
+            var qlbC=txtFfaLobbyBody as Component;
+            if(qlbC!=null)UIFactory.AddLE(qlbC.gameObject,prefH:22,minH:22,flexH:0);
+            UIFactory.SetWordWrap(txtFfaLobbyBody,true);
+
+            // Bottom row: leaderboard (left, fixed width) + recent matches
+            // (right, flex). Fixed prefH inside the outer scroll — never
+            // flexH:1 (learning #63).
+            var bottom=new GameObject("FfaBot");bottom.transform.SetParent(panel.transform,false);bottom.AddComponent<RectTransform>();
+            UIFactory.AddHLG(bottom,spacing:8);UIFactory.AddLE(bottom,prefH:720,minH:400,flexH:0);
+
+            var lbCol=new GameObject("FfaLBCol");lbCol.transform.SetParent(bottom.transform,false);lbCol.AddComponent<RectTransform>();
+            UIFactory.AddVLG(lbCol,spacing:4);
+            // flexW:0 explicit + load-bearing (learning #132 — rows inside
+            // would otherwise bubble flexW up and stretch the column).
+            UIFactory.AddLE(lbCol,prefW:690,minW:640,flexW:0,flexH:1);
+            txtFfaLbHeader=UIFactory.CreateText("FfaLBH",lbCol.transform,"<b>FFA Leaderboard</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(500,24));
+            var lbHdrRow=new GameObject("FfaLBHR");lbHdrRow.transform.SetParent(lbCol.transform,false);lbHdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(lbHdrRow,spacing:4,padL:8,padR:8);UIFactory.AddLE(lbHdrRow,prefH:24,minH:24,flexH:0);
+            string[] hdrLabels=new[]{"#","Player","Rating","Games","Wins","Top3","AvgPl","WR"};
+            string[] hdrSortKey=new[]{null,null,"rating","games","wins","top3","avg_placement","win_rate"};
+            ffaLbSortBtns=new List<GameObject>();ffaLbSortKeys=hdrSortKey;ffaLbHeaderTexts=new object[hdrLabels.Length];
+            for(int hi=0;hi<hdrLabels.Length;hi++)
             {
-                var t=UIFactory.CreateText("FfaR",how.transform,"-  "+r,14f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(820,20));
-                UIFactory.SetWordWrap(t,true);UIFactory.SetTextAutoHeight(t);
+                int idx=hi;
+                if(hdrSortKey[hi]==null)
+                {
+                    var lbl=UIFactory.CreateText($"FfaLBH_{hi}",lbHdrRow.transform,hdrLabels[hi],13f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(FFA_LB_COL_W[hi],24));
+                    ffaLbHeaderTexts[hi]=lbl;ffaLbSortBtns.Add(null);
+                }
+                else
+                {
+                    var b=UIFactory.CreateButton($"FfaLBS_{hdrSortKey[hi]}",lbHdrRow.transform,hdrLabels[hi],13f,C_LABEL,new Color(0.18f,0.20f,0.24f,0.85f),
+                        ()=>{ffaLbSortReq=hdrSortKey[idx];ApiClient.FetchFfaLeaderboard(200,hdrSortKey[idx]);},
+                        sizeDelta:new Vector2(FFA_LB_COL_W[hi],24));
+                    ffaLbSortBtns.Add(b);ffaLbHeaderTexts[hi]=UIFactory.GetButtonText(b);
+                }
             }
+            var lbScroll=UIFactory.CreateScrollView("FfaLBSV",lbCol.transform,spacing:1);
+            UIFactory.AddLE(lbScroll.scrollGO,flexH:1);
+            ffaLbContainer=lbScroll.content;
+            ffaLbScrollRect=lbScroll.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
+            for(int i=0;i<100;i++)ffaLbRows.Add(CreateFfaLBRow(ffaLbContainer.transform,$"flb{i}"));
 
-            var why=UIFactory.CreatePanel("FfaWhy",panel.transform,C_PANEL);
-            UIFactory.AddVLG(why,spacing:3,padL:12,padR:12,padT:8,padB:8);UIFactory.AddLE(why,flexH:0);
-            UIFactory.CreateText("FfaWhyH",why.transform,"Why it isn't out yet",18f,C_SUB,sizeDelta:new Vector2(400,26));
-            var whyT=UIFactory.CreateText("FfaWhyB",why.transform,"The rolling card bar removes and re-applies cards mid-match — brand-new netcode that has to survive ROUNDS' messiest cards. It gets a dedicated Sandbox test matrix (Empower, Shield Charge, Phoenix, Abyssal, Brainwash) before any public lobby sees it. 1v2 shipped first because it reuses proven 2v2 machinery; FFA gets its own focused pass next.",14f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(820,40));
-            UIFactory.SetWordWrap(whyT,true);UIFactory.SetTextAutoHeight(whyT);
-
-            var ffaSp=new GameObject("S");ffaSp.transform.SetParent(panel.transform,false);ffaSp.AddComponent<RectTransform>();UIFactory.AddLE(ffaSp,flexH:1);
+            // Right: recent ranked FFAs, paged 5/page.
+            var rCol=new GameObject("FfaRCol");rCol.transform.SetParent(bottom.transform,false);rCol.AddComponent<RectTransform>();
+            UIFactory.AddVLG(rCol,spacing:4);UIFactory.AddLE(rCol,flexW:1,flexH:1);
+            var rHdrRow=new GameObject("FfaRHR");rHdrRow.transform.SetParent(rCol.transform,false);rHdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:26,minH:26,flexH:0);
+            txtFfaRecentHeader=UIFactory.CreateText("FfaRH",rHdrRow.transform,"<b>Recent Ranked FFAs</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(300,26));
+            var rSp=new GameObject("FfaRSp");rSp.transform.SetParent(rHdrRow.transform,false);rSp.AddComponent<RectTransform>();UIFactory.AddLE(rSp,flexW:1);
+            ffaRecentPrevBtn=UIFactory.CreateButton("FfaRP",rHdrRow.transform,"<",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ffaRecentPageReq=Math.Max(0,ffaRecentPageReq-1);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(28,22));
+            txtFfaRecentPage=UIFactory.CreateText("FfaRPI",rHdrRow.transform,"1/1",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(48,22));
+            ffaRecentNextBtn=UIFactory.CreateButton("FfaRN",rHdrRow.transform,">",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ffaRecentPageReq+=1;ApiClient.FetchFfaRecent(ffaRecentPageReq,5);},sizeDelta:new Vector2(28,22));
+            var rScroll=UIFactory.CreateScrollView("FfaRSV",rCol.transform,spacing:2);
+            UIFactory.AddLE(rScroll.scrollGO,flexH:1);
+            ffaRecentContainer=rScroll.content;
+            ffaRecentScrollRect=rScroll.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
             return outer;
         }
 
+        private static FfaLBRow CreateFfaLBRow(Transform parent,string name)
+        {
+            var row=new FfaLBRow();
+            row.root=new GameObject(name);row.root.transform.SetParent(parent,false);row.root.AddComponent<RectTransform>();
+            UIFactory.AddHLG(row.root,spacing:4,padL:8,padR:8);
+            UIFactory.AddLE(row.root,prefH:22,minH:22,flexH:0);
+            row.txtRank  =UIFactory.CreateText("r", row.root.transform,"",15f,C_GOLD, UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[0],22));
+            row.txtName  =UIFactory.CreateText("n", row.root.transform,"",15f,C_WHITE,UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[1],22));
+            row.txtRating=UIFactory.CreateText("rt",row.root.transform,"",15f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[2],22));
+            UIFactory.SetBold(row.txtRating,true);
+            row.txtGames =UIFactory.CreateText("g", row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[3],22));
+            row.txtWins  =UIFactory.CreateText("w", row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[4],22));
+            row.txtTop3  =UIFactory.CreateText("t3",row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[5],22));
+            row.txtAvgPl =UIFactory.CreateText("ap",row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[6],22));
+            row.txtWR    =UIFactory.CreateText("wr",row.root.transform,"",14f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[7],22));
+            row.root.SetActive(false);
+            return row;
+        }
+
+        // 2s queue traffic rides the internal throttles; recent 10s, board 30s.
+        private static float ffaLbRefreshAt, ffaRecentRefreshAt;
+        private static void MaybeRefreshFfaTab()
+        {
+            if(currentTab!=12)return;
+            ApiClient.UpdateFfaQueuePoll(false);   // internally 2s-throttled; no-op when not polling
+            ApiClient.UpdateFfaQueueList(false);   // internally 2s-throttled
+            if(Time.unscaledTime>=ffaRecentRefreshAt)
+            {
+                ffaRecentRefreshAt=Time.unscaledTime+10f;
+                ApiClient.FetchFfaRecent(ffaRecentPageReq,5);
+            }
+            if(Time.unscaledTime>=ffaLbRefreshAt)
+            {
+                ffaLbRefreshAt=Time.unscaledTime+30f;
+                ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);
+            }
+        }
+
+        private static void RefreshFfaTab()
+        {
+            bool polling=ApiClient.IsFfaQueuePolling;
+            string st=ApiClient.FfaQueueStatus;
+            // Locked = a lock landed even though polling stopped: Join stays
+            // hidden, Leave stays visible (only escape from a husk lock).
+            // Inside an actual ffa_ room both are hidden (mirrors the 1v2 tab).
+            bool ffaLocked=Plugin.PendingFfaSlot>=0;
+            bool inFfaRoom=false;
+            try{inFfaRoom=PhotonNetwork.InRoom&&(PhotonNetwork.CurrentRoom?.Name??"").StartsWith("ffa_");}catch{}
+            if(ffaJoinBtn!=null)ffaJoinBtn.SetActive(!polling&&!ffaLocked&&!inFfaRoom&&st!="leaving");
+            if(ffaLeaveBtn!=null)ffaLeaveBtn.SetActive((polling||ffaLocked)&&!inFfaRoom);
+            if(txtFfaStatus!=null)
+            {
+                string msg;
+                if(inFfaRoom)msg="<color=#66DD66>In FFA match.</color>";
+                else if(st=="leaving")msg="<color=#888>Leaving queue...</color>";
+                else if(st=="ready_join"||ffaLocked)
+                {
+                    int slot=Plugin.PendingFfaSlot>=0?Plugin.PendingFfaSlot:ApiClient.FfaMySlot;
+                    int cnt=Math.Max(ApiClient.FfaLobbyPlayerCount,slot+1);
+                    msg=$"<color=#66DD66>Match found! Joining as player {slot+1} of {cnt}...</color>";
+                }
+                else if(st=="searching")
+                {
+                    msg=$"<color=#FFCC44>Searching</color> - {ApiClient.FfaQueueCount} in queue";
+                    if(ApiClient.FfaGatherSecondsLeft>=0)
+                        msg+=$"  <color=#888>lobby locks in {ApiClient.FfaGatherSecondsLeft}s (more can still join, up to 10)</color>";
+                    else
+                        msg+="  <color=#888>waiting for at least 3 players</color>";
+                }
+                else msg="Not in queue.";
+                UIFactory.SetText(txtFfaStatus,msg);
+            }
+            RenderFfaLobbySection();
+
+            // Leaderboard — active-sort header highlight + pooled rows.
+            var lb=ApiClient.CachedFfaLeaderboard??new List<ApiClient.FfaLeaderboardEntry>();
+            if(ffaLbSortKeys!=null&&ffaLbHeaderTexts!=null&&ffaLbSortBtns!=null)
+            {
+                string[] baseLabels=new[]{"#","Player","Rating","Games","Wins","Top3","AvgPl","WR"};
+                for(int hi=0;hi<ffaLbSortKeys.Length&&hi<baseLabels.Length;hi++)
+                {
+                    bool active=ffaLbSortKeys[hi]!=null&&ffaLbSortKeys[hi]==ffaLbSortReq;
+                    UIFactory.SetText(ffaLbHeaderTexts[hi],active?baseLabels[hi]+" v":baseLabels[hi]);
+                    if(ffaLbSortBtns[hi]!=null)
+                        UIFactory.SetImageColor(ffaLbSortBtns[hi],active?new Color(0.30f,0.40f,0.55f,0.95f):new Color(0.18f,0.20f,0.24f,0.85f));
+                }
+            }
+            for(int i=0;i<ffaLbRows.Count;i++)
+            {
+                var row=ffaLbRows[i];
+                if(i>=lb.Count){row.root.SetActive(false);continue;}
+                var e=lb[i];
+                bool me=e.steam_id==MatchTracker.LocalSteamId;
+                UIFactory.SetText(row.txtRank,$"#{e.rank}");
+                UIFactory.SetColor(row.txtRank,
+                    e.rank==1?new Color(1f,0.84f,0f):
+                    e.rank==2?new Color(0.75f,0.75f,0.75f):
+                    e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);
+                string nameDisplay=Trunc(e.display_name,14);
+                if(!string.IsNullOrEmpty(e.title))
+                {
+                    string col=string.IsNullOrEmpty(e.title_color)?"#FFD94D":e.title_color;
+                    nameDisplay=IsPodiumTitle(e.title)
+                        ?$"{nameDisplay} {PodiumSparkleSpan(e.title,col,0)}"
+                        :$"{nameDisplay} <color={col}>[{Trunc(e.title,12)}]</color>";
+                }
+                UIFactory.SetText(row.txtName,nameDisplay);
+                UIFactory.SetColor(row.txtName,me?C_GREEN:C_WHITE);
+                if(e.rd>0)UIFactory.SetText(row.txtRating,$"{e.rating} <size=72%><color=#9AA0A6>~{e.rd}</color></size>");
+                else UIFactory.SetText(row.txtRating,$"{e.rating}");
+                UIFactory.SetText(row.txtGames,$"{e.games_played}");
+                UIFactory.SetText(row.txtWins,$"{e.wins}");
+                UIFactory.SetText(row.txtTop3,$"{e.top3}");
+                UIFactory.SetText(row.txtAvgPl,e.avg_placement>0f?$"{e.avg_placement:F1}":"-");
+                UIFactory.SetText(row.txtWR,$"{e.win_rate*100f:F0}%");
+                row.root.SetActive(true);
+            }
+            if(txtFfaLbHeader!=null)
+                UIFactory.SetText(txtFfaLbHeader,lb.Count==0
+                    ?"<b>FFA Leaderboard</b>  <color=#888>- no ranked FFAs yet</color>"
+                    :$"<b>FFA Leaderboard</b>  <color=#888>({lb.Count} ranked)</color>");
+            ToggleInnerScroll(ffaLbScrollRect,Math.Min(lb.Count,ffaLbRows.Count)*23f);
+
+            // Recent ranked FFAs — pooled multi-line texts, honest prefH.
+            if(ffaRecentContainer!=null)
+            {
+                var rec=ApiClient.CachedFfaRecent??new List<ApiClient.FfaRecentMatch>();
+                while(ffaRecentRows.Count<Math.Min(rec.Count,10))
+                {
+                    var t=UIFactory.CreateText($"FfaRR{ffaRecentRows.Count}",ffaRecentContainer.transform,"",13f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(900,20));
+                    UIFactory.SetWordWrap(t,false);
+                    ffaRecentRows.Add(t);
+                }
+                float recTotalH=0f;
+                for(int i=0;i<ffaRecentRows.Count;i++)
+                {
+                    var comp=ffaRecentRows[i] as Component;if(comp==null)continue;
+                    if(i>=rec.Count){comp.gameObject.SetActive(false);continue;}
+                    int lines;
+                    UIFactory.SetText(ffaRecentRows[i],BuildFfaRecentRowText(rec[i],out lines));
+                    int h=lines*18+8;
+                    UIFactory.SetPrefH(comp.gameObject,h);
+                    var rt=comp.GetComponent<RectTransform>();
+                    if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,h);
+                    comp.gameObject.SetActive(true);
+                    recTotalH+=h+2;
+                }
+                ToggleInnerScroll(ffaRecentScrollRect,recTotalH);
+                if(txtFfaRecentHeader!=null)
+                    UIFactory.SetText(txtFfaRecentHeader,ApiClient.CachedFfaRecentTotal==0
+                        ?"<b>Recent Ranked FFAs</b>  <color=#888>- none yet</color>"
+                        :$"<b>Recent Ranked FFAs</b>  <color=#888>({ApiClient.CachedFfaRecentTotal} total)</color>");
+                int pages=Math.Max(1,ApiClient.CachedFfaRecentPages);
+                if(txtFfaRecentPage!=null)UIFactory.SetText(txtFfaRecentPage,$"{ffaRecentPageReq+1}/{pages}");
+                if(ffaRecentPrevBtn!=null)ffaRecentPrevBtn.SetActive(ffaRecentPageReq>0);
+                if(ffaRecentNextBtn!=null)ffaRecentNextBtn.SetActive(ffaRecentPageReq+1<pages);
+            }
+        }
+
+        // One match = one multi-line rich text: header, per-player placement
+        // lines (winner gold), then cards lines for the top-3 placements only
+        // (compactness — the full board is a click away on Card Stats).
+        private static string BuildFfaRecentRowText(ApiClient.FfaRecentMatch m,out int lines)
+        {
+            var sb=new StringBuilder();lines=1;
+            string dt="";
+            try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateTime.Parse(m.ended_at).ToString("M/d");}catch{}
+            string dur=m.duration_seconds>0?$"{m.duration_seconds/60}m{m.duration_seconds%60:D2}s":"?";
+            sb.Append($"<color=#DDDDDD><b>{dt}</b></color> <color=#888>-</color> {m.player_count} players <color=#888>-</color> <color=#8FA3B8>{dur}</color>\n");
+            var ps=new List<ApiClient.FfaRecentPlayer>(m.players??new List<ApiClient.FfaRecentPlayer>());
+            ps.Sort((a,b)=>(a.placement<=0?99:a.placement).CompareTo(b.placement<=0?99:b.placement));
+            foreach(var p in ps)
+            {
+                string nameCol=p.placement==1?"#FFD700":"#FFFFFF";
+                string elo="";
+                if(p.has_rating_change)
+                {
+                    string ec=p.rating_change>=0?"#00FF00":"#FF6666";
+                    elo=$" <color={ec}>{(p.rating_change>=0?"+":"")}{p.rating_change:F0}</color>";
+                }
+                string left=p.left_early?" <color=#888>(left)</color>":"";
+                sb.Append($"  <color=#888>#{p.placement}</color> <color={nameCol}>{Trunc(p.display_name,16)}</color> <color=#AAAAAA>{p.rounds_won}R {p.points_total}P</color>{elo}{left}\n");
+                lines++;
+            }
+            foreach(var p in ps)
+            {
+                if(p.placement<1||p.placement>3)continue;
+                if(p.cards==null||p.cards.Count==0)continue;
+                string joined=string.Join(", ",p.cards.ToArray());
+                if(joined.Length>90)joined=joined.Substring(0,90)+"...";
+                sb.Append($"    <color=#667788>#{p.placement} cards: {joined}</color>\n");
+                lines++;
+            }
+            return sb.ToString();
+        }
+
+        // Same shape as RenderOvtLobbySection: text-line body with a dynamic
+        // LayoutElement height. Rating context: FFA elo once the player has
+        // one, else their 1v1 elo.
+        private static void RenderFfaLobbySection()
+        {
+            if(txtFfaLobbyHeader==null||txtFfaLobbyBody==null)return;
+            var list=ApiClient.CachedFfaQueueList;
+            int n=list!=null?list.Count:0;
+            float perRow=18f;
+            int newH;
+            if(n==0)
+            {
+                UIFactory.SetText(txtFfaLobbyHeader,"<b>FFA Lobby</b>  <color=#888>(empty)</color>");
+                UIFactory.SetText(txtFfaLobbyBody,list==null?"<color=#888>Loading...</color>":"<color=#888>No one in the FFA queue right now.</color>");
+                newH=22;
+            }
+            else
+            {
+                UIFactory.SetText(txtFfaLobbyHeader,$"<b>FFA Lobby</b>  <color=#888>({n} - locks at 3+, up to 10)</color>");
+                var sb=new StringBuilder();
+                foreach(var q in list)
+                {
+                    bool isMe=q.steam_id==MatchTracker.LocalSteamId;
+                    string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
+                    string ratingDisplay=q.rating>0
+                        ?$"<color=#FFFFFF>FFA {q.rating}</color>"
+                        :$"<color=#DDDDDD>1v1 {q.rating_1v1}</color>";
+                    string statusTag=q.status=="searching"?"<color=#AAAAAA>searching</color>"
+                        :q.status=="ready_join"?"<color=#88FF88>locked</color>":$"<color=#FFD94D>{q.status}</color>";
+                    int waitMin=q.wait_seconds/60,waitSec=q.wait_seconds%60;
+                    string waitStr=waitMin>0?$"{waitMin}m{waitSec:D2}s":$"{waitSec}s";
+                    sb.Append($"  {nameC}{Trunc(q.display_name,18)}</color>  {ratingDisplay}  {statusTag}  <color=#888>{waitStr}</color>\n");
+                }
+                UIFactory.SetText(txtFfaLobbyBody,sb.ToString());
+                newH=(int)(n*perRow+6);
+            }
+            var bodyComp=txtFfaLobbyBody as Component;
+            if(bodyComp!=null)
+            {
+                var le=bodyComp.gameObject.GetComponent(UIFactory.tLE);
+                if(le!=null)
+                {
+                    UIFactory.tLE.GetProperty("preferredHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,(float)newH);
+                    UIFactory.tLE.GetProperty("minHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,(float)newH);
+                }
+                var rt=bodyComp.GetComponent<RectTransform>();
+                if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
+            }
+        }
+
         // ── 1v2 tab (solo vs duo; UNSCORED beta) ──────────────────────────
-        private static object txtOvtStatus, txtOvtLbHeader, txtOvtLobbyHeader, txtOvtLobbyBody; private static GameObject ovtJoinBtn, ovtLeaveBtn, ovtSideBtn, ovtExtraBtn, ovtLbContainer;
+        private static object txtOvtStatus, txtOvtLobbyHeader, txtOvtLobbyBody, txtOvtSoloLbHeader, txtOvtDuoLbHeader, txtOvtRecentHeader, txtOvtRecentPage;
+        private static GameObject ovtJoinBtn, ovtLeaveBtn, ovtSideBtn, ovtExtraBtn, ovtSoloLbContainer, ovtDuoLbContainer, ovtRecentContainer, ovtRecentPrevBtn, ovtRecentNextBtn;
         private static int ovtPreferredSide = 0;   // 0 any, 1 solo, 2 duo
         private static bool ovtSoloExtraPick = false;
-        private static readonly List<object> ovtLbRows = new List<object>();
+        private static readonly List<object> ovtSoloLbRows = new List<object>();
+        private static readonly List<object> ovtDuoLbRows = new List<object>();
+        private static readonly List<object> ovtRecentRows = new List<object>();
+        public static int ovtRecentPageReq = 0;
         private static GameObject BuildOneVTwoTab(Transform parent,int tabIdx)
         {
             // Outer wrapper (2v2 pattern): the sub-tab anchor lives in an
@@ -1120,8 +1518,12 @@ namespace CompetitiveRounds
             var outer=new GameObject("OneVTwoOuter");outer.transform.SetParent(parent,false);outer.AddComponent<RectTransform>();
             UIFactory.AddVLG(outer,spacing:0);UIFactory.AddLE(outer,flexH:1);
             MakeSubTabAnchor(tabIdx,outer.transform,true);
-            var panel=new GameObject("OneVTwo");panel.transform.SetParent(outer.transform,false);panel.AddComponent<RectTransform>();
-            UIFactory.AddVLG(panel,spacing:8,padL:20,padT:8,padB:14);UIFactory.AddLE(panel,flexH:1);
+            // Whole tab in a ScrollView (2v2 pattern) so the boards/recent row
+            // below stays reachable at any aspect (learning #199).
+            var o1Scroll=UIFactory.CreateScrollView("OneVTwoScroll",outer.transform,spacing:6);
+            UIFactory.AddLE(o1Scroll.scrollGO,flexH:1);
+            var panel=new GameObject("OneVTwo");panel.transform.SetParent(o1Scroll.content.transform,false);panel.AddComponent<RectTransform>();
+            UIFactory.AddVLG(panel,spacing:8,padL:20,padR:10,padT:8,padB:14);
             UIFactory.CreateText("O1H",panel.transform,"1v2 — Solo vs Duo",24f,C_GOLD,sizeDelta:new Vector2(700,32));
             UIFactory.CreateText("O1Beta",panel.transform,"<color=#FFCC44>UNRANKED BETA</color> — single games, no series rating yet. Stats are tracked and will count once ranked launches.",14f,C_DIM,sizeDelta:new Vector2(760,22));
 
@@ -1149,23 +1551,68 @@ namespace CompetitiveRounds
             if(qlbComp!=null)UIFactory.AddLE(qlbComp.gameObject,prefH:22,minH:22,flexH:0);
             UIFactory.SetWordWrap(txtOvtLobbyBody,true);
 
-            // Leaderboard.
-            UIFactory.CreateText("O1LbH",panel.transform,"1v2 Leaderboard (by games played)",17f,C_SUB,sizeDelta:new Vector2(700,26));
-            var sv=UIFactory.CreateScrollView("O1LbSV",panel.transform,spacing:1);UIFactory.AddLE(sv.scrollGO,flexH:1);
-            ovtLbContainer=sv.content;
-            txtOvtLbHeader=UIFactory.CreateText("O1LbHdr",ovtLbContainer.transform,"Loading...",14f,C_DIM,sizeDelta:new Vector2(760,20));
+            // Bottom row: split solo/duo activity boards (left, fixed width)
+            // + recent 1v2 games (right, flex). Fixed prefH inside the outer
+            // scroll — never flexH:1 (learning #63).
+            var o1Bot=new GameObject("O1Bot");o1Bot.transform.SetParent(panel.transform,false);o1Bot.AddComponent<RectTransform>();
+            UIFactory.AddHLG(o1Bot,spacing:8);UIFactory.AddLE(o1Bot,prefH:700,minH:400,flexH:0);
+
+            // Left column — stacked Solo + Duo boards. flexW:0 explicit +
+            // load-bearing (learning #132).
+            var lcol=new GameObject("O1LCol");lcol.transform.SetParent(o1Bot.transform,false);lcol.AddComponent<RectTransform>();
+            UIFactory.AddVLG(lcol,spacing:4);UIFactory.AddLE(lcol,prefW:460,minW:420,flexW:0,flexH:1);
+            txtOvtSoloLbHeader=UIFactory.CreateText("O1SLH",lcol.transform,"<b><color=#FFB347>Solo Leaderboard</color></b>  <color=#888>(unranked beta)</color>",16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(440,22));
+            var ssv=UIFactory.CreateScrollView("O1SLSV",lcol.transform,spacing:1);
+            UIFactory.AddLE(ssv.scrollGO,prefH:300,minH:150,flexH:0);
+            ovtSoloLbContainer=ssv.content;
+            ovtSoloScrollRect=ssv.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
+            txtOvtDuoLbHeader=UIFactory.CreateText("O1DLH",lcol.transform,"<b><color=#88AAFF>Duo Leaderboard</color></b>  <color=#888>(unranked beta)</color>",16f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(440,22));
+            var dsv=UIFactory.CreateScrollView("O1DLSV",lcol.transform,spacing:1);
+            UIFactory.AddLE(dsv.scrollGO,prefH:300,minH:150,flexH:0);
+            ovtDuoLbContainer=dsv.content;
+            ovtDuoScrollRect=dsv.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
+
+            // Right column — recent 1v2 games, paged 5 series/page.
+            var rcol=new GameObject("O1RCol");rcol.transform.SetParent(o1Bot.transform,false);rcol.AddComponent<RectTransform>();
+            UIFactory.AddVLG(rcol,spacing:4);UIFactory.AddLE(rcol,flexW:1,flexH:1);
+            var rHdrRow=new GameObject("O1RHR");rHdrRow.transform.SetParent(rcol.transform,false);rHdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(rHdrRow,spacing:6);UIFactory.AddLE(rHdrRow,prefH:26,minH:26,flexH:0);
+            txtOvtRecentHeader=UIFactory.CreateText("O1RH",rHdrRow.transform,"<b>Recent 1v2 Games</b>",18f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));
+            var rSp=new GameObject("O1RSp");rSp.transform.SetParent(rHdrRow.transform,false);rSp.AddComponent<RectTransform>();UIFactory.AddLE(rSp,flexW:1);
+            ovtRecentPrevBtn=UIFactory.CreateButton("O1RP",rHdrRow.transform,"<",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ovtRecentPageReq=Math.Max(0,ovtRecentPageReq-1);ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(28,22));
+            txtOvtRecentPage=UIFactory.CreateText("O1RPI",rHdrRow.transform,"1/1",13f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(48,22));
+            ovtRecentNextBtn=UIFactory.CreateButton("O1RN",rHdrRow.transform,">",13f,C_WHITE,new Color(0.22f,0.25f,0.30f,0.95f),
+                ()=>{ovtRecentPageReq+=1;ApiClient.FetchOvtRecent(ovtRecentPageReq);},sizeDelta:new Vector2(28,22));
+            var rsv=UIFactory.CreateScrollView("O1RSV",rcol.transform,spacing:2);
+            UIFactory.AddLE(rsv.scrollGO,flexH:1);
+            ovtRecentContainer=rsv.content;
+            ovtRecentScrollRect=rsv.scrollGO.GetComponent(UIFactory.tScrollRect) as Component;
             return outer;
         }
 
-        private static float ovtTabRefreshAt;
+        private static float ovtTabRefreshAt, ovtRecentRefreshAt;
         private static void MaybeRefreshOvtTab()
         {
             if(currentTab!=11)return;
             ApiClient.UpdateOvtQueuePoll(false);   // safe no-op when not polling
             ApiClient.UpdateOvtQueueList(false);   // lobby panel snapshot (2s throttle)
-            if(Time.unscaledTime<ovtTabRefreshAt)return;
-            ovtTabRefreshAt=Time.unscaledTime+3f;
-            ApiClient.FetchOvtLeaderboard();
+            if(Time.unscaledTime>=ovtRecentRefreshAt)
+            {
+                ovtRecentRefreshAt=Time.unscaledTime+10f;
+                ApiClient.FetchOvtRecent(ovtRecentPageReq);
+            }
+            if(Time.unscaledTime>=ovtTabRefreshAt)
+            {
+                // Boards are slow-moving — 30s (was 3s when the combined board
+                // was the tab's only data). Combined stays fetched so legacy
+                // consumers of CachedOvtLeaderboard keep a fresh cache; the tab
+                // itself renders the solo/duo split.
+                ovtTabRefreshAt=Time.unscaledTime+30f;
+                ApiClient.FetchOvtLeaderboard();
+                ApiClient.FetchOvtLeaderboard(200,"solo");
+                ApiClient.FetchOvtLeaderboard(200,"duo");
+            }
         }
 
         private static void RefreshOneVTwoTab()
@@ -1206,23 +1653,118 @@ namespace CompetitiveRounds
                 UIFactory.SetText(txtOvtStatus,msg);
             }
             RenderOvtLobbySection();
-            // Leaderboard rows (pooled text lines).
-            var lb=ApiClient.CachedOvtLeaderboard;
-            if(ovtLbContainer!=null&&lb!=null)
+            // Split activity boards (server-ordered; role-scoped W/L).
+            FillOvtRoleBoard(ovtSoloLbContainer,ovtSoloLbRows,ApiClient.CachedOvtLeaderboardSolo,txtOvtSoloLbHeader,"Solo Leaderboard","#FFB347");
+            FillOvtRoleBoard(ovtDuoLbContainer,ovtDuoLbRows,ApiClient.CachedOvtLeaderboardDuo,txtOvtDuoLbHeader,"Duo Leaderboard","#88AAFF");
+            ToggleInnerScroll(ovtSoloScrollRect,(ApiClient.CachedOvtLeaderboardSolo?.Count??0)*19f);
+            ToggleInnerScroll(ovtDuoScrollRect,(ApiClient.CachedOvtLeaderboardDuo?.Count??0)*19f);
+            RefreshOvtRecent();
+        }
+
+        // One rich line per entry: "#N Name  W-L (WR%)  Lv". Name takes the
+        // title_color when the player has a colored title equipped.
+        private static void FillOvtRoleBoard(GameObject container,List<object> pool,List<ApiClient.OvtLeaderboardEntry> lb,object headerTxt,string label,string accent)
+        {
+            if(container==null)return;
+            if(lb==null)
             {
-                while(ovtLbRows.Count<lb.Count)
-                {
-                    var t=UIFactory.CreateText($"O1LbR{ovtLbRows.Count}",ovtLbContainer.transform,"",14f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(760,20));
-                    ovtLbRows.Add(t);
-                }
-                for(int i=0;i<ovtLbRows.Count;i++)
-                {
-                    var comp=ovtLbRows[i] as Component;if(comp==null)continue;
-                    if(i<lb.Count){var e=lb[i];comp.gameObject.SetActive(true);string _orc=e.rank==1?"#FFD700":e.rank==2?"#C0C0C0":e.rank==3?"#CD7F32":"#FFD94D";/* July 22 item 3: W/L split by role, colored per the tab's solo=orange / duo=blue convention. Falls back to the old totals if the server hasn't sent the split yet. */string _roleSplit=(e.solo_wins+e.solo_losses+e.duo_wins+e.duo_losses)>0?$"<color=#FFB347>solo {e.solo_wins}W-{e.solo_losses}L</color> <color=#88AAFF>duo {e.duo_wins}W-{e.duo_losses}L</color>":$"<color=#888>(solo {e.solo_games} / duo {e.duo_games})</color>";UIFactory.SetText(ovtLbRows[i],$"<color={_orc}>#{e.rank}</color>  <b>{e.display_name}</b>  {e.games_played}g  <color=#66DD66>{e.win_rate:F0}%</color>  {_roleSplit}");}
-                    else comp.gameObject.SetActive(false);
-                }
-                if(txtOvtLbHeader!=null)UIFactory.SetText(txtOvtLbHeader,lb.Count==0?"No 1v2 games played yet — be the first!":"");
+                if(headerTxt!=null)UIFactory.SetText(headerTxt,$"<b><color={accent}>{label}</color></b>  <color=#888>(unranked beta - loading...)</color>");
+                return;
             }
+            if(headerTxt!=null)UIFactory.SetText(headerTxt,lb.Count==0
+                ?$"<b><color={accent}>{label}</color></b>  <color=#888>(unranked beta - no games yet)</color>"
+                :$"<b><color={accent}>{label}</color></b>  <color=#888>(unranked beta - {lb.Count} players)</color>");
+            while(pool.Count<lb.Count&&pool.Count<100)
+            {
+                var t=UIFactory.CreateText($"{container.name}R{pool.Count}",container.transform,"",13f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(430,18));
+                pool.Add(t);
+            }
+            for(int i=0;i<pool.Count;i++)
+            {
+                var comp=pool[i] as Component;if(comp==null)continue;
+                if(i>=lb.Count){comp.gameObject.SetActive(false);continue;}
+                var e=lb[i];
+                comp.gameObject.SetActive(true);
+                bool me=e.steam_id==MatchTracker.LocalSteamId;
+                string nameCol=!string.IsNullOrEmpty(e.title_color)?e.title_color:(me?"#88FF88":"#FFFFFF");
+                string rankCol=e.rank==1?"#FFD700":e.rank==2?"#C0C0C0":e.rank==3?"#CD7F32":"#FFD94D";
+                UIFactory.SetText(pool[i],
+                    $"<color={rankCol}>#{e.rank}</color>  <color={nameCol}>{Trunc(e.display_name,14)}</color>  {e.wins}-{e.losses} <color=#66DD66>({e.win_rate:F0}%)</color>  <color=#888>Lv{e.level}</color>");
+            }
+        }
+
+        private static void RefreshOvtRecent()
+        {
+            if(ovtRecentContainer==null)return;
+            var list=ApiClient.CachedOvtRecent??new List<ApiClient.OvtRecentSeries>();
+            while(ovtRecentRows.Count<Math.Min(list.Count,10))
+            {
+                var t=UIFactory.CreateText($"O1RR{ovtRecentRows.Count}",ovtRecentContainer.transform,"",13f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(900,20));
+                UIFactory.SetWordWrap(t,false);
+                ovtRecentRows.Add(t);
+            }
+            float recTotalH=0f;
+            for(int i=0;i<ovtRecentRows.Count;i++)
+            {
+                var comp=ovtRecentRows[i] as Component;if(comp==null)continue;
+                if(i>=list.Count){comp.gameObject.SetActive(false);continue;}
+                int lines;
+                UIFactory.SetText(ovtRecentRows[i],BuildOvtRecentRowText(list[i],out lines));
+                int h=lines*18+8;
+                UIFactory.SetPrefH(comp.gameObject,h);
+                var rt=comp.GetComponent<RectTransform>();
+                if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,h);
+                comp.gameObject.SetActive(true);
+                recTotalH+=h+2;
+            }
+            ToggleInnerScroll(ovtRecentScrollRect,recTotalH);
+            if(txtOvtRecentHeader!=null)
+                UIFactory.SetText(txtOvtRecentHeader,ApiClient.CachedOvtRecentTotal==0
+                    ?"<b>Recent 1v2 Games</b>  <color=#888>- none yet</color>"
+                    :$"<b>Recent 1v2 Games</b>  <color=#888>({ApiClient.CachedOvtRecentTotal} series)</color>");
+            int pages=Math.Max(1,ApiClient.CachedOvtRecentPages);
+            if(txtOvtRecentPage!=null)UIFactory.SetText(txtOvtRecentPage,$"{ovtRecentPageReq+1}/{pages}");
+            if(ovtRecentPrevBtn!=null)ovtRecentPrevBtn.SetActive(ovtRecentPageReq>0);
+            if(ovtRecentNextBtn!=null)ovtRecentNextBtn.SetActive(ovtRecentPageReq+1<pages);
+        }
+
+        // One series = one multi-line rich text: header (solo orange vs duo
+        // blue, score, date), then per match a score/winner/duration line +
+        // compact per-player cards lines (comma-joined, ~90-char cap).
+        private static string BuildOvtRecentRowText(ApiClient.OvtRecentSeries s,out int lines)
+        {
+            var sb=new StringBuilder();lines=1;
+            string dt="";
+            try{string d=!string.IsNullOrEmpty(s.completed_at)?s.completed_at:s.created_at;if(!string.IsNullOrEmpty(d)&&d.Length>=10)dt=DateTime.Parse(d).ToString("M/d");}catch{}
+            string statusTag=s.status=="completed"?"":"  <color=#888>(in progress)</color>";
+            string extraTag=s.solo_extra_pick?"  <color=#888>+pick</color>":"";
+            sb.Append($"<color=#FFB347><b>{Trunc(s.solo_name??"?",14)}</b></color> <color=#888>vs</color> <color=#88AAFF>{Trunc(s.duo_a_name??"?",14)} + {Trunc(s.duo_b_name??"?",14)}</color>  <b>{s.solo_wins}-{s.duo_wins}</b>  <color=#999>{dt}</color>{statusTag}{extraTag}\n");
+            foreach(var m in s.matches)
+            {
+                string wTag=m.winner_side==1?"<color=#FFB347>solo won</color>":m.winner_side==2?"<color=#88AAFF>duo won</color>":"";
+                string dur=m.duration_seconds>0?$"<color=#8FA3B8>{m.duration_seconds/60}:{m.duration_seconds%60:00}</color>":"";
+                sb.Append($"  <color=#888>-</color> {m.solo_rounds}-{m.duo_rounds}  {wTag}  {dur}\n");
+                lines++;
+                if(m.cards_by_steam!=null&&m.cards_by_steam.Count>0)
+                {
+                    // Stable order: solo, duo A, duo B (side colors match the header).
+                    string[][] who=new[]{
+                        new[]{s.solo_steam,s.solo_name,"#FFB347"},
+                        new[]{s.duo_a_steam,s.duo_a_name,"#88AAFF"},
+                        new[]{s.duo_b_steam,s.duo_b_name,"#88AAFF"}};
+                    foreach(var w in who)
+                    {
+                        if(string.IsNullOrEmpty(w[0]))continue;
+                        List<string> cards;
+                        if(!m.cards_by_steam.TryGetValue(w[0],out cards)||cards==null||cards.Count==0)continue;
+                        string joined=string.Join(", ",cards.ToArray());
+                        if(joined.Length>90)joined=joined.Substring(0,90)+"...";
+                        sb.Append($"      <color={w[2]}>{Trunc(w[1]??"?",12)}:</color> <color=#667788>{joined}</color>\n");
+                        lines++;
+                    }
+                }
+            }
+            return sb.ToString();
         }
 
         // Same shape as RenderTeamQueueSection: text-line body with a dynamic
@@ -1281,7 +1823,7 @@ namespace CompetitiveRounds
                 if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
             }
         }
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+3f;ApiClient.FetchOvtLeaderboard();ApiClient.UpdateOvtQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -3095,7 +3637,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         }
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshTournamentGameIndicator();/* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 13:RefreshHomeTab();break;}}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshTournamentGameIndicator();/* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;}}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
         // every-refresh toggle from re-firing and re-posting /toggle-ranked

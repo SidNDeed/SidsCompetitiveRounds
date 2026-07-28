@@ -70,6 +70,11 @@ from schemas import (
     OvtMatchResponse,
     Ovt1v2LeaderboardEntry,
     Ovt1v2LeaderboardResponse,
+    FfaPlayerEntry,
+    FfaMatchReport,
+    FfaMatchResponse,
+    FfaLeaderboardEntry,
+    FfaLeaderboardResponse,
 )
 
 # ── Config from environment ────────────────────────────────────
@@ -748,6 +753,58 @@ async def queue_cleanup_loop():
                         RETURNING steam_id, status"""))
                 for r in husk_result.fetchall():
                     print(f"[OVT-CLEANUP] Husk row swept: {r[0]} status={r[1]}")
+                # ── FFA janitor (same nobody-is-polling contract as the ovt
+                # sweeps above; fine-grained cleanup lives in ffa_queue_poll).
+                # Zero-game dead lobbies cancel; lobbies WITH games close as
+                # 'completed' once every member has stopped polling for long
+                # enough that no rematch can still be in flight.
+                ffa_dead = await db.execute(
+                    text("""UPDATE ffa_lobbies l
+                        SET status = 'canceled',
+                            invalidated_at = NOW(),
+                            invalidation_reason = 'janitor_dead_lock'
+                        WHERE l.status = 'active'
+                          AND l.created_at < NOW() - INTERVAL '30 minutes'
+                          AND l.games_played = 0
+                          AND NOT EXISTS (SELECT 1 FROM ffa_queue q
+                                          WHERE q.series_id = l.id
+                                            AND q.last_polled >= NOW() - INTERVAL '15 minutes')
+                        RETURNING l.id"""))
+                ffa_dead_ids = [r[0] for r in ffa_dead.fetchall()]
+                for lid in ffa_dead_ids:
+                    print(f"[FFA-CLEANUP] Zero-game dead lobby canceled: {lid}")
+                if ffa_dead_ids:
+                    await db.execute(
+                        text("""DELETE FROM ffa_queue
+                            WHERE player_id IN (
+                                SELECT player_id FROM ffa_queue
+                                WHERE series_id = ANY(:lids)
+                                FOR UPDATE SKIP LOCKED
+                            )"""),
+                        {"lids": ffa_dead_ids},
+                    )
+                ffa_done = await db.execute(
+                    text("""UPDATE ffa_lobbies l
+                        SET status = 'completed', completed_at = NOW()
+                        WHERE l.status = 'active'
+                          AND l.games_played > 0
+                          AND l.created_at < NOW() - INTERVAL '3 hours'
+                          AND NOT EXISTS (SELECT 1 FROM ffa_queue q
+                                          WHERE q.series_id = l.id
+                                            AND q.last_polled >= NOW() - INTERVAL '30 minutes')
+                        RETURNING l.id"""))
+                for r in ffa_done.fetchall():
+                    print(f"[FFA-CLEANUP] Played-out lobby closed: {r[0]}")
+                ffa_husks = await db.execute(
+                    text("""DELETE FROM ffa_queue
+                        WHERE player_id IN (
+                            SELECT player_id FROM ffa_queue
+                            WHERE last_polled < NOW() - INTERVAL '30 minutes'
+                            FOR UPDATE SKIP LOCKED
+                        )
+                        RETURNING steam_id, status"""))
+                for r in ffa_husks.fetchall():
+                    print(f"[FFA-CLEANUP] Husk row swept: {r[0]} status={r[1]}")
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] Error: {e}")
@@ -5037,14 +5094,18 @@ READY_TIMEOUT_SECONDS = 90
 # Tables whose queue rows are locked pairwise/group-wise. Closed set: the table
 # name is interpolated into SQL below, so it must never come from a request
 # (learning #188 — an "obviously safe" interpolation is how the last injection got in).
-_QUEUE_LOCK_TABLES = {"ranked_queue", "team_queue", "ovt_queue"}
+_QUEUE_LOCK_TABLES = {"ranked_queue", "team_queue", "ovt_queue", "ffa_queue"}
 _QUEUE_GROUP_SERIES_TABLES = {
     "team_queue": "team_series",
     "ovt_queue": "ovt_series",
+    # ffa_queue.series_id holds an ffa_lobbies.id — the column NAME is the
+    # helper's contract, the target table differs per mode.
+    "ffa_queue": "ffa_lobbies",
 }
 _QUEUE_GROUP_STATUSES = {
     "team_queue": {"matched", "ready"},
     "ovt_queue": {"matched", "ready_join"},
+    "ffa_queue": {"ready_join"},
 }
 
 
@@ -10158,7 +10219,19 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     _ovt_grp = (await db.execute(text(
         "SELECT series_id FROM ovt_queue WHERE player_id = :pid AND series_id IS NOT NULL"
     ), {"pid": pid})).scalars().all()
-    for _qt in ("team_queue", "ovt_queue"):
+    _ffa_grp = (await db.execute(text(
+        "SELECT series_id FROM ffa_queue WHERE player_id = :pid AND series_id IS NOT NULL"
+    ), {"pid": pid})).scalars().all()
+    # Review find 8: FFA's canonical writer order is LOBBY row first, then its
+    # queue members (leave/poll/janitor all take it that way). Deleting the
+    # queue row first and touching ffa_lobbies afterwards inverts that and
+    # deadlocks against a concurrent leave/poll. Take the lobby locks here,
+    # BEFORE the queue-row deletes below, in canonical UUID order.
+    for _lid in sorted(_ffa_grp, key=str):
+        await db.execute(text(
+            "SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
+        ), {"lid": _lid})
+    for _qt in ("team_queue", "ovt_queue", "ffa_queue"):
         await db.execute(text(f"""
             DELETE FROM {_qt}
             WHERE player_id IN (
@@ -10200,6 +10273,19 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                   AND EXISTS (SELECT 1 FROM ovt_series s WHERE s.id=:sid
                               AND s.invalidation_reason='member_deleted')"""),
             {"sid": _sid})
+    for _lid in _ffa_grp:
+        await db.execute(text(
+            """UPDATE ffa_lobbies SET status='canceled', invalidation_reason='member_deleted',
+                      invalidated_at=NOW()
+                WHERE id=:lid AND status='active' AND games_played = 0"""),
+            {"lid": _lid})
+        await db.execute(text(
+            """UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
+                      room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+                WHERE series_id=:lid
+                  AND EXISTS (SELECT 1 FROM ffa_lobbies l WHERE l.id=:lid
+                              AND l.invalidation_reason='member_deleted')"""),
+            {"lid": _lid})
 
     # Steam sessions store the raw Steam ID (and authenticate as it) — purge
     # them so no live token outlives the account.
@@ -14557,50 +14643,88 @@ async def ovt_series_active(steam_id: str = Query(...), db: AsyncSession = Depen
 
 
 @app.get("/api/v1/ovt/leaderboard", response_model=Ovt1v2LeaderboardResponse, tags=["1v2 Matches"])
-async def ovt_leaderboard(limit: int = 200, db: AsyncSession = Depends(get_db)):
-    """1v2 stats leaderboard. UNSCORED at launch — ranked by games played then
-    win rate (the client shows an 'Unranked (beta)' banner off is_ranked=False).
-    Win rate / games come straight from ovt_matches so nothing needs backfilling
-    when ranked turns on."""
+async def ovt_leaderboard(
+    limit: int = 200,
+    role: str = "combined",
+    db: AsyncSession = Depends(get_db),
+):
+    """1v2 stats leaderboard, optionally scoped to solo or duo games."""
+    if role not in {"combined", "solo", "duo"}:
+        role = "combined"
+
     rows = (await db.execute(text("""
         WITH per_player AS (
             SELECT pid, SUM(played) AS games, SUM(won) AS wins,
                    SUM(solo_g) AS solo_games, SUM(duo_g) AS duo_games,
-                   SUM(solo_w) AS solo_wins, SUM(duo_w) AS duo_wins
+                   SUM(solo_w) AS solo_wins, SUM(duo_w) AS duo_wins,
+                   MAX(ended_at) AS last_played
             FROM (
                 SELECT solo_id AS pid, 1 AS played,
                        CASE WHEN winner_side=1 THEN 1 ELSE 0 END AS won, 1 AS solo_g, 0 AS duo_g,
-                       CASE WHEN winner_side=1 THEN 1 ELSE 0 END AS solo_w, 0 AS duo_w
+                       CASE WHEN winner_side=1 THEN 1 ELSE 0 END AS solo_w, 0 AS duo_w,
+                       ended_at
                   FROM ovt_matches WHERE invalidated_at IS NULL
                 UNION ALL
                 SELECT duo_a_id, 1, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, 0, 1,
-                       0, CASE WHEN winner_side=2 THEN 1 ELSE 0 END
+                       0, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, ended_at
                   FROM ovt_matches WHERE invalidated_at IS NULL
                 UNION ALL
                 SELECT duo_b_id, 1, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, 0, 1,
-                       0, CASE WHEN winner_side=2 THEN 1 ELSE 0 END
+                       0, CASE WHEN winner_side=2 THEN 1 ELSE 0 END, ended_at
                   FROM ovt_matches WHERE invalidated_at IS NULL
             ) u
             GROUP BY pid
+        ),
+        scoped AS (
+            SELECT pp.*,
+                   CASE WHEN :role = 'solo' THEN pp.solo_games
+                        WHEN :role = 'duo' THEN pp.duo_games
+                        ELSE pp.games END AS scoped_games,
+                   CASE WHEN :role = 'solo' THEN pp.solo_wins
+                        WHEN :role = 'duo' THEN pp.duo_wins
+                        ELSE pp.wins END AS scoped_wins
+              FROM per_player pp
         )
-        SELECT pp.pid, p.steam_id, p.display_name, p.total_xp,
-               pp.games, pp.wins, pp.solo_games, pp.duo_games,
-               pp.solo_wins, pp.duo_wins
-          FROM per_player pp JOIN players p ON p.id = pp.pid
+        SELECT sc.pid AS player_id, p.steam_id, p.display_name, p.total_xp,
+               sc.games, sc.wins, sc.solo_games, sc.duo_games,
+               sc.solo_wins, sc.duo_wins, sc.scoped_games, sc.scoped_wins,
+               sc.last_played,
+               si.name AS title_name, si.color AS title_color, si.sku AS title_sku,
+               gr.rating AS rating_1v1
+          FROM scoped sc
+          JOIN players p ON p.id = sc.pid
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
          WHERE p.deleted_at IS NULL
-         ORDER BY pp.games DESC, (pp.wins::float / NULLIF(pp.games,0)) DESC NULLS LAST
+           AND sc.scoped_games >= 1
+         ORDER BY
+               CASE WHEN :role = 'combined' THEN sc.games END DESC,
+               CASE WHEN :role = 'combined'
+                    THEN sc.wins::float / NULLIF(sc.games, 0) END DESC NULLS LAST,
+               CASE WHEN :role IN ('solo', 'duo') THEN sc.scoped_wins END DESC,
+               CASE WHEN :role IN ('solo', 'duo')
+                    THEN sc.scoped_wins::float / NULLIF(sc.scoped_games, 0)
+                    END DESC NULLS LAST,
+               CASE WHEN :role IN ('solo', 'duo') THEN sc.scoped_games END DESC
          LIMIT :lim
-    """), {"lim": max(1, min(limit, 500))})).mappings().all()
+    """), {"lim": max(1, min(limit, 500)), "role": role})).mappings().all()
+
+    _colors = await _rank_colors(db)
+    _pmap = await _podium_map(db) if any(
+        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
     entries = []
     for i, r in enumerate(rows):
-        games = int(r["games"] or 0)
-        wins = int(r["wins"] or 0)
+        games = int(r["scoped_games"] or 0)
+        wins = int(r["scoped_wins"] or 0)
         losses = games - wins
         lvl, _, _ = level_from_xp(r["total_xp"] or 0)
         solo_g = int(r["solo_games"] or 0)
         duo_g = int(r["duo_games"] or 0)
         solo_w = int(r["solo_wins"] or 0)
         duo_w = int(r["duo_wins"] or 0)
+        t_name, t_color = _display_title_sync(
+            _colors, r["title_sku"], r["title_name"], r["title_color"],
+            r["rating_1v1"], podium_pos=_pmap.get(str(r["player_id"])))
         entries.append(Ovt1v2LeaderboardEntry(
             rank=i + 1, steam_id=r["steam_id"], display_name=r["display_name"] or "Player",
             games_played=games, wins=wins, losses=losses,
@@ -14608,11 +14732,966 @@ async def ovt_leaderboard(limit: int = 200, db: AsyncSession = Depends(get_db)):
             solo_games=solo_g, duo_games=duo_g,
             solo_wins=solo_w, solo_losses=solo_g - solo_w,
             duo_wins=duo_w, duo_losses=duo_g - duo_w,
-            level=lvl,
+            level=lvl, title=t_name, title_color=t_color,
+            last_played=r["last_played"].isoformat() if r["last_played"] else None,
         ))
     return Ovt1v2LeaderboardResponse(
         entries=entries, total_players=len(entries),
         last_updated=datetime.now(timezone.utc), is_ranked=False)
+
+
+@app.get("/api/v1/ovt/recent", tags=["1v2 Matches"])
+async def ovt_recent(
+    page: int = Query(0, ge=0),
+    page_size: int = Query(5, ge=1, le=10),
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated feed of 1v2 series that contain at least one valid match."""
+    total = (await db.execute(text("""
+        SELECT COUNT(*)
+          FROM ovt_series s
+         WHERE EXISTS (
+                   SELECT 1
+                     FROM ovt_matches vm
+                    WHERE vm.series_id = s.id
+                      AND vm.invalidated_at IS NULL
+               )
+    """))).scalar() or 0
+
+    series_rows = (await db.execute(text("""
+        SELECT s.id AS series_id, s.status, s.winner_side,
+               s.created_at, s.completed_at,
+               s.solo_series_wins, s.duo_series_wins, s.solo_extra_pick,
+               s.solo_id, s.duo_a_id, s.duo_b_id,
+               s.solo_gold_earned, s.duo_a_gold_earned, s.duo_b_gold_earned,
+               s.solo_xp_earned, s.duo_a_xp_earned, s.duo_b_xp_earned,
+               solo.steam_id AS solo_sid, solo.display_name AS solo_name,
+               duo_a.steam_id AS duo_a_sid, duo_a.display_name AS duo_a_name,
+               duo_b.steam_id AS duo_b_sid, duo_b.display_name AS duo_b_name
+          FROM ovt_series s
+          JOIN players solo ON solo.id = s.solo_id
+          JOIN players duo_a ON duo_a.id = s.duo_a_id
+          JOIN players duo_b ON duo_b.id = s.duo_b_id
+         WHERE EXISTS (
+                   SELECT 1
+                     FROM ovt_matches vm
+                    WHERE vm.series_id = s.id
+                      AND vm.invalidated_at IS NULL
+               )
+         ORDER BY COALESCE(s.completed_at, s.created_at) DESC
+         LIMIT :lim OFFSET :off
+    """), {"lim": page_size, "off": page * page_size})).mappings().all()
+
+    series_ids = [r["series_id"] for r in series_rows]
+    matches_by_series: dict[str, list] = {}
+    cards_by_match: dict[str, dict[str, list[str]]] = {}
+    if series_ids:
+        match_rows = (await db.execute(text("""
+            SELECT m.id AS match_id, m.series_id, m.ended_at, m.winner_side,
+                   m.solo_rounds_won, m.duo_rounds_won,
+                   m.solo_points_total, m.duo_points_total,
+                   m.duration_seconds,
+                   m.solo_fps_avg, m.duo_a_fps_avg, m.duo_b_fps_avg,
+                   solo.steam_id AS solo_sid,
+                   duo_a.steam_id AS duo_a_sid,
+                   duo_b.steam_id AS duo_b_sid
+              FROM ovt_matches m
+              JOIN players solo ON solo.id = m.solo_id
+              JOIN players duo_a ON duo_a.id = m.duo_a_id
+              JOIN players duo_b ON duo_b.id = m.duo_b_id
+             WHERE m.series_id = ANY(:sids)
+               AND m.invalidated_at IS NULL
+             ORDER BY m.series_id, m.ended_at ASC
+        """), {"sids": series_ids})).mappings().all()
+
+        match_ids = [m["match_id"] for m in match_rows]
+        if match_ids:
+            card_rows = (await db.execute(text("""
+                SELECT c.match_id, p.steam_id, c.card_name
+                  FROM ovt_match_cards c
+                  JOIN players p ON p.id = c.player_id
+                 WHERE c.match_id = ANY(:mids)
+                 ORDER BY c.match_id, c.player_id, c.pick_order, c.id
+            """), {"mids": match_ids})).mappings().all()
+            for c in card_rows:
+                cards_by_match.setdefault(str(c["match_id"]), {}).setdefault(
+                    c["steam_id"], []).append(c["card_name"])
+
+        for m in match_rows:
+            fps_by_steam = {}
+            for sid_key, fps_key in (
+                ("solo_sid", "solo_fps_avg"),
+                ("duo_a_sid", "duo_a_fps_avg"),
+                ("duo_b_sid", "duo_b_fps_avg"),
+            ):
+                if m[fps_key]:
+                    fps_by_steam[m[sid_key]] = int(m[fps_key])
+            matches_by_series.setdefault(str(m["series_id"]), []).append({
+                "match_id": str(m["match_id"]),
+                "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
+                "winner_side": m["winner_side"],
+                "solo_rounds": int(m["solo_rounds_won"] or 0),
+                "duo_rounds": int(m["duo_rounds_won"] or 0),
+                "solo_points": int(m["solo_points_total"] or 0),
+                "duo_points": int(m["duo_points_total"] or 0),
+                "duration_seconds": int(m["duration_seconds"] or 0),
+                "fps_by_steam": fps_by_steam,
+                "cards_by_steam": cards_by_match.get(str(m["match_id"]), {}),
+            })
+
+    out_series = []
+    for r in series_rows:
+        gold_by_steam = {
+            r["solo_sid"]: int(r["solo_gold_earned"] or 0),
+            r["duo_a_sid"]: int(r["duo_a_gold_earned"] or 0),
+            r["duo_b_sid"]: int(r["duo_b_gold_earned"] or 0),
+        }
+        xp_by_steam = {
+            r["solo_sid"]: int(r["solo_xp_earned"] or 0),
+            r["duo_a_sid"]: int(r["duo_a_xp_earned"] or 0),
+            r["duo_b_sid"]: int(r["duo_b_xp_earned"] or 0),
+        }
+        out_series.append({
+            "series_id": str(r["series_id"]),
+            "status": r["status"],
+            "winner_side": r["winner_side"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            "solo_wins": int(r["solo_series_wins"] or 0),
+            "duo_wins": int(r["duo_series_wins"] or 0),
+            "solo_extra_pick": bool(r["solo_extra_pick"]),
+            "solo": {
+                "steam_id": r["solo_sid"],
+                "display_name": r["solo_name"] or "Player",
+            },
+            "duo": [
+                {
+                    "steam_id": r["duo_a_sid"],
+                    "display_name": r["duo_a_name"] or "Player",
+                },
+                {
+                    "steam_id": r["duo_b_sid"],
+                    "display_name": r["duo_b_name"] or "Player",
+                },
+            ],
+            "gold_by_steam": gold_by_steam,
+            "xp_by_steam": xp_by_steam,
+            "matches": matches_by_series.get(str(r["series_id"]), []),
+        })
+
+    return {
+        "series": out_series,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": (total + page_size - 1) // page_size if total else 0,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# FFA (free-for-all, 3-10 players) — RANKED from day one (Sid July 27).
+# One FFA match is a complete rated unit (no series layer); the "lobby" row
+# groups rematches in one room for the queue lifecycle. Pairwise Glicko-2:
+# each player is scored against every opponent by placement (better=1,
+# worse=0, tie=0.5) from PRE-match snapshots. Queue is consent-at-join
+# (#127): no Elo band, no ready step. Lock protocol follows #197/#202-#207:
+# lobby row first (client names it), players FOR NO KEY UPDATE sorted,
+# glicko FOR UPDATE sorted after (the players pass is the real gate — #203).
+# ══════════════════════════════════════════════════════════════════════════
+
+FFA_MIN_PLAYERS = 3
+FFA_MAX_PLAYERS = 10
+# Once >= MIN fresh searching rows exist, the lock fires when the MIN-th
+# earliest of them has been waiting this long (a gather window so later
+# joiners can still make the lobby), or immediately at MAX. Anchoring on the
+# MIN-th earliest join means the countdown starts when the pool became
+# viable — anchoring on the EARLIEST would fire instantly for any pool whose
+# first member had been waiting alone.
+FFA_GATHER_SECONDS = 25
+FFA_MATCH_XP_BASE = 300
+FFA_XP_PER_BEATEN = 60      # + per opponent placed STRICTLY below you
+FFA_WIN_MULT = 1.5
+# Rating movement per game is bounded: each player is compared against at
+# most this many placement-adjacent opponents (see submit_ffa_match).
+FFA_MAX_RATED_OPPONENTS = 4
+# Engine constants — MUST match plugin/FfaMode.cs (RoundsToWin/PointsToWinRound).
+# Reports are validated against them so a crafted body can't invent a score.
+FFA_ROUNDS_TO_WIN = 3
+FFA_POINTS_TO_WIN_ROUND = 2
+# Max points a player can have banked in one game: every round they won is
+# worth PointsToWinRound, plus at most PointsToWinRound-1 unconverted points.
+FFA_MAX_POINTS = FFA_ROUNDS_TO_WIN * FFA_POINTS_TO_WIN_ROUND + (FFA_POINTS_TO_WIN_ROUND - 1)
+# A lobby is one sitting; this bounds a compromised client's fabrication rate.
+FFA_MAX_GAMES_PER_LOBBY = 40
+
+
+def _ffa_sort_key(steam_id: str) -> tuple:
+    """Deterministic cross-language ordering for steam ids: (length, ordinal)
+    equals numeric order for canonical non-padded numeric ids, and the C#
+    reporter implements the identical comparison — the HMAC canonical and
+    slot assignment must byte-match without either side parsing int64."""
+    return (len(steam_id or ""), steam_id or "")
+
+
+def _ffa_hmac_canonical(report: FfaMatchReport) -> str:
+    parts = [
+        "ffa", report.lobby_id, report.photon_room_id or "",
+        report.reported_by_steam_id, str(report.is_ranked).lower(),
+        report.winner_steam_id, str(len(report.players)),
+    ]
+    for p in sorted(report.players, key=lambda e: _ffa_sort_key(e.steam_id)):
+        parts.extend([p.steam_id, str(p.rounds_won), str(p.points_total)])
+    return ":".join(parts)
+
+
+def _verify_ffa_hmac(report: FfaMatchReport) -> bool:
+    if not MATCH_HMAC_SECRET:
+        return True
+    if not report.hmac_signature:
+        print("[FFA-HMAC] no signature provided")
+        return False
+    msg = _ffa_hmac_canonical(report)
+    expected = hmac.new(MATCH_HMAC_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+    ok = hmac.compare_digest(report.hmac_signature, expected)
+    if not ok:
+        print(f"[FFA-HMAC] mismatch. canonical='{msg}'")
+    return ok
+
+
+class _FfaQueueJoinReq(BaseModel):
+    steam_id: str
+    display_name: str = "Player"
+    region: str | None = None
+
+
+@app.post("/api/v1/ffa/queue/join", tags=["FFA Queue"])
+async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSession = Depends(get_db)):
+    """Join the FFA queue (consent queue — no Elo band). Idempotent per
+    player; re-joining refreshes the display fields and poll timestamp but
+    never resets a locked row (same contract as the 1v2 join)."""
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(404, "Player not registered")
+    g = (await db.execute(text(
+        "SELECT rating, rating_deviation, games_played FROM glicko_ratings_ffa WHERE player_id = :pid"
+    ), {"pid": player.id})).mappings().first()
+    rating = g["rating"] if g else 1500.0
+    rd = g["rating_deviation"] if g else 350.0
+    games = g["games_played"] if g else 0
+    g1 = (await db.execute(text(
+        "SELECT rating FROM glicko_ratings WHERE player_id = :pid"
+    ), {"pid": player.id})).mappings().first()
+    fallback = float(g1["rating"]) if g1 and g1["rating"] is not None else 1500.0
+    await db.execute(text("""
+        INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating_deviation,
+                               games_played, fallback_rating, region, status, joined_at, last_polled)
+        VALUES (:pid, :sid, :dn, :r, :rd, :gp, :fr, :reg, 'searching', NOW(), NOW())
+        ON CONFLICT (player_id) DO UPDATE SET
+            display_name = EXCLUDED.display_name, region = EXCLUDED.region,
+            last_polled = NOW()
+    """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64], "r": rating,
+           "rd": rd, "gp": games, "fr": fallback, "reg": (req.region or "")[:8] or None})
+    await db.commit()
+    n = (await db.execute(text("SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"))).scalar() or 0
+    return {"status": "ok", "queue_count": int(n)}
+
+
+@app.post("/api/v1/ffa/queue/leave", tags=["FFA Queue"])
+async def ffa_queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+    """Leave the FFA queue. Zero-game locked lobby → DISSOLVED (canceled,
+    everyone else reset to searching — the #150 lifecycle rule). Lobby WITH
+    recorded games → the whole lobby CLOSES: the roster is fixed at lock, so
+    one member leaving means the remaining group can never reach N again in
+    that room (Codex design find 4 — leaving them 'ready_join' would re-feed
+    a dead room forever). Everyone's rows are deleted; they requeue fresh."""
+    await _check_steam_session(request, steam_id, db)
+    me = await _lock_queue_group_for_player(db, "ffa_queue", steam_id)
+    if me is None:
+        return {"status": "ok"}
+    dissolved = False
+    lobby_id = me["series_id"]
+    if me["status"] == "ready_join" and lobby_id is not None:
+        lrow = (await db.execute(text(
+            "SELECT l.status, l.games_played FROM ffa_lobbies l WHERE l.id = :lid FOR UPDATE"
+        ), {"lid": lobby_id})).mappings().first()
+        if lrow is not None and lrow["status"] == "active" and int(lrow["games_played"] or 0) == 0:
+            await db.execute(text(
+                "UPDATE ffa_lobbies SET status='canceled', invalidation_reason='assembly_timeout',"
+                "       invalidated_at=NOW() WHERE id=:lid AND status='active'"
+            ), {"lid": lobby_id})
+            await db.execute(text("""
+                UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
+                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+                 WHERE series_id = :lid AND player_id != :pid
+            """), {"lid": lobby_id, "pid": me["player_id"]})
+            dissolved = True
+            print(f"[FFA-LOCK] lobby dissolved by leave (lobby {lobby_id}, leaver {steam_id})")
+        elif lrow is not None and lrow["status"] == "active":
+            # Played lobby: close it for everyone. Peer rows are deleted (not
+            # reset to searching — auto-requeueing people who just finished a
+            # sitting would fire surprise locks at them, #150).
+            await db.execute(text(
+                "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
+                " WHERE id=:lid AND status='active'"
+            ), {"lid": lobby_id})
+            await db.execute(text(
+                "DELETE FROM ffa_queue WHERE series_id = :lid AND player_id != :pid"
+            ), {"lid": lobby_id, "pid": me["player_id"]})
+            print(f"[FFA-LOCK] played lobby closed by leave (lobby {lobby_id}, leaver {steam_id})")
+    await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"), {"pid": me["player_id"]})
+    await db.commit()
+    return {"status": "ok", "lock_dissolved": dissolved}
+
+
+@app.get("/api/v1/ffa/queue/recent-joins", tags=["FFA Queue"])
+async def ffa_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
+    """Players who joined the FFA queue in the last N seconds (Discord beacon
+    parity with the other queues). Rating shown is the FFA elo once the player
+    has FFA games, else their 1v1 elo as the only meaningful hint."""
+    rows = (await db.execute(text("""
+        SELECT q.display_name, q.steam_id, q.rating, q.games_played, q.fallback_rating, q.joined_at,
+               CASE WHEN p.show_discord THEN p.discord_display_name END AS discord_display_name
+          FROM ffa_queue q
+          LEFT JOIN players p ON p.steam_id = q.steam_id
+         WHERE q.status = 'searching'
+           AND q.joined_at > NOW() - INTERVAL '1 second' * :secs
+         ORDER BY q.joined_at DESC
+    """), {"secs": seconds})).mappings().all()
+    cnt = (await db.execute(text(
+        "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
+        "   AND last_polled > NOW() - INTERVAL '75 seconds'"
+    ))).scalar() or 0
+    return {
+        "joins": [
+            {"display_name": r["display_name"], "steam_id": r["steam_id"],
+             "rating": int(round(r["rating"] if (r["games_played"] or 0) > 0 else (r["fallback_rating"] or 1500))),
+             "joined_at": r["joined_at"].isoformat() if r["joined_at"] else None,
+             "discord_display_name": r["discord_display_name"]}
+            for r in rows
+        ],
+        "queue_size": int(cnt),
+    }
+
+
+@app.get("/api/v1/ffa/queue/list", tags=["FFA Queue"])
+async def ffa_queue_list(db: AsyncSession = Depends(get_db)):
+    """Snapshot of the FFA lobby panel: fresh searching rows + recent locks.
+    Same ghost-filtering contract as the 1v2 list."""
+    rows = (await db.execute(text("""
+        SELECT q.steam_id, q.display_name, q.status, q.slot, q.region, q.joined_at,
+               q.rating, q.games_played, q.fallback_rating
+          FROM ffa_queue q
+         WHERE (q.status = 'searching' AND q.last_polled > NOW() - INTERVAL '75 seconds')
+            OR (q.status != 'searching'
+                AND COALESCE(q.matched_at, q.joined_at) > NOW() - INTERVAL '3 hours')
+         ORDER BY q.joined_at ASC
+    """))).mappings().all()
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows:
+        has_ffa = (r["games_played"] or 0) > 0
+        out.append({
+            "steam_id": r["steam_id"],
+            "display_name": r["display_name"],
+            "rating": int(round(r["rating"])) if has_ffa else 0,
+            "rating_1v1": int(round(r["fallback_rating"] or 1500)),
+            "status": r["status"],
+            "slot": int(r["slot"]) if r["slot"] is not None else -1,
+            "wait_seconds": int((now - r["joined_at"]).total_seconds()) if r["joined_at"] else 0,
+            "region": r["region"],
+        })
+    return {"queuers": out, "count": len(out)}
+
+
+@app.get("/api/v1/ffa/queue/poll/{steam_id}", tags=["FFA Queue"])
+async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """Poll the FFA queue. Lock rule: with >= FFA_MIN_PLAYERS fresh searching
+    rows, the lowest Steam ID AMONG THE LOCKED SET (ovt lesson — the decider
+    must be a member) locks up to FFA_MAX_PLAYERS earliest joiners once the
+    gather window has run (or instantly when full). Session-bound (Codex
+    design find 8): an unauthenticated poll would let anyone keep a victim's
+    row eternally fresh and repeatedly elect it into doomed lobbies."""
+    await _check_steam_session(request, steam_id, db)
+    _presence_touch(steam_id)
+    locked = await _lock_queue_group_for_player(db, "ffa_queue", steam_id)
+    if locked is None:
+        return {"status": "not_in_queue", "queue_count": 0}
+    me = (await db.execute(text(
+        "SELECT * FROM ffa_queue WHERE steam_id = :sid"
+    ), {"sid": steam_id})).mappings().first()
+    if me is None:
+        await db.commit()
+        return {"status": "not_in_queue", "queue_count": 0}
+    await db.execute(
+        text("UPDATE ffa_queue SET last_polled = NOW() WHERE player_id = :pid"),
+        {"pid": me["player_id"]},
+    )
+
+    # Ghost prune (75s survives a backend redeploy; 3h husks) — same shape and
+    # SKIP LOCKED reasoning as the ovt poll.
+    await db.execute(text("""
+        DELETE FROM ffa_queue WHERE player_id IN (
+            SELECT player_id FROM ffa_queue
+             WHERE status = 'searching' AND last_polled < NOW() - INTERVAL '75 seconds'
+             FOR UPDATE SKIP LOCKED)
+    """))
+    await db.execute(text("""
+        DELETE FROM ffa_queue WHERE player_id IN (
+            SELECT player_id FROM ffa_queue
+             WHERE status != 'searching' AND matched_at IS NOT NULL
+               AND matched_at < NOW() - INTERVAL '3 hours'
+             FOR UPDATE SKIP LOCKED)
+    """))
+
+    # Already locked → self-heal dead locks, else report the lobby.
+    if me["status"] == "ready_join" and me["series_id"] is not None:
+        lrow = (await db.execute(text(
+            "SELECT l.status, l.games_played FROM ffa_lobbies l WHERE l.id = :lid"
+        ), {"lid": me["series_id"]})).mappings().first()
+        lock_age = ((datetime.now(timezone.utc) - me["matched_at"]).total_seconds()
+                    if me["matched_at"] is not None else 0)
+        dead = (lrow is None or lrow["status"] != "active"
+                or (int(lrow["games_played"] or 0) == 0 and lock_age > 600))
+        if dead:
+            if lrow is not None and lrow["status"] == "active":
+                await db.execute(text(
+                    "UPDATE ffa_lobbies SET status='canceled', invalidation_reason='assembly_timeout',"
+                    "       invalidated_at=NOW() WHERE id=:lid AND status='active'"
+                ), {"lid": me["series_id"]})
+            await db.execute(text("""
+                UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
+                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+                 WHERE series_id = :lid
+            """), {"lid": me["series_id"]})
+            await db.commit()
+            print(f"[FFA-LOCK] dead lock reset (lobby {me['series_id']}, age {int(lock_age)}s)")
+            n = (await db.execute(text(
+                "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
+                "   AND last_polled > NOW() - INTERVAL '75 seconds'"
+            ))).scalar() or 0
+            return {"status": "searching", "queue_count": int(n)}
+        await db.commit()
+        return await _ffa_poll_locked_payload(db, me["series_id"], steam_id)
+
+    # Candidate scan: earliest fresh searching rows, one lobby's worth. LIMIT
+    # bounds the lock set so concurrent pollers carve disjoint lobbies.
+    rows = (await db.execute(text("""
+        SELECT player_id, steam_id, display_name, region, joined_at
+          FROM ffa_queue
+         WHERE status = 'searching'
+           AND last_polled > NOW() - INTERVAL '10 seconds'
+         ORDER BY joined_at
+         LIMIT :maxp
+         FOR UPDATE SKIP LOCKED
+    """), {"maxp": FFA_MAX_PLAYERS})).mappings().all()
+    fresh_count = (await db.execute(text(
+        "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
+        "   AND last_polled > NOW() - INTERVAL '75 seconds'"
+    ))).scalar() or 0
+
+    if len(rows) < FFA_MIN_PLAYERS:
+        await db.commit()
+        return {"status": "searching", "queue_count": int(fresh_count),
+                "players_needed": FFA_MIN_PLAYERS, "gather_seconds_left": -1}
+
+    # Gather window: countdown anchored on the MIN-th earliest fresh join.
+    now = datetime.now(timezone.utc)
+    anchor = rows[FFA_MIN_PLAYERS - 1]["joined_at"]
+    waited = (now - anchor).total_seconds() if anchor else 0
+    full = len(rows) >= FFA_MAX_PLAYERS
+    if not full and waited < FFA_GATHER_SECONDS:
+        await db.commit()
+        return {"status": "searching", "queue_count": int(fresh_count),
+                "players_needed": FFA_MIN_PLAYERS,
+                "gather_seconds_left": max(0, int(FFA_GATHER_SECONDS - waited))}
+
+    # Decider election: lowest steam id WITHIN the locked set (must be a member).
+    lobby_rows = list(rows)
+    lowest = min((r["steam_id"] for r in lobby_rows), key=_ffa_sort_key)
+    if steam_id != lowest:
+        await db.commit()
+        return {"status": "searching", "queue_count": int(fresh_count),
+                "players_needed": FFA_MIN_PLAYERS, "gather_seconds_left": 0}
+
+    # Lock: slots by the deterministic steam ordering (client mirrors it).
+    ordered = sorted(lobby_rows, key=lambda r: _ffa_sort_key(r["steam_id"]))
+    regions = [r["region"] for r in lobby_rows if r["region"]]
+    region = max(set(regions), key=regions.count) if regions else "us"
+    room = f"ffa_{uuid.uuid4().hex[:12]}"
+    lobby_id = uuid.uuid4()
+    await db.execute(text("""
+        INSERT INTO ffa_lobbies (id, status, photon_room_id, region, player_count, member_ids, created_at)
+        VALUES (:lid, 'active', :room, :reg, :n, :members, NOW())
+    """), {"lid": lobby_id, "room": room, "reg": (region or "us")[:8],
+           "n": len(ordered), "members": [r["player_id"] for r in ordered]})
+    for slot, r in enumerate(ordered):
+        await db.execute(text("""
+            UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
+                   room_name=:room, room_region=:reg, matched_at=NOW()
+             WHERE player_id=:pid
+        """), {"lid": lobby_id, "slot": slot, "room": room, "reg": (region or "us")[:8],
+               "pid": r["player_id"]})
+    await db.commit()
+    print(f"[FFA-LOCK] lobby {lobby_id} room {room} n={len(ordered)} decider={steam_id}")
+    return await _ffa_poll_locked_payload(db, lobby_id, steam_id)
+
+
+async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) -> dict:
+    lobby = (await db.execute(text(
+        "SELECT * FROM ffa_lobbies WHERE id = :lid"
+    ), {"lid": lobby_id})).mappings().first()
+    if lobby is None:
+        return {"status": "searching", "queue_count": 0}
+    members = (await db.execute(text("""
+        SELECT q.steam_id, q.display_name, q.slot
+          FROM ffa_queue q WHERE q.series_id = :lid ORDER BY q.slot
+    """), {"lid": lobby_id})).mappings().all()
+    my_slot = next((int(m["slot"]) for m in members
+                    if m["steam_id"] == steam_id and m["slot"] is not None), -1)
+    return {
+        "status": "ready_join",
+        "lobby_id": str(lobby_id),
+        "room_name": lobby["photon_room_id"],
+        "room_region": lobby["region"],
+        "player_count": int(lobby["player_count"] or len(members)),
+        "slot": my_slot,
+        "players": [
+            {"steam_id": m["steam_id"], "display_name": m["display_name"],
+             "slot": int(m["slot"]) if m["slot"] is not None else -1}
+            for m in members
+        ],
+    }
+
+
+@app.post("/api/v1/ffa/matches", response_model=FfaMatchResponse, tags=["FFA Matches"])
+async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSession = Depends(get_db)):
+    """Record one FFA game and apply pairwise Glicko + XP/gold inline (an FFA
+    match is a complete rated unit). Placements are computed SERVER-side from
+    the per-player round/point tallies — the client's ordering is not trusted.
+    Idempotent via the room-id unique (rooms are per-game suffixed)."""
+    await _check_steam_session(request, report.reported_by_steam_id, db)
+    if not _verify_ffa_hmac(report):
+        raise HTTPException(403, "Invalid FFA match signature")
+    try:
+        lobby_uuid = UUID(report.lobby_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid lobby_id format")
+    steams = [p.steam_id for p in report.players]
+    if len(set(steams)) != len(steams) or len(steams) < 2:
+        raise HTTPException(400, "Need at least two distinct players")
+    if report.winner_steam_id not in set(steams):
+        raise HTTPException(400, "Winner is not among the players")
+    if report.reported_by_steam_id not in set(steams):
+        raise HTTPException(400, "Reporter is not a participant")
+    if not (report.photon_room_id or "").strip():
+        raise HTTPException(400, "photon_room_id is required")
+    # FFA lobbies are ranked, period — a crafted is_ranked=false must not open
+    # an unrated-economy side channel (Codex design find 12). Clients always
+    # send true; reject rather than silently flip (the flag is HMAC-signed).
+    if not report.is_ranked:
+        raise HTTPException(400, "FFA matches are ranked")
+
+    # Winner must hold the unique round maximum.
+    max_rounds = max(p.rounds_won for p in report.players)
+    top = [p for p in report.players if p.rounds_won == max_rounds]
+    if len(top) != 1 or top[0].steam_id != report.winner_steam_id:
+        raise HTTPException(400, "winner disagrees with the round tallies")
+
+    prows = (await db.execute(
+        select(Player.id, Player.steam_id).where(Player.steam_id.in_(steams))
+    )).all()
+    id_by_steam = {r.steam_id: r.id for r in prows}
+    if len(id_by_steam) != len(steams):
+        raise HTTPException(404, "One or more players not registered")
+
+    # Lobby row FIRST (the group anchor — serializes concurrent reports).
+    lobby = (await db.execute(text(
+        "SELECT * FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
+    ), {"lid": lobby_uuid})).mappings().first()
+    if lobby is None:
+        raise HTTPException(404, "Lobby not found")
+    # Review find 2: a canceled/completed lobby must not keep minting rated
+    # games. Only a live lobby accepts reports.
+    if lobby["status"] != "active":
+        raise HTTPException(409, "Lobby is not active")
+    # Roster validation (review finds 1/3): member_ids is the lock-time roster
+    # ORDERED BY SLOT (queue rows get pruned; this array doesn't). The report
+    # must cover the roster EXACTLY — a subset would let a hostile reporter
+    # drop whoever beat them and still bank rating/XP. Leavers stay in the
+    # report with left_early=true, so a shrinking lobby is not a valid excuse.
+    members = list(lobby["member_ids"] or [])
+    member_set = set(members)
+    reported_ids = set(id_by_steam.values())
+    if not member_set:
+        raise HTTPException(409, "Lobby has no recorded roster")
+    if reported_ids != member_set:
+        raise HTTPException(403, "Report must cover exactly the lobby roster")
+    if len(report.players) != int(lobby["player_count"] or len(members)):
+        raise HTTPException(403, "Report player count does not match the lobby")
+    slot_by_pid = {pid: i for i, pid in enumerate(members)}
+    for p in report.players:
+        pid = id_by_steam[p.steam_id]
+        if slot_by_pid.get(pid) != p.slot:
+            raise HTTPException(403, f"Slot mismatch for {p.steam_id}")
+    # Engine invariants (review find 2): the FFA engine ends a game at exactly
+    # FFA_ROUNDS_TO_WIN rounds, and nobody else can have reached it. A crafted
+    # "I won 20-0" body is rejected outright rather than rated.
+    if max_rounds != FFA_ROUNDS_TO_WIN:
+        raise HTTPException(400, f"winner must hold exactly {FFA_ROUNDS_TO_WIN} rounds")
+    for p in report.players:
+        if p.rounds_won > FFA_ROUNDS_TO_WIN:
+            raise HTTPException(400, "round tally above the game limit")
+        if p.points_total > FFA_MAX_POINTS:
+            raise HTTPException(400, "point tally above the game limit")
+    # Rate ceiling: a lobby's games are real matches taking minutes each. This
+    # bounds a compromised client's fabrication rate even inside a live lobby
+    # (a full server-issued per-game nonce is the next hardening step).
+    if int(lobby["games_played"] or 0) >= FFA_MAX_GAMES_PER_LOBBY:
+        raise HTTPException(409, "Lobby game limit reached")
+
+    # Players pass: sorted FOR NO KEY UPDATE (#202/#203 — never FOR UPDATE,
+    # and this pass is the real gate; glicko rows may not exist yet).
+    for pid in sorted(reported_ids, key=str):
+        await db.execute(text(
+            "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
+        ), {"pid": pid})
+
+    # Server-side placements: (rounds desc, points desc); ties share the same
+    # placement, COMPETITION style (1,2,2,4 — not dense; Codex design find 15).
+    entries = sorted(report.players,
+                     key=lambda p: (-p.rounds_won, -p.points_total, _ffa_sort_key(p.steam_id)))
+    placements: dict[str, int] = {}
+    prev_key = None
+    prev_place = 0
+    for i, p in enumerate(entries):
+        k = (p.rounds_won, p.points_total)
+        place = prev_place if k == prev_key else i + 1
+        placements[p.steam_id] = place
+        prev_key, prev_place = k, place
+    # Strictly-beaten counts drive XP (a tied pair didn't beat each other).
+    beaten_count = {
+        p.steam_id: sum(1 for q in report.players
+                        if placements[q.steam_id] > placements[p.steam_id])
+        for p in report.players
+    }
+
+    match_id = uuid.uuid4()
+    n = len(report.players)
+    try:
+        await db.execute(text("""
+            INSERT INTO ffa_matches (id, lobby_id, photon_room_id, player_count, winner_id,
+                duration_seconds, game_version, region, hmac_signature, reported_by,
+                is_ranked, started_at, ended_at)
+            VALUES (:id, :lid, :room, :n, :win, :dur, :gv, :reg, :hmac, :rep, :ranked, :started, NOW())
+        """), {"id": match_id, "lid": lobby_uuid, "room": (report.photon_room_id or "")[:64],
+               "n": n, "win": id_by_steam[report.winner_steam_id],
+               "dur": report.match_duration, "gv": (report.game_version or "")[:32] or None,
+               "reg": (report.region or "")[:8] or None,
+               "hmac": (report.hmac_signature or "")[:160] or None,
+               "rep": id_by_steam.get(report.reported_by_steam_id),
+               "ranked": bool(report.is_ranked), "started": report.started_at})
+    except IntegrityError as ie:
+        await db.rollback()
+        # Only the room-id unique means "replay" — any OTHER integrity error
+        # (FK violation etc.) is a real failure, not a duplicate (Codex design
+        # find 11: a catch-all here would misreport broken inserts as success).
+        if "uq_ffa_match_room" not in str(getattr(ie, "orig", ie)):
+            raise HTTPException(500, "FFA match insert failed")
+        # Replay: return the already-recorded outcome idempotently.
+        prior = (await db.execute(text(
+            "SELECT id, player_count, lobby_id FROM ffa_matches WHERE photon_room_id = :room"
+        ), {"room": (report.photon_room_id or "")[:64]})).mappings().first()
+        if prior is None:
+            raise HTTPException(409, "Duplicate room id")
+        if str(prior["lobby_id"]) != str(lobby_uuid):
+            raise HTTPException(409, "Room already recorded for a different lobby")
+        mine = (await db.execute(text(
+            "SELECT placement, rating_change, xp_gained, gold_gained FROM ffa_match_players"
+            " WHERE match_id = :m AND player_id = :p"
+        ), {"m": prior["id"], "p": id_by_steam[report.reported_by_steam_id]})).mappings().first()
+        changes = (await db.execute(text(
+            "SELECT p.steam_id, fmp.rating_change FROM ffa_match_players fmp"
+            " JOIN players p ON p.id = fmp.player_id WHERE fmp.match_id = :m"
+        ), {"m": prior["id"]})).mappings().all()
+        return FfaMatchResponse(
+            match_id=prior["id"], lobby_id=lobby_uuid,
+            placement=int(mine["placement"]) if mine else 0,
+            player_count=int(prior["player_count"] or n),
+            rating_changes={r["steam_id"]: float(r["rating_change"] or 0.0) for r in changes},
+            xp_gained=int(mine["xp_gained"] or 0) if mine else 0,
+            gold_gained=int(mine["gold_gained"] or 0) if mine else 0,
+            message="Already recorded")
+
+    # ── Pairwise Glicko (pre-match snapshots for everyone). ──
+    rating_changes: dict[str, float] = {}
+    pre: dict[str, tuple[float, float, float]] = {}
+    if report.is_ranked:
+        # Glicko rows sorted FOR UPDATE (after the players pass).
+        for pid in sorted(reported_ids, key=str):
+            await db.execute(text(
+                "SELECT 1 FROM glicko_ratings_ffa WHERE player_id = :pid FOR UPDATE"
+            ), {"pid": pid})
+        grows = (await db.execute(text(
+            "SELECT player_id, rating, rating_deviation, volatility FROM glicko_ratings_ffa"
+            " WHERE player_id = ANY(:pids)"
+        ), {"pids": list(reported_ids)})).mappings().all()
+        by_pid = {r["player_id"]: r for r in grows}
+        for sid_, pid in id_by_steam.items():
+            r = by_pid.get(pid)
+            pre[sid_] = ((float(r["rating"]), float(r["rating_deviation"]), float(r["volatility"]))
+                         if r else (1500.0, 350.0, 0.06))
+        # Rating comparisons are BOUNDED to the placement-adjacent opponents
+        # (up to FFA_MAX_RATED_OPPONENTS, nearest placements first): raw full
+        # pairwise would make a 10-player game move ratings ~4.5x as much as a
+        # 3-player game and crush RD after a handful of lobbies (Codex design
+        # find 14). Adjacent placements are also the most informative
+        # comparisons. Deterministic: sorted by |placement gap| then the
+        # canonical steam ordering.
+        for p in report.players:
+            my_place = placements[p.steam_id]
+            ranked_opps = sorted(
+                (q for q in report.players if q.steam_id != p.steam_id),
+                key=lambda q: (abs(placements[q.steam_id] - my_place),
+                               _ffa_sort_key(q.steam_id)))
+            opponents = []
+            for q in ranked_opps[:FFA_MAX_RATED_OPPONENTS]:
+                score = (1.0 if my_place < placements[q.steam_id]
+                         else 0.0 if my_place > placements[q.steam_id] else 0.5)
+                opponents.append((pre[q.steam_id][0], pre[q.steam_id][1], score))
+            old_r, old_rd, old_vol = pre[p.steam_id]
+            new_r, new_rd, new_vol = calculate_new_rating(old_r, old_rd, old_vol, opponents)
+            rating_changes[p.steam_id] = round(new_r - old_r, 1)
+            pid = id_by_steam[p.steam_id]
+            await db.execute(text("""
+                INSERT INTO glicko_ratings_ffa (player_id, rating, rating_deviation, volatility,
+                    peak_rating, games_played, wins, top3, placement_sum, last_calculated, updated_at)
+                VALUES (:pid, :r, :rd, :vol, :peak, 1, :w, :t3, :pl, NOW(), NOW())
+                ON CONFLICT (player_id) DO UPDATE SET
+                    rating = :r, rating_deviation = :rd, volatility = :vol,
+                    peak_rating = GREATEST(glicko_ratings_ffa.peak_rating, :peak),
+                    games_played = glicko_ratings_ffa.games_played + 1,
+                    wins = glicko_ratings_ffa.wins + :w,
+                    top3 = glicko_ratings_ffa.top3 + :t3,
+                    placement_sum = glicko_ratings_ffa.placement_sum + :pl,
+                    last_calculated = NOW(), updated_at = NOW()
+            """), {"pid": pid, "r": new_r, "rd": new_rd, "vol": new_vol, "peak": new_r,
+                   "w": 1 if my_place == 1 else 0, "t3": 1 if my_place <= 3 else 0,
+                   "pl": my_place})
+
+    # ── XP + gold: base + per-opponent-beaten, x1.5 for the win; atomic
+    # UPDATE..RETURNING (#148), canonical str(pid) award order (#197). ──
+    award_info: dict[str, tuple[int, int]] = {}
+    by_steam = {p.steam_id: p for p in report.players}
+    for pid in sorted(reported_ids, key=str):
+        sid_ = next(s for s, i2 in id_by_steam.items() if i2 == pid)
+        place = placements[sid_]
+        xp = FFA_MATCH_XP_BASE + FFA_XP_PER_BEATEN * beaten_count.get(sid_, 0)
+        if place == 1:
+            xp = int(xp * FFA_WIN_MULT)
+        row = (await db.execute(text(
+            "UPDATE players SET total_xp = COALESCE(total_xp,0) + :xp,"
+            "       ffa_xp_earned = COALESCE(ffa_xp_earned,0) + :xp"
+            " WHERE id = :pid"
+            " RETURNING total_xp AS new_xp, (COALESCE(total_xp,0) - :xp) AS old_xp"
+        ), {"xp": xp, "pid": pid})).mappings().first()
+        new_xp = row["new_xp"] if row else xp
+        old_xp = row["old_xp"] if row else 0
+        gold_delta = max(0, (new_xp // 100) - (old_xp // 100))
+        if gold_delta > 0:
+            await db.execute(text(
+                "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g,"
+                "       ffa_gold_earned = COALESCE(ffa_gold_earned,0) + :g WHERE id = :pid"
+            ), {"g": gold_delta, "pid": pid})
+            db.add(GoldTransaction(player_id=pid, amount=gold_delta, reason="ffa_xp",
+                                   reference_id=str(match_id)))
+        award_info[sid_] = (xp, gold_delta)
+
+    # ── Per-player rows + cards. ──
+    for p in report.players:
+        pid = id_by_steam[p.steam_id]
+        tel = p.telemetry
+        xp_g, gold_g = award_info.get(p.steam_id, (0, 0))
+        old_r = pre.get(p.steam_id, (None, None, None))[0]
+        chg = rating_changes.get(p.steam_id)
+        await db.execute(text("""
+            INSERT INTO ffa_match_players (match_id, player_id, slot, rounds_won, points_total,
+                placement, left_early, rating_before, rating_after, rating_change,
+                xp_gained, gold_gained, fps_avg, ping_avg, bullets_fired, bullets_hit,
+                blocks_activated, blocks_successful, keys_pressed, active_seconds,
+                fps_timeline, ping_timeline, hit_timeline, block_timeline)
+            VALUES (:m, :p, :slot, :rw, :pt, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,
+                    :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt)
+        """), {"m": match_id, "p": pid, "slot": p.slot, "rw": p.rounds_won, "pt": p.points_total,
+               "pl": placements[p.steam_id], "le": bool(p.left_early),
+               "rb": old_r, "ra": (old_r + chg) if (old_r is not None and chg is not None) else None,
+               "rc": chg, "xp": xp_g, "g": gold_g,
+               "fps": p.fps, "ping": tel.ping_avg if tel else None,
+               "bf": tel.bullets_fired if tel else None, "bh": tel.bullets_hit if tel else None,
+               "ba": tel.blocks_activated if tel else None,
+               "bs": tel.blocks_successful if tel else None,
+               "kp": tel.keys_pressed if tel else None,
+               "asec": tel.active_seconds if tel else None,
+               "ft": tel.fps_timeline if tel else None, "pt2": tel.ping_timeline if tel else None,
+               "ht": tel.hit_timeline if tel else None, "bt": tel.block_timeline if tel else None})
+        for i, c in enumerate(p.cards or []):
+            nm = getattr(c, "card_name", None)
+            if not nm:
+                continue
+            await db.execute(text(
+                "INSERT INTO ffa_match_cards (match_id, player_id, card_name, card_rarity,"
+                " pick_order, round_number) VALUES (:m, :p, :c, :r, :o, :rn)"
+            ), {"m": match_id, "p": pid, "c": str(nm)[:64],
+                "r": (getattr(c, "card_rarity", None) or "")[:16] or None,
+                "o": getattr(c, "pick_order", i) or i,
+                "rn": getattr(c, "round_number", None)})
+
+    await db.execute(text(
+        "UPDATE ffa_lobbies SET games_played = games_played + 1 WHERE id = :lid"
+    ), {"lid": lobby_uuid})
+    await db.commit()
+
+    rep_place = placements.get(report.reported_by_steam_id, 0)
+    rep_xp, rep_gold = award_info.get(report.reported_by_steam_id, (0, 0))
+    print(f"[FFA-REPORT] match {match_id} lobby {lobby_uuid} n={n} "
+          f"winner={report.winner_steam_id} reporter_place={rep_place}")
+    return FfaMatchResponse(
+        match_id=match_id, lobby_id=lobby_uuid, placement=rep_place, player_count=n,
+        rating_changes=rating_changes, xp_gained=rep_xp, gold_gained=rep_gold)
+
+
+_FFA_LB_SORTS = {
+    "rating": "g.rating DESC",
+    "wins": "g.wins DESC, g.rating DESC",
+    "games": "g.games_played DESC, g.rating DESC",
+    "win_rate": "(g.wins::float / NULLIF(g.games_played,0)) DESC NULLS LAST, g.rating DESC",
+    "top3": "g.top3 DESC, g.rating DESC",
+    "avg_placement": "(g.placement_sum::float / NULLIF(g.games_played,0)) ASC NULLS LAST, g.rating DESC",
+}
+
+
+@app.get("/api/v1/ffa/leaderboard", response_model=FfaLeaderboardResponse, tags=["FFA Matches"])
+async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "rating",
+                          db: AsyncSession = Depends(get_db)):
+    """FFA leaderboard — RANKED. sort_by resolves through a dict allowlist
+    (never interpolate the raw param — learning #188)."""
+    order_sql = _FFA_LB_SORTS.get(sort_by, _FFA_LB_SORTS["rating"])
+    rows = (await db.execute(text(f"""
+        SELECT p.id AS player_id, p.steam_id, p.display_name, p.total_xp, p.hide_gold,
+               p.ffa_gold_earned, p.ffa_xp_earned,
+               g.rating, g.rating_deviation, g.games_played, g.wins, g.top3, g.placement_sum,
+               si.name AS title_name, si.color AS title_color, si.sku AS title_sku,
+               gr.rating AS rating_1v1
+          FROM glicko_ratings_ffa g
+          JOIN players p ON p.id = g.player_id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+         WHERE g.games_played >= :ming AND p.deleted_at IS NULL
+         ORDER BY {order_sql}
+         LIMIT :lim
+    """), {"ming": max(1, min_games), "lim": max(1, min(limit, 500))})).mappings().all()
+    _colors = await _rank_colors(db)
+    _pmap = await _podium_map(db) if any(
+        r["title_sku"] == TITLE_PODIUM_SKU for r in rows) else {}
+    entries = []
+    for i, r in enumerate(rows):
+        games = int(r["games_played"] or 0)
+        wins = int(r["wins"] or 0)
+        lvl, _, _ = level_from_xp(r["total_xp"] or 0)
+        t_name, t_color = _display_title_sync(
+            _colors, r["title_sku"], r["title_name"], r["title_color"],
+            r["rating_1v1"], podium_pos=_pmap.get(str(r["player_id"])))
+        entries.append(FfaLeaderboardEntry(
+            rank=i + 1, steam_id=r["steam_id"], display_name=r["display_name"] or "Player",
+            rating=int(round(r["rating"] or 1500)), rd=int(round(r["rating_deviation"] or 350)),
+            games_played=games, wins=wins, top3=int(r["top3"] or 0),
+            avg_placement=round((r["placement_sum"] or 0) / games, 2) if games else 0.0,
+            win_rate=round(wins / games, 3) if games else 0.0,
+            level=lvl, title=t_name, title_color=t_color,
+            ffa_gold_earned=(-1 if r["hide_gold"] else int(r["ffa_gold_earned"] or 0)),
+            ffa_xp_earned=int(r["ffa_xp_earned"] or 0),
+        ))
+    return FfaLeaderboardResponse(
+        entries=entries, total_players=len(entries),
+        last_updated=datetime.now(timezone.utc), is_ranked=True)
+
+
+@app.get("/api/v1/ffa/recent", tags=["FFA Matches"])
+async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1, le=10),
+                     db: AsyncSession = Depends(get_db)):
+    """Recent ranked FFA matches, newest first, with the full per-player stat
+    surface (placements, rounds, rating deltas, cards, telemetry) — the
+    'Recent Ranked FFAs' panel feed. Browsable by anyone, like
+    /team/all-series-paged."""
+    total = (await db.execute(text(
+        "SELECT COUNT(*) FROM ffa_matches WHERE invalidated_at IS NULL"
+    ))).scalar() or 0
+    matches = (await db.execute(text("""
+        SELECT m.id, m.photon_room_id, m.player_count, m.duration_seconds,
+               m.ended_at, m.is_ranked, pw.steam_id AS winner_steam
+          FROM ffa_matches m
+          LEFT JOIN players pw ON pw.id = m.winner_id
+         WHERE m.invalidated_at IS NULL
+         ORDER BY m.ended_at DESC
+         LIMIT :lim OFFSET :off
+    """), {"lim": page_size, "off": page * page_size})).mappings().all()
+    match_ids = [r["id"] for r in matches]
+    players_by_match: dict = {mid: [] for mid in match_ids}
+    cards_by_match_player: dict = {}
+    if match_ids:
+        prow = (await db.execute(text("""
+            SELECT fmp.*, p.steam_id, p.display_name
+              FROM ffa_match_players fmp
+              JOIN players p ON p.id = fmp.player_id
+             WHERE fmp.match_id = ANY(:mids)
+             ORDER BY fmp.placement ASC, fmp.rounds_won DESC
+        """), {"mids": match_ids})).mappings().all()
+        crow = (await db.execute(text("""
+            SELECT fc.match_id, p.steam_id, fc.card_name, fc.pick_order
+              FROM ffa_match_cards fc
+              JOIN players p ON p.id = fc.player_id
+             WHERE fc.match_id = ANY(:mids)
+             ORDER BY fc.pick_order ASC
+        """), {"mids": match_ids})).mappings().all()
+        for c in crow:
+            cards_by_match_player.setdefault((c["match_id"], c["steam_id"]), []).append(c["card_name"])
+        for r in prow:
+            players_by_match[r["match_id"]].append({
+                "steam_id": r["steam_id"],
+                "display_name": r["display_name"] or "Player",
+                "slot": int(r["slot"]) if r["slot"] is not None else -1,
+                "placement": int(r["placement"]),
+                "rounds_won": int(r["rounds_won"] or 0),
+                "points_total": int(r["points_total"] or 0),
+                "left_early": bool(r["left_early"]),
+                "rating_change": float(r["rating_change"]) if r["rating_change"] is not None else None,
+                "xp_gained": int(r["xp_gained"] or 0),
+                "gold_gained": int(r["gold_gained"] or 0),
+                "fps_avg": int(r["fps_avg"]) if r["fps_avg"] is not None else 0,
+                "ping_avg": int(r["ping_avg"]) if r["ping_avg"] is not None else None,
+                "bullets_fired": r["bullets_fired"], "bullets_hit": r["bullets_hit"],
+                "blocks_activated": r["blocks_activated"],
+                "blocks_successful": r["blocks_successful"],
+                "keys_pressed": r["keys_pressed"], "active_seconds": r["active_seconds"],
+                "fps_timeline": r["fps_timeline"], "ping_timeline": r["ping_timeline"],
+                "hit_timeline": r["hit_timeline"], "block_timeline": r["block_timeline"],
+                "cards": cards_by_match_player.get((r["match_id"], r["steam_id"]), []),
+            })
+    return {
+        "matches": [
+            {"match_id": str(m["id"]), "photon_room_id": m["photon_room_id"],
+             "player_count": int(m["player_count"] or 0),
+             "duration_seconds": m["duration_seconds"],
+             "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
+             "is_ranked": bool(m["is_ranked"]),
+             "winner_steam_id": m["winner_steam"],
+             "players": players_by_match.get(m["id"], [])}
+            for m in matches
+        ],
+        "page": page, "page_size": page_size, "total": int(total),
+        "total_pages": (int(total) + page_size - 1) // page_size if total else 0,
+    }
 
 
 @app.post("/api/v1/team/matches", response_model=TeamMatchResponse, tags=["Team Matches"])

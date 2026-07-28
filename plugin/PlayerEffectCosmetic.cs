@@ -150,9 +150,75 @@ namespace CompetitiveRounds
                 if (p == null) continue;
                 var pv = p.GetComponent<PhotonView>();
                 if (pv == null || pv.OwnerActorNr != actor) continue;
-                ApplyToPlayer(p.transform, actor, sku);
+                ApplyOrDefer(p.transform, actor, sku);
                 return;
             }
+        }
+
+        // ── Inactive-player defer ───────────────────────────────────
+        // Between rounds ROUNDS deactivates dead Player GOs (RPCA_Die →
+        // SetActive(false); Revive at next-round load reactivates). A re-apply
+        // landing in that window silently no-ops: ParticleSystem.Play() on an
+        // inactive GO does nothing, so the aura stays invisible for the whole
+        // next round. Defer the apply on Plugin.Instance (learning #85: never
+        // host coroutines on scene/player objects) until the body is active,
+        // with a bail so a player who never revives (match over, leaver)
+        // doesn't leak a spinning coroutine.
+        private static readonly HashSet<int> _pendingInactiveApplies = new HashSet<int>();
+        // Per-actor generation: EVERY apply/teardown request bumps it, so a
+        // pending deferred apply can tell it has been superseded (review find
+        // 12 — an unequip during the dead window used to be overwritten by the
+        // stale deferred apply on revive, resurrecting the removed aura).
+        private static readonly Dictionary<int, int> _applyGen = new Dictionary<int, int>();
+
+        private static int BumpGen(int actor)
+        {
+            int g;
+            _applyGen.TryGetValue(actor, out g);
+            g++;
+            _applyGen[actor] = g;
+            return g;
+        }
+
+        private static void ApplyOrDefer(Transform playerRoot, int actor, string sku)
+        {
+            if (playerRoot == null) return;
+            int gen = BumpGen(actor);   // supersedes any in-flight defer
+            // Empty sku = teardown only (Destroy works on inactive GOs) — never defer.
+            if (string.IsNullOrEmpty(sku) || playerRoot.gameObject.activeInHierarchy)
+            {
+                ApplyToPlayer(playerRoot, actor, sku);
+                return;
+            }
+            if (!_pendingInactiveApplies.Add(actor)) return;  // one defer in flight per actor
+            Plugin.Log.LogInfo($"[EFFECT] deferred (player inactive) actor={actor}");
+            try { Plugin.Instance.StartCoroutine(ApplyWhenActive(playerRoot, actor, sku, gen)); }
+            catch (Exception ex)
+            {
+                _pendingInactiveApplies.Remove(actor);
+                Plugin.Log.LogWarning($"[EFFECT] defer failed: {ex.Message}");
+            }
+        }
+
+        private static IEnumerator ApplyWhenActive(Transform playerRoot, int actor, string sku, int gen)
+        {
+            float deadline = Time.realtimeSinceStartup + 10f;
+            while (playerRoot != null && !playerRoot.gameObject.activeInHierarchy
+                   && Time.realtimeSinceStartup < deadline)
+                yield return null;
+            _pendingInactiveApplies.Remove(actor);
+            // Superseded while we waited (unequip, or a newer sku)? Drop —
+            // the newer request already applied the current truth.
+            int cur;
+            if (_applyGen.TryGetValue(actor, out cur) && cur != gen)
+            {
+                Plugin.Log.LogInfo($"[EFFECT] deferred apply superseded actor={actor}");
+                yield break;
+            }
+            // Destroyed (room/match ended) or still inactive at the bail → drop;
+            // the next OnRoundStart pass re-applies from live props anyway.
+            if (playerRoot == null || !playerRoot.gameObject.activeInHierarchy) yield break;
+            ApplyToPlayer(playerRoot, actor, sku);
         }
 
         private static IEnumerator DelayedApplyAll()
@@ -184,7 +250,7 @@ namespace CompetitiveRounds
                         && photonPlayer.CustomProperties.ContainsKey(PROP_SKU))
                         sku = photonPlayer.CustomProperties[PROP_SKU]?.ToString() ?? "";
                 }
-                ApplyToPlayer(p.transform, actor, sku);
+                ApplyOrDefer(p.transform, actor, sku);
             }
         }
 

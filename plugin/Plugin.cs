@@ -162,6 +162,29 @@ namespace CompetitiveRounds
             pendingOvtSlot = -1;
         }
 
+        // FFA slot 0..N-1 assigned at ffa queue lock (steam-ordinal order, so
+        // every client derives the identical mapping). In FFA each player is
+        // their own ROUNDS team: TeamID = slot. pendingFfaCount is the locked
+        // lobby size N (3-10) — playersNeededToStart for the room. Same
+        // lifecycle as the other pending slots (set on ready_join, cleared on
+        // queue leave / mismatch join / room leave).
+        private static int pendingFfaSlot = -1;
+        private static int pendingFfaCount = 0;
+        public static int PendingFfaSlot => pendingFfaSlot;
+        public static int PendingFfaCount => pendingFfaCount;
+        public static void SetPendingFfaSlot(int slot, int playerCount)
+        {
+            pendingFfaSlot = slot;
+            pendingFfaCount = playerCount;
+            Log.LogInfo($"[FFA] Pending slot set: {slot} of {playerCount}");
+        }
+        public static void ClearPendingFfaSlot()
+        {
+            if (pendingFfaSlot >= 0) Log.LogInfo("[FFA] Pending slot cleared");
+            pendingFfaSlot = -1;
+            pendingFfaCount = 0;
+        }
+
         private void Awake()
         {
             Log = Logger;
@@ -590,6 +613,7 @@ namespace CompetitiveRounds
                 // lineup, pending slot) that would otherwise leave the tab
                 // showing "Match found! Joining…" over a live Join button.
                 bool wasOvt = (targetRoom ?? "").StartsWith("ovt_") || (pendingRoom ?? "").StartsWith("ovt_");
+                bool wasFfa = (targetRoom ?? "").StartsWith("ffa_") || (pendingRoom ?? "").StartsWith("ffa_");
                 Plugin.ClearPendingRoom();
                 joinInitiated = false;
                 state = JoinState.Idle;
@@ -604,6 +628,13 @@ namespace CompetitiveRounds
                 {
                     try { ApiClient.OvtLeaveQueue(); } catch { }
                     CompetitiveUI.ShowNotification("Failed to join the 1v2 room — lobby dissolved, please requeue", new Color(1f, 0.4f, 0.4f), 8f);
+                }
+                else if (wasFfa)
+                {
+                    // Same #150 lifecycle as 1v2: a failed join must dissolve the
+                    // FFA lobby server-side or the husk re-feeds this dead room.
+                    try { ApiClient.FfaLeaveQueue(); } catch { }
+                    CompetitiveUI.ShowNotification("Failed to join the FFA room — lobby dissolved, please requeue", new Color(1f, 0.4f, 0.4f), 8f);
                 }
                 else
                 {
@@ -754,6 +785,13 @@ namespace CompetitiveRounds
                         // room was created MaxPlayers=2 (the 1v1 default) and the
                         // third player could never join, so 1v2 could never start.
                         bool is1v2 = capturedRoom != null && capturedRoom.StartsWith("ovt_");
+                        // FFA: ffa_ rooms hold the locked lobby size (3-10) —
+                        // learning #146a: a missing MaxPlayers branch means the
+                        // Nth player can never join. The creator stamps the
+                        // lobby size as a room prop so late joiners (and any
+                        // client whose queue payload got lost) read one truth.
+                        bool isFfa = capturedRoom != null && capturedRoom.StartsWith("ffa_");
+                        int ffaCount = Plugin.PendingFfaCount > 0 ? Plugin.PendingFfaCount : 10;
                         var roomProps = new ExitGames.Client.Photon.Hashtable
                         {
                             { "C2", capturedRoom }
@@ -764,9 +802,10 @@ namespace CompetitiveRounds
                         // got it in the lock payload, so whichever creates the
                         // room stamps it and late joiners read one truth.
                         if (is1v2 && ApiClient.OvtSoloExtraPick) roomProps["cr_ovt_xp"] = true;
+                        if (isFfa) roomProps["cr_ffa_n"] = ffaCount;
                         var roomOptions = new Photon.Realtime.RoomOptions
                         {
-                            MaxPlayers = (byte)(is2v2 ? 4 : (is1v2 ? 3 : 2)),
+                            MaxPlayers = (byte)(is2v2 ? 4 : (is1v2 ? 3 : (isFfa ? ffaCount : 2))),
                             IsOpen = true,
                             IsVisible = true,
                             CustomRoomProperties = roomProps,
@@ -822,6 +861,8 @@ namespace CompetitiveRounds
             // after the series (the lock lineup stays cached for the HUD).
             if (roomName != null && roomName.StartsWith("ovt_"))
                 ApiClient.OvtQueueStatus = "";
+            if (roomName != null && roomName.StartsWith("ffa_"))
+                ApiClient.FfaQueueStatus = "";
 
             // 2v2 / 1v2: bypass ROUNDS' character-select press-any-key gate.
             // Vanilla PlayerAssigner.Update polls input devices and only fires
@@ -832,7 +873,7 @@ namespace CompetitiveRounds
             // menu while the room sits empty from their perspective. Auto-fire
             // CreatePlayer ourselves (which routes through the CreatePlayer
             // override and uses the server-issued slot).
-            if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0)
+            if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0 || Plugin.PendingFfaSlot >= 0)
                 StartCoroutine(Auto2v2SpawnCoroutine());
         }
 
@@ -845,7 +886,7 @@ namespace CompetitiveRounds
             int tickLogCount = 0;
             while (Time.realtimeSinceStartup < deadline)
             {
-                if (Plugin.Pending2v2Slot < 0 && Plugin.PendingOvtSlot < 0)
+                if (Plugin.Pending2v2Slot < 0 && Plugin.PendingOvtSlot < 0 && Plugin.PendingFfaSlot < 0)
                 {
                     Plugin.Log.LogInfo("[2v2] Auto-spawn aborted — pending slot cleared mid-wait");
                     yield break;
@@ -990,6 +1031,14 @@ namespace CompetitiveRounds
             if (ApiClient.IsOvtQueuePolling)
             {
                 try { ApiClient.UpdateOvtQueuePoll(false); }
+                catch { }
+            }
+
+            // Poll FFA queue if searching — same always-on rationale as 1v2
+            // (ready_join must land with the menu closed).
+            if (ApiClient.IsFfaQueuePolling)
+            {
+                try { ApiClient.UpdateFfaQueuePoll(false); }
                 catch { }
             }
 
@@ -1253,13 +1302,17 @@ namespace CompetitiveRounds
                 // path — the CharacterSelectionMenu slot-overflow guard below
                 // already tolerates the extra players generically.
                 bool isOvt = rn.StartsWith("ovt_");
+                // Trust-gated (review find 10): forcing playersNeededToStart to
+                // the FFA lobby size in an untrusted room named "ffa_..." would
+                // wedge a custom lobby that can never reach that count.
+                bool isFfa = rn.StartsWith("ffa_") && FfaMode.EngineActive();
                 bool isFf = props != null && props.ContainsKey("cr_ff");
-                if (!isOvt && !isFf) return;
-                int need = isOvt ? 3 : 4;
+                if (!isOvt && !isFf && !isFfa) return;
+                int need = isFfa ? Diag2v2.PlayersNeeded() : (isOvt ? 3 : 4);
                 __instance.playersNeededToStart = need;
                 if (PlayerAssigner.instance != null)
                     PlayerAssigner.instance.maxPlayers = need;
-                Plugin.Log.LogInfo($"[MODE] Forced playersNeededToStart={need} ({(isOvt ? "ovt_ 1v2" : "cr_ff 2v2")} room)");
+                Plugin.Log.LogInfo($"[MODE] Forced playersNeededToStart={need} ({(isFfa ? "ffa_ FFA" : isOvt ? "ovt_ 1v2" : "cr_ff 2v2")} room)");
             }
             catch (Exception ex) { Plugin.Log.LogError($"[2v2] OnEnable patch error: {ex.Message}"); }
         }
@@ -1390,8 +1443,10 @@ namespace CompetitiveRounds
             // the OTHER mode can never mis-map teams.
             var roomProps = PhotonNetwork.CurrentRoom.CustomProperties;
             bool isOvtRoom = (PhotonNetwork.CurrentRoom.Name ?? "").StartsWith("ovt_");
+            bool isFfaRoom = (PhotonNetwork.CurrentRoom.Name ?? "").StartsWith("ffa_");
             bool isFfRoom = roomProps != null && roomProps.ContainsKey("cr_ff");
             int slot = isOvtRoom ? Plugin.PendingOvtSlot
+                     : isFfaRoom ? Plugin.PendingFfaSlot
                      : isFfRoom ? Plugin.Pending2v2Slot
                      : -1;
             if (slot < 0) return true;                              // not a team-mode spawn
@@ -1496,7 +1551,7 @@ namespace CompetitiveRounds
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] PlayerSkin re-bake failed: {ex.Message}"); }
 
-                Plugin.Log.LogInfo($"[{(isOvtRoom ? "1v2" : "2v2")}] CreatePlayer override: slot={slot} team={teamID} pid={playerID}");
+                Plugin.Log.LogInfo($"[{(isFfaRoom ? "FFA" : isOvtRoom ? "1v2" : "2v2")}] CreatePlayer override: slot={slot} team={teamID} pid={playerID}");
                 return false;  // skip vanilla
             }
             catch (Exception ex)
@@ -1619,14 +1674,17 @@ namespace CompetitiveRounds
         // team mapping) go through PlayersNeeded()/SlotToTeam() below.
         public static bool IsActive()
         {
-            if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0) return true;
+            if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0 || Plugin.PendingFfaSlot >= 0) return true;
             try
             {
                 if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null)
                 {
                     var p = PhotonNetwork.CurrentRoom.CustomProperties;
                     if (p != null && p.ContainsKey("cr_ff")) return true;
-                    if ((PhotonNetwork.CurrentRoom.Name ?? "").StartsWith("ovt_")) return true;
+                    string rn = PhotonNetwork.CurrentRoom.Name ?? "";
+                    if (rn.StartsWith("ovt_")) return true;
+                    // FFA needs TRUST, not just the prefix (review find 10).
+                    if (rn.StartsWith("ffa_") && FfaMode.EngineActive()) return true;
                 }
             }
             catch { }
@@ -1648,27 +1706,65 @@ namespace CompetitiveRounds
             return Plugin.PendingOvtSlot >= 0;
         }
 
+        /// <summary>True in the FFA context. In a room this requires TRUST,
+        /// not just the name (review find 10): a hand-made room called
+        /// "ffa_test" must not activate the multi-player join/spawn/skin
+        /// machinery or ban the normal report routes while the engine itself
+        /// (FfaMode.EngineActive) correctly stays off. Trust = the same proof
+        /// the engine uses: a live queue lobby id or the creator-stamped
+        /// cr_ffa_n room prop. Outside a room the pending slot covers the
+        /// bounded pre-join window.</summary>
+        public static bool IsFfa()
+        {
+            try
+            {
+                if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null)
+                    return FfaMode.EngineActive();
+            }
+            catch { }
+            return Plugin.PendingFfaSlot >= 0;
+        }
+
         /// <summary>Server-issued slot → ROUNDS TeamID. 2v2: slots 0,1 = team 0,
         /// slots 2,3 = team 1. 1v2: slot 0 = solo = team 0, slots 1,2 = duo =
-        /// team 1 (vanilla two-team scoring carries straight through).</summary>
+        /// team 1 (vanilla two-team scoring carries straight through). FFA:
+        /// every player is their own team (TeamID = slot).</summary>
         public static int SlotToTeam(int slot)
         {
+            if (IsFfa()) return slot;
             return IsOvt() ? (slot == 0 ? 0 : 1) : slot / 2;
         }
 
         /// <summary>Players required for the mode's game to start: 3 in an ovt_
-        /// room, 4 in a cr_ff room.</summary>
+        /// room, 4 in a cr_ff room, the locked lobby size (3-10) in an ffa_
+        /// room (from the cr_ffa_n room prop stamped by the creator, falling
+        /// back to the queue payload count).</summary>
         public static int PlayersNeeded()
         {
+            if (IsFfa())
+            {
+                try
+                {
+                    var p = PhotonNetwork.InRoom ? PhotonNetwork.CurrentRoom?.CustomProperties : null;
+                    if (p != null && p.ContainsKey("cr_ffa_n"))
+                    {
+                        int n = Convert.ToInt32(p["cr_ffa_n"]);
+                        if (n >= 2 && n <= 10) return n;
+                    }
+                }
+                catch { }
+                return Plugin.PendingFfaCount > 0 ? Plugin.PendingFfaCount : 10;
+            }
             return IsOvt() ? 3 : 4;
         }
 
         /// <summary>The local pending slot regardless of mode (-1 when neither
-        /// queue has issued one). 1v2 wins when both are somehow set — the ovt
-        /// slot is always the more recent lock (2v2 slots persist through
+        /// queue has issued one). 1v2/FFA win when multiple are somehow set —
+        /// theirs is always the more recent lock (2v2 slots persist through
         /// series end only until cleared).</summary>
         public static int PendingSlot()
         {
+            if (Plugin.PendingFfaSlot >= 0) return Plugin.PendingFfaSlot;
             if (Plugin.PendingOvtSlot >= 0) return Plugin.PendingOvtSlot;
             return Plugin.Pending2v2Slot;
         }
@@ -1768,8 +1864,9 @@ namespace CompetitiveRounds
             // checks PASS when the trio overlaps the old roster — applying
             // real 2v2 Glicko/gold from a 1v2 game's points. 1v2 has no DC
             // path yet by design (unscored beta; the match report handles the
-            // recorded outcome).
-            if (Diag2v2.IsOvt()) return;
+            // recorded outcome). FFA likewise: leavers are recorded in the
+            // normal FFA report (left_early), never via the 2v2 DC pipeline.
+            if (Diag2v2.IsOvt() || Diag2v2.IsFfa()) return;
             try
             {
                 if (p == null) return;
@@ -1879,6 +1976,8 @@ namespace CompetitiveRounds
                     Plugin.ClearPending2v2Slot();
                 if (Plugin.PendingOvtSlot >= 0 && !rn.StartsWith("ovt_"))
                     Plugin.ClearPendingOvtSlot();
+                if (Plugin.PendingFfaSlot >= 0 && !rn.StartsWith("ffa_"))
+                    Plugin.ClearPendingFfaSlot();
             }
             catch { }
             // July 22 item 2: fresh room, stale leaver banner (and our own
@@ -2092,6 +2191,10 @@ namespace CompetitiveRounds
             float deadline = Time.realtimeSinceStartup + 15f;
             while (Time.realtimeSinceStartup < deadline)
             {
+                // FFA doesn't extend bars — up to 10 stacked bars is unusable.
+                // FfaMode's CardBarHandler.AddCard guard renders only the local
+                // player's own bar; the hold-Tab board is the everyone view.
+                if (Diag2v2.IsFfa()) yield break;
                 // 1v2 needs this too: pid 2 (duo_b) overflows the vanilla
                 // 2-slot cardBars array exactly like 2v2's pids 2/3. Extending
                 // to 4 covers both modes (the 4th bar just stays unused in ovt).
@@ -2903,6 +3006,26 @@ namespace CompetitiveRounds
                 if (gm == null || PlayerManager.instance == null || PlayerManager.instance.players == null)
                     return false;
 
+                GameObject ffaCrown = __instance.transform.childCount > 0
+                    ? __instance.transform.GetChild(0).gameObject : null;
+                if (Diag2v2.IsFfa())
+                {
+                    // FFA: single crown on the current overall leader (rounds,
+                    // then points, from FfaMode's own score table — the vanilla
+                    // p1/p2 fields never move in FFA). Ties = no crown.
+                    if (ffaCrown == null) return false;
+                    var leader = FfaMode.CurrentLeader();
+                    if (mateCrown != null && mateCrown.activeSelf) mateCrown.SetActive(false);
+                    if (leader == null || !leader.gameObject.activeInHierarchy)
+                    {
+                        if (ffaCrown.activeSelf) ffaCrown.SetActive(false);
+                        return false;
+                    }
+                    if (!ffaCrown.activeSelf) ffaCrown.SetActive(true);
+                    __instance.transform.position = leader.data.GetCrownPos();
+                    return false;
+                }
+
                 // Leading team: rounds first, points as tiebreak (vanilla PointOver order).
                 int lead = -1;
                 if (gm.p1Rounds != gm.p2Rounds) lead = gm.p1Rounds > gm.p2Rounds ? 0 : 1;
@@ -2990,7 +3113,9 @@ namespace CompetitiveRounds
                 var props = PhotonNetwork.CurrentRoom.CustomProperties;
                 if (props != null && props.ContainsKey("cr_ff")) return true;
                 string n = PhotonNetwork.CurrentRoom.Name ?? "";
-                return n.StartsWith("ranked_") || n.StartsWith("team_") || n.StartsWith("sct-") || n.StartsWith("ovt_");
+                return n.StartsWith("ranked_") || n.StartsWith("team_") || n.StartsWith("sct-")
+                    || n.StartsWith("ovt_")
+                    || (n.StartsWith("ffa_") && FfaMode.EngineActive());
             }
             catch { return false; }
         }
@@ -3059,6 +3184,24 @@ namespace CompetitiveRounds
                 if (!Diag2v2.IsActive()) return;
                 Array.Sort(__result, (a, b) =>
                     (a == null ? 0f : a.localStartPos.x).CompareTo(b == null ? 0f : b.localStartPos.x));
+                // FFA: maps ship ~2-4 spawn points; PlayerManager.MovePlayers
+                // indexes spawnPoints[i] per player, so an N-player lobby on a
+                // smaller map would IndexOutOfRange mid-transition. Pad by
+                // REUSING existing points cyclically — exact duplicates are
+                // guaranteed-valid positions (physics separates the overlap in
+                // the first frames; a synthesized offset could land inside a
+                // wall — Codex design find 22).
+                if (Diag2v2.IsFfa())
+                {
+                    int need = Diag2v2.PlayersNeeded();
+                    if (__result.Length < need)
+                    {
+                        var padded = new SpawnPoint[need];
+                        for (int i = 0; i < need; i++)
+                            padded[i] = __result[i % __result.Length];
+                        __result = padded;
+                    }
+                }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] SpawnPoint sort failed: {ex.Message}"); }
         }
@@ -3106,6 +3249,15 @@ namespace CompetitiveRounds
             try
             {
                 if (!Diag2v2.IsActive()) return;
+                // FFA: PlayerIDs run 0..9 but the vanilla skins array has 4
+                // entries — ANY unclamped call (ours or vanilla's own
+                // GetColorFromTeam) would IndexOutOfRange. Colors repeat
+                // (slot % 4); nametags keep duplicates distinguishable.
+                if (Diag2v2.IsFfa())
+                {
+                    if (team > 3) team = ((team % 4) + 4) % 4;
+                    return;
+                }
                 if (team < 0 || team > 3) return;
 
                 // Walk a few stack frames up to determine if this call is for a

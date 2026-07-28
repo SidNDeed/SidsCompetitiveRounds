@@ -902,6 +902,7 @@ class Ovt1v2LeaderboardEntry(BaseModel):
     level: int = 0
     title: str | None = None
     title_color: str | None = None
+    last_played: str | None = None
 
 
 class Ovt1v2LeaderboardResponse(BaseModel):
@@ -949,3 +950,76 @@ class TeamMatchHistoryEntry(BaseModel):
     series_score: str | None = None
     series_rating_change: float | None = None
     fps_by_player: dict[str, int] = Field(default_factory=dict)  # keyed by steam_id, 0 = missing
+
+
+# ── FFA (free-for-all, 3-10 players) ─────────────────────────────────
+class FfaPlayerEntry(BaseModel):
+    """One participant in an FFA match report. Rounds/points are that player's
+    own tallies from the mod's FFA score engine; cards/telemetry mirror the
+    2v2 per-slot surface so stat parity holds from day one."""
+    steam_id: str = Field(..., max_length=20)
+    display_name: str = Field("Player", max_length=64)
+    slot: int = Field(0, ge=0, le=15)
+    rounds_won: int = Field(0, ge=0, le=20)
+    points_total: int = Field(0, ge=0, le=200)
+    left_early: bool = False
+    fps: int | None = Field(None, ge=0, le=10000)
+    cards: list[CardPick] = Field(default_factory=list)
+    telemetry: TeamPlayerTelemetry | None = None
+
+
+class FfaMatchReport(BaseModel):
+    """
+    Submitted by the lowest-Steam-ID participant after an FFA game ends.
+    HMAC canonical — NEW variable-length format, domain-separated by the "ffa"
+    literal so it can never collide with the frozen 7/10/11-field formats:
+      ffa:{lobby_id}:{room}:{reporter}:{is_ranked}:{winner_steam}:{n}
+        then, per player sorted by numeric steam id: :{steam}:{rounds}:{points}
+    """
+    lobby_id: str
+    players: list[FfaPlayerEntry] = Field(..., min_length=2, max_length=10)
+    winner_steam_id: str = Field(..., max_length=20)
+    photon_room_id: str | None = Field(None, max_length=64)
+    game_version: str | None = Field(None, max_length=32)
+    region: str | None = Field(None, max_length=8)
+    match_duration: int | None = Field(None, ge=0)
+    started_at: datetime | None = None
+    hmac_signature: str | None = Field(None, max_length=160)
+    is_ranked: bool = True
+    reported_by_steam_id: str = Field(..., max_length=20)
+
+
+class FfaMatchResponse(BaseModel):
+    match_id: UUID
+    lobby_id: UUID
+    placement: int              # the REPORTER's own placement (1 = won)
+    player_count: int
+    rating_changes: dict[str, float] = Field(default_factory=dict)  # steam_id -> delta
+    xp_gained: int = 0          # reporter's own
+    gold_gained: int = 0        # reporter's own
+    message: str = "FFA match recorded"
+
+
+class FfaLeaderboardEntry(BaseModel):
+    rank: int
+    steam_id: str
+    display_name: str
+    rating: int
+    rd: int
+    games_played: int
+    wins: int                   # 1st places
+    top3: int
+    avg_placement: float        # over recorded games
+    win_rate: float             # fraction 0-1 (matches 1v1/2v2 convention)
+    level: int = 0
+    title: str | None = None
+    title_color: str | None = None
+    ffa_gold_earned: int = 0
+    ffa_xp_earned: int = 0
+
+
+class FfaLeaderboardResponse(BaseModel):
+    entries: list[FfaLeaderboardEntry]
+    total_players: int
+    last_updated: datetime
+    is_ranked: bool = True

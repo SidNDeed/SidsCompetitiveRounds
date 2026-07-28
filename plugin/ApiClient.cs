@@ -6993,9 +6993,17 @@ namespace CompetitiveRounds
             // July 22 item 3: W/L split by role (as solo vs as duo half).
             public int solo_wins, solo_losses, duo_wins, duo_losses;
             public float win_rate;
+            // Split-board pass: server-resolved title + newest ovt_match time
+            // (iso string, "" when the server omits it / sends null).
+            public string title, title_color, last_played;
         }
         public static List<OvtLeaderboardEntry> CachedOvtLeaderboard = null;
         public static int CachedOvtLeaderboardTotal = 0;
+        // role=solo / role=duo boards — the server re-scopes games/wins/losses/
+        // win_rate to the role; the combined cache above stays untouched so
+        // legacy consumers keep working.
+        public static List<OvtLeaderboardEntry> CachedOvtLeaderboardSolo = null;
+        public static List<OvtLeaderboardEntry> CachedOvtLeaderboardDuo = null;
 
         // Live queue state (drives the 1v2 tab + auto room-join).
         public static string OvtQueueStatus = "";        // ""/searching/ready_join/leaving
@@ -7333,41 +7341,60 @@ namespace CompetitiveRounds
             }, maxRetries: 2, retryDelay: 2f));
         }
 
-        public static void FetchOvtLeaderboard(int limit = 200)
+        /// <summary>GET /ovt/leaderboard. role: combined|solo|duo — combined fills
+        /// the legacy CachedOvtLeaderboard, solo/duo fill the split activity-board
+        /// caches the 1v2 tab renders. The server re-scopes games/wins/losses/
+        /// win_rate to the role (note: 1v2 win_rate is 0-100, unlike FFA's 0-1).</summary>
+        public static void FetchOvtLeaderboard(int limit = 200, string role = "combined")
         {
-            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/leaderboard?limit={limit}", (ok, resp) =>
+            string roleQ = (role == "solo" || role == "duo") ? role : "combined";
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/leaderboard?limit={limit}&role={roleQ}", (ok, resp) =>
             {
                 if (!ok) return;
                 try
                 {
                     var entries = new List<OvtLeaderboardEntry>();
-                    var parts = resp.Split(new[] { "\"rank\":" }, StringSplitOptions.None);
-                    for (int i = 1; i < parts.Length; i++)
+                    // String-aware slicing (learning #156) — the old "rank": split
+                    // parser would break on a display name containing that literal.
+                    int eStart = resp.IndexOf("\"entries\"");
+                    int arrStart = eStart >= 0 ? resp.IndexOf('[', eStart) : -1;
+                    int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
+                    if (arrStart >= 0 && arrEnd > arrStart)
                     {
-                        var chunk = parts[i];
-                        int rankVal = 0; try { int comma = chunk.IndexOf(','); rankVal = int.Parse(chunk.Substring(0, comma)); } catch { }
-                        entries.Add(new OvtLeaderboardEntry
+                        foreach (string chunk in SliceTopLevelObjects(
+                            resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
                         {
-                            rank = rankVal,
-                            steam_id = ExtractJsonString(chunk, "steam_id"),
-                            display_name = ExtractJsonString(chunk, "display_name"),
-                            games_played = ExtractJsonInt(chunk, "games_played"),
-                            wins = ExtractJsonInt(chunk, "wins"),
-                            losses = ExtractJsonInt(chunk, "losses"),
-                            win_rate = ExtractJsonFloat(chunk, "win_rate"),
-                            solo_games = ExtractJsonInt(chunk, "solo_games"),
-                            duo_games = ExtractJsonInt(chunk, "duo_games"),
-                            solo_wins = ExtractJsonInt(chunk, "solo_wins"),
-                            solo_losses = ExtractJsonInt(chunk, "solo_losses"),
-                            duo_wins = ExtractJsonInt(chunk, "duo_wins"),
-                            duo_losses = ExtractJsonInt(chunk, "duo_losses"),
-                            level = ExtractJsonInt(chunk, "level"),
-                        });
+                            entries.Add(new OvtLeaderboardEntry
+                            {
+                                rank = ExtractJsonInt(chunk, "rank"),
+                                steam_id = ExtractJsonString(chunk, "steam_id"),
+                                display_name = ExtractJsonString(chunk, "display_name"),
+                                games_played = ExtractJsonInt(chunk, "games_played"),
+                                wins = ExtractJsonInt(chunk, "wins"),
+                                losses = ExtractJsonInt(chunk, "losses"),
+                                win_rate = ExtractJsonFloat(chunk, "win_rate"),
+                                solo_games = ExtractJsonInt(chunk, "solo_games"),
+                                duo_games = ExtractJsonInt(chunk, "duo_games"),
+                                solo_wins = ExtractJsonInt(chunk, "solo_wins"),
+                                solo_losses = ExtractJsonInt(chunk, "solo_losses"),
+                                duo_wins = ExtractJsonInt(chunk, "duo_wins"),
+                                duo_losses = ExtractJsonInt(chunk, "duo_losses"),
+                                level = ExtractJsonInt(chunk, "level"),
+                                title = ExtractJsonString(chunk, "title"),
+                                title_color = ExtractJsonString(chunk, "title_color"),
+                                last_played = ExtractJsonString(chunk, "last_played"),
+                            });
+                        }
                     }
-                    CachedOvtLeaderboard = entries;
-                    CachedOvtLeaderboardTotal = ExtractJsonInt(resp, "total_players");
+                    if (roleQ == "solo") CachedOvtLeaderboardSolo = entries;
+                    else if (roleQ == "duo") CachedOvtLeaderboardDuo = entries;
+                    else
+                    {
+                        CachedOvtLeaderboard = entries;
+                        CachedOvtLeaderboardTotal = ExtractJsonInt(resp, "total_players");
+                    }
                     NativeUI.MarkDirty();
-                    Plugin.Log.LogInfo($"[1v2-LB] loaded {entries.Count} players");
+                    Plugin.Log.LogInfo($"[1v2-LB] loaded {entries.Count} players (role={roleQ})");
                 }
                 catch (Exception ex) { Plugin.Log.LogError($"[1v2-LB] parse: {ex.Message}"); }
             }));
@@ -7426,6 +7453,705 @@ namespace CompetitiveRounds
                 {
                     Plugin.Log.LogWarning($"[1v2] report failed: {resp}");
                     EnqueueFailedReport($"{baseUrl}/api/v1/ovt/matches", json);  // bug #65 outbox
+                }
+            }, maxRetries: 3, retryDelay: 2f));
+        }
+
+        // ── 1v2 recent games feed (GET /ovt/recent) ──────────────────────────
+        // Field names parse the codex-task-1v2-server.md contract byte-for-byte
+        // (learning #152). Every array/object slice over regions carrying user
+        // display names is string-aware (learning #156).
+
+        public class OvtRecentMatch
+        {
+            public string match_id, ended_at;
+            public int winner_side, solo_rounds, duo_rounds, solo_points, duo_points, duration_seconds;
+            public Dictionary<string, int> fps_by_steam = new Dictionary<string, int>();
+            public Dictionary<string, List<string>> cards_by_steam = new Dictionary<string, List<string>>();
+        }
+        public class OvtRecentSeries
+        {
+            public string series_id, status, created_at, completed_at;
+            public int winner_side, solo_wins, duo_wins;
+            public bool solo_extra_pick;
+            public string solo_steam, solo_name, duo_a_steam, duo_a_name, duo_b_steam, duo_b_name;
+            public Dictionary<string, int> gold_by_steam = new Dictionary<string, int>();
+            public Dictionary<string, int> xp_by_steam = new Dictionary<string, int>();
+            public List<OvtRecentMatch> matches = new List<OvtRecentMatch>();
+        }
+        public static List<OvtRecentSeries> CachedOvtRecent = null;
+        public static int CachedOvtRecentTotal = 0;
+        public static int CachedOvtRecentPages = 0;
+
+        /// <summary>Parse a {"7656...": 123, ...} object. The object is LOCATED
+        /// with the string-aware brace matcher (sibling fields carry user names);
+        /// INSIDE it the keys are numeric steam ids and the values plain ints,
+        /// so simple quote/number scans are safe. Search includes the closing
+        /// quote + colon so an escaped key literal inside a name can't match.</summary>
+        private static Dictionary<string, int> ParseSteamIntMap(string json, string key)
+        {
+            var d = new Dictionary<string, int>();
+            int k = json.IndexOf($"\"{key}\":");
+            if (k < 0) return d;
+            int open = json.IndexOf('{', k);
+            if (open < 0) return d;
+            int close = FindMatchingBraceStringAware(json, open);
+            if (close < 0) return d;
+            int i = open + 1;
+            while (i < close)
+            {
+                int q1 = json.IndexOf('"', i); if (q1 < 0 || q1 >= close) break;
+                int q2 = json.IndexOf('"', q1 + 1); if (q2 < 0 || q2 >= close) break;
+                string sid = json.Substring(q1 + 1, q2 - q1 - 1);
+                int colon = json.IndexOf(':', q2); if (colon < 0 || colon >= close) break;
+                int e = colon + 1;
+                while (e < close && json[e] == ' ') e++;
+                int st = e;
+                while (e < close && (char.IsDigit(json[e]) || json[e] == '-')) e++;
+                int val = 0;
+                if (e > st) int.TryParse(json.Substring(st, e - st), out val);
+                if (!string.IsNullOrEmpty(sid)) d[sid] = val;
+                i = e + 1;
+            }
+            return d;
+        }
+
+        /// <summary>Read the quoted strings of a JSON string array spanning
+        /// s[open..close] ('[' and ']'). Values are card names — treat as
+        /// arbitrary text: escape-aware, never comma-split.</summary>
+        private static List<string> ParseJsonStringArray(string s, int open, int close)
+        {
+            var list = new List<string>();
+            var sb = new StringBuilder();
+            bool inStr = false;
+            for (int i = open + 1; i < close; i++)
+            {
+                char c = s[i];
+                if (!inStr) { if (c == '"') { inStr = true; sb.Length = 0; } continue; }
+                if (c == '\\' && i + 1 < close)
+                {
+                    i++;
+                    char nx = s[i];
+                    sb.Append(nx == 'n' ? '\n' : nx == 't' ? '\t' : nx == 'r' ? '\r' : nx);
+                    continue;
+                }
+                if (c == '"') { inStr = false; list.Add(sb.ToString()); continue; }
+                sb.Append(c);
+            }
+            return list;
+        }
+
+        /// <summary>Parse {"7656...": ["Card A", ...], ...}. Keys numeric steam
+        /// ids; VALUES are card-name string arrays — sliced string-aware.</summary>
+        private static Dictionary<string, List<string>> ParseSteamCardsMap(string json, string key)
+        {
+            var d = new Dictionary<string, List<string>>();
+            int k = json.IndexOf($"\"{key}\":");
+            if (k < 0) return d;
+            int open = json.IndexOf('{', k);
+            if (open < 0) return d;
+            int close = FindMatchingBraceStringAware(json, open);
+            if (close < 0) return d;
+            int i = open + 1;
+            while (i < close)
+            {
+                int q1 = json.IndexOf('"', i); if (q1 < 0 || q1 >= close) break;
+                int q2 = json.IndexOf('"', q1 + 1); if (q2 < 0 || q2 >= close) break;
+                string sid = json.Substring(q1 + 1, q2 - q1 - 1);
+                int arrOpen = json.IndexOf('[', q2); if (arrOpen < 0 || arrOpen >= close) break;
+                int arrClose = FindMatchingBracketStringAware(json, arrOpen);
+                if (arrClose < 0 || arrClose > close) break;
+                if (!string.IsNullOrEmpty(sid)) d[sid] = ParseJsonStringArray(json, arrOpen, arrClose);
+                i = arrClose + 1;
+            }
+            return d;
+        }
+
+        /// <summary>GET /ovt/recent — paged recent 1v2 series with nested matches
+        /// (the tab's "Recent 1v2 Games" panel). Anyone can browse.</summary>
+        public static void FetchOvtRecent(int page = 0, int pageSize = 5)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/recent?page={page}&page_size={pageSize}", (ok, resp) =>
+            {
+                if (!ok) return;
+                try
+                {
+                    var seriesList = new List<OvtRecentSeries>();
+                    int sStart = resp.IndexOf("\"series\"");
+                    int arrStart = sStart >= 0 ? resp.IndexOf('[', sStart) : -1;
+                    int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
+                    if (arrStart >= 0 && arrEnd > arrStart)
+                    {
+                        foreach (string sObj in SliceTopLevelObjects(
+                            resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                        {
+                            // Series-level scalars are read from the text BEFORE the
+                            // matches array — winner_side exists at BOTH levels and
+                            // the contract places matches last, so this guarantees
+                            // the series value can't be shadowed by game 1's.
+                            int mKey = sObj.IndexOf("\"matches\":");
+                            string head = mKey >= 0 ? sObj.Substring(0, mKey) : sObj;
+                            var s = new OvtRecentSeries
+                            {
+                                series_id = ExtractJsonString(head, "series_id"),
+                                status = ExtractJsonString(head, "status"),
+                                winner_side = ExtractJsonInt(head, "winner_side"),
+                                created_at = ExtractJsonString(head, "created_at"),
+                                completed_at = ExtractJsonString(head, "completed_at"),
+                                solo_wins = ExtractJsonInt(head, "solo_wins"),
+                                duo_wins = ExtractJsonInt(head, "duo_wins"),
+                                solo_extra_pick = ExtractJsonBool(head, "solo_extra_pick"),
+                                gold_by_steam = ParseSteamIntMap(head, "gold_by_steam"),
+                                xp_by_steam = ParseSteamIntMap(head, "xp_by_steam"),
+                            };
+                            // solo: {"steam_id":..,"display_name":..}
+                            int soloK = head.IndexOf("\"solo\":");
+                            int soloOpen = soloK >= 0 ? head.IndexOf('{', soloK) : -1;
+                            int soloClose = soloOpen >= 0 ? FindMatchingBraceStringAware(head, soloOpen) : -1;
+                            if (soloOpen >= 0 && soloClose > soloOpen)
+                            {
+                                string so = head.Substring(soloOpen, soloClose - soloOpen + 1);
+                                s.solo_steam = ExtractJsonString(so, "steam_id");
+                                s.solo_name = ExtractJsonString(so, "display_name");
+                            }
+                            // duo: [ {..}, {..} ]
+                            int duoK = head.IndexOf("\"duo\":");
+                            int duoOpen = duoK >= 0 ? head.IndexOf('[', duoK) : -1;
+                            int duoClose = duoOpen >= 0 ? FindMatchingBracketStringAware(head, duoOpen) : -1;
+                            if (duoOpen >= 0 && duoClose > duoOpen)
+                            {
+                                var duo = SliceTopLevelObjects(head.Substring(duoOpen + 1, duoClose - duoOpen - 1));
+                                if (duo.Count > 0)
+                                {
+                                    s.duo_a_steam = ExtractJsonString(duo[0], "steam_id");
+                                    s.duo_a_name = ExtractJsonString(duo[0], "display_name");
+                                }
+                                if (duo.Count > 1)
+                                {
+                                    s.duo_b_steam = ExtractJsonString(duo[1], "steam_id");
+                                    s.duo_b_name = ExtractJsonString(duo[1], "display_name");
+                                }
+                            }
+                            // matches: [ {..}, .. ]
+                            int mArr = mKey >= 0 ? sObj.IndexOf('[', mKey) : -1;
+                            int mEnd = mArr >= 0 ? FindMatchingBracketStringAware(sObj, mArr) : -1;
+                            if (mArr >= 0 && mEnd > mArr)
+                            {
+                                foreach (string mObj in SliceTopLevelObjects(
+                                    sObj.Substring(mArr + 1, mEnd - mArr - 1)))
+                                {
+                                    s.matches.Add(new OvtRecentMatch
+                                    {
+                                        match_id = ExtractJsonString(mObj, "match_id"),
+                                        ended_at = ExtractJsonString(mObj, "ended_at"),
+                                        winner_side = ExtractJsonInt(mObj, "winner_side"),
+                                        solo_rounds = ExtractJsonInt(mObj, "solo_rounds"),
+                                        duo_rounds = ExtractJsonInt(mObj, "duo_rounds"),
+                                        solo_points = ExtractJsonInt(mObj, "solo_points"),
+                                        duo_points = ExtractJsonInt(mObj, "duo_points"),
+                                        duration_seconds = ExtractJsonInt(mObj, "duration_seconds"),
+                                        fps_by_steam = ParseSteamIntMap(mObj, "fps_by_steam"),
+                                        cards_by_steam = ParseSteamCardsMap(mObj, "cards_by_steam"),
+                                    });
+                                }
+                            }
+                            seriesList.Add(s);
+                        }
+                    }
+                    CachedOvtRecent = seriesList;
+                    CachedOvtRecentTotal = ExtractJsonInt(resp, "total");
+                    CachedOvtRecentPages = ExtractJsonInt(resp, "total_pages");
+                    NativeUI.MarkDirty();
+                    Plugin.Log.LogInfo($"[1v2-RECENT] loaded {seriesList.Count} series (page {page})");
+                }
+                catch (Exception ex) { Plugin.Log.LogError($"[1v2-RECENT] parse: {ex.Message}"); }
+            }));
+        }
+
+        // ── FFA (free-for-all, 3-10 players — RANKED) ────────────────────────
+        // Mirrors the 1v2 queue client shape: consent-at-join, no ready step,
+        // always-on poll (ready_join must land with the F5 menu closed), the
+        // same leave/dissolve + not_in_queue auto-rejoin lifecycle.
+
+        public class FfaLeaderboardEntry
+        {
+            public int rank, rating, rd, games_played, wins, top3, level;
+            public string steam_id, display_name, title, title_color;
+            public float avg_placement, win_rate;
+            public int ffa_gold_earned, ffa_xp_earned;
+        }
+        public static List<FfaLeaderboardEntry> CachedFfaLeaderboard = null;
+        public static int CachedFfaLeaderboardTotal = 0;
+
+        public class FfaRecentPlayer
+        {
+            public string steam_id, display_name;
+            public int slot, placement, rounds_won, points_total, fps_avg, xp_gained, gold_gained;
+            public bool left_early;
+            public float rating_change;
+            public bool has_rating_change;
+            public List<string> cards = new List<string>();
+        }
+        public class FfaRecentMatch
+        {
+            public string match_id, photon_room_id, ended_at, winner_steam_id;
+            public int player_count, duration_seconds;
+            public List<FfaRecentPlayer> players = new List<FfaRecentPlayer>();
+        }
+        public static List<FfaRecentMatch> CachedFfaRecent = null;
+        public static int CachedFfaRecentTotal = 0;
+        public static int CachedFfaRecentPages = 0;
+
+        // Live queue state (drives the FFA tab + auto room-join).
+        public static string FfaQueueStatus = "";        // ""/searching/ready_join/leaving
+        public static int FfaQueueCount = 0;
+        public static int FfaGatherSecondsLeft = -1;     // -1 = below min players
+        public static string ActiveFfaLobbyId = null;
+        public static int FfaMySlot = -1;
+        public static int FfaLobbyPlayerCount = 0;       // locked lobby size (PlayersNeeded)
+        public static bool IsFfaQueuePolling = false;
+        public static List<TeamQueueMember> FfaLockedRoster = null;  // slot-ordered
+        private static float _ffaLastPollAt = -999f;
+
+        public class FfaQueueListEntry
+        {
+            public string steam_id, display_name, status, region;
+            public int rating, rating_1v1, slot, wait_seconds;
+        }
+        public static List<FfaQueueListEntry> CachedFfaQueueList = null;
+        private static float _ffaListLastAt = -999f;
+        private static float _ffaLastAutoRejoinAt = -999f;
+        private static float _ffaLeavingSince = -999f;
+        private static int ffaGen = 0;  // lifecycle generation — see queueGen
+
+        public static void FfaJoinQueue()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            if (FfaQueueStatus == "leaving")
+            {
+                if (Time.realtimeSinceStartup - _ffaLeavingSince < LEAVE_STUCK_TIMEOUT)
+                {
+                    CompetitiveUI.ShowNotification("Still leaving the FFA queue — try again in a moment.", new Color(1f, 0.6f, 0.2f));
+                    return;
+                }
+                FfaQueueStatus = "";
+            }
+            // No ready-up step (consent-at-join, #127) — never queue from
+            // inside a live online room or a later lock would yank the player
+            // out mid-match (#150). OfflineMode lingers InRoom at menu (#122).
+            bool inOnlineRoom = false;
+            try { inOnlineRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+            if (inOnlineRoom)
+            {
+                CompetitiveUI.ShowNotification("Finish or leave your current game before joining the FFA queue.", new Color(1f, 0.7f, 0.3f), 5f);
+                return;
+            }
+            string name = Escape(MatchTracker.LocalDisplayName ?? "Player");
+            string region = "";
+            try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            string body = $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"}}";
+            int gen = ++ffaGen;
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/queue/join", body, (ok, resp) =>
+            {
+                if (gen != ffaGen) { Plugin.Log.LogInfo("[FFA] stale join ack ignored (lifecycle moved on)"); return; }
+                if (ok) { IsFfaQueuePolling = true; FfaQueueStatus = "searching"; UpdateFfaQueueList(force: true); NativeUI.MarkDirty(); }
+                else Plugin.Log.LogWarning($"[FFA] join failed: {resp}");
+            }));
+        }
+
+        public static void FfaLeaveQueue()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (FfaQueueStatus == "leaving") return;
+            IsFfaQueuePolling = false; FfaQueueCount = 0; FfaGatherSecondsLeft = -1;
+            FfaLockedRoster = null;
+            ActiveFfaLobbyId = null;
+            FfaMySlot = -1; FfaLobbyPlayerCount = 0;
+            Plugin.ClearPendingFfaSlot();
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") { FfaQueueStatus = ""; return; }
+            int gen = ++ffaGen;
+            FfaQueueStatus = "leaving";
+            _ffaLeavingSince = Time.realtimeSinceStartup;
+            NativeUI.MarkDirty();
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                $"{baseUrl}/api/v1/ffa/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}", "",
+                (ok, resp) =>
+                {
+                    if (gen != ffaGen) return;
+                    if (ok)
+                        Plugin.Log.LogInfo("[FFA] Left FFA queue");
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[FFA] Leave failed after retries: {resp} — server will prune the stale row");
+                        CompetitiveUI.ShowNotification("Couldn't confirm FFA queue leave — the server will clear you shortly.", new Color(1f, 0.6f, 0.2f), 5f);
+                    }
+                    if (FfaQueueStatus == "leaving") FfaQueueStatus = "";
+                    UpdateFfaQueueList(force: true);
+                    NativeUI.MarkDirty();
+                },
+                maxRetries: 3, retryDelay: 2f));
+        }
+
+        /// <summary>Throttled FFA queue poll — ticked from the plugin-level
+        /// always-on loop AND the FFA tab ticker (2s throttle shared). On
+        /// ready_join: records lobby/slot, publishes pre-join props, joins
+        /// the ffa_ room via SetPendingRoom.</summary>
+        public static void UpdateFfaQueuePoll(bool force)
+        {
+            if (!IsFfaQueuePolling) return;
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            if (!force && Time.unscaledTime - _ffaLastPollAt < 2f) return;
+            _ffaLastPollAt = Time.unscaledTime;
+            int gen = ffaGen;
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/queue/poll/{sid}", (ok, resp) =>
+            {
+                if (!ok || string.IsNullOrEmpty(resp)) return;
+                if (!IsFfaQueuePolling) return;
+                if (gen != ffaGen) return;
+                string status = ExtractJsonString(resp, "status") ?? "";
+                FfaQueueStatus = status;
+                FfaQueueCount = ExtractJsonInt(resp, "queue_count");
+                if (status == "searching")
+                {
+                    int gsl = -1;
+                    try { gsl = resp.Contains("\"gather_seconds_left\"") ? ExtractJsonInt(resp, "gather_seconds_left") : -1; } catch { }
+                    FfaGatherSecondsLeft = gsl;
+                }
+                if (status == "ready_join")
+                {
+                    // Consent guard: decline a lock that lands mid-game (#150).
+                    bool busyInRoom = false;
+                    try { busyInRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+                    if (busyInRoom)
+                    {
+                        Plugin.Log.LogWarning("[FFA] ready_join landed while in another room — declining (leaving FFA queue)");
+                        FfaLeaveQueue();
+                        CompetitiveUI.ShowNotification("FFA match found, but you're in a game — removed from the FFA queue.", new Color(1f, 0.7f, 0.3f), 7f);
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    IsFfaQueuePolling = false;
+                    ActiveFfaLobbyId = ExtractJsonString(resp, "lobby_id");
+                    FfaMySlot = ExtractJsonInt(resp, "slot");
+                    FfaLobbyPlayerCount = ExtractJsonInt(resp, "player_count");
+                    string room = ExtractJsonString(resp, "room_name");
+                    string region = ExtractJsonString(resp, "room_region");
+                    var roster = ExtractTeamMemberList(resp, "players");
+                    FfaLockedRoster = roster;
+
+                    if (!string.IsNullOrEmpty(room))
+                    {
+                        Plugin.SetPendingFfaSlot(FfaMySlot, FfaLobbyPlayerCount);
+                        try
+                        {
+                            var prejoin = new ExitGames.Client.Photon.Hashtable();
+                            prejoin["p_id"] = FfaMySlot;
+                            prejoin["t_id"] = FfaMySlot;   // FFA: every player own team
+                            prejoin["u_id"] = sid;
+                            if (PhotonNetwork.LocalPlayer != null)
+                                PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join SetCustomProperties: {ex.Message}"); }
+                        try { NametagStyler.PublishToPhoton(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join nametag publish: {ex.Message}"); }
+                        try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join pcolor publish: {ex.Message}"); }
+                        try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join trail publish: {ex.Message}"); }
+
+                        Plugin.SetPendingRoom(room, region);
+                        Plugin.Log.LogInfo($"[FFA] Lobby locked! Room: {room} (region: {region ?? "auto"}) lobby={ActiveFfaLobbyId} slot={FfaMySlot} players={FfaLobbyPlayerCount}");
+                        CompetitiveUI.ShowNotification($"{FfaLobbyPlayerCount}-player FFA found! Joining...", Color.green, 5f);
+                        try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
+                    }
+                }
+                else if (status == "not_in_queue" || status == "expired")
+                {
+                    IsFfaQueuePolling = false; FfaQueueStatus = "";
+                    FfaLockedRoster = null;
+                    Plugin.ClearPendingFfaSlot();
+                    // Ghost-prune recovery: auto-rejoin once per minute (#150).
+                    if (status == "not_in_queue"
+                        && Time.unscaledTime - _ffaLastAutoRejoinAt > 60f)
+                    {
+                        _ffaLastAutoRejoinAt = Time.unscaledTime;
+                        Plugin.Log.LogWarning("[FFA] queue row vanished server-side while searching — auto-rejoining");
+                        FfaJoinQueue();
+                    }
+                }
+                NativeUI.MarkDirty();
+            }));
+        }
+
+        public static void UpdateFfaQueueList(bool force = false)
+        {
+            if (!force && Time.unscaledTime - _ffaListLastAt < 2f) return;
+            _ffaListLastAt = Time.unscaledTime;
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/queue/list", (ok, resp) =>
+            {
+                if (!ok || string.IsNullOrEmpty(resp)) return;
+                try
+                {
+                    var list = new List<FfaQueueListEntry>();
+                    int qStart = resp.IndexOf("\"queuers\"");
+                    int arrStart = qStart >= 0 ? resp.IndexOf('[', qStart) : -1;
+                    int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
+                    if (arrStart >= 0 && arrEnd > arrStart)
+                    {
+                        foreach (string obj in SliceTopLevelObjects(
+                            resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                        {
+                            list.Add(new FfaQueueListEntry
+                            {
+                                steam_id = ExtractJsonString(obj, "steam_id"),
+                                display_name = ExtractJsonString(obj, "display_name"),
+                                rating = ExtractJsonInt(obj, "rating"),
+                                rating_1v1 = ExtractJsonInt(obj, "rating_1v1"),
+                                status = ExtractJsonString(obj, "status"),
+                                slot = ExtractJsonInt(obj, "slot"),
+                                wait_seconds = ExtractJsonInt(obj, "wait_seconds"),
+                                region = ExtractJsonString(obj, "region"),
+                            });
+                        }
+                    }
+                    CachedFfaQueueList = list;
+                    NativeUI.MarkDirty();
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[FFA-QUEUE-LIST] parse: {ex.Message}"); }
+            }));
+        }
+
+        public static void FetchFfaLeaderboard(int limit = 200, string sortBy = "rating")
+        {
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/leaderboard?limit={limit}&sort_by={UnityWebRequest.EscapeURL(sortBy)}", (ok, resp) =>
+            {
+                if (!ok) return;
+                try
+                {
+                    var entries = new List<FfaLeaderboardEntry>();
+                    int eStart = resp.IndexOf("\"entries\"");
+                    int arrStart = eStart >= 0 ? resp.IndexOf('[', eStart) : -1;
+                    int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
+                    if (arrStart >= 0 && arrEnd > arrStart)
+                    {
+                        foreach (string chunk in SliceTopLevelObjects(
+                            resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                        {
+                            entries.Add(new FfaLeaderboardEntry
+                            {
+                                rank = ExtractJsonInt(chunk, "rank"),
+                                steam_id = ExtractJsonString(chunk, "steam_id"),
+                                display_name = ExtractJsonString(chunk, "display_name"),
+                                rating = ExtractJsonInt(chunk, "rating"),
+                                rd = ExtractJsonInt(chunk, "rd"),
+                                games_played = ExtractJsonInt(chunk, "games_played"),
+                                wins = ExtractJsonInt(chunk, "wins"),
+                                top3 = ExtractJsonInt(chunk, "top3"),
+                                avg_placement = ExtractJsonFloat(chunk, "avg_placement"),
+                                win_rate = ExtractJsonFloat(chunk, "win_rate"),
+                                level = ExtractJsonInt(chunk, "level"),
+                                title = ExtractJsonString(chunk, "title"),
+                                title_color = ExtractJsonString(chunk, "title_color"),
+                                ffa_gold_earned = ExtractJsonInt(chunk, "ffa_gold_earned"),
+                                ffa_xp_earned = ExtractJsonInt(chunk, "ffa_xp_earned"),
+                            });
+                        }
+                    }
+                    CachedFfaLeaderboard = entries;
+                    CachedFfaLeaderboardTotal = ExtractJsonInt(resp, "total_players");
+                    NativeUI.MarkDirty();
+                    Plugin.Log.LogInfo($"[FFA-LB] loaded {entries.Count} players");
+                }
+                catch (Exception ex) { Plugin.Log.LogError($"[FFA-LB] parse: {ex.Message}"); }
+            }));
+        }
+
+        public static void FetchFfaRecent(int page = 0, int pageSize = 5)
+        {
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/recent?page={page}&page_size={pageSize}", (ok, resp) =>
+            {
+                if (!ok) return;
+                try
+                {
+                    var matches = new List<FfaRecentMatch>();
+                    int mStart = resp.IndexOf("\"matches\"");
+                    int arrStart = mStart >= 0 ? resp.IndexOf('[', mStart) : -1;
+                    int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
+                    if (arrStart >= 0 && arrEnd > arrStart)
+                    {
+                        foreach (string mObj in SliceTopLevelObjects(
+                            resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                        {
+                            var m = new FfaRecentMatch
+                            {
+                                match_id = ExtractJsonString(mObj, "match_id"),
+                                photon_room_id = ExtractJsonString(mObj, "photon_room_id"),
+                                ended_at = ExtractJsonString(mObj, "ended_at"),
+                                winner_steam_id = ExtractJsonString(mObj, "winner_steam_id"),
+                                player_count = ExtractJsonInt(mObj, "player_count"),
+                                duration_seconds = ExtractJsonInt(mObj, "duration_seconds"),
+                            };
+                            int pStart = mObj.IndexOf("\"players\"");
+                            int pArr = pStart >= 0 ? mObj.IndexOf('[', pStart) : -1;
+                            int pEnd = pArr >= 0 ? FindMatchingBracketStringAware(mObj, pArr) : -1;
+                            if (pArr >= 0 && pEnd > pArr)
+                            {
+                                foreach (string pObj in SliceTopLevelObjects(
+                                    mObj.Substring(pArr + 1, pEnd - pArr - 1)))
+                                {
+                                    var rp = new FfaRecentPlayer
+                                    {
+                                        steam_id = ExtractJsonString(pObj, "steam_id"),
+                                        display_name = ExtractJsonString(pObj, "display_name"),
+                                        slot = ExtractJsonInt(pObj, "slot"),
+                                        placement = ExtractJsonInt(pObj, "placement"),
+                                        rounds_won = ExtractJsonInt(pObj, "rounds_won"),
+                                        points_total = ExtractJsonInt(pObj, "points_total"),
+                                        fps_avg = ExtractJsonInt(pObj, "fps_avg"),
+                                        xp_gained = ExtractJsonInt(pObj, "xp_gained"),
+                                        gold_gained = ExtractJsonInt(pObj, "gold_gained"),
+                                        left_early = ExtractJsonBool(pObj, "left_early"),
+                                    };
+                                    try
+                                    {
+                                        // rating_change may be null (unranked rows)
+                                        if (pObj.Contains("\"rating_change\":") && !pObj.Contains("\"rating_change\":null"))
+                                        {
+                                            rp.rating_change = ExtractJsonFloat(pObj, "rating_change");
+                                            rp.has_rating_change = true;
+                                        }
+                                    }
+                                    catch { }
+                                    int cStart = pObj.IndexOf("\"cards\"");
+                                    int cArr = cStart >= 0 ? pObj.IndexOf('[', cStart) : -1;
+                                    int cEnd = cArr >= 0 ? FindMatchingBracketStringAware(pObj, cArr) : -1;
+                                    if (cArr >= 0 && cEnd > cArr)
+                                    {
+                                        // Review find 13: card names are NOT
+                                        // guaranteed bracket/comma-free — they come
+                                        // from the report payload (a modded card
+                                        // called "Push, Pull" would split into two)
+                                        // and aren't HMAC-covered. String-aware
+                                        // element parse, never a comma split.
+                                        rp.cards.AddRange(ParseJsonStringArray(pObj, cArr, cEnd));
+                                    }
+                                    m.players.Add(rp);
+                                }
+                            }
+                            matches.Add(m);
+                        }
+                    }
+                    CachedFfaRecent = matches;
+                    CachedFfaRecentTotal = ExtractJsonInt(resp, "total");
+                    CachedFfaRecentPages = ExtractJsonInt(resp, "total_pages");
+                    NativeUI.MarkDirty();
+                    Plugin.Log.LogInfo($"[FFA-RECENT] loaded {matches.Count} matches (page {page})");
+                }
+                catch (Exception ex) { Plugin.Log.LogError($"[FFA-RECENT] parse: {ex.Message}"); }
+            }));
+        }
+
+        /// <summary>One participant's payload for an FFA match report.</summary>
+        public class FfaReportPlayer
+        {
+            public string steamId, displayName;
+            public int slot, rounds, points, fps;
+            public bool leftEarly;
+            public List<MatchTracker.CardPickData> cards;
+            public TeamTelemetry telemetry;
+        }
+
+        /// <summary>Deterministic cross-language steam-id ordering used by the
+        /// FFA HMAC canonical + slot assignment: (length, ordinal) — equals
+        /// numeric order for canonical numeric ids; the server implements the
+        /// identical comparison (main.py _ffa_sort_key).</summary>
+        public static int FfaCompareSteamIds(string a, string b)
+        {
+            int la = (a ?? "").Length, lb = (b ?? "").Length;
+            if (la != lb) return la.CompareTo(lb);
+            return string.CompareOrdinal(a ?? "", b ?? "");
+        }
+
+        /// <summary>Report a finished FFA game to /ffa/matches. Variable-length
+        /// domain-separated HMAC canonical (see schemas.py FfaMatchReport).</summary>
+        public static void ReportFfaMatch(
+            string lobbyId, string room, string region, int durationSeconds,
+            List<FfaReportPlayer> players, string winnerSteam, string reporterSteam)
+        {
+            if (players == null || players.Count < 2)
+            {
+                Plugin.Log.LogWarning("[FFA-REPORT] not enough players to report");
+                return;
+            }
+            bool isRanked = true;
+            var sb = new StringBuilder();
+            sb.Append("{");
+            sb.Append($"\"lobby_id\":\"{Escape(lobbyId)}\",");
+            sb.Append("\"players\":[");
+            for (int i = 0; i < players.Count; i++)
+            {
+                var p = players[i];
+                if (i > 0) sb.Append(",");
+                sb.Append("{");
+                sb.Append($"\"steam_id\":\"{Escape(p.steamId)}\",\"display_name\":\"{Escape(p.displayName ?? "Player")}\",");
+                sb.Append($"\"slot\":{p.slot},\"rounds_won\":{p.rounds}," +
+                          $"\"points_total\":{p.points},\"left_early\":{(p.leftEarly ? "true" : "false")},");
+                sb.Append($"\"fps\":{Math.Max(0, p.fps)},");
+                sb.Append("\"cards\":[");
+                AppendCards(sb, p.cards ?? new List<MatchTracker.CardPickData>());
+                sb.Append("]");
+                if (p.telemetry != null)
+                {
+                    var t = p.telemetry;
+                    sb.Append(",\"telemetry\":{");
+                    sb.Append($"\"fps_timeline\":\"{Escape(ClampTimeline(t.fpsTimeline))}\",");
+                    sb.Append($"\"ping_timeline\":\"{Escape(ClampTimeline(t.pingTimeline))}\",");
+                    sb.Append($"\"ping_avg\":{Math.Max(0, Math.Min(30000, t.pingAvg))},");
+                    sb.Append($"\"hit_timeline\":\"{Escape(ClampTimeline(t.hitTimeline, 1024))}\",");
+                    sb.Append($"\"block_timeline\":\"{Escape(ClampTimeline(t.blockTimeline, 1024))}\",");
+                    sb.Append($"\"bullets_fired\":{Math.Max(0, t.bulletsFired)},");
+                    sb.Append($"\"bullets_hit\":{Math.Max(0, t.bulletsHit)},");
+                    sb.Append($"\"blocks_activated\":{Math.Max(0, t.blocksActivated)},");
+                    sb.Append($"\"blocks_successful\":{Math.Max(0, t.blocksSuccessful)},");
+                    sb.Append($"\"keys_pressed\":{Math.Max(0, t.keysPressed)},");
+                    sb.Append($"\"active_seconds\":{Math.Max(0f, t.activeSeconds).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
+                    sb.Append("}");
+                }
+                sb.Append("}");
+            }
+            sb.Append("],");
+            sb.Append($"\"winner_steam_id\":\"{Escape(winnerSteam)}\",");
+            sb.Append($"\"photon_room_id\":\"{Escape(room)}\",\"game_version\":\"v{Application.version}\",");
+            sb.Append($"\"region\":\"{Escape(region)}\",\"match_duration\":{durationSeconds},");
+            sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
+            sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteam)}\",");
+            // Canonical: ffa:{lobby}:{room}:{reporter}:{is_ranked}:{winner}:{n}
+            // then per player sorted by (len, ordinal): :{steam}:{rounds}:{points}
+            var sorted = new List<FfaReportPlayer>(players);
+            sorted.Sort((a, b) => FfaCompareSteamIds(a.steamId, b.steamId));
+            var canon = new StringBuilder();
+            canon.Append($"ffa:{lobbyId}:{room ?? ""}:{reporterSteam}:{(isRanked ? "true" : "false")}:{winnerSteam}:{players.Count}");
+            foreach (var p in sorted)
+                canon.Append($":{p.steamId}:{p.rounds}:{p.points}");
+            sb.Append($"\"hmac_signature\":\"{ComputeHmacHex(canon.ToString())}\"");
+            sb.Append("}");
+            string json = sb.ToString();
+            Plugin.Log.LogInfo($"[FFA-REPORT] submitting lobby={lobbyId} n={players.Count} winner={winnerSteam}");
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/ffa/matches", json, (ok, resp) =>
+            {
+                if (ok)
+                {
+                    Plugin.Log.LogInfo($"[FFA] match reported: {resp}");
+                    int myPlace = ExtractJsonInt(resp, "placement");
+                    int xp = ExtractJsonInt(resp, "xp_gained");
+                    if (myPlace > 0)
+                        CompetitiveUI.ShowNotification(
+                            myPlace == 1 ? $"FFA VICTORY! +{xp}xp" : $"FFA: placed #{myPlace} (+{xp}xp)",
+                            myPlace == 1 ? Color.green : new Color(0.6f, 0.8f, 1f), 6f);
+                }
+                else
+                {
+                    Plugin.Log.LogWarning($"[FFA] report failed: {resp}");
+                    EnqueueFailedReport($"{baseUrl}/api/v1/ffa/matches", json);
                 }
             }, maxRetries: 3, retryDelay: 2f));
         }
