@@ -13,8 +13,14 @@ namespace CompetitiveRounds
     internal static class FfaMapScale
     {
         public const string PropKey = "cr_ffa_scl";
-        public const float PerPlayer = 0.03f;
-        public const float MaxFactor = 1.30f;
+        // Bug #117 (Sid: "check map size is increasing as it should"). It WAS
+        // increasing — by 3% at 5 players, which is imperceptible, and the old
+        // 1.30 clamp needed 14 players to reach so it was unreachable dead
+        // code at FFA_MAX_PLAYERS = 10. 6%/player above 4: 5p -> 1.06,
+        // 10p -> 1.36. Raised only together with the MovePlayers fix below —
+        // before that fix, raising the factor multiplied the spawn error.
+        public const float PerPlayer = 0.06f;
+        public const float MaxFactor = 1.40f;
 
         /// <summary>Factor applied to the current map (1 when unscaled).</summary>
         public static float CurrentFactor { get; private set; } = 1f;
@@ -113,11 +119,146 @@ namespace CompetitiveRounds
                     CurrentFactor = f;
                     Plugin.Log.LogInfo(
                         $"[FFA-SCALE] map scaled x{f:F2} for {n} players (size {map.size:F1})");
+                    // Bug #116: while the map is still parked and untouched, look
+                    // for static ground for players 5+. Vanilla ships 4 points and
+                    // the FFA padding duplicates them, so without this two players
+                    // land on the same coordinate. Must run HERE — once
+                    // MapTransition.Move starts, each child re-enables its collider
+                    // after its own Random delay, so a physics query is
+                    // non-deterministic across clients by construction.
+                    try
+                    {
+                        FfaSpawnPoints.ScanForMap(map, f, map.transform.position,
+                                                  Math.Max(0, Diag2v2.PlayersNeeded() - 4));
+                    }
+                    catch (Exception sx)
+                    { Plugin.Log.LogWarning($"[FFA-SPAWN] scan hook: {sx.Message}"); }
                 }
                 catch (Exception ex)
                 {
                     Reset();
                     Plugin.Log.LogWarning($"[FFA-SCALE] SetStartPos: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Bug #116: scale the SPAWN TARGET too, or every player lands off
+        /// their marker.
+        ///
+        /// SpawnPoint.Awake caches `localStartPos = transform.localPosition`
+        /// once, at scene load, and PlayerManager.MovePlayers consumes THAT
+        /// FIELD - not the live transform. localPosition is scale-independent,
+        /// so scaling the map root moves the geometry to f*L while every
+        /// player is still teleported to L. Vanilla is correct only because
+        /// f == 1: MapTransition parks the root at +90 and Enter shifts each
+        /// child by -90, so a child lands at exactly localStartPos.
+        ///
+        /// The error is (f-1)*|L|, directed toward map centre in both axes, on
+        /// every round of every 5+ player FFA. Move ends by re-enabling physics
+        /// while the player overlaps geometry; PlayerCollision then depenetrates
+        /// and, if the overlapped collider is a movable piece, NetworkPhysicsObject
+        /// .OnPlayerCollision applies CallTakeDamage + CallTakeForce - which is
+        /// exactly Sid's "spawning in/on moveable objects that immediately
+        /// discombobulated and killed the players".
+        ///
+        /// Fixed at the single consumption site rather than by multiplying
+        /// SpawnPoint.localStartPos in the GetSpawnPoints postfix: that would
+        /// mutate a live component and compound the factor, because
+        /// CallInNewMapAndMovePlayers runs more than once per map instance.
+        /// </summary>
+        // Vanilla's spawn SFX, reached by reflection: SoundEvent lives in
+        // SonigonAudioEngine.Runtime and the csproj deliberately does not
+        // reference it (same discipline as the UI: no new assembly references
+        // for something a MethodInfo can reach). Purely cosmetic - every
+        // failure is swallowed, because a missing spawn blip must never be
+        // able to take down the round transition.
+        private static System.Reflection.FieldInfo fiSpawnSounds;
+        private static System.Reflection.PropertyInfo piSoundInstance;
+        private static System.Reflection.MethodInfo miSoundPlay;
+        private static bool soundReflectResolved;
+
+        private static void PlaySpawnSound(PlayerManager pm, int index, Transform at)
+        {
+            try
+            {
+                if (!soundReflectResolved)
+                {
+                    soundReflectResolved = true;
+                    fiSpawnSounds = typeof(PlayerManager).GetField("soundCharacterSpawn",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                        | System.Reflection.BindingFlags.Instance);
+                    var tSm = AccessTools.TypeByName("Sonigon.SoundManager");
+                    if (tSm != null)
+                    {
+                        piSoundInstance = tSm.GetProperty("Instance",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                        foreach (var m in tSm.GetMethods(System.Reflection.BindingFlags.Public
+                                                         | System.Reflection.BindingFlags.Instance))
+                        {
+                            if (m.Name != "Play") continue;
+                            var ps = m.GetParameters();
+                            if (ps.Length == 2 && ps[1].ParameterType == typeof(Transform))
+                            { miSoundPlay = m; break; }
+                        }
+                    }
+                }
+                if (fiSpawnSounds == null || miSoundPlay == null || piSoundInstance == null) return;
+                var arr = fiSpawnSounds.GetValue(pm) as Array;
+                if (arr == null || arr.Length == 0) return;
+                var inst = piSoundInstance.GetValue(null, null);
+                if (inst == null) return;
+                miSoundPlay.Invoke(inst, new object[] { arr.GetValue(index % arr.Length), at });
+            }
+            catch { }
+        }
+
+        [HarmonyPatch(typeof(PlayerManager), "MovePlayers")]
+        class PlayerManager_MovePlayers_FfaScale_Patch
+        {
+            static bool Prefix(PlayerManager __instance, SpawnPoint[] spawnPoints)
+            {
+                try
+                {
+                    float f = CurrentFactor;
+                    if (f <= 1.001f || !FfaMode.EngineActive()) return true;   // vanilla
+                    if (__instance?.players == null || spawnPoints == null) return true;
+
+                    // Bug #116 second half: the padded array repeats vanilla
+                    // points, so any index whose target was already claimed this
+                    // pass gets a scanned static-ground position instead. If the
+                    // scan came up short (a map with nowhere else to stand) the
+                    // duplicate is kept — Sid's "unless there's no other options".
+                    // Substituting only on COLLISION means the deterministic
+                    // per-half-point shuffle still decides who gets which of the
+                    // real spawn points; extras just fill the clashes.
+                    var used = new System.Collections.Generic.List<Vector3>();
+                    var extras = FfaSpawnPoints.Extras;
+                    int nextExtra = 0;
+                    for (int i = 0; i < __instance.players.Count && i < spawnPoints.Length; i++)
+                    {
+                        var pl = __instance.players[i];
+                        if (pl == null || spawnPoints[i] == null) continue;
+                        Vector3 target = spawnPoints[i].localStartPos * f;
+                        bool clash = false;
+                        for (int u = 0; u < used.Count; u++)
+                            if ((used[u] - target).sqrMagnitude < 0.01f) { clash = true; break; }
+                        if (clash && extras != null && nextExtra < extras.Count)
+                            target = extras[nextExtra++];
+                        used.Add(target);
+                        __instance.StartCoroutine(__instance.Move(pl.data.playerVel, target));
+                        PlaySpawnSound(__instance, i, pl.transform);
+                    }
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    // MovePlayers runs inside MapManager's map-load coroutine,
+                    // which is the round-transition critical path - a throw
+                    // here is the #45/#85 class of stall. Degrade to vanilla
+                    // placement rather than killing the transition.
+                    Plugin.Log.LogWarning($"[FFA-SCALE] MovePlayers: {ex.Message}");
+                    return true;
                 }
             }
         }

@@ -1115,6 +1115,12 @@ namespace CompetitiveRounds
         /// the opponent can read it. Only active while a match is being tracked.</summary>
         public static void TickFrame()
         {
+            // Bug #119: rising-edge detector for the FFA spawn grace window.
+            // Runs BEFORE the isTracking gate — the window opens the instant
+            // vanilla re-enables the local player at the end of Move, which is
+            // a per-frame edge (#120: sampling edges from the 10Hz poll drops
+            // ~97% of them). Self-gated to FFA rooms.
+            try { FfaMode.TickSpawnGrace(); } catch { }
             if (!isTracking) { _lastTickStopwatchMs = -1; return; }
             float dt = Time.unscaledDeltaTime;
             // July 21 item 2 — freeze detection BEFORE the dt>1 skip (that skip
@@ -4173,20 +4179,30 @@ namespace CompetitiveRounds
         /// other roster member (leavers included) gets a per-opponent entry in
         /// slots 6/7 of the shared record. Placement list feeds the Session
         /// Info line ("placements 1,1,2").</summary>
-        private static void RecordFfaSession(int myPlace, bool localWon)
+        private static void RecordFfaSession(int myPlace, bool localWon, int myTeam)
         {
             if (localWon) sessionFfaWins++; else sessionFfaLosses++;
             if (myPlace > 0 && sessionFfaPlacements.Count < 200) sessionFfaPlacements.Add(myPlace);
-            var names = new List<string>();
+            // Bug #123: the per-opponent record is PAIRWISE by placement, not a
+            // copy of my own result. Previously one `localWon` boolean was
+            // applied to every name in the room, so any game I didn't WIN
+            // credited a loss against all of them — Sid placed 2nd once in a
+            // 5-player sitting and the panel showed a loss vs all four
+            // opponents instead of only vs the player who actually beat him.
+            // The rule now matches the server's own semantics: it scores each
+            // pair 1.0/0.0/0.5 by placement for Glicko, and pays XP off a
+            // strictly-beaten count.
+            var roster = new List<KeyValuePair<string, int>>();   // (deduped name, teamId)
             try
             {
+                var names = new List<string>();
                 // Duplicate display names get the same "(2)" disambiguation
                 // as the 1v1 path (review find 16 — two opponents both named
                 // "Player" would double-increment one record).
-                void AddName(string raw)
+                string AddName(string raw)
                 {
                     string nm = StripRichText(raw ?? "");
-                    if (string.IsNullOrEmpty(nm)) return;
+                    if (string.IsNullOrEmpty(nm)) return null;
                     if (names.Contains(nm))
                     {
                         int dup = 2;
@@ -4194,29 +4210,66 @@ namespace CompetitiveRounds
                         nm = $"{nm} ({dup})";
                     }
                     names.Add(nm);
+                    return nm;
                 }
+                var pm = PlayerManager.instance;
                 foreach (var pp in PhotonNetwork.PlayerList ?? new Photon.Realtime.Player[0])
                 {
                     if (pp == null || pp.IsLocal) continue;
-                    AddName(pp.NickName);
+                    // Resolve this actor's TeamID the same way the report path
+                    // does. Without a team we cannot place them, and inventing
+                    // a result is exactly the bug being fixed — skip instead.
+                    int teamId = -1;
+                    if (pm?.players != null)
+                    {
+                        foreach (var po in pm.players)
+                        {
+                            if (po == null || po.gameObject == null) continue;
+                            var pv = po.GetComponent<PhotonView>();
+                            if (pv?.Owner == null || pv.Owner.ActorNumber != pp.ActorNumber) continue;
+                            teamId = po.TeamID; break;
+                        }
+                    }
+                    if (teamId < 0)
+                    {
+                        Plugin.Log.LogWarning($"[SESSION] ffa: no team for actor {pp.ActorNumber} " +
+                                              $"({pp.NickName}) — skipped");
+                        continue;
+                    }
+                    string nm2 = AddName(pp.NickName);
+                    if (nm2 != null) roster.Add(new KeyValuePair<string, int>(nm2, teamId));
                 }
                 foreach (var kvL in FfaMode.Leavers)
                 {
-                    string nm = StripRichText(kvL.Value.displayName ?? "");
-                    if (!string.IsNullOrEmpty(nm) && !names.Contains(nm)) AddName(nm);
+                    // #227: a leaver only counts for the game they actually left
+                    // during. The report path already filters on this; without it
+                    // someone who quit in game 2 kept collecting a result for
+                    // games 3..N they were never in — part of what Sid saw as
+                    // "names I did not lose to".
+                    if (kvL.Value.leftGameNumber != FfaMode.GameNumber) continue;
+                    string nm3 = AddName(kvL.Value.displayName ?? "");
+                    if (nm3 != null) roster.Add(new KeyValuePair<string, int>(nm3, kvL.Value.slot));
                 }
             }
-            catch { }
-            foreach (var raw in names)
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SESSION] ffa roster: {ex.Message}"); }
+
+            if (myTeam >= 0)
             {
-                string key = raw;
-                if (!sessionWLByOpponent.TryGetValue(key, out var rec) || rec == null || rec.Length < 8)
+                foreach (var kv in roster)
                 {
-                    var grown = new int[8];
-                    if (rec != null) Array.Copy(rec, grown, Math.Min(rec.Length, 8));
-                    sessionWLByOpponent[key] = rec = grown;
+                    int cmp;
+                    try { cmp = FfaMode.ComparePlacement(kv.Value, myTeam); }
+                    catch { continue; }
+                    if (cmp == 0) continue;   // exact tie: neither a win nor a loss
+                    if (!sessionWLByOpponent.TryGetValue(kv.Key, out var rec) || rec == null || rec.Length < 8)
+                    {
+                        var grown = new int[8];
+                        if (rec != null) Array.Copy(rec, grown, Math.Min(rec.Length, 8));
+                        sessionWLByOpponent[kv.Key] = rec = grown;
+                    }
+                    if (cmp > 0) rec[6]++;    // they placed BELOW me -> a win for me
+                    else rec[7]++;            // they placed ABOVE me -> a loss for me
                 }
-                if (localWon) rec[6]++; else rec[7]++;
             }
             SaveSessionState();
         }
@@ -4298,7 +4351,7 @@ namespace CompetitiveRounds
                                $"(you placed #{myPlace}{(localWon ? " - VICTORY" : "")})");
             // Session Info tally (bug #106): FFA never reaches the polled
             // OnGameOver path, so its session bookkeeping lives here.
-            try { RecordFfaSession(myPlace, localWon); } catch (Exception ex)
+            try { RecordFfaSession(myPlace, localWon, myTeam); } catch (Exception ex)
             { Plugin.Log.LogWarning($"[SESSION] ffa record failed: {ex.Message}"); }
             CompetitiveUI.ShowNotification(localWon
                 ? "FFA VICTORY!"

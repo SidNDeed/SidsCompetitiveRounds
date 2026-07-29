@@ -1202,12 +1202,29 @@ namespace CompetitiveRounds
         // so wider cells can't push the last column out of view.
         private static readonly int[] FFA_LB_COL_W = new int[] { 42, 220, 92, 80, 74, 74, 82, 70 };
         private const int FFA_HALF_DOT_CAP = 8;
-        private static readonly Color[] FFA_PLAYER_FALLBACK = new Color[]
+        // FFA recent-panel series palette (bug #118). NOT the vanilla skin bank:
+        // that is 4 wide and 2-team-shaped, so a 5-player lobby wrapped slot 4
+        // back onto slot 0's colour BYTE-IDENTICALLY, and skins[0] #A44A2C vs
+        // skins[2] #A14546 are ~16 degrees apart at the same lightness — Sid's
+        // "there's like 3 different reds that look too similar" was two clones
+        // plus a genuine near-neighbour. Three of the four vanilla skins also
+        // sit at or below the 3:1 contrast floor on the near-black tooltip panel.
+        // Ordered so a prefix of length N is the most separable N-subset.
+        // MUST stay in sync with `palette` in discord_bot.py's
+        // _render_game_detail_png_locked, or /game and the in-game hover graph
+        // key the same player to different colours.
+        private static readonly Color[] FFA_SLOT_PALETTE = new Color[]
         {
-            new Color(0.96f,0.55f,0.23f),
-            new Color(0.35f,0.60f,0.95f),
-            new Color(0.90f,0.30f,0.30f),
-            new Color(0.40f,0.85f,0.45f),
+            new Color(1.000f,0.769f,0.239f), // 0 #FFC43D amber
+            new Color(0.310f,0.659f,1.000f), // 1 #4FA8FF azure
+            new Color(1.000f,0.361f,0.478f), // 2 #FF5C7A rose
+            new Color(0.863f,0.890f,0.925f), // 3 #DCE3EC silver
+            new Color(0.275f,0.878f,0.486f), // 4 #46E07C green
+            new Color(0.769f,0.549f,1.000f), // 5 #C48CFF lavender
+            new Color(0.149f,0.847f,0.824f), // 6 #26D8D2 cyan
+            new Color(1.000f,0.482f,0.878f), // 7 #FF7BE0 pink
+            new Color(1.000f,0.541f,0.239f), // 8 #FF8A3D orange
+            new Color(0.784f,1.000f,0.400f), // 9 #C8FF66 lime
         };
         private sealed class FfaRecentPlayerRow
         {
@@ -1570,30 +1587,21 @@ namespace CompetitiveRounds
             UIFactory.AddHLG(header,spacing:6,forceExpandH:false);
             UIFactory.AddLE(header,prefH:29,minH:29,flexH:0);
             row.txtHeader=CreateFfaTextCell("HeaderText",header.transform,520,UIFactory.AlignMidLeft,17f,C_WHITE,true,260);
+            // Bug #120: use the SHARED game-code helper, not a private copy.
+            // FFA was pasting the full 36-char dashed UUID with a toast that
+            // never mentioned /game, while 1v1 and 2v2 copy the 12-char
+            // uppercase code the Discord command actually takes.
             row.btnId=UIFactory.CreateButton("ID",header.transform,"ID",12f,C_DIM,C_BTN,
-                ()=>CopyFfaMatchId(row.currentMatchId),sizeDelta:new Vector2(30,21));
+                ()=>CopyGameCode(row.currentMatchId),sizeDelta:new Vector2(30,21));
             SetFfaLayoutWidth(row.btnId,30f,0f,30f);
             row.root.SetActive(false);
             return row;
         }
 
-        private static void CopyFfaMatchId(string matchId)
-        {
-            if(string.IsNullOrEmpty(matchId))return;
-            GUIUtility.systemCopyBuffer=matchId;
-            CompetitiveUI.ShowNotification("Match ID copied",new Color(0.6f,0.9f,1f),2f);
-        }
-
         private static Color FfaPlayerColor(int slot)
         {
-            int skin=((slot%4)+4)%4;
-            try
-            {
-                var colors=PlayerSkinBank.GetPlayerSkinColors(skin);
-                if(colors!=null)return colors.color;
-            }
-            catch{}
-            return FFA_PLAYER_FALLBACK[skin];
+            int n=FFA_SLOT_PALETTE.Length;
+            return FFA_SLOT_PALETTE[((slot%n)+n)%n];
         }
 
         private static string FfaSafeRich(string value)
@@ -1670,7 +1678,11 @@ namespace CompetitiveRounds
             for(int i=0;i<n;i++)
             {
                 graph.names[i]=Trunc(players[i]?.display_name??"?",18);
-                graph.colors[i]=FfaPlayerColor(players[i]?.slot??i);
+                // A missing slot serialises as -1, which would land every such
+                // player on the same palette entry — fall back to row index.
+                int slotForColor=players[i]!=null?players[i].slot:-1;
+                if(slotForColor<0)slotForColor=i;
+                graph.colors[i]=FfaPlayerColor(slotForColor);
                 graph.values[i]=new float[tokens.Length+1];
             }
             int eventIndex=0;

@@ -1132,6 +1132,33 @@ async def _is_steam_id_purged(db: AsyncSession, steam_id: str) -> bool:
     return row.scalar() is not None
 
 
+def _clean_display_name(display_name: str | None, steam_id: str) -> str | None:
+    """A usable display name, or None when the caller had nothing real.
+
+    Sid: "quite a lot of people that launch the mod have their steam IDs listed
+    instead of their names." Production had 19 such rows spanning mod versions
+    1.28.2 to 1.35.1, every one with first_seen == last_seen and rating 1500 —
+    i.e. people who launched once, were registered before their Steam persona
+    name was available, and never came back to heal it.
+
+    Treated as "no name": empty/whitespace, the steam_id itself, and any bare
+    17-digit run (a SteamID64 under a different formatting). Returning None lets
+    callers distinguish "call me this" from "I don't know yet", which is what
+    stops a nameless call from clobbering a good stored name.
+    """
+    nm = (display_name or "").strip()
+    if not nm:
+        return None
+    if nm == (steam_id or "").strip():
+        return None
+    # Every SteamID64 starts with the 7656119 prefix, so requiring it lets a
+    # player legitimately called "12345678901234567" keep their name while
+    # still catching an id that arrived under different formatting.
+    if len(nm) == 17 and nm.isdigit() and nm.startswith("7656119"):
+        return None
+    return nm
+
+
 async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: str) -> Player:
     """
     Find an existing player by Steam ID or create a new one.
@@ -1149,7 +1176,16 @@ async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: st
     if player:
         # Don't resurrect a tombstoned row.
         if player.deleted_at is None:
-            player.display_name = display_name
+            # Never overwrite a real name with a placeholder. Callers that have
+            # no name to offer pass the steam_id (or nothing), and this used to
+            # write it straight through — so a single nameless call could
+            # replace an established display name with a raw 17-digit id. It
+            # also means a player whose FIRST contact was nameless keeps the id
+            # forever unless a later call carries a real one; healing that is
+            # the point of the asymmetry here.
+            clean = _clean_display_name(display_name, steam_id)
+            if clean:
+                player.display_name = clean
             player.last_seen = datetime.now(timezone.utc)
         return player
 
@@ -1166,7 +1202,8 @@ async def get_or_create_player(db: AsyncSession, steam_id: str, display_name: st
     # lobby-code matches don't touch queue/join.
     player = Player(
         steam_id=steam_id,
-        display_name="[Deleted User]" if purged else display_name,
+        display_name=("[Deleted User]" if purged
+                      else (_clean_display_name(display_name, steam_id) or steam_id)),
         ranked_enabled=True,
         deleted_at=datetime.now(timezone.utc) if purged else None,
     )
@@ -4330,11 +4367,13 @@ _GAME_CODE_RE = _re.compile(r"^[0-9a-f]{12}([0-9a-f]{20})?$")
 async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
     """Look one recorded game up by its short code — the first 12 hex chars of
     the match UUID (dashes stripped), as copied from the in-game ID button.
-    Public read, same exposure as /players/{id}/matches. Tries all three match
-    tables (UUIDs share one random space; a 12-hex cross-table collision is
-    negligible). Data is raw p1/p2 (or slot) oriented — the bot labels sides
-    by name, no viewer flipping. The WHERE expression must stay byte-identical
-    to the migration-143 index expression."""
+    Public read, same exposure as /players/{id}/matches. Tries all FOUR match
+    tables in order 1v1 -> 2v2 -> 1v2 -> FFA (UUIDs share one random space; a
+    12-hex cross-table collision is negligible, and the order fixes ties in
+    favour of the pre-existing modes). Data is raw p1/p2 (or slot) oriented —
+    the bot labels sides by name, no viewer flipping. Each WHERE expression
+    must stay byte-identical to its index expression (migration 143 for the
+    first three, migration 163 for ffa_matches)."""
     code_n = (code or "").strip().lower().replace("-", "")
     if not _GAME_CODE_RE.match(code_n):
         raise HTTPException(400, "Bad game code — expected 12 hex characters")
@@ -4580,6 +4619,84 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
             "winner_side": row["winner_side"],
             "series_status": row["series_status"],
             "players": [_side1v2("solo", 1), _side1v2("duo_a", 2), _side1v2("duo_b", 2)],
+        }
+
+    # ── FFA (bug #120) ──
+    # MUST stay the LAST branch: the 12-hex code space is shared across four
+    # tables now, so branch order decides a (vanishingly unlikely) collision —
+    # putting FFA last preserves the pre-existing behaviour of the other three.
+    # The WHERE expression is byte-identical to the shortcode index created in
+    # migration 163; changing one without the other silently drops to a seq scan.
+    row = (await db.execute(text("""
+        SELECT m.id, m.ended_at, m.invalidated_at, m.invalidation_reason, m.is_ranked,
+               m.duration_seconds, m.player_count, m.timeline, m.photon_room_id,
+               m.winner_id, pw.steam_id AS winner_sid
+          FROM ffa_matches m
+          LEFT JOIN players pw ON pw.id = m.winner_id
+         WHERE LEFT(REPLACE(m.id::text,'-',''),12) = :c
+         LIMIT 1"""), {"c": code12})).mappings().first()
+    if row is not None:
+        p_rows = (await db.execute(text("""
+            SELECT fmp.player_id, p.steam_id, p.display_name,
+                   fmp.slot, fmp.placement, fmp.left_early,
+                   fmp.rounds_won, fmp.points_total, fmp.kills,
+                   fmp.rating_change, fmp.xp_gained, fmp.gold_gained,
+                   fmp.fps_avg, fmp.ping_avg,
+                   fmp.bullets_fired, fmp.bullets_hit,
+                   fmp.blocks_activated, fmp.blocks_successful,
+                   fmp.keys_pressed, fmp.active_seconds,
+                   fmp.fps_timeline, fmp.ping_timeline, fmp.hit_timeline, fmp.block_timeline
+              FROM ffa_match_players fmp
+              JOIN players p ON p.id = fmp.player_id
+             WHERE fmp.match_id = :mid
+             ORDER BY fmp.placement ASC, fmp.slot ASC"""),
+            {"mid": row["id"]})).mappings().all()
+        # Cards flattened to list[str] to match the other three branches — the
+        # /ffa/recent feed emits {"n","r"} objects, but the bot's generic
+        # renderer expects plain names (#152: grep both ends for the same key).
+        ffa_cards: dict[str, list[str]] = {}
+        for pid_, cname in (await db.execute(text("""
+            SELECT player_id, card_name FROM ffa_match_cards
+             WHERE match_id = :mid ORDER BY pick_order"""), {"mid": row["id"]})).all():
+            ffa_cards.setdefault(str(pid_), []).append(cname)
+        return {
+            "mode": "ffa",
+            "code": code12.upper(),
+            "match_id": str(row["id"]),
+            "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+            "is_ranked": bool(row["is_ranked"]),
+            "invalidated": row["invalidated_at"] is not None,
+            "invalidation_reason": row["invalidation_reason"],
+            "duration_seconds": row["duration_seconds"] or 0,
+            "player_count": int(row["player_count"] or len(p_rows)),
+            "timeline": row["timeline"],
+            "photon_room_id": row["photon_room_id"],
+            "winner_steam_id": row["winner_sid"],
+            "series_status": None,
+            "players": [{
+                "steam_id": r["steam_id"], "name": r["display_name"],
+                "placement": int(r["placement"]),
+                "won": int(r["placement"]) == 1,
+                "left_early": bool(r["left_early"]),
+                "slot": int(r["slot"]) if r["slot"] is not None else None,
+                "rounds_won": int(r["rounds_won"] or 0),
+                "points_total": int(r["points_total"] or 0),
+                "kills": int(r["kills"] or 0),
+                "rating_change": float(r["rating_change"]) if r["rating_change"] is not None else None,
+                # *_gained (not *_earned): FFA rewards are PER GAME like 1v1's,
+                # not per series like 2v2/1v2's — the bot labels the _earned
+                # pair "(series)".
+                "xp_gained": int(r["xp_gained"] or 0),
+                "gold_gained": int(r["gold_gained"] or 0),
+                "fps_avg": r["fps_avg"], "ping_avg": r["ping_avg"],
+                "bullets_fired": r["bullets_fired"], "bullets_hit": r["bullets_hit"],
+                "blocks_activated": r["blocks_activated"],
+                "blocks_successful": r["blocks_successful"],
+                "keys_pressed": r["keys_pressed"], "active_seconds": r["active_seconds"],
+                "fps_timeline": r["fps_timeline"], "ping_timeline": r["ping_timeline"],
+                "hit_timeline": r["hit_timeline"], "block_timeline": r["block_timeline"],
+                "cards": ffa_cards.get(str(r["player_id"]), []),
+            } for r in p_rows],
         }
 
     raise HTTPException(404, "No game found for that code")
@@ -4906,8 +5023,12 @@ async def toggle_ranked(steam_id: str, request: Request, enabled: bool = Query(.
     player = result.scalar_one_or_none()
 
     if not player:
-        # Auto-register on first toggle (startup sync)
-        player = await get_or_create_player(db, steam_id, steam_id)
+        # Auto-register on first toggle (startup sync). This call carries NO
+        # name — the client's ranked-sync fires at launch before it has one —
+        # and passing steam_id here is precisely how first-launch players ended
+        # up displayed as raw ids. Pass None so the row is created with the
+        # steam_id as a placeholder that the FIRST named call will heal.
+        player = await get_or_create_player(db, steam_id, None)
 
     player.ranked_enabled = enabled
     await _mark_mod_seen(db, player)
@@ -8846,31 +8967,85 @@ async def get_player_team_bets(
     }
 
 
+def _ledger_safe_name(name: str | None) -> str:
+    """Neutralise a user-authored display name for the bets ledger.
+
+    Two independent hazards in the SHIPPED client, neither fixable by a server
+    release alone: its parser splits on the literal `"id":` token (#156), and it
+    renders the value into TMP rich text. Angle brackets become their fullwidth
+    look-alikes rather than being stripped, so a name like `<3` still reads as
+    the player wrote it.
+    """
+    nm = (name or "").replace('"id":', "id:")
+    return nm.replace("<", "＜").replace(">", "＞")
+
+
 @app.get("/api/v1/players/{steam_id}/bets", tags=["Betting"])
 async def get_player_bets(
     steam_id: str,
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
-    """Player's recent bets — both pending and settled."""
+    """Player's recent bets — both pending and settled, ACROSS ALL MODES.
+
+    Was 1v1-only, which meant an FFA or 2v2 wager was invisible to the player
+    who placed it: the ledger is the one surface that would have shown a
+    stranded bet sitting unsettled. The added arms reuse the existing column
+    names so the shipped client's parser renders them with no client change —
+    `vs_name` carries the mode context ("5-player FFA", "2v2") and
+    `series_score` the game/series position.
+    """
     rows = (await db.execute(text("""
-        SELECT
-            b.id, b.amount, b.odds_multiplier, b.created_at, b.settled_at, b.payout,
-            b.series_id::text AS series_id,
-            bo.steam_id      AS bet_on_steam_id,
-            bo.display_name  AS bet_on_name,
-            vs.display_name  AS vs_name,
-            rs.status        AS series_status,
-            rs.winner_id     AS series_winner_id,
-            rs.p1_series_wins, rs.p2_series_wins
-        FROM bets b
-        JOIN players p        ON p.id = b.player_id
-        JOIN players bo       ON bo.id = b.bet_on_player_id
-        JOIN ranked_series rs ON rs.id = b.series_id
-        JOIN players vs       ON vs.id = CASE WHEN rs.player1_id = b.bet_on_player_id
-                                              THEN rs.player2_id ELSE rs.player1_id END
-        WHERE p.steam_id = :sid
-        ORDER BY b.created_at DESC
+        SELECT * FROM (
+            SELECT
+                b.id::text AS id, b.amount, b.odds_multiplier::float8 AS odds_multiplier,
+                b.created_at, b.settled_at, b.payout,
+                b.series_id::text AS series_id,
+                bo.steam_id      AS bet_on_steam_id,
+                bo.display_name  AS bet_on_name,
+                vs.display_name  AS vs_name,
+                rs.status        AS series_status,
+                (rs.p1_series_wins || '-' || rs.p2_series_wins) AS series_score
+            FROM bets b
+            JOIN players p        ON p.id = b.player_id
+            JOIN players bo       ON bo.id = b.bet_on_player_id
+            JOIN ranked_series rs ON rs.id = b.series_id
+            JOIN players vs       ON vs.id = CASE WHEN rs.player1_id = b.bet_on_player_id
+                                                  THEN rs.player2_id ELSE rs.player1_id END
+            WHERE p.steam_id = :sid
+
+            UNION ALL
+
+            SELECT
+                fb.id::text, fb.amount, fb.odds_multiplier::float8,
+                fb.created_at, fb.settled_at, fb.payout,
+                fb.lobby_id::text,
+                bo.steam_id, bo.display_name,
+                (l.player_count || '-player FFA') AS vs_name,
+                l.status,
+                ('game ' || fb.game_number) AS series_score
+            FROM ffa_bets fb
+            JOIN players p      ON p.id = fb.player_id
+            JOIN players bo     ON bo.id = fb.bet_on_player_id
+            JOIN ffa_lobbies l  ON l.id = fb.lobby_id
+            WHERE p.steam_id = :sid
+
+            UNION ALL
+
+            SELECT
+                tb.id::text, tb.amount, tb.odds_multiplier,
+                tb.created_at, tb.settled_at, tb.payout,
+                tb.team_series_id::text,
+                NULL, ('Team ' || tb.bet_on_team),
+                '2v2' AS vs_name,
+                ts.status,
+                (COALESCE(ts.t1_series_wins,0) || '-' || COALESCE(ts.t2_series_wins,0)) AS series_score
+            FROM team_bets tb
+            JOIN players p       ON p.id = tb.player_id
+            JOIN team_series ts  ON ts.id = tb.team_series_id
+            WHERE p.steam_id = :sid
+        ) all_bets
+        ORDER BY created_at DESC
         LIMIT :limit
     """), {"sid": steam_id, "limit": limit})).mappings().all()
     return {
@@ -8884,11 +9059,18 @@ async def get_player_bets(
                 "payout": r["payout"],
                 "series_id": r["series_id"],
                 "bet_on_steam_id": r["bet_on_steam_id"],
-                "bet_on_name": r["bet_on_name"],
+                # Both name fields are USER-AUTHORED and land in an
+                # already-shipped client that (a) splits this payload on the
+                # literal token `"id":` and is not string-aware (#156), and
+                # (b) renders the value straight into TMP markup. So a name can
+                # truncate the whole ledger, or inject rich text that resizes
+                # and overlaps the panel. Neutralise both classes here, because
+                # the client that has to survive it is already in the wild.
+                "bet_on_name": _ledger_safe_name(r["bet_on_name"]),
                 # The OTHER player in the series — "on X (vs Y)" (item 6).
-                "vs_name": r["vs_name"],
+                "vs_name": _ledger_safe_name(r["vs_name"]),
                 "series_status": r["series_status"],
-                "series_score": f"{r['p1_series_wins']}-{r['p2_series_wins']}",
+                "series_score": r["series_score"],
             }
             for r in rows
         ]
@@ -15390,8 +15572,24 @@ _ffa_gather_last_join_mono: float = 0.0
 # poll every ~2s, so an observation gap >15s means the pool collapsed or the
 # process restarted — either way the next gather starts a fresh window.
 _ffa_gather_pool_seen_mono: float = 0.0
-FFA_MATCH_XP_BASE = 300
-FFA_XP_PER_BEATEN = 60      # + per opponent placed STRICTLY below you
+# ── FFA economy (bug #121) ─────────────────────────────────────────────────
+# Parity target is 2v2's per-player-MINUTE rate, not its per-game rate. One
+# FFA game is a first-to-5 (each point = 2 half-points) and runs ~13 min in
+# prod at 5 players — i.e. about a 2-0 2v2 BO3 — so one FFA game must pay like
+# one 2v2 SERIES, not like one 2v2 game. Pre-fix FFA paid 0.45 g/player-min
+# against 2v2's 2.71, a 6x deficit, because of three compounding gaps:
+#   (1) the XP base was half of TEAM_MATCH_XP_BASE,
+#   (2) there was no flat completion bonus at all (every other mode has one:
+#       SERIES_GOLD_BASE / TEAM_SERIES_WIN_GOLD / OVT_SERIES_WIN_GOLD),
+#   (3) the lobby-size multiplier was gated behind `place == 1`, so lobby size
+#       paid nothing to 9 of 10 players — 4th-of-10 earned exactly 4th-of-4.
+FFA_MATCH_XP_BASE = 600     # was 300 — parity with TEAM_MATCH_XP_BASE
+FFA_XP_PER_BEATEN = 90      # + per opponent placed STRICTLY below you (was 60)
+FFA_PLACE_GOLD_TOP = 50     # 1st  — parity with TEAM_SERIES_WIN_GOLD
+FFA_PLACE_GOLD_LAST = 10    # last — deliberately BELOW TEAM_SERIES_LOSS_GOLD
+                            # (25): an FFA game has n-1 losers, not 2, and a
+                            # flat floor is the AFK-farm surface (no FFA AFK
+                            # detector exists yet — learning #58 has no analogue).
 
 
 def _ffa_win_mult(n_players: int) -> float:
@@ -15399,9 +15597,66 @@ def _ffa_win_mult(n_players: int) -> float:
     2): x1.5 at the 3-player minimum up to x5.0 for a full 10 — winning a
     bigger FFA is a bigger feat. Gold rides the 100xp=1g conversion."""
     return min(5.0, 1.5 + 0.5 * max(0, n_players - 3))
+
+
+def _ffa_place_frac(place: int, beaten: int, n_live: int) -> float:
+    """0.0 at last place, 1.0 at 1st — the share of the field you outplaced.
+    Driven off `beaten` (already ghost-filtered and tie-correct) rather than
+    `place`, because ghosts keep their original placement so a live player's
+    `place` can exceed `n_live`. `place <= 1` short-circuits so a TIE FOR 1ST
+    still gets the full share (the beaten-fraction alone would under-pay it)."""
+    if place <= 1 or n_live <= 1:
+        return 1.0
+    return min(1.0, max(0.0, beaten / float(n_live - 1)))
+
+
+def _ffa_place_mult(place: int, beaten: int, n_live: int) -> float:
+    """Placement multiplier: _ffa_win_mult(n) at 1st, decaying linearly to x1.0
+    at last. This is gap (3) above — the lobby-size multiplier becomes a curve
+    over the whole field instead of a winner-only switch. 1st place is
+    byte-identical to the old winner-only path, so no payout can ever DROP."""
+    top = _ffa_win_mult(n_live)
+    return 1.0 + (top - 1.0) * _ffa_place_frac(place, beaten, n_live)
+
+
+def _ffa_place_gold(place: int, beaten: int, n_live: int) -> int:
+    """Flat per-game placement gold — the FFA analogue of the 2v2/1v2 series
+    bonus (gap 2). Scaled by lobby size on the same curve as the XP multiplier
+    and normalised to the 5-player case (x0.6 at 3, x1.0 at 5, x2.0 at 10),
+    because both track GAME LENGTH, which is what the parity target is
+    denominated in.
+
+    Deliberately NOT tier-scaled, unlike 2v2's series bonus: the tier
+    multiplier already rides the (much larger) XP half, and keeping this
+    component a pure function of (placement, beaten, lobby size) is what lets
+    migration 164 reproduce it EXACTLY from stored columns for the back-pay.
+    """
+    size = _ffa_win_mult(n_live) / _ffa_win_mult(5)
+    frac = _ffa_place_frac(place, beaten, n_live)
+    base = FFA_PLACE_GOLD_LAST + (FFA_PLACE_GOLD_TOP - FFA_PLACE_GOLD_LAST) * frac
+    return int(round(base * size))
 # Rating movement per game is bounded: each player is compared against at
 # most this many placement-adjacent opponents (see submit_ffa_match).
 FFA_MAX_RATED_OPPONENTS = 4
+# ── FFA betting: odds band + how long a lobby stays bettable ───────────────
+FFA_ODDS_MAX = 5.0          # ceiling, reachable only at 10 players with a low RD
+FFA_ODDS_MIN_LARGE = 2.0    # floor at 5+ players (Sid's ask)
+FFA_ODDS_MIN_SMALL = 1.4    # floor at 3-4 players — 1/3 of a 3-man field is a
+                            # 33% shot, so a 2.0 floor there would be near-fair
+                            # odds with no margin at all.
+# A lobby is bettable only while a NEXT game is plausibly coming. Without this
+# a finished sitting stayed listed forever (the "Live FFA betting still shows
+# the last session" report) because the only predicate was status='active'.
+FFA_BET_LIVE_AFTER_GAME_MINUTES = 30   # ...since the last recorded game ended
+FFA_BET_LIVE_ASSEMBLY_MINUTES = 15     # ...since lock, for a lobby with 0 games
+# INTERIM exploit gate (see the docstring on _ffa_bet_window_open). FFA has no
+# live score server-side, so bets currently stay open until the game's REPORT
+# lands — i.e. until the final kill, which is free money for anyone watching.
+# Sid's rule is "bet until someone has 2 points"; that needs a client push and
+# ships with the next build. Until then, betting on game N closes this many
+# seconds after game N-1 ended (or after the lock, for game 1). Delete this
+# once the live-score lock is live and adoption is confirmed.
+FFA_BET_OPEN_SECONDS = 90
 # Engine constants — MUST match plugin/FfaMode.cs (RoundsToWin/PointsToWinRound).
 # Reports are validated against them so a crafted body can't invent a score.
 # 3 -> 5 after the first playtest (Sid: games ended too fast for the rolling
@@ -16225,11 +16480,22 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         if sid_ in ghosts:
             continue   # no XP/gold for games they never played
         place = placements[sid_]
-        xp = FFA_MATCH_XP_BASE + FFA_XP_PER_BEATEN * beaten_count.get(sid_, 0)
-        if place == 1:
-            # Round-2 review find 10: scale by players actually IN this game
-            # — roster ghosts must not inflate a 3-live-player win to x5.
-            xp = int(xp * _ffa_win_mult(len(report.players) - len(ghosts)))
+        beaten = beaten_count.get(sid_, 0)
+        # Round-2 review find 10: scale by players actually IN this game —
+        # roster ghosts must not inflate a 3-live-player win to x5.
+        n_live = len(report.players) - len(ghosts)
+        # Opponent-tier multiplier (bug #117 audit item: every other mode has
+        # one, FFA had none — beating a 2300-rated field paid the same as
+        # beating four 1200s). Mean pre-match rating of the LIVE opponents.
+        # `pre` is only populated for ranked games, so an unranked FFA takes
+        # x1.0 rather than _tier_mult_for(None)'s x1.5 — no tier bonus where
+        # there are no ratings to earn it against.
+        opp_ratings = [pre[s][0] for s in pre
+                       if s != sid_ and s not in ghosts]
+        tier_mult = (_tier_mult_for(sum(opp_ratings) / len(opp_ratings))[0]
+                     if opp_ratings else 1.0)
+        xp = int((FFA_MATCH_XP_BASE + FFA_XP_PER_BEATEN * beaten)
+                 * _ffa_place_mult(place, beaten, n_live) * tier_mult)
         row = (await db.execute(text(
             "UPDATE players SET total_xp = COALESCE(total_xp,0) + :xp,"
             "       ffa_xp_earned = COALESCE(ffa_xp_earned,0) + :xp"
@@ -16239,14 +16505,36 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         new_xp = row["new_xp"] if row else xp
         old_xp = row["old_xp"] if row else 0
         gold_delta = max(0, (new_xp // 100) - (old_xp // 100))
-        if gold_delta > 0:
+        place_gold = _ffa_place_gold(place, beaten, n_live)
+        # Level-reward gold (bug #117 audit item: `_maybe_grant_level_rewards`
+        # is called from submit_match and inlined in the 2v2 path, but FFA had
+        # NO level rewards at all — an FFA-only player banked nothing for
+        # dinging. Inlined here because we hold `pid`, not an ORM object.)
+        old_lvl, _, _ = level_from_xp(old_xp)
+        new_lvl, _, _ = level_from_xp(new_xp)
+        level_gold = (sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
+                      if new_lvl > old_lvl else 0)
+        # ONE players UPDATE per player: the canonical tuple-lock order
+        # (#197/#202) must not gain a second write site inside the loop.
+        total_gold = gold_delta + place_gold + level_gold
+        if total_gold > 0:
             await db.execute(text(
                 "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g,"
                 "       ffa_gold_earned = COALESCE(ffa_gold_earned,0) + :g WHERE id = :pid"
-            ), {"g": gold_delta, "pid": pid})
+            ), {"g": total_gold, "pid": pid})
+        # Separate audit rows per reason (same shape as 1v1's "xp" +
+        # "level_reward" sharing one reference_id). `ffa_placement` is the
+        # idempotency key the back-pay migration keys off — do not rename.
+        if gold_delta > 0:
             db.add(GoldTransaction(player_id=pid, amount=gold_delta, reason="ffa_xp",
                                    reference_id=str(match_id)))
-        award_info[sid_] = (xp, gold_delta)
+        if place_gold > 0:
+            db.add(GoldTransaction(player_id=pid, amount=place_gold, reason="ffa_placement",
+                                   reference_id=str(match_id)))
+        if level_gold > 0:
+            db.add(GoldTransaction(player_id=pid, amount=level_gold, reason="level_reward",
+                                   reference_id=str(match_id)))
+        award_info[sid_] = (xp, total_gold)
 
     # ── Per-player rows + cards. ──
     for p in report.players:
@@ -16513,20 +16801,92 @@ def _ffa_field_odds(field: list[tuple[str, float, float]]) -> dict[str, float]:
         strengths[sid_i] = max(1e-6, acc / (n - 1))
     total = sum(strengths.values()) or 1e-6
     mults: dict[str, float] = {}
-    full_cap = min(5.0, n / 2.0)
+    full_cap = min(FFA_ODDS_MAX, n / 2.0)
+    # Sid's ask: "minimum odds 2x for 5+ people games". A floor RAISES what the
+    # house pays on favourites (the 5-player screenshot had the top seed at
+    # x1.39), so it narrows the margin rather than widening it — but only from
+    # enormous to large: picking 1 winner from 5 is a true p of ~0.2, i.e. fair
+    # odds of 5.0, so paying 2.0 still keeps roughly half. Verified in the
+    # house-edge check below the function.
+    floor = FFA_ODDS_MIN_LARGE if n >= 5 else FFA_ODDS_MIN_SMALL
     for sid_i, r_i, rd_i in field:
         p = strengths[sid_i] / total
         raw = 1.0 / max(1e-6, 2.0 * p)
         other_rds = [rd for s, _, rd in field if s != sid_i]
-        rd_eff = max(rd_i, (sum(other_rds) / len(other_rds)) if other_rds else rd_i)
+        field_rd = (sum(other_rds) / len(other_rds)) if other_rds else rd_i
+        # OWN RD dominates the cap (was: max(own, field mean), which let a
+        # single unrated player in the lobby collapse EVERYONE's cap). Sid's
+        # "max x5 for low elo low rd players" is precisely this: low RD means a
+        # CONVERGED, trusted rating (#68 uses RD <= 110 as the trust
+        # threshold), so a confidently-weak player is a genuine longshot and
+        # earns the ceiling. Keeping a 30% weight on the field's uncertainty is
+        # the anti-smurf term: a fresh account carries RD 350, so its own cap
+        # collapses and it can never be the x5 longshot that mints gold.
+        rd_eff = 0.70 * rd_i + 0.30 * field_rd
         if rd_eff <= 150.0:
             cap = full_cap
         elif rd_eff >= 350.0:
             cap = 1.0
         else:
             cap = 1.0 + (full_cap - 1.0) * (350.0 - rd_eff) / 200.0
-        mults[sid_i] = max(1.01, min(raw, cap))
+        # The floor must never be squeezed out by a low cap in an uncertain
+        # field, or "minimum 2x at 5+" would silently not hold.
+        cap = max(cap, floor)
+        mults[sid_i] = max(floor, min(raw, cap))
     return mults
+
+
+def _ffa_lobby_is_live(lobby) -> bool:
+    """Is a NEXT game plausibly coming in this lobby?
+
+    The only predicate used to be `status = 'active'`, and nothing advances that
+    status when a sitting simply ends — so a finished lobby stayed listed as
+    bettable indefinitely (Sid: "the Live FFA betting is glitched and still
+    showing the last session of people"). A lobby qualifies while it is either
+    still assembling its first game, or its most recent game ended recently
+    enough that another is expected.
+
+    `lobby` needs id / games_played / created_at / last_game_at.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        games = int(lobby["games_played"] or 0)
+        last = lobby["last_game_at"]
+        if games <= 0 or last is None:
+            created = lobby["created_at"]
+            if created is None:
+                return False
+            return (now - created).total_seconds() <= FFA_BET_LIVE_ASSEMBLY_MINUTES * 60
+        return (now - last).total_seconds() <= FFA_BET_LIVE_AFTER_GAME_MINUTES * 60
+    except Exception:
+        return False
+
+
+def _ffa_bet_window_open(lobby) -> bool:
+    """INTERIM exploit gate — see FFA_BET_OPEN_SECONDS.
+
+    Sid's rule is "let people bet until someone has 2 points", but the server
+    has no live FFA score: nothing reports progress between the lock and the
+    game's final report, so the only enforceable gate today is elapsed time.
+    Without it, betting stays open until the last kill, and with the odds floor
+    raised to 2.0 (5.0 at ten players) that is a guaranteed multiple on a
+    decided game for anyone spectating.
+
+    So: game 1 is bettable for FFA_BET_OPEN_SECONDS after the lock, game N+1
+    for the same window after game N ended. This is deliberately COARSER than
+    the real rule — it can close while a slow lobby is still picking cards —
+    and it is replaced by the exact 2-point lock as soon as the client can push
+    live scores. Being slightly too strict costs a missed bet; being too loose
+    mints gold.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        anchor = lobby["last_game_at"] if int(lobby["games_played"] or 0) > 0 else lobby["created_at"]
+        if anchor is None:
+            return False
+        return (now - anchor).total_seconds() <= FFA_BET_OPEN_SECONDS
+    except Exception:
+        return False
 
 
 async def _ffa_lobby_field(db: AsyncSession, member_ids: list) -> list[dict]:
@@ -16624,9 +16984,12 @@ async def ffa_bettable(steam_id: str = Query(""), db: AsyncSession = Depends(get
     """Active FFA lobbies with per-player odds for the bet UI. Lobbies the
     requester is a member of are flagged (client hides the buttons)."""
     lobbies = (await db.execute(text("""
-        SELECT id, member_ids, departed_ids, player_count, games_played, created_at
-          FROM ffa_lobbies WHERE status = 'active'
-         ORDER BY created_at DESC LIMIT 5
+        SELECT l.id, l.member_ids, l.departed_ids, l.player_count, l.games_played,
+               l.created_at,
+               (SELECT MAX(m.ended_at) FROM ffa_matches m
+                 WHERE m.lobby_id = l.id AND m.invalidated_at IS NULL) AS last_game_at
+          FROM ffa_lobbies l WHERE l.status = 'active'
+         ORDER BY l.created_at DESC LIMIT 20
     """))).mappings().all()
     me = None
     if steam_id:
@@ -16635,6 +16998,13 @@ async def ffa_bettable(steam_id: str = Query(""), db: AsyncSession = Depends(get
         ), {"sid": steam_id})).scalar()
     out = []
     for l in lobbies:
+        if not _ffa_lobby_is_live(l):
+            continue
+        # Codex wave-5 finding 6: listing a lobby whose per-game window has
+        # closed made the shipped client render live Bet buttons that the POST
+        # then rejected with a 409. The listing and the enforcement must use the
+        # SAME predicate; `bets_open` lets the panel dim rather than lie.
+        window_open = _ffa_bet_window_open(l)
         # Departed members are out of the field: no odds, no bet target
         # (round-2 review find 6).
         departed = set(l["departed_ids"] or [])
@@ -16656,11 +17026,12 @@ async def ffa_bettable(steam_id: str = Query(""), db: AsyncSession = Depends(get
             "game_number": next_game,
             "is_member": bool(me is not None and any(f["player_id"] == me for f in field_rows)),
             "already_bet": already,
+            "bets_open": window_open,
             "players": [
                 {"steam_id": f["steam_id"], "display_name": f["display_name"],
                  "rating": int(round(f["rating"])),
                  "odds_multiplier": round(mults.get(f["steam_id"], 1.01), 2),
-                 "bettable": mults.get(f["steam_id"], 1.01) >= 1.10}
+                 "bettable": window_open and mults.get(f["steam_id"], 1.01) >= 1.10}
                 for f in field_rows
             ],
         })
@@ -16683,8 +17054,8 @@ async def place_ffa_bet(
     game_number is signed and validated against the lobby (Codex round-2
     review find 2: an unbound signed URL was replayable once per LATER game —
     a lost-response retry after game 1 settled would silently place a game-2
-    bet). Soft window: with no live half-point state server-side, bets stay
-    open until that game's report lands (FFA games are short; documented)."""
+    bet). The window is enforced HERE, not just hidden in the UI — a client-side
+    hide is a rendering suggestion, not a gate (#159)."""
     await _check_steam_session(request, steam_id, db)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
@@ -16704,18 +17075,37 @@ async def place_ffa_bet(
         lid = UUID(lobby_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid lobby_id")
+    # FOR NO KEY UPDATE, not FOR UPDATE: ffa_bets.lobby_id and
+    # ffa_queue.series_id both FK to ffa_lobbies, so every ffa_bets INSERT takes
+    # FOR KEY SHARE on this row — and FOR KEY SHARE conflicts with exactly one
+    # mode, FOR UPDATE (#202). Taking the strongest lock here enrolled every
+    # concurrent bet insert in our wait graph for no benefit; we never change a
+    # key column.
     lobby = (await db.execute(text(
-        "SELECT id, status, member_ids, games_played FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
+        "SELECT id, status, member_ids, departed_ids, games_played, created_at,"
+        "       (SELECT MAX(m.ended_at) FROM ffa_matches m"
+        "         WHERE m.lobby_id = ffa_lobbies.id AND m.invalidated_at IS NULL) AS last_game_at"
+        "  FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
     ), {"lid": lid})).mappings().first()
     if lobby is None:
         raise HTTPException(status_code=404, detail="Lobby not found")
     if lobby["status"] != "active":
         raise HTTPException(status_code=409, detail="Lobby is not active")
+    if not _ffa_lobby_is_live(lobby):
+        raise HTTPException(status_code=409, detail="Betting closed - this sitting has ended")
+    if not _ffa_bet_window_open(lobby):
+        raise HTTPException(status_code=409,
+                            detail="Betting for this game has closed - wait for the next one")
     member_ids = list(lobby["member_ids"] or [])
     if bettor.id in member_ids:
         raise HTTPException(status_code=409, detail="Cannot bet on your own lobby")
 
-    field_rows = await _ffa_lobby_field(db, member_ids)
+    # Build the field from LIVE members only. /ffa/bettable already excludes
+    # departed players, but this endpoint used the raw member_ids — so a signed
+    # request could bet on someone who had already left, and settlement would
+    # then score them as a loser (critic M3).
+    departed = set(lobby["departed_ids"] or [])
+    field_rows = await _ffa_lobby_field(db, [m for m in member_ids if m not in departed])
     target = next((f for f in field_rows if f["steam_id"] == bet_on_steam_id), None)
     if target is None:
         raise HTTPException(status_code=400, detail="bet_on_steam_id is not in this lobby")

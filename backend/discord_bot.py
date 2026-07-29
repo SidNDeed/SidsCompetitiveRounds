@@ -966,24 +966,6 @@ FAQ_ENTRIES = [
                   "Ranked tab -> Search Ranked. When matched, click Ready within 90s and it auto-connects."),
     },
     {
-        "key": "modes_1v2_ffa",
-        "title": "1v2 and FFA",
-        "patterns": [
-            r"(what|how|where|when|can|is).{0,25}\b1 ?v ?2\b",
-            r"\b1 ?v ?2\b.{0,20}(work|works|play|queue|ranked|rating|available|live|beta)",
-            r"(what|how).{0,15}(is|about|play).{0,10}(ffa|free ?for ?all)",
-            r"(what|how|where|when|can|is).{0,20}solo (vs|versus|against) duo",
-        ],
-        "examples": ["what is 1v2", "how do i play 1v2", "when is ffa coming"],
-        "answer": ("• **1v2** (solo vs duo) is live as an **unranked beta** — queue from **F5 → Multiplayer → 1v2**. "
-                   "One player fights a team of two; stats are tracked so games can be rated retroactively once "
-                   "the mode graduates.\n"
-                   "• **FFA** (3-10 player free-for-all) is **live and RANKED** — queue from **F5 → Multiplayer → FFA**. "
-                   "Last player standing takes a half point, two halves make a point, first to 5 points wins. "
-                   "Everyone picks cards at the same time, you hold at most 5 cards (a 6th pick replaces your "
-                   "oldest), and it has its own rating and leaderboard."),
-    },
-    {
         "key": "tournaments",
         "title": "How tournaments work",
         "patterns": [
@@ -1400,6 +1382,88 @@ FAQ_ENTRIES = [
                    "3. **Play outside your comfort zone** — learn everything there is to know about cards, "
                    "blocking, and angling shots. Force yourself onto builds you'd normally pass on; every card "
                    "you understand is a matchup you stop losing to."),
+    },
+    # ── Bug #122: "How does FFA work" / "How does 1v2 work" were unanswerable.
+    # These two replace the old combined `modes_1v2_ffa` entry, which could only
+    # be reached through a handful of hard-coded phrasings.
+    # THESE TWO SIT LAST ON PURPOSE. The file's convention is "first regex hit
+    # wins, so specific entries sit above general ones" (see the header comment
+    # on FAQ_ENTRIES). The \bffa\b patterns below are deliberately broad; placed
+    # mid-table they would steal "how do i report a bug in ffa" from bug_report
+    # and "how do tournaments work in ffa" from tournaments.
+    {
+        "key": "how_ffa",
+        "title": "How FFA works",
+        "patterns": [
+            r"(what|how|hows|where|when|why|can|does|do|is|explain|tell).{0,40}\bffa\b",
+            r"\bffa\b.{0,30}(work|works|mode|rules?|scor(e|ing)|rating|ranked|rank|queue|lobby|placement|points?|cards?|xp|gold|leaderboard|players?)",
+            r"(what|how|explain).{0,25}\bfree ?-? ?for ?-? ?alls?\b",
+            r"\bfree ?-? ?for ?-? ?alls?\b.{0,30}(work|works|mode|rules?|scor(e|ing)|rating|ranked|queue|lobby|match)",
+        ],
+        "examples": ["how does ffa work", "how does free for all work", "what is ffa",
+                     "how do i play ffa", "how does ffa scoring work", "is ffa ranked"],
+        "answer": (
+            "**Free-for-all, 3-10 players, and it's fully RANKED.** Queue from "
+            "**F5 → Multiplayer → FFA → Join FFA Queue**.\n"
+            "• **Getting in** — no Elo band and no ready-up: joining *is* consent. Once 3 players are "
+            "searching a **25s gather window** opens, each new joiner adds ~20s (2 min hard cap), and a "
+            "full 10 locks instantly. The mod auto-connects everyone into the lobby.\n"
+            "• **Scoring** — everyone is their own team. Last player alive takes a **half point**; "
+            "**2 halves = a point**; **first to 5 points** wins the game. The lobby keeps playing "
+            "rematches until people leave.\n"
+            "• **Cards** — after each point, everyone *except* the point winner picks **at the same "
+            "time**. Nothing is ever picked for you: the window stays open at least **45s** and extends "
+            "as picks land (90s max) — miss it and you get no card that round. You hold **5 cards**; "
+            "picking a 6th removes your oldest.\n"
+            "• **Rating** — FFA has its **own Glicko rating and leaderboard**; your 1v1 elo is untouched. "
+            "Placement is points, then total half points earned, then kills, and ties share a place "
+            "(1, 2, 2, 4). You're rated against the **4 players placed nearest you**, so a 10-player "
+            "lobby doesn't swing your rating harder than a 3-player one.\n"
+            "• **Rewards** — **600 XP** plus **90 per player you finish above**, all multiplied by how "
+            "much of the field you outplaced (up to **×1.5** in a 3-player lobby and **×5** in a full "
+            "10) and by the usual opponent-tier bonus. On top of that every player banks **placement "
+            "gold** — 1st down to last, scaled by lobby size. 100 XP = 1 extra gold.\n"
+            "• The map and its out-of-bounds edge **grow with the lobby**.\n"
+            "• Spectators can **bet gold** on who wins the next game, from the FFA tab.\n"
+            "Full rules in-game: **F5 → Multiplayer → FFA → Info**."),
+        "short": ("FFA is a RANKED 3-10 player free-for-all. F5 -> Multiplayer -> FFA -> Join FFA Queue: "
+                  "no elo band, no ready-up, the lobby locks ~25s after 3 are searching (instantly at 10). "
+                  "Last player alive takes a half point, 2 halves make a point, first to 5 points wins. "
+                  "After each point everyone but the point winner picks a card at the same time; you hold "
+                  "5 cards, a 6th drops your oldest. Own rating and leaderboard."),
+    },
+    {
+        "key": "how_1v2",
+        "title": "How 1v2 works",
+        "patterns": [
+            r"(what|how|where|when|can|is|does|do|explain).{0,25}\b(1 ?v ?2|2 ?v ?1)\b",
+            r"\b(1 ?v ?2|2 ?v ?1)\b.{0,25}(work|works|play|queue|ranked|rating|available|live|beta|mode|rules?|scor(e|ing)|xp|gold)",
+            r"(what|how|where|when|can|is).{0,20}solo (vs|versus|v|against) duo",
+            r"(what|how|explain).{0,20}\bone (v|vs|versus) two\b",
+        ],
+        "examples": ["how does 1v2 work", "what is 1v2", "how do i play 1v2",
+                     "how does solo vs duo work", "how does 2v1 work"],
+        "answer": (
+            "**Solo vs duo — one player against a team of two, best-of-3** (first side to 2 game wins). "
+            "Queue from **F5 → Multiplayer → 1v2 → Join 1v2 Lobby**.\n"
+            "• **Getting in** — consent queue: no Elo band, no ready-up. It locks the moment **3 players** "
+            "are searching and the mod auto-connects you.\n"
+            "• **Sides** — the **Side: Any / Solo / Duo** button sets your preference. The first player who "
+            "asked for solo gets it, otherwise the earliest joiner does; the other two are the duo.\n"
+            "• **Solo Extra Initial Pick** — optional handicap: if **any** of the three turns it on, the "
+            "solo draws **2 cards on the opening pick only**.\n"
+            "• **Rating** — 1v2 is still an **unranked beta**, so no rating is applied yet. Every game is "
+            "fully recorded so the mode can be rated retroactively when it graduates.\n"
+            "• **Rewards** — **500 XP** per game (**750** for a win), plus **40g** each to the series "
+            "winners and **20g** to the losers. 100 XP = 1 gold.\n"
+            "• **Boards** — the tab has separate **Solo** and **Duo** activity boards (W-L / win rate in "
+            "that role); you appear only on boards for roles you've actually played.\n"
+            "Full rules in-game: **F5 → Multiplayer → 1v2 → Info**."),
+        "short": ("1v2 is solo vs duo, best-of-3 (first side to 2 wins). F5 -> Multiplayer -> 1v2 -> "
+                  "Join 1v2 Lobby: consent queue, no elo band, no ready-up, it locks once 3 are searching. "
+                  "Side: Any/Solo/Duo picks your role; Solo Extra Initial Pick gives the solo 2 cards on the "
+                  "FIRST draw if any of the three turn it on. UNRANKED beta - no rating yet, but every game "
+                  "is recorded. 500 XP a game (750 on a win), 40g/20g series."),
     },
 ]
 
@@ -3290,13 +3354,81 @@ def _pair_series(s):
     return aa, bb
 
 
+def _ffa_point_series(timeline, players):
+    """Port of ParseFfaTimeline (plugin/NativeUI.cs) for the /game PNG.
+
+    The FFA timeline is one comma-separated token per HALF POINT, shaped
+    `slot[R][G]` — leading digits are the winning slot, an `R` means that half
+    converted into a full point (which resets everyone's live halves), `G`
+    means it also won the game. Score at any instant is
+    `full_points + live_halves * 0.5`, exactly as the in-game hover graph
+    draws it. Returns [(name, values, linestyle, palette_index), ...] with the
+    palette index taken from the player's SLOT so the colour matches the
+    in-game graph and the score dots.
+    """
+    if not timeline or not players:
+        return []
+    tokens = [t for t in str(timeline).split(",") if t.strip()]
+    if not tokens:
+        return []
+    n = len(players)
+    slot_to_line = {}
+    for i, p in enumerate(players):
+        s = p.get("slot")
+        slot_to_line[i if s is None else int(s)] = i
+    full = [0] * n
+    live = [0] * n
+    values = [[0.0] for _ in range(n)]
+    events = 0
+    for tok in tokens:
+        # Match ParseFfaTimeline byte for byte: it skips only SPACE and TAB
+        # (not \n or \r), and it accumulates only ASCII digits. `.strip()` plus
+        # `str.isdigit()` would both be more permissive, so a token like
+        # "\n0R" would score a point here and be discarded in-game — the two
+        # graphs would disagree. Our own writer never emits whitespace, so this
+        # is defensive, but the two parsers must not be allowed to drift.
+        t = tok.lstrip(" \t")
+        digits = ""
+        for ch in t:
+            if "0" <= ch <= "9":
+                digits += ch
+            else:
+                break
+        if not digits:
+            continue
+        line = slot_to_line.get(int(digits))
+        if line is None:
+            continue
+        live[line] += 1
+        if "R" in t[len(digits):]:
+            full[line] += 1
+            live = [0] * n
+        events += 1
+        for i in range(n):
+            values[i].append(full[i] + live[i] * 0.5)
+    if events == 0:
+        return []
+    out = []
+    for i, p in enumerate(players):
+        s = p.get("slot")
+        out.append((str(p.get("name") or "?")[:14], values[i], "-",
+                    i if s is None else int(s)))
+    return out
+
+
 def _render_game_detail_png_locked(game):
     """Stacked panels for whatever series the game actually recorded:
     score progression, FPS, ping, shots fired-vs-hit, dmg-vs-blocks.
     1v1 = two players; 2v2 = up to four (from telemetry_by_player fields the
     by-code endpoint flattens onto each player). Returns BytesIO or None."""
     players = game.get("players") or []
-    palette = ["#00B0F4", "#ED4245", "#57F287", "#FAA61A"]
+    # 10 wide because an FFA game has up to 10 series (bug #118 — the in-game
+    # graph used the 4-entry vanilla skin bank and wrapped, so slot 0 and slot
+    # 4 drew in the IDENTICAL colour). MUST stay in sync with
+    # FFA_SLOT_PALETTE in plugin/NativeUI.cs — same order, same hexes, so the
+    # Discord PNG and the in-game hover graph key a player to the same colour.
+    palette = ["#FFC43D", "#4FA8FF", "#FF5C7A", "#DCE3EC", "#46E07C",
+               "#C48CFF", "#26D8D2", "#FF7BE0", "#FF8A3D", "#C8FF66"]
     panels = []
 
     # Series tuples carry an EXPLICIT palette index (review [11]) — the color
@@ -3314,6 +3446,10 @@ def _render_game_detail_png_locked(game):
             panels.append(("Score progression (rounds)",
                            [(n1, [v / 2.0 for v in [0] + a], "-", 0),
                             (n2, [v / 2.0 for v in [0] + b], "-", 1)], None))
+    elif game.get("mode") == "ffa" and game.get("timeline"):
+        ffa_series = _ffa_point_series(game["timeline"], players)
+        if ffa_series:
+            panels.append(("Score progression (points)", ffa_series, None))
     fps_series = [(p["name"][:14], _csv_ints(p.get("fps_timeline")), "-", pi)
                   for pi, p in enumerate(players) if _csv_ints(p.get("fps_timeline"))]
     if fps_series:
@@ -3388,8 +3524,8 @@ def _render_game_detail_png_locked(game):
 async def cmd_game(ctx, code: str):
     """July 22 item 6: full per-game breakdown for any recorded game — score
     history, hit/block, FPS/ping graphs, cards, rewards — for all players in
-    it. Works for 1v1 (full telemetry), 2v2 (per-player telemetry rows) and
-    1v2 (score + cards + rewards)."""
+    it. Works for 1v1 (full telemetry), 2v2 (per-player telemetry rows),
+    1v2 (score + cards + rewards) and FFA (placements + full telemetry)."""
     norm = "".join(c for c in (code or "").lower() if c in "0123456789abcdef")
     if len(norm) not in (12, 32):
         await ctx.send("❌ That doesn't look like a game code — copy it with the ID button next to a game in the F5 menu.")
@@ -3402,7 +3538,10 @@ async def cmd_game(ctx, code: str):
 
     mode = game.get("mode", "1v1")
     label = {"1v1": "1v1 " + ("Ranked" if game.get("is_ranked") else "Casual"),
-             "2v2": "2v2 Ranked", "1v2": "1v2 (unranked beta)"}.get(mode, mode)
+             "2v2": "2v2 Ranked", "1v2": "1v2 (unranked beta)",
+             "ffa": f"FFA {'Ranked' if game.get('is_ranked') else 'Casual'} "
+                    f"({game.get('player_count') or len(game.get('players') or [])} players)",
+             }.get(mode, mode)
     when = (game.get("ended_at") or "")[:10]
     dur = game.get("duration_seconds") or 0
     players = game.get("players") or []
@@ -3411,10 +3550,17 @@ async def cmd_game(ctx, code: str):
         score = f"{players[0]['rounds_won']}-{players[1]['rounds_won']}" if len(players) == 2 else "?"
     elif mode == "2v2":
         score = f"{game.get('t1_rounds_won', '?')}-{game.get('t2_rounds_won', '?')}"
-    else:
+    elif mode == "ffa":
+        # An FFA result is a placement list, not a scoreline — the per-player
+        # fields below carry it. (Explicit branch so a future mode can't
+        # inherit the 1v2 "solo ? - duo ?" fallback.)
+        score = None
+    elif mode == "1v2":
         score = f"solo {game.get('solo_rounds_won', '?')} - duo {game.get('duo_rounds_won', '?')}"
+    else:
+        score = None
 
-    desc = f"**{label}** · {when} · score **{score}**"
+    desc = f"**{label}** · {when}" + (f" · score **{score}**" if score else "")
     if dur:
         desc += f" · {dur // 60}:{dur % 60:02d}"
     if game.get("series_status"):
@@ -3426,12 +3572,24 @@ async def cmd_game(ctx, code: str):
 
     for p in players:
         won = p.get("won")
-        head = f"{'🏆 ' if won else ''}{p['name']}"
+        if mode == "ffa":
+            # Mirror log_ffa_match_result's rendering so the /game embed and
+            # the series-log channel post describe a placement the same way.
+            pl = p.get("placement") or 0
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(pl, f"#{pl}")
+            head = f"{medal} {p['name']}"
+            if p.get("left_early"):
+                head += "  *(left)*"
+        else:
+            head = f"{'🏆 ' if won else ''}{p['name']}"
         if mode == "2v2":
             head += f"  (team {p.get('team')})"
         elif mode == "1v2":
             head += f"  ({p.get('side')})"
         lines = []
+        if mode == "ffa":
+            lines.append(f"{p.get('rounds_won', 0)} pts · {p.get('points_total', 0)} half-pts"
+                         f" · {p.get('kills', 0)} kills")
         bf, bh = p.get("bullets_fired"), p.get("bullets_hit")
         ba, bs = p.get("blocks_activated"), p.get("blocks_successful")
         if bf or ba:
@@ -3454,7 +3612,10 @@ async def cmd_game(ctx, code: str):
             rewards.append(f"+{p['gold_earned']} g (series)")
         rc = p.get("rating_change")
         if rc is not None:
-            rewards.append(f"{'+' if rc >= 0 else ''}{rc:.1f} elo (series)")
+            # FFA rates every game individually; the other modes only move
+            # rating on series completion.
+            rewards.append(f"{'+' if rc >= 0 else ''}{rc:.1f} elo"
+                           + ("" if mode == "ffa" else " (series)"))
         if rewards:
             lines.append(" · ".join(rewards))
         cards = p.get("cards") or []

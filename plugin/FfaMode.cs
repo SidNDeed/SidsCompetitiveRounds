@@ -255,6 +255,73 @@ namespace CompetitiveRounds
             catch { return ""; }
         }
 
+        // ── Spawn grace (bug #119) ─────────────────────────────────────────
+        // "Some people don't get to spawn and react before being shot in FFA,
+        // can we give a 1 second moment when you spawn in where you can't
+        // shoot (just for FFA)."
+        //
+        // NO-FIRE, not invulnerability. Every client gates its own player, and
+        // Gun.FireBurst only spawns a projectile under CheckIsMine() — so a
+        // blocked shot never exists on ANY client and there is no desync
+        // surface. Invulnerability would have to be suppressed identically in
+        // HealthHandler.TakeDamage on every client AND still wouldn't stop
+        // knockback, so an "invulnerable" player could still be launched out
+        // of bounds.
+        //
+        // Armed at the rising edge of the LOCAL player's isPlaying+simulated,
+        // which is the instant vanilla hands control back at the END of
+        // PlayerManager.Move (~0.93s, measured). Deliberately NOT armed at
+        // `battleOngoing = true`: this engine sets that 0.6-0.9s EARLIER,
+        // while players are still being flown to their spawn points and
+        // physically cannot fire, so a window anchored there would deliver
+        // ~0.37s of protection per round and ~0.07s on game 1.
+        public const float SpawnGraceSeconds = 1.0f;
+        private static float spawnGraceUntil = 0f;
+        private static bool lastLocalPlaying = false;
+
+        /// <summary>True while the FFA post-spawn no-fire window is open.</summary>
+        public static bool SpawnGraceActive =>
+            spawnGraceUntil > 0f && Time.realtimeSinceStartup < spawnGraceUntil && EngineActive();
+
+        public static float SpawnGraceLeft =>
+            SpawnGraceActive ? Mathf.Max(0f, spawnGraceUntil - Time.realtimeSinceStartup) : 0f;
+
+        /// <summary>Per-frame edge detector. realtimeSinceStartup is monotonic
+        /// and timescale-independent, so the window expires even in slow motion
+        /// (#221), even if the transition coroutine is killed by a leaver
+        /// (#222), and even if the round ends inside it — there is no state to
+        /// tear down and no way to strand a player unable to shoot.</summary>
+        public static void TickSpawnGrace()
+        {
+            try
+            {
+                if (!EngineActive()) { lastLocalPlaying = false; return; }
+                bool playing = false;
+                var pm = PlayerManager.instance;
+                if (pm?.players != null)
+                {
+                    foreach (var po in pm.players)
+                    {
+                        if (po == null || po.gameObject == null) continue;
+                        if (po.data?.view == null || !po.data.view.IsMine) continue;
+                        playing = po.data.isPlaying && po.data.playerVel != null
+                                  && po.data.playerVel.simulated;
+                        break;
+                    }
+                }
+                if (playing && !lastLocalPlaying)
+                    spawnGraceUntil = Time.realtimeSinceStartup + SpawnGraceSeconds;
+                lastLocalPlaying = playing;
+            }
+            catch { }
+        }
+
+        private static void ClearSpawnGrace()
+        {
+            spawnGraceUntil = 0f;
+            lastLocalPlaying = false;
+        }
+
         // ── Lifecycle ──
 
         /// <summary>New game in the room (game 1 AND rematches — invoked from
@@ -281,6 +348,7 @@ namespace CompetitiveRounds
             isTransitioning = false;
             pointLatched = false;
             gameOverFired = false;
+            ClearSpawnGrace();
             freshGameCancelFired = false;
             deckViewRebuilds.Clear();
             matchStartRealtime = Time.realtimeSinceStartup;
@@ -319,6 +387,8 @@ namespace CompetitiveRounds
             pickDeadlineRealtime = 0f;
             localPickOpen = false;
             try { FfaMapScale.Reset(); } catch { }
+            try { FfaSpawnPoints.Clear(); } catch { }
+            ClearSpawnGrace();
         }
 
         /// <summary>Capture a leaver's tallies before Photon destroys their
@@ -1885,6 +1955,45 @@ namespace CompetitiveRounds
                 bestDist = d; best = p;
             }
             return best;
+        }
+    }
+
+    /// <summary>
+    /// Bug #119: enforce the FFA post-spawn no-fire window.
+    ///
+    /// WeaponHandler is on the PLAYER root (WeaponHandler.Awake does
+    /// data = GetComponent&lt;CharacterData&gt;()), so ownership resolves cleanly
+    /// here. Do NOT copy the idiom from the F5 gun block in Plugin.cs: that
+    /// one calls Gun.GetComponentInParent&lt;PhotonView&gt;(), which is ALWAYS null
+    /// because Holding.Awake instantiates the holdable unparented - that patch
+    /// has never fired in any mode.
+    ///
+    /// Owner-only is both sufficient and complete: Gun.FireBurst only spawns a
+    /// projectile under CheckIsMine(), so a blocked owner shot never exists
+    /// anywhere. Card-driven forceAttack calls bypass WeaponHandler.Attack
+    /// entirely and are deliberately left alone - they need a trigger (a block,
+    /// a hit) that cannot occur inside a no-fire window anyway.
+    /// </summary>
+    [HarmonyPatch(typeof(WeaponHandler), "Attack")]
+    internal class WeaponHandler_FfaSpawnGrace_Patch
+    {
+        private static float lastDenyLog = -999f;
+
+        static bool Prefix(WeaponHandler __instance)
+        {
+            try
+            {
+                if (!FfaMode.SpawnGraceActive) return true;
+                var data = __instance != null ? __instance.GetComponent<CharacterData>() : null;
+                if (data == null || data.view == null || !data.view.IsMine) return true;
+                if (Time.realtimeSinceStartup - lastDenyLog > 1f)
+                {
+                    lastDenyLog = Time.realtimeSinceStartup;
+                    Plugin.Log.LogInfo($"[FFA-GRACE] fire suppressed ({FfaMode.SpawnGraceLeft:F2}s left)");
+                }
+                return false;
+            }
+            catch { return true; }   // fail OPEN - never strand a player unable to shoot
         }
     }
 

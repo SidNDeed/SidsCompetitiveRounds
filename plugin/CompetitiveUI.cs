@@ -463,6 +463,18 @@ namespace CompetitiveRounds
         {
             if (!active)
             {
+                // Bug #119: outside the pick phase this banner slot carries the
+                // spawn grace cue, so players can see WHY the trigger is dead
+                // for the first second of a round rather than reading it as a
+                // hitch. Non-local styling (dim grey) - it is information, not
+                // a call to act.
+                if (FfaMode.SpawnGraceActive)
+                {
+                    ffaPickBannerLocal = false;
+                    ffaPickBannerSeconds = -1;
+                    ffaPickBannerText = "GET READY - hold fire";
+                    return;
+                }
                 ffaPickBannerText = "";
                 ffaPickBannerSeconds = -1;
                 return;
@@ -1799,6 +1811,48 @@ namespace CompetitiveRounds
         private static Vector2 bugAdminListScroll, bugAdminDetailScroll;
         private static bool bugAdminLoading = false;
         private static GUIStyle bugAdminRowStyle, bugAdminDetailStyle, bugAdminTabStyle, bugAdminTabActiveStyle;
+        // richText = FALSE: an attached game log contains real rich-text tags
+        // and tag-shaped stack frames, so it must be drawn verbatim (#115).
+        private static GUIStyle bugAdminLogStyle;
+        // Measured chunk layout, recomputed only when the selected report, its
+        // log, or the pane width changes.
+        private static List<string> bugAdminLogChunks;
+        private static List<float> bugAdminLogHeights;
+        private static float bugAdminLogTotalH, bugAdminMetaH, bugAdminLayoutW = -1f;
+        private static string bugAdminLayoutKey = null;
+
+        private static void EnsureBugLogLayout(string reportId, string meta, string log, float width)
+        {
+            string key = (reportId ?? "") + "|" + (meta == null ? 0 : meta.Length)
+                         + "|" + (log == null ? 0 : log.Length);
+            if (key == bugAdminLayoutKey && Mathf.Approximately(width, bugAdminLayoutW)) return;
+            bugAdminLayoutKey = key;
+            bugAdminLayoutW = width;
+            bugAdminLogChunks = new List<string>();
+            bugAdminLogHeights = new List<float>();
+            bugAdminLogTotalH = 0f;
+            try
+            {
+                bugAdminMetaH = bugAdminDetailStyle.CalcHeight(new GUIContent(meta ?? ""), width) + 8f;
+                if (!string.IsNullOrEmpty(log))
+                {
+                    const int LOG_CHUNK = 12_000;
+                    for (int start = 0; start < log.Length; start += LOG_CHUNK)
+                    {
+                        string piece = log.Substring(start, Math.Min(LOG_CHUNK, log.Length - start));
+                        float h = bugAdminLogStyle.CalcHeight(new GUIContent(piece), width);
+                        bugAdminLogChunks.Add(piece);
+                        bugAdminLogHeights.Add(h);
+                        bugAdminLogTotalH += h;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[BUG-ADMIN] log layout: {ex.Message}");
+                bugAdminMetaH = 400f;
+            }
+        }
         private static string bugAdminCommentDraft = "";
         private static int bugAdminStatusIdx = 0;
         private static string bugAdminActionStatus = "";
@@ -1829,6 +1883,7 @@ namespace CompetitiveRounds
             {
                 bugAdminRowStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, richText = true, wordWrap = false };
                 bugAdminDetailStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, richText = true, wordWrap = true, alignment = TextAnchor.UpperLeft };
+                bugAdminLogStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, richText = false, wordWrap = true, alignment = TextAnchor.UpperLeft };
                 bugAdminTabStyle = new GUIStyle(GUI.skin.button) { fontSize = 12 };
                 bugAdminTabActiveStyle = new GUIStyle(GUI.skin.button)
                 {
@@ -1846,6 +1901,12 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(x - 10, y - 10, w + 20, h + 20), Texture2D.whiteTexture,
                             ScaleMode.StretchToFill, true, 0, new Color(0.05f, 0.06f, 0.08f, 0.98f), 0, 0);
 
+            // #115 companion: bugTitleStyle is created by EnsureBugStyles(),
+            // whose only other caller is the SUBMIT modal — so opening this
+            // viewer without having filed a report first left it null and the
+            // fallback GUI.skin.label (richText defaults to FALSE) rendered the
+            // title as the literal text "<b>Bug Reports</b>".
+            try { EnsureBugStyles(); } catch { }
             GUI.Label(new Rect(x, y, w, 24), "<b>Bug Reports</b>", bugTitleStyle ?? GUI.skin.label);
             if (GUI.Button(new Rect(x + w - 100, y, 100, 26), "Close")) { bugAdminOpen = false; return; }
             if (GUI.Button(new Rect(x + w - 210, y, 100, 26), "Refresh"))
@@ -2027,21 +2088,35 @@ namespace CompetitiveRounds
                         sbDet.AppendLine($"  <color=#888>{ts}</color> <b>{who}:</b> {e.comment ?? ""}");
                 }
             }
+            // Bug #115: the attached log is drawn SEPARATELY, below, in a
+            // richText=FALSE style — it is never concatenated into this
+            // rich-text label. Two independent reasons:
+            //  1. A raw game log is hostile input for rich text. It is full of
+            //     real tags (our own nametag publishes emit <b><i><color=...>)
+            //     and tag-shaped stack frames (<4ed2dee7...>), so rendering it
+            //     as rich text mangles the log even when it "works" — and
+            //     concatenating ~400k characters of it into one GUI.Label is
+            //     what made the whole pane render its tags verbatim.
+            //  2. It keeps this label a few hundred characters, which is the
+            //     only structural difference between this pane and the report
+            //     LIST pane that has always rendered its colours correctly.
+            string logBody = null;
+            string logHeader = null;
             if (!string.IsNullOrEmpty(d.log_text))
             {
-                sbDet.AppendLine();
                 int fullLen = d.log_text.Length;
-                const int DISPLAY_CAP = 400_000;
-                string log = d.log_text;
+                const int DISPLAY_CAP = 200_000;
+                logBody = d.log_text;
                 string truncNote = "";
-                if (log.Length > DISPLAY_CAP)
+                if (logBody.Length > DISPLAY_CAP)
                 {
-                    log = "[... earlier content trimmed for display - see ssh bug-log:" + d.bug_number + " for full ...]\n"
-                          + log.Substring(log.Length - DISPLAY_CAP);
+                    logBody = "[... earlier content trimmed for display - see ssh bug-log:" + d.bug_number + " for full ...]\n"
+                              + logBody.Substring(logBody.Length - DISPLAY_CAP);
                     truncNote = $" — <color=#FFCC66>showing last {DISPLAY_CAP:N0} of {fullLen:N0} chars</color>";
                 }
-                sbDet.AppendLine($"<b><color=#88CCFF>Attached log ({d.log_bytes:N0} bytes gzipped on disk, {fullLen:N0} chars decoded){truncNote}:</color></b>");
-                sbDet.AppendLine(log);
+                sbDet.AppendLine();
+                logHeader = $"<b><color=#88CCFF>Attached log ({d.log_bytes:N0} bytes gzipped on disk, {fullLen:N0} chars decoded){truncNote}:</color></b>";
+                sbDet.AppendLine(logHeader);
             }
 
             string body = sbDet.ToString();
@@ -2049,11 +2124,35 @@ namespace CompetitiveRounds
             float commentRowH = 96;      // reserved at bottom for comment input
             float scrollH = bodyH - (scrollTop - bodyY) - commentRowH - 8;
             float bw = detailW - 24;
-            float bh = Mathf.Max(scrollH, body.Length / 90f * 14f + 80f);
+            float labelW = bw - 12;
+            // The log is split across several labels of LOG_CHUNK characters
+            // each so no single IMGUI label ever carries a mesh-breaking string
+            // (the previous single 400k-char label is what broke this pane).
+            //
+            // Heights are MEASURED, not estimated. A chars-per-line guess is
+            // wrong by 2-3x on real attachments — sampled bug logs average
+            // 39-81 characters per line, not the ~90 an eyeballed constant
+            // assumes — and an undersized rect makes each chunk overpaint the
+            // one below it. CalcHeight is exact and also accounts for wrapping;
+            // it is cached per report because it is far too expensive to run
+            // over ~200k characters on every IMGUI event (#162).
+            EnsureBugLogLayout(d.id, body, logBody, labelW);
+            float metaH = bugAdminMetaH;
+            float bh = Mathf.Max(scrollH, bugAdminLogTotalH + metaH + 40f);
             bugAdminDetailScroll = GUI.BeginScrollView(new Rect(detailX + 8, scrollTop, detailW - 12, scrollH),
                                                         bugAdminDetailScroll,
-                                                        new Rect(0, 0, bw - 12, bh));
-            GUI.Label(new Rect(4, 4, bw - 12, bh - 8), body, bugAdminDetailStyle);
+                                                        new Rect(0, 0, labelW, bh));
+            GUI.Label(new Rect(4, 4, labelW, metaH), body, bugAdminDetailStyle);
+            if (bugAdminLogChunks != null)
+            {
+                float ly = 4 + metaH;
+                for (int ci = 0; ci < bugAdminLogChunks.Count; ci++)
+                {
+                    GUI.Label(new Rect(4, ly, labelW, bugAdminLogHeights[ci]),
+                              bugAdminLogChunks[ci], bugAdminLogStyle);
+                    ly += bugAdminLogHeights[ci];
+                }
+            }
             GUI.EndScrollView();
 
             // Comment input + submit at the bottom.
