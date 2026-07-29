@@ -5052,7 +5052,56 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning("[1v2] Leaving state stuck past timeout -- recovered");
                 NativeUI.MarkDirty();
             }
+            // FFA was the ONE mode with no stuck-Leaving recovery, and it is the
+            // one that stranded four players: FfaLeaveQueue tears local state
+            // down before its request is even sent, so a lost leave left the
+            // client believing it was idle while the server still held a
+            // ready_join row that blocked every queue in every mode.
+            if (FfaQueueStatus == "leaving" && now - _ffaLeavingSince > LEAVE_STUCK_TIMEOUT)
+            {
+                ffaGen++;
+                FfaQueueStatus = "";
+                Plugin.Log.LogWarning("[FFA] Leaving state stuck past timeout -- recovered");
+                NativeUI.MarkDirty();
+            }
+            // Re-arm the poll when we hold a lobby but are NOT in a room.
+            //
+            // This is the root fix. The client disarms polling the instant a
+            // lobby locks, which is why the server's sitting-over self-heal
+            // ("every member polled within 90s") could never fire for a
+            // dispersed lobby - it was dead code for exactly the population it
+            // was written for. Resuming the poll while locked-but-roomless
+            // makes that heal reachable with its intended meaning: everyone is
+            // back at the menu, so the sitting really is over. It also gives the
+            // client its own escape, because the poll is what discovers that the
+            // lobby has been closed.
+            //
+            // Gated on OfflineMode so leaving Sandbox (which lingers InRoom at
+            // the menu, #122) does not look like a live game.
+            if (!string.IsNullOrEmpty(ActiveFfaLobbyId) && !IsFfaQueuePolling
+                && FfaQueueStatus != "leaving")
+            {
+                bool inRoom = false;
+                try { inRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+                if (!inRoom)
+                {
+                    if (_ffaRoomlessSince < 0f) _ffaRoomlessSince = now;
+                    // 20s of grace: the gap between the lock and actually being
+                    // in the Photon room is legitimately roomless, and re-arming
+                    // inside it would make the server think we had given up.
+                    if (now - _ffaRoomlessSince > 20f)
+                    {
+                        Plugin.Log.LogInfo("[FFA] holding a lobby but not in a room -- resuming queue poll so the server can free us");
+                        IsFfaQueuePolling = true;
+                        _ffaRoomlessSince = -1f;
+                    }
+                }
+                else _ffaRoomlessSince = -1f;
+            }
+            else _ffaRoomlessSince = -1f;
         }
+
+        private static float _ffaRoomlessSince = -1f;
 
         public static void JoinQueue(string steamId, string displayName, string region, bool rankedOnly)
         {
@@ -8085,7 +8134,13 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo("[FFA] Left FFA queue");
                     else
                     {
-                        Plugin.Log.LogWarning($"[FFA] Leave failed after retries: {resp} — server will prune the stale row");
+                        // Was "server will prune the stale row" - which was false:
+                        // nothing freed a ready_join row inside 30 minutes, and
+                        // the player's own requeue attempts pushed even that out.
+                        // The poll re-arm in TickLeaveRecovery is what recovers
+                        // this now, so say something true.
+                        Plugin.Log.LogWarning($"[FFA] Leave failed after retries: {resp} — re-arming the poll to recover");
+                        IsFfaQueuePolling = !string.IsNullOrEmpty(ActiveFfaLobbyId);
                         CompetitiveUI.ShowNotification("Couldn't confirm FFA queue leave — the server will clear you shortly.", new Color(1f, 0.6f, 0.2f), 5f);
                     }
                     if (FfaQueueStatus == "leaving") FfaQueueStatus = "";

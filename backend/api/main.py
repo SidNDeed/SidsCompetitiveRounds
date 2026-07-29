@@ -863,6 +863,66 @@ async def queue_cleanup_loop():
                             )"""),
                         {"lids": ffa_dead_ids},
                     )
+                # ── ready_join backstop (the "stuck in the queue" incident) ──
+                # A ready_join row makes _locked_in_other_queue treat the player
+                # as mid-match, so they cannot join ANY queue in ANY mode. The
+                # in-poll sitting-over heal CANNOT rescue them: the client sets
+                # IsFfaQueuePolling = false the instant a lobby locks
+                # (ApiClient.cs), so "every member polled within 90s" is
+                # unreachable for a dispersed lobby and that branch is dead code
+                # for the exact population it was written for. This is the
+                # correction to learning #233.
+                #
+                # So the backstop must be driven by state the SERVER owns, with
+                # no cooperation from the stuck client at all: how long since
+                # this lobby last produced a game.
+                #
+                # The threshold has to exceed the longest LEGITIMATE gap between
+                # reports, or it cancels live sittings. An FFA game is a
+                # first-to-5 and production 5-player games ran 12-19 minutes,
+                # with game 1 anchored on the lock (no prior report to measure
+                # from) - so anything under ~20 minutes would kill a slow game 1
+                # mid-play. 25 minutes is the smallest safe value; do not lower
+                # it without re-measuring ffa_matches.duration_seconds.
+                ffa_dispersed = await db.execute(
+                    text("""UPDATE ffa_lobbies l
+                        SET status = 'completed', completed_at = NOW()
+                        WHERE l.status = 'active'
+                          AND COALESCE(
+                                (SELECT MAX(m.ended_at) FROM ffa_matches m
+                                  WHERE m.lobby_id = l.id),
+                                l.created_at
+                              ) < NOW() - INTERVAL '25 minutes'
+                        RETURNING l.id"""))
+                for r in ffa_dispersed.fetchall():
+                    print(f"[FFA-CLEANUP] Dispersed lobby closed (no game in 25m): {r[0]}")
+
+                # Fast path for the whole lobby having quit ROUNDS: the presence
+                # ping is always-on and fires every 60s from a RUNNING client
+                # (in-game or at the menu), so "not one member has pinged in 3
+                # minutes" means nobody is running the mod - there is no game to
+                # protect. 6 minutes of lock age keeps a normal assembly, which
+                # legitimately has a quiet gap while everyone loads, out of it.
+                quiet = (await db.execute(text("""
+                    SELECT l.id, ARRAY(SELECT q2.steam_id FROM ffa_queue q2
+                                        WHERE q2.series_id = l.id) AS sids
+                      FROM ffa_lobbies l
+                     WHERE l.status = 'active'
+                       AND l.created_at < NOW() - INTERVAL '6 minutes'
+                       AND COALESCE(
+                             (SELECT MAX(m.ended_at) FROM ffa_matches m
+                               WHERE m.lobby_id = l.id), l.created_at
+                           ) < NOW() - INTERVAL '6 minutes'
+                """))).mappings().all()
+                for qrow in quiet:
+                    sids = [x for x in (qrow["sids"] or []) if x]
+                    if not sids or any(_presence_is_online(x) for x in sids):
+                        continue     # somebody is still running the mod - leave it
+                    await db.execute(text(
+                        "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
+                        " WHERE id=:lid AND status='active'"), {"lid": qrow["id"]})
+                    print(f"[FFA-CLEANUP] Abandoned lobby closed (nobody online): {qrow['id']}")
+
                 ffa_done = await db.execute(
                     text("""UPDATE ffa_lobbies l
                         SET status = 'completed', completed_at = NOW()
@@ -875,6 +935,22 @@ async def queue_cleanup_loop():
                         RETURNING l.id"""))
                 for r in ffa_done.fetchall():
                     print(f"[FFA-CLEANUP] Played-out lobby closed: {r[0]}")
+                # Free every row pointing at a lobby that is no longer active.
+                # This is what actually un-sticks the player: closing the lobby
+                # alone leaves the ready_join row, and it is the ROW that blocks
+                # them from joining another queue.
+                freed = await db.execute(text("""
+                    DELETE FROM ffa_queue
+                     WHERE player_id IN (
+                        SELECT q.player_id FROM ffa_queue q
+                          JOIN ffa_lobbies l ON l.id = q.series_id
+                         WHERE q.status <> 'searching' AND l.status <> 'active'
+                         FOR UPDATE OF q SKIP LOCKED
+                     )
+                    RETURNING steam_id"""))
+                for r in freed.fetchall():
+                    print(f"[FFA-CLEANUP] Freed stranded queue row: {r[0]}")
+
                 ffa_husks = await db.execute(
                     text("""DELETE FROM ffa_queue
                         WHERE player_id IN (
@@ -3090,7 +3166,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                         print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
                 # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
                 if winner_steam:
-                    streak = await get_ranked_streak(winner_steam)
+                    streak = await get_ranked_streak(db, winner_steam)
                     granted_streak = False
                     if streak >= 25:
                         granted_streak |= await _grant_achievement_inline(db, series.winner_id, "on_fire")
@@ -6924,6 +7000,44 @@ async def get_player_by_discord(discord_id: str, db: AsyncSession = Depends(get_
     }
 
 
+async def get_ranked_streak(db: AsyncSession, steam_id: str) -> int:
+    """Current ranked series streak: positive = wins, negative = losses.
+
+    MODULE scope, not nested. This lived inside get_recent_series and was ALSO
+    called from submit_match's achievement block, where the name simply does not
+    exist - so every streak-achievement grant since v1.30.0 has died on
+    `NameError: name 'get_ranked_streak' is not defined`, caught and logged as
+    "Slayer auto-grant error". on_fire and its 25/50/100 tiers have never been
+    awarded to anyone. Third occurrence of learning #135 (a function-local name
+    referenced from another function); the general rule is that anything called
+    from more than one place belongs at module scope, and `db` is a parameter
+    rather than a closure capture for exactly that reason.
+    """
+    p = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if not p:
+        return 0
+    # No LIMIT: the loop below breaks at the first series the player didn't win,
+    # so it only walks the actual streak. A prior LIMIT 20 capped every displayed
+    # streak at 20 (bug #17). winner_id-only rows make a full scan cheap.
+    streak_rows = (await db.execute(text("""
+        SELECT rs.winner_id
+        FROM ranked_series rs
+        WHERE rs.status = 'completed'
+          AND (rs.player1_id = :pid OR rs.player2_id = :pid)
+        ORDER BY rs.completed_at DESC
+    """), {"pid": p.id})).mappings().all()
+    if not streak_rows:
+        return 0
+    first_won = (streak_rows[0]["winner_id"] == p.id)
+    count = 0
+    for sr in streak_rows:
+        if (sr["winner_id"] == p.id) == first_won:
+            count += 1
+        else:
+            break
+    return count if first_won else -count
+
+
 @app.get("/api/v1/series/recent", tags=["Discord", "Series"])
 async def get_recent_series(
     minutes: int = Query(2, ge=1, le=43200),
@@ -6981,33 +7095,6 @@ async def get_recent_series(
     rows = (await db.execute(query, {"cutoff": cutoff, "limit": limit})).mappings().all()
 
     # Compute streaks for each player
-    async def get_ranked_streak(steam_id):
-        """Get current ranked win/loss streak."""
-        p = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
-        if not p:
-            return 0
-        # No LIMIT: the loop below breaks at the first series the player didn't win,
-        # so it only walks the actual streak. A prior LIMIT 20 capped every displayed
-        # streak at 20 (bug #17). winner_id-only rows make a full scan cheap.
-        streak_q = text("""
-            SELECT rs.winner_id
-            FROM ranked_series rs
-            WHERE rs.status = 'completed'
-              AND (rs.player1_id = :pid OR rs.player2_id = :pid)
-            ORDER BY rs.completed_at DESC
-        """)
-        streak_rows = (await db.execute(streak_q, {"pid": p.id})).mappings().all()
-        if not streak_rows:
-            return 0
-        first_won = (streak_rows[0]["winner_id"] == p.id)
-        count = 0
-        for sr in streak_rows:
-            if (sr["winner_id"] == p.id) == first_won:
-                count += 1
-            else:
-                break
-        return count if first_won else -count
-
     # Pull all settled bets for the series in this page in one go (avoids N+1). Joined to
     # bettor + bet-on names so the client can render rows like "AsteRiA bet 500g on Sid → +505g".
     series_ids = [row["series_id"] for row in rows]
@@ -7045,8 +7132,8 @@ async def get_recent_series(
 
     series_list = []
     for row in rows:
-        p1_streak = await get_ranked_streak(row["p1_steam_id"])
-        p2_streak = await get_ranked_streak(row["p2_steam_id"])
+        p1_streak = await get_ranked_streak(db, row["p1_steam_id"])
+        p2_streak = await get_ranked_streak(db, row["p2_steam_id"])
 
         series_list.append({
             "series_id": row["series_id"],
