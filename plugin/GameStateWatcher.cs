@@ -2592,7 +2592,15 @@ namespace CompetitiveRounds
                 if (steamId.m_SteamID != 0)
                 {
                     localSteamId = steamId.m_SteamID.ToString();
-                    localDisplayName = StripRichText(SteamFriends.GetPersonaName());
+                    // Steam is not always ready this early: GetPersonaName can
+                    // return empty (or, once, the id itself) before the Steam
+                    // callbacks have run. Registering with that is how ~19
+                    // players ended up displayed as raw 17-digit ids, and since
+                    // most of them never played again nothing ever healed it.
+                    // Keep the name empty rather than store a placeholder — the
+                    // poller calls this again, so a real name lands shortly.
+                    string persona = StripRichText(SteamFriends.GetPersonaName() ?? "");
+                    if (!IsPlaceholderName(persona, localSteamId)) localDisplayName = persona;
                     MaybeSyncRankedStateOnce();
                     return;
                 }
@@ -2619,14 +2627,41 @@ namespace CompetitiveRounds
         /// to avoid spamming. Called whenever IdentifyLocalPlayer succeeds — covers the race
         /// where Steam's API hadn't returned the ID by the time Plugin.cs ran its startup
         /// sync and skipped the call.</summary>
+        /// <summary>True when a name is missing or is just the Steam ID —
+        /// i.e. nothing worth sending to the server as a display name. Mirrors
+        /// _clean_display_name on the API side, including the 7656119 SteamID64
+        /// prefix check so a player legitimately named with 17 digits is kept.
+        /// </summary>
+        internal static bool IsPlaceholderName(string name, string steamId)
+        {
+            string nm = (name ?? "").Trim();
+            if (nm.Length == 0) return true;
+            if (nm == (steamId ?? "").Trim()) return true;
+            if (nm.Length == 17 && nm.StartsWith("7656119"))
+            {
+                bool allDigits = true;
+                foreach (char c in nm) if (c < '0' || c > '9') { allDigits = false; break; }
+                if (allDigits) return true;
+            }
+            return false;
+        }
+
         private static void MaybeSyncRankedStateOnce()
         {
             if (_rankedSyncSent) return;
             if (string.IsNullOrEmpty(localSteamId) || localSteamId == "unknown") return;
+            // Wait for a real display name before the FIRST server contact.
+            // This call auto-registers the player, so firing it nameless is
+            // precisely what created the raw-Steam-ID rows. IdentifyLocalPlayer
+            // runs from the poller, so this retries on its own; the 30s bound
+            // stops a player whose Steam name genuinely never resolves from
+            // never syncing their ranked preference at all.
+            if (IsPlaceholderName(localDisplayName, localSteamId)
+                && Time.realtimeSinceStartup < 30f) return;
             try
             {
                 bool wanted = Plugin.RankedEnabled != null && Plugin.RankedEnabled.Value;
-                ApiClient.ToggleRanked(localSteamId, wanted);
+                ApiClient.ToggleRanked(localSteamId, wanted, displayName: localDisplayName);
                 _rankedSyncSent = true;
                 Plugin.Log.LogInfo($"[POLL] Initial ranked state synced to server: enabled={wanted}");
             }

@@ -298,6 +298,7 @@ async def on_ready():
     if not poll_github_releases.is_running(): poll_github_releases.start()
     if not poll_live_bets.is_running(): poll_live_bets.start()
     if not poll_team_live_bets.is_running(): poll_team_live_bets.start()
+    if not poll_ffa_live_bets.is_running(): poll_ffa_live_bets.start()
     if not poll_gambler_pings.is_running(): poll_gambler_pings.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
@@ -6837,6 +6838,92 @@ def _format_team_live_bet_embed(s: dict) -> discord.Embed:
 
 # series_id -> message_id for the 2v2 live-bets posts (separate map from 1v1).
 team_live_bet_messages = {}
+
+
+ffa_live_bet_messages = {}
+
+
+def _format_ffa_live_bet_embed(lobby):
+    """Read-only live-odds embed for one FFA lobby, keyed per GAME.
+
+    Deliberately not a bet-placement UI: 10 players x 3 presets would blow past
+    Discord's 25-component cap, so placing an FFA bet from Discord needs a
+    select+modal flow that is its own piece of work. This is the visibility half
+    Sid asked for ("make FFA bets show up in the discord gambler chat").
+    """
+    n = lobby.get("player_count") or len(lobby.get("players") or [])
+    game_no = lobby.get("game_number") or 1
+    locked = False
+    open_ = bool(lobby.get("bets_open"))
+    lines = []
+    for p in lobby.get("players") or []:
+        odds = p.get("odds_multiplier") or 0
+        # escape_markdown: a display name is user-authored, and without it a
+        # name carrying bold markers plus a newline can break out of its span
+        # and forge a convincing state line inside this embed (Codex F7).
+        nm = discord.utils.escape_markdown(str(p.get("display_name") or "?"))
+        lines.append(f"**{nm}** ({p.get('rating')}) — x{odds:.2f}")
+    if locked:
+        state = "🔒 **Bets closed** for this game"
+    elif not open_:
+        state = "⏳ Betting for this game has closed"
+    else:
+        state = "🟢 **Bets open** — in game, F5 → Leaderboard"
+    embed = discord.Embed(
+        title=f"🎯 FFA Game {game_no} — {n} players",
+        description=state + "\n\n" + "\n".join(lines),
+        color=0x8E44AD if not locked else 0x555555,
+    )
+    embed.set_footer(text="Bet in-game: F5 -> Leaderboard")
+    return embed
+
+
+@tasks.loop(seconds=10)
+async def poll_ffa_live_bets():
+    """Post/update one embed per live FFA lobby GAME in the gambler channel.
+
+    Keyed on (lobby_id, game_number) rather than lobby alone, because the bet
+    window genuinely re-opens for every game of a sitting — a new game deserves
+    a new post, not an edit of the finished one. Own guarded loop: a tasks.loop
+    dies permanently on an unhandled exception (#129), so this must not share
+    one with the 1v1/2v2 pollers.
+    """
+    if not LIVE_BETS_CHANNEL_ID:
+        return
+    data = await api_get("/ffa/bettable")
+    if not data:
+        return
+    lobbies = data.get("lobbies") or []
+    channel = bot.get_channel(LIVE_BETS_CHANNEL_ID)
+    if channel is None:
+        try: channel = await bot.fetch_channel(LIVE_BETS_CHANNEL_ID)
+        except Exception: return
+    seen_now = set()
+    for l in lobbies:
+        lid = l.get("lobby_id")
+        if not lid:
+            continue
+        key = (lid, int(l.get("game_number") or 1))
+        seen_now.add(key)
+        embed = _format_ffa_live_bet_embed(l)
+        msg_id = ffa_live_bet_messages.get(key)
+        try:
+            if msg_id is None:
+                msg = await channel.send(embed=embed)
+                ffa_live_bet_messages[key] = msg.id
+            else:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(embed=embed)
+        except discord.NotFound:
+            try:
+                msg = await channel.send(embed=embed)
+                ffa_live_bet_messages[key] = msg.id
+            except Exception as e:
+                print(f"[FFA-LIVE-BETS] re-post failed for {lid}: {e}")
+        except Exception as e:
+            print(f"[FFA-LIVE-BETS] update failed for {lid}: {e}")
+    for key in [k for k in list(ffa_live_bet_messages.keys()) if k not in seen_now]:
+        del ffa_live_bet_messages[key]
 
 
 @tasks.loop(seconds=10)

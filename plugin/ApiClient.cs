@@ -1222,6 +1222,68 @@ namespace CompetitiveRounds
         // Fetches the local player's recent bets so the live-series UI can replace the wager
         // buttons with "You bet 500g on PlayerName" once a bet is placed (server enforces one
         // bet per series per player; this is purely the visible feedback).
+        /// <summary>A rating tier's floor + its LIVE Discord role colour.</summary>
+        public class RankTierEntry
+        {
+            public float floor;
+            public string name;
+            public string color;   // "#RRGGBB"
+        }
+
+        /// <summary>Rank-tier colours for the rating-history graph's benchmark
+        /// lines. Hardcoding them made the graph drift the moment a Discord
+        /// rank role was recoloured; the client now reads the server's live
+        /// values and keeps its compiled palette only as an offline fallback.
+        /// Null until the first successful fetch.</summary>
+        public static List<RankTierEntry> CachedRankTiers = null;
+        private static bool _rankTiersInFlight;
+        private static float _rankTiersAt = -99999f;
+        // Server caches role colours for 5 minutes; re-ask a little slower than
+        // that so a Discord recolour actually reaches a client that stays open
+        // for hours. Without a TTL the cache was fetched once per process and
+        // the advertised propagation never happened (Codex wave-5b finding 6).
+        private const float RANK_TIERS_TTL = 420f;
+
+        public static void FetchRankTiers()
+        {
+            if (_rankTiersInFlight) return;
+            if (CachedRankTiers != null && Time.realtimeSinceStartup - _rankTiersAt < RANK_TIERS_TTL) return;
+            _rankTiersAt = Time.realtimeSinceStartup;
+            _rankTiersInFlight = true;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/rank-tiers",
+                (ok, resp) =>
+                {
+                    _rankTiersInFlight = false;
+                    if (!ok || string.IsNullOrEmpty(resp)) return;
+                    try
+                    {
+                        var list = new List<RankTierEntry>();
+                        int key = resp.IndexOf("\"tiers\":", StringComparison.Ordinal);
+                        int open = key >= 0 ? resp.IndexOf('[', key) : -1;
+                        // String-aware slicing even though every value here is
+                        // server-generated — matching the house style costs
+                        // nothing and this stops being true the day a tier name
+                        // becomes configurable (#156).
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (open < 0 || close <= open) return;
+                        foreach (var chunk in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
+                        {
+                            var t = new RankTierEntry
+                            {
+                                floor = ExtractJsonInt(chunk, "floor"),
+                                name = ExtractJsonString(chunk, "name"),
+                                color = ExtractJsonString(chunk, "color"),
+                            };
+                            if (!string.IsNullOrEmpty(t.name)) list.Add(t);
+                        }
+                        if (list.Count > 0) { CachedRankTiers = list; NativeUI.MarkDirty(); }
+                    }
+                    catch (Exception ex)
+                    { Plugin.Log.LogWarning($"[RANK-TIERS] parse failed: {ex.Message}"); }
+                }));
+        }
+
         public static void FetchMyBets(string steamId)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
@@ -4748,10 +4810,39 @@ namespace CompetitiveRounds
             }));
         }
 
-        public static void ToggleRanked(string steamId, bool enabled, int attempt = 1)
+        public static void ToggleRanked(string steamId, bool enabled, int attempt = 1,
+                                       string displayName = null)
         {
+            // The launch-time ranked sync is the FIRST server contact for a new
+            // install and it auto-registers the player, so it must carry the
+            // display name or the row is created under the raw Steam ID. Not
+            // part of the signed canonical: the signature covers the ACTION
+            // (who toggles what), and adding a mutable field to it would break
+            // every older client's signature for no security gain — the server
+            // treats the name as advisory and cleans it.
+            // EscapeURL, not Escape(): Escape() is the JSON string escaper and
+            // does nothing for URLs, while a display name can legitimately
+            // contain &, #, + or spaces - which would truncate or inject query
+            // parameters. Steam ids and UUIDs elsewhere are digit/hex-only, so
+            // the distinction never bit before this field.
+            // Resolve the name HERE rather than at the call sites. There are five
+            // callers (startup init, the Steam-ready init, the 401 retry, the
+            // consent grant, and the two F5 buttons) and only one of them was
+            // passing a name — including the one that actually registers a
+            // fresh install, so the raw-Steam-ID rows would have kept appearing.
+            // Doing it at the single choke point makes every path correct and
+            // keeps it correct when the sixth caller appears.
+            string nm = displayName;
+            if (string.IsNullOrEmpty(nm))
+            {
+                try { nm = MatchTracker.LocalDisplayName; } catch { nm = null; }
+            }
+            if (GameStateWatcher.IsPlaceholderName(nm, steamId)) nm = null;
+            string nameQ = string.IsNullOrEmpty(nm)
+                ? "" : $"&display_name={UnityEngine.Networking.UnityWebRequest.EscapeURL(nm)}"
+                       + $"&name_sig={ComputeHmacHex($"toggle-ranked-name:{steamId}:{nm}")}";
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/mod/toggle-ranked/{steamId}?enabled={enabled.ToString().ToLower()}&sig={ComputeHmacHex($"toggle-ranked:{steamId}:{enabled.ToString().ToLower()}")}",
+                $"{baseUrl}/api/v1/mod/toggle-ranked/{steamId}?enabled={enabled.ToString().ToLower()}&sig={ComputeHmacHex($"toggle-ranked:{steamId}:{enabled.ToString().ToLower()}")}{nameQ}",
                 "",
                 (success, response) =>
                 {

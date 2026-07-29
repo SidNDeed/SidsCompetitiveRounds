@@ -2568,7 +2568,7 @@ namespace CompetitiveRounds
                 if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
             }
         }
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchActiveSeries();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -7304,24 +7304,50 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             float yPad=range*0.1f;minV-=yPad;maxV+=yPad;range=maxV-minV;
 
             // July 21 item 6: the old green/red YMax/YMin window labels (arbitrary
-            // per-player values) are GONE — fixed rating reference lines below
-            // give every player's graph the same universally-readable scale.
-            // Same colors for everyone: 1500 purple, 1600 tan, 1800 blue,
-            // 2000 green, 2400 red. Only lines inside the current y-range draw.
+            // per-player values) are GONE — fixed rating reference lines give
+            // every player's graph the same universally-readable scale. Only
+            // lines inside the current y-range draw.
             if (useElo)
             {
-                // July 28 rank reorg: the reference lines are the rank-tier
-                // boundaries — 1139 is the TOP of Beginner I (per Sid's spec);
-                // 1500/1675/1980/2330 are the Intermediate/Advanced/Master/GM
-                // floors — colored to match the Discord rank families.
+                // The reference lines are the rank-tier boundaries: 1139 is the
+                // TOP of Beginner I; 1500/1675/1980/2330 are the Intermediate/
+                // Advanced/Master/Grand Master floors.
+                //
+                // Colours come from the SERVER (/rank-tiers), which resolves the
+                // live Discord role colours. They used to be hardcoded here and
+                // drifted the moment a role was recoloured — Sid reported 2330
+                // and 1500 and Beginner all rendering the wrong rank's colour
+                // while 1980 and 1675 happened to still be right, which is the
+                // signature of a stale copy rather than a scrambled mapping.
+                // The literals below are the compiled fallback for an offline
+                // client, refreshed to today's live values.
                 float[] refVals = { 1139f, 1500f, 1675f, 1980f, 2330f };
                 Color[] refCols = {
-                    new Color(0.58f, 0.65f, 0.65f),   // Beginner grey
-                    new Color(0.90f, 0.49f, 0.13f),   // Intermediate orange
-                    new Color(0.20f, 0.60f, 0.86f),   // Advanced blue
-                    new Color(0.18f, 0.80f, 0.44f),   // Master green
-                    new Color(0.95f, 0.77f, 0.06f),   // Grand Master gold
+                    new Color(0.733f, 0.475f, 0.933f),  // Beginner I      #BB79EE
+                    new Color(0.992f, 0.780f, 0.467f),  // Intermediate I  #FDC777
+                    new Color(0.467f, 0.639f, 0.988f),  // Advanced I      #77A3FC
+                    new Color(0.333f, 0.847f, 0.275f),  // Master I        #55D846
+                    new Color(0.957f, 0.529f, 0.663f),  // Grand Master I  #F487A9
                 };
+                // Live colours win when the server has answered. Matched by tier
+                // NAME, not by index or floor: the line POSITIONS are a display
+                // choice owned by this graph (1139 is the top of Beginner I,
+                // where the server reports Beginner's floor as 0), so only the
+                // colour is taken from the server. A tier the server omits or
+                // returns unparseable simply keeps its compiled colour.
+                string[] refTierNames = { "Beginner", "Intermediate", "Advanced", "Master", "Grand Master" };
+                var tiers = ApiClient.CachedRankTiers;
+                if (tiers != null && tiers.Count > 0)
+                {
+                    for (int ti = 0; ti < refTierNames.Length && ti < refCols.Length; ti++)
+                    {
+                        var t = tiers.Find(x => x != null && string.Equals(
+                            x.name, refTierNames[ti], StringComparison.OrdinalIgnoreCase));
+                        if (t == null) continue;
+                        Color c;
+                        if (ColorUtility.TryParseHtmlString(t.color ?? "", out c)) refCols[ti] = c;
+                    }
+                }
                 float lastLabelY = -999f;
                 for (int ri = 0; ri < refVals.Length; ri++)
                 {
@@ -8775,26 +8801,32 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                       .Append(ModeHistoryDate(entry.ended_at)).Append("</color>");
 
                     var participants=entry.participants;
-                    if(participants!=null&&participants.Count>1)
+                    if(participants!=null&&participants.Count>0)
                     {
-                        int selfAt=entry.placement>0&&entry.placement<=participants.Count
-                            ?entry.placement-1:-1;
-                        int otherTotal=participants.Count-(selfAt>=0?1:0);
-                        if(selfAt<0)
+                        // Sid: "player FFA history cuts off some people, can you have the
+                        // names wrapped and tabbed to where the vs thing is?"
+                        //
+                        // Three separate causes of "cuts off": a 4-name cap with a
+                        // "+N more" tail, a 12-char truncation, and — the invisible one —
+                        // the client re-deriving which participant was the viewed player
+                        // and skipping them by INDEX. The server already excludes the
+                        // viewed player from this list (main.py's history query filters
+                        // `p2.steam_id != :sid`), so that arithmetic was dropping a real
+                        // opponent from every row. Do not re-add it.
+                        //
+                        // <indent> sets a persistent left margin that applies at every
+                        // line start until closed, so wrapped continuation lines land
+                        // under the "vs" instead of at the row's left edge. It is a
+                        // percentage so it survives any change to the column width, and
+                        // the closing tag is load-bearing — leaving it open would inherit
+                        // the margin into every following row.
+                        sb.Append("\n<indent=9%>vs ");
+                        for(int p=0;p<participants.Count;p++)
                         {
-                            for(int p=0;p<participants.Count;p++)
-                                if(string.Equals(participants[p],selectedStats?.display_name,
-                                    StringComparison.OrdinalIgnoreCase)){selfAt=p;otherTotal--;break;}
+                            if(p>0)sb.Append(", ");
+                            sb.Append(FfaSafeRich(Trunc(participants[p]??"?",16)));
                         }
-                        int shown=0;
-                        for(int p=0;p<participants.Count&&shown<4;p++)
-                        {
-                            if(p==selfAt)continue;
-                            sb.Append(shown==0?"  vs ":", ");
-                            sb.Append(FfaSafeRich(Trunc(participants[p]??"?",12)));
-                            shown++;
-                        }
-                        if(otherTotal>shown)sb.Append(" +").Append(otherTotal-shown).Append(" more");
+                        sb.Append("</indent>");
                     }
                     sb.Append('\n');
                 }

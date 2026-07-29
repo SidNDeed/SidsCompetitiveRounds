@@ -5012,23 +5012,49 @@ async def check_player_registered(steam_id: str, db: AsyncSession = Depends(get_
 
 
 @app.post("/api/v1/mod/toggle-ranked/{steam_id}", tags=["Mod"])
-async def toggle_ranked(steam_id: str, request: Request, enabled: bool = Query(...), sig: str | None = Query(None), db: AsyncSession = Depends(get_db)):
+async def toggle_ranked(steam_id: str, request: Request, enabled: bool = Query(...),
+                        sig: str | None = Query(None),
+                        display_name: str | None = Query(None, max_length=64),
+                        name_sig: str | None = Query(None),
+                        db: AsyncSession = Depends(get_db)):
     """Toggle a player's ranked mode on or off. Auto-registers if needed.
     HMAC signs 'toggle-ranked:{steam_id}:{true|false}' (F5: was unauthenticated —
-    anyone could flip any account in/out of matchmaking)."""
+    anyone could flip any account in/out of matchmaking).
+
+    `display_name` carries its OWN signature (`name_sig`) over
+    'toggle-ranked-name:{steam_id}:{name}' rather than joining the toggle
+    canonical — that keeps every older client's existing signature valid while
+    still making the field integrity-protected, so an on-path attacker cannot
+    swap a name on a request whose other fields verify. An unsigned or
+    mis-signed name is IGNORED, not an error, so an old client simply behaves as
+    before. It can only ever set a name, never clear one. This is the launch
+    sync and the first server contact a fresh install makes, so carrying the
+    name here is what stops a new player being registered under their raw
+    Steam ID."""
     await _check_steam_session(request, steam_id, db)
     if not _verify_action_sig(f"toggle-ranked:{steam_id}:{str(enabled).lower()}", sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
+    # Drop an unsigned/mis-signed name rather than trusting it.
+    if display_name and not _verify_action_sig(
+            f"toggle-ranked-name:{steam_id}:{display_name}", name_sig):
+        print(f"[RANKED] display_name rejected for {steam_id} (bad name_sig)")
+        display_name = None
+
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
 
     if not player:
-        # Auto-register on first toggle (startup sync). This call carries NO
-        # name — the client's ranked-sync fires at launch before it has one —
-        # and passing steam_id here is precisely how first-launch players ended
-        # up displayed as raw ids. Pass None so the row is created with the
-        # steam_id as a placeholder that the FIRST named call will heal.
-        player = await get_or_create_player(db, steam_id, None)
+        # Auto-register on first toggle (startup sync). Older clients send no
+        # name here, which is how first-launch players ended up displayed as
+        # raw ids; newer ones carry it. get_or_create_player cleans it either
+        # way and falls back to the steam_id only when there is nothing real.
+        player = await get_or_create_player(db, steam_id, display_name)
+    else:
+        # Heal a row that was created nameless by an older client, and follow a
+        # Steam rename. Never clears an existing name (#_clean_display_name).
+        _clean = _clean_display_name(display_name, steam_id)
+        if _clean and player.deleted_at is None:
+            player.display_name = _clean
 
     player.ranked_enabled = enabled
     await _mark_mod_seen(db, player)
@@ -8965,6 +8991,29 @@ async def get_player_team_bets(
             for r in rows
         ]
     }
+
+
+@app.get("/api/v1/rank-tiers", tags=["Leaderboard"])
+async def get_rank_tiers(db: AsyncSession = Depends(get_db)):
+    """Rating-tier floors with their LIVE Discord role colours.
+
+    The client's rating-history graph draws a benchmark line per tier and had
+    the colours hardcoded — so the moment a rank role was recoloured in Discord
+    the graph started lying (Sid: "the elo bucket benchmark lines are the wrong
+    color for the rank/role they benchmark"). Serving them makes a recolour
+    propagate within the 5-minute cache and with no client release, the same
+    principle as the dynamic `title_rank` item (#111).
+
+    Prefers the exact rung a line marks ("Beginner I") over the family row,
+    then the compiled fallback palette. No request parameters, so there is
+    nothing to interpolate into SQL (#188).
+    """
+    colors = await _rank_colors(db)
+    return {"tiers": [
+        {"floor": floor, "name": label,
+         "color": colors.get(f"{label} I") or colors.get(label) or _rank_fallback_color(label)}
+        for floor, _mult, label in TIER_MULTIPLIERS
+    ]}
 
 
 def _ledger_safe_name(name: str | None) -> str:
