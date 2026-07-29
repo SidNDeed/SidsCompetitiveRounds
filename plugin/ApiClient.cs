@@ -1284,6 +1284,95 @@ namespace CompetitiveRounds
                 }));
         }
 
+        /// <summary>One result from any mode for the Leaderboard tab's Recent
+        /// Ranked Series panel. The server composes the winner side, score and
+        /// labels, so the client never re-derives a winner — a DC forfeit whose
+        /// stored score is tied cannot render backwards.</summary>
+        public class MultimodeSeriesEntry
+        {
+            public string mode;            // "2v2" | "1v2" | "ffa"
+            public string id, ended_at;
+            public string left_label, right_label, score;
+            public float left_rating_change, right_rating_change;
+            public List<MultimodeBet> bets = new List<MultimodeBet>();
+        }
+
+        public class MultimodeBet
+        {
+            public string bettor_name, bettor_steam_id, bet_on_label;
+            public int amount, payout;
+            public float odds_multiplier;
+            // Explicit state from the server, never inferred: `payout > amount`
+            // renders a REFUND as a loss (#107).
+            public string state;           // open | won | lost | refunded
+        }
+
+        public static List<MultimodeSeriesEntry> CachedRecentMultimode = null;
+        private static bool _multimodeInFlight;
+
+        public static void FetchRecentMultimodeSeries(int limit = 60)
+        {
+            if (_multimodeInFlight) return;
+            _multimodeInFlight = true;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/series/recent-multimode?limit={limit}",
+                (ok, resp) =>
+                {
+                    _multimodeInFlight = false;
+                    if (!ok || string.IsNullOrEmpty(resp)) return;
+                    try
+                    {
+                        var list = new List<MultimodeSeriesEntry>();
+                        int key = resp.IndexOf("\"entries\":", StringComparison.Ordinal);
+                        int open = key >= 0 ? resp.IndexOf('[', key) : -1;
+                        // Every field here carries user-authored display names,
+                        // so the slicing must be string-aware end to end (#156).
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (open < 0 || close <= open) return;
+                        foreach (var chunk in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
+                        {
+                            var e = new MultimodeSeriesEntry
+                            {
+                                mode = ExtractJsonString(chunk, "mode"),
+                                id = ExtractJsonString(chunk, "id"),
+                                ended_at = ExtractJsonString(chunk, "ended_at"),
+                                left_label = ExtractJsonString(chunk, "left_label"),
+                                right_label = ExtractJsonString(chunk, "right_label"),
+                                score = ExtractJsonString(chunk, "score"),
+                                left_rating_change = ExtractJsonFloat(chunk, "left_rating_change"),
+                                right_rating_change = ExtractJsonFloat(chunk, "right_rating_change"),
+                            };
+                            int bk = chunk.IndexOf("\"bets\":", StringComparison.Ordinal);
+                            int bo = bk >= 0 ? chunk.IndexOf('[', bk) : -1;
+                            int bc = bo >= 0 ? FindMatchingBracketStringAware(chunk, bo) : -1;
+                            if (bo >= 0 && bc > bo)
+                            {
+                                foreach (var bch in SliceTopLevelObjects(chunk.Substring(bo + 1, bc - bo - 1)))
+                                {
+                                    var b = new MultimodeBet
+                                    {
+                                        bettor_name = ExtractJsonString(bch, "bettor_name"),
+                                        bettor_steam_id = ExtractJsonString(bch, "bettor_steam_id"),
+                                        bet_on_label = ExtractJsonString(bch, "bet_on_label"),
+                                        amount = ExtractJsonInt(bch, "amount"),
+                                        payout = ExtractJsonInt(bch, "payout"),
+                                        odds_multiplier = ExtractJsonFloat(bch, "odds_multiplier"),
+                                        state = ExtractJsonString(bch, "state"),
+                                    };
+                                    if (!string.IsNullOrEmpty(b.bettor_name)) e.bets.Add(b);
+                                }
+                            }
+                            if (!string.IsNullOrEmpty(e.mode)) list.Add(e);
+                        }
+                        CachedRecentMultimode = list;
+                        Plugin.Log.LogInfo($"Recent multimode series loaded: {list.Count}");
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex)
+                    { Plugin.Log.LogWarning($"[MULTIMODE] parse failed: {ex.Message}"); }
+                }));
+        }
+
         public static void FetchMyBets(string steamId)
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
@@ -3564,6 +3653,10 @@ namespace CompetitiveRounds
                                 try{int rc2=parts[i].IndexOf("\"p2_rating_change\":");if(rc2>=0){rc2+="\"p2_rating_change\":".Length;int rc2e=rc2;while(rc2e<parts[i].Length&&(char.IsDigit(parts[i][rc2e])||parts[i][rc2e]=='.'||parts[i][rc2e]=='-'))rc2e++;if(rc2e>rc2)e.p2_rating_change=float.Parse(parts[i].Substring(rc2,rc2e-rc2),System.Globalization.CultureInfo.InvariantCulture);}}catch{}
                                 e.p1_rating = ExtractJsonInt(parts[i], "p1_rating");
                                 e.p2_rating = ExtractJsonInt(parts[i], "p2_rating");
+                                // Merge key for the multi-mode Recent panel: the
+                                // server has always sent this, the client just
+                                // never read it.
+                                e.completed_at = ExtractJsonString(parts[i], "completed_at");
                                 // Parse the bets array. Server inlines a 'bets' list into each series — each entry has
                                 // bettor_name / amount / payout / bet_on_name / won. We isolate this series's bets chunk
                                 // (from "bets" up to the next "series_id" boundary) so we don't accidentally pull bets
@@ -3572,7 +3665,11 @@ namespace CompetitiveRounds
                                 if (betsKey >= 0)
                                 {
                                     int betsStart = parts[i].IndexOf('[', betsKey);
-                                    int betsEnd = parts[i].IndexOf(']', betsStart);
+                                    // String-aware: a display name containing ']'
+                                    // truncated the block and silently dropped
+                                    // every bet after it (#156 family).
+                                    int betsEnd = betsStart >= 0
+                                        ? FindMatchingBracketStringAware(parts[i], betsStart) : -1;
                                     if (betsStart >= 0 && betsEnd > betsStart)
                                     {
                                         string betsBlock = parts[i].Substring(betsStart, betsEnd - betsStart + 1);
@@ -7885,6 +7982,9 @@ namespace CompetitiveRounds
             public string lobby_id;
             public int player_count, game_number;
             public bool is_member, already_bet;
+            // Server-side window state (item 4). A finished sitting used to stay
+            // listed forever because the only predicate was status='active'.
+            public bool bets_open;
             public List<FfaBettablePlayer> players = new List<FfaBettablePlayer>();
         }
         public static List<FfaBettableLobby> CachedFfaBettable = null;
@@ -8520,6 +8620,7 @@ namespace CompetitiveRounds
                                     game_number = ExtractJsonInt(obj, "game_number"),
                                     is_member = ExtractJsonBool(obj, "is_member"),
                                     already_bet = ExtractJsonBool(obj, "already_bet"),
+                                    bets_open = ExtractJsonBool(obj, "bets_open"),
                                 };
                                 int playersOpen = FindJsonArrayStartStringAware(obj, "players");
                                 int playersClose = playersOpen >= 0
@@ -8912,6 +9013,7 @@ namespace CompetitiveRounds
                 CachedCardStats = null;
                 CachedMatchHistory = null;
                 CachedRecentSeries = null;
+                CachedRecentMultimode = null;
                 CachedAchievements = null;
                 CachedShopItems = null;
                 CachedInventory = null;

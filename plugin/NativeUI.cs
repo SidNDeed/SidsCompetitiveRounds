@@ -547,6 +547,9 @@ namespace CompetitiveRounds
             ApiClient.FetchActiveSeries();
             ApiClient.FetchActiveTeamSeries();
             var sid = MatchTracker.LocalSteamId;
+            // FFA betting moved into this column (item 4), so it rides the same
+            // 5s tick rather than needing a ticker of its own (#62).
+            ApiClient.FetchFfaBettable(sid);
             if (!string.IsNullOrEmpty(sid) && sid != "unknown") ApiClient.FetchMyBets(sid);
         }
         public struct ChatEntry { public string Line; public DateTime AddedUtc; }
@@ -850,6 +853,7 @@ namespace CompetitiveRounds
             lbTabRefreshAt = Time.unscaledTime + 30f;
             ApiClient.FetchLeaderboard();
             ApiClient.FetchRecentSeries();
+            ApiClient.FetchRecentMultimodeSeries();
         }
 
         // ── Podium title sparkle (v1.32 item 4) ────────────────────────────
@@ -2568,7 +2572,7 @@ namespace CompetitiveRounds
                 if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
             }
         }
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -4384,7 +4388,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return artistBlockRows[idx];
         }
 
-        private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
+        private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
         private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshTournamentGameIndicator();/* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;}}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
@@ -6703,11 +6707,59 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             SetPerfRow(perfPoolTxt,      Plugin.PerfClampObjectPoolInit,       "ObjectPool init clamp (in-match)");
         }
 
+        private sealed class MergedSeriesRow
+        {
+            public string ts;
+            public ApiClient.RecentSeriesEntry oneVone;
+            public ApiClient.MultimodeSeriesEntry multi;
+        }
+        private static float _multiAutoFetchAt=-999f;
+
+        /// <summary>One Recent-Series line for a non-1v1 mode. The winner side,
+        /// score and labels arrive already composed from the server, so this only
+        /// formats. Mode tag is ASCII (#47 - the game font has no box-draw or
+        /// bullet glyphs) and names are hard-truncated because the column does not
+        /// word-wrap (#199: an unwrapped fixed-height stack overpaints its
+        /// neighbours on a wide-aspect window).</summary>
+        private static string BuildMultimodeSeriesLine(ApiClient.MultimodeSeriesEntry m,string myName)
+        {
+            string tag=m.mode=="2v2"?"[2v2]":m.mode=="1v2"?"[1v2]":"[FFA]";
+            // 2v2/1v2 labels are two names joined by " + ", so they need a longer
+            // budget than a single 1v1 name or they clip mid-name.
+            // 16/14, not 18/22: two labels plus the mode tag, score and both
+            // rating tails have to fit a column whose MINIMUM width is 340 with
+            // word-wrap off, or the losing side clips mid-name (#199/#132).
+            int cap=m.mode=="ffa"?16:14;
+            string wElo=m.left_rating_change!=0?$" <color=#00FF00>+{m.left_rating_change:F0}</color>":"";
+            string lElo=m.right_rating_change!=0?$" <color=#FF6666>{m.right_rating_change:F0}</color>":"";
+            string line=$"<color=#8899AA>{tag}</color> <color=#FFFFFF>{Trunc(m.left_label??"?",cap)}</color>{wElo}"
+                      +$"  <b>{m.score}</b>  <color=#AAAAAA>{Trunc(m.right_label??"?",cap)}</color>{lElo}\n";
+            if(m.bets!=null)
+            {
+                foreach(var b in m.bets)
+                {
+                    string who=b.bettor_name==myName?"<b>You</b>":FfaSafeRich(Trunc(b.bettor_name??"?",14));
+                    string on=FfaSafeRich(Trunc(b.bet_on_label??"?",14));
+                    // Explicit server state, never `payout > amount` — that test
+                    // renders a REFUND as a loss (#107).
+                    if(b.state=="won")
+                        line+=$"    <color=#88CC88>-> {who} bet {b.amount}g on {on} -> <b>+{b.payout}g</b></color>\n";
+                    else if(b.state=="refunded")
+                        line+=$"    <color=#AA9955>-> {who} bet {b.amount}g on {on} - refunded</color>\n";
+                    else if(b.state=="open")
+                        line+=$"    <color=#7788AA>-> {who} bet {b.amount}g on {on} - pending</color>\n";
+                    else
+                        line+=$"    <color=#664444>-> {who} bet {b.amount}g on {on} - lost</color>\n";
+                }
+            }
+            return line;
+        }
+
         private static void RefreshRecentSeries()
         {
             if(txtRecentSeries==null)return;
             var series=ApiClient.CachedRecentSeries;
-            if(series==null)
+            if(series==null&&ApiClient.CachedRecentMultimode==null)
             {
                 // Self-heal (#32): null = never loaded OR the open-time fetch
                 // failed (timeout/server blip) — nothing used to retry until
@@ -6721,19 +6773,41 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 UIFactory.SetText(txtRecentSeries,"Loading recent series...");
                 if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;
             }
-            if(series.Count==0){UIFactory.SetText(txtRecentSeries,"No recent series");if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;}
+            // Item 6: 2v2 / 1v2 / FFA results are merged into this panel for bet
+            // tracking. The per-mode Recent panels on the Multiplayer sub-tabs are
+            // deliberately untouched — this is additive.
+            //
+            // Two independent caches rather than one merged feed, so a failure of
+            // either degrades instead of blanking the panel: if the multi-mode
+            // fetch fails this renders exactly today's 1v1 list, and vice versa.
+            if(series==null)series=new List<ApiClient.RecentSeriesEntry>();
+            var multi=ApiClient.CachedRecentMultimode;
+            if(multi==null&&Time.realtimeSinceStartup-_multiAutoFetchAt>8f)
+            {
+                _multiAutoFetchAt=Time.realtimeSinceStartup;
+                ApiClient.FetchRecentMultimodeSeries();
+            }
+            // One row per entry, newest first, keyed on the ISO-8601 timestamp —
+            // string compare is a correct chronological sort for that format and
+            // avoids parsing dates just to order them.
+            var merged=new List<MergedSeriesRow>();
+            foreach(var e in series)merged.Add(new MergedSeriesRow{ts=e.completed_at??"",oneVone=e});
+            if(multi!=null)foreach(var m in multi)merged.Add(new MergedSeriesRow{ts=m.ended_at??"",multi=m});
+            merged.Sort((a,b)=>string.CompareOrdinal(b.ts,a.ts));
+            if(merged.Count==0){UIFactory.SetText(txtRecentSeries,"No recent series");if(seriesPrev!=null)seriesPrev.SetActive(false);if(seriesNext!=null)seriesNext.SetActive(false);if(txtSeriesPage!=null)UIFactory.SetText(txtSeriesPage,"");return;}
             // 50 series per page (item 7): the list lives in a flex ScrollView, so a
             // short page left dead space between the last row and the pager. A big
             // page keeps the column visually full and scrolls; the pager only
             // matters past 50. Server returns up to 100 - see FetchRecentSeries.
-            int perPage=50,totalPages=(series.Count+perPage-1)/perPage;
+            int perPage=50,totalPages=(merged.Count+perPage-1)/perPage;
             recentSeriesPage=Math.Max(0,Math.Min(recentSeriesPage,totalPages-1));
-            int start=recentSeriesPage*perPage,end=Math.Min(start+perPage,series.Count);
+            int start=recentSeriesPage*perPage,end=Math.Min(start+perPage,merged.Count);
             string txt="";
             string myName=ApiClient.CachedPlayerStats?.display_name??"";
             for(int i=start;i<end;i++)
             {
-                var s=series[i];
+                if(merged[i].multi!=null){txt+=BuildMultimodeSeriesLine(merged[i].multi,myName);continue;}
+                var s=merged[i].oneVone;
                 bool p1Won=s.p1_wins>s.p2_wins;
                 string wName=p1Won?s.p1_name:s.p2_name;
                 string lName=p1Won?s.p2_name:s.p1_name;

@@ -7264,6 +7264,183 @@ async def _lookup_chat_meta(*, steam_id: str | None = None, discord_id: str | No
         return {"rating": None, "title": None, "title_color": None}
 
 
+@app.get("/api/v1/series/recent-multimode", tags=["Series"])
+async def get_recent_multimode_series(
+    minutes: int = Query(10080, ge=1, le=43200),
+    limit: int = Query(60, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """2v2 / 1v2 / FFA results for the Leaderboard tab's Recent Ranked Series
+    panel, so every mode's games (and their bets) are visible in one place.
+
+    Deliberately a SEPARATE endpoint from /series/recent rather than an
+    extension of it: that one is dual-consumer (the Discord bot drives its live
+    announcement feed off it at ?minutes=2 and ?minutes=5), so changing its
+    shape risks the bot - and its per-row streak lookup already issues two
+    queries per series, which folding three more modes into would multiply.
+    Splitting also gives the panel graceful degradation: if this call fails the
+    client still renders the 1v1 list, and vice versa. Neither can blank it.
+
+    Every entry has the SAME shape regardless of mode, and the winner side,
+    score and labels are composed HERE. The client never re-derives a winner,
+    so a DC forfeit whose stored score is tied cannot render backwards.
+
+    1v2 is included for completeness but is an unranked beta: it has no bet
+    table at all and no rating deltas, so those rows carry empty bets and null
+    changes.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    entries: list[dict] = []
+
+    def _bet_state(payout, amount, settled_at, odds) -> str:
+        """Explicit state, never a bool. `payout > amount` as a win test renders
+        a REFUND as a loss (#107), and production has carried both an unsettled
+        bet on a finished lobby and refunded rows - so 'open' has to be a real
+        state rather than an assumption that everything eventually settles.
+
+        `payout == amount` is AMBIGUOUS on its own: a refund returns the stake,
+        but so does a tiny win, because settlement rounds - a 1g bet at the
+        x1.10 minimum pays int(round(1.10)) == 1. Comparing against the winning
+        payout the stored odds would have produced disambiguates it, so a small
+        winner is no longer reported to the player as a refund.
+        """
+        if settled_at is None or payout is None:
+            return "open"
+        p, a = int(payout), int(amount)
+        if p == 0:
+            return "lost"
+        try:
+            win_payout = int(round(a * float(odds or 0)))
+        except Exception:
+            win_payout = -1
+        if p == a and p != win_payout:
+            return "refunded"
+        return "won" if p >= a else "lost"
+
+    # -- 2v2 --
+    t_rows = (await db.execute(text("""
+        SELECT s.id, s.completed_at, s.winner_team,
+               s.t1_series_wins, s.t2_series_wins,
+               s.t1a_rating_change, s.t2a_rating_change,
+               p1a.display_name AS t1a_name, p1b.display_name AS t1b_name,
+               p2a.display_name AS t2a_name, p2b.display_name AS t2b_name
+          FROM team_series s
+          JOIN players p1a ON p1a.id = s.t1a_id
+          JOIN players p1b ON p1b.id = s.t1b_id
+          JOIN players p2a ON p2a.id = s.t2a_id
+          JOIN players p2b ON p2b.id = s.t2b_id
+         WHERE s.status = 'completed' AND s.completed_at >= :cut
+         ORDER BY s.completed_at DESC LIMIT :lim
+    """), {"cut": cutoff, "lim": limit})).mappings().all()
+    t_ids = [r["id"] for r in t_rows]
+    t_bets: dict = {}
+    if t_ids:
+        for b in (await db.execute(text("""
+            SELECT b.team_series_id, b.bet_on_team, b.amount, b.payout, b.settled_at,
+                   b.odds_multiplier, p.display_name AS bettor_name, p.steam_id AS bettor_steam_id
+              FROM team_bets b JOIN players p ON p.id = b.player_id
+             WHERE b.team_series_id = ANY(:ids)
+        """), {"ids": t_ids})).mappings().all():
+            t_bets.setdefault(b["team_series_id"], []).append(b)
+    for r in t_rows:
+        t1 = str(r["t1a_name"]) + " + " + str(r["t1b_name"])
+        t2 = str(r["t2a_name"]) + " + " + str(r["t2b_name"])
+        won1 = r["winner_team"] == 1
+        entries.append({
+            "mode": "2v2", "id": str(r["id"]),
+            "ended_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            "left_label": t1 if won1 else t2,
+            "right_label": t2 if won1 else t1,
+            "score": (str(r["t1_series_wins"]) + "-" + str(r["t2_series_wins"])) if won1
+                     else (str(r["t2_series_wins"]) + "-" + str(r["t1_series_wins"])),
+            "left_rating_change": (r["t1a_rating_change"] if won1 else r["t2a_rating_change"]),
+            "right_rating_change": (r["t2a_rating_change"] if won1 else r["t1a_rating_change"]),
+            "bets": [{
+                "bettor_name": b["bettor_name"], "bettor_steam_id": b["bettor_steam_id"],
+                "bet_on_label": (t1 if b["bet_on_team"] == 1 else t2),
+                "amount": int(b["amount"]), "payout": b["payout"],
+                "odds_multiplier": float(b["odds_multiplier"] or 0),
+                "state": _bet_state(b["payout"], b["amount"], b["settled_at"], b["odds_multiplier"]),
+            } for b in t_bets.get(r["id"], [])],
+        })
+
+    # -- 1v2 (no bet table exists; unranked beta, so no deltas) --
+    for r in (await db.execute(text("""
+        SELECT s.id, s.completed_at, s.winner_side,
+               s.solo_series_wins, s.duo_series_wins,
+               ps.display_name AS solo_name,
+               pa.display_name AS duo_a_name, pb.display_name AS duo_b_name
+          FROM ovt_series s
+          JOIN players ps ON ps.id = s.solo_id
+          JOIN players pa ON pa.id = s.duo_a_id
+          JOIN players pb ON pb.id = s.duo_b_id
+         WHERE s.status = 'completed' AND s.completed_at >= :cut
+         ORDER BY s.completed_at DESC LIMIT :lim
+    """), {"cut": cutoff, "lim": limit})).mappings().all():
+        solo = str(r["solo_name"])
+        duo = str(r["duo_a_name"]) + " + " + str(r["duo_b_name"])
+        solo_won = r["winner_side"] == 1
+        entries.append({
+            "mode": "1v2", "id": str(r["id"]),
+            "ended_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            "left_label": solo if solo_won else duo,
+            "right_label": duo if solo_won else solo,
+            "score": (str(r["solo_series_wins"]) + "-" + str(r["duo_series_wins"])) if solo_won
+                     else (str(r["duo_series_wins"]) + "-" + str(r["solo_series_wins"])),
+            "left_rating_change": None, "right_rating_change": None,
+            "bets": [],
+        })
+
+    # -- FFA (per GAME, because bets are per game) --
+    f_rows = (await db.execute(text("""
+        SELECT m.id, m.ended_at, m.player_count, m.lobby_id, m.photon_room_id,
+               pw.display_name AS winner_name,
+               (SELECT fmp.rating_change FROM ffa_match_players fmp
+                 WHERE fmp.match_id = m.id AND fmp.player_id = m.winner_id) AS winner_change
+          FROM ffa_matches m
+          LEFT JOIN players pw ON pw.id = m.winner_id
+         WHERE m.invalidated_at IS NULL AND m.is_ranked = TRUE AND m.ended_at >= :cut
+         ORDER BY m.ended_at DESC LIMIT :lim
+    """), {"cut": cutoff, "lim": limit})).mappings().all()
+    lobby_ids = [r["lobby_id"] for r in f_rows if r["lobby_id"] is not None]
+    f_bets: dict = {}
+    if lobby_ids:
+        for b in (await db.execute(text("""
+            SELECT b.lobby_id, b.game_number, b.amount, b.payout, b.settled_at,
+                   b.odds_multiplier,
+                   p.display_name AS bettor_name, p.steam_id AS bettor_steam_id,
+                   t.display_name AS target_name
+              FROM ffa_bets b
+              JOIN players p ON p.id = b.player_id
+              JOIN players t ON t.id = b.bet_on_player_id
+             WHERE b.lobby_id = ANY(:ids)
+        """), {"ids": lobby_ids})).mappings().all():
+            f_bets.setdefault((b["lobby_id"], int(b["game_number"])), []).append(b)
+    for r in f_rows:
+        # Reuse the SAME helper the settlement path uses to map a room id to its
+        # game number, rather than a second regex that could drift from it.
+        gno = _ffa_room_game_no(r["photon_room_id"])
+        blist = f_bets.get((r["lobby_id"], gno), []) if (r["lobby_id"] and gno) else []
+        entries.append({
+            "mode": "ffa", "id": str(r["id"]),
+            "ended_at": r["ended_at"].isoformat() if r["ended_at"] else None,
+            "left_label": r["winner_name"] or "?",
+            "right_label": str(r["player_count"]) + "-player FFA",
+            "score": "#1 of " + str(r["player_count"]),
+            "left_rating_change": r["winner_change"], "right_rating_change": None,
+            "bets": [{
+                "bettor_name": b["bettor_name"], "bettor_steam_id": b["bettor_steam_id"],
+                "bet_on_label": b["target_name"],
+                "amount": int(b["amount"]), "payout": b["payout"],
+                "odds_multiplier": float(b["odds_multiplier"] or 0),
+                "state": _bet_state(b["payout"], b["amount"], b["settled_at"], b["odds_multiplier"]),
+            } for b in blist],
+        })
+
+    entries.sort(key=lambda e: e["ended_at"] or "", reverse=True)
+    return {"entries": entries[:limit]}
+
+
 @app.websocket("/api/v1/ws/chat")
 async def ws_chat(ws: WebSocket):
     """Mod <-> server chat channel. Messages are broadcast fan-out style."""
