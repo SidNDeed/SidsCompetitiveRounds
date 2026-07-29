@@ -1,5 +1,77 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased — FFA fixes, economy rebalance, queue lockout fix
+
+Backend and bot changes in this block are **already live**. Client changes are built but not
+released — they ship with the next version.
+
+### FFA gameplay
+
+- **Spawn positions were wrong in every 5+ player game.** The base game caches each spawn point as
+  a *local* coordinate at map load and then teleports players to that raw number as a *world*
+  position — which only holds at scale 1. FFA scales the map with the lobby, so since map scaling
+  shipped, every player in every round of a 5+ player game landed short of their marker, and landing
+  on one of the movable crates applies damage plus an impulse. Fixed at the point the coordinate is
+  consumed.
+- **Players 5–10 get real spawn points.** Maps ship four; the extra slots used to reuse another
+  player's exact spot. Each fresh map is now scanned for solid static ground — skipping physics
+  objects, animated pieces and the networked crates — and falls back to the old duplicate only where
+  a map genuinely has nowhere else to stand.
+- **Maps grow faster with lobby size** (3% → 6% per player above 4). Landed together with the spawn
+  fix, because a larger factor multiplied the old spawn error.
+- **One second of no-fire grace at the start of each FFA round**, so you can react before being
+  shot. Armed at the moment the game actually hands control back, not when the round is flagged live.
+- **Shield Charge and the rolling card cap** — a stale network handler key from an aborted teardown
+  could leave the card's effect unattached; the pipeline now scrubs immediately before every apply.
+
+### FFA economy
+
+- **Gold roughly matches 2v2 per minute played.** FFA was paying about six times less: its XP base
+  was half of 2v2's, it had no flat completion bonus at all, and the lobby-size multiplier only
+  applied to first place — so lobby size paid nothing to nine of ten players. All three are fixed. A
+  five-player win goes from about 13 gold to about 86; last place from 3 to 19.
+- **Everyone who already played FFA was back-paid** the new placement bonus.
+- **FFA now grants level-up gold**, which it never did.
+- **Better betting odds** — minimum 2x in a 5+ player game, up to 5x for a confidently-rated
+  underdog in a full lobby. A brand-new account cannot reach the ceiling.
+
+### Queues
+
+- **Fixed a lockout that could strand you in "Match found" indefinitely.** Leaving an FFA room to
+  re-form the lobby left your queue entry claimed, which blocked joining *any* queue in *any* mode.
+  The server now frees dispersed lobbies on its own, and the client recovers when it is holding a
+  lobby but is not actually in a game.
+- Betting on a finished FFA sitting is no longer offered, and the server rejects it.
+
+### Menus
+
+- **Recent Ranked Series now lists 2v2, 1v2 and FFA games** alongside 1v1, with the bets placed on
+  each. The per-mode panels are unchanged.
+- **Rating-history graph benchmark lines use the real Discord rank colours** instead of a hardcoded
+  copy that drifted whenever a role was recoloured.
+- **FFA match history shows every opponent**, wrapped and aligned, instead of cutting the list off
+  at four names — and it no longer silently omitted one player per row.
+- FFA score-progression graphs use a palette wide enough for ten players; two players could
+  previously draw in the identical colour.
+- The in-game bug-report viewer renders attached logs correctly.
+- FFA game IDs copy in the same format as every other mode and work with the Discord `/game` command.
+
+### Discord
+
+- Live FFA lobbies and their odds now appear in the gambler channel.
+- `/game` renders FFA matches (placements, per-player stats, cards, score graph).
+- Dedicated "How FFA works" and "How 1v2 works" FAQ answers.
+
+### Fixes
+
+- **Streak achievements have never been granted to anyone** since they were added — the code that
+  reads your streak was unreachable from the code that awards them. Fixed.
+- Per-opponent session records in FFA are now decided head-to-head by placement. Previously any game
+  you did not win counted as a loss against every player in it.
+- Your bet history shows FFA and 2v2 wagers, not just 1v1.
+- New players are no longer registered under their raw Steam ID when the game has not yet reported
+  their name.
+
 ## v1.35.1 — 2026-07-28 — queue single-ownership, FFA gather window, report fixes
 
 ### Packaging
