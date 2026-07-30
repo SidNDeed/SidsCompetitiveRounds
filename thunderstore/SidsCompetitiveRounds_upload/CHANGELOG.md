@@ -1,3 +1,130 @@
+## v1.35.2 — 2026-07-29 — FFA host lobbies, betting reliability, forced picks
+
+Everything below (previously accumulated as "Unreleased") ships in this version. Backend
+changes were deployed progressively through the day; the client half lands with this release.
+Schema changes: migration **166** (`ffa_lobbies.host_player_id` + open-lobby index; applied).
+
+### FFA host lobbies (replaces the auto-gather queue; ships with the next release)
+
+- **FFA is now played from host-controlled lobbies.** Create a lobby or join an open one from
+  the new in-tab browser; the host presses **Start** once at least 3 players are in (up to 10).
+  Several lobbies can be open at the same time — the old "3 players and a countdown" auto-start
+  is gone from the new client.
+- If the host leaves, the longest-waiting member is promoted automatically; an emptied lobby
+  closes itself. Sitting in a lobby counts as your active queue everywhere else, exactly like a
+  locked match.
+- Players on the previous version keep the old auto-gather until they update; the two systems
+  run side by side on the server during the transition, with separate pools.
+
+### FFA pick window (client, next release)
+
+- **Running out the pick timer no longer skips your pick.** When the on-screen countdown hits
+  zero, the card you have highlighted is picked automatically (card 1 if you never moved) and a
+  toast announces it. Skipping a pick used to be a way to protect a finished build from the
+  rolling 5-card cap, which defeated the point of the mode's card cycle. Nothing silent: the
+  timer is visible the whole time and the auto-pick is announced on screen.
+- The pick deadline is now published by the lobby's host clock, so every player's countdown and
+  auto-pick agree with the clock that actually closes the window — a slow-loading client can no
+  longer miss its forced pick to clock skew. (Mixed-version caveats until the minimum supported
+  version reaches this release: players on older builds don't auto-pick at all, and when the
+  lobby's host is an older build the deadline isn't shared, so this build falls back to a local
+  timer with a wider safety lead.)
+
+### Betting reliability (server, live)
+
+- **Bets can no longer be stranded when a lobby or series ends without a result.** Every way an
+  FFA lobby or 2v2 series closes now resolves its open bets: wagers on games that were actually
+  played settle against the recorded result, and wagers on games that never happened are
+  refunded. A background sweep also heals any bet that slipped through (including two
+  historical ones), so "charged but never resolved" can no longer persist.
+- 2v2 bets gained a refund path for cancelled or voided series — previously a cancelled series
+  destroyed the stake outright.
+- Settlement writes are claim-based on every path that touches FFA and 2v2 bets — a bet reaches
+  exactly one terminal state, so two concurrent resolution passes can never pay the same bet
+  twice. Series awaiting an admin decision after a disconnect are left untouched until the
+  decision lands.
+
+### FFA tab (client, next release)
+
+- Recent Ranked FFAs shows each player's **final hand** inline, with replaced picks collapsed
+  into a red "+N replaced" chip — hover the card line to see every pick in order. Long card
+  histories no longer wrap into multi-line blocks.
+- Titles render **after** the player name in Recent Ranked FFAs, matching every other surface.
+- Long name+title combinations no longer paint into the Rating column on the FFA leaderboard.
+- The Info button is the same size in the same place on the 2v2, 1v2 and FFA headers.
+- The FFA info popup was rewritten: it now explains the Recent FFAs display (points, unconverted
+  round wins, kills, replaced cards, rewards and rating change), documents the automatic pick,
+  carries the current reward numbers, and is spaced for reading. It also notes that a level-up
+  bonus lands inside that game's gold number — which is how a last place can occasionally
+  out-earn the winner.
+
+### FFA gameplay
+
+- **Spawn positions were wrong in every 5+ player game.** The base game caches each spawn point as
+  a *local* coordinate at map load and then teleports players to that raw number as a *world*
+  position — which only holds at scale 1. FFA scales the map with the lobby, so since map scaling
+  shipped, every player in every round of a 5+ player game landed short of their marker, and landing
+  on one of the movable crates applies damage plus an impulse. Fixed at the point the coordinate is
+  consumed.
+- **Players 5–10 get real spawn points.** Maps ship four; the extra slots used to reuse another
+  player's exact spot. Each fresh map is now scanned for solid static ground — skipping physics
+  objects, animated pieces and the networked crates — and falls back to the old duplicate only where
+  a map genuinely has nowhere else to stand.
+- **Maps grow faster with lobby size** (3% → 6% per player above 4). Landed together with the spawn
+  fix, because a larger factor multiplied the old spawn error.
+- **One second of no-fire grace at the start of each FFA round**, so you can react before being
+  shot. Armed at the moment the game actually hands control back, not when the round is flagged live.
+- **Shield Charge and the rolling card cap** — a stale network handler key from an aborted teardown
+  could leave the card's effect unattached; the pipeline now scrubs immediately before every apply.
+
+### FFA economy
+
+- **Gold roughly matches 2v2 per minute played.** FFA was paying about six times less: its XP base
+  was half of 2v2's, it had no flat completion bonus at all, and the lobby-size multiplier only
+  applied to first place — so lobby size paid nothing to nine of ten players. All three are fixed. A
+  five-player win goes from about 13 gold to about 86; last place from 3 to 19.
+- **Everyone who already played FFA was back-paid** the new placement bonus.
+- **FFA now grants level-up gold**, which it never did.
+- **Better betting odds** — minimum 2x in a 5+ player game, up to 5x for a confidently-rated
+  underdog in a full lobby. A brand-new account cannot reach the ceiling.
+
+### Queues
+
+- **Fixed a lockout that could strand you in "Match found" indefinitely.** Leaving an FFA room to
+  re-form the lobby left your queue entry claimed, which blocked joining *any* queue in *any* mode.
+  The server now frees dispersed lobbies on its own, and the client recovers when it is holding a
+  lobby but is not actually in a game.
+- Betting on a finished FFA sitting is no longer offered, and the server rejects it.
+
+### Menus
+
+- **Recent Ranked Series now lists 2v2, 1v2 and FFA games** alongside 1v1, with the bets placed on
+  each. The per-mode panels are unchanged.
+- **Rating-history graph benchmark lines use the real Discord rank colours** instead of a hardcoded
+  copy that drifted whenever a role was recoloured.
+- **FFA match history shows every opponent**, wrapped and aligned, instead of cutting the list off
+  at four names — and it no longer silently omitted one player per row.
+- FFA score-progression graphs use a palette wide enough for ten players; two players could
+  previously draw in the identical colour.
+- The in-game bug-report viewer renders attached logs correctly.
+- FFA game IDs copy in the same format as every other mode and work with the Discord `/game` command.
+
+### Discord
+
+- Live FFA lobbies and their odds now appear in the gambler channel.
+- `/game` renders FFA matches (placements, per-player stats, cards, score graph).
+- Dedicated "How FFA works" and "How 1v2 works" FAQ answers.
+
+### Fixes
+
+- **Streak achievements have never been granted to anyone** since they were added — the code that
+  reads your streak was unreachable from the code that awards them. Fixed.
+- Per-opponent session records in FFA are now decided head-to-head by placement. Previously any game
+  you did not win counted as a loss against every player in it.
+- Your bet history shows FFA and 2v2 wagers, not just 1v1.
+- New players are no longer registered under their raw Steam ID when the game has not yet reported
+  their name.
+
 ## v1.35.1 — 2026-07-28 — queue single-ownership, FFA gather window, report fixes
 
 ### Packaging
