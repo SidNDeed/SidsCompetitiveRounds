@@ -63,6 +63,10 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> MapShadowsEnabled;
         internal static ConfigEntry<bool> AnimatedCosmetics;
         internal static ConfigEntry<bool> ChromaticAberrationEnabled;
+        // Bloom strength: "Full" | "Reduced" | "Off". String, not an enum —
+        // TournamentDateFormat is the codebase's 3-state precedent and a plain
+        // string round-trips through BepInEx's TOML without a converter.
+        internal static ConfigEntry<string> BloomStrength;
         internal static ConfigEntry<bool> AutoRequeueOnMatchmakingBug;
         // Performance pass — master + 7 per-patch flags so users can disable
         // any individual port without giving up the rest. Mirrors the
@@ -375,6 +379,18 @@ namespace CompetitiveRounds
                 "UI", "ChromaticAberrationEnabled",
                 true,
                 "The RGB color-fringing distortion that pulses on shots/hits/deaths. Turn OFF for crisp edges and a tiny FPS gain (local only)."
+            );
+            // Default MUST be "Full": a Config.Bind default is written to disk on
+            // first launch and never revisited (learning #190), so this is the one
+            // shot at what every existing install gets. Full = today's rendering.
+            BloomStrength = Config.Bind(
+                "UI", "BloomStrength",
+                "Full",
+                "Strength of the post-processing GLOW (bloom) — the soft halo around bright cosmetics, map art and effects. "
+                + "Full = vanilla. Reduced = smaller, dimmer halo. Off = no halo at all. Local only, and it never hides "
+                + "anything: the cosmetic/map itself still renders exactly the same, only the halo around it changes. "
+                + "Note that a few cosmetics have their glow PAINTED INTO the artwork (energy orbs, shooting star) — that "
+                + "part is pixels, not an effect, so it stays visible at any setting. Valid values: Full, Reduced, Off."
             );
             AutoRequeueOnMatchmakingBug = Config.Bind(
                 "UI", "AutoRequeueOnMatchmakingBug",
@@ -5532,6 +5548,7 @@ namespace CompetitiveRounds
             // Item 8: assert the chromatic-aberration toggle on every art profile
             // as soon as the scene's ArtHandler exists (per-scene coverage).
             try { MapPhysicalColorPatch.ChromaticAberrationSetting.Apply(); } catch { }
+            try { MapPhysicalColorPatch.BloomStrengthSetting.Apply(); } catch { }
         }
     }
 
@@ -5712,6 +5729,7 @@ namespace CompetitiveRounds
             // does NOT need the MapTransitionGuardSec defer.
             RenderPerfSettings.Apply();
             ChromaticAberrationSetting.Apply();
+            BloomStrengthSetting.Apply();
             // Use whatever sku is currently live after the cycle (ArtHandlerNextArtPatch sets
             // MapColorState.CurrentSku on every cycle advance). Fall back to the legacy single
             // field when the cycle hasn't run yet (fresh map load before any Shift press).
@@ -6344,6 +6362,159 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Bloom strength (Sid's "cosmetics are illuminated and the effect is quite
+        /// large for some people"). Full / Reduced / Off, local to this client.
+        ///
+        /// <para>TARGETING NOTE — this is the whole reason the setting works. ROUNDS runs TWO
+        /// PostProcessVolumes: `Post_Background`, whose profile ArtHandler swaps per art, and
+        /// `Post_Main`, which permanently holds the `Default` profile. Every one of the nine ART
+        /// profiles ships Bloom with <c>active = false</c>, and
+        /// <c>PostProcessLayer.OverrideSettings</c> opens with
+        /// <c>if (!baseSetting.active || !baseSetting.enabled) continue;</c> — so those Blooms are
+        /// inert. The bloom that actually renders is `Default`'s: active, intensity 35,
+        /// threshold 1.20, diffusion 7. Writing to the ArtHandler profiles (which is what the
+        /// obvious ChromaticAberrationSetting-shaped implementation would do, and what
+        /// CustomMapColors has been doing since v1.29) changes nothing at all — learning #91's
+        /// silent-forever-no-op, one layer up. So we enumerate every live PostProcessVolume
+        /// instead of assuming which one matters.</para>
+        ///
+        /// <para>Knobs, from the decompiled BloomRenderer: brightness is
+        /// <c>Exp2(intensity/10) - 1</c> (35 -> 10.3x, 21 -> 3.3x); halo EXTENT is
+        /// <c>2^(diffusion-10)</c>, so each -1 halves the radius; <c>threshold</c> decides which
+        /// pixels qualify at all. "Quite large" is the diffusion knob, which is why Reduced
+        /// leans on it hardest.</para>
+        ///
+        /// <para>Nothing here touches a renderer, material, colour, particle or equipped state,
+        /// so no cosmetic can be hidden or broken by any level (cf. #96 / #29). Off removes the
+        /// halo and leaves the object itself pixel-identical. It cannot remove glow that an
+        /// artist PAINTED into their PNG (energy orbs, shooting star) — that is art, not an
+        /// effect.</para></summary>
+        internal static class BloomStrengthSetting
+        {
+            private struct Authored
+            {
+                public bool active;
+                public float intensity, threshold, diffusion;
+                public bool oIntensity, oThreshold, oDiffusion;
+            }
+            private static readonly Dictionary<int, Authored> _authored = new Dictionary<int, Authored>();
+            private static bool _logged;
+
+            internal static string Level
+            {
+                get
+                {
+                    string v = Plugin.BloomStrength != null ? (Plugin.BloomStrength.Value ?? "") : "";
+                    v = v.Trim();
+                    if (string.Equals(v, "Off", StringComparison.OrdinalIgnoreCase)) return "Off";
+                    if (string.Equals(v, "Reduced", StringComparison.OrdinalIgnoreCase)) return "Reduced";
+                    return "Full";
+                }
+            }
+
+            /// <summary>Cycles Full -> Reduced -> Off -> Full and applies immediately.</summary>
+            internal static void Cycle()
+            {
+                string next = Level == "Full" ? "Reduced" : Level == "Reduced" ? "Off" : "Full";
+                if (Plugin.BloomStrength != null) Plugin.BloomStrength.Value = next;
+                Apply();
+            }
+
+            internal static void Apply()
+            {
+                try
+                {
+                    string lvl = Level;
+                    int touched = 0;
+                    // Enumerate the live volumes rather than trusting ArtHandler's — see the
+                    // targeting note above.
+                    //
+                    // `.profile`, NOT `.sharedProfile` — and this is the second no-op trap in
+                    // the same feature (review find, confirmed against the decompile). What the
+                    // renderer reads is `PostProcessVolume.profileRef`, which returns
+                    // `m_InternalProfile` when one exists and only falls back to `sharedProfile`
+                    // otherwise. Vanilla `ChomaticAberrationFeeler.OnAwake` does
+                    // `GetComponent<PostProcessVolume>().profile.TryGetSettings<ChromaticAberration>(…)`
+                    // on the volume that carries the LIVE bloom, and the `.profile` getter
+                    // CREATES `m_InternalProfile` — so by the time we run, that volume is always
+                    // reading the internal clone and writes to the shared asset are invisible.
+                    // Using `.profile` also means we never mutate the on-disk asset.
+                    foreach (var vol in UnityEngine.Object.FindObjectsOfType<PostProcessVolume>())
+                    {
+                        if (vol == null) continue;
+                        if (Set(vol.profile, lvl, vol.name)) touched++;
+                    }
+                    // Our own map-skin clones, so a custom skin doesn't reinstate full bloom.
+                    foreach (var clone in CustomMapColors.CachedClones)
+                        if (Set(clone, lvl, "cr-clone")) touched++;
+                    if (!_logged)
+                    {
+                        _logged = true;
+                        Plugin.Log.LogInfo($"[BLOOM] level={lvl}; {touched} profile(s) carrying a Bloom found");
+                        if (touched == 0)
+                            Plugin.Log.LogWarning("[BLOOM] no Bloom settings found on any volume — "
+                                                  + "the strength setting will do nothing");
+                    }
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[BLOOM] apply failed: {ex.Message}"); }
+            }
+
+            private static bool Set(PostProcessProfile p, string lvl, string who)
+            {
+                if (p == null) return false;
+                try
+                {
+                    UnityEngine.Rendering.PostProcessing.Bloom b;
+                    if (!p.TryGetSettings(out b) || b == null) return false;
+                    int id = p.GetInstanceID();
+                    if (!_authored.ContainsKey(id))
+                    {
+                        _authored[id] = new Authored
+                        {
+                            active = b.active,
+                            intensity = b.intensity.value,
+                            threshold = b.threshold.value,
+                            diffusion = b.diffusion.value,
+                            oIntensity = b.intensity.overrideState,
+                            oThreshold = b.threshold.overrideState,
+                            oDiffusion = b.diffusion.overrideState,
+                        };
+                        // Log only the profile that actually renders — the inert ones are noise.
+                        if (b.active)
+                            Plugin.Log.LogInfo($"[BLOOM] live bloom on '{p.name}' (volume {who}): "
+                                + $"intensity={b.intensity.value:F1} threshold={b.threshold.value:F2} "
+                                + $"diffusion={b.diffusion.value:F1}");
+                    }
+                    var a = _authored[id];
+                    if (lvl == "Off")
+                    {
+                        b.active = false;
+                        return a.active;   // only count profiles that were ever going to render
+                    }
+                    b.active = a.active;
+                    if (lvl == "Reduced")
+                    {
+                        // Extent first (that is the reported complaint): -2 diffusion = a
+                        // QUARTER of the radius. Then a real but not total brightness cut, and
+                        // a higher threshold so fewer pixels qualify at all.
+                        b.intensity.Override(a.intensity * 0.6f);
+                        b.threshold.Override(Mathf.Max(a.threshold, 1.5f));
+                        b.diffusion.Override(Mathf.Max(1f, a.diffusion - 2f));
+                    }
+                    else
+                    {
+                        // Full: restore the authored values AND their override states, so we
+                        // leave the profile exactly as we found it.
+                        b.intensity.value = a.intensity; b.intensity.overrideState = a.oIntensity;
+                        b.threshold.value = a.threshold; b.threshold.overrideState = a.oThreshold;
+                        b.diffusion.value = a.diffusion; b.diffusion.overrideState = a.oDiffusion;
+                    }
+                    return a.active;
+                }
+                catch { return false; }
+            }
+        }
+
         // Per-map backdrop quads: any renderer wide enough to cover the play
         // area (x span [-35.56, 35.56] per OutOfBoundsHandler) that isn't a
         // particle. Cached vanilla colors per instance; logged once per object
@@ -6676,6 +6847,7 @@ namespace CompetitiveRounds
                     // Freshly-built skin clones carry a copied CA object — assert
                     // the toggle on it same-frame.
                     MapPhysicalColorPatch.ChromaticAberrationSetting.Apply();
+                    MapPhysicalColorPatch.BloomStrengthSetting.Apply();
                     // Instant/sharp swap (v1.26.10): ROUNDS fades the post-process volume in
                     // gradually, which reads as the map "sliding" into the next skin on Shift.
                     // Force the volume to full weight on the same frame so the new ColorGrading

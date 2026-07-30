@@ -487,6 +487,8 @@ namespace CompetitiveRounds
         }
         private static object txtRating,txtRD,txtLevel,txtXPProg,txtTotalXP,txtTopLeftName;private static Component xpFill;
         private static object txtRankedRec,txtRankedStrk,txtCasualRec,txtCasualStrk,txtSweeps,txtTotalRec,txtAccuracy,txtSessionSum,txtSessionSplit,txtSessionSweeps,txtOppSummary,txtSessionOppLifetime,txtTeam2v2Rec,txtTeam2v2Strk;
+        /* Bug #130: My Stats -> Record covered only 1v1 ranked/casual + 2v2. */
+        private static object txtOvtRec,txtFfaRec,txtFfaExtra;
         private static object sessionSplitLayoutTarget;
         private static GameObject sessionOppContainer;private static List<object> sessionOppTexts=new List<object>();
         private static object txtLinkCode;private static GameObject linkCodeBtn;
@@ -2745,6 +2747,35 @@ namespace CompetitiveRounds
                     }
                 }
             }
+            // Bug #129: the per-player series xp/gold. The server has always sent
+            // gold_by_steam/xp_by_steam here and the client has always PARSED them —
+            // this panel just never drew them, which is a large part of why 1v2 read
+            // as "no XP/gold". Series-cumulative, so labelled per series, not per game.
+            // `lines` drives the row's LayoutElement height, so every appended line
+            // must increment it or the text overpaints its neighbours (#199).
+            if(s.xp_by_steam!=null||s.gold_by_steam!=null)
+            {
+                string[][] rw=new[]{
+                    new[]{s.solo_steam,s.solo_name,"#FFB347"},
+                    new[]{s.duo_a_steam,s.duo_a_name,"#88AAFF"},
+                    new[]{s.duo_b_steam,s.duo_b_name,"#88AAFF"}};
+                var rewards=new List<string>();
+                foreach(var w in rw)
+                {
+                    if(string.IsNullOrEmpty(w[0]))continue;
+                    int xp=0,gold=0;
+                    if(s.xp_by_steam!=null)s.xp_by_steam.TryGetValue(w[0],out xp);
+                    if(s.gold_by_steam!=null)s.gold_by_steam.TryGetValue(w[0],out gold);
+                    if(xp<=0&&gold<=0)continue;
+                    rewards.Add($"<color={w[2]}>{Trunc(w[1]??"?",12)}</color> <color=#9BE8A0>+{xp}xp</color>"
+                               +(gold>0?$" <color=#FFD94D>+{gold}g</color>":""));
+                }
+                if(rewards.Count>0)
+                {
+                    sb.Append("      <color=#667788>series:</color> "+string.Join("   ",rewards.ToArray())+"\n");
+                    lines++;
+                }
+            }
             return sb.ToString();
         }
 
@@ -2804,7 +2835,7 @@ namespace CompetitiveRounds
                 if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
             }
         }
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -3073,7 +3104,21 @@ namespace CompetitiveRounds
          * UNPADDED VLG outer so the sub-tab bar sits at the identical top
          * position on all three tabs; the original HLG panel nests inside. */
         var outer=new GameObject("MyStatsOuter");outer.transform.SetParent(parent,false);outer.AddComponent<RectTransform>();UIFactory.AddVLG(outer,spacing:2);UIFactory.AddLE(outer,flexH:1);MakeSubTabAnchor(0,outer.transform,true);
-        var panel=new GameObject("MyStats");panel.transform.SetParent(outer.transform,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:8);UIFactory.AddLE(panel,flexH:1);var left=new GameObject("Left");left.transform.SetParent(panel.transform,false);left.AddComponent<RectTransform>();UIFactory.AddVLG(left,spacing:4);UIFactory.AddLE(left,prefW:380);var rBox=UIFactory.CreatePanel("RB",left.transform,C_PANEL);UIFactory.AddVLG(rBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(rBox,flexH:0);var glHdr=UIFactory.CreateText("RL",rBox.transform,"Glicko-2 Rating",19f,C_SUB,sizeDelta:new Vector2(250,28));UIFactory.SetCharSpacing(glHdr,1f);var rRow=new GameObject("RR");rRow.transform.SetParent(rBox.transform,false);rRow.AddComponent<RectTransform>();UIFactory.AddHLG(rRow,spacing:12);UIFactory.AddLE(rRow,prefH:38);txtRating=UIFactory.CreateText("Rat",rRow.transform,"1500",30f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,38));UIFactory.SetBold(txtRating,true);txtRD=UIFactory.CreateText("RD",rRow.transform,"RD: 350",18f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,38));var xBox=UIFactory.CreatePanel("XB",left.transform,C_PANEL);UIFactory.AddVLG(xBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(xBox,flexH:0);var lvRow=new GameObject("LR");lvRow.transform.SetParent(xBox.transform,false);lvRow.AddComponent<RectTransform>();UIFactory.AddHLG(lvRow,spacing:8);UIFactory.AddLE(lvRow,prefH:28);txtLevel=UIFactory.CreateText("Lv",lvRow.transform,"Level 1",19f,C_BLUE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(100,28));UIFactory.SetBold(txtLevel,true);txtXPProg=UIFactory.CreateText("XPP",lvRow.transform,"",16f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(130,28));var xSp=new GameObject("S");xSp.transform.SetParent(lvRow.transform,false);xSp.AddComponent<RectTransform>();UIFactory.AddLE(xSp,flexW:1);txtTotalXP=UIFactory.CreateText("TXP",lvRow.transform,"0 XP",16f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(110,28));xpFill=UIFactory.CreateFillBar("XP",xBox.transform,new Color(0.2f,0.2f,0.25f,0.8f),new Color(0.3f,0.7f,1f,0.9f),10f);var recBox=UIFactory.CreatePanel("RecB",left.transform,C_PANEL);UIFactory.AddVLG(recBox,spacing:1,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(recBox,flexH:0);UIFactory.CreateText("RecL",recBox.transform,"Record",19f,C_SUB,sizeDelta:new Vector2(340,28));txtRankedRec=UIFactory.CreateText("RR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtRankedStrk=UIFactory.CreateText("RS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));txtTeam2v2Rec=UIFactory.CreateText("T2",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTeam2v2Strk=UIFactory.CreateText("T2S",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtCasualRec=UIFactory.CreateText("CR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtCasualStrk=UIFactory.CreateText("CS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtSweeps=UIFactory.CreateText("SW",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTotalRec=UIFactory.CreateText("TR",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtAccuracy=UIFactory.CreateText("AC",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));var sesBox=UIFactory.CreatePanel("SB",left.transform,C_PANEL);UIFactory.AddVLG(sesBox,spacing:3,padL:10,padR:10,padT:8,padB:8);UIFactory.AddLE(sesBox,flexH:0);UIFactory.CreateText("SL",sesBox.transform,"Session Info",19f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(340,28));txtSessionSum=UIFactory.CreateText("SS",sesBox.transform,"No games this session",17f,C_DIM,sizeDelta:new Vector2(340,26));txtSessionSplit=UIFactory.CreateText("SSp",sesBox.transform,"",16f,C_LABEL,sizeDelta:new Vector2(340,24));txtSessionSweeps=UIFactory.CreateText("SSw",sesBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtSessionOppLifetime=UIFactory.CreateText("SOL",sesBox.transform,"",15f,new Color(0.6f,0.75f,1f),sizeDelta:new Vector2(340,22));sessionOppContainer=new GameObject("SOC");sessionOppContainer.transform.SetParent(sesBox.transform,false);sessionOppContainer.AddComponent<RectTransform>();UIFactory.AddVLG(sessionOppContainer,spacing:1);
+        var panel=new GameObject("MyStats");panel.transform.SetParent(outer.transform,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:8);UIFactory.AddLE(panel,flexH:1);/* Bug #130: this column is a fixed-height stack (rating + xp + Record + Session Info +
+           an UNBOUNDED per-opponent list) with no minH anywhere, inside a WIDTH-matched
+           CanvasScaler — so above 16:9 it gets fewer than 1080 vertical units and already
+           overflowed at 21:9 with a single session opponent (~621 needed vs ~616 available),
+           compressing rows to ~0 height while TMP kept painting over its neighbours (#199).
+           Adding the 1v2 + FFA Record rows makes that certain, so the column now scrolls.
+           Per #63 the inner holder must be flexH:0 (a flexH:1 child inside a scroll viewport
+           sizes to the viewport AND reports 0 preferred height, collapsing the content). */
+        var leftSV=UIFactory.CreateScrollView("MSLeftSV",panel.transform,spacing:4);/* flexW:1 is DELIBERATE and must not be "corrected" to 0. The pre-scroll `left`
+           column had flexW UNSET, which per #132 means it INHERITED flexW:1 from the
+           flexW:1 spacer inside the XP row, so it shared the row's slack 50/50 with the
+           history column. Setting flexW:0 here (as #132's rule would suggest for a
+           fixed-prefW column) silently handed all of that slack to Ranked/Casual History
+           and squeezed this column to a bare 380 -- Sid caught it immediately. #132's rule
+           is about columns that must NOT stretch; this one always did. */UIFactory.AddLE(leftSV.scrollGO,prefW:380,minW:340,flexW:1,flexH:1);var left=leftSV.content;UIFactory.AddLE(left,flexH:0);var rBox=UIFactory.CreatePanel("RB",left.transform,C_PANEL);UIFactory.AddVLG(rBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(rBox,flexH:0);var glHdr=UIFactory.CreateText("RL",rBox.transform,"Glicko-2 Rating",19f,C_SUB,sizeDelta:new Vector2(250,28));UIFactory.SetCharSpacing(glHdr,1f);var rRow=new GameObject("RR");rRow.transform.SetParent(rBox.transform,false);rRow.AddComponent<RectTransform>();UIFactory.AddHLG(rRow,spacing:12);UIFactory.AddLE(rRow,prefH:38);txtRating=UIFactory.CreateText("Rat",rRow.transform,"1500",30f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,38));UIFactory.SetBold(txtRating,true);txtRD=UIFactory.CreateText("RD",rRow.transform,"RD: 350",18f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(240,38));var xBox=UIFactory.CreatePanel("XB",left.transform,C_PANEL);UIFactory.AddVLG(xBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(xBox,flexH:0);var lvRow=new GameObject("LR");lvRow.transform.SetParent(xBox.transform,false);lvRow.AddComponent<RectTransform>();UIFactory.AddHLG(lvRow,spacing:8);UIFactory.AddLE(lvRow,prefH:28);txtLevel=UIFactory.CreateText("Lv",lvRow.transform,"Level 1",19f,C_BLUE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(100,28));UIFactory.SetBold(txtLevel,true);txtXPProg=UIFactory.CreateText("XPP",lvRow.transform,"",16f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(130,28));var xSp=new GameObject("S");xSp.transform.SetParent(lvRow.transform,false);xSp.AddComponent<RectTransform>();UIFactory.AddLE(xSp,flexW:1);txtTotalXP=UIFactory.CreateText("TXP",lvRow.transform,"0 XP",16f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(110,28));xpFill=UIFactory.CreateFillBar("XP",xBox.transform,new Color(0.2f,0.2f,0.25f,0.8f),new Color(0.3f,0.7f,1f,0.9f),10f);var recBox=UIFactory.CreatePanel("RecB",left.transform,C_PANEL);UIFactory.AddVLG(recBox,spacing:1,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(recBox,flexH:0);UIFactory.CreateText("RecL",recBox.transform,"Record",19f,C_SUB,sizeDelta:new Vector2(340,28));txtRankedRec=UIFactory.CreateText("RR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtRankedStrk=UIFactory.CreateText("RS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));txtTeam2v2Rec=UIFactory.CreateText("T2",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTeam2v2Strk=UIFactory.CreateText("T2S",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));/* Bug #130: 1v2 (split by seat) + FFA. Placed with the other per-mode lines, above Casual. */txtOvtRec=UIFactory.CreateText("O12",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtFfaRec=UIFactory.CreateText("FFR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtFfaExtra=UIFactory.CreateText("FFX",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtCasualRec=UIFactory.CreateText("CR",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtCasualStrk=UIFactory.CreateText("CS",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtSweeps=UIFactory.CreateText("SW",recBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtTotalRec=UIFactory.CreateText("TR",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,22));txtAccuracy=UIFactory.CreateText("AC",recBox.transform,"",15f,C_LABEL,sizeDelta:new Vector2(340,44));var sesBox=UIFactory.CreatePanel("SB",left.transform,C_PANEL);UIFactory.AddVLG(sesBox,spacing:3,padL:10,padR:10,padT:8,padB:8);UIFactory.AddLE(sesBox,flexH:0);UIFactory.CreateText("SL",sesBox.transform,"Session Info",19f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(340,28));txtSessionSum=UIFactory.CreateText("SS",sesBox.transform,"No games this session",17f,C_DIM,sizeDelta:new Vector2(340,26));txtSessionSplit=UIFactory.CreateText("SSp",sesBox.transform,"",16f,C_LABEL,sizeDelta:new Vector2(340,24));txtSessionSweeps=UIFactory.CreateText("SSw",sesBox.transform,"",16f,C_WHITE,sizeDelta:new Vector2(340,24));txtSessionOppLifetime=UIFactory.CreateText("SOL",sesBox.transform,"",15f,new Color(0.6f,0.75f,1f),sizeDelta:new Vector2(340,22));sessionOppContainer=new GameObject("SOC");sessionOppContainer.transform.SetParent(sesBox.transform,false);sessionOppContainer.AddComponent<RectTransform>();UIFactory.AddVLG(sessionOppContainer,spacing:1);
         /* Discord Link + chat panels moved to the Home tab (v1.33) — the left
          * column here keeps rating/XP/record/session; Home is the social hub. */
         var right=new GameObject("Right");right.transform.SetParent(panel.transform,false);right.AddComponent<RectTransform>();UIFactory.AddVLG(right,spacing:4);UIFactory.AddLE(right,flexW:1,flexH:1);var rkBox=UIFactory.CreatePanel("RkB",right.transform,C_PANEL);UIFactory.AddVLG(rkBox,spacing:1,padL:8,padR:8,padT:6,padB:6);UIFactory.AddLE(rkBox,flexH:1);UIFactory.CreateText("RkH",rkBox.transform,"Ranked History",21f,C_GOLD,sizeDelta:new Vector2(250,30));txtOppSummary=UIFactory.CreateText("OS",rkBox.transform,"",15f,new Color(0.7f,0.8f,1f),sizeDelta:new Vector2(500,22));var rkSV=UIFactory.CreateScrollView("RkSV",rkBox.transform,spacing:1);UIFactory.AddLE(rkSV.scrollGO,flexH:1);rankedContainer=rkSV.content;for(int i=0;i<15;i++)rankedRows.Add(CreateHistoryRow(rankedContainer.transform,$"rr{i}"));var rPg=new GameObject("RPg");rPg.transform.SetParent(rkBox.transform,false);rPg.AddComponent<RectTransform>();UIFactory.AddHLG(rPg,spacing:6,forceExpandH:true);UIFactory.AddLE(rPg,prefH:20,flexH:0);var rS1=new GameObject("S");rS1.transform.SetParent(rPg.transform,false);rS1.AddComponent<RectTransform>();UIFactory.AddLE(rS1,flexW:1);rPrev=UIFactory.CreateButton("rP",rPg.transform,"< Prev",10f,C_LABEL,C_BTN,()=>{if(rankedPage>0){rankedPage--;dirty=true;}},sizeDelta:new Vector2(50,18));txtRankedPage=UIFactory.CreateText("rPI",rPg.transform,"",10f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(35,18));rNext=UIFactory.CreateButton("rN",rPg.transform,"Next >",10f,C_LABEL,C_BTN,()=>{rankedPage++;dirty=true;},sizeDelta:new Vector2(50,18));var rS2=new GameObject("S");rS2.transform.SetParent(rPg.transform,false);rS2.AddComponent<RectTransform>();UIFactory.AddLE(rS2,flexW:1);rCardModeBtn=UIFactory.CreateButton("rCm",rPg.transform,"",10f,C_LABEL,C_BTN,ToggleHistoryCardMode,sizeDelta:new Vector2(100,18));rCardModeTxt=UIFactory.GetButtonText(rCardModeBtn);
@@ -6312,8 +6357,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static GameObject appearOfflineBtn; private static object appearOfflineTxt;
         private static GameObject showDiscordBtn; private static object showDiscordTxt;
         // v1.32 items 7+8 toggle rows.
-        private static GameObject screenShakeToggleBtn, mapLightingToggleBtn, mapShadowsToggleBtn, animCosToggleBtn;
-        private static object screenShakeToggleTxt, mapLightingToggleTxt, mapShadowsToggleTxt, animCosToggleTxt;
+        private static GameObject screenShakeToggleBtn, mapLightingToggleBtn, mapShadowsToggleBtn, animCosToggleBtn, bloomToggleBtn;
+        private static object screenShakeToggleTxt, mapLightingToggleTxt, mapShadowsToggleTxt, animCosToggleTxt, bloomToggleTxt;
         // July 20 item 8: chromatic aberration toggle row.
         private static GameObject chromAbToggleBtn;
         private static object chromAbToggleTxt;
@@ -6588,6 +6633,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 },
                 "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = all freeze to a static frame instantly.", 34f);
             animCosToggleTxt = UIFactory.GetButtonText(animCosToggleBtn);
+            // Bloom strength (Sid: "cosmetics are illuminated and the effect is quite large
+            // for some people"). 3-state cycler — same SettingsToggle row the cursor-shape
+            // and date-format cyclers already use; the label carries the current level.
+            bloomToggleBtn = SettingsToggle(dispBox.transform, "SBloom", new Vector2(260, 28),
+                () =>
+                {
+                    MapPhysicalColorPatch.BloomStrengthSetting.Cycle();
+                    Plugin.Log.LogInfo($"[SETTINGS] Bloom strength -> {MapPhysicalColorPatch.BloomStrengthSetting.Level}");
+                    dirty = true;
+                },
+                "Glow (bloom): the soft halo around bright cosmetics, map art and effects. Reduced = smaller, dimmer halo. Off = no halo. Local only — nothing is hidden, the cosmetic itself still renders the same. A few items have their glow painted into the artwork, and that part stays.", 46f);
+            bloomToggleTxt = UIFactory.GetButtonText(bloomToggleBtn);
             screenShakeToggleBtn = SettingsToggle(dispBox.transform, "SShake", new Vector2(260, 28),
                 () =>
                 {
@@ -6895,6 +6952,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.AnimatedCosmetics.Value
                         ? "Animated cosmetics: <color=#88FF88>ON</color>"
                         : "Animated cosmetics: <color=#FF9966>OFF</color> (static)");
+            if (bloomToggleTxt != null && Plugin.BloomStrength != null)
+            {
+                string _bl = MapPhysicalColorPatch.BloomStrengthSetting.Level;
+                string _bc = _bl == "Full" ? "#88FF88" : _bl == "Reduced" ? "#DDDD66" : "#FF9966";
+                UIFactory.SetText(bloomToggleTxt, $"Glow (bloom): <color={_bc}>{_bl.ToUpperInvariant()}</color>");
+            }
             if (chromAbToggleTxt != null && Plugin.ChromaticAberrationEnabled != null)
                 UIFactory.SetText(chromAbToggleTxt,
                     Plugin.ChromaticAberrationEnabled.Value
@@ -6956,22 +7019,30 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static string BuildMultimodeSeriesLine(ApiClient.MultimodeSeriesEntry m,string myName)
         {
             string tag=m.mode=="2v2"?"[2v2]":m.mode=="1v2"?"[1v2]":"[FFA]";
-            // 2v2/1v2 labels are two names joined by " + ", so they need a longer
-            // budget than a single 1v1 name or they clip mid-name.
-            // 16/14, not 18/22: two labels plus the mode tag, score and both
-            // rating tails have to fit a column whose MINIMUM width is 340 with
-            // word-wrap off, or the losing side clips mid-name (#199/#132).
-            int cap=m.mode=="ffa"?16:14;
             string wElo=m.left_rating_change!=0?$" <color=#00FF00>+{m.left_rating_change:F0}</color>":"";
             string lElo=m.right_rating_change!=0?$" <color=#FF6666>{m.right_rating_change:F0}</color>":"";
-            string line=$"<color=#8899AA>{tag}</color> <color=#FFFFFF>{Trunc(m.left_label??"?",cap)}</color>{wElo}"
-                      +$"  <b>{m.score}</b>  <color=#AAAAAA>{Trunc(m.right_label??"?",cap)}</color>{lElo}\n";
+            // Bug #126: ONE budget shared across every name on both sides, fairly
+            // allocated (FitLabelPair) instead of a flat per-label cap. The old
+            // 14-char cap on a COMBINED "A + B" label spent all 14 on name A and
+            // rendered name B as literal "..". Budget is the visible-character
+            // width the two labels may occupy: the fixed furniture on this line is
+            // the mode tag (6) + score block (~7), so ~36 keeps the row about as
+            // wide as the 1v1 row above it (2x16 names + two "(1842)" tags). The
+            // unrated modes carry no elo tails, so they get that space back.
+            int budget=(wElo.Length==0&&lElo.Length==0)?44:36;
+            string leftFit,rightFit;
+            FitLabelPair(m.left_label??"?",m.right_label??"?",budget,out leftFit,out rightFit);
+            string line=$"<color=#8899AA>{tag}</color> <color=#FFFFFF>{leftFit}</color>{wElo}"
+                      +$"  <b>{m.score}</b>  <color=#AAAAAA>{rightFit}</color>{lElo}\n";
             if(m.bets!=null)
             {
                 foreach(var b in m.bets)
                 {
+                    // bet_on_label is a full team label for 2v2 ("A + B"), so it
+                    // needs the same per-name fitting as the header (#126) — a flat
+                    // Trunc here produced the same "bet on GalaxyIce + .." rows.
                     string who=b.bettor_name==myName?"<b>You</b>":FfaSafeRich(Trunc(b.bettor_name??"?",14));
-                    string on=FfaSafeRich(Trunc(b.bet_on_label??"?",14));
+                    string on=FfaSafeRich(FitLabel(b.bet_on_label??"?",22));
                     // Explicit server state, never `payout > amount` — that test
                     // renders a REFUND as a loss (#107).
                     if(b.state=="won")
@@ -7103,7 +7174,12 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
  * "Best: 128W" (his true series best) read as an uncounted game streak.
  * Now: two labeled lines, both from new server fields (full-history, no
  * 400-row cache cap); client CalcStreak stays only as an old-server fallback. */
-{int gCur=s.current_ranked_game_streak!=0?s.current_ranked_game_streak:(sR.Count>0?CalcStreak(sR):0);int gBest=s.best_ranked_game_streak;int srCur=s.current_ranked_series_streak;int srBest=s.best_ranked_series_streak>0?s.best_ranked_series_streak:s.best_ranked_streak;if(gCur==0&&gBest==0&&srCur==0&&srBest==0)UIFactory.SetText(txtRankedStrk,"");else{string gc=gCur>=0?"#00FF00":"#FF6666";string sc2=srCur>=0?"#00FF00":"#FF6666";string l1=$"  <color={gc}>Game streak: {(gCur>=0?$"{gCur}W":$"{-gCur}L")}</color>"+(gBest>0?$"  Best: {gBest}W":"");string l2=$"  <color={sc2}>Series streak: {(srCur>=0?$"{srCur}W":$"{-srCur}L")}</color>"+(srBest>0?$"  Best: {srBest}W":"");UIFactory.SetText(txtRankedStrk,l1+"\n"+l2);}}/* 2v2 line — shows the parallel Glicko / W-L / streak. Hidden when no 2v2 series played, since the row otherwise reads as a confusing 0-0/1500 default. */{var t2=ApiClient.CachedTeamStats;if(t2!=null&&(t2.series_wins+t2.series_losses)>0){string ratio=t2.series_losses>0?$"{(float)t2.series_wins/t2.series_losses:F1}":t2.series_wins>0?$"{t2.series_wins}:0":"0:0";UIFactory.SetText(txtTeam2v2Rec,$"<color=#FFB347>2v2:</color> {t2.series_wins}W / {t2.series_losses}L ({ratio})  <color=#888>Rating:</color> {t2.rating:F0}  <color=#888>Peak:</color> {t2.peak_rating:F0}");int st2=t2.current_streak;if(st2!=0){string c2=st2>0?"#00FF00":"#FF6666";UIFactory.SetText(txtTeam2v2Strk,$"  <color={c2}>Streak: {(st2>0?$"{st2}W":$"{-st2}L")}</color>");}else UIFactory.SetText(txtTeam2v2Strk,"");}else{UIFactory.SetText(txtTeam2v2Rec,"<color=#FFB347>2v2:</color> -");UIFactory.SetText(txtTeam2v2Strk,"");}}UIFactory.SetText(txtCasualRec,cW+cL>0?$"Casual: {cW}W / {cL}L ({(cL>0?$"{(float)cW/cL:F1}":cW>0?$"{cW}:0":"")})":"Casual: -");if(sC.Count>0){int st=CalcStreak(sC);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtCasualStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_casual_streak>0?$"  Best: {s.best_casual_streak}W":""));}else UIFactory.SetText(txtCasualStrk,"");UIFactory.SetText(txtSweeps,$"Sweeps: <color=#00FF00>5-0 x{sweepG}</color>  <color=#FF6666>0-5 x{sweepT}</color>");UIFactory.SetText(txtTotalRec,$"Total: {s.total_matches} ({s.wins}W / {s.losses}L)  <color=#FFD94D>Gold: {(s.gold_earned - s.gold_spent)}</color>");/* Hit% / Block% lifetime - one-sided totals (only the reporter-side's client has these
+{int gCur=s.current_ranked_game_streak!=0?s.current_ranked_game_streak:(sR.Count>0?CalcStreak(sR):0);int gBest=s.best_ranked_game_streak;int srCur=s.current_ranked_series_streak;int srBest=s.best_ranked_series_streak>0?s.best_ranked_series_streak:s.best_ranked_streak;if(gCur==0&&gBest==0&&srCur==0&&srBest==0)UIFactory.SetText(txtRankedStrk,"");else{string gc=gCur>=0?"#00FF00":"#FF6666";string sc2=srCur>=0?"#00FF00":"#FF6666";string l1=$"  <color={gc}>Game streak: {(gCur>=0?$"{gCur}W":$"{-gCur}L")}</color>"+(gBest>0?$"  Best: {gBest}W":"");string l2=$"  <color={sc2}>Series streak: {(srCur>=0?$"{srCur}W":$"{-srCur}L")}</color>"+(srBest>0?$"  Best: {srBest}W":"");UIFactory.SetText(txtRankedStrk,l1+"\n"+l2);}}/* 2v2 line — shows the parallel Glicko / W-L / streak. Hidden when no 2v2 series played, since the row otherwise reads as a confusing 0-0/1500 default. */{var t2=ApiClient.CachedTeamStats;if(t2!=null&&(t2.series_wins+t2.series_losses)>0){string ratio=t2.series_losses>0?$"{(float)t2.series_wins/t2.series_losses:F1}":t2.series_wins>0?$"{t2.series_wins}:0":"0:0";UIFactory.SetText(txtTeam2v2Rec,$"<color=#FFB347>2v2:</color> {t2.series_wins}W / {t2.series_losses}L ({ratio})  <color=#888>Rating:</color> {t2.rating:F0}  <color=#888>Peak:</color> {t2.peak_rating:F0}");int st2=t2.current_streak;if(st2!=0){string c2=st2>0?"#00FF00":"#FF6666";UIFactory.SetText(txtTeam2v2Strk,$"  <color={c2}>Streak: {(st2>0?$"{st2}W":$"{-st2}L")}</color>");}else UIFactory.SetText(txtTeam2v2Strk,"");}else{UIFactory.SetText(txtTeam2v2Rec,"<color=#FFB347>2v2:</color> -");UIFactory.SetText(txtTeam2v2Strk,"");}}/* Bug #130: 1v2 (split by seat, like the 1v2 tab) and FFA. Same
+        "hide behind a dash when unplayed" rule as the 2v2 line above — a 0-0 row
+        reads as a bug. 1v2 shows no rating: the mode is unranked beta and
+        glicko_ratings_1v2.rating is 1500 for everyone. */{int osw=s.ovt_solo_wins,osl=s.ovt_solo_losses,odw=s.ovt_duo_wins,odl=s.ovt_duo_losses;if(osw+osl+odw+odl>0){string solo=osw+osl>0?$"Solo {osw}W/{osl}L":"Solo -";string duo=odw+odl>0?$"Duo {odw}W/{odl}L":"Duo -";UIFactory.SetText(txtOvtRec,$"<color=#9BE8A0>1v2:</color> {solo}  <color=#888>|</color>  {duo}");}else UIFactory.SetText(txtOvtRec,"<color=#9BE8A0>1v2:</color> -");}{int fg=s.ffa_games,fw=s.ffa_wins;if(fg>0){float wr=100f*fw/fg;float t3=100f*s.ffa_top3/fg;UIFactory.SetText(txtFfaRec,$"<color=#C48CFF>FFA:</color> {fw}W / {fg-fw}L ({wr:F0}% win)");/* Gate on the COUNT of games carrying damage telemetry, not on the value
+        (review find): pre-telemetry games have no data at all, but a real game
+        where the player dealt zero damage is a legitimate 0.0 that must show. */string dmg=s.ffa_damage_games>0?$"  Dmg/game: {s.ffa_avg_damage:F0}":"";UIFactory.SetText(txtFfaExtra,$"  Top 3: {t3:F0}%  Kills/game: {s.ffa_avg_kills:F1}  Avg place: {s.ffa_avg_placement:F1}{dmg}");}else{UIFactory.SetText(txtFfaRec,"<color=#C48CFF>FFA:</color> -");UIFactory.SetText(txtFfaExtra,"");}}UIFactory.SetText(txtCasualRec,cW+cL>0?$"Casual: {cW}W / {cL}L ({(cL>0?$"{(float)cW/cL:F1}":cW>0?$"{cW}:0":"")})":"Casual: -");if(sC.Count>0){int st=CalcStreak(sC);string c=st>0?"#00FF00":"#FF6666";UIFactory.SetText(txtCasualStrk,$"  <color={c}>Streak: {(st>0?$"{st}W":$"{-st}L")}</color>"+(s.best_casual_streak>0?$"  Best: {s.best_casual_streak}W":""));}else UIFactory.SetText(txtCasualStrk,"");UIFactory.SetText(txtSweeps,$"Sweeps: <color=#00FF00>5-0 x{sweepG}</color>  <color=#FF6666>0-5 x{sweepT}</color>");UIFactory.SetText(txtTotalRec,$"Total: {s.total_matches} ({s.wins}W / {s.losses}L)  <color=#FFD94D>Gold: {(s.gold_earned - s.gold_spent)}</color>");/* Hit% / Block% lifetime - one-sided totals (only the reporter-side's client has these
  * counters). Split across two lines in the 44px-tall txtAccuracy field because the
  * combined string overflows 340px at 15pt and TMP wordwrap clips the second line
  * when the field is only 22px tall. Newline gives TMP a proper 2-line render. */
@@ -9088,8 +9164,14 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                         matchup=$"as DUO (w/ {FfaSafeRich(Trunc(partner,12))}) vs "+
                             FfaSafeRich(Trunc(entry.solo??"?",12));
                     }
+                    // Bug #129: reward tag appended INLINE, exactly like the
+                    // Ranked History rows' "+843xp +9g" — deliberately not a new
+                    // line, so the 1v2 reward finally shows without growing the
+                    // history block's height.
+                    int oGold=entry.gold_gained+entry.series_gold_gained;
+                    string oGoldTag=oGold>0?$"  <color=#FFD94D>+{oGold}g</color>":"";
                     sb.Append("  ").Append(result).Append(' ').Append(entry.score??"?")
-                      .Append(' ').Append(matchup).Append("  <color=#888>")
+                      .Append(' ').Append(matchup).Append(oGoldTag).Append("  <color=#888>")
                       .Append(ModeHistoryDate(entry.ended_at)).Append("</color>\n");
                 }
             }
@@ -9984,7 +10066,128 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static string OnlineSuffix(){int on=ApiClient.CachedOnlineCount;return on>0?$"  <color=#7FDBFF>|</color>  <color=#AAAAAA>{on} online</color>":"";}
 
         private static int CalcStreak(List<ApiClient.MatchHistoryEntry> m){if(m==null||m.Count==0)return 0;bool t=m[0].won;int c=0;for(int i=0;i<m.Count;i++){if(m[i].won==t)c++;else break;}return t?c:-c;}
-        private static string Trunc(string s,int max){if(string.IsNullOrEmpty(s))return "";return s.Length<=max?s:s.Substring(0,max-2)+"..";}
+        private static string Trunc(string s,int max){if(string.IsNullOrEmpty(s))return "";if(max<=2)return s.Length<=max?s:"..";return s.Length<=max?s:s.Substring(0,max-2)+"..";}
+
+        // ── Multi-name label fitting (bug #126) ──────────────────
+        // A 2v2/1v2 side label is "NameA + NameB". Truncating that COMBINED
+        // string to a flat character cap spends the whole budget on the first
+        // name and leaves the second as literal ".." (Sid: "galaxy's teammate
+        // has no characters shown for their name at all") — and it cuts a name
+        // that had room, because the OTHER side of the line may be a single
+        // short name with slack going spare ("kleavonish's name was
+        // unnecessarily cut off when there was enough space for it").
+        //
+        // So allocate ONE budget across every name on BOTH sides using max-min
+        // fair water-filling: sort by length, hand each name the smaller of
+        // what it needs and its equal share, and roll every unused character
+        // forward to the names that are still hungry. A name is only ever cut
+        // when the line genuinely cannot hold it, and then every name is cut
+        // to a similar width instead of one being annihilated.
+        private const string LBL_SEP = " + ";
+        private const int LBL_MIN_VISIBLE = 6;   // "Abcd.." — below this a name is unreadable
+        private static readonly List<string> _lblParts = new List<string>(4);
+        private static readonly List<int> _lblOrder = new List<int>(4);
+        private static readonly int[] _lblGrant = new int[8];
+
+        /// <summary>Fits the names of two " + "-joined side labels into one shared
+        /// character budget. Budget counts the separators too, so it maps directly
+        /// onto how much of the column the two labels may occupy.</summary>
+        private static void FitLabelPair(string left,string right,int budget,out string outLeft,out string outRight)
+        {
+            _lblParts.Clear();
+            int leftCount=SplitLabel(left,_lblParts);
+            int rightCount=SplitLabel(right,_lblParts);
+            int n=_lblParts.Count;
+            outLeft="";outRight="";
+            // >8 names is not a shape this panel renders (only reachable when a
+            // display name itself contains " + "). Fall back to a plain even
+            // split rather than indexing past the scratch array — and still
+            // BOUNDED, because returning the raw labels here would let an
+            // authored name overrun the column (review find).
+            if(n==0||n>_lblGrant.Length)
+            {
+                int half=Math.Max(2,budget/2);
+                outLeft=Trunc(left??"",half);
+                outRight=Trunc(right??"",half);
+                return;
+            }
+            // Separators are structural — they are not negotiable, so take them
+            // off the top before sharing what's left between the names.
+            int sepChars=(Math.Max(0,leftCount-1)+Math.Max(0,rightCount-1))*LBL_SEP.Length;
+            int pool=Math.Max(n*2,budget-sepChars);
+            // Water-fill in ascending length order: the shortest name can never
+            // consume more than it needs, so its surplus is what buys the long
+            // names their extra characters.
+            _lblOrder.Clear();
+            for(int i=0;i<n;i++)_lblOrder.Add(i);
+            _lblOrder.Sort((a,b)=>_lblParts[a].Length.CompareTo(_lblParts[b].Length));
+            int remaining=pool,left_n=n;
+            for(int k=0;k<_lblOrder.Count;k++)
+            {
+                int idx=_lblOrder[k];
+                int share=remaining/Math.Max(1,left_n);
+                int want=_lblParts[idx].Length;
+                int grant=Math.Min(want,share);
+                // Never hand out a stub: below the floor, show the floor and let
+                // the tail clip at the ScrollView mask rather than render "..".
+                if(grant<LBL_MIN_VISIBLE)grant=Math.Min(want,LBL_MIN_VISIBLE);
+                _lblGrant[idx]=grant;
+                remaining=Math.Max(0,remaining-grant);
+                left_n--;
+            }
+            outLeft=JoinFitted(0,leftCount);
+            outRight=JoinFitted(leftCount,rightCount);
+            // Unconditional backstop (review find): the LBL_MIN_VISIBLE floor can
+            // hand out more than the pool when there are many names, and a display
+            // name that itself contains " + " inflates the name count — a player
+            // can therefore author a label that overruns the budget and clips at
+            // the mask again. Clamp the joined result so this function's contract
+            // ("the two labels fit `budget` visible characters") holds for any
+            // input, not just well-formed ones.
+            int over=(outLeft.Length+outRight.Length)-budget;
+            if(over>0)
+            {
+                // Shave the longer side first so one huge label can't starve the other.
+                if(outLeft.Length>=outRight.Length)outLeft=Trunc(outLeft,Math.Max(2,outLeft.Length-over));
+                else outRight=Trunc(outRight,Math.Max(2,outRight.Length-over));
+            }
+        }
+
+        private static int SplitLabel(string label,List<string> into)
+        {
+            // Empty = "this side has no label" (the single-label FitLabel form),
+            // NOT a name to spend budget on.
+            if(string.IsNullOrEmpty(label))return 0;
+            int added=0,from=0;
+            while(true)
+            {
+                int at=label.IndexOf(LBL_SEP,from,StringComparison.Ordinal);
+                if(at<0){into.Add(label.Substring(from));added++;break;}
+                into.Add(label.Substring(from,at-from));added++;
+                from=at+LBL_SEP.Length;
+            }
+            return added;
+        }
+
+        private static string JoinFitted(int start,int count)
+        {
+            if(count<=0)return "";
+            var sb=new System.Text.StringBuilder(48);
+            for(int i=0;i<count;i++)
+            {
+                if(i>0)sb.Append(LBL_SEP);
+                sb.Append(Trunc(_lblParts[start+i],_lblGrant[start+i]));
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Single-label form (bet targets: "A + B" or one name).</summary>
+        private static string FitLabel(string label,int budget)
+        {
+            string a,b;
+            FitLabelPair(label,"",budget,out a,out b);
+            return a;
+        }
         private struct SGroup{public string series_id;public List<ApiClient.MatchHistoryEntry> matches;}
         private static List<SGroup> GroupBySeries(List<ApiClient.MatchHistoryEntry> ranked){var groups=new List<SGroup>();SGroup cur=new SGroup{series_id=null,matches=null};foreach(var m in ranked){string sid=m.series_id;bool has=!string.IsNullOrEmpty(sid)&&sid!="null";if(has&&cur.matches!=null&&cur.series_id==sid)cur.matches.Add(m);else{if(cur.matches!=null&&cur.matches.Count>0)groups.Add(cur);cur=new SGroup{series_id=has?sid:null,matches=new List<ApiClient.MatchHistoryEntry>{m}};}}if(cur.matches!=null&&cur.matches.Count>0)groups.Add(cur);return groups;}
         internal static Type TImage=>UIFactory.tImage;internal static Type TButton=>UIFactory.tButton;
@@ -10001,6 +10204,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static GameObject adminSeriesContainer;
         private static object txtAdminSeriesHdr;
         private static List<GameObject> adminSeriesRowPool = new List<GameObject>();
+        private static GameObject adminQuarantineContainer;
+        private static object txtAdminQuarantineHdr;
+        private static List<GameObject> adminQuarantineRowPool = new List<GameObject>();
+        private static List<ApiClient.QuarantineReportEntry> adminQuarantineRowBindings = new List<ApiClient.QuarantineReportEntry>();
+        private const int ADMIN_QUARANTINE_ROW_CAP = 20;
 
         private static GameObject BuildAdminTab(Transform parent)
         {
@@ -10016,7 +10224,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.CreateButton("ARefresh", hdrRow.transform, "Refresh", 13f, C_WHITE, C_BTN, () =>
             {
                 var sid = MatchTracker.LocalSteamId;
-                if (!string.IsNullOrEmpty(sid)) { ApiClient.FetchFlaggedMatches(sid); ApiClient.FetchBannedUsers(sid); ApiClient.FetchAdminRecentSeries(sid); }
+                if (!string.IsNullOrEmpty(sid)) { ApiClient.FetchFlaggedMatches(sid); ApiClient.FetchBannedUsers(sid); ApiClient.FetchAdminRecentSeries(sid); ApiClient.FetchAdminQuarantine(sid); }
             }, sizeDelta: new Vector2(90, 26));
 
             var actionRow = new GameObject("AAct"); actionRow.transform.SetParent(panel.transform, false); actionRow.AddComponent<RectTransform>();
@@ -10081,6 +10289,17 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddLE(seriesSV.scrollGO, minH: 80, flexH: 1);
             adminSeriesContainer = seriesSV.content;
 
+            // Rejected reports are independently scrollable and client-capped:
+            // the Admin panel's outer VLG cannot absorb an unbounded fixed-height
+            // list on wide monitors (#199/#245). Each child has prefH (#63).
+            var quarantineHdrRow = new GameObject("AQHRow"); quarantineHdrRow.transform.SetParent(panel.transform, false); quarantineHdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(quarantineHdrRow, spacing: 8); UIFactory.AddLE(quarantineHdrRow, prefH: 24, flexH: 0);
+            txtAdminQuarantineHdr = UIFactory.CreateText("AQH", quarantineHdrRow.transform, "Rejected Reports", 16f, new Color(1f, 0.65f, 0.35f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
+            UIFactory.SetBold(txtAdminQuarantineHdr, true);
+            var quarantineSV = UIFactory.CreateScrollView("AQSV", panel.transform, spacing: 3);
+            UIFactory.AddLE(quarantineSV.scrollGO, minH: 72, flexH: 1);
+            adminQuarantineContainer = quarantineSV.content;
+
             var split = new GameObject("ASplit"); split.transform.SetParent(panel.transform, false); split.AddComponent<RectTransform>();
             UIFactory.AddHLG(split, spacing: 8); UIFactory.AddLE(split, minH: 140, flexH: 2);
 
@@ -10141,6 +10360,208 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 if (i >= adminSeriesRowPool.Count) adminSeriesRowPool.Add(BuildAdminSeriesRow(adminSeriesContainer.transform, i));
                 FillAdminSeriesRow(adminSeriesRowPool[i], series[i]);
             }
+
+            // Quarantined match reports. The server's can_accept decision is
+            // authoritative; the client only renders it and disables the button.
+            var rejected = ApiClient.CachedQuarantineReports ?? new List<ApiClient.QuarantineReportEntry>();
+            int shown = Math.Min(ADMIN_QUARANTINE_ROW_CAP, rejected.Count);
+            string qHeader;
+            if (ApiClient.IsAdminQuarantineLoading && !ApiClient.AdminQuarantineLoaded)
+                qHeader = "Rejected Reports (loading...)";
+            else if (!string.IsNullOrEmpty(ApiClient.AdminQuarantineError))
+                qHeader = $"Rejected Reports ({rejected.Count})  <color=#FF7777>refresh failed</color>";
+            else if (rejected.Count > shown)
+                qHeader = $"Rejected Reports ({rejected.Count}, showing {shown})";
+            else
+                qHeader = $"Rejected Reports ({rejected.Count})";
+            UIFactory.SetText(txtAdminQuarantineHdr, qHeader);
+            for (int i = shown; i < adminQuarantineRowPool.Count; i++) adminQuarantineRowPool[i].SetActive(false);
+            for (int i = 0; i < shown; i++)
+            {
+                if (i >= adminQuarantineRowPool.Count)
+                    adminQuarantineRowPool.Add(BuildAdminQuarantineRow(adminQuarantineContainer.transform, i));
+                FillAdminQuarantineRow(adminQuarantineRowPool[i], rejected[i]);
+            }
+        }
+
+        private static GameObject BuildAdminQuarantineRow(Transform parent, int idx)
+        {
+            while (adminQuarantineRowBindings.Count <= idx) adminQuarantineRowBindings.Add(null);
+            var row = UIFactory.CreatePanel($"AQ{idx}", parent, new Color(0.19f, 0.14f, 0.11f, 0.9f));
+            UIFactory.AddHLG(row, spacing: 6, padL: 6, padR: 6, padT: 4, padB: 4);
+            UIFactory.AddLE(row, prefH: 128, flexH: 0);
+
+            var info = new GameObject("AQInfo"); info.transform.SetParent(row.transform, false); info.AddComponent<RectTransform>();
+            UIFactory.AddVLG(info, spacing: 1);
+            UIFactory.AddLE(info, minW: 420, flexW: 1, prefH: 120, flexH: 0);
+            var top = UIFactory.CreateText($"AQT{idx}", info.transform, "", 13f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(680, 20));
+            var players = UIFactory.CreateText($"AQP{idx}", info.transform, "", 12f, C_WHITE, UIFactory.AlignTopLeft, sizeDelta: new Vector2(680, 54));
+            var reason = UIFactory.CreateText($"AQR{idx}", info.transform, "", 12f, new Color(1f, 0.75f, 0.55f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(680, 20));
+            var blocked = UIFactory.CreateText($"AQX{idx}", info.transform, "", 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(680, 20));
+            UIFactory.SetWordWrap(top, false); UIFactory.SetOverflowMode(top, 1);
+            UIFactory.SetWordWrap(players, true); UIFactory.SetOverflowMode(players, 1);
+            UIFactory.SetWordWrap(reason, false); UIFactory.SetOverflowMode(reason, 1);
+            UIFactory.SetWordWrap(blocked, false); UIFactory.SetOverflowMode(blocked, 1);
+
+            var actions = new GameObject("AQActions"); actions.transform.SetParent(row.transform, false); actions.AddComponent<RectTransform>();
+            UIFactory.AddVLG(actions, spacing: 4);
+            UIFactory.AddLE(actions, prefW: 88, prefH: 60, flexW: 0, flexH: 0);
+            UIFactory.CreateButton($"AQA{idx}", actions.transform, "Accept", 11f, C_WHITE,
+                new Color(0.2f, 0.45f, 0.2f, 0.9f),
+                () => OnAdminQuarantineAction(idx, true), sizeDelta: new Vector2(84, 27));
+            UIFactory.CreateButton($"AQD{idx}", actions.transform, "Discard", 11f, C_WHITE,
+                new Color(0.5f, 0.25f, 0.16f, 0.9f),
+                () => OnAdminQuarantineAction(idx, false), sizeDelta: new Vector2(84, 27));
+            row.SetActive(false);
+            return row;
+        }
+
+        private static void FillAdminQuarantineRow(GameObject row, ApiClient.QuarantineReportEntry e)
+        {
+            row.SetActive(true);
+            string sfx = row.name.Substring(2);
+            if (int.TryParse(sfx, out int rowIndex)
+                && rowIndex >= 0 && rowIndex < adminQuarantineRowBindings.Count)
+                adminQuarantineRowBindings[rowIndex] = e;
+            string players;
+            if (e.player_names == null || e.player_names.Count == 0)
+                players = "(players unavailable)";
+            else
+            {
+                var names = new List<string>();
+                foreach (string name in e.player_names)
+                    names.Add(AdminDisplay(string.IsNullOrWhiteSpace(name) ? "(deleted player)" : name, 24));
+                players = string.Join(" vs ", names.ToArray());
+            }
+
+            string when = FormatAdminQuarantineTime(e.created_at);
+            string mode = AdminDisplay(string.IsNullOrEmpty(e.mode) ? "unknown" : e.mode, 12);
+            string score = AdminDisplay(string.IsNullOrEmpty(e.score) ? "score unavailable" : e.score, 20);
+            string room = AdminDisplay(string.IsNullOrEmpty(e.room) ? "room unavailable" : e.room, 24);
+            string topLine = $"<color=#FFB46A>[{mode}]</color> {when}  <b>{score}</b>  <color=#778899>{room}</color>";
+            string playersLine = $"Players: {players}";
+            string reasonLine = $"Rejected: {AdminDisplay(string.IsNullOrEmpty(e.reason) ? "reason unavailable" : e.reason, 140)}"
+                              + (e.http_status > 0 ? $"  <color=#888>HTTP {e.http_status}</color>" : "");
+            string blockedLine = e.can_accept
+                ? $"<color=#77CC88>Status: {AdminDisplay(string.IsNullOrEmpty(e.status) ? "pending" : e.status, 24)}; safe to accept</color>"
+                : $"<color=#FFAA66>Accept blocked: {AdminDisplay(string.IsNullOrEmpty(e.accept_blocked_reason) ? "server did not provide a reason" : e.accept_blocked_reason, 140)}</color>";
+
+            SetAdminRowText(row.transform.Find($"AQInfo/AQT{sfx}"), topLine);
+            SetAdminRowText(row.transform.Find($"AQInfo/AQP{sfx}"), playersLine);
+            SetAdminRowText(row.transform.Find($"AQInfo/AQR{sfx}"), reasonLine);
+            SetAdminRowText(row.transform.Find($"AQInfo/AQX{sfx}"), blockedLine);
+
+            var accept = row.transform.Find($"AQActions/AQA{sfx}")?.gameObject;
+            if (accept != null)
+            {
+                SetButtonInteractable(accept, e.can_accept);
+                UIFactory.SetImageColor(accept, e.can_accept
+                    ? new Color(0.2f, 0.45f, 0.2f, 0.9f)
+                    : new Color(0.18f, 0.18f, 0.18f, 0.75f));
+                UIFactory.SetColor(UIFactory.GetButtonText(accept), e.can_accept ? C_WHITE : C_DIM);
+            }
+        }
+
+        private static void OnAdminQuarantineAction(int index, bool accept)
+        {
+            // Bind the callback to what THIS rendered row displays, not to the
+            // latest cache index. A refresh can replace/reorder the cache one
+            // frame before the dirty UI redraw; indexing the new cache during
+            // that frame could accept a different report than the visible row.
+            if (index < 0 || index >= adminQuarantineRowBindings.Count) return;
+            var e = adminQuarantineRowBindings[index];
+            if (e == null) return;
+            if (accept && !e.can_accept) return;
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || string.IsNullOrEmpty(e.id)) return;
+
+            string verb = accept ? "Accept" : "Discard";
+            string players = e.player_names == null || e.player_names.Count == 0
+                ? "this rejected report"
+                : string.Join(" vs ", e.player_names.Select(n => AdminDisplay(n, 24)).ToArray());
+            string question = accept
+                ? $"Accept the rejected report for {players}?\n\nServer eligibility will be rechecked."
+                : $"Discard the rejected report for {players}?\n\nThis cannot be accepted later.";
+            CompetitiveUI.OpenConfirm(question, () =>
+            {
+                Action<bool, string> done = (ok, resp) =>
+                {
+                    string detail = ApiClient.ExtractJsonStringPublic(resp ?? "", "detail");
+                    if (string.IsNullOrEmpty(detail)) detail = resp;
+                    if (ok)
+                    {
+                        CompetitiveUI.ShowNotification(
+                            accept ? "Rejected report accepted." : "Rejected report discarded.",
+                            new Color(0.45f, 0.9f, 0.5f), 4f);
+                        ApiClient.FetchAdminQuarantine(sid);
+                    }
+                    else
+                    {
+                        CompetitiveUI.ShowNotification(
+                            $"{verb} failed: {AdminDisplay(string.IsNullOrEmpty(detail) ? "request failed" : detail, 180)}",
+                            new Color(1f, 0.45f, 0.35f), 7f);
+                    }
+                };
+                if (accept) ApiClient.AdminQuarantineAccept(sid, e.id, done);
+                else ApiClient.AdminQuarantineDiscard(
+                    sid, e.id, "Discarded from in-game admin panel.", done);
+            });
+        }
+
+        private static void SetAdminRowText(Transform textTransform, string value)
+        {
+            if (textTransform == null) return;
+            foreach (var c in textTransform.GetComponents<Component>())
+                if (c.GetType().Name == "TextMeshProUGUI") { UIFactory.SetText(c, value); break; }
+        }
+
+        private static string FormatAdminQuarantineTime(string value)
+        {
+            if (DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out DateTime parsed))
+                return parsed.ToString("MM-dd HH:mm 'UTC'", System.Globalization.CultureInfo.InvariantCulture);
+            return "time unavailable";
+        }
+
+        private static string AdminDisplay(string value, int max)
+        {
+            if (string.IsNullOrEmpty(value)) return "";
+            var sb = new StringBuilder(value.Length);
+            bool lastSpace = false;
+            foreach (char c in value)
+            {
+                char a = c == '<' ? '[' : c == '>' ? ']' : c;
+                if (a == '\r' || a == '\n' || a == '\t') a = ' ';
+                // Flatten CONTROL characters only. Do NOT clamp to ASCII here:
+                // learning #110 added a runtime TMP unicode fallback precisely so
+                // Cyrillic/CJK/accented personas render instead of turning into
+                // squares, and every other name surface in the menu shows them
+                // correctly. Mapping >= 127 to '?' would render a 6-player lobby
+                // as "??????? vs ?????????" in the ONE panel whose entire job is
+                // letting an admin identify which players a report belongs to.
+                if (a < 32) a = ' ';
+                if (a == ' ')
+                {
+                    if (lastSpace) continue;
+                    lastSpace = true;
+                }
+                else lastSpace = false;
+                sb.Append(a);
+            }
+            return Trunc(sb.ToString().Trim(), max);
+        }
+
+        private static void SetButtonInteractable(GameObject button, bool interactable)
+        {
+            try
+            {
+                var component = button?.GetComponent(UIFactory.tButton);
+                var property = UIFactory.tButton?.GetProperty(
+                    "interactable", BindingFlags.Public | BindingFlags.Instance);
+                property?.SetValue(component, interactable);
+            }
+            catch { }
         }
 
         private static GameObject BuildAdminFlagRow(Transform parent, int idx)

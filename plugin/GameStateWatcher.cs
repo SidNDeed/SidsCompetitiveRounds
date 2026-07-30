@@ -1163,6 +1163,9 @@ namespace CompetitiveRounds
                 PollOpponentFps();
                 SampleConnectionQuality();
                 SampleOwnStatTimelines();
+                // FFA kills + damage-dealt, all players, same 3s x-axis as
+                // hit/block so the /game chart panels line up (#127/#130).
+                try { FfaMode.SampleTimelines(); } catch { }
             }
             TickInputSampling(dt);
         }
@@ -1252,8 +1255,12 @@ namespace CompetitiveRounds
                 inputBucketStartedAtMs = -1;
                 return;
             }
+            // AnyChatTyping, not just OUR box (bug #128 FINDING 8): a left-click
+            // to place the caret in ROUNDS' own Enter chat was counting as a shot
+            // fired, and bullets_fired is the accuracy DENOMINATOR (#137) — so
+            // chatting mid-round quietly deflated hit%.
             bool typingInChat = false;
-            try { typingInChat = CompetitiveUI.IsChatInputOpen || NativeUI.IsOpen; } catch { }
+            try { typingInChat = CompetitiveUI.AnyChatTyping || NativeUI.IsOpen; } catch { }
             if (typingInChat)
             {
                 inputBucketTimer = 0f;
@@ -4532,6 +4539,11 @@ namespace CompetitiveRounds
                     leftEarly = false, fps = fps,
                     cards = FfaMode.PickHistoryFor(teamId),
                     telemetry = tele,
+                    // #127/#130: computed locally for EVERY player (vanilla RPCs
+                    // damage to All), so these need no peer heartbeat.
+                    damageDealt = FfaMode.DamageDealtFor(teamId),
+                    killTimeline = FfaMode.KillTimelineFor(teamId),
+                    damageTimeline = FfaMode.DamageTimelineFor(teamId),
                 });
                 presentSteams.Add(sid);
                 if (teamId == winnerTeam) winnerSteam = sid;
@@ -4558,6 +4570,13 @@ namespace CompetitiveRounds
                     absent = kv.Value.leftGameNumber != FfaMode.GameNumber,
                     cards = FfaMode.PickHistoryFor(kv.Value.slot),
                     telemetry = null,
+                    // #127/#130: a player who left DURING this game still dealt
+                    // real damage, and FfaMode keys it by slot and clears it per
+                    // game — so this is their true figure, and correctly 0 for an
+                    // `absent` ghost who was never in this game at all.
+                    damageDealt = FfaMode.DamageDealtFor(kv.Value.slot),
+                    killTimeline = FfaMode.KillTimelineFor(kv.Value.slot),
+                    damageTimeline = FfaMode.DamageTimelineFor(kv.Value.slot),
                 });
             }
 
@@ -4897,16 +4916,20 @@ namespace CompetitiveRounds
             // 10 Hz sample sees reliably.
             if (localAliveInCombat && !inPickPhase)
             {
-                if (!achFiredShot && Input.GetMouseButton(0))
+                // Skip while the chat overlay / F5 menu has focus — typing "wasd"
+                // in a Discord-bridged message previously false-flagged Immovable
+                // Object. Hoisted above the shot check for bug #128: the T chat is
+                // now openable DURING combat, so a click that lands while the box
+                // has focus fires no gun (GameManager.lockInput) and must not
+                // count as "fired a shot" either — that would silently break a
+                // Pacifist run for anyone who chats mid-round.
+                bool typingInChat = false;
+                try { typingInChat = CompetitiveUI.AnyChatTyping || NativeUI.IsOpen; } catch { }
+                if (!typingInChat && !achFiredShot && Input.GetMouseButton(0))
                 {
                     achFiredShot = true;
                     Plugin.Log.LogInfo("[ACH] Player fired a shot");
                 }
-                // Skip while the chat overlay / F5 menu has focus — typing "wasd"
-                // in a Discord-bridged message previously false-flagged Immovable
-                // Object.
-                bool typingInChat = false;
-                try { typingInChat = CompetitiveUI.IsChatInputOpen || NativeUI.IsOpen; } catch { }
                 if (!typingInChat && !achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
                     Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
                     Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||

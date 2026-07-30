@@ -184,8 +184,13 @@ TIER_MULTIPLIERS = [
 
 
 def _tier_mult_for(rating: float | None) -> tuple[float, str]:
-    """(multiplier, base-tier label) for an opponent's rating. Unknown/None
-    rating → 1500 → Beginner x1.0."""
+    """(multiplier, base-tier label) for an opponent's rating.
+
+    Unknown/None rating → 1500, which is *Intermediate x1.5*, NOT Beginner x1.0:
+    the table's 1500 row is `>=`, and the default Glicko rating is exactly 1500.
+    This docstring used to claim x1.0 and that sentence is what hid the 1v2-vs-2v2
+    economy gap for a release (2v2 multiplies its base by this and 1v2 did not,
+    so an all-default lobby quietly paid 2v2 1.5x more — bug #129)."""
     r = rating if rating is not None else 1500.0
     for threshold, mult, label in TIER_MULTIPLIERS:
         if r >= threshold:
@@ -375,6 +380,62 @@ def _presence_online_ids() -> list[str]:
     """Currently-online steam_ids (prunes stale entries as a side effect)."""
     _presence_online_count()
     return list(_presence_seen.keys())
+
+
+# ── In-match evidence (July 30 lifecycle sweep) ────────────────────────────
+# The failure behind two destroyed games: the server only learns a game happened
+# when the REPORT lands, which is at game END, so every lifecycle timer is blind
+# for the entire duration of a live match and infers "nothing is happening" from
+# silence. A 40-minute FFA is normal, so that inference is simply wrong.
+#
+# This is the positive signal. The mod's existing 60s presence ping carries
+# `in_match=<group_id>` while the player is in a competitive room; a group with a
+# recent one has a live game and MUST NOT be closed by any timer.
+#
+# Process-local like presence, for the same reason (#125: single-worker uvicorn
+# is load-bearing) — and that carries a trap worth naming, because it would have
+# caused the next incident: a restart empties this dict, so for the first few
+# minutes after every deploy EVERY group looks idle. Four API deploys happened
+# during the night these bugs were found. `_in_match_evidence_trustworthy()`
+# refuses to answer until the process has been up longer than the TTL, so a sweep
+# asking "is anything live here?" gets "I cannot tell" rather than a confident
+# and destructive "no".
+_in_match_seen: dict[str, float] = {}          # group_id -> monotonic
+IN_MATCH_TTL_SEC = 210                          # 3.5x the 60s ping cadence
+_PROCESS_STARTED_AT = time.monotonic()
+
+
+def _in_match_touch(group_id: str | None) -> None:
+    if group_id:
+        _in_match_seen[str(group_id)] = time.monotonic()
+
+
+def _in_match_evidence_trustworthy() -> bool:
+    """False while this process is too young to have heard a full ping cycle."""
+    return (time.monotonic() - _PROCESS_STARTED_AT) > IN_MATCH_TTL_SEC
+
+
+def _group_game_in_progress(group_id) -> bool:
+    """True if a client reported being IN a game for this lobby/series recently.
+
+    Returns False when the evidence is not yet trustworthy (fresh process) — so
+    callers must treat this as 'proof of life', never as 'proof of death'. Use it
+    only to VETO a destructive action, never to trigger one.
+    """
+    if not group_id:
+        return False
+    if not _in_match_evidence_trustworthy():
+        # Too soon after boot to distinguish "idle" from "we just restarted".
+        # Veto every close: a delayed cleanup costs a few minutes, a wrong one
+        # costs a live game.
+        return True
+    at = _in_match_seen.get(str(group_id))
+    if at is None:
+        return False
+    if time.monotonic() - at > IN_MATCH_TTL_SEC:
+        _in_match_seen.pop(str(group_id), None)
+        return False
+    return True
 
 
 def _presence_is_online(steam_id: str | None) -> bool:
@@ -802,7 +863,12 @@ async def queue_cleanup_loop():
                     text("""DELETE FROM ovt_queue
                         WHERE player_id IN (
                             SELECT player_id FROM ovt_queue
-                            WHERE last_polled < NOW() - INTERVAL '30 minutes'
+                            -- 60, not 30 (lifecycle sweep, July 30): FFA games run
+                            -- to 40+ minutes and clients stop polling once in a
+                            -- room, so a 30-minute husk sweep deletes the queue
+                            -- rows of a LIVE game - taking the cross-mode lock,
+                            -- the recovery path and leave semantics with them.
+                            WHERE last_polled < NOW() - INTERVAL '60 minutes'
                             FOR UPDATE SKIP LOCKED
                         )
                         RETURNING steam_id, status"""))
@@ -887,18 +953,57 @@ async def queue_cleanup_loop():
                 # mid-play. 25 minutes is the smallest safe value; do not lower
                 # it without re-measuring ffa_matches.duration_seconds.
                 ffa_dispersed = await db.execute(
-                    text("""UPDATE ffa_lobbies l
-                        SET status = 'completed', completed_at = NOW()
+                    # Window scales with LOBBY SIZE, because FFA duration does.
+                    # Measured from prod (n=21): 3p max 12.7 min, 4p max 28.2,
+                    # 5p max 24.2, 6p max 40.1. Host lobbies allow up to 10.
+                    #
+                    # Two corrections are baked in here. First, learning #248's
+                    # flat 25 minutes came from "an FFA first-to-5 ran 12-19
+                    # minutes" — that measured GAME time, and game 1 of a host
+                    # lobby also pays for Photon join, region connect, map load
+                    # and up to 10 people readying up. It killed a live 5-player
+                    # game at 25.3 minutes on July 30 and the report then 409'd.
+                    # Second, my own first fix for that (45 min for game 1, 25
+                    # between games) was still wrong: a 4-player game has ALREADY
+                    # run 28.2 minutes in prod, so any game 2 of that length was
+                    # still going to be killed. A per-game constant cannot work
+                    # when the quantity it bounds scales with player count.
+                    #
+                    # GREATEST(45, players*7) => 45 min up to 6 players, 70 at 10,
+                    # i.e. always clear of the observed maximum for that size.
+                    # This is only the slow backstop: the 6-minute "nobody is
+                    # running the mod" fast path below still reaps the common
+                    # everyone-quit case promptly.
+                    # SELECT-then-filter, not a single UPDATE..RETURNING: the
+                    # elapsed-time predicate alone is not authority to destroy a
+                    # sitting, and a set-based UPDATE gives no chance to veto a
+                    # row that has live-game evidence.
+                    text("""SELECT l.id,
+                                   (l.created_at < NOW() - INTERVAL '3 hours') AS past_ceiling
+                              FROM ffa_lobbies l
                         WHERE l.status = 'active'
                           AND COALESCE(
                                 (SELECT MAX(m.ended_at) FROM ffa_matches m
                                   WHERE m.lobby_id = l.id),
                                 l.created_at
-                              ) < NOW() - INTERVAL '25 minutes'
-                        RETURNING l.id"""))
+                              ) < NOW() - (INTERVAL '1 minute'
+                                           * GREATEST(60, COALESCE(l.player_count, 5) * 7))"""))
                 for r in ffa_dispersed.fetchall():
-                    await _reconcile_ffa_lobby_bets(db, r[0], "dispersed 25m close")
-                    print(f"[FFA-CLEANUP] Dispersed lobby closed (no game in 25m): {r[0]}")
+                    # The veto is BOUNDED. in_match evidence is client-supplied,
+                    # so a client that keeps naming a stale lobby id (its static
+                    # not cleared, or a crash mid-sitting) could otherwise hold a
+                    # dead lobby open forever - the veto would have converted a
+                    # too-eager sweep into a never-firing one. Past the hard
+                    # ceiling the timer wins regardless; 3h is far beyond any
+                    # real sitting (longest recorded game: 40 min).
+                    if _group_game_in_progress(r[0]) and not r[1]:
+                        print(f"[FFA-CLEANUP] dispersed close VETOED, game in progress: {r[0]}")
+                        continue
+                    await db.execute(text(
+                        "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
+                        " WHERE id = :lid AND status = 'active'"), {"lid": r[0]})
+                    await _reconcile_ffa_lobby_bets(db, r[0], "dispersed close")
+                    print(f"[FFA-CLEANUP] Dispersed lobby closed (no game in window): {r[0]}")
 
                 # Fast path for the whole lobby having quit ROUNDS: the presence
                 # ping is always-on and fires every 60s from a RUNNING client
@@ -921,6 +1026,9 @@ async def queue_cleanup_loop():
                     sids = [x for x in (qrow["sids"] or []) if x]
                     if not sids or any(_presence_is_online(x) for x in sids):
                         continue     # somebody is still running the mod - leave it
+                    if _group_game_in_progress(qrow["id"]):
+                        print(f"[FFA-CLEANUP] quiet close VETOED, game in progress: {qrow['id']}")
+                        continue
                     await db.execute(text(
                         "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
                         " WHERE id=:lid AND status='active'"), {"lid": qrow["id"]})
@@ -1002,7 +1110,12 @@ async def queue_cleanup_loop():
                     text("""DELETE FROM ffa_queue
                         WHERE player_id IN (
                             SELECT player_id FROM ffa_queue
-                            WHERE last_polled < NOW() - INTERVAL '30 minutes'
+                            -- 60, not 30 (lifecycle sweep, July 30): FFA games run
+                            -- to 40+ minutes and clients stop polling once in a
+                            -- room, so a 30-minute husk sweep deletes the queue
+                            -- rows of a LIVE game - taking the cross-mode lock,
+                            -- the recovery path and leave semantics with them.
+                            WHERE last_polled < NOW() - INTERVAL '60 minutes'
                             FOR UPDATE SKIP LOCKED
                         )
                         RETURNING steam_id, status"""))
@@ -4094,6 +4207,85 @@ async def get_player_stats(
     except Exception:
         pass
 
+    # ── 1v2 record, split by seat (bug #130) ──────────────────────────────
+    # Per GAME (not per series) so it reads the same as the 1v2 tab. Own
+    # savepoint per block so an unexpected failure degrades this section to
+    # zeros instead of poisoning the transaction for everything after it
+    # (#235 — a bare try/except does NOT survive a failed statement).
+    ovt_solo_w = ovt_solo_l = ovt_duo_w = ovt_duo_l = 0
+    try:
+        async with db.begin_nested():
+            orow = (await db.execute(text("""
+                SELECT
+                  COUNT(*) FILTER (WHERE m.solo_id = :pid AND m.winner_side = 1) AS sw,
+                  COUNT(*) FILTER (WHERE m.solo_id = :pid AND m.winner_side = 2) AS sl,
+                  COUNT(*) FILTER (WHERE m.solo_id <> :pid AND m.winner_side = 2) AS dw,
+                  COUNT(*) FILTER (WHERE m.solo_id <> :pid AND m.winner_side = 1) AS dl
+                  FROM ovt_matches m
+                 WHERE m.invalidated_at IS NULL
+                   AND :pid IN (m.solo_id, m.duo_a_id, m.duo_b_id)
+            """), {"pid": player.id})).mappings().first()
+            if orow:
+                ovt_solo_w = int(orow["sw"] or 0)
+                ovt_solo_l = int(orow["sl"] or 0)
+                ovt_duo_w = int(orow["dw"] or 0)
+                ovt_duo_l = int(orow["dl"] or 0)
+    except Exception as ex:
+        print(f"[STATS] 1v2 record block failed: {ex}")
+
+    # ── FFA record (bug #130) ─────────────────────────────────────────────
+    # games/wins/top3/placement_sum come from glicko_ratings_ffa (already
+    # maintained per game); kills and damage need the per-match rows.
+    ffa_games = ffa_wins = ffa_top3 = 0
+    ffa_avg_place = ffa_avg_kills = ffa_avg_dmg = 0.0
+    try:
+        async with db.begin_nested():
+            frow = (await db.execute(text(
+                "SELECT games_played, wins, top3, placement_sum "
+                "  FROM glicko_ratings_ffa WHERE player_id = :pid"
+            ), {"pid": player.id})).mappings().first()
+            if frow and (frow["games_played"] or 0) > 0:
+                ffa_games = int(frow["games_played"] or 0)
+                ffa_wins = int(frow["wins"] or 0)
+                ffa_top3 = int(frow["top3"] or 0)
+                ffa_avg_place = round(float(frow["placement_sum"] or 0) / ffa_games, 2)
+    except Exception as ex:
+        print(f"[STATS] FFA record block failed: {ex}")
+    ffa_damage_games = 0
+    try:
+        async with db.begin_nested():
+            # Two DIFFERENT denominators, each correct for its data (review find):
+            #  kills  — SUM over played games / games_played. Roster-ghost rows
+            #           (absent: held the slot in a later game of the sitting they
+            #           weren't in) contribute 0 to the sum and are not in
+            #           games_played, so this is right for ALL history, including
+            #           rows written before the `absent` column existed.
+            #  damage — AVG over the rows that actually CARRY it. damage_dealt is
+            #           NULL for every pre-telemetry game, so dividing by total
+            #           games would understate the average for months; and ghosts
+            #           are excluded explicitly because post-migration they DO
+            #           carry a real 0. ffa_damage_games is sent alongside so the
+            #           client can tell "no data" from a legitimate 0.0 average.
+            krow = (await db.execute(text("""
+                SELECT SUM(fmp.kills)::float AS ksum,
+                       COUNT(*) FILTER (WHERE NOT fmp.absent) AS played_rows,
+                       AVG(fmp.damage_dealt::float) FILTER (WHERE NOT fmp.absent) AS ad,
+                       COUNT(*) FILTER (WHERE NOT fmp.absent
+                                          AND fmp.damage_dealt IS NOT NULL) AS dmg_rows
+                  FROM ffa_match_players fmp
+                  JOIN ffa_matches fm ON fm.id = fmp.match_id
+                 WHERE fmp.player_id = :pid AND fm.invalidated_at IS NULL
+            """), {"pid": player.id})).mappings().first()
+            if krow:
+                _kden = ffa_games or int(krow["played_rows"] or 0)
+                if _kden > 0:
+                    ffa_avg_kills = round(float(krow["ksum"] or 0.0) / _kden, 1)
+                ffa_damage_games = int(krow["dmg_rows"] or 0)
+                if ffa_damage_games > 0:
+                    ffa_avg_dmg = round(float(krow["ad"] or 0.0), 1)
+    except Exception as ex:
+        print(f"[STATS] FFA kills/damage block failed: {ex}")
+
     # LFP-ping cooldown surface (July 21): seconds until this player may fire
     # the next Discord LFP ping — same MAX(created_at) source the /lfp-ping
     # cooldown gate reads. Guarded (and LAST before the return so a failed
@@ -4197,6 +4389,17 @@ async def get_player_stats(
         rank_color=rank_color,
         team_rating=team_rating,
         team_completed_series=team_completed,
+        ovt_solo_wins=ovt_solo_w,
+        ovt_solo_losses=ovt_solo_l,
+        ovt_duo_wins=ovt_duo_w,
+        ovt_duo_losses=ovt_duo_l,
+        ffa_games=ffa_games,
+        ffa_wins=ffa_wins,
+        ffa_top3=ffa_top3,
+        ffa_avg_placement=ffa_avg_place,
+        ffa_avg_kills=ffa_avg_kills,
+        ffa_avg_damage=ffa_avg_dmg,
+        ffa_damage_games=ffa_damage_games,
         lfp_seconds_left=lfp_seconds_left,
     )
 
@@ -4867,7 +5070,8 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                    fmp.bullets_fired, fmp.bullets_hit,
                    fmp.blocks_activated, fmp.blocks_successful,
                    fmp.keys_pressed, fmp.active_seconds,
-                   fmp.fps_timeline, fmp.ping_timeline, fmp.hit_timeline, fmp.block_timeline
+                   fmp.fps_timeline, fmp.ping_timeline, fmp.hit_timeline, fmp.block_timeline,
+                   fmp.damage_dealt, fmp.damage_dealt_timeline, fmp.kill_timeline
               FROM ffa_match_players fmp
               JOIN players p ON p.id = fmp.player_id
              WHERE fmp.match_id = :mid
@@ -4877,10 +5081,18 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
         # /ffa/recent feed emits {"n","r"} objects, but the bot's generic
         # renderer expects plain names (#152: grep both ends for the same key).
         ffa_cards: dict[str, list[str]] = {}
-        for pid_, cname in (await db.execute(text("""
-            SELECT player_id, card_name FROM ffa_match_cards
+        # cards_detail carries the ROLLED flag (bug #127): FFA's rolling 5-card
+        # cap discards cards mid-game, and the bot's /game card list showed every
+        # pick in one undifferentiated bundle because this query dropped the
+        # column. "cards" stays exactly as it was for every existing consumer.
+        ffa_cards_detail: dict = {}
+        for pid_, cname, rolled_, rnd_ in (await db.execute(text("""
+            SELECT player_id, card_name, rolled, round_number FROM ffa_match_cards
              WHERE match_id = :mid ORDER BY pick_order"""), {"mid": row["id"]})).all():
             ffa_cards.setdefault(str(pid_), []).append(cname)
+            ffa_cards_detail.setdefault(str(pid_), []).append(
+                {"name": cname, "rolled": bool(rolled_),
+                 "round": int(rnd_) if rnd_ is not None else None})
         return {
             "mode": "ffa",
             "code": code12.upper(),
@@ -4917,7 +5129,13 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                 "keys_pressed": r["keys_pressed"], "active_seconds": r["active_seconds"],
                 "fps_timeline": r["fps_timeline"], "ping_timeline": r["ping_timeline"],
                 "hit_timeline": r["hit_timeline"], "block_timeline": r["block_timeline"],
+                # #127/#130 telemetry. NULL for every game recorded before
+                # v1.35.3 — consumers must treat all three as optional.
+                "damage_dealt": (int(r["damage_dealt"]) if r["damage_dealt"] is not None else None),
+                "damage_dealt_timeline": r["damage_dealt_timeline"],
+                "kill_timeline": r["kill_timeline"],
                 "cards": ffa_cards.get(str(r["player_id"]), []),
+                "cards_detail": ffa_cards_detail.get(str(r["player_id"]), []),
             } for r in p_rows],
         }
 
@@ -6028,6 +6246,7 @@ async def queue_count(steam_id: str | None = Query(None), db: AsyncSession = Dep
 
 @app.get("/api/v1/presence/ping", tags=["Queue"])
 async def presence_ping(steam_id: str = Query(..., max_length=20),
+                        in_match: str | None = Query(None, max_length=64),
                         db: AsyncSession = Depends(get_db)):
     """Presence heartbeat (v1.29). The mod's always-on loop calls this every
     ~60s while the game is running; the response carries the current online
@@ -6035,6 +6254,11 @@ async def presence_ping(steam_id: str = Query(..., max_length=20),
     stamps players.last_seen (throttled to one write per 5 min per player)
     so the Home tab's 'recently online' list stays fresh."""
     _presence_touch(steam_id)
+    # in_match=<lobby/series id> means "I am IN a game for this group right now".
+    # Optional on purpose: pre-v1.35.3 clients never send it, and every consumer
+    # treats its absence as "unknown", never as "no game" (_group_game_in_progress).
+    if in_match:
+        _in_match_touch(in_match)
     if _presence_db_stamp_ok(steam_id):
         try:
             await db.execute(text(
@@ -15114,6 +15338,120 @@ OVT_SERIES_WIN_GOLD = 40
 OVT_SERIES_LOSS_GOLD = 20
 OVT_READY_TIMEOUT_SECONDS = 90     # matches team ready window (#51)
 
+# ── 1v2 difficulty scaling (bug #129) ────────────────────────────────────
+# 1v2 shipped as the ONLY mode with no opponent-tier multiplier and an
+# un-scaled series bonus, which put it ~40-50% below 2v2/FFA per minute of
+# play: measured at prod average game lengths (1v2 487s, 2v2 544s, FFA 643s)
+# the old numbers paid the solo 3.33 g/min and a duo member 1.85, against
+# 2v2's 5.57 winner / 3.03 loser and FFA's 6.91 first / 1.49 last.
+#
+# The lift comes from multipliers, NOT from raising the bases — deliberately,
+# because 1v2 has no AFK detector (the 1v1 signal is cards_picked == 0 and has
+# no 1v2 analogue), and a flat per-game floor is the farmable surface (#58).
+# Everything below is multiplicative on XP, so an idle game still pays ~nothing.
+#
+# Factors are the four Sid asked for: harder seat, handicap off, stronger
+# opponents, and opponents who are actually top of the 1v2 board.
+OVT_SOLO_MULT           = 1.5   # the solo seat fights two players
+OVT_NO_EXTRA_PICK_MULT  = 1.20  # solo with the extra-pick handicap OFF = hardest config
+OVT_EXTRA_PICK_DUO_MULT = 1.10  # mirror: the duo facing a BUFFED solo has it harder
+OVT_PODIUM_OPP_MULT     = 1.35  # any OPPOSING player sits in the 1v2 leaderboard top 3
+OVT_DIFFICULTY_CAP      = 4.0   # ceiling on the product (GM+solo+no-pick+podium = 7.29 raw)
+
+
+def _ovt_difficulty_mult(is_solo: bool, extra_pick: bool,
+                         opp_rating: float | None, opp_podium: bool):
+    """(multiplier, [human labels]) for one 1v2 seat.
+
+    `opp_rating` is the opponents' average **1v1** Glicko. 1v2 has no rating of
+    its own (`glicko_ratings_1v2.rating` is 1500/350 for every row and nothing
+    writes it), and the 1v2 leaderboard already shows 1v1 elo as the mode's
+    context rating — so it is both the only implementable signal and the one
+    players already see. Sid's ask says "inline with 1v1" explicitly.
+    Note this diverges on purpose from FFA, which forces x1.0 while unranked.
+    """
+    m = 1.0
+    labels: list[str] = []
+    if is_solo:
+        m *= OVT_SOLO_MULT
+        labels.append(f"Solo seat x{OVT_SOLO_MULT:g}")
+        if not extra_pick:
+            m *= OVT_NO_EXTRA_PICK_MULT
+            labels.append(f"No extra pick x{OVT_NO_EXTRA_PICK_MULT:g}")
+    elif extra_pick:
+        m *= OVT_EXTRA_PICK_DUO_MULT
+        labels.append(f"Buffed solo x{OVT_EXTRA_PICK_DUO_MULT:g}")
+    t, tlabel = _tier_mult_for(opp_rating)
+    m *= t
+    if t > 1.0:
+        labels.append(f"{tlabel} opp x{t:g}")
+    if opp_podium:
+        m *= OVT_PODIUM_OPP_MULT
+        # Must NOT contain the substring "Top 3" — shipped v1.33.0 clients
+        # Contains-match that and render a defunct label (see the 1v1 series
+        # gold block's identical warning).
+        labels.append(f"Podium opp x{OVT_PODIUM_OPP_MULT:g}")
+    if m > OVT_DIFFICULTY_CAP:
+        m = OVT_DIFFICULTY_CAP
+        labels.append(f"capped x{OVT_DIFFICULTY_CAP:g}")
+    return m, labels
+
+
+# 1v2 podium (factor iv). Runs the SAME query shape as GET
+# /ovt/leaderboard?role=combined — same UNION ALL over ovt_matches, same
+# invalidated_at/deleted_at filters, same `games DESC, win-rate DESC` ordering,
+# same >= 1 game floor — so the player DISPLAYED at #3 is the player whose defeat
+# pays the bonus (#153). Review-noted caveat: the 60s TTL means a result that
+# just reshuffled the standings can leave up to 60s where the rewarded top-3 and
+# the displayed top-3 differ. That is accepted, and identical to how the 1v1
+# podium (which gates real series gold doubling) has always behaved. Deliberately
+# NOT _podium_map (1v1-only) and deliberately does NOT grant title_podium: that
+# shop item is defined as the 1v1 podium, and cross-granting would silently
+# widen an existing cosmetic's meaning.
+_ovt_podium_cache: dict = {"at": 0.0, "ids": []}
+
+_OVT_PODIUM_QUERY = """
+    WITH per_player AS (
+        SELECT pid, SUM(played) AS games, SUM(won) AS wins
+        FROM (
+            SELECT solo_id AS pid, 1 AS played,
+                   CASE WHEN winner_side = 1 THEN 1 ELSE 0 END AS won
+              FROM ovt_matches WHERE invalidated_at IS NULL
+            UNION ALL
+            SELECT duo_a_id, 1, CASE WHEN winner_side = 2 THEN 1 ELSE 0 END
+              FROM ovt_matches WHERE invalidated_at IS NULL
+            UNION ALL
+            SELECT duo_b_id, 1, CASE WHEN winner_side = 2 THEN 1 ELSE 0 END
+              FROM ovt_matches WHERE invalidated_at IS NULL
+        ) u GROUP BY pid
+    )
+    SELECT pp.pid
+      FROM per_player pp
+      JOIN players p ON p.id = pp.pid
+     WHERE p.deleted_at IS NULL AND pp.games >= 1
+     ORDER BY pp.games DESC, pp.wins::float / NULLIF(pp.games, 0) DESC NULLS LAST
+     LIMIT 3
+"""
+
+
+async def _ovt_podium_ids(db: AsyncSession) -> list:
+    """[1st, 2nd, 3rd] player ids as strings. 60s TTL; a failure serves the
+    stale copy and never raises — a podium lookup must not fail a match report."""
+    now = time.monotonic()
+    if now - _ovt_podium_cache["at"] > 60:
+        try:
+            # SAVEPOINT-wrapped: this runs inside the caller's match-report
+            # transaction, and under asyncpg a caught statement error would
+            # otherwise abort that transaction and 500 the report (#235). The
+            # savepoint is what makes "serve the stale copy" actually work.
+            async with db.begin_nested():
+                rows = (await db.execute(text(_OVT_PODIUM_QUERY))).scalars().all()
+            _ovt_podium_cache["ids"] = [str(r) for r in rows]
+        except Exception as ex:
+            print(f"[OVT-PODIUM] cache refresh failed: {ex}")
+        _ovt_podium_cache["at"] = now
+    return _ovt_podium_cache["ids"]
+
 
 def _verify_ovt_hmac(report: OvtMatchReport) -> bool:
     """10-field canonical: solo:duo_a:duo_b:sr:dr:is_ranked:reporter:room:winner_side:series."""
@@ -15439,7 +15777,19 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                 last_game = (await db.execute(text(
                     "SELECT MAX(ended_at) FROM ovt_matches WHERE series_id = :sid"
                 ), {"sid": me["series_id"]})).scalar()
-                if last_game is not None and (datetime.now(timezone.utc) - last_game).total_seconds() > 300:
+                # 900s, not 300s - the FFA copy of this rule (see the locked
+                # branch in the FFA poll) killed a live sitting between games on
+                # July 30, and 1v2 runs the identical rule against a BO3 whose
+                # between-games gap is just as ordinary. Prod already carries a
+                # likely victim: series 2442a2dc, abandoned at 0-1 after one
+                # recorded game with reason 'sitting_abandoned', which paid no
+                # series bonus to either side.
+                # Elapsed time alone must never close a sitting (this exact rule
+                # killed a live FFA game 5m04s after its game 1 recorded). A
+                # recent in-match ping from any member vetoes it outright.
+                if (last_game is not None
+                        and (datetime.now(timezone.utc) - last_game).total_seconds() > 900
+                        and not _group_game_in_progress(me["series_id"])):
                     sitting_over = True
             elif all_polling and int(srow["games"] or 0) == 0 and lock_age > 300:
                 assembly_failed = True
@@ -15697,11 +16047,41 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         raise HTTPException(400, "winner_side disagrees with the round score")
 
     # Lock the series row FIRST (serializes concurrent reports / DC callers, #78).
+    # FOR NO KEY UPDATE, not FOR UPDATE (#202): the INSERT INTO ovt_matches below
+    # has an FK to this row, so every inserter also takes FOR KEY SHARE on it —
+    # and KEY SHARE conflicts with exactly one mode, FOR UPDATE. NO KEY UPDATE is
+    # the weakest mode that still self-conflicts (so two reports still serialize)
+    # while staying KEY-SHARE-compatible, which keeps any future ovt_matches
+    # writer out of this lock graph.
     series = (await db.execute(text(
-        "SELECT * FROM ovt_series WHERE id = :sid FOR UPDATE"
+        "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"
     ), {"sid": series_uuid})).mappings().first()
     if series is None:
         raise HTTPException(404, "Series not found")
+
+    # ── Difficulty inputs (bug #129) ──────────────────────────────────────
+    # Opponents' 1v1 Glicko drives the tier multiplier; guarded exactly like
+    # 2v2's fetch so a ratings hiccup degrades to x1.0-at-1500 instead of
+    # failing the report.
+    # begin_nested, not a bare try/except (#235, and review-confirmed): under
+    # asyncpg a caught statement error still leaves the TRANSACTION aborted, so
+    # the "degrade to 1500" promise below would be a lie — the very next
+    # statement (the ovt_matches INSERT) would raise InFailedSQLTransaction and
+    # 500 the whole report. The SAVEPOINT is what makes the fallback real.
+    _r_by_pid: dict = {}
+    try:
+        async with db.begin_nested():
+            for _row in (await db.execute(text(
+                "SELECT player_id, rating FROM glicko_ratings "
+                " WHERE player_id IN (:a, :b, :c)"
+            ), {"a": solo_id, "b": duo_a_id, "c": duo_b_id})).mappings().all():
+                _r_by_pid[str(_row["player_id"])] = float(_row["rating"])
+    except Exception as ex:
+        print(f"[OVT-ECON] 1v1 tier-mult rating fetch failed (defaulting 1500): {ex}")
+    _solo_r = _r_by_pid.get(str(solo_id), 1500.0)
+    _duo_avg_r = (_r_by_pid.get(str(duo_a_id), 1500.0)
+                  + _r_by_pid.get(str(duo_b_id), 1500.0)) / 2.0
+    _ovt_pod = set(await _ovt_podium_ids(db))
     # Verify the three reported players are exactly the series' three (a client
     # can't swap in a different opponent). Keep the client's solo/duo LABELING
     # though — it's derived from the actual in-game team sizes (team-of-1 = solo),
@@ -15741,10 +16121,19 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                 solo_rounds_won, duo_rounds_won, solo_points_total, duo_points_total,
                 winner_side, solo_fps_avg, duo_a_fps_avg, duo_b_fps_avg, duration_seconds,
                 photon_room_id, game_version, region, hmac_signature, reported_by,
-                is_ranked, started_at, ended_at)
+                is_ranked, started_at, ended_at,
+                solo_rating_at, duo_a_rating_at, duo_b_rating_at)
             VALUES (:id, :sid, :solo, :da, :db, :sr, :dr, :sp, :dp, :ws,
-                    :sf, :daf, :dbf, :dur, :room, :gv, :reg, :hmac, :rep, false, :started, NOW())
+                    :sf, :daf, :dbf, :dur, :room, :gv, :reg, :hmac, :rep, false, :started, NOW(),
+                    :sra, :dar, :dbr)
         """), {"id": match_id, "sid": series_uuid, "solo": solo_id, "da": duo_a_id, "db": duo_b_id,
+               # Snapshot the ratings the multiplier was computed from — these
+               # three columns were dead (NULL on all 11 legacy rows) and without
+               # them no audit or back-pay can reproduce what was actually paid
+               # (#229/#236).
+               "sra": _solo_r,
+               "dar": _r_by_pid.get(str(duo_a_id), 1500.0),
+               "dbr": _r_by_pid.get(str(duo_b_id), 1500.0),
                "sr": report.solo_rounds_won, "dr": report.duo_rounds_won,
                "sp": report.solo_points_total, "dp": report.duo_points_total, "ws": report.winner_side,
                "sf": report.solo_fps, "daf": report.duo_a_fps, "dbf": report.duo_b_fps,
@@ -15798,10 +16187,8 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # absolute write over a separate SELECT — the latter loses updates if the
     # same player is credited by two concurrent series completions. NO rating
     # at launch. Gold conversion (100xp=1g) computed from the returned totals. ──
-    async def _award(pid, won_game: bool):
-        xp = OVT_MATCH_XP_BASE
-        if won_game:
-            xp = int(xp * OVT_MATCH_WIN_MULT)
+    async def _award(pid, won_game: bool, mult: float):
+        xp = int(OVT_MATCH_XP_BASE * (OVT_MATCH_WIN_MULT if won_game else 1.0) * mult)
         row = (await db.execute(text(
             "UPDATE players SET total_xp = COALESCE(total_xp,0) + :xp WHERE id = :pid "
             "RETURNING total_xp AS new_xp, (COALESCE(total_xp,0) - :xp) AS old_xp"
@@ -15809,21 +16196,47 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         new_xp = row["new_xp"] if row else xp
         old_xp = row["old_xp"] if row else 0
         gold_delta = max(0, (new_xp // 100) - (old_xp // 100))
-        if gold_delta > 0:
+        # Level-ding gold (bug #129): 1v2 was the ONLY mode that never granted it
+        # — verified zero `level_reward` rows referencing an ovt match, while
+        # 1v1/2v2/FFA all do. It is the game's 3rd-largest gold source, so a
+        # 1v2-only player banked nothing for levelling.
+        old_lvl, _, _ = level_from_xp(old_xp)
+        new_lvl, _, _ = level_from_xp(new_xp)
+        level_gold = (sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
+                      if new_lvl > old_lvl else 0)
+        # ONE gold UPDATE per player per game (FFA's rule) — a second UPDATE of
+        # the same row buys nothing and widens the write set.
+        if gold_delta + level_gold > 0:
             await db.execute(text(
                 "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = :pid"
-            ), {"g": gold_delta, "pid": pid})
+            ), {"g": gold_delta + level_gold, "pid": pid})
+        # ...but two audit rows, so `reason` stays a truthful breakdown.
+        if gold_delta > 0:
             db.add(GoldTransaction(player_id=pid, amount=gold_delta, reason="ovt_xp", reference_id=str(match_id)))
-        return xp, gold_delta
+        if level_gold > 0:
+            db.add(GoldTransaction(player_id=pid, amount=level_gold,
+                                   reason="level_reward", reference_id=str(match_id)))
+        return xp, gold_delta + level_gold
 
     solo_won_game = report.winner_side == 1
     # Award in canonical str(pid) order, not solo/duo slot order — players-row
     # tuple locks must follow one global order across concurrent completions
     # (learning #197 / review find).
     _award_results = {}
+    _bonus_labels: dict = {}
+    _duo_pod = (str(duo_a_id) in _ovt_pod) or (str(duo_b_id) in _ovt_pod)
+    _solo_pod = str(solo_id) in _ovt_pod
+    # solo_extra_pick is already in scope — the series SELECT is `SELECT *`.
+    _extra_pick = bool(series["solo_extra_pick"])
     for _pid in sorted([solo_id, duo_a_id, duo_b_id], key=str):
-        _won = solo_won_game if _pid == solo_id else (not solo_won_game)
-        _award_results[_pid] = await _award(_pid, _won)
+        _is_solo = (_pid == solo_id)
+        _won = solo_won_game if _is_solo else (not solo_won_game)
+        _m, _lbl = _ovt_difficulty_mult(
+            _is_solo, _extra_pick,
+            _duo_avg_r if _is_solo else _solo_r,
+            _duo_pod if _is_solo else _solo_pod)
+        _bonus_labels[_pid] = _lbl
+        _award_results[_pid] = await _award(_pid, _won, _m)
     sx, sg = _award_results[solo_id]
     ax, ag = _award_results[duo_a_id]
     bx, bg = _award_results[duo_b_id]
@@ -15839,11 +16252,24 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
            "sg": sg, "ag": ag, "bg": bg, "sid": series_uuid})
 
     status = "active"
+    _series_bonus_by_pid: dict = {}
     if series_done:
         status = "completed"
-        # Series-completion gold: +40 winners / +20 losers.
+        # Series-completion gold: 40 winners / 20 losers, now TIER-scaled by the
+        # opponents' 1v1 elo exactly as 2v2 scales its 50/25 (bug #129 — 1v2 was
+        # the only mode paying a flat series bonus). Tier ONLY here; the
+        # side/extra-pick/podium factors stay on the XP half, which keeps the
+        # per-minute totals inside the 2v2/FFA band.
+        #
+        # This loop iterates in solo/duo_a/duo_b order, NOT sorted by str(pid) —
+        # safe only because the _award loop above already tuple-locked all three
+        # players in canonical order inside this same transaction. Do not move any
+        # players write above that loop (#197).
         for pid, side in ((solo_id, 1), (duo_a_id, 2), (duo_b_id, 2)):
-            bonus = OVT_SERIES_WIN_GOLD if side == winner_side else OVT_SERIES_LOSS_GOLD
+            _s_mult, _ = _tier_mult_for(_duo_avg_r if pid == solo_id else _solo_r)
+            bonus = int((OVT_SERIES_WIN_GOLD if side == winner_side
+                         else OVT_SERIES_LOSS_GOLD) * _s_mult)
+            _series_bonus_by_pid[pid] = bonus
             await db.execute(text(
                 "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = :pid"
             ), {"g": bonus, "pid": pid})
@@ -15879,9 +16305,22 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     reporter_side = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
     score = f"{solo_wins}-{duo_wins}" if reporter_side == 1 else f"{duo_wins}-{solo_wins}"
     print(f"[OVT-REPORT] match {match_id} series {series_uuid} {solo_wins}-{duo_wins} status={status}")
+    # The reporter's own game reward (#129). id_by_steam is the report's own
+    # steam->player-id map, so this is the reporter's row whichever seat they hold.
+    _rep_pid = id_by_steam.get(report.reported_by_steam_id)
+    _rep_xp, _rep_gold = _award_results.get(_rep_pid, (0, 0))
+    _rep_labels = list(_bonus_labels.get(_rep_pid, []))
+    # On the closing game, fold the series bonus into the reported gold so the
+    # toast matches what actually landed in the player's balance.
+    _rep_series_bonus = _series_bonus_by_pid.get(_rep_pid, 0)
+    if _rep_series_bonus > 0:
+        _rep_gold += _rep_series_bonus
+        _rep_labels.append(f"Series bonus +{_rep_series_bonus}g")
     return OvtMatchResponse(
         match_id=match_id, series_id=series_uuid, series_status=status,
-        series_score=score, winner_side=report.winner_side)
+        series_score=score, winner_side=report.winner_side,
+        xp_gained=_rep_xp, gold_gained=_rep_gold,
+        xp_bonuses=_rep_labels)
 
 
 @app.get("/api/v1/ovt/series/active", tags=["1v2 Matches"])
@@ -16296,6 +16735,48 @@ def _ffa_max_points(n_players: int) -> int:
     return own + cleared
 # A lobby is one sitting; this bounds a compromised client's fabrication rate.
 FFA_MAX_GAMES_PER_LOBBY = 40
+
+
+async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status_code: int,
+                             payload, group_id=None, photon_room_id: str | None = None,
+                             reporter_id=None, player_ids=None) -> None:
+    """Preserve a match report that was rejected for a LIFECYCLE reason.
+
+    Sid, July 30, after two completed FFA games were destroyed: "if it fails
+    again, send it to the admin tab instead of having it straight deleted."
+
+    Call this ONLY where the rejection's predicate read a DB row (lobby not
+    active, series already resolved, roster missing, game limit) — never for an
+    integrity failure (bad HMAC, unknown player, impossible score), or this table
+    becomes an unauthenticated write primitive. HMAC has always been verified by
+    the time any caller reaches here.
+
+    Runs in its OWN transaction, and the caller is expected to raise immediately
+    afterwards: every lifecycle gate fires BEFORE the endpoint's first write, so
+    rolling back here discards nothing. Never raises — a failure to quarantine
+    must not change the response the client already had coming (#187).
+    """
+    try:
+        await db.rollback()
+        await db.execute(text("""
+            INSERT INTO match_report_quarantine
+                (mode, reason, http_status, group_id, photon_room_id,
+                 reporter_id, player_ids, payload)
+            VALUES (:m, :r, :s, :g, :room, :rep, :pids, CAST(:pl AS JSONB))
+            ON CONFLICT (mode, photon_room_id) WHERE photon_room_id IS NOT NULL
+                DO NOTHING
+        """), {"m": mode, "r": reason[:64], "s": status_code, "g": group_id,
+               "room": (photon_room_id or "")[:64] or None, "rep": reporter_id,
+               "pids": list(player_ids or []),
+               "pl": payload if isinstance(payload, str) else _json.dumps(payload, default=str)})
+        await db.commit()
+        print(f"[QUARANTINE] {mode} report kept for admin review: {reason} room={photon_room_id}")
+    except Exception as ex:
+        print(f"[QUARANTINE] capture failed ({mode}/{reason}): {ex}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
 
 def _ffa_sort_key(steam_id: str) -> tuple:
@@ -16840,14 +17321,29 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
 async def ffa_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
     """Players who joined the FFA queue in the last N seconds (Discord beacon
     parity with the other queues). Rating shown is the FFA elo once the player
-    has FFA games, else their 1v1 elo as the only meaningful hint."""
+    has FFA games, else their 1v1 elo as the only meaningful hint.
+
+    Covers BOTH FFA flows. The July-29 host-lobby redesign put lobby members in
+    this same table under `status='lobby'` (series_id = the lobby), and this
+    query still filtered `status='searching'` only — so opening or joining a
+    lobby produced no Discord beacon at all, while the legacy gather queue kept
+    working. Same shape as the sweep bug in learning #252: a status predicate
+    written before a new state existed silently drops the new state's rows.
+    Enumerate the VALID states rather than assuming one."""
     rows = (await db.execute(text("""
         SELECT q.display_name, q.steam_id, q.rating, q.games_played, q.fallback_rating, q.joined_at,
+               q.status,
+               CASE WHEN q.status = 'lobby' THEN q.series_id END AS lobby_id,
+               (l.host_player_id IS NOT NULL AND l.host_player_id = q.player_id) AS is_host,
+               (SELECT COUNT(*) FROM ffa_queue m
+                 WHERE m.series_id = q.series_id AND m.status = 'lobby') AS lobby_members,
                CASE WHEN p.show_discord THEN p.discord_display_name END AS discord_display_name
           FROM ffa_queue q
           LEFT JOIN players p ON p.steam_id = q.steam_id
-         WHERE q.status = 'searching'
-           AND q.joined_at > NOW() - INTERVAL '1 second' * :secs
+          LEFT JOIN ffa_lobbies l ON l.id = q.series_id AND q.status = 'lobby'
+         WHERE q.joined_at > NOW() - INTERVAL '1 second' * :secs
+           AND (q.status = 'searching'
+                OR (q.status = 'lobby' AND l.status = 'open'))
          ORDER BY q.joined_at DESC
     """), {"secs": seconds})).mappings().all()
     cnt = (await db.execute(text(
@@ -16859,7 +17355,12 @@ async def ffa_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = De
             {"display_name": r["display_name"], "steam_id": r["steam_id"],
              "rating": int(round(r["rating"] if (r["games_played"] or 0) > 0 else (r["fallback_rating"] or 1500))),
              "joined_at": r["joined_at"].isoformat() if r["joined_at"] else None,
-             "discord_display_name": r["discord_display_name"]}
+             "discord_display_name": r["discord_display_name"],
+             # Lobby fields are null for a legacy gather-queue join, so an old
+             # bot build renders exactly what it does today.
+             "lobby_id": str(r["lobby_id"]) if r["lobby_id"] else None,
+             "is_host": bool(r["is_host"]),
+             "lobby_members": int(r["lobby_members"] or 0)}
             for r in rows
         ],
         "queue_size": int(cnt),
@@ -17052,7 +17553,28 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                 last_game = (await db.execute(text(
                     "SELECT MAX(ended_at) FROM ffa_matches WHERE lobby_id = :lid"
                 ), {"lid": me["series_id"]})).scalar()
-                if last_game is not None and (datetime.now(timezone.utc) - last_game).total_seconds() > 300:
+                # 900s, not 300s (Sid, July 30 - this closed a LIVE sitting 5m04s
+                # after its game 1 recorded, and game 2's report then 409'd with
+                # "Lobby is not active", losing that game outright).
+                #
+                # The premise above is sound and still holds: a client mid-GAME
+                # does not poll, so "every member is polling" really does prove
+                # nobody is in a game right now (verified in prod - lobby fa372459
+                # sat at games_played=0 for 40 minutes through a live game 1 and
+                # neither this nor the assembly branch fired). What was wrong is
+                # the CONCLUSION that 5 minutes of it means the sitting ended.
+                # BETWEEN games of a host lobby everyone is legitimately back on
+                # the lobby screen - picking, chatting, waiting on a straggler -
+                # and 5 minutes of that is ordinary, especially at 6+ players.
+                # 15 minutes clears any real between-games gap while still
+                # freeing a finished sitting 10 minutes before the 25-minute
+                # dispersed-close backstop would.
+                # Elapsed time alone must never close a sitting (this exact rule
+                # killed a live FFA game 5m04s after its game 1 recorded). A
+                # recent in-match ping from any member vetoes it outright.
+                if (last_game is not None
+                        and (datetime.now(timezone.utc) - last_game).total_seconds() > 900
+                        and not _group_game_in_progress(me["series_id"])):
                     sitting_over = True
             elif all_polling and int(lrow["games_played"] or 0) == 0 and lock_age > 300:
                 assembly_failed = True
@@ -17272,10 +17794,20 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         "SELECT * FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
     ), {"lid": lobby_uuid})).mappings().first()
     if lobby is None:
+        await _quarantine_report(
+            db, mode="ffa", reason="lobby_not_found", status_code=404, payload=report.model_dump(),
+            group_id=lobby_uuid, photon_room_id=report.photon_room_id,
+            reporter_id=id_by_steam.get(report.reported_by_steam_id),
+            player_ids=list(id_by_steam.values()))
         raise HTTPException(404, "Lobby not found")
     # Review find 2: a canceled/completed lobby must not keep minting rated
     # games. Only a live lobby accepts reports.
     if lobby["status"] != "active":
+        await _quarantine_report(
+            db, mode="ffa", reason=f"lobby_{lobby['status']}", status_code=409, payload=report.model_dump(),
+            group_id=lobby_uuid, photon_room_id=report.photon_room_id,
+            reporter_id=id_by_steam.get(report.reported_by_steam_id),
+            player_ids=list(id_by_steam.values()))
         raise HTTPException(409, "Lobby is not active")
     # Roster validation (review finds 1/3): member_ids is the lock-time roster
     # ORDERED BY SLOT (queue rows get pruned; this array doesn't). The report
@@ -17286,6 +17818,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     member_set = set(members)
     reported_ids = set(id_by_steam.values())
     if not member_set:
+        await _quarantine_report(
+            db, mode="ffa", reason="lobby_no_roster", status_code=409, payload=report.model_dump(),
+            group_id=lobby_uuid, photon_room_id=report.photon_room_id,
+            reporter_id=id_by_steam.get(report.reported_by_steam_id),
+            player_ids=list(id_by_steam.values()))
         raise HTTPException(409, "Lobby has no recorded roster")
     if reported_ids != member_set:
         raise HTTPException(403, "Report must cover exactly the lobby roster")
@@ -17311,6 +17848,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # bounds a compromised client's fabrication rate even inside a live lobby
     # (a full server-issued per-game nonce is the next hardening step).
     if int(lobby["games_played"] or 0) >= FFA_MAX_GAMES_PER_LOBBY:
+        await _quarantine_report(
+            db, mode="ffa", reason="lobby_game_limit", status_code=409, payload=report.model_dump(),
+            group_id=lobby_uuid, photon_room_id=report.photon_room_id,
+            reporter_id=id_by_steam.get(report.reported_by_steam_id),
+            player_ids=list(id_by_steam.values()))
         raise HTTPException(409, "Lobby game limit reached")
 
     # Players pass: sorted FOR NO KEY UPDATE (#202/#203 — never FOR UPDATE,
@@ -17543,11 +18085,24 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 kills, placement, left_early, rating_before, rating_after, rating_change,
                 xp_gained, gold_gained, fps_avg, ping_avg, bullets_fired, bullets_hit,
                 blocks_activated, blocks_successful, keys_pressed, active_seconds,
-                fps_timeline, ping_timeline, hit_timeline, block_timeline)
+                fps_timeline, ping_timeline, hit_timeline, block_timeline,
+                damage_dealt, damage_dealt_timeline, kill_timeline, absent)
             VALUES (:m, :p, :slot, :rw, :pt, :k, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,
-                    :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt)
+                    :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt,
+                    :dmg, :dmgtl, :killtl, :absent)
         """), {"m": match_id, "p": pid, "slot": p.slot, "rw": p.rounds_won, "pt": p.points_total,
                "k": int(getattr(p, "kills", 0) or 0),
+               # Bugs #127/#130. Pass None straight through — do NOT collapse it
+               # with `or None`, which would turn a genuine 0 (this player dealt
+               # no damage) into "not reported" and quietly drop real zeros out of
+               # the average. The schema default is already None for old clients.
+               "dmg": getattr(p, "damage_dealt", None),
+               # Roster ghost: held the slot but did not play THIS game. The
+               # report always sent it; the row never stored it, so those
+               # all-zero rows were dragging down the new per-game averages.
+               "absent": bool(getattr(p, "absent", False)),
+               "dmgtl": (getattr(p, "damage_dealt_timeline", None) or None),
+               "killtl": (getattr(p, "kill_timeline", None) or None),
                "pl": placements[p.steam_id], "le": bool(p.left_early),
                "rb": old_r, "ra": (old_r + chg) if (old_r is not None and chg is not None) else None,
                "rc": chg, "xp": xp_g, "g": gold_g,
@@ -18321,7 +18876,19 @@ async def player_ovt_history(steam_id: str, limit: int = Query(10, ge=1, le=30),
                m.solo_rounds_won AS solo_rounds, m.duo_rounds_won AS duo_rounds,
                m.solo_id, m.duo_a_id, m.duo_b_id,
                ps.display_name AS solo_name, pa.display_name AS duo_a_name,
-               pb.display_name AS duo_b_name, me.id AS my_id
+               pb.display_name AS duo_b_name, me.id AS my_id,
+               -- Bug #129: the per-game reward, so My Stats' 1v2 history can show
+               -- it like the 1v1 and FFA rows already do. Read from the ledger
+               -- rather than a new column: ovt_matches has no per-player reward
+               -- columns and the series accumulators are series-cumulative.
+               (SELECT COALESCE(SUM(gt.amount), 0) FROM gold_transactions gt
+                 WHERE gt.player_id = me.id
+                   AND gt.reason IN ('ovt_xp', 'level_reward')
+                   AND gt.reference_id = m.id::text) AS gold_gained,
+               (SELECT COALESCE(SUM(gt.amount), 0) FROM gold_transactions gt
+                 WHERE gt.player_id = me.id
+                   AND gt.reason IN ('ovt_series_win', 'ovt_series_loss')
+                   AND gt.reference_id = m.series_id::text) AS series_gold_gained
           FROM ovt_matches m
           JOIN players me ON me.steam_id = :sid
           LEFT JOIN players ps ON ps.id = m.solo_id
@@ -18342,6 +18909,8 @@ async def player_ovt_history(steam_id: str, limit: int = Query(10, ge=1, le=30),
             "solo": r["solo_name"] or "?",
             "duo": [r["duo_a_name"] or "?", r["duo_b_name"] or "?"],
             "ended_at": r["ended_at"].isoformat() if r["ended_at"] else None,
+            "gold_gained": int(r["gold_gained"] or 0),
+            "series_gold_gained": int(r["series_gold_gained"] or 0),
         })
     return {"games": games}
 
@@ -19608,3 +20177,138 @@ async def team_leaderboard(
         {"m": min_series},
     )).scalar() or 0
     return Team2v2LeaderboardResponse(entries=entries, total_players=cnt, last_updated=datetime.now(timezone.utc))
+
+
+class _AdminQuarantineReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    note: str | None = None
+
+
+# ── Routes: match-report quarantine (July 30 lifecycle sweep) ──────────────
+# Sid: "if it fails again, send it to the admin tab instead of having it
+# straight deleted." Capture happens at the lifecycle rejection sites via
+# _quarantine_report; these three routes are the admin surface over it.
+
+@app.get("/api/v1/admin/quarantine", tags=["Admin"])
+async def admin_list_quarantine(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pending rejected reports, newest first.
+
+    `can_accept` is computed SERVER-side and is authoritative — the client only
+    renders it. Accepting a report re-applies Glicko, and Glicko is order
+    dependent: if any participant has been rated since this report was rejected,
+    applying it now would write a rating that never existed in that order. The
+    July 30 recovery needed a full chronological ladder replay for exactly this
+    reason, so Accept is offered only when nothing has moved since.
+    """
+    await _require_admin(db, admin_steam_id, "quarantine", "list", hmac_signature)
+    rows = (await db.execute(text("""
+        SELECT q.id, q.mode, q.reason, q.http_status, q.group_id, q.photon_room_id,
+               q.player_ids, q.payload, q.status, q.created_at,
+               (SELECT COALESCE(ARRAY_AGG(p.display_name ORDER BY p.display_name), '{}'::text[])
+                  FROM players p WHERE p.id = ANY(q.player_ids)) AS names
+          FROM match_report_quarantine q
+         WHERE q.status = 'pending'
+         ORDER BY q.created_at DESC
+         LIMIT 50
+    """))).mappings().all()
+    out = []
+    for r in rows:
+        # Has anything rated these players since? Any later FFA result for a
+        # participant means an accept would land out of order.
+        blocked = None
+        try:
+            async with db.begin_nested():
+                later = (await db.execute(text("""
+                    SELECT COUNT(*) FROM ffa_match_players f
+                      JOIN ffa_matches m ON m.id = f.match_id
+                     WHERE f.player_id = ANY(:pids) AND m.ended_at > :since
+                """), {"pids": list(r["player_ids"] or []), "since": r["created_at"]})).scalar() or 0
+            if later:
+                blocked = (f"{later} later rated game(s) for these players — accepting now "
+                           "would apply rating out of order; needs an ordered replay")
+        except Exception as ex:
+            blocked = f"eligibility check failed: {ex}"
+        # Compose the human-readable result from the stored payload. Without
+        # this the admin panel renders "score unavailable" on every row - and the
+        # score is the single fact an admin needs to judge what they are about to
+        # re-apply to six players' ratings. The payload is the verbatim report,
+        # so this is derived, never trusted as authority.
+        score = ""
+        try:
+            pl = r["payload"] if isinstance(r["payload"], dict) else _json.loads(r["payload"])
+            entries = sorted(
+                [(str(x.get("display_name") or "?")[:14], int(x.get("rounds_won") or 0))
+                 for x in (pl.get("players") or [])],
+                key=lambda t: -t[1])
+            score = " | ".join(f"{n} {v}" for n, v in entries[:10])
+        except Exception:
+            score = ""
+        out.append({
+            "id": str(r["id"]), "mode": r["mode"], "reason": r["reason"],
+            "score": score,
+            "http_status": int(r["http_status"]), "created_at": r["created_at"].isoformat(),
+            "player_names": list(r["names"] or []),
+            "room": r["photon_room_id"], "status": r["status"],
+            "can_accept": blocked is None,
+            "accept_blocked_reason": blocked or "",
+        })
+    return {"reports": out}
+
+
+@app.post("/api/v1/admin/quarantine/{qid}/discard", tags=["Admin"])
+async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
+                                   db: AsyncSession = Depends(get_db)):
+    await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
+    res = await db.execute(text("""
+        UPDATE match_report_quarantine
+           SET status='discarded', reviewed_at=NOW(), review_note=:note,
+               reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
+         WHERE id=CAST(:qid AS UUID) AND status='pending'
+    """), {"qid": qid, "sid": req.admin_steam_id, "note": (req.note or "")[:500]})
+    await db.commit()
+    if not res.rowcount:
+        raise HTTPException(409, "Already reviewed")
+    return {"status": "discarded"}
+
+
+@app.post("/api/v1/admin/quarantine/{qid}/accept", tags=["Admin"])
+async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
+                                  db: AsyncSession = Depends(get_db)):
+    """Marks a quarantined report approved for recovery.
+
+    Deliberately does NOT re-run the submit path. Re-applying an old report
+    inline would rate it at today's ratings rather than at its own point in
+    history, which is precisely the corruption the July 30 recovery had to undo
+    with a chronological replay. This route records the admin's decision and
+    locks the row; the actual application is an ordered replay, run deliberately.
+    """
+    await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
+    row = (await db.execute(text(
+        "SELECT player_ids, created_at, status FROM match_report_quarantine"
+        " WHERE id = CAST(:qid AS UUID) FOR UPDATE"), {"qid": qid})).mappings().first()
+    if row is None:
+        raise HTTPException(404, "Not found")
+    if row["status"] != "pending":
+        raise HTTPException(409, "Already reviewed")
+    later = (await db.execute(text("""
+        SELECT COUNT(*) FROM ffa_match_players f JOIN ffa_matches m ON m.id = f.match_id
+         WHERE f.player_id = ANY(:pids) AND m.ended_at > :since
+    """), {"pids": list(row["player_ids"] or []), "since": row["created_at"]})).scalar() or 0
+    if later:
+        # Re-checked under the row lock, not just at list time (#178/#208): the
+        # admin may have been looking at a stale screen.
+        raise HTTPException(409, f"{later} later rated game(s) — needs an ordered replay")
+    await db.execute(text("""
+        UPDATE match_report_quarantine
+           SET status='accepted', reviewed_at=NOW(),
+               reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
+         WHERE id=CAST(:qid AS UUID) AND status='pending'
+    """), {"qid": qid, "sid": req.admin_steam_id})
+    await db.commit()
+    print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}")
+    return {"status": "accepted"}

@@ -100,13 +100,23 @@ namespace CompetitiveRounds
         public static void MarkDirty() => NativeUI.MarkDirty();
 
         /// <summary>Called from Update. Ticks the native UI.</summary>
-        public static void Tick() => NativeUI.Tick();
+        public static void Tick()
+        {
+            // Second, independent release path for the chat input lock: this call
+            // site is try/caught in Plugin.Update, so it survives an OnGUI that
+            // throws every frame (bug #128, FINDING 6).
+            TickChatLockWatchdog();
+            NativeUI.Tick();
+        }
 
         /// <summary>Called from OnGUI. FPS + notifications + match status. The server-down
         /// banner moved to the F5 menu (NativeUI.RefreshServerBanner) — it was constantly
         /// firing in-game during quiet periods + felt obtrusive.</summary>
         public static void DrawUI()
         {
+            // FIRST, before anything that can throw: releases the chat input lock
+            // if the box stopped rendering (bug #128 — see TickChatLockWatchdog).
+            TickChatLockWatchdog();
             DrawFPS();
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
@@ -4224,6 +4234,204 @@ namespace CompetitiveRounds
             catch { return false; }
         }
 
+        // ── Vanilla "Enter" chat detection (bug #128) ────────────
+        // ROUNDS' own chat is `DevConsole`. Its Update() is literally
+        //     if (Input.GetKeyDown(KeyCode.Return)) ToggleConsole();
+        // and ToggleConsole() does
+        //     inputField.gameObject.SetActive(!active);
+        //     isTyping = inputField.gameObject.activeSelf;
+        //     GameManager.lockInput = isTyping;
+        // so `DevConsole.isTyping` is a game-authored, exact "the Enter chat is
+        // consuming keystrokes" signal. That — and ONLY that — may suppress our
+        // T chat: the old active-combat gate was a bandaid that made T dead for
+        // the whole match (Sid's report).
+        //
+        // Read by reflection rather than as a direct `DevConsole.isTyping`: the
+        // type carries a `public TMP_InputField inputField` field and this csproj
+        // deliberately references no TMPro assembly (learning #15). Reflection
+        // also degrades the right way — a failed lookup returns false, i.e.
+        // "vanilla chat is not typing", i.e. our chat stays available.
+        private static System.Reflection.FieldInfo s_devConsoleIsTyping;
+        private static bool s_devConsoleLookedUp;
+        private static System.Reflection.FieldInfo DevConsoleIsTypingField()
+        {
+            if (s_devConsoleLookedUp) return s_devConsoleIsTyping;
+            s_devConsoleLookedUp = true;
+            try
+            {
+                Type dc = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try { dc = asm.GetType("DevConsole"); } catch { }
+                    if (dc != null) break;
+                }
+                if (dc != null)
+                    s_devConsoleIsTyping = dc.GetField("isTyping",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+            }
+            catch { }
+            // Learning #83: a reflection lookup that silently fails is a
+            // forever-no-op. Say which way it went, once, at first use.
+            Plugin.Log.LogInfo(s_devConsoleIsTyping != null
+                ? "[CHAT] Vanilla chat detection armed (DevConsole.isTyping)"
+                : "[CHAT] DevConsole.isTyping NOT found — T chat will not defer to the Enter chat");
+            return s_devConsoleIsTyping;
+        }
+
+        /// <summary>True while ROUNDS' OWN Enter chat is consuming keystrokes.
+        /// Masked while we hold the flag ourselves (see SetGameplayInputLock) so
+        /// this always answers the question it's named after.</summary>
+        private static bool IsVanillaChatTyping()
+        {
+            try
+            {
+                var f = DevConsoleIsTypingField();
+                if (f == null) return false;
+                return (bool)f.GetValue(null) && !weHoldTypingFlag;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>True while EITHER chat box is taking keystrokes. The telemetry
+        /// and achievement input gates need this rather than just our own box:
+        /// a left-click to place the caret in ROUNDS' Enter chat still counted as
+        /// a shot fired, which is the accuracy DENOMINATOR (#137).</summary>
+        public static bool AnyChatTyping => chatInputOpen || IsVanillaChatTypingRaw();
+
+        // The vanilla box's own truth, unmasked — used both by AnyChatTyping and
+        // as the authoritative value to restore isTyping to when we let go.
+        private static bool IsVanillaChatTypingRaw()
+        {
+            try
+            {
+                var f = DevConsoleIsTypingField();
+                return f != null && (bool)f.GetValue(null);
+            }
+            catch { return false; }
+        }
+
+        // Is vanilla's chat input field ACTUALLY on screen? `isTyping` is a
+        // mirror we may be holding, but `inputField.gameObject.activeSelf` is
+        // what ToggleConsole itself derives isTyping from, so it is the only
+        // honest answer to "does vanilla currently own a text box?" — and
+        // therefore the only safe value to restore isTyping to (a blind `false`
+        // can leave a live, focused vanilla field with gameplay input ON).
+        // Reached as a plain Component so no TMPro reference is needed.
+        private static object s_devConsoleInstance;
+        private static System.Reflection.FieldInfo s_devConsoleField;
+        private static bool VanillaChatBoxActive()
+        {
+            try
+            {
+                Type dc = DevConsoleIsTypingField()?.DeclaringType;
+                if (dc == null) return false;
+                var inst = s_devConsoleInstance as UnityEngine.Object;
+                if (inst == null)
+                {
+                    s_devConsoleInstance = UnityEngine.Object.FindObjectOfType(dc);
+                    inst = s_devConsoleInstance as UnityEngine.Object;
+                    if (inst == null) return false;
+                }
+                if (s_devConsoleField == null)
+                    s_devConsoleField = dc.GetField("inputField",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                var field = s_devConsoleField?.GetValue(s_devConsoleInstance) as Component;
+                return field != null && field.gameObject.activeSelf;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>True while vanilla's chat box is on screen — used by the
+        /// ToggleConsole guard so Enter can ALWAYS close a genuinely-open vanilla
+        /// box even if our own box somehow stayed open at the same time.</summary>
+        internal static bool VanillaChatBoxOnScreen => VanillaChatBoxActive();
+
+        // While our chat box has focus we hold ROUNDS' own two "a text field owns
+        // the keyboard" flags — exactly the pair DevConsole.ToggleConsole sets:
+        //
+        //   GameManager.lockInput  — GeneralInput.Update() early-returns on it
+        //                            before reading Move/Aim/shoot/block, so
+        //                            typing "wasd" can't drive the player.
+        //   DevConsole.isTyping    — PlayerAssigner.LateUpdate() early-returns on
+        //                            it before its raw Space/B reads, so a SPACE
+        //                            inside a message can't ready-up or spawn a
+        //                            local player. lockInput does NOT cover that
+        //                            path; only isTyping does.
+        //
+        // Deliberately NOT PlayerManager.SetInputActive — that path NREs on
+        // half-wired players (learning #75). Asserted every IMGUI frame from our
+        // own state so no early-return path can strand the flags on; ROUNDS also
+        // zeroes both on scene load / quit-to-menu, which is a free self-heal.
+        private static bool gameplayInputLockHeld;
+        private static bool weHoldTypingFlag;
+        private static void SetGameplayInputLock(bool on)
+        {
+            try
+            {
+                if (on)
+                {
+                    gameplayInputLockHeld = true;
+                    GameManager.lockInput = true;
+                    var f = DevConsoleIsTypingField();
+                    if (f != null) { f.SetValue(null, true); weHoldTypingFlag = true; }
+                }
+                else if (gameplayInputLockHeld)
+                {
+                    gameplayInputLockHeld = false;
+                    // Restore to what VANILLA wants, never to a blind false.
+                    // If DevConsoleToggleGuardPatch failed to attach (learning
+                    // #83 — per-class patch failures are non-fatal and only
+                    // logged), an Enter could have opened the real box under us;
+                    // clearing both flags then would leave a live, focused
+                    // vanilla text field with gameplay input fully ENABLED —
+                    // WASD would type AND move. inputField.activeSelf is the
+                    // same source ToggleConsole itself derives isTyping from.
+                    bool vanillaWants = VanillaChatBoxActive();
+                    if (weHoldTypingFlag)
+                    {
+                        weHoldTypingFlag = false;
+                        var f = DevConsoleIsTypingField();
+                        if (f != null) f.SetValue(null, vanillaWants);
+                    }
+                    GameManager.lockInput = vanillaWants;
+                }
+            }
+            catch { gameplayInputLockHeld = false; weHoldTypingFlag = false; }
+        }
+
+        // Bug #128 / spec FINDING 6: every assert and release of the two input
+        // flags lives inside DrawChatInput, which is the EIGHTH call in DrawUI —
+        // and Plugin.OnGUI has no try/catch. A throw in any earlier overlay while
+        // the box is open would mean DrawChatInput never runs again, stranding
+        // lockInput + isTyping true and the ToggleConsole guard armed: no
+        // movement, no shooting, no ready-up, and no way to open the vanilla chat
+        // to break out (learnings #75/#82's exact symptom, self-inflicted).
+        // So: stamp every draw, and force-close from two paths that cannot be
+        // starved by a mid-DrawUI throw — the very top of DrawUI, and Tick().
+        private static float chatDrawStampedAt = -999f;
+        internal static void TickChatLockWatchdog()
+        {
+            try
+            {
+                if (!chatInputOpen && !gameplayInputLockHeld) return;
+                if (Time.unscaledTime - chatDrawStampedAt < 0.5f) return;
+                Plugin.Log.LogWarning("[CHAT] chat box went unrendered for >0.5s — "
+                                      + "force-closing and releasing the input lock");
+                CloseChatInput();
+            }
+            catch { }
+        }
+
+        /// <summary>Closes the chat box and releases the gameplay-input lock.
+        /// Every path that stops rendering the box must come through here.</summary>
+        private static void CloseChatInput()
+        {
+            chatInputOpen = false;
+            chatJustOpened = false;
+            chatInputText = "";
+            SetGameplayInputLock(false);
+        }
+
         // ── Chat input (IMGUI overlay) ───────────────────────────
         // Lives over the native F5 menu so we don't need TMP_InputField reflection
         // just for a one-line send box. Press T with the menu open to focus; Enter
@@ -4239,17 +4447,24 @@ namespace CompetitiveRounds
 
         private static void DrawChatInput()
         {
-            // Chat input is now available outside the F5 menu too. Press T anywhere (including
-            // mid-match in lobby/pick-phase/etc.) to open. Closed automatically if the player
-            // is currently in active combat — we don't want T to swallow movement input. The
-            // active-combat gate uses GameStateWatcher's existing pick/combat tracking.
-            if (!Plugin.DataConsentGranted) return;
-            bool combatActive = GameStateWatcher.IsInMatch && !NativeUI.IsOpen
-                && GameStateWatcher.LocalAliveInCombatNow;
+            // Liveness stamp for TickChatLockWatchdog — first statement, so it is
+            // set even on the frames this method early-returns.
+            chatDrawStampedAt = Time.unscaledTime;
+            // Bug #128: T chat is available whenever the game is running —
+            // menus, lobby, pick phase AND active combat. The previous
+            // active-combat gate was a bandaid for "don't fight the Enter
+            // chat"; the real gate is DevConsole.isTyping (below), and the
+            // reason combat used to be excluded (typing would drive the
+            // player) is handled properly now by holding ROUNDS' own
+            // GameManager.lockInput while the box has focus.
+            if (!Plugin.DataConsentGranted) { CloseChatInput(); return; }
             // Don't hijack T while a modal IMGUI input is taking keystrokes —
             // bug report form, log viewer, admin bug viewer, and the Compare-tab
             // search field all have their own text entry that need T to type
             // "the", "tree", etc. (lopi: typing "t" in Compare search opened chat).
+            // CloseChatInput (not a bare return): a modal opening while the box
+            // is up must not leave it "open" and holding the input lock with
+            // nothing rendering it.
             if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused
                 // July 22 item 8: leaderboard search takes typed text too.
                 || lbSearchFocused
@@ -4259,14 +4474,18 @@ namespace CompetitiveRounds
                 || NativeUI.LfpPromptOpen
                 // July 12 round 2 item 4: the artist input / roster picker / player
                 // search modals all take typed text — 't' there must not open chat.
-                || ArtistPromptOpen) return;
+                || ArtistPromptOpen) { CloseChatInput(); return; }
 
             var ev = Event.current;
             if (!chatInputOpen)
             {
-                if (combatActive) return;
+                // Assert-from-state: if we don't own the box we don't own the lock.
+                SetGameplayInputLock(false);
+                // Vanilla's Enter chat owns the keyboard while it's open — T there
+                // is a literal 't' in their message, not our hotkey (bug #128).
+                if (IsVanillaChatTyping()) return;
                 // Don't open the T chat if some OTHER text input already has focus — covers
-                // the user's "Enter chat" (Photon / mod chat) and any other uGUI/TMP InputField.
+                // any other uGUI/TMP InputField (another mod, a future ROUNDS field).
                 // EventSystem.currentSelectedGameObject is non-null whenever a uGUI Selectable
                 // owns focus; we additionally inspect it for any InputField-typed component so
                 // we don't false-positive on plain buttons.
@@ -4277,9 +4496,20 @@ namespace CompetitiveRounds
                     chatJustOpened = true;
                     chatInputText = "";
                     ev.Use();
+                    // Take the lock on the same frame the box opens, so the 't'
+                    // that opened it can't also be read as gameplay input.
+                    SetGameplayInputLock(true);
                 }
                 return;
             }
+
+            // Vanilla chat opening on top of ours (Enter is our submit key, so this
+            // is only reachable if something else toggles DevConsole) — yield to it.
+            if (IsVanillaChatTyping()) { CloseChatInput(); return; }
+            // Re-assert every frame: GameManager.lockInput is a shared global that
+            // vanilla also writes, and GameManager.Start() zeroes it on every scene
+            // load (which is also our free self-heal if we ever miss a release).
+            SetGameplayInputLock(true);
 
             // Unity IMGUI fires TWO KeyDown events per physical key: one with
             // keyCode set, and a second with ev.character set to the typed Unicode.
@@ -4349,13 +4579,11 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo($"[CHAT] -> sent: {text}");
                     }
                 }
-                chatInputText = "";
-                chatInputOpen = false;
+                CloseChatInput();
             }
             else if (cancel)
             {
-                chatInputText = "";
-                chatInputOpen = false;
+                CloseChatInput();
             }
         }
 

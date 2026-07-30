@@ -677,4 +677,164 @@ namespace CompetitiveRounds
             return VanillaFixSupport.Cleanup("InactiveVisualsHide", exception);
         }
     }
+
+    /// <summary>Bug #128 — keep our T chat's own keystrokes out of ROUNDS' Enter chat.
+    ///
+    /// <para>Vanilla <c>DevConsole.Update()</c> is <c>if (Input.GetKeyDown(KeyCode.Return))
+    /// ToggleConsole();</c> — a RAW <c>Input</c> read, which no IMGUI <c>Event.Use()</c> can
+    /// intercept. So pressing Enter to SEND one of our messages also toggled vanilla's chat
+    /// open behind it: <c>isTyping</c> and <c>GameManager.lockInput</c> both latched true and
+    /// the player was left input-locked with a vanilla text box up (at the main menu that box
+    /// is the room-code field, so the next Enter tried to join a room named after the
+    /// message). That is the mess the old "don't open T chat during combat" bandaid was
+    /// papering over.</para>
+    ///
+    /// <para>Blocking <c>ToggleConsole</c> — not <c>Update</c> — is deliberate: Update also
+    /// drives <c>PlatformManager.Update()</c>, which must keep running. Ordering works out
+    /// because Unity runs Update before OnGUI: on the frame we submit, DevConsole reads Enter
+    /// while our box is still open, so the guard is armed.</para>
+    ///
+    /// <para>Resolved via <c>TargetMethods()</c> instead of <c>[HarmonyPatch(typeof(DevConsole)…)]</c>
+    /// so this file never names a type carrying a <c>TMP_InputField</c> field (this csproj
+    /// references no TMPro assembly — learning #15), and logged either way because a patch
+    /// that silently fails to attach is a forever-no-op (learning #83).</para></summary>
+    [HarmonyPatch]
+    internal static class DevConsoleToggleGuardPatch
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            var found = new List<MethodBase>();
+            try
+            {
+                Type dc = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try { dc = asm.GetType("DevConsole"); } catch { }
+                    if (dc != null) break;
+                }
+                var m = dc?.GetMethod("ToggleConsole",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (m != null) found.Add(m);
+                else Plugin.Log.LogWarning("[VANILLA-FIX] DevConsole.ToggleConsole NOT found — "
+                                          + "our chat's Enter will also toggle the vanilla chat");
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("DevConsoleToggleGuard", ex); }
+            return found;
+        }
+
+        [HarmonyPrefix]
+        private static bool BeforeToggle()
+        {
+            try
+            {
+                // Only while OUR box owns the keyboard. Every other caller
+                // (a genuine Enter with our chat closed, the platform dialog
+                // callback) passes through untouched.
+                //
+                // Deadlock-proof by construction: if vanilla's box is ACTUALLY on
+                // screen we always let the toggle through, so Enter can close it
+                // even in the (patch-failed, flag-desynced) state where both boxes
+                // somehow ended up open. A guard that can trap the player behind a
+                // live text field is worse than the bug it fixes.
+                if (CompetitiveUI.IsChatInputOpen && !CompetitiveUI.VanillaChatBoxOnScreen)
+                    return false;
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("DevConsoleToggleGuard", ex); }
+            return true;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("DevConsoleToggleGuard", exception);
+        }
+    }
+
+    /// <summary>Damage-dealt telemetry for FFA (bugs #127 / #130).
+    ///
+    /// <para>Nothing in the mod or the database ever recorded damage DEALT — only damage
+    /// taken (the left half of <c>block_timeline</c>). Vanilla's
+    /// <c>HealthHandler.DoDamage(damage, position, blinkColor, damagingWeapon, damagingPlayer, …)</c>
+    /// carries the dealing <c>Player</c>, and since <c>CallTakeDamage</c> RPCs to
+    /// <c>RpcTarget.All</c> every client runs it for every hit — the same property FFA kill
+    /// credit already relies on. So a single Postfix gives the reporter a complete
+    /// per-player damage table with no new Photon heartbeat fields.</para>
+    ///
+    /// <para>The hook is <c>CharacterStatModifiers.DealtDamage</c>, NOT <c>DoDamage</c> itself,
+    /// and that choice is load-bearing: <c>DoDamage</c> opens with
+    /// <c>if (damage == zero || !isPlaying || dead || (block.IsBlocking() &amp;&amp; !ignoreBlock) || isRespawning) return;</c>
+    /// — a Postfix on it runs even on those early returns, so every BLOCKED shot would have
+    /// been credited as damage dealt. <c>DealtDamage</c> is called on the dealer's own stats
+    /// component immediately AFTER that guard, and receives the victim, so it fires exactly
+    /// once per unit of damage that really landed. <c>__instance</c> is the DEALER's
+    /// component (vanilla calls <c>damagingPlayer.GetComponent&lt;CharacterStatModifiers&gt;()</c>).</para>
+    ///
+    /// <para>FFA-gated (the only mode asking for it) and Postfix, so a throw here can never
+    /// interfere with damage actually being applied. Note learning #137: <c>damagingWeapon</c>
+    /// is the gun for DOT ticks too, so attribution deliberately uses the dealer identity —
+    /// which means DOT and explosion damage IS credited to whoever applied it, unlike the
+    /// bullets_hit counter which counts only direct impacts.</para></summary>
+    [HarmonyPatch(typeof(CharacterStatModifiers), "DealtDamage")]
+    internal static class FfaDamageDealtTrackerPatch
+    {
+        [HarmonyPostfix]
+        private static void AfterDealtDamage(CharacterStatModifiers __instance, Vector2 damage,
+                                            bool selfDamage, Player damagedPlayer)
+        {
+            try
+            {
+                if (selfDamage || damagedPlayer == null) return;
+                if (!FfaMode.EngineActive()) return;
+                var dealer = __instance != null ? __instance.GetComponent<Player>() : null;
+                if (dealer == null) return;
+                FfaMode.RecordDamageDealt(dealer, damagedPlayer, damage.magnitude);
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("FfaDamageDealtTracker", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("FfaDamageDealtTracker", exception);
+        }
+    }
+
+    /// <summary>Bug #128 — the pick phase reads player input BEHIND GameManager.lockInput.
+    ///
+    /// <para><c>CardChoice.DoPlayerSelect</c> pulls the action set straight off the player
+    /// (<c>PlayerManager.GetActionsFromPlayer(pickrID)</c>) and reads <c>Right/Left.Value</c>
+    /// and <c>Jump.WasPressed</c> from it. It never consults <c>GameManager.lockInput</c>,
+    /// which only gates <c>GeneralInput.Update</c>. So while the T chat has focus, typing
+    /// "a"/"d" still slid the card highlight and a SPACE inside a message still CONFIRMED
+    /// the pick. That hole predates this bug (the chat has always been openable during the
+    /// pick phase) but it is squarely the thing #128 asks us to make safe.</para>
+    ///
+    /// <para>Suppressed by skipping the vanilla method rather than by toggling
+    /// <c>playerActions.Enabled</c>: a mutated Enabled flag is one more piece of state that
+    /// can be stranded if we stop running (learning #75's failure mode), whereas a Prefix
+    /// that reads our own bool cannot leave anything behind. The picker keeps its current
+    /// highlight; nothing else in the pick flow is touched.</para></summary>
+    [HarmonyPatch(typeof(CardChoice), "DoPlayerSelect")]
+    internal static class CardPickChatInputGuardPatch
+    {
+        [HarmonyPrefix]
+        private static bool BeforeDoPlayerSelect()
+        {
+            try
+            {
+                if (CompetitiveUI.AnyChatTyping) return false;
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("CardPickChatInputGuard", ex); }
+            return true;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("CardPickChatInputGuard", exception);
+        }
+    }
 }

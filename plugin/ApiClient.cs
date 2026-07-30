@@ -217,6 +217,23 @@ namespace CompetitiveRounds
             public string rank_color;
             public float team_rating;              // 0 = no completed 2v2 series
             public int team_completed_series;
+            // Bug #130: 1v2 + FFA record for My Stats. All flat scalars, so
+            // JsonUtility populates them with ZERO parser changes (#73) — only
+            // nested arrays need the manual slicers (#25).
+            public int ovt_solo_wins;
+            public int ovt_solo_losses;
+            public int ovt_duo_wins;
+            public int ovt_duo_losses;
+            public int ffa_games;
+            public int ffa_wins;
+            public int ffa_top3;
+            public float ffa_avg_placement;
+            public float ffa_avg_kills;
+            public float ffa_avg_damage;
+            // How many FFA games carry damage telemetry. 0 = no data yet, which
+            // is how we tell that apart from a legitimate average of 0.0 (a real
+            // game where the player dealt no damage) — review find.
+            public int ffa_damage_games;
         }
 
         [Serializable]
@@ -585,8 +602,29 @@ namespace CompetitiveRounds
                             && (resp.Contains("401")
                                 || resp.Contains("409")
                                 || resp.Contains("429"));
+                        // "Any 4xx is permanent" threw away three RECOVERABLE
+                        // classes (found auditing the July 30 lost-game
+                        // incidents). The rule was written for 403 bad-signature
+                        // and duplicate-key, where retrying genuinely cannot
+                        // help, but it also deleted:
+                        //   429 — we were merely throttled; the game is fine and
+                        //         the next attempt would have worked.
+                        //   401 — the Steam session lapsed; SteamAuth.MaybeRefresh
+                        //         mints a new ticket on its own 60s loop, so the
+                        //         retry after it lands succeeds.
+                        // Both are now retryable for EVERY outbox url, not just
+                        // the silent macro-evidence ones. 409 stays permanent:
+                        // the server state really has moved on, retrying cannot
+                        // change it, and the server now quarantines that report
+                        // for admin recovery instead of dropping it. The attempts
+                        // cap still bounds anything that never succeeds.
+                        bool retryableTransient =
+                            resp != null
+                            && (resp.Contains("HTTP 429") || resp.Contains("HTTP/1.1 429")
+                                || resp.Contains("HTTP 401") || resp.Contains("HTTP/1.1 401"));
                         bool permanent =
                             !retryableMacroResponse
+                            && !retryableTransient
                             && resp != null
                             && (resp.StartsWith("HTTP 4", StringComparison.Ordinal)
                                 || resp.Contains("HTTP/1.1 4")
@@ -1891,6 +1929,10 @@ namespace CompetitiveRounds
         // Cached lists, refreshed by FetchFlaggedMatches / FetchBannedUsers.
         public static List<FlaggedMatchEntry> CachedFlaggedMatches { get; private set; } = new List<FlaggedMatchEntry>();
         public static List<BannedUserEntry> CachedBannedUsers { get; private set; } = new List<BannedUserEntry>();
+        public static List<QuarantineReportEntry> CachedQuarantineReports { get; private set; } = new List<QuarantineReportEntry>();
+        public static bool IsAdminQuarantineLoading { get; private set; }
+        public static bool AdminQuarantineLoaded { get; private set; }
+        public static string AdminQuarantineError { get; private set; } = "";
 
         public class FlaggedMatchEntry
         {
@@ -1910,6 +1952,15 @@ namespace CompetitiveRounds
         public class BannedUserEntry
         {
             public string id, steam_id, display_name, reason, banned_by_steam_id, banned_at;
+        }
+
+        public class QuarantineReportEntry
+        {
+            public string id, mode, reason, created_at, score, room, status;
+            public int http_status;
+            public List<string> player_names = new List<string>();
+            public bool can_accept;
+            public string accept_blocked_reason;
         }
 
         public static void CheckAdminStatus(string steamId, Action<bool> callback = null)
@@ -2624,6 +2675,104 @@ namespace CompetitiveRounds
                 try { CachedBannedUsers = ParseBannedUsers(body); callback?.Invoke(true); }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[ADMIN] bans parse: {ex.Message}"); callback?.Invoke(false); }
             }));
+        }
+
+        public static void FetchAdminQuarantine(string adminSteamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
+            IsAdminQuarantineLoading = true;
+            AdminQuarantineError = "";
+            NativeUI.MarkDirty();
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:quarantine:list");
+            string url = $"{baseUrl}/api/v1/admin/quarantine"
+                       + $"?admin_steam_id={UnityWebRequest.EscapeURL(adminSteamId)}"
+                       + $"&hmac_signature={UnityWebRequest.EscapeURL(sig)}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                IsAdminQuarantineLoading = false;
+                if (!ok)
+                {
+                    AdminQuarantineError = string.IsNullOrEmpty(body) ? "request failed" : body;
+                    Plugin.Log.LogWarning($"[ADMIN] quarantine fetch failed: {body}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(false);
+                    return;
+                }
+                try
+                {
+                    CachedQuarantineReports = ParseQuarantineReports(body);
+                    AdminQuarantineLoaded = true;
+                    AdminQuarantineError = "";
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(true);
+                }
+                catch (Exception ex)
+                {
+                    AdminQuarantineError = "response parse failed";
+                    Plugin.Log.LogWarning($"[ADMIN] quarantine parse: {ex.Message}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(false);
+                }
+            }));
+        }
+
+        public static void AdminQuarantineDiscard(
+            string adminSteamId, string reportId, string note,
+            Action<bool, string> callback = null)
+        {
+            string sig = ComputeAdminHmacHex(
+                $"admin:{adminSteamId}:quarantine_action:{reportId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\","
+                        + $"\"hmac_signature\":\"{sig}\","
+                        + $"\"note\":\"{JsonEscapeFull(note ?? "")}\"}}";
+            string url = $"{baseUrl}/api/v1/admin/quarantine/"
+                       + $"{UnityWebRequest.EscapeURL(reportId ?? "")}/discard";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                url, body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        public static void AdminQuarantineAccept(
+            string adminSteamId, string reportId,
+            Action<bool, string> callback = null)
+        {
+            string sig = ComputeAdminHmacHex(
+                $"admin:{adminSteamId}:quarantine_action:{reportId}");
+            string body = $"{{\"admin_steam_id\":\"{Escape(adminSteamId)}\","
+                        + $"\"hmac_signature\":\"{sig}\"}}";
+            string url = $"{baseUrl}/api/v1/admin/quarantine/"
+                       + $"{UnityWebRequest.EscapeURL(reportId ?? "")}/accept";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                url, body, (ok, resp) => callback?.Invoke(ok, resp)));
+        }
+
+        private static List<QuarantineReportEntry> ParseQuarantineReports(string body)
+        {
+            var list = new List<QuarantineReportEntry>();
+            if (string.IsNullOrEmpty(body)) return list;
+            int key = body.IndexOf("\"reports\"", StringComparison.Ordinal);
+            int open = key >= 0 ? body.IndexOf('[', key) : -1;
+            int close = open >= 0 ? FindMatchingBracketStringAware(body, open) : -1;
+            if (open < 0 || close < 0) return list;
+            foreach (string obj in SliceTopLevelObjects(
+                body.Substring(open + 1, close - open - 1)))
+            {
+                var entry = new QuarantineReportEntry
+                {
+                    id = ExtractJsonString(obj, "id"),
+                    mode = ExtractJsonString(obj, "mode"),
+                    reason = ExtractJsonString(obj, "reason"),
+                    http_status = ExtractJsonInt(obj, "http_status"),
+                    created_at = ExtractJsonString(obj, "created_at"),
+                    player_names = ExtractStringListStringAware(obj, "player_names"),
+                    score = ExtractJsonString(obj, "score"),
+                    room = ExtractJsonString(obj, "room"),
+                    status = ExtractJsonString(obj, "status"),
+                    can_accept = ExtractJsonBool(obj, "can_accept"),
+                    accept_blocked_reason = ExtractJsonString(obj, "accept_blocked_reason"),
+                };
+                if (!string.IsNullOrEmpty(entry.id)) list.Add(entry);
+            }
+            return list;
         }
 
         public static void AdminBan(string adminSteamId, string targetSteamId, string reason, Action<bool, string> callback = null)
@@ -4718,7 +4867,52 @@ namespace CompetitiveRounds
 
         // Public alias so CompetitiveUI can reuse the helper without exposing
         // every parser internal. Same semantics as ExtractJsonInt.
+        public static string ExtractJsonStringPublic(string json, string key) => ExtractJsonString(json, key);
         public static int ExtractJsonIntPublic(string json, string key) => ExtractJsonInt(json, key);
+
+        /// <summary>Reads a flat array of strings ("xp_bonuses":["a","b"]) into a list.
+        /// Quote-aware, so a label containing a comma can't split into two entries —
+        /// these labels are SERVER-generated, but the naive split-on-comma version of
+        /// this parse already exists inline in the 1v1 path and is one comma away from
+        /// being wrong (cf. #156: only server-generated, bracket-free values are safe
+        /// for the naive slicers). Returns an empty list when the key is absent, so a
+        /// server that doesn't send it yet degrades silently.</summary>
+        private static List<string> ExtractJsonStringArray(string json, string key)
+        {
+            var outList = new List<string>();
+            try
+            {
+                if (string.IsNullOrEmpty(json)) return outList;
+                int at = json.IndexOf("\"" + key + "\":", StringComparison.Ordinal);
+                if (at < 0) return outList;
+                int open = json.IndexOf('[', at);
+                if (open < 0) return outList;
+                bool inStr = false, esc = false;
+                var cur = new StringBuilder(32);
+                for (int i = open + 1; i < json.Length; i++)
+                {
+                    char c = json[i];
+                    if (inStr)
+                    {
+                        if (esc) { cur.Append(c); esc = false; continue; }
+                        if (c == '\\') { esc = true; continue; }
+                        if (c == '"')
+                        {
+                            inStr = false;
+                            if (cur.Length > 0) outList.Add(cur.ToString());
+                            cur.Length = 0;
+                            continue;
+                        }
+                        cur.Append(c);
+                        continue;
+                    }
+                    if (c == '"') { inStr = true; continue; }
+                    if (c == ']') break;
+                }
+            }
+            catch { }
+            return outList;
+        }
         public static float ExtractJsonFloatPublic(string json, string key) => ExtractJsonFloat(json, key);
 
         private static int ExtractJsonInt(string json, string key)
@@ -5877,8 +6071,14 @@ namespace CompetitiveRounds
                     string sid = MatchTracker.LocalSteamId;
                     if (!string.IsNullOrEmpty(sid) && sid != "unknown")
                     {
+                        string inMatch = GetPresenceMatchGroupId();
+                        string matchQuery = string.IsNullOrEmpty(inMatch)
+                            ? ""
+                            : $"&in_match={UnityWebRequest.EscapeURL(inMatch)}";
                         Plugin.Instance.StartCoroutine(GetRequest(
-                            $"{baseUrl}/api/v1/presence/ping?steam_id={Escape(sid)}",
+                            $"{baseUrl}/api/v1/presence/ping"
+                            + $"?steam_id={UnityWebRequest.EscapeURL(sid)}"
+                            + matchQuery,
                             (success, response) =>
                             {
                                 if (success)
@@ -5899,6 +6099,30 @@ namespace CompetitiveRounds
                 }
                 yield return new WaitForSeconds(60f);
             }
+        }
+
+        private static string GetPresenceMatchGroupId()
+        {
+            try
+            {
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()
+                    || PhotonNetwork.CurrentRoom == null)
+                    return null;
+
+                string room = PhotonNetwork.CurrentRoom.Name ?? "";
+                if (room.StartsWith("ffa_", StringComparison.Ordinal))
+                    return string.IsNullOrEmpty(ActiveFfaLobbyId) ? null : ActiveFfaLobbyId;
+                if (room.StartsWith("ovt_", StringComparison.Ordinal))
+                    return string.IsNullOrEmpty(ActiveOvt1v2SeriesId) ? null : ActiveOvt1v2SeriesId;
+
+                var props = PhotonNetwork.CurrentRoom.CustomProperties;
+                bool isTeamRoom = room.StartsWith("team_", StringComparison.Ordinal)
+                    || (props != null && props.ContainsKey("cr_ff"));
+                if (isTeamRoom)
+                    return string.IsNullOrEmpty(ActiveTeamSeriesId) ? null : ActiveTeamSeriesId;
+            }
+            catch { }
+            return null;
         }
 
         // ════════════════════════════════════════════════════════════
@@ -7723,6 +7947,20 @@ namespace CompetitiveRounds
                     string sScore = ExtractJsonString(resp, "series_score");
                     if (sStatus == "completed") { CompetitiveUI.ShowNotification($"1v2 series complete: {sScore}", Color.green, 6f); ActiveOvt1v2SeriesId = null; Plugin.ClearPendingOvtSlot(); }
                     else if (!string.IsNullOrEmpty(sScore)) CompetitiveUI.ShowNotification($"1v2 series: {sScore}", new Color(0.6f, 0.8f, 1f), 4f);
+                    // Bug #129: 1v2 always PAID xp+gold, but nothing anywhere ever
+                    // showed it — which is exactly why it read as "1v2 doesn't give
+                    // XP/gold". Queue (not Show) so it follows the score toast
+                    // instead of replacing it. Bonus labels are read generically so
+                    // a future server-side factor renders with no client release.
+                    int gXp = ExtractJsonInt(resp, "xp_gained");
+                    int gGold = ExtractJsonInt(resp, "gold_gained");
+                    if (gXp > 0 || gGold > 0)
+                    {
+                        string gLine = $"+{gXp} XP" + (gGold > 0 ? $"  <color=#FFD94D>+{gGold}g</color>" : "");
+                        string bon = string.Join(", ", ExtractJsonStringArray(resp, "xp_bonuses").ToArray());
+                        if (!string.IsNullOrEmpty(bon)) gLine += $"  ({bon})";
+                        CompetitiveUI.QueueNotification(gLine, new Color(0.75f, 0.9f, 0.6f), 5f);
+                    }
                 }
                 else
                 {
@@ -7998,6 +8236,11 @@ namespace CompetitiveRounds
             public string match_id, role, score, solo, ended_at;
             public bool won;
             public List<string> duo = new List<string>();
+            // Bug #129 (review find): the endpoint sends these and nothing read
+            // them, so the third 1v2 reward surface stayed blank. gold_gained is
+            // this GAME's xp-conversion + level-ding gold; series_gold_gained is
+            // the series bonus, which lands only on the closing game.
+            public int gold_gained, series_gold_gained;
         }
         public class PlayerFfaHistoryEntry
         {
@@ -9079,6 +9322,8 @@ namespace CompetitiveRounds
                                     solo = ExtractJsonString(obj, "solo"),
                                     duo = ExtractStringListStringAware(obj, "duo"),
                                     ended_at = ExtractJsonString(obj, "ended_at"),
+                                    gold_gained = ExtractJsonInt(obj, "gold_gained"),
+                                    series_gold_gained = ExtractJsonInt(obj, "series_gold_gained"),
                                 });
                             }
                         }
@@ -9216,6 +9461,11 @@ namespace CompetitiveRounds
             public bool absent;   // left in an EARLIER game of the sitting
             public List<MatchTracker.CardPickData> cards;
             public TeamTelemetry telemetry;
+            // Bugs #127/#130. Cumulative CSV ints on the 3s telemetry cadence,
+            // plus the per-match total. Ride OUTSIDE the frozen ffa: HMAC
+            // canonical (#213) like kills/timeline do; old servers ignore them.
+            public int damageDealt;
+            public string killTimeline, damageTimeline;
         }
 
         /// <summary>Deterministic cross-language steam-id ordering used by the
@@ -9259,6 +9509,14 @@ namespace CompetitiveRounds
                           $"\"left_early\":{(p.leftEarly ? "true" : "false")}," +
                           $"\"absent\":{(p.absent ? "true" : "false")},");
                 sb.Append($"\"fps\":{Math.Max(0, p.fps)},");
+                // Damage dealt + kill/damage timelines (#127/#130). Outside the
+                // frozen HMAC canonical; omitted entirely when empty so an FFA
+                // game with no data doesn't ship empty strings.
+                sb.Append($"\"damage_dealt\":{Math.Max(0, p.damageDealt)},");
+                if (!string.IsNullOrEmpty(p.killTimeline))
+                    sb.Append($"\"kill_timeline\":\"{Escape(ClampTimeline(p.killTimeline, 512))}\",");
+                if (!string.IsNullOrEmpty(p.damageTimeline))
+                    sb.Append($"\"damage_dealt_timeline\":\"{Escape(ClampTimeline(p.damageTimeline, 1024))}\",");
                 sb.Append("\"cards\":[");
                 AppendCards(sb, p.cards ?? new List<MatchTracker.CardPickData>());
                 sb.Append("]");

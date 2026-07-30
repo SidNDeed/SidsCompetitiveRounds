@@ -261,6 +261,28 @@ class PlayerStatsResponse(BaseModel):
     # 2v2 headline stats inline (saves the Compare tab a second endpoint).
     team_rating: float = 0.0
     team_completed_series: int = 0
+    # 1v2 + FFA headline stats inline (bug #130: My Stats -> Record covered only
+    # 1v1/2v2). All FLAT SCALARS on purpose — the mod parses this payload with
+    # JsonUtility, which silently fails on nested arrays but picks up scalar
+    # additions with zero parser changes (learnings #25 / #73).
+    # 1v2 is per GAME and split by seat, matching what the 1v2 tab shows.
+    ovt_solo_wins: int = 0
+    ovt_solo_losses: int = 0
+    ovt_duo_wins: int = 0
+    ovt_duo_losses: int = 0
+    # FFA: win rate is derivable from wins/games; the rest are the three
+    # averages Sid asked for. avg_damage stays 0 until enough games carry the
+    # new damage_dealt telemetry.
+    ffa_games: int = 0
+    ffa_wins: int = 0
+    ffa_top3: int = 0
+    ffa_avg_placement: float = 0.0
+    ffa_avg_kills: float = 0.0
+    ffa_avg_damage: float = 0.0
+    # How many of this player's FFA games actually carry damage telemetry.
+    # 0 = "no data yet", which is how the client tells that apart from a
+    # legitimate ffa_avg_damage of 0.0 (a real game where they dealt none).
+    ffa_damage_games: int = 0
     # Most recently observed mod version for this player (X-Mod-Version
     # header on their last mod-only request). null for non-mod players.
     mod_version: str | None = None
@@ -885,6 +907,14 @@ class OvtMatchResponse(BaseModel):
     series_score: str           # solo-duo, from the reporter's own side perspective
     winner_side: int
     message: str = "1v2 match recorded"
+    # Bug #129: the REPORTER's own reward for this game, so the client has
+    # something to show. 1v2 paid xp+gold from day one but no surface ever
+    # rendered it, which is why it read as "1v2 doesn't provide XP/gold".
+    # Mirrors FfaMatchResponse / MatchResponse. Zero on an idempotent replay —
+    # a re-report pays nothing, so it must not claim to.
+    xp_gained: int = 0
+    gold_gained: int = 0
+    xp_bonuses: list[str] = Field(default_factory=list)
 
 
 class Ovt1v2LeaderboardEntry(BaseModel):
@@ -968,6 +998,16 @@ class FfaPlayerEntry(BaseModel):
     # Placement tie-break only (rounds, then points, then kills). Rides
     # OUTSIDE the frozen ffa: HMAC canonical; 0 from pre-kills clients.
     kills: int = Field(0, ge=0, le=500)
+    # Damage dealt + cumulative kill/damage timelines (bugs #127 / #130).
+    # Also OUTSIDE the frozen ffa: HMAC canonical (#213) — advisory telemetry,
+    # bounded so a crafted value can't overflow a column and 500 the submit.
+    # None (not 0) is the default ON PURPOSE: it is the ONLY way to tell a
+    # pre-v1.35.3 client that never sends the field from a player who genuinely
+    # dealt no damage. A `0` default would make both arrive as 0, and either the
+    # avg-damage aggregate counts phantom zeros or it discards real ones (#257).
+    damage_dealt: int | None = Field(None, ge=0, le=10000000)
+    kill_timeline: str | None = Field(None, max_length=512)
+    damage_dealt_timeline: str | None = Field(None, max_length=1024)
     left_early: bool = False
     # True = left in an EARLIER game of the sitting (roster ghost: holds the
     # slot for the frozen-roster check, never rated/rewarded). False +

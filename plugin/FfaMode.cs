@@ -199,6 +199,88 @@ namespace CompetitiveRounds
             return KillsFor(teamB).CompareTo(KillsFor(teamA));
         }
 
+        // ── Damage dealt + per-player timelines (bug #127 / #130) ────────
+        // Damage DEALT was tracked nowhere: the client only ever accumulated
+        // damage TAKEN (GameStateWatcher.LocalDamageTakenThisMatch), and the
+        // whole database had no damage column at all. It is attributable
+        // though: vanilla's HealthHandler.DoDamage receives the dealing
+        // `Player`, and because CallTakeDamage RPCs to All, EVERY client sees
+        // every attributed hit — the same property that lets kill credit be
+        // computed locally. So the reporter alone can produce a full
+        // damage-dealt table for all N players with no new peer heartbeat.
+        private static readonly Dictionary<int, float> damageDealt = new Dictionary<int, float>();
+        // Cumulative CSV samples per team id, taken on GameStateWatcher's
+        // existing 3s telemetry cadence so the x-axis matches hit/block.
+        private static readonly Dictionary<int, List<int>> killTimeline = new Dictionary<int, List<int>>();
+        private static readonly Dictionary<int, List<int>> damageTimeline = new Dictionary<int, List<int>>();
+        private const int FFA_TIMELINE_CAP = 128;   // 6.4 min at 3s, matches hit/block
+
+        public static int DamageDealtFor(int teamId)
+        {
+            float v;
+            return damageDealt.TryGetValue(teamId, out v) ? (int)v : 0;
+        }
+
+        /// <summary>Credits damage to the dealer. Called from the
+        /// HealthHandler.DoDamage patch on every client. Self-damage is
+        /// excluded (vanilla passes the victim as the dealer for recoil/DOT
+        /// self-hits) and so is anything after game over, so the number always
+        /// matches the score snapshot the report carries.</summary>
+        public static void RecordDamageDealt(Player dealer, Player victim, float amount)
+        {
+            try
+            {
+                if (gameOverFired) return;
+                if (dealer == null || victim == null) return;
+                if (dealer.TeamID == victim.TeamID) return;
+                if (!(amount > 0f) || amount > 10000f) return;   // same sanity bound as damage-taken
+                float cur;
+                damageDealt.TryGetValue(dealer.TeamID, out cur);
+                damageDealt[dealer.TeamID] = cur + amount;
+            }
+            catch { }
+        }
+
+        /// <summary>One cumulative sample per player, on the 3s cadence.
+        /// Driven from GameStateWatcher's existing telemetry tick so all FFA
+        /// series share one x-axis.</summary>
+        public static void SampleTimelines()
+        {
+            try
+            {
+                if (!EngineActive()) return;
+                var pm = PlayerManager.instance;
+                if (pm?.players == null) return;
+                for (int i = 0; i < pm.players.Count; i++)
+                {
+                    var p = pm.players[i];
+                    if (p == null) continue;
+                    int tid = p.TeamID;
+                    List<int> kl;
+                    if (!killTimeline.TryGetValue(tid, out kl)) { kl = new List<int>(32); killTimeline[tid] = kl; }
+                    if (kl.Count < FFA_TIMELINE_CAP) kl.Add(KillsFor(tid));
+                    List<int> dl;
+                    if (!damageTimeline.TryGetValue(tid, out dl)) { dl = new List<int>(32); damageTimeline[tid] = dl; }
+                    if (dl.Count < FFA_TIMELINE_CAP) dl.Add(DamageDealtFor(tid));
+                }
+            }
+            catch { }
+        }
+
+        public static string KillTimelineFor(int teamId)
+        {
+            List<int> l;
+            if (!killTimeline.TryGetValue(teamId, out l) || l.Count == 0) return null;
+            return string.Join(",", l.ConvertAll(v => v.ToString()).ToArray());
+        }
+
+        public static string DamageTimelineFor(int teamId)
+        {
+            List<int> l;
+            if (!damageTimeline.TryGetValue(teamId, out l) || l.Count == 0) return null;
+            return string.Join(",", l.ConvertAll(v => v.ToString()).ToArray());
+        }
+
         /// <summary>Kill credit at death time: the victim's
         /// lastSourceOfDamage (vanilla sets it in HealthHandler.TakeDamage on
         /// every client) unless it's the victim themselves or already gone.
@@ -372,6 +454,8 @@ namespace CompetitiveRounds
             gameNumber++;
             cycleNumber = 0;
             points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
+            // Per-game, same lifetime as kills (bug #127/#130 telemetry).
+            damageDealt.Clear(); killTimeline.Clear(); damageTimeline.Clear();
             timelineEvents.Clear();
             decks.Clear(); pickHistory.Clear(); baselines.Clear();
             // Leavers PERSIST across rematches in the same room (Codex review
@@ -417,6 +501,8 @@ namespace CompetitiveRounds
             matchStartRealtime = 0f;
             gameNumber = 0;
             points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
+            // Per-game, same lifetime as kills (bug #127/#130 telemetry).
+            damageDealt.Clear(); killTimeline.Clear(); damageTimeline.Clear();
             timelineEvents.Clear();
             decks.Clear(); pickHistory.Clear(); baselines.Clear();
             Leavers.Clear();
@@ -1373,8 +1459,15 @@ namespace CompetitiveRounds
                     autoPicked = true;
                     break;
                 }
+                // Bug #128: playerActions are read DIRECTLY here, so
+                // GameManager.lockInput (which only gates GeneralInput) does not
+                // cover the pick phase — a SPACE typed into the chat box would
+                // confirm a card. Freeze the highlight and ignore Jump while
+                // either chat owns the keyboard. lastDir is zeroed rather than
+                // frozen so the first real nudge after closing chat registers.
                 var actions = localPlayer?.data?.playerActions;
-                if (actions != null)
+                if (CompetitiveUI.AnyChatTyping) { lastDir = 0; }
+                else if (actions != null)
                 {
                     int dir = 0;
                     try

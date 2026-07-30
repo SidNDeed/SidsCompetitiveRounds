@@ -17,6 +17,7 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.dates as mdates
+    import matplotlib.ticker as mticker
     _MPL_AVAILABLE = True
 except Exception as _mpl_ex:
     _MPL_AVAILABLE = False
@@ -155,7 +156,20 @@ intents.members = True
 # message instead of trying to read member.status.
 _PRESENCE_ENABLED = os.getenv("DISCORD_PRESENCE_INTENT", "false").lower() in ("true", "1", "yes")
 intents.presences = _PRESENCE_ENABLED
-bot = commands.Bot(command_prefix="!", intents=intents, chunk_guilds_at_startup=False)
+# allowed_mentions default = NOTHING PINGS. This is a structural fix, not a
+# preference: the bot relays player-authored text (in-game chat, display names)
+# into Discord, and `escape_markdown` — the only sanitiser those paths had —
+# escapes `* _ ~ | \` and NOT `<`, `@`, `#`, `&`. With discord.py's own default
+# (everything parses), any send that interpolated player text was a live
+# mention-injection sink firing under the bot's identity, and three separate
+# ones were found in a single review pass (the chat relay, the FAQ mirror, and
+# the FAQ in-game mirror). Per-site patching is whack-a-mole; defaulting to
+# none() makes every FUTURE send safe unless it explicitly opts in.
+# The three sites that legitimately ping (tournament DMs :5310, LFP beacon
+# :6454, gambler role :7392) pass their own AllowedMentions, which overrides
+# this default and keeps working unchanged.
+bot = commands.Bot(command_prefix="!", intents=intents, chunk_guilds_at_startup=False,
+                   allowed_mentions=discord.AllowedMentions.none())
 http_session = None
 seen_series = set()
 
@@ -1861,9 +1875,88 @@ def _faq_short_text(entry, answer_text: str) -> str:
     return entry.get("short") or _faq_plainify(answer_text)
 
 
+_CHAT_USER_MENTION_RE = _faq_re.compile(r"<@!?(\d+)>")
+_CHAT_ROLE_MENTION_RE = _faq_re.compile(r"<@&(\d+)>")
+_CHAT_CHANNEL_MENTION_RE = _faq_re.compile(r"<#(\d+)>")
+_CHAT_CUSTOM_EMOJI_RE = _faq_re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
+_CHAT_TIMESTAMP_RE = _faq_re.compile(r"<t:(-?\d+)(?::[tTdDfFR])?>")
+_CHAT_COMMAND_RE = _faq_re.compile(r"</([^:>]+):\d+>")
+
+
+def _discord_chat_plain_content(message: discord.Message) -> str:
+    """Resolve Discord wire markup and neutralize TMP rich-text delimiters.
+
+    Message.clean_content handles cached user/role/channel mentions. The
+    explicit passes cover cache misses plus markup clean_content intentionally
+    leaves alone (custom emoji, timestamps and application-command mentions).
+    """
+    raw = message.content or ""
+    try:
+        content = message.clean_content
+    except Exception:
+        content = raw
+
+    guild = getattr(message, "guild", None)
+    users = {str(m.id): m for m in (getattr(message, "mentions", None) or [])}
+    roles = {str(r.id): r for r in (getattr(message, "role_mentions", None) or [])}
+    channels = {str(c.id): c for c in (getattr(message, "channel_mentions", None) or [])}
+
+    def _user(match):
+        uid = match.group(1)
+        member = users.get(uid)
+        if member is None and guild is not None:
+            member = guild.get_member(int(uid))
+        name = getattr(member, "display_name", None) or getattr(member, "name", None)
+        return f"@{name}" if name else "@unknown"
+
+    def _role(match):
+        rid = match.group(1)
+        role = roles.get(rid)
+        if role is None and guild is not None:
+            role = guild.get_role(int(rid))
+        name = getattr(role, "name", None)
+        return f"@{name}" if name else "@unknown-role"
+
+    def _channel(match):
+        cid = match.group(1)
+        channel = channels.get(cid)
+        if channel is None and guild is not None:
+            channel = guild.get_channel(int(cid))
+        name = getattr(channel, "name", None)
+        return f"#{name}" if name else "#unknown-channel"
+
+    def _timestamp(match):
+        try:
+            stamp = datetime.fromtimestamp(int(match.group(1)), tz=timezone.utc)
+            return stamp.strftime("%Y-%m-%d %H:%M UTC")
+        except (OverflowError, OSError, ValueError):
+            return "unknown-time"
+
+    content = _CHAT_USER_MENTION_RE.sub(_user, content)
+    content = _CHAT_ROLE_MENTION_RE.sub(_role, content)
+    content = _CHAT_CHANNEL_MENTION_RE.sub(_channel, content)
+    content = _CHAT_CUSTOM_EMOJI_RE.sub(lambda m: f":{m.group(1)}:", content)
+    content = _CHAT_TIMESTAMP_RE.sub(_timestamp, content)
+    content = _CHAT_COMMAND_RE.sub(lambda m: f"/{m.group(1)}", content)
+
+    # Discord autolinks and arbitrary user text can still contain <...>.
+    # TMP treats those delimiters as rich-text tags, so preserve the text but
+    # make the delimiters inert before it reaches an in-game client.
+    return content.replace("<", "[").replace(">", "]").strip()
+
+
 async def _maybe_answer_faq_discord(message: discord.Message) -> None:
     """FAQ pass for guild messages. Called from on_message AFTER the chat
     relay so an in-game audience sees the question before the answer."""
+    # Match on the RAW content, not the mention-resolved text (review find).
+    # _faq_norm deliberately DELETES `<@id>` / `<#id>` / `<:emoji:id>` before
+    # matching, precisely so that names cannot become trigger words. Feeding it
+    # resolved text defeats that: "thanks @SCR Helper, my mods load fine"
+    # matches the `help.{0,20}(my )?mods?` pattern and fires an unsolicited
+    # mod-troubleshooting answer — and worse, that false hit stamps the 180s
+    # per-topic cooldown, so a player who genuinely asks right after gets
+    # nothing. Any display/role/channel/emoji name becomes an injection surface.
+    # The relay to the game still uses the cleaned text; only MATCHING is raw.
     content = (message.content or "").strip()
     if not content or content.startswith(("!", "/", ".")):
         return
@@ -1926,7 +2019,19 @@ async def _maybe_answer_faq_ingame(data: dict) -> None:
             if channel is not None:
                 asker = discord.utils.escape_markdown(data.get("display_name") or "player")
                 await channel.send(content=f"-# answering **{asker}** (in-game):",
-                                   embed=_faq_embed(entry, answer))
+                                   embed=_faq_embed(entry, answer),
+                                   # SECOND unguarded sink on the in-game ->
+                                   # Discord path (review find). `asker` is a
+                                   # mod-supplied display_name that the API
+                                   # stores verbatim, and /ws/chat is
+                                   # unauthenticated — so a crafted entry can
+                                   # put `<@id>` or `@everyone` in message
+                                   # CONTENT here and ping under the bot's
+                                   # identity. escape_markdown does not touch
+                                   # `<` `@` `#` `&`; allowed_mentions is the
+                                   # only real gate. Patching only
+                                   # _forward_ingame_to_discord left this open.
+                                   allowed_mentions=discord.AllowedMentions.none())
         except Exception as ex:
             print(f"[FAQ] discord mirror failed: {ex}")
 
@@ -2097,7 +2202,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
     if CHAT_CHANNEL_ID and message.channel and message.channel.id == CHAT_CHANNEL_ID:
-        content = (message.content or "").strip()
+        content = _discord_chat_plain_content(message)
         display = getattr(message.author, "global_name", None) or message.author.name
         print(f"[CHAT] Discord msg from {display}: {content[:60]} (session={http_session is not None}, key={'set' if API_SECRET_KEY else 'MISSING'})")
         if content and http_session is not None and API_SECRET_KEY:
@@ -2222,7 +2327,19 @@ async def _forward_ingame_to_discord(data: dict) -> bool:
             f"**{discord.utils.escape_markdown(name)}"
             f"{discord.utils.escape_markdown(title_str)}"
             f"{rating_str}** (in-game): "
-            f"{discord.utils.escape_markdown(content)[:1900]}"
+            f"{discord.utils.escape_markdown(content)[:1900]}",
+            # Bug #125 adjacent (found by the independent audit of this feature).
+            # escape_markdown handles * _ ~ | ` and nothing else — it does NOT
+            # touch `<`, `@`, `#` or `&`. Nothing on the in-game path strips them
+            # either (the mod only JSON-escapes, the API only truncates), and the
+            # Bot constructor sets no allowed_mentions default, so a player typing
+            # `<@id>` / `<@&roleid>` / `@everyone` in T-chat produced a REAL ping
+            # posted under the bot's own account. allowed_mentions is the actual
+            # gate (same reasoning as the LFP beacon's send). suppress_embeds
+            # stops a pasted link unfurling under the trusted bot identity.
+            # Newly more reachable now that #128 makes T-chat usable mid-combat.
+            allowed_mentions=discord.AllowedMentions.none(),
+            suppress_embeds=True,
         )
         if ts:
             _last_relayed_ts = ts
@@ -3419,10 +3536,11 @@ def _ffa_point_series(timeline, players):
 
 def _render_game_detail_png_locked(game):
     """Stacked panels for whatever series the game actually recorded:
-    score progression, FPS, ping, shots fired-vs-hit, dmg-vs-blocks.
+    score progression, FPS, ping, combat counters and FFA damage/kills.
     1v1 = two players; 2v2 = up to four (from telemetry_by_player fields the
     by-code endpoint flattens onto each player). Returns BytesIO or None."""
     players = game.get("players") or []
+    mode = game.get("mode")
     # 10 wide because an FFA game has up to 10 series (bug #118 — the in-game
     # graph used the 4-entry vanilla skin bank and wrapped, so slot 0 and slot
     # 4 drew in the IDENTICAL colour). MUST stay in sync with
@@ -3430,13 +3548,30 @@ def _render_game_detail_png_locked(game):
     # Discord PNG and the in-game hover graph key a player to the same colour.
     palette = ["#FFC43D", "#4FA8FF", "#FF5C7A", "#DCE3EC", "#46E07C",
                "#C48CFF", "#26D8D2", "#FF7BE0", "#FF8A3D", "#C8FF66"]
+    # Panel tuple:
+    # (title, series, special, seconds_per_sample, explicit_x, x_axis_label).
+    # Score progression has event positions (or real 1v1 point timestamps);
+    # sampled telemetry uses its fixed client cadence. Never stretch capped
+    # telemetry to duration_seconds: a long game's samples truthfully end early.
+    # Colour a player by SLOT, not by their index in this list (review find).
+    # `players` arrives PLACEMENT-ordered, so enumerate() gives a different
+    # index than the score-progression panel (which keys on slot) and than the
+    # in-game hover graph — the same player was drawn in two different colours
+    # in the same image. Slot is the stable identity everywhere else.
+    def _pcolor(idx, player):
+        slot = player.get("slot")
+        try:
+            return int(slot) if slot is not None else idx
+        except (TypeError, ValueError):
+            return idx
+
     panels = []
 
     # Series tuples carry an EXPLICIT palette index (review [11]) — the color
     # is the player's position, never sniffed from the label text (a player
     # literally named "hit" must not recolor the chart).
     tl = game.get("point_timeline")
-    if tl and game.get("mode") == "1v1":
+    if tl and mode == "1v1":
         a, b = _pair_series(tl)
         if len(a) >= 2:
             n1 = players[0]["name"][:14] if players else "P1"
@@ -3444,37 +3579,97 @@ def _render_game_detail_png_locked(game):
             # Stored totals are POINTS (rounds*2+points); every in-game surface
             # shows ROUNDS, so halve (feedback item 3: "10 points" on a 5-round
             # game). Half-steps = a point inside an unfinished round.
+            point_times = _csv_ints(game.get("point_times"))
+            point_x = None
+            score_xlabel = "events"
+            if len(point_times) == len(a) and all(
+                    point_times[i] <= point_times[i + 1]
+                    for i in range(len(point_times) - 1)):
+                point_x = [0] + point_times
+                score_xlabel = "time (M:SS)"
             panels.append(("Score progression (rounds)",
                            [(n1, [v / 2.0 for v in [0] + a], "-", 0),
-                            (n2, [v / 2.0 for v in [0] + b], "-", 1)], None))
-    elif game.get("mode") == "ffa" and game.get("timeline"):
+                            (n2, [v / 2.0 for v in [0] + b], "-", 1)],
+                           None, None, point_x, score_xlabel))
+    elif mode == "ffa" and game.get("timeline"):
         ffa_series = _ffa_point_series(game["timeline"], players)
         if ffa_series:
-            panels.append(("Score progression (points)", ffa_series, None))
-    fps_series = [(p["name"][:14], _csv_ints(p.get("fps_timeline")), "-", pi)
+            panels.append(("Score progression (points)", ffa_series,
+                           None, None, None, "events"))
+    fps_series = [(p["name"][:14], _csv_ints(p.get("fps_timeline")), "-", _pcolor(pi, p))
                   for pi, p in enumerate(players) if _csv_ints(p.get("fps_timeline"))]
     if fps_series:
-        panels.append(("FPS", fps_series, None))
-    ping_series = [(p["name"][:14], _csv_ints(p.get("ping_timeline")), "-", pi)
+        # FPS cadence is MODE-DEPENDENT, unlike every other series here.
+        # Only the 1v1 reporter's own timeline is the 5s bucket
+        # (GameStateWatcher.localFpsTimeline, `tlAccum >= 5f`). 2v2/1v2/FFA
+        # report `localFps3sTimeline`, appended inside BroadcastFps() on the
+        # 3s tick, and every PEER's series is harvested from the same 3s
+        # cr_gstats heartbeat. Hardcoding 5.0 stretched the FFA FPS axis by
+        # 67% — the one mode this whole change is about.
+        panels.append(("FPS", fps_series, None,
+                       5.0 if mode == "1v1" else 3.0, None, "time (M:SS)"))
+    ping_series = [(p["name"][:14], _csv_ints(p.get("ping_timeline")), "-", _pcolor(pi, p))
                    for pi, p in enumerate(players) if _csv_ints(p.get("ping_timeline"))]
     if ping_series:
-        panels.append(("Ping (ms)", ping_series, None))
-    hit_series = []
+        panels.append(("Ping (ms)", ping_series, None, 3.0, None, "time (M:SS)"))
+    hit_fired_series = []
+    hit_landed_series = []
     for pi, p in enumerate(players):
         fa, fb = _pair_series(p.get("hit_timeline"))
-        if len(fa) >= 2:
-            hit_series.append((f"{p['name'][:12]} fired", fa, "--", pi))
-            hit_series.append((f"{p['name'][:12]} hit", fb, "-", pi))
-    if hit_series:
-        panels.append(("Shots fired (dashed) vs hits (solid)", hit_series, None))
-    blk_series = []
+        if fa:
+            hit_fired_series.append((p["name"][:14], fa, "-", _pcolor(pi, p)))
+            hit_landed_series.append((p["name"][:14], fb, "-", _pcolor(pi, p)))
+    if mode == "ffa":
+        if hit_fired_series:
+            panels.append(("Shots fired", hit_fired_series,
+                           None, 3.0, None, "time (M:SS)"))
+            panels.append(("Shots hit", hit_landed_series,
+                           None, 3.0, None, "time (M:SS)"))
+    elif hit_fired_series:
+        hit_series = []
+        for fired, landed in zip(hit_fired_series, hit_landed_series):
+            label, vals, _, pi = fired
+            hit_series.append((f"{label[:12]} fired", vals, "--", pi))
+            hit_series.append((f"{label[:12]} hit", landed[1], "-", pi))
+        panels.append(("Shots fired (dashed) vs hits (solid)", hit_series,
+                       None, 3.0, None, "time (M:SS)"))
+    damage_taken_series = []
+    blocks_series = []
     for pi, p in enumerate(players):
         ba, bb = _pair_series(p.get("block_timeline"))
-        if len(ba) >= 2:
-            blk_series.append((f"{p['name'][:12]} dmg", ba, "--", pi))
-            blk_series.append((f"{p['name'][:12]} blocks", bb, "-", pi))
-    if blk_series:
-        panels.append(("Damage taken (dashed, left) vs successful blocks (solid, right)", blk_series, "dual"))
+        if ba:
+            damage_taken_series.append((p["name"][:14], ba, "-", _pcolor(pi, p)))
+            blocks_series.append((p["name"][:14], bb, "-", _pcolor(pi, p)))
+    if mode == "ffa":
+        if damage_taken_series:
+            panels.append(("Damage taken", damage_taken_series,
+                           None, 3.0, None, "time (M:SS)"))
+            panels.append(("Successful blocks", blocks_series,
+                           None, 3.0, None, "time (M:SS)"))
+    elif damage_taken_series:
+        blk_series = []
+        for damage, blocks in zip(damage_taken_series, blocks_series):
+            label, vals, _, pi = damage
+            blk_series.append((f"{label[:12]} dmg", vals, "--", pi))
+            blk_series.append((f"{label[:12]} blocks", blocks[1], "-", pi))
+        panels.append(("Damage taken (dashed, left) vs successful blocks (solid, right)",
+                       blk_series, "dual", 3.0, None, "time (M:SS)"))
+
+    if mode == "ffa":
+        kill_series = [
+            (p["name"][:14], _csv_ints(p.get("kill_timeline")), "-", _pcolor(pi, p))
+            for pi, p in enumerate(players) if _csv_ints(p.get("kill_timeline"))
+        ]
+        if kill_series:
+            panels.append(("Kills", kill_series, None, 3.0, None, "time (M:SS)"))
+        damage_dealt_series = [
+            (p["name"][:14], _csv_ints(p.get("damage_dealt_timeline")), "-", _pcolor(pi, p))
+            for pi, p in enumerate(players)
+            if _csv_ints(p.get("damage_dealt_timeline"))
+        ]
+        if damage_dealt_series:
+            panels.append(("Damage dealt", damage_dealt_series,
+                           None, 3.0, None, "time (M:SS)"))
 
     if not panels:
         return None
@@ -3484,11 +3679,28 @@ def _render_game_detail_png_locked(game):
             if len(panels) == 1:
                 axes = [axes]
             fig.patch.set_facecolor(_CHART_BG)
-            for ax, (title, series, special) in zip(axes, panels):
+            for ax, (title, series, special, step_seconds,
+                     explicit_x, xlabel) in zip(axes, panels):
                 _style_axes(ax)
                 ax.set_title(title, color="#ffffff", fontsize=11, pad=6, loc="left")
                 ax.grid(True, axis="y", color=_CHART_GRID, linewidth=0.6, alpha=0.5)
                 ax.set_axisbelow(True)
+                legend_kwargs = {
+                    "loc": "upper left",
+                    "fontsize": 7 if len(series) > 8 else 8,
+                    "ncol": 2 if len(series) > 6 else 1,
+                    "facecolor": _CHART_BG,
+                    "labelcolor": _CHART_FG,
+                    "edgecolor": _CHART_GRID,
+                }
+
+                def _x_for(vals):
+                    if explicit_x is not None and len(explicit_x) == len(vals):
+                        return explicit_x
+                    if step_seconds is not None:
+                        return [i * step_seconds for i in range(len(vals))]
+                    return range(len(vals))
+
                 if special == "dual":
                     ax2 = ax.twinx()
                     ax2.tick_params(colors=_CHART_MUTED, labelsize=9)
@@ -3497,20 +3709,44 @@ def _render_game_detail_png_locked(game):
                     for label, vals, style, color_idx in series:
                         col = palette[color_idx % len(palette)]
                         target = ax if style == "--" else ax2
-                        target.plot(range(len(vals)), vals, style, color=col,
-                                    linewidth=1.8, label=label)
+                        target.plot(_x_for(vals), vals, style, color=col,
+                                    linewidth=1.8, label=label,
+                                    marker="o" if len(vals) == 1 else None)
                     h1, l1 = ax.get_legend_handles_labels()
                     h2, l2 = ax2.get_legend_handles_labels()
-                    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=8,
-                              facecolor=_CHART_BG, labelcolor=_CHART_FG, edgecolor=_CHART_GRID)
+                    ax.legend(h1 + h2, l1 + l2, **legend_kwargs)
                 else:
                     for label, vals, style, color_idx in series:
                         col = palette[color_idx % len(palette)]
-                        ax.plot(range(len(vals)), vals, style, color=col,
-                                linewidth=1.8, label=label)
-                    ax.legend(loc="upper left", fontsize=8, facecolor=_CHART_BG,
-                              labelcolor=_CHART_FG, edgecolor=_CHART_GRID)
-                ax.set_xlabel("time (samples every ~3-5s)", color=_CHART_MUTED, fontsize=8)
+                        ax.plot(_x_for(vals), vals, style, color=col,
+                                linewidth=1.8, label=label,
+                                marker="o" if len(vals) == 1 else None)
+                    ax.legend(**legend_kwargs)
+                if step_seconds is not None or explicit_x is not None:
+                    ax.set_xlim(left=0)
+                    # Guard the empty case (review find): max() over an empty
+                    # sequence raises ValueError, and this runs INSIDE the shared
+                    # figure loop — so one zero-length series would abort the
+                    # whole PNG and /game would silently lose every panel, not
+                    # just this one. `default=0` on both levels keeps a degenerate
+                    # series to a single 0:00 tick instead.
+                    max_x = max(
+                        (max(_x_for(vals), default=0)
+                         for _label, vals, _style, _idx in series),
+                        default=0,
+                    )
+                    if max_x <= 0:
+                        ax.set_xlim(0, step_seconds or 1)
+                        ax.set_xticks([0])
+                    ax.xaxis.set_major_formatter(
+                        mticker.FuncFormatter(
+                            lambda seconds, _pos: (
+                                f"{max(0, int(round(seconds))) // 60}:"
+                                f"{max(0, int(round(seconds))) % 60:02d}"
+                            )
+                        )
+                    )
+                ax.set_xlabel(xlabel, color=_CHART_MUTED, fontsize=8)
             fig.tight_layout()
             buf = io.BytesIO()
             fig.savefig(buf, format="png", facecolor=_CHART_BG)
@@ -3518,6 +3754,63 @@ def _render_game_detail_png_locked(game):
             return buf
         finally:
             plt.close(fig)
+
+
+def _game_embed_plain(value) -> str:
+    """Markdown-safe embed text that cannot turn <@...> into a mention."""
+    inert = str(value or "?").replace("<", "[").replace(">", "]")
+    return discord.utils.escape_markdown(inert)
+
+
+def _game_card_list(items, limit=300, strikethrough=False) -> str:
+    rendered = []
+    used = 0
+    for item in items:
+        value = _game_embed_plain(item)
+        if strikethrough:
+            value = f"~~{value}~~"
+        added = len(value) + (2 if rendered else 0)
+        if used + added > limit:
+            if not rendered:
+                rendered.append(value[:max(0, limit - 3)] + "...")
+            else:
+                rendered.append("...")
+            break
+        rendered.append(value)
+        used += added
+    return ", ".join(rendered)
+
+
+def _game_card_lines(player, limit=300) -> list[str]:
+    """Render legacy cards unchanged unless roll detail has useful data.
+
+    `limit` is per card GROUP, and the caller shrinks it as the player count
+    grows: splitting one `Cards:` line into `Cards kept:` + `Rolled/discarded:`
+    roughly DOUBLES each player's field, and while every field is individually
+    clamped to 1024, Discord also caps a whole embed at 6000 characters across
+    all fields. At 10 players (a full FFA — exactly the mode this split was
+    added for) the old single-line shape landed near 5000 and the split pushed
+    it past 6000, which is a hard 400 from Discord: the entire /game reply
+    fails, not just the card list (review find).
+    """
+    cards = player.get("cards") or []
+    detail = player.get("cards_detail") or []
+    usable_detail = [
+        item for item in detail
+        if isinstance(item, dict) and item.get("name")
+    ] if isinstance(detail, list) else []
+
+    if usable_detail and any(bool(item.get("rolled")) for item in usable_detail):
+        kept = [item.get("name") for item in usable_detail if not item.get("rolled")]
+        rolled = [item.get("name") for item in usable_detail if item.get("rolled")]
+        return [
+            f"Cards kept: {_game_card_list(kept) if kept else '*(none)*'}",
+            f"Rolled/discarded: {_game_card_list(rolled, strikethrough=True)}",
+        ]
+    if cards:
+        return [f"Cards: {_game_card_list(cards)}"]
+    # Older games (and some unmodded-opponent games) never recorded this side.
+    return ["Cards: *(not recorded for this game)*"]
 
 
 @bot.hybrid_command(name="game", description="Look up one recorded game by its ID (copy it from the F5 menu)")
@@ -3571,26 +3864,41 @@ async def cmd_game(ctx, code: str):
     embed = discord.Embed(title=f"🎮 Game {game.get('code', norm[:12].upper())}",
                           description=desc, color=0x5865F2)
 
+    # Card text is budgeted by player count: a 10-player FFA has 10 fields, and
+    # the kept/rolled split doubled each one. 300 chars per card group is fine
+    # for 1v1/2v2/1v2; a full FFA needs a tighter slice to stay under Discord's
+    # 6000-char whole-embed cap (the running guard below is the hard backstop).
+    _card_limit = 300 if len(players) <= 4 else 120
+    _embed_used = len(embed.title or "") + len(desc or "")
+    _shown = 0
+
     for p in players:
         won = p.get("won")
+        display_name = _game_embed_plain(p.get("name"))
         if mode == "ffa":
             # Mirror log_ffa_match_result's rendering so the /game embed and
             # the series-log channel post describe a placement the same way.
             pl = p.get("placement") or 0
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(pl, f"#{pl}")
-            head = f"{medal} {p['name']}"
+            head = f"{medal} {display_name}"
             if p.get("left_early"):
                 head += "  *(left)*"
         else:
-            head = f"{'🏆 ' if won else ''}{p['name']}"
+            head = f"{'🏆 ' if won else ''}{display_name}"
         if mode == "2v2":
             head += f"  (team {p.get('team')})"
         elif mode == "1v2":
             head += f"  ({p.get('side')})"
         lines = []
         if mode == "ffa":
-            lines.append(f"{p.get('rounds_won', 0)} pts · {p.get('points_total', 0)} half-pts"
-                         f" · {p.get('kills', 0)} kills")
+            result_bits = [
+                f"{p.get('rounds_won', 0)} pts",
+                f"{p.get('points_total', 0)} half-pts",
+                f"{p.get('kills', 0)} kills",
+            ]
+            if p.get("damage_dealt") is not None:
+                result_bits.append(f"{p.get('damage_dealt')} damage dealt")
+            lines.append(" · ".join(result_bits))
         bf, bh = p.get("bullets_fired"), p.get("bullets_hit")
         ba, bs = p.get("blocks_activated"), p.get("blocks_successful")
         if bf or ba:
@@ -3619,17 +3927,21 @@ async def cmd_game(ctx, code: str):
                            + ("" if mode == "ffa" else " (series)"))
         if rewards:
             lines.append(" · ".join(rewards))
-        cards = p.get("cards") or []
-        if cards:
-            cl = ", ".join(cards)
-            if len(cl) > 300:
-                cl = cl[:297] + "..."
-            lines.append(f"Cards: {cl}")
-        else:
-            # Feedback item 2: absence must be legible — older games (and some
-            # unmodded-opponent games) never recorded this side's picks.
-            lines.append("Cards: *(not recorded for this game)*")
-        embed.add_field(name=head[:256], value=("\n".join(lines) or "—")[:1024], inline=False)
+        lines.extend(_game_card_lines(p, _card_limit))
+        _value = ("\n".join(lines) or "—")[:1024]
+        # Whole-embed budget guard (review find): every FIELD is clamped to
+        # 1024, but Discord also rejects an embed whose title + description +
+        # all fields exceed 6000 with a hard 400 — which fails the ENTIRE /game
+        # reply, not just the overflowing field. Stop adding players instead.
+        if _embed_used + len(_value) + len(head[:256]) > 5600:
+            embed.add_field(
+                name="…",
+                value=f"({len(players) - _shown} more players omitted — embed size limit)",
+                inline=False)
+            break
+        _embed_used += len(_value) + len(head[:256])
+        _shown += 1
+        embed.add_field(name=head[:256], value=_value, inline=False)
 
     buf = None
     if _MPL_AVAILABLE:
@@ -3952,7 +4264,13 @@ async def poll_ffa_queue_beacon():
         qsize = data.get("queue_size", 0)
         for j in data["joins"]:
             sid = j["steam_id"]
-            if sid in seen_ffa_queue_joins:
+            lobby_id = j.get("lobby_id")
+            # Key on (player, lobby) not player alone: since the host-lobby
+            # redesign a host may open a lobby, cancel and open another inside
+            # the 5-minute window, and each genuinely new lobby deserves a
+            # beacon. Legacy gather joins keep the old player-only behaviour.
+            seen_key = f"{sid}|{lobby_id}" if lobby_id else sid
+            if seen_key in seen_ffa_queue_joins:
                 continue
             name = j["display_name"] or sid
             rating = j.get("rating", 1500)
@@ -3962,15 +4280,21 @@ async def poll_ffa_queue_beacon():
                     channel = await bot.fetch_channel(QUEUE_BEACON_CHANNEL_ID)
                 except:
                     continue
+            if lobby_id:
+                members = j.get("lobby_members") or 1
+                verb = "opened an **FFA lobby**" if j.get("is_host") else "joined an **FFA lobby**"
+                body = (f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) {verb} — "
+                        f"**{members}**/10 in the lobby (the host can start at 3)!")
+            else:
+                body = (f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **FFA** — "
+                        f"**{qsize}** in the queue (starts at 3, up to 10)!")
             await channel.send(
-                f"🎯 **{discord.utils.escape_markdown(str(name))}** ({rating}) is searching for **FFA** — "
-                f"**{qsize}** in the queue (starts at 3, up to 10)!"
-                + _beacon_discord_suffix(j),
+                body + _beacon_discord_suffix(j),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             # Marked seen only AFTER a successful send (round-2 review find
             # 17): a transient Discord error must retry on the next poll.
-            seen_ffa_queue_joins[sid] = now
+            seen_ffa_queue_joins[seen_key] = now
     except Exception as e:
         print(f"FFA queue beacon error: {e}")
 

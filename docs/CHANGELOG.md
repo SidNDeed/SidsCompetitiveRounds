@@ -1,5 +1,28 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased — bug reports #125-#130
+
+Backend + bot deployed 2026-07-30. Client half is built locally and awaits a release.
+Schema changes: migration **167** (`ffa_match_players.damage_dealt`, `damage_dealt_timeline`,
+`kill_timeline`, `absent`; applied).
+
+- **T chat works during combat again (#128).** It now opens any time the game is running; the
+  only thing that suppresses it is ROUNDS' own Enter chat actually being open. While the box has
+  focus the mod holds the game's own two input flags, so typing can't move you, shoot, ready you
+  up, or confirm a card pick. Also stops our Enter from toggling the vanilla chat open behind it.
+- **1v2 rewards are visible and scale with difficulty (#129).** 1v2 always paid, but nothing
+  displayed it and the every-5-levels bonus never fired for it. Added the display in three
+  places, granted the level bonus, and scaled rewards by seat, extra-pick handicap, opponent elo
+  and 1v2-leaderboard standing.
+- **Recent Series no longer eats teammate names (#126).** Two-name side labels shared one
+  character budget, so the second name could render as just "..".
+- **My Stats → Record covers 1v2 and FFA (#130).** 1v2 split by seat; FFA win rate, top-3 rate,
+  kills/game, average placement, and damage/game once games carry the new telemetry.
+- **Discord mentions resolve to names in the in-game chat (#125)**, and the bot can no longer be
+  used to ping the server via relayed in-game text.
+- **`/game` for FFA (#127):** discarded cards shown separately, real M:SS time axis, damage and
+  blocks split apart, plus new kills and damage-dealt graphs.
+
 ## v1.35.2 — 2026-07-29 — FFA host lobbies, betting reliability, forced picks
 
 Everything below (previously accumulated as "Unreleased") ships in this version. Backend
