@@ -1,9 +1,10 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased — FFA fixes, economy rebalance, queue lockout fix
+## v1.35.2 — 2026-07-29 — FFA host lobbies, betting reliability, forced picks
 
-Backend and bot changes in this block are **already live**. Client changes are built but not
-released — they ship with the next version.
+Everything below (previously accumulated as "Unreleased") ships in this version. Backend
+changes were deployed progressively through the day; the client half lands with this release.
+Schema changes: migration **166** (`ffa_lobbies.host_player_id` + open-lobby index; applied).
 
 ### FFA host lobbies (replaces the auto-gather queue; ships with the next release)
 
