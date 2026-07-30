@@ -1175,7 +1175,15 @@ namespace CompetitiveRounds
         }
         // ── FFA tab (live — first playtest build, ranked from day one) ─────
         private static object txtFfaStatus, txtFfaLobbyHeader, txtFfaLobbyBody, txtFfaLbHeader, txtFfaRecentHeader, txtFfaRecentPage;
-        private static GameObject ffaJoinBtn, ffaLeaveBtn, ffaBetPanel, ffaBetContainer;
+        private static GameObject ffaJoinBtn, ffaLeaveBtn, ffaStartBtn, ffaBetPanel, ffaBetContainer;
+        private static GameObject ffaBrowserContainer;
+        private sealed class FfaBrowserRow
+        {
+            public GameObject root, joinBtn;
+            public object txtInfo;
+            public string lobbyId;
+        }
+        private static readonly List<FfaBrowserRow> ffaBrowserRows = new List<FfaBrowserRow>();
         private static GameObject ffaLbContainer, ffaRecentContainer, ffaRecentPrevBtn, ffaRecentNextBtn;
         private static List<GameObject> ffaLbSortBtns; private static string[] ffaLbSortKeys; private static object[] ffaLbHeaderTexts;
         private static string ffaLbSortReq = "rating";   // last requested sort — highlights the header
@@ -1319,18 +1327,25 @@ namespace CompetitiveRounds
             UIFactory.CreateButton("FfaInfo",ffaHdrRow.transform,"Info",18f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.FfaTitle,ModeInfoText.Ffa),sizeDelta:new Vector2(110,34));
             UIFactory.CreateText("FfaNote",panel.transform,"<color=#FFCC44>New mode - first playtest build.</color> <color=#888>Games are ranked from day one.</color>",18f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
 
-            // Queue controls row.
+            // Lobby controls row (July 29 redesign: host-controlled lobbies
+            // replace the auto-gather queue — Sid's spec).
             var ctl=new GameObject("FfaCtl");ctl.transform.SetParent(panel.transform,false);ctl.AddComponent<RectTransform>();
             UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:44,flexH:0);
-            ffaJoinBtn=UIFactory.CreateButton("FfaJoin",ctl.transform,"Join FFA Queue",18f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.FfaJoinQueue();dirty=true;},sizeDelta:new Vector2(184,36));
+            ffaJoinBtn=UIFactory.CreateButton("FfaCreate",ctl.transform,"Create Lobby",18f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.FfaCreateLobby();dirty=true;},sizeDelta:new Vector2(184,36));
+            ffaStartBtn=UIFactory.CreateButton("FfaStart",ctl.transform,"Start Game",18f,C_WHITE,new Color(0.55f,0.42f,0.10f,0.95f),()=>{ApiClient.FfaStartLobby();dirty=true;},sizeDelta:new Vector2(158,36));
             ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",18f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(103,36));
-            txtFfaStatus=UIFactory.CreateText("FfaSt",panel.transform,"Not in queue.",20f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,31));
+            txtFfaStatus=UIFactory.CreateText("FfaSt",panel.transform,"Browse open lobbies below, or create your own.",20f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,31));
 
-            // In-lobby panel (who's queueing) — RenderFfaLobbySection body.
+            // Lobby panel: browser (open lobbies + Join buttons) when idle,
+            // member list while sitting in one — RenderFfaLobbySection body.
             var lobbyPanel=UIFactory.CreatePanel("FfaQL",panel.transform,C_PANEL);
             UIFactory.AddVLG(lobbyPanel,spacing:2,padL:10,padR:10,padT:6,padB:6);
             UIFactory.AddLE(lobbyPanel,flexH:0);
-            txtFfaLobbyHeader=UIFactory.CreateText("FfaQLH",lobbyPanel.transform,"<b>FFA Lobby</b>",21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
+            txtFfaLobbyHeader=UIFactory.CreateText("FfaQLH",lobbyPanel.transform,"<b>Open FFA Lobbies</b>",21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
+            ffaBrowserContainer=new GameObject("FfaBrowser");
+            ffaBrowserContainer.transform.SetParent(lobbyPanel.transform,false);
+            ffaBrowserContainer.AddComponent<RectTransform>();
+            UIFactory.AddVLG(ffaBrowserContainer,spacing:3);
             txtFfaLobbyBody=UIFactory.CreateText("FfaQLB",lobbyPanel.transform,"<color=#888>Loading...</color>",18f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1035,29));
             var qlbC=txtFfaLobbyBody as Component;
             if(qlbC!=null)UIFactory.AddLE(qlbC.gameObject,prefH:29,minH:29,flexH:0);
@@ -2151,8 +2166,12 @@ namespace CompetitiveRounds
         private static void MaybeRefreshFfaTab()
         {
             if(currentTab!=12)return;
+            // One-shot membership discovery on first tab visit (design review
+            // find 6): a relaunched client whose server row survived must
+            // find it before offering Create.
+            ApiClient.FfaProbeServerState();
             ApiClient.UpdateFfaQueuePoll(false);   // internally 2s-throttled; no-op when not polling
-            ApiClient.UpdateFfaQueueList(false);   // internally 2s-throttled
+            ApiClient.FetchFfaLobbies(false);      // internally 3s-throttled (browser panel)
             if(Time.unscaledTime>=ffaRecentRefreshAt)
             {
                 ffaRecentRefreshAt=Time.unscaledTime+10f;
@@ -2174,34 +2193,49 @@ namespace CompetitiveRounds
         {
             bool polling=ApiClient.IsFfaQueuePolling;
             string st=ApiClient.FfaQueueStatus;
-            // Locked = a lock landed even though polling stopped: Join stays
+            bool inLobby=!string.IsNullOrEmpty(ApiClient.OpenFfaLobbyId);
+            // Locked = a lock landed even though polling stopped: Create stays
             // hidden, Leave stays visible (only escape from a husk lock).
-            // Inside an actual ffa_ room both are hidden (mirrors the 1v2 tab).
+            // Inside an actual ffa_ room everything hides (mirrors 1v2).
             bool ffaLocked=Plugin.PendingFfaSlot>=0;
             bool inFfaRoom=false;
             try{inFfaRoom=PhotonNetwork.InRoom&&(PhotonNetwork.CurrentRoom?.Name??"").StartsWith("ffa_");}catch{}
-            if(ffaJoinBtn!=null)ffaJoinBtn.SetActive(!polling&&!ffaLocked&&!inFfaRoom&&st!="leaving");
-            if(ffaLeaveBtn!=null)ffaLeaveBtn.SetActive((polling||ffaLocked)&&!inFfaRoom);
+            if(ffaJoinBtn!=null)ffaJoinBtn.SetActive(!polling&&!ffaLocked&&!inFfaRoom&&!inLobby&&st!="leaving");
+            if(ffaStartBtn!=null)
+            {
+                bool showStart=inLobby&&ApiClient.FfaLobbyIsHost&&!ffaLocked&&!inFfaRoom&&st!="leaving";
+                ffaStartBtn.SetActive(showStart);
+                if(showStart)
+                    UIFactory.SetText(UIFactory.GetButtonText(ffaStartBtn),ApiClient.FfaLobbyCanStart
+                        ?$"Start Game ({ApiClient.FfaLobbyMemberCount}/{ApiClient.FfaLobbyMaxPlayers})"
+                        :$"Start (need {ApiClient.FfaLobbyMinPlayers}+)");
+            }
+            if(ffaLeaveBtn!=null)ffaLeaveBtn.SetActive((polling||ffaLocked||inLobby)&&!inFfaRoom);
             if(txtFfaStatus!=null)
             {
                 string msg;
                 if(inFfaRoom)msg="<color=#66DD66>In FFA match.</color>";
-                else if(st=="leaving")msg="<color=#888>Leaving queue...</color>";
+                else if(st=="leaving")msg="<color=#888>Leaving...</color>";
                 else if(st=="ready_join"||ffaLocked)
                 {
                     int slot=Plugin.PendingFfaSlot>=0?Plugin.PendingFfaSlot:ApiClient.FfaMySlot;
                     int cnt=Math.Max(ApiClient.FfaLobbyPlayerCount,slot+1);
-                    msg=$"<color=#66DD66>Match found! Joining as player {slot+1} of {cnt}...</color>";
+                    msg=$"<color=#66DD66>Game starting! Joining as player {slot+1} of {cnt}...</color>";
                 }
-                else if(st=="searching")
+                else if(inLobby)
                 {
-                    msg=$"<color=#FFCC44>Searching</color> - {ApiClient.FfaQueueCount} in queue";
-                    if(ApiClient.FfaGatherSecondsLeft>=0)
-                        msg+=$"  <color=#888>lobby locks in {ApiClient.FfaGatherSecondsLeft}s (more can still join, up to 10)</color>";
+                    if(ApiClient.FfaLobbyIsHost)
+                        msg=ApiClient.FfaLobbyCanStart
+                            ?$"<color=#66DD66>Your lobby is ready.</color> {ApiClient.FfaLobbyMemberCount} in - press Start, or wait for more (up to {ApiClient.FfaLobbyMaxPlayers})."
+                            :$"<color=#FFCC44>You are the host.</color> Waiting for players - {ApiClient.FfaLobbyMemberCount}/{ApiClient.FfaLobbyMinPlayers} needed to start.";
                     else
-                        msg+="  <color=#888>waiting for at least 3 players</color>";
+                    {
+                        string hostName=null;
+                        try{hostName=ApiClient.FfaLobbyMembers?.Find(m=>m.is_host)?.display_name;}catch{}
+                        msg=$"<color=#FFCC44>In {FfaSafeRich(Trunc(hostName??"the host",16))}'s lobby</color> - waiting for the host to start ({ApiClient.FfaLobbyMemberCount} in).";
+                    }
                 }
-                else msg="Not in queue.";
+                else msg="Browse open lobbies below, or create your own.";
                 UIFactory.SetText(txtFfaStatus,msg);
             }
             RenderFfaLobbySection();
@@ -2334,41 +2368,97 @@ namespace CompetitiveRounds
             }
         }
 
-        // Same shape as RenderOvtLobbySection: text-line body with a dynamic
-        // LayoutElement height. Rating context: FFA elo once the player has
-        // one, else their 1v1 elo.
+        private static FfaBrowserRow CreateFfaBrowserRow(Transform parent,string name)
+        {
+            var row=new FfaBrowserRow();
+            row.root=new GameObject(name);
+            row.root.transform.SetParent(parent,false);
+            row.root.AddComponent<RectTransform>();
+            UIFactory.AddHLG(row.root,spacing:8,padL:6,padR:6,forceExpandH:false);
+            UIFactory.AddLE(row.root,prefH:31,minH:31,flexH:0);
+            row.txtInfo=CreateFfaTextCell("Info",row.root.transform,760,UIFactory.AlignMidLeft,17f,C_WHITE,true,300);
+            UIFactory.SetOverflowMode(row.txtInfo,3);
+            row.joinBtn=UIFactory.CreateButton("Join",row.root.transform,"Join",16f,C_WHITE,
+                new Color(0.25f,0.42f,0.20f,0.95f),
+                ()=>{if(!string.IsNullOrEmpty(row.lobbyId))ApiClient.FfaJoinLobby(row.lobbyId);dirty=true;},
+                sizeDelta:new Vector2(88,26));
+            SetFfaLayoutWidth(row.joinBtn,88f,0f,88f);
+            row.root.SetActive(false);
+            return row;
+        }
+
+        // Lobby panel body (July 29 redesign). Two modes:
+        //   idle      -> browser: open lobbies with Join buttons (pooled rows)
+        //   in lobby  -> member list text (from the poll's members payload)
         private static void RenderFfaLobbySection()
         {
             if(txtFfaLobbyHeader==null||txtFfaLobbyBody==null)return;
-            var list=ApiClient.CachedFfaQueueList;
-            int n=list!=null?list.Count:0;
-            float perRow=23f;
+            bool inLobby=!string.IsNullOrEmpty(ApiClient.OpenFfaLobbyId);
             int newH;
-            if(n==0)
+            if(inLobby)
             {
-                UIFactory.SetText(txtFfaLobbyHeader,"<b>FFA Lobby</b>  <color=#888>(empty)</color>");
-                UIFactory.SetText(txtFfaLobbyBody,list==null?"<color=#888>Loading...</color>":"<color=#888>No one in the FFA queue right now.</color>");
-                newH=29;
+                for(int i=0;i<ffaBrowserRows.Count;i++)ffaBrowserRows[i].root.SetActive(false);
+                var mem=ApiClient.FfaLobbyMembers;
+                int n=mem?.Count??0;
+                UIFactory.SetText(txtFfaLobbyHeader,
+                    $"<b>Your Lobby</b>  <color=#888>({Math.Max(n,ApiClient.FfaLobbyMemberCount)}/{ApiClient.FfaLobbyMaxPlayers} - host starts at {ApiClient.FfaLobbyMinPlayers}+)</color>");
+                if(n==0)
+                {
+                    UIFactory.SetText(txtFfaLobbyBody,"<color=#888>Loading members...</color>");
+                    newH=29;
+                }
+                else
+                {
+                    var sb=new StringBuilder();
+                    foreach(var m in mem)
+                    {
+                        bool isMe=m.steam_id==MatchTracker.LocalSteamId;
+                        string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
+                        string ratingDisplay=m.rating>0
+                            ?$"<color=#FFFFFF>FFA {m.rating}</color>"
+                            :$"<color=#DDDDDD>1v1 {m.rating_1v1}</color>";
+                        string hostTag=m.is_host?"  <color=#FFD94D>HOST</color>":"";
+                        int waitMin=m.wait_seconds/60,waitSec=m.wait_seconds%60;
+                        string waitStr=waitMin>0?$"{waitMin}m{waitSec:D2}s":$"{waitSec}s";
+                        sb.Append($"  {nameC}{FfaSafeRich(Trunc(m.display_name,18))}</color>  {ratingDisplay}{hostTag}  <color=#888>{waitStr}</color>\n");
+                    }
+                    UIFactory.SetText(txtFfaLobbyBody,sb.ToString());
+                    newH=(int)(n*23f+6);
+                }
             }
             else
             {
-                UIFactory.SetText(txtFfaLobbyHeader,$"<b>FFA Lobby</b>  <color=#888>({n} - locks at 3+, up to 10)</color>");
-                var sb=new StringBuilder();
-                foreach(var q in list)
+                var lobbies=ApiClient.CachedFfaLobbies;
+                int n=lobbies?.Count??0;
+                UIFactory.SetText(txtFfaLobbyHeader,n==0
+                    ?"<b>Open FFA Lobbies</b>  <color=#888>(none right now)</color>"
+                    :$"<b>Open FFA Lobbies</b>  <color=#888>({n})</color>");
+                while(ffaBrowserRows.Count<Math.Min(n,20))
+                    ffaBrowserRows.Add(CreateFfaBrowserRow(ffaBrowserContainer.transform,$"FfaBrow{ffaBrowserRows.Count}"));
+                for(int i=0;i<ffaBrowserRows.Count;i++)
                 {
-                    bool isMe=q.steam_id==MatchTracker.LocalSteamId;
-                    string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
-                    string ratingDisplay=q.rating>0
-                        ?$"<color=#FFFFFF>FFA {q.rating}</color>"
-                        :$"<color=#DDDDDD>1v1 {q.rating_1v1}</color>";
-                    string statusTag=q.status=="searching"?"<color=#AAAAAA>searching</color>"
-                        :q.status=="ready_join"?"<color=#88FF88>locked</color>":$"<color=#FFD94D>{q.status}</color>";
-                    int waitMin=q.wait_seconds/60,waitSec=q.wait_seconds%60;
-                    string waitStr=waitMin>0?$"{waitMin}m{waitSec:D2}s":$"{waitSec}s";
-                    sb.Append($"  {nameC}{Trunc(q.display_name,18)}</color>  {ratingDisplay}  {statusTag}  <color=#888>{waitStr}</color>\n");
+                    var row=ffaBrowserRows[i];
+                    if(lobbies==null||i>=lobbies.Count){row.root.SetActive(false);continue;}
+                    var l=lobbies[i];
+                    row.lobbyId=l.lobby_id;
+                    int ageMin=l.age_seconds/60;
+                    string age=ageMin>0?$"{ageMin}m":$"{l.age_seconds}s";
+                    UIFactory.SetText(row.txtInfo,
+                        $"<color=#FFFFFF>{FfaSafeRich(Trunc(l.host_name,18))}'s lobby</color>"+
+                        $"  <color=#7FD4FF>{l.player_count}/{l.max_players}</color>"+
+                        $"  <color=#888>open {age}</color>");
+                    bool joinable=l.player_count<l.max_players
+                        &&ApiClient.FfaQueueStatus!="leaving";
+                    row.joinBtn.SetActive(joinable);
+                    row.root.SetActive(true);
                 }
-                UIFactory.SetText(txtFfaLobbyBody,sb.ToString());
-                newH=(int)(n*perRow+6);
+                UIFactory.SetText(txtFfaLobbyBody,n==0
+                    ?(ApiClient.FfaLobbiesUnavailable
+                        ?"<color=#FFAA55>Lobby browser unavailable right now - the server may be updating.</color>"
+                        :lobbies==null?"<color=#888>Loading...</color>"
+                                      :"<color=#888>No open lobbies - create one and rally the Discord!</color>")
+                    :"");
+                newH=n==0?29:2;
             }
             var bodyComp=txtFfaLobbyBody as Component;
             if(bodyComp!=null)

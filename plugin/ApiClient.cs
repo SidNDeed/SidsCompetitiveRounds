@@ -5061,7 +5061,17 @@ namespace CompetitiveRounds
             {
                 ffaGen++;
                 FfaQueueStatus = "";
-                Plugin.Log.LogWarning("[FFA] Leaving state stuck past timeout -- recovered");
+                // Durable leave target (lobby impl round-2 find 2): the leave
+                // callback that would have carried the belief may be dead
+                // (NetworkRestart kills coroutine-hosted requests). Restore
+                // the belief from the static so the poll-driven leave-intent
+                // retry machinery owns the seat; without this, polling stayed
+                // off while the server still held the row.
+                if (_ffaLeaveIntent && string.IsNullOrEmpty(OpenFfaLobbyId)
+                    && !string.IsNullOrEmpty(_ffaLeaveTargetLobby))
+                    OpenFfaLobbyId = _ffaLeaveTargetLobby;
+                Plugin.Log.LogWarning("[FFA] Leaving state stuck past timeout -- recovered"
+                    + (_ffaLeaveIntent ? $" (leave retry re-armed for {OpenFfaLobbyId})" : ""));
                 NativeUI.MarkDirty();
             }
             // Re-arm the poll when we hold a lobby but are NOT in a room.
@@ -5078,7 +5088,8 @@ namespace CompetitiveRounds
             //
             // Gated on OfflineMode so leaving Sandbox (which lingers InRoom at
             // the menu, #122) does not look like a live game.
-            if (!string.IsNullOrEmpty(ActiveFfaLobbyId) && !IsFfaQueuePolling
+            if ((!string.IsNullOrEmpty(ActiveFfaLobbyId) || !string.IsNullOrEmpty(OpenFfaLobbyId))
+                && !IsFfaQueuePolling
                 && FfaQueueStatus != "leaving")
             {
                 bool inRoom = false;
@@ -5089,6 +5100,9 @@ namespace CompetitiveRounds
                     // 20s of grace: the gap between the lock and actually being
                     // in the Photon room is legitimately roomless, and re-arming
                     // inside it would make the server think we had given up.
+                    // OpenFfaLobbyId rides the same recovery: an open-lobby
+                    // belief with a dead poll loop is always wrong — the poll
+                    // is what discovers whether the membership still exists.
                     if (now - _ffaRoomlessSince > 20f)
                     {
                         Plugin.Log.LogInfo("[FFA] holding a lobby but not in a room -- resuming queue poll so the server can free us");
@@ -6366,32 +6380,17 @@ namespace CompetitiveRounds
             var list = new List<TeamQueueMember>();
             try
             {
-                int kIdx = json.IndexOf("\"" + key + "\":[");
-                if (kIdx < 0) return list;
-                int start = kIdx + key.Length + 4;
-                int depth = 1, i = start;
-                while (i < json.Length && depth > 0)
+                // String-AWARE slicing (#156, lobby-redesign design review find
+                // 12): these arrays carry display names, and a name containing
+                // ']' or '}' broke the naive depth counters this used — which
+                // truncated the READY ROSTER for 2v2/1v2/FFA locks, not just a
+                // cosmetic list.
+                int kIdx = json.IndexOf("\"" + key + "\"");
+                int arrStart = kIdx >= 0 ? json.IndexOf('[', kIdx) : -1;
+                int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(json, arrStart) : -1;
+                if (arrStart < 0 || arrEnd <= arrStart) return list;
+                foreach (string obj in SliceTopLevelObjects(json.Substring(arrStart + 1, arrEnd - arrStart - 1)))
                 {
-                    if (json[i] == '[') depth++;
-                    else if (json[i] == ']') depth--;
-                    i++;
-                }
-                if (depth != 0) return list;
-                string slice = json.Substring(start, i - start - 1);
-                int oIdx = 0;
-                while (oIdx < slice.Length)
-                {
-                    int objStart = slice.IndexOf('{', oIdx);
-                    if (objStart < 0) break;
-                    int oDepth = 1, j = objStart + 1;
-                    while (j < slice.Length && oDepth > 0)
-                    {
-                        if (slice[j] == '{') oDepth++;
-                        else if (slice[j] == '}') oDepth--;
-                        j++;
-                    }
-                    if (oDepth != 0) break;
-                    string obj = slice.Substring(objStart, j - objStart);
                     list.Add(new TeamQueueMember
                     {
                         steam_id = ExtractJsonString(obj, "steam_id"),
@@ -6404,7 +6403,6 @@ namespace CompetitiveRounds
                         completed_series = ExtractJsonInt(obj, "completed_series"),
                         ready = ExtractJsonBool(obj, "ready"),
                     });
-                    oIdx = j;
                 }
             }
             catch { }
@@ -8040,15 +8038,86 @@ namespace CompetitiveRounds
         private static bool _ffaBettableInFlight;
 
         // Live queue state (drives the FFA tab + auto room-join).
-        public static string FfaQueueStatus = "";        // ""/searching/ready_join/leaving
+        public static string FfaQueueStatus = "";        // ""/lobby/ready_join/leaving (searching = legacy)
         public static int FfaQueueCount = 0;
-        public static int FfaGatherSecondsLeft = -1;     // -1 = below min players
-        public static string ActiveFfaLobbyId = null;
+        public static int FfaGatherSecondsLeft = -1;     // legacy gather countdown (unused in the lobby UI)
+        public static string ActiveFfaLobbyId = null;    // LOCKED lobby (engine/report state)
         public static int FfaMySlot = -1;
         public static int FfaLobbyPlayerCount = 0;       // locked lobby size (PlayersNeeded)
         public static bool IsFfaQueuePolling = false;
         public static List<TeamQueueMember> FfaLockedRoster = null;  // slot-ordered
         private static float _ffaLastPollAt = -999f;
+        // ── Open host-lobby state (July 29 redesign). OpenFfaLobbyId is the
+        // lobby we BELIEVE we're a member of — kept until a leave is ACKED or
+        // the server authoritatively closes it (design review find 6); it is
+        // deliberately separate from ActiveFfaLobbyId (the locked/engine id).
+        public static string OpenFfaLobbyId = null;
+        public static bool FfaLobbyIsHost = false;
+        public static bool FfaLobbyCanStart = false;
+        public static int FfaLobbyMemberCount = 0;
+        public static int FfaLobbyMinPlayers = 3;
+        public static int FfaLobbyMaxPlayers = 10;
+        public class FfaLobbyMemberEntry
+        {
+            public string steam_id, display_name;
+            public int rating, rating_1v1, wait_seconds;
+            public bool is_host;
+        }
+        public static List<FfaLobbyMemberEntry> FfaLobbyMembers = null;
+        public class FfaOpenLobbyEntry
+        {
+            public string lobby_id, host_name;
+            public int player_count, max_players, age_seconds;
+        }
+        public static List<FfaOpenLobbyEntry> CachedFfaLobbies = null;
+        public static bool FfaLobbiesUnavailable = false;   // old server / fetch failing
+        private static float _ffaLobbiesLastAt = -999f;
+        private static float _ffaLobbyRejoinAt = -999f;
+        private static bool _ffaLobbyActionInFlight = false;
+        private static float _ffaLobbyActionAt = -999f;
+        // Generation for the in-flight bit (round-2 find: a STALE callback
+        // clearing the global bit could release a newer action's guard and
+        // let two actions overlap). A callback only clears the bit if no
+        // newer action started; the watchdog releases at 30s — ABOVE the 20s
+        // POST timeout, so a live request can never overlap its successor.
+        private static int _ffaLobbyActionGen = 0;
+
+        private static void FfaLobbyActionBegin()
+        {
+            _ffaLobbyActionInFlight = true;
+            _ffaLobbyActionAt = Time.realtimeSinceStartup;
+            _ffaLobbyActionGen++;
+        }
+
+        private static void FfaLobbyActionEnd(int actionGen)
+        {
+            if (actionGen == _ffaLobbyActionGen) _ffaLobbyActionInFlight = false;
+        }
+        // Explicit-leave intent (impl review find 2): once the player asked to
+        // leave, every later signal bends toward OUT — a 'lobby' poll retries
+        // the leave instead of re-adopting the seat, a not_in_queue means the
+        // leave landed (never the rejoin recovery), and a ready_join that
+        // raced the start is left, not joined. Cleared by leave ack or a
+        // fresh create/join intent.
+        private static bool _ffaLeaveIntent = false;
+        private static float _ffaLeaveRetryAt = -999f;
+        // Durable leave target (round-2 find 2): the id the leave was aimed
+        // at must survive the callback being killed (NetworkRestart right
+        // after FfaLeaveQueue) so the stuck-leave watchdog can restore the
+        // belief and re-arm the poll-driven retry.
+        private static string _ffaLeaveTargetLobby = null;
+        // Ambiguity window after a transport-failed enroll: keep polling so a
+        // late-committing create/join surfaces instead of hiding a seat.
+        private static float _ffaAmbiguousPollUntil = -999f;
+
+        /// <summary>Server-sent error detail, or the fallback when the server
+        /// never spoke (ExtractJsonString returns "" — `??` alone can't tell
+        /// a transport failure from a spoken 4xx; impl review find 8).</summary>
+        private static string DetailOr(string resp, string fallback)
+        {
+            string d = ExtractJsonString(resp ?? "", "detail");
+            return string.IsNullOrEmpty(d) ? fallback : d;
+        }
 
         public class FfaQueueListEntry
         {
@@ -8111,40 +8180,285 @@ namespace CompetitiveRounds
             }));
         }
 
+        // ── Open host-lobby actions (July 29 redesign) ─────────────────────
+
+        private static bool FfaLobbyActionPreflight(out string sid)
+        {
+            sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return false;
+            // Watchdog release (impl review adjacent find): a lost callback
+            // must not wedge the buttons forever. 30s > the 20s POST timeout,
+            // so a still-live request can never overlap its successor.
+            if (_ffaLobbyActionInFlight && Time.realtimeSinceStartup - _ffaLobbyActionAt > 30f)
+                _ffaLobbyActionInFlight = false;
+            if (_ffaLobbyActionInFlight) return false;
+            if (FfaQueueStatus == "leaving")
+            {
+                CompetitiveUI.ShowNotification("Still leaving — try again in a moment.", new Color(1f, 0.6f, 0.2f));
+                return false;
+            }
+            // Consent-at-join (#127/#150): never take a lobby membership from
+            // inside a live online room. OfflineMode lingers InRoom (#122).
+            bool inOnlineRoom = false;
+            try { inOnlineRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+            if (inOnlineRoom)
+            {
+                CompetitiveUI.ShowNotification("Finish or leave your current game first.", new Color(1f, 0.7f, 0.3f), 5f);
+                return false;
+            }
+            return true;
+        }
+
+        private static string FfaLobbyBody(string sid, string lobbyId = null)
+        {
+            string name = Escape(MatchTracker.LocalDisplayName ?? "Player");
+            string region = "";
+            try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            string lob = lobbyId == null ? "" : $",\"lobby_id\":\"{Escape(lobbyId)}\"";
+            return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}}}";
+        }
+
+        /// <summary>Shared post-enroll handling: adopt the membership, or —
+        /// when the server may have committed without us hearing (transport
+        /// failure) — let the SERVER state win via an immediate poll probe
+        /// (impl review find 4: a lost create/join ack must not leave a
+        /// hidden seat the host can lock).</summary>
+        private static void FfaEnrollResult(bool ok, string resp, string intendedLobbyId, bool wasRecovery)
+        {
+            if (ok)
+            {
+                string lid = ExtractJsonString(resp, "lobby_id");
+                OpenFfaLobbyId = string.IsNullOrEmpty(lid) ? intendedLobbyId : lid;
+                _ffaLeaveIntent = false;
+                IsFfaQueuePolling = true; FfaQueueStatus = "lobby";
+                Plugin.Log.LogInfo($"[FFA-LOBBY] enrolled in lobby {OpenFfaLobbyId} (recovery={wasRecovery})");
+                // Level-triggered room exclusion (impl review find 3): if a
+                // vanilla game finished connecting while the enroll was in
+                // flight, we now hold a seat we cannot sit in — leave it.
+                bool inOnlineRoom = false;
+                try { inOnlineRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+                if (inOnlineRoom)
+                {
+                    Plugin.Log.LogWarning("[FFA-LOBBY] enrolled while inside an online room — leaving the lobby");
+                    FfaLeaveQueue();
+                    return;
+                }
+            }
+            else
+            {
+                // "The server judged this" = any 4xx (FormatRequestError now
+                // carries the body, so detail parses out of it too). 5xx and
+                // transport failures stay AMBIGUOUS — the request may have
+                // committed (round-2 find 4).
+                bool serverSpoke = resp != null && resp.StartsWith("HTTP 4", StringComparison.Ordinal);
+                Plugin.Log.LogWarning($"[FFA-LOBBY] enroll failed (recovery={wasRecovery}, serverSpoke={serverSpoke}): {resp}");
+                if (wasRecovery && serverSpoke)
+                {
+                    // The server judged our old membership: it's gone.
+                    OpenFfaLobbyId = null; FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+                    FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
+                    IsFfaQueuePolling = false;
+                    if (FfaQueueStatus == "lobby") FfaQueueStatus = "";
+                    CompetitiveUI.ShowNotification("Your FFA lobby closed.", new Color(1f, 0.75f, 0.4f), 6f);
+                }
+                else if (!serverSpoke)
+                {
+                    // Transport failure — the request may have COMMITTED
+                    // (possibly AFTER this callback: a timed-out handler can
+                    // still be queued behind a lock server-side, round-2
+                    // plausible find). Adopt the intended belief when we know
+                    // it (join), and keep polling through a 90s ambiguity
+                    // window so a late commit surfaces instead of becoming a
+                    // hidden seat.
+                    if (!string.IsNullOrEmpty(intendedLobbyId))
+                        OpenFfaLobbyId = intendedLobbyId;
+                    _ffaAmbiguousPollUntil = Time.unscaledTime + 90f;
+                    IsFfaQueuePolling = true;
+                    UpdateFfaQueuePoll(force: true);
+                }
+                else
+                    CompetitiveUI.ShowNotification(DetailOr(resp, "Couldn't join that lobby."), new Color(1f, 0.6f, 0.2f), 5f);
+            }
+            FetchFfaLobbies(force: true);
+            NativeUI.MarkDirty();
+        }
+
+        public static void FfaCreateLobby()
+        {
+            if (!FfaLobbyActionPreflight(out string sid)) return;
+            _ffaLeaveIntent = false;
+            int gen = ++ffaGen;
+            FfaLobbyActionBegin(); int actionGen = _ffaLobbyActionGen;
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/lobby/create", FfaLobbyBody(sid), (ok, resp) =>
+            {
+                FfaLobbyActionEnd(actionGen);
+                if (gen != ffaGen) return;
+                if (ok) FfaLobbyIsHost = true;
+                FfaEnrollResult(ok, resp, null, wasRecovery: false);
+            }));
+        }
+
+        public static void FfaJoinLobby(string lobbyId)
+        {
+            if (string.IsNullOrEmpty(lobbyId)) return;
+            if (!FfaLobbyActionPreflight(out string sid)) return;
+            bool wasRecovery = OpenFfaLobbyId == lobbyId;
+            if (!wasRecovery) _ffaLeaveIntent = false;
+            int gen = ++ffaGen;
+            FfaLobbyActionBegin(); int actionGen = _ffaLobbyActionGen;
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/lobby/join", FfaLobbyBody(sid, lobbyId), (ok, resp) =>
+            {
+                FfaLobbyActionEnd(actionGen);
+                if (gen != ffaGen) return;
+                FfaEnrollResult(ok, resp, lobbyId, wasRecovery);
+            }));
+        }
+
+        public static void FfaStartLobby()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            // Same watchdog discipline as create/join (round-2 find: Start
+            // neither stamped nor released, so one lost callback blocked
+            // every later Start for the membership).
+            if (_ffaLobbyActionInFlight && Time.realtimeSinceStartup - _ffaLobbyActionAt > 30f)
+                _ffaLobbyActionInFlight = false;
+            if (_ffaLobbyActionInFlight) return;
+            int gen = ffaGen;   // NOT ++: starting must not orphan the poll lifecycle
+            FfaLobbyActionBegin(); int actionGen = _ffaLobbyActionGen;
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/lobby/start",
+                $"{{\"steam_id\":\"{sid}\"}}", (ok, resp) =>
+            {
+                FfaLobbyActionEnd(actionGen);
+                if (gen != ffaGen) return;
+                if (!ok)
+                {
+                    Plugin.Log.LogWarning($"[FFA-LOBBY] start failed: {resp}");
+                    CompetitiveUI.ShowNotification(DetailOr(resp, "Couldn't start the game."),
+                        new Color(1f, 0.6f, 0.2f), 5f);
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                // The response IS the ready_join payload — the very next poll
+                // would deliver the same thing; hand it to the poll handler's
+                // logic by just letting the 2s poll pick it up (keeps ONE
+                // room-join code path). Nothing to do here but log.
+                Plugin.Log.LogInfo("[FFA-LOBBY] start accepted — lock lands via the poll");
+            }));
+        }
+
+        public static void FetchFfaLobbies(bool force = false)
+        {
+            if (!force && Time.unscaledTime - _ffaLobbiesLastAt < 3f) return;
+            _ffaLobbiesLastAt = Time.unscaledTime;
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/lobbies", (ok, resp) =>
+            {
+                if (!ok || string.IsNullOrEmpty(resp))
+                {
+                    // Old server / outage: show "unavailable", never eternal
+                    // "Loading..." (impl review find 8).
+                    FfaLobbiesUnavailable = true;
+                    if (CachedFfaLobbies == null) CachedFfaLobbies = new List<FfaOpenLobbyEntry>();
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                FfaLobbiesUnavailable = false;
+                try
+                {
+                    var list = new List<FfaOpenLobbyEntry>();
+                    int aStart = resp.IndexOf("\"lobbies\"");
+                    int arrStart = aStart >= 0 ? resp.IndexOf('[', aStart) : -1;
+                    int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
+                    if (arrStart >= 0 && arrEnd > arrStart)
+                    {
+                        foreach (string obj in SliceTopLevelObjects(resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                        {
+                            var e = new FfaOpenLobbyEntry
+                            {
+                                lobby_id = ExtractJsonString(obj, "lobby_id"),
+                                host_name = ExtractJsonString(obj, "host_name") ?? "?",
+                                player_count = ExtractJsonInt(obj, "player_count"),
+                                max_players = Math.Max(1, ExtractJsonInt(obj, "max_players")),
+                                age_seconds = ExtractJsonInt(obj, "age_seconds"),
+                            };
+                            if (!string.IsNullOrEmpty(e.lobby_id)) list.Add(e);
+                        }
+                    }
+                    CachedFfaLobbies = list;
+                    NativeUI.MarkDirty();
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[FFA-LOBBY] browser parse: {ex.Message}"); }
+            }));
+        }
+
+        /// <summary>One-shot membership discovery (design review find 6): a
+        /// relaunched client whose server row still exists must find it. Runs
+        /// on FFA-tab open; harmless when nothing is held (the poll returns
+        /// not_in_queue with no lobby belief -> polling just stops).</summary>
+        private static bool _ffaProbed = false;
+        public static void FfaProbeServerState()
+        {
+            if (_ffaProbed || IsFfaQueuePolling) { _ffaProbed = true; return; }
+            _ffaProbed = true;
+            IsFfaQueuePolling = true;
+            UpdateFfaQueuePoll(force: true);
+        }
+
         public static void FfaLeaveQueue()
         {
             string sid = MatchTracker.LocalSteamId;
             if (FfaQueueStatus == "leaving") return;
+            // Capture the expected target BEFORE any clears (impl review find
+            // 2: the old order captured after clearing ActiveFfaLobbyId, so a
+            // locked-lobby leave carried no expected id and no recovery
+            // anchor). Explicit leave = standing intent: every later signal
+            // bends toward OUT until an ack or an authoritative not_in_queue.
+            string expectedLobby = !string.IsNullOrEmpty(OpenFfaLobbyId) ? OpenFfaLobbyId : ActiveFfaLobbyId;
+            _ffaLeaveIntent = true;
+            if (!string.IsNullOrEmpty(expectedLobby)) _ffaLeaveTargetLobby = expectedLobby;
             IsFfaQueuePolling = false; FfaQueueCount = 0; FfaGatherSecondsLeft = -1;
             FfaLockedRoster = null;
             ActiveFfaLobbyId = null;
             FfaMySlot = -1; FfaLobbyPlayerCount = 0;
+            FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+            FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
             Plugin.ClearPendingFfaSlot();
-            if (string.IsNullOrEmpty(sid) || sid == "unknown") { FfaQueueStatus = ""; return; }
+            // A pending ffa_ room join must die with the membership (impl
+            // review find 5: QueueRoomJoiner could still fire its captured
+            // JoinOrCreateRoom after a successful leave).
+            try { if ((Plugin.PendingRankedRoom ?? "").StartsWith("ffa_")) Plugin.ClearPendingRoom(); } catch { }
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") { FfaQueueStatus = ""; OpenFfaLobbyId = null; _ffaLeaveIntent = false; return; }
             int gen = ++ffaGen;
             FfaQueueStatus = "leaving";
             _ffaLeavingSince = Time.realtimeSinceStartup;
             NativeUI.MarkDirty();
-            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
-                $"{baseUrl}/api/v1/ffa/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}", "",
+            string url = $"{baseUrl}/api/v1/ffa/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}";
+            if (!string.IsNullOrEmpty(expectedLobby))
+                url += $"&expected_lobby_id={UnityWebRequest.EscapeURL(expectedLobby)}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "",
                 (ok, resp) =>
                 {
                     if (gen != ffaGen) return;
                     if (ok)
-                        Plugin.Log.LogInfo("[FFA] Left FFA queue");
+                    {
+                        OpenFfaLobbyId = null;
+                        _ffaLeaveIntent = false;
+                        _ffaLeaveTargetLobby = null;
+                        Plugin.Log.LogInfo("[FFA] Left FFA queue/lobby");
+                    }
                     else
                     {
-                        // Was "server will prune the stale row" - which was false:
-                        // nothing freed a ready_join row inside 30 minutes, and
-                        // the player's own requeue attempts pushed even that out.
-                        // The poll re-arm in TickLeaveRecovery is what recovers
-                        // this now, so say something true.
+                        // Keep the belief AND the intent: the poll re-arm lets
+                        // the server state win — a surviving seat triggers a
+                        // leave RETRY (intent), a dead row clears us silently.
                         Plugin.Log.LogWarning($"[FFA] Leave failed after retries: {resp} — re-arming the poll to recover");
-                        IsFfaQueuePolling = !string.IsNullOrEmpty(ActiveFfaLobbyId);
-                        CompetitiveUI.ShowNotification("Couldn't confirm FFA queue leave — the server will clear you shortly.", new Color(1f, 0.6f, 0.2f), 5f);
+                        OpenFfaLobbyId = OpenFfaLobbyId ?? expectedLobby;
+                        IsFfaQueuePolling = !string.IsNullOrEmpty(OpenFfaLobbyId);
+                        CompetitiveUI.ShowNotification("Couldn't confirm FFA leave — the server will clear you shortly.", new Color(1f, 0.6f, 0.2f), 5f);
                     }
                     if (FfaQueueStatus == "leaving") FfaQueueStatus = "";
                     UpdateFfaQueueList(force: true);
+                    FetchFfaLobbies(force: true);
                     NativeUI.MarkDirty();
                 },
                 maxRetries: 3, retryDelay: 2f));
@@ -8157,6 +8471,24 @@ namespace CompetitiveRounds
         public static void UpdateFfaQueuePoll(bool force)
         {
             if (!IsFfaQueuePolling) return;
+            // Ambiguity-window expiry must not depend on a SUCCESSFUL poll
+            // response (round-3 find E1): with the server unreachable, a
+            // belief-less ambiguity poll would otherwise dispatch forever.
+            // Fires only when a window was actually armed; the one-shot probe
+            // and all belief-carrying polling are untouched.
+            if (_ffaAmbiguousPollUntil > 0f
+                && Time.unscaledTime > _ffaAmbiguousPollUntil
+                && string.IsNullOrEmpty(OpenFfaLobbyId)
+                && string.IsNullOrEmpty(ActiveFfaLobbyId)
+                && !_ffaLeaveIntent)
+            {
+                _ffaAmbiguousPollUntil = -999f;
+                IsFfaQueuePolling = false;
+                if (FfaQueueStatus != "leaving") FfaQueueStatus = "";
+                Plugin.Log.LogInfo("[FFA-LOBBY] ambiguity window lapsed with no resolution — stopping the probe poll");
+                NativeUI.MarkDirty();
+                return;
+            }
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
             if (!force && Time.unscaledTime - _ffaLastPollAt < 2f) return;
@@ -8175,9 +8507,109 @@ namespace CompetitiveRounds
                     int gsl = -1;
                     try { gsl = resp.Contains("\"gather_seconds_left\"") ? ExtractJsonInt(resp, "gather_seconds_left") : -1; } catch { }
                     FfaGatherSecondsLeft = gsl;
+                    // A NEW client never wants a legacy searching row (impl
+                    // review finds 5+7): it appears when a dissolved active
+                    // lobby reset us, or when the probe found a pre-update
+                    // remnant. Clear every belief and delete the row — the
+                    // auto-gather is retired in this client.
+                    bool hadBelief = !string.IsNullOrEmpty(OpenFfaLobbyId)
+                                     || !string.IsNullOrEmpty(ActiveFfaLobbyId)
+                                     || Plugin.PendingFfaSlot >= 0;
+                    OpenFfaLobbyId = null; ActiveFfaLobbyId = null;
+                    FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+                    FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
+                    FfaMySlot = -1; FfaLobbyPlayerCount = 0;
+                    FfaLockedRoster = null;
+                    Plugin.ClearPendingFfaSlot();
+                    if (hadBelief)
+                        CompetitiveUI.ShowNotification("Your FFA lobby was dissolved.", new Color(1f, 0.75f, 0.4f), 6f);
+                    Plugin.Log.LogInfo($"[FFA-LOBBY] legacy searching row detected (belief={hadBelief}) — leaving it");
+                    FfaLeaveQueue();
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                if (status == "lobby")
+                {
+                    // Leave intent outranks membership (impl review find 2):
+                    // the seat still existing means the leave never landed —
+                    // retry it instead of re-adopting.
+                    if (_ffaLeaveIntent)
+                    {
+                        if (Time.unscaledTime - _ffaLeaveRetryAt > 10f)
+                        {
+                            _ffaLeaveRetryAt = Time.unscaledTime;
+                            Plugin.Log.LogWarning("[FFA-LOBBY] leave intent pending but seat still exists — retrying leave");
+                            FfaLeaveQueue();
+                        }
+                        return;
+                    }
+                    // Level-triggered room exclusion (impl review find 3): a
+                    // lobby seat cannot ride along a live online game, and
+                    // this gate re-fires every poll — no missed edges.
+                    bool inRoomNow = false;
+                    try { inRoomNow = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+                    if (inRoomNow)
+                    {
+                        Plugin.Log.LogWarning("[FFA-LOBBY] in an online room while holding a lobby seat — leaving the lobby");
+                        FfaLeaveQueue();
+                        return;
+                    }
+                    // Open host-lobby membership (July 29 redesign).
+                    _ffaAmbiguousPollUntil = -999f;   // resolved — the seat exists
+                    OpenFfaLobbyId = ExtractJsonString(resp, "lobby_id") ?? OpenFfaLobbyId;
+                    FfaLobbyIsHost = ExtractJsonBool(resp, "is_host");
+                    FfaLobbyCanStart = ExtractJsonBool(resp, "can_start");
+                    FfaLobbyMemberCount = ExtractJsonInt(resp, "player_count");
+                    int minP = ExtractJsonInt(resp, "min_players"); if (minP > 0) FfaLobbyMinPlayers = minP;
+                    int maxP = ExtractJsonInt(resp, "max_players"); if (maxP > 0) FfaLobbyMaxPlayers = maxP;
+                    try
+                    {
+                        var members = new List<FfaLobbyMemberEntry>();
+                        int mStart = resp.IndexOf("\"members\"");
+                        int arrStart = mStart >= 0 ? resp.IndexOf('[', mStart) : -1;
+                        int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
+                        if (arrStart >= 0 && arrEnd > arrStart)
+                        {
+                            foreach (string obj in SliceTopLevelObjects(resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                            {
+                                members.Add(new FfaLobbyMemberEntry
+                                {
+                                    steam_id = ExtractJsonString(obj, "steam_id"),
+                                    display_name = ExtractJsonString(obj, "display_name") ?? "?",
+                                    rating = ExtractJsonInt(obj, "rating"),
+                                    rating_1v1 = ExtractJsonInt(obj, "rating_1v1"),
+                                    wait_seconds = ExtractJsonInt(obj, "wait_seconds"),
+                                    is_host = ExtractJsonBool(obj, "is_host"),
+                                });
+                            }
+                        }
+                        FfaLobbyMembers = members;
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[FFA-LOBBY] member parse: {ex.Message}"); }
+                }
+                else if (status == "lobby_closed")
+                {
+                    // Authoritative terminal: the lobby we sat in is gone
+                    // (disband, janitor, or we were pruned at start).
+                    Plugin.Log.LogInfo($"[FFA-LOBBY] lobby closed server-side (was {OpenFfaLobbyId})");
+                    OpenFfaLobbyId = null; FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+                    FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
+                    IsFfaQueuePolling = false; FfaQueueStatus = "";
+                    CompetitiveUI.ShowNotification("Your FFA lobby closed.", new Color(1f, 0.75f, 0.4f), 6f);
+                    FetchFfaLobbies(force: true);
                 }
                 if (status == "ready_join")
                 {
+                    // Leave intent outranks a racing Start (impl review find
+                    // 2): the player asked OUT before the lock landed —
+                    // leaving now uses the legacy ready_join dissolution.
+                    if (_ffaLeaveIntent)
+                    {
+                        Plugin.Log.LogWarning("[FFA-LOBBY] ready_join landed after a leave request — leaving instead of joining");
+                        FfaLeaveQueue();
+                        NativeUI.MarkDirty();
+                        return;
+                    }
                     // Consent guard: decline a lock that lands mid-game (#150).
                     bool busyInRoom = false;
                     try { busyInRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
@@ -8191,6 +8623,12 @@ namespace CompetitiveRounds
                     }
                     IsFfaQueuePolling = false;
                     ActiveFfaLobbyId = ExtractJsonString(resp, "lobby_id");
+                    // The open-lobby membership just became a LOCKED lobby —
+                    // clear the open belief or the room-join teardown would
+                    // "leave" our own game the moment we enter the ffa_ room.
+                    OpenFfaLobbyId = null;
+                    FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+                    FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
                     FfaMySlot = ExtractJsonInt(resp, "slot");
                     FfaLobbyPlayerCount = ExtractJsonInt(resp, "player_count");
                     string room = ExtractJsonString(resp, "room_name");
@@ -8243,24 +8681,67 @@ namespace CompetitiveRounds
                 {
                     IsFfaQueuePolling = false; FfaQueueStatus = "";
                     FfaLockedRoster = null;
+                    // Full teardown (impl review find 5): a dead row means NO
+                    // live commitment — stale lock state here caused repeated
+                    // roomless-poll recovery loops and a QueueRoomJoiner that
+                    // could still fire into a canceled Photon room.
+                    ActiveFfaLobbyId = null;
+                    FfaMySlot = -1; FfaLobbyPlayerCount = 0;
+                    FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+                    FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
                     Plugin.ClearPendingFfaSlot();
+                    try { if ((Plugin.PendingRankedRoom ?? "").StartsWith("ffa_")) Plugin.ClearPendingRoom(); } catch { }
                     // 30-min server cap (July 28) — explicit reason, and no
                     // auto-rejoin for this status (that would defeat the cap).
                     if (status == "expired")
                         CompetitiveUI.ShowNotification(
                             "Removed from FFA queue after 30 minutes of searching - rejoin if you're still here!",
                             Color.yellow, 7f);
-                    // Ghost-prune recovery: auto-rejoin once per minute (#150).
-                    // Online-room gate (finds 1 + C): never recreate a row the
-                    // cross-queue eviction removed while we're in a real game;
-                    // offline sandbox rooms (learning #122) keep the recovery.
-                    if (status == "not_in_queue"
-                        && (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode)
-                        && Time.unscaledTime - _ffaLastAutoRejoinAt > 60f)
+                    // A pending explicit leave reaching not_in_queue means the
+                    // leave LANDED (its ack was just lost) — clear the belief
+                    // silently; re-enrolling an explicit leaver is the one
+                    // thing recovery must never do (impl review find 2).
+                    if (_ffaLeaveIntent)
                     {
-                        _ffaLastAutoRejoinAt = Time.unscaledTime;
-                        Plugin.Log.LogWarning("[FFA] queue row vanished server-side while searching — auto-rejoining");
-                        FfaJoinQueue();
+                        _ffaLeaveIntent = false;
+                        _ffaLeaveTargetLobby = null;
+                        OpenFfaLobbyId = null;
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    // Ambiguity window after a transport-failed CREATE (no id
+                    // to re-join): the enroll may still commit behind a lock
+                    // server-side — keep polling so it surfaces as 'lobby'
+                    // instead of becoming a hidden seat (round-2 plausible
+                    // find). Joins carry a belief and use the rejoin path.
+                    // 'expired' is TERMINAL and kills the window instead of
+                    // re-arming it (round-3 find E2 — the 30-min cap must
+                    // never turn into another 90s of polling).
+                    if (status == "expired")
+                        _ffaAmbiguousPollUntil = -999f;
+                    if (status == "not_in_queue"
+                        && string.IsNullOrEmpty(OpenFfaLobbyId)
+                        && Time.unscaledTime < _ffaAmbiguousPollUntil)
+                    {
+                        IsFfaQueuePolling = true;
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    // Ghost-prune recovery, lobby edition (design review finds
+                    // 6+9): if we BELIEVE we're in an open lobby, attempt ONE
+                    // same-lobby rejoin (idempotent server-side); the join's
+                    // failure path converts a truly-gone lobby into the
+                    // explicit closed toast. Never auto-CREATE, and never the
+                    // legacy gather queue — that mechanism is retired in this
+                    // client. Online-room gate as before (#122/#150).
+                    if (status == "not_in_queue"
+                        && !string.IsNullOrEmpty(OpenFfaLobbyId)
+                        && (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode)
+                        && Time.unscaledTime - _ffaLobbyRejoinAt > 60f)
+                    {
+                        _ffaLobbyRejoinAt = Time.unscaledTime;
+                        Plugin.Log.LogWarning("[FFA-LOBBY] membership row vanished server-side — attempting same-lobby rejoin");
+                        FfaJoinLobby(OpenFfaLobbyId);
                     }
                 }
                 NativeUI.MarkDirty();
@@ -9180,8 +9661,17 @@ namespace CompetitiveRounds
         private static string FormatRequestError(UnityWebRequest request)
         {
             if (request == null) return "request failed";
+            // Carry the RESPONSE BODY, not just Unity's status text (lobby
+            // impl review round 2 find 4): FastAPI's {"detail": ...} is how a
+            // 4xx explains itself, and discarding it made "the server judged
+            // this" indistinguishable from a transport timeout. The
+            // "HTTP <code>:" prefix is load-bearing — the report outbox
+            // pattern-matches it for permanence.
+            string body = "";
+            try { body = request.downloadHandler?.text ?? ""; } catch { }
+            if (body.Length > 300) body = body.Substring(0, 300);
             return request.responseCode > 0
-                ? $"HTTP {request.responseCode}: {request.error}"
+                ? $"HTTP {request.responseCode}: {(string.IsNullOrEmpty(body) ? request.error : body)}"
                 : request.error;
         }
 

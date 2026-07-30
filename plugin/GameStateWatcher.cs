@@ -1850,6 +1850,27 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo(
                             $"[QUEUE] Auto-declined pre-room 1v1 match after joining online room '{photonRoomId}'");
                     }
+                    // Open FFA host-lobby membership is exclusive ownership
+                    // (July 29 redesign, design review find 3): entering ANY
+                    // real online room means we're no longer waiting in that
+                    // lobby — leave it so the host can't lock us into a game
+                    // we can't join. Our OWN lock transition clears
+                    // OpenFfaLobbyId before the ffa_ room join, so this never
+                    // fires on the lobby's own game. ALL rooms count here
+                    // (vanilla casual included), unlike the 1v1-search case
+                    // above — a search can ride along a casual game, a lobby
+                    // seat cannot.
+                    if (!PhotonNetwork.OfflineMode
+                        && !string.IsNullOrEmpty(ApiClient.OpenFfaLobbyId))
+                    {
+                        Plugin.Log.LogInfo(
+                            $"[FFA-LOBBY] joined room '{photonRoomId}' while in an open lobby — leaving the lobby");
+                        try { ApiClient.FfaLeaveQueue(); } catch { }
+                        CompetitiveUI.ShowNotification(
+                            "Left your FFA lobby - you joined a game",
+                            Color.yellow,
+                            5f);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -2056,6 +2077,14 @@ namespace CompetitiveRounds
                     try { Plugin.ClearPendingFfaSlot(); } catch { }
                     try { FfaMode.OnRoomLeft(); } catch { }
                 }
+                // Consume LeavingForRanked on EVERY observed room exit (lobby
+                // impl round 6): the flag's meaning is "the NEXT room exit is
+                // our deliberate leave-for-ranked". The tracking-gated scoring
+                // branch above consumes it when a match was live; a pre/post-
+                // game exit skipped that branch and left the flag set — where
+                // it silently suppressed the NEXT genuine DC score and the
+                // roomless-recovery watchdog. Single-shot by construction now.
+                LeavingForRanked = false;
                 // Dump per-match perf-patch hit counts so we can verify in the log
                 // which ported patches actually fired this match (and how often).
                 PerfGate.DumpAndReset();

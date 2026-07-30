@@ -940,21 +940,63 @@ async def queue_cleanup_loop():
                 for r in ffa_done.fetchall():
                     await _reconcile_ffa_lobby_bets(db, r[0], "played-out 3h close")
                     print(f"[FFA-CLEANUP] Played-out lobby closed: {r[0]}")
-                # Free every row pointing at a lobby that is no longer active.
-                # This is what actually un-sticks the player: closing the lobby
-                # alone leaves the ready_join row, and it is the ROW that blocks
-                # them from joining another queue.
+                # Free every row whose lobby has moved past its state. Explicit
+                # VALID state pairs, not a negative predicate (design review
+                # find 1: "<> 'active'" would eat the perfectly valid
+                # lobby-member + open-lobby pair every 60 seconds):
+                #   ready_join is valid only on an ACTIVE lobby;
+                #   lobby      is valid only on an OPEN lobby.
                 freed = await db.execute(text("""
                     DELETE FROM ffa_queue
                      WHERE player_id IN (
                         SELECT q.player_id FROM ffa_queue q
                           JOIN ffa_lobbies l ON l.id = q.series_id
-                         WHERE q.status <> 'searching' AND l.status <> 'active'
+                         WHERE (q.status = 'ready_join' AND l.status <> 'active')
+                            OR (q.status = 'lobby' AND l.status <> 'open')
                          FOR UPDATE OF q SKIP LOCKED
                      )
                     RETURNING steam_id"""))
                 for r in freed.fetchall():
                     print(f"[FFA-CLEANUP] Freed stranded queue row: {r[0]}")
+                # ── Open host-lobby maintenance (July 29 redesign) ──────────
+                # Per-lobby, lobby-lock-first (the canonical open-lobby
+                # protocol): prune members whose clients stopped polling for
+                # 75s+ (the established freshness contract — never 30s, see
+                # design review find 5), promote a new host if the host was
+                # pruned, disband when nobody is left. SKIP LOCKED: a lobby
+                # being mutated right now is that mutator's to maintain.
+                # ORDER BY random(), not created_at (impl review find 6): a
+                # stable oldest-first pick + LIMIT means ten long-lived healthy
+                # lobbies would permanently starve lobby 11+ of pruning and
+                # promotion. The open set is tiny; random rotation covers all.
+                open_lobbies = (await db.execute(text("""
+                    SELECT l.id, l.host_player_id FROM ffa_lobbies l
+                     WHERE l.status = 'open'
+                     ORDER BY random()
+                     LIMIT 10
+                     FOR UPDATE SKIP LOCKED"""))).mappings().all()
+                for ol in open_lobbies:
+                    await db.execute(text("""
+                        DELETE FROM ffa_queue
+                         WHERE series_id = :lid AND status = 'lobby'
+                           AND last_polled < NOW() - INTERVAL '75 seconds'"""),
+                        {"lid": ol["id"]})
+                    live = (await db.execute(text("""
+                        SELECT player_id, joined_at FROM ffa_queue
+                         WHERE series_id = :lid AND status = 'lobby'
+                         ORDER BY joined_at, player_id::text"""),
+                        {"lid": ol["id"]})).mappings().all()
+                    if not live:
+                        await db.execute(text("""
+                            UPDATE ffa_lobbies SET status='canceled', invalidated_at=NOW(),
+                                   invalidation_reason='lobby_abandoned'
+                             WHERE id=:lid AND status='open'"""), {"lid": ol["id"]})
+                        print(f"[FFA-LOBBY] open lobby abandoned (no live members): {ol['id']}")
+                    elif ol["host_player_id"] not in {m["player_id"] for m in live}:
+                        await db.execute(text(
+                            "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
+                        ), {"h": live[0]["player_id"], "lid": ol["id"]})
+                        print(f"[FFA-LOBBY] host pruned — promoted earliest member (lobby {ol['id']})")
 
                 ffa_husks = await db.execute(
                     text("""DELETE FROM ffa_queue
@@ -5538,7 +5580,15 @@ _QUEUE_GROUP_SERIES_TABLES = {
 _QUEUE_GROUP_STATUSES = {
     "team_queue": {"matched", "ready"},
     "ovt_queue": {"matched", "ready_join"},
-    "ffa_queue": {"ready_join"},
+    # 'lobby' = member of an OPEN host-controlled lobby (July 29 redesign).
+    # Grouping it means every _lock_queue_group_for_player caller (poll,
+    # leave, start) acquires lobby-row-first -> members in UUID order -> an
+    # authoritative re-read — the one canonical protocol for every open-lobby
+    # membership mutation (design review find 4). The extra cost is that a
+    # member's 2s poll group-locks its lobby for ~1ms; with <=10 members
+    # that's ~5 short lock-holds/sec on one row, chosen deliberately over a
+    # second special-cased locking scheme.
+    "ffa_queue": {"ready_join", "lobby"},
 }
 
 
@@ -5715,10 +5765,17 @@ _QUEUE_LOCK_LIVENESS_SQL = {
     "ffa_queue": (
         "SELECT 1 FROM ffa_queue q JOIN ffa_lobbies l ON l.id = q.series_id"
         " WHERE q.player_id = :pid AND q.status != 'searching'"
-        " AND l.status = 'active'"
-        " AND (l.created_at > NOW() - INTERVAL '15 minutes'"
-        "      OR EXISTS (SELECT 1 FROM ffa_matches m WHERE m.lobby_id = l.id"
-        "                  AND m.ended_at > NOW() - INTERVAL '15 minutes'))"),
+        " AND ((l.status = 'active'"
+        "       AND (l.created_at > NOW() - INTERVAL '15 minutes'"
+        "            OR EXISTS (SELECT 1 FROM ffa_matches m WHERE m.lobby_id = l.id"
+        "                        AND m.ended_at > NOW() - INTERVAL '15 minutes')))"
+        # Membership in an OPEN host lobby is exclusive ownership too (design
+        # review find 3): without this, a lobby member could search/lock in
+        # another mode and the eventual Start would yank them mid-game. A
+        # fresh heartbeat bounds it — lobby members poll every ~2s, so 75s
+        # stale means the client is gone and the janitor will prune them.
+        "   OR (q.status = 'lobby' AND l.status = 'open'"
+        "       AND q.last_polled > NOW() - INTERVAL '75 seconds'))"),
 }
 
 
@@ -11171,6 +11228,32 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                               AND s.invalidation_reason='member_deleted')"""),
             {"sid": _sid})
     for _lid in _ffa_grp:
+        # OPEN host lobby (July 29 redesign): run the same remove/promote/
+        # disband step an explicit Leave performs — without it the open lobby
+        # would keep pointing at the anonymized account as host (design
+        # review find 7). SKIP LOCKED because deletion already holds the
+        # player's queue rows (the pre-existing row->series order): if a
+        # concurrent Start/Join holds the lobby, do nothing — the generic row
+        # DELETE below still removes the membership and the janitor promotes
+        # or disbands within a minute.
+        _ol = (await db.execute(text(
+            "SELECT id, host_player_id FROM ffa_lobbies WHERE id=:lid AND status='open'"
+            " FOR UPDATE SKIP LOCKED"), {"lid": _lid})).mappings().first()
+        if _ol is not None:
+            _live = (await db.execute(text("""
+                SELECT player_id FROM ffa_queue
+                 WHERE series_id = :lid AND status = 'lobby' AND player_id <> :pid
+                 ORDER BY joined_at, player_id::text"""),
+                {"lid": _lid, "pid": pid})).scalars().all()
+            if not _live:
+                await db.execute(text(
+                    """UPDATE ffa_lobbies SET status='canceled', invalidated_at=NOW(),
+                              invalidation_reason='lobby_disbanded'
+                        WHERE id=:lid AND status='open'"""), {"lid": _lid})
+            elif _ol["host_player_id"] == pid:
+                await db.execute(text(
+                    "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
+                ), {"h": _live[0], "lid": _lid})
         await db.execute(text(
             """UPDATE ffa_lobbies SET status='canceled', invalidation_reason='member_deleted',
                       invalidated_at=NOW()
@@ -11192,7 +11275,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
                 WHERE series_id=:lid
                   AND EXISTS (SELECT 1 FROM ffa_lobbies l WHERE l.id=:lid
-                              AND l.status <> 'active')"""),
+                              AND l.status NOT IN ('active', 'open'))"""),
             {"lid": _lid})
 
     # Steam sessions store the raw Steam ID (and authenticate as it) — purge
@@ -16317,8 +16400,327 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     return {"status": "ok", "queue_count": int(n)}
 
 
+# ── FFA host lobbies (July 29 redesign — Sid's spec) ───────────────────────
+# A host opens a lobby, players browse and join, the host presses Start at
+# 3+ members. Start produces EXACTLY the state the legacy gather-decider lock
+# produces (active ffa_lobbies row + ready_join queue rows), so everything
+# downstream — auto-join, reports, roster validation, self-heals, betting —
+# is the existing shipped machinery, untouched. While a lobby is OPEN, its
+# queue rows (status='lobby', series_id=lobby id) are the ONLY membership
+# truth; member_ids stays empty until Start freezes the roster. The legacy
+# auto-gather flow above stays intact for 1.35.1 clients until the minimum
+# version crosses the redesign build (the pools are disjoint by status).
+#
+# Locking protocol (design review find 4): every membership mutation locks
+# the LOBBY row first, then queue rows in canonical player-id order, then
+# re-reads authoritative state. Poll/leave/start get this from
+# _lock_queue_group_for_player ('lobby' is a grouped status); create/join
+# implement it directly; the janitor arm and account deletion use
+# FOR UPDATE SKIP LOCKED on the lobby. Freshness is the established 75s
+# contract everywhere (find 5).
+
+FFA_LOBBY_MEMBER_FRESH_SQL = "last_polled > NOW() - INTERVAL '75 seconds'"
+
+
+async def _ffa_live_lobby_members(db: AsyncSession, lobby_id):
+    """Fresh 'lobby' members of an open lobby, promotion order (joined_at,
+    then player_id::text — deterministic per design review Q3)."""
+    return (await db.execute(text(f"""
+        SELECT player_id, steam_id, display_name, rating, games_played,
+               fallback_rating, region, joined_at
+          FROM ffa_queue
+         WHERE series_id = :lid AND status = 'lobby'
+           AND {FFA_LOBBY_MEMBER_FRESH_SQL}
+         ORDER BY joined_at, player_id::text
+    """), {"lid": lobby_id})).mappings().all()
+
+
+def _ffa_effective_host(lobby_host_id, live_members):
+    """The player allowed to press Start: the stored host if still a live
+    member, else the earliest-joined live member (display + validation use
+    this; it is PERSISTED only by leave/prune/start — never by reads)."""
+    if not live_members:
+        return None
+    live_ids = {m["player_id"] for m in live_members}
+    if lobby_host_id in live_ids:
+        return lobby_host_id
+    return live_members[0]["player_id"]
+
+
+async def _ffa_lobby_snapshot_fields(db: AsyncSession, player_id):
+    """Rating-snapshot fields for a queue row (same shape the legacy join
+    stores — the browser shows them, and Start's lock reuses them)."""
+    g = (await db.execute(text(
+        "SELECT rating, rating_deviation, games_played FROM glicko_ratings_ffa WHERE player_id = :pid"
+    ), {"pid": player_id})).mappings().first()
+    g1 = (await db.execute(text(
+        "SELECT rating FROM glicko_ratings WHERE player_id = :pid"
+    ), {"pid": player_id})).mappings().first()
+    return {
+        "r": g["rating"] if g else 1500.0,
+        "rd": g["rating_deviation"] if g else 350.0,
+        "gp": g["games_played"] if g else 0,
+        "fr": float(g1["rating"]) if g1 and g1["rating"] is not None else 1500.0,
+    }
+
+
+class _FfaLobbyCreateReq(BaseModel):
+    steam_id: str
+    display_name: str = "Player"
+    region: str | None = None
+
+
+class _FfaLobbyJoinReq(BaseModel):
+    steam_id: str
+    display_name: str = "Player"
+    region: str | None = None
+    lobby_id: str
+
+
+async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> None:
+    """Move the caller's queue row into `lobby_id` under the already-held
+    lobby lock. CAS ladder (design review find 8): only a missing row or a
+    'searching' row may become a lobby membership — a row the legacy gather
+    just locked (ready_join) or a different lobby's membership 409s; no
+    implicit lobby switching in round one (Q4/Q7). Raises HTTPException on
+    conflict; caller's transaction (including a just-created lobby row)
+    rolls back with it."""
+    mine = (await db.execute(text(
+        "SELECT status, series_id FROM ffa_queue WHERE player_id = :pid FOR UPDATE"
+    ), {"pid": player.id})).mappings().first()
+    if mine is not None and mine["status"] == "lobby":
+        if mine["series_id"] == lobby_id:
+            # Idempotent same-lobby rejoin — the client recovery path (find 6).
+            await db.execute(text(
+                "UPDATE ffa_queue SET last_polled = NOW(), display_name = :dn WHERE player_id = :pid"
+            ), {"pid": player.id, "dn": req.display_name[:64]})
+            return
+        raise HTTPException(409, "Leave your current lobby first")
+    if mine is not None and mine["status"] not in ("searching",):
+        raise HTTPException(409, "You're locked into another FFA game — finish or leave it first")
+    snap = await _ffa_lobby_snapshot_fields(db, player.id)
+    if mine is None:
+        # ON CONFLICT DO NOTHING + re-check (impl review adjacent find): two
+        # concurrent enrolls for the same account (double-click across PCs)
+        # must produce a 409, not a unique-violation 500 that aborts the
+        # caller's transaction.
+        inserted = (await db.execute(text("""
+            INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating_deviation,
+                                   games_played, fallback_rating, region, status, series_id,
+                                   joined_at, last_polled)
+            VALUES (:pid, :sid, :dn, :r, :rd, :gp, :fr, :reg, 'lobby', :lid, NOW(), NOW())
+            ON CONFLICT (player_id) DO NOTHING
+            RETURNING player_id
+        """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64],
+               "reg": (req.region or "")[:8] or None, "lid": lobby_id, **snap})).scalar()
+        if inserted is None:
+            raise HTTPException(409, "Your queue state just changed — try again")
+    else:
+        # CAS: the WHERE re-checks 'searching' on the locked row — a legacy
+        # gather cannot have flipped it under our lock, but the guard makes
+        # the invariant explicit and free.
+        flipped = (await db.execute(text("""
+            UPDATE ffa_queue SET status='lobby', series_id=:lid, slot=NULL,
+                   room_name=NULL, room_region=NULL, matched_at=NULL,
+                   display_name=:dn, region=:reg, rating=:r, rating_deviation=:rd,
+                   games_played=:gp, fallback_rating=:fr,
+                   joined_at=NOW(), last_polled=NOW()
+             WHERE player_id=:pid AND status='searching'
+            RETURNING player_id
+        """), {"pid": player.id, "dn": req.display_name[:64],
+               "reg": (req.region or "")[:8] or None, "lid": lobby_id, **snap})).scalar()
+        if flipped is None:
+            raise HTTPException(409, "Your queue state just changed — try again")
+
+
+@app.post("/api/v1/ffa/lobby/create", tags=["FFA Queue"])
+async def ffa_lobby_create(req: _FfaLobbyCreateReq, request: Request, db: AsyncSession = Depends(get_db)):
+    """Open a host lobby. The caller becomes host and its only member."""
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    await _check_ban_or_raise(db, req.steam_id)
+    player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(404, "Player not registered")
+    _other = await _locked_in_other_queue(db, player.id, "ffa_queue")
+    if _other:
+        raise HTTPException(409, "You're in a live match in another mode - finish it first")
+    lobby_id = uuid.uuid4()
+    # Brand-new row: invisible to every other transaction until commit, so
+    # inserting it first IS the lobby-first order for the enroll below.
+    await db.execute(text("""
+        INSERT INTO ffa_lobbies (id, status, player_count, member_ids, host_player_id, created_at)
+        VALUES (:lid, 'open', 0, '{}', :host, NOW())
+    """), {"lid": lobby_id, "host": player.id})
+    await _ffa_lobby_enroll_caller(db, player, req, lobby_id)
+    await db.commit()
+    print(f"[FFA-LOBBY] {req.steam_id} opened lobby {lobby_id}")
+    # A lobby member is committed to FFA — clear their searches elsewhere
+    # (design review find 3; post-commit, own transactions, SKIP LOCKED).
+    await _evict_other_queue_searching(db, [player.id], "ffa_queue", "an open FFA lobby")
+    return {"status": "ok", "lobby_id": str(lobby_id)}
+
+
+@app.post("/api/v1/ffa/lobby/join", tags=["FFA Queue"])
+async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSession = Depends(get_db)):
+    """Join an open host lobby from the browser."""
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    await _check_ban_or_raise(db, req.steam_id)
+    player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(404, "Player not registered")
+    try:
+        lobby_id = UUID(req.lobby_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid lobby_id")
+    _other = await _locked_in_other_queue(db, player.id, "ffa_queue")
+    if _other:
+        raise HTTPException(409, "You're in a live match in another mode - finish it first")
+    # Lobby-first lock, then prune/count/enroll under it (find 4: join must
+    # revalidate open + capacity under the lobby lock, or two joins at 9/10
+    # both pass and produce 11).
+    lrow = (await db.execute(text(
+        "SELECT id, status FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        raise HTTPException(404, "That lobby is no longer open")
+    await db.execute(text(f"""
+        DELETE FROM ffa_queue
+         WHERE series_id = :lid AND status = 'lobby'
+           AND NOT ({FFA_LOBBY_MEMBER_FRESH_SQL})
+    """), {"lid": lobby_id})
+    live = await _ffa_live_lobby_members(db, lobby_id)
+    if any(m["player_id"] == player.id for m in live):
+        # Idempotent same-lobby rejoin handled in the enroll helper too, but
+        # short-circuit so the capacity check below can't 409 our own row.
+        await _ffa_lobby_enroll_caller(db, player, req, lobby_id)
+        await db.commit()
+        # Eviction runs on the idempotent path too (impl review find 10): if
+        # the FIRST enrollment's best-effort eviction failed, the recovery
+        # rejoin is the only later actor that can repair the cross-queue ghost.
+        await _evict_other_queue_searching(db, [player.id], "ffa_queue", "an open FFA lobby")
+        return {"status": "ok", "lobby_id": str(lobby_id)}
+    if len(live) >= FFA_MAX_PLAYERS:
+        raise HTTPException(409, "That lobby is full")
+    await _ffa_lobby_enroll_caller(db, player, req, lobby_id)
+    await db.commit()
+    print(f"[FFA-LOBBY] {req.steam_id} joined lobby {lobby_id} ({len(live)+1} members)")
+    await _evict_other_queue_searching(db, [player.id], "ffa_queue", "an open FFA lobby")
+    return {"status": "ok", "lobby_id": str(lobby_id)}
+
+
+class _FfaLobbyStartReq(BaseModel):
+    steam_id: str
+
+
+@app.post("/api/v1/ffa/lobby/start", tags=["FFA Queue"])
+async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSession = Depends(get_db)):
+    """Host presses Start: freeze the roster and produce the legacy lock
+    state. From here on the lobby is indistinguishable from a gather lock."""
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    # Refresh our own liveness FIRST (find 5): the authenticated Start is
+    # proof the host's client is alive even if its polls lagged a rebuild.
+    await db.execute(text(
+        "UPDATE ffa_queue SET last_polled = NOW() WHERE steam_id = :sid AND status = 'lobby'"
+    ), {"sid": req.steam_id})
+    await db.commit()
+    me = await _lock_queue_group_for_player(db, "ffa_queue", req.steam_id)
+    if me is None or me["status"] != "lobby" or me["series_id"] is None:
+        raise HTTPException(409, "You're not in an open lobby")
+    lobby_id = me["series_id"]
+    # The group helper already holds the lobby row FOR UPDATE + member rows.
+    lrow = (await db.execute(text(
+        "SELECT id, status, host_player_id FROM ffa_lobbies WHERE id = :lid"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        raise HTTPException(409, "That lobby is no longer open")
+    await db.execute(text(f"""
+        DELETE FROM ffa_queue
+         WHERE series_id = :lid AND status = 'lobby'
+           AND NOT ({FFA_LOBBY_MEMBER_FRESH_SQL})
+    """), {"lid": lobby_id})
+    live = await _ffa_live_lobby_members(db, lobby_id)
+    host_id = _ffa_effective_host(lrow["host_player_id"], live)
+    if host_id != me["player_id"]:
+        raise HTTPException(403, "Only the lobby host can start the game")
+    if host_id is not None and host_id != lrow["host_player_id"]:
+        await db.execute(text("UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"),
+                         {"h": host_id, "lid": lobby_id})
+    if len(live) < FFA_MIN_PLAYERS:
+        raise HTTPException(409, f"Need at least {FFA_MIN_PLAYERS} players to start")
+    # EXACTLY the legacy gather-decider lock body from here. created_at is
+    # reset to NOW() because every active-lobby consumer (25-min dispersed
+    # close, bettable assembly window, zero-game dead sweep) reads it as the
+    # ACTIVATION time (design review find 2 — a lobby that sat open 26
+    # minutes would otherwise be janitor-closed on the next sweep).
+    ordered = sorted(live, key=lambda r: _ffa_sort_key(r["steam_id"]))
+    regions = [r["region"] for r in ordered if r["region"]]
+    region = max(set(regions), key=regions.count) if regions else "us"
+    room = f"ffa_{uuid.uuid4().hex[:12]}"
+    await db.execute(text("""
+        UPDATE ffa_lobbies
+           SET status='active', photon_room_id=:room, region=:reg,
+               player_count=:n, member_ids=:members, created_at=NOW()
+         WHERE id=:lid AND status='open'
+    """), {"room": room, "reg": (region or "us")[:8], "n": len(ordered),
+           "members": [r["player_id"] for r in ordered], "lid": lobby_id})
+    for slot, r in enumerate(ordered):
+        await db.execute(text("""
+            UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
+                   room_name=:room, room_region=:reg, matched_at=NOW()
+             WHERE player_id=:pid
+        """), {"lid": lobby_id, "slot": slot, "room": room, "reg": (region or "us")[:8],
+               "pid": r["player_id"]})
+    await db.commit()
+    print(f"[FFA-LOBBY] host {req.steam_id} started lobby {lobby_id} room {room} n={len(ordered)}")
+    await _evict_other_queue_searching(
+        db, [r["player_id"] for r in ordered], "ffa_queue", "an FFA lobby")
+    return await _ffa_poll_locked_payload(db, lobby_id, req.steam_id)
+
+
+@app.get("/api/v1/ffa/lobbies", tags=["FFA Queue"])
+async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
+    """Open host lobbies for the browser panel. Host name + live member count
+    only (round-one scope per the design review — member names arrive in the
+    joined poll). Read-only: effective host is derived, never persisted here."""
+    # HAVING inside the query, not a post-LIMIT filter (impl review find 6):
+    # zero-member husks awaiting the janitor must not consume the LIMIT and
+    # crowd real lobbies out of the browser.
+    lobbies = (await db.execute(text(f"""
+        SELECT l.id, l.host_player_id, l.created_at,
+               COUNT(q.player_id) FILTER (WHERE {FFA_LOBBY_MEMBER_FRESH_SQL}) AS live_n
+          FROM ffa_lobbies l
+          LEFT JOIN ffa_queue q ON q.series_id = l.id AND q.status = 'lobby'
+         WHERE l.status = 'open'
+         GROUP BY l.id, l.host_player_id, l.created_at
+        HAVING COUNT(q.player_id) FILTER (WHERE {FFA_LOBBY_MEMBER_FRESH_SQL}) > 0
+         ORDER BY l.created_at DESC
+         LIMIT 20
+    """))).mappings().all()
+    now = datetime.now(timezone.utc)
+    out = []
+    for l in lobbies:
+        live = await _ffa_live_lobby_members(db, l["id"])
+        if not live:
+            continue   # started/emptied between the two reads — skip, not "?"
+        host_id = _ffa_effective_host(l["host_player_id"], live)
+        host = next((m for m in live if m["player_id"] == host_id), None)
+        out.append({
+            "lobby_id": str(l["id"]),
+            "host_name": (host["display_name"] if host else "?") or "?",
+            "player_count": len(live),
+            "max_players": FFA_MAX_PLAYERS,
+            "age_seconds": int((now - l["created_at"]).total_seconds()) if l["created_at"] else 0,
+        })
+    return {"lobbies": out, "count": len(out)}
+
+
 @app.post("/api/v1/ffa/queue/leave", tags=["FFA Queue"])
-async def ffa_queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
+                          expected_lobby_id: str | None = Query(None),
+                          db: AsyncSession = Depends(get_db)):
     """Leave the FFA queue. Zero-game locked lobby → DISSOLVED (canceled,
     everyone else reset to searching — the #150 lifecycle rule). Lobby WITH
     recorded games → the whole lobby CLOSES: the roster is fixed at lock, so
@@ -16353,6 +16755,37 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
         return {"status": "ok"}
     dissolved = False
     lobby_id = me["series_id"]
+    # Delayed-retry fence for BOTH lobby shapes (impl review find 2): a leave
+    # retry that was aimed at lobby A must never tear down a LATER membership
+    # or lock in lobby B. New clients always send the id they mean.
+    if (expected_lobby_id and lobby_id is not None
+            and me["status"] in ("lobby", "ready_join")
+            and str(lobby_id) != expected_lobby_id):
+        await db.commit()
+        return {"status": "ok", "note": "membership moved on"}
+    # Open host-lobby member (July 29 redesign): remove, promote, disband —
+    # all under the lobby-first locks the group helper already holds.
+    if me["status"] == "lobby" and lobby_id is not None:
+        await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
+                         {"pid": me["player_id"]})
+        lrow = (await db.execute(text(
+            "SELECT status, host_player_id FROM ffa_lobbies WHERE id = :lid"
+        ), {"lid": lobby_id})).mappings().first()
+        if lrow is not None and lrow["status"] == "open":
+            live = await _ffa_live_lobby_members(db, lobby_id)
+            if not live:
+                await db.execute(text(
+                    """UPDATE ffa_lobbies SET status='canceled', invalidated_at=NOW(),
+                              invalidation_reason='lobby_disbanded'
+                        WHERE id=:lid AND status='open'"""), {"lid": lobby_id})
+                print(f"[FFA-LOBBY] lobby {lobby_id} disbanded (last member left: {steam_id})")
+            elif lrow["host_player_id"] == me["player_id"]:
+                await db.execute(text(
+                    "UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"
+                ), {"h": live[0]["player_id"], "lid": lobby_id})
+                print(f"[FFA-LOBBY] host left lobby {lobby_id} — promoted earliest member")
+        await db.commit()
+        return {"status": "ok"}
     if me["status"] == "ready_join" and lobby_id is not None:
         lrow = (await db.execute(text(
             "SELECT l.status, l.games_played FROM ffa_lobbies l WHERE l.id = :lid FOR UPDATE"
@@ -16435,14 +16868,18 @@ async def ffa_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = De
 
 @app.get("/api/v1/ffa/queue/list", tags=["FFA Queue"])
 async def ffa_queue_list(db: AsyncSession = Depends(get_db)):
-    """Snapshot of the FFA lobby panel: fresh searching rows + recent locks.
-    Same ghost-filtering contract as the 1v2 list."""
+    """Snapshot of the LEGACY FFA queue panel: fresh searching rows + recent
+    locks. Same ghost-filtering contract as the 1v2 list. Explicitly excludes
+    host-lobby members ('lobby' rows) — old 1.35.1 clients render this list as
+    ONE gather pool with a "locks at 3+" caption, and hosted-lobby members are
+    not part of any gather (design review find 10). New clients browse
+    /ffa/lobbies instead."""
     rows = (await db.execute(text("""
         SELECT q.steam_id, q.display_name, q.status, q.slot, q.region, q.joined_at,
                q.rating, q.games_played, q.fallback_rating
           FROM ffa_queue q
          WHERE (q.status = 'searching' AND q.last_polled > NOW() - INTERVAL '75 seconds')
-            OR (q.status != 'searching'
+            OR (q.status = 'ready_join'
                 AND COALESCE(q.matched_at, q.joined_at) > NOW() - INTERVAL '3 hours')
          ORDER BY q.joined_at ASC
     """))).mappings().all()
@@ -16519,6 +16956,49 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                              {"pid": me["player_id"]})
             await db.commit()
             return {"status": "expired", "queue_count": 0}
+
+    # Open host-lobby member (July 29 redesign). The group helper holds the
+    # lobby row + member rows, so the state we report cannot be mid-mutation.
+    if me["status"] == "lobby" and me["series_id"] is not None:
+        lrow = (await db.execute(text(
+            "SELECT l.status, l.host_player_id FROM ffa_lobbies l WHERE l.id = :lid"
+        ), {"lid": me["series_id"]})).mappings().first()
+        if lrow is None or lrow["status"] != "open":
+            # Start flips member rows to ready_join ATOMICALLY under the
+            # lobby lock, so a 'lobby' row on a non-open lobby is either a
+            # canceled lobby (janitor/disband) or an invariant violation —
+            # log the latter, heal both by dropping the row, and tell the
+            # client EXPLICITLY (a bare not_in_queue would trip the
+            # auto-rejoin path — design review find 9 / #150 family).
+            if lrow is not None and lrow["status"] == "active":
+                print(f"[FFA-LOBBY] INVARIANT: 'lobby' row survived Start on active lobby "
+                      f"{me['series_id']} (player {steam_id}) — healing")
+            await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
+                             {"pid": me["player_id"]})
+            await db.commit()
+            return {"status": "lobby_closed", "queue_count": 0}
+        live = await _ffa_live_lobby_members(db, me["series_id"])
+        host_id = _ffa_effective_host(lrow["host_player_id"], live)
+        now_utc = datetime.now(timezone.utc)
+        await db.commit()
+        return {
+            "status": "lobby",
+            "lobby_id": str(me["series_id"]),
+            "is_host": host_id == me["player_id"],
+            "can_start": host_id == me["player_id"] and len(live) >= FFA_MIN_PLAYERS,
+            "player_count": len(live),
+            "max_players": FFA_MAX_PLAYERS,
+            "min_players": FFA_MIN_PLAYERS,
+            "queue_count": len(live),
+            "members": [
+                {"steam_id": m["steam_id"], "display_name": m["display_name"],
+                 "rating": int(round(m["rating"])) if (m["games_played"] or 0) > 0 else 0,
+                 "rating_1v1": int(round(m["fallback_rating"] or 1500)),
+                 "is_host": m["player_id"] == host_id,
+                 "wait_seconds": int((now_utc - m["joined_at"]).total_seconds()) if m["joined_at"] else 0}
+                for m in live
+            ],
+        }
 
     # Already locked → self-heal dead locks, else report the lobby.
     if me["status"] == "ready_join" and me["series_id"] is not None:
@@ -16726,7 +17206,8 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
         return {"status": "searching", "queue_count": 0}
     members = (await db.execute(text("""
         SELECT q.steam_id, q.display_name, q.slot
-          FROM ffa_queue q WHERE q.series_id = :lid ORDER BY q.slot
+          FROM ffa_queue q WHERE q.series_id = :lid AND q.status = 'ready_join'
+         ORDER BY q.slot
     """), {"lid": lobby_id})).mappings().all()
     my_slot = next((int(m["slot"]) for m in members
                     if m["steam_id"] == steam_id and m["slot"] is not None), -1)

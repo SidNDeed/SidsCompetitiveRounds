@@ -5,6 +5,18 @@
 Backend and bot changes in this block are **already live**. Client changes are built but not
 released — they ship with the next version.
 
+### FFA host lobbies (replaces the auto-gather queue; ships with the next release)
+
+- **FFA is now played from host-controlled lobbies.** Create a lobby or join an open one from
+  the new in-tab browser; the host presses **Start** once at least 3 players are in (up to 10).
+  Several lobbies can be open at the same time — the old "3 players and a countdown" auto-start
+  is gone from the new client.
+- If the host leaves, the longest-waiting member is promoted automatically; an emptied lobby
+  closes itself. Sitting in a lobby counts as your active queue everywhere else, exactly like a
+  locked match.
+- Players on the previous version keep the old auto-gather until they update; the two systems
+  run side by side on the server during the transition, with separate pools.
+
 ### FFA pick window (client, next release)
 
 - **Running out the pick timer no longer skips your pick.** When the on-screen countdown hits

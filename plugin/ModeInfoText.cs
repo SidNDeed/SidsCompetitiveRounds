@@ -96,10 +96,14 @@ Standard ROUNDS scoring - first to 5 points takes the game.
 
 <color=#FFD94D><b>HOW TO PLAY</b></color>
 
-- The queue has no Elo band. Joining is consent to play.
+- There is no Elo band. Joining a lobby is consent to play.
 
-- At 3 players, a 25-second gather window begins.
-  Up to 10 players can join. A full lobby starts at once.
+- Create a lobby, or join an open one from the browser.
+  The HOST presses Start once at least 3 players are in
+  (up to 10). Several lobbies can be open at once.
+
+- If the host leaves, the longest-waiting member becomes
+  the new host automatically.
 
 - After each point, everyone except the point winner
   picks a card at the same time.

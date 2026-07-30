@@ -582,6 +582,34 @@ namespace CompetitiveRounds
 
             stateTimer += Time.deltaTime;
 
+            // Pending-room replacement fence (lobby impl round 3 find C2): a
+            // NEW pending room while this run is bound to the old one means
+            // the old target is dead — restart the machine immediately with a
+            // fresh budget instead of burning the old room's 30s timeout and
+            // retry on a target nobody wants. (Cleared-to-empty is handled by
+            // the Idle reset above; the old room's DoActionWhenConnected
+            // callback dies on its own capture check.)
+            if (state != JoinState.Idle && !string.IsNullOrEmpty(targetRoom)
+                && !string.Equals(pendingRoom, targetRoom, StringComparison.Ordinal))
+            {
+                Plugin.Log.LogWarning($"[QUEUE-JOINER] pending room replaced mid-run ('{targetRoom}' -> '{pendingRoom}') — restarting joiner for the new room");
+                // LeavingForRanked stays SET while a deliberate room-leave is
+                // still in flight (round-4 find: clearing it mid-LeavingRoom
+                // let GameStateWatcher score our own exit as a DC). The
+                // leave-completion flow consumes the flag normally.
+                if (state != JoinState.LeavingRoom)
+                {
+                    try { GameStateWatcher.LeavingForRanked = false; } catch { }
+                }
+                joinInitiated = false;
+                state = JoinState.Idle;
+                stateTimer = 0f;
+                joinAttempts = 0;
+                targetRoom = null;
+                targetRegion = null;
+                return;
+            }
+
             // Safety timeout — 30s to account for disconnect + NCH connection sequence.
             // Lexia hit this on a slow Photon connect (v1.26.1 logs): pending room set
             // mid-queue from a prior session, timeout fired, but the reset only cleared
@@ -598,10 +626,18 @@ namespace CompetitiveRounds
                     // The pending room is still set, so the Idle branch below
                     // re-initiates leave/connect/join on the next frame.
                     Plugin.Log.LogWarning($"[QUEUE-JOINER] Join attempt {joinAttempts} timed out (state={state}, target='{targetRoom}') — retrying once");
+                    // Keep LeavingForRanked while the deliberate leave is
+                    // still in flight (round-5: an early clear here let the
+                    // watcher score our own hung exit as a DC). The join-
+                    // success path and the leave-event consumer own it.
+                    bool leaveStillInFlight = state == JoinState.LeavingRoom;
                     joinInitiated = false;
                     state = JoinState.Idle;
                     stateTimer = 0f;
-                    try { GameStateWatcher.LeavingForRanked = false; } catch { }
+                    if (!leaveStillInFlight)
+                    {
+                        try { GameStateWatcher.LeavingForRanked = false; } catch { }
+                    }
                     CompetitiveUI.ShowNotification("Slow connection — retrying ranked room join...", new Color(1f, 0.8f, 0.3f), 6f);
                     return;
                 }
@@ -614,6 +650,7 @@ namespace CompetitiveRounds
                 // showing "Match found! Joining…" over a live Join button.
                 bool wasOvt = (targetRoom ?? "").StartsWith("ovt_") || (pendingRoom ?? "").StartsWith("ovt_");
                 bool wasFfa = (targetRoom ?? "").StartsWith("ffa_") || (pendingRoom ?? "").StartsWith("ffa_");
+                bool giveUpLeaveInFlight = state == JoinState.LeavingRoom;
                 Plugin.ClearPendingRoom();
                 joinInitiated = false;
                 state = JoinState.Idle;
@@ -622,8 +659,16 @@ namespace CompetitiveRounds
                 targetRoom = null;
                 targetRegion = null;
                 // We may have set this when state went to LeavingRoom — clear so a
-                // future legitimate leave doesn't mistakenly cancel match-result counting.
-                try { GameStateWatcher.LeavingForRanked = false; } catch { }
+                // future legitimate leave doesn't mistakenly cancel match-result
+                // counting. Round-5 refinement: NOT while the deliberate leave is
+                // itself still in flight (the leave-event consumer or the next
+                // successful ranked join owns it then; a hung leave that never
+                // lands leaves the flag for the join-success clear — accepted
+                // residual, favors the innocent player).
+                if (!giveUpLeaveInFlight)
+                {
+                    try { GameStateWatcher.LeavingForRanked = false; } catch { }
+                }
                 if (wasOvt)
                 {
                     try { ApiClient.OvtLeaveQueue(); } catch { }
@@ -658,6 +703,11 @@ namespace CompetitiveRounds
                             return;
                         }
                         // In a different room — need to leave first
+                        // Fresh retry budget for a NEW target (round-4 find
+                        // C2: after room A's first timeout the machine idles
+                        // with joinAttempts=1, and a replacement B arriving
+                        // then inherited A's consumed budget).
+                        if (!string.Equals(pendingRoom, targetRoom, StringComparison.Ordinal)) joinAttempts = 0;
                         targetRoom = pendingRoom;
                         targetRegion = Plugin.PendingRankedRegion;
                         joinInitiated = true;
@@ -681,6 +731,9 @@ namespace CompetitiveRounds
                     }
 
                     // Not in a room — go straight to connecting
+                    // Fresh budget on target change (round-4 find C2, same as
+                    // the in-room pickup above).
+                    if (!string.Equals(pendingRoom, targetRoom, StringComparison.Ordinal)) joinAttempts = 0;
                     targetRoom = pendingRoom;
                     targetRegion = Plugin.PendingRankedRegion;
                     StartNCHConnect();
@@ -775,6 +828,29 @@ namespace CompetitiveRounds
                 {
                     try
                     {
+                        // Cancellation check (lobby impl review rounds 2+3):
+                        // the pending-room static is the cancellation token —
+                        // a Leave (or a replacement lock) clears/repoints it
+                        // between capture and connect, and a canceled join
+                        // must NOT still enter the dead room. Applies to all
+                        // modes. NEVER StopLoading here (round-3 find C1:
+                        // that is ROUNDS' match-found SUCCESS transition, not
+                        // a cancel — it can activate gameplay with no room).
+                        // Cleared -> the player wants OUT: NetworkRestart is
+                        // the codebase's one honest abort-to-menu lever.
+                        // Replaced -> the NEW room's joiner run owns the
+                        // loading screen and connection; this stale callback
+                        // simply dies.
+                        if (!string.Equals(Plugin.PendingRankedRoom, capturedRoom, StringComparison.Ordinal))
+                        {
+                            bool cleared = string.IsNullOrEmpty(Plugin.PendingRankedRoom);
+                            Plugin.Log.LogWarning($"[QUEUE-JOINER] pending room changed/cleared since capture ('{capturedRoom}' -> '{Plugin.PendingRankedRoom ?? "(none)"}') — aborting join (cleared={cleared})");
+                            if (cleared)
+                            {
+                                try { NetworkConnectionHandler.instance.NetworkRestart(); } catch { }
+                            }
+                            return;
+                        }
                         Plugin.Log.LogInfo($"[QUEUE-JOINER] Connected! JoinOrCreate: {capturedRoom}");
                         // 2v2 rooms have a `team_` prefix (set by /team/queue/ready
                         // server-side). Bump MaxPlayers to 4 + flag the room as
@@ -839,6 +915,12 @@ namespace CompetitiveRounds
             state = JoinState.Idle;
             stateTimer = 0f;
             joinAttempts = 0;
+            // The leave-for-ranked is COMPLETE once we're in the target room —
+            // consume the flag here too (lobby impl round 5: an exit path that
+            // skipped GameStateWatcher's consumer left it set, and the next
+            // GENUINE opponent DC in this room was misclassified as our own
+            // leave-for-ranked).
+            try { GameStateWatcher.LeavingForRanked = false; } catch { }
 
             // Clear force region flag so NCH works normally for vanilla play afterward
             try
