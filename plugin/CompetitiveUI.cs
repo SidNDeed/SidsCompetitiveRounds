@@ -487,7 +487,11 @@ namespace CompetitiveRounds
             {
                 ffaPickBannerCachedAt = now;
                 ffaPickBannerLocal = localOpen;
-                ffaPickBannerSeconds = Mathf.CeilToInt(FfaMode.PickSecondsLeft);
+                // Pickers see the auto-confirm clock (0 = your highlighted
+                // card locks in); spectators of the phase see the REAL window
+                // close, which runs ~5s later (Codex Jul-29 find 11).
+                ffaPickBannerSeconds = Mathf.CeilToInt(
+                    localOpen ? FfaMode.PickSecondsLeft : FfaMode.PickWindowSecondsLeft);
                 ffaPickBannerText = localOpen
                     ? $"PICK YOUR CARD - {ffaPickBannerSeconds}s"
                     : $"Card picks close in {ffaPickBannerSeconds}s";

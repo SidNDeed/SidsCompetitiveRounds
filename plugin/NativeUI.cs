@@ -1235,6 +1235,9 @@ namespace CompetitiveRounds
             public GameObject root, cardsGO, fullDotsGO, halfDotsGO, halfOverflowGO;
             public object txtPlacement, txtIdentity, txtPoints, txtHalfOverflow;
             public object txtHalves, txtKills, txtRewards, txtElo, txtCards;
+            // Full chronological pick list for the hover tooltip; null/empty
+            // when the inline line already shows everything (nothing rolled).
+            public string cardsHoverText;
             public readonly List<GameObject> fullDots = new List<GameObject>();
             public readonly List<GameObject> halfDots = new List<GameObject>();
         }
@@ -1276,6 +1279,11 @@ namespace CompetitiveRounds
         }
         private static readonly List<FfaRecentMatchRow> ffaRecentRows = new List<FfaRecentMatchRow>();
         private static RectTransform ffaRecentViewport;
+        // The whole FFA tab lives in its own outer ScrollView; hover regions
+        // must clip against BOTH masks or a row scrolled under the outer edge
+        // keeps a live hover rect over whatever is drawn there (#185 family,
+        // Codex Jul-29 find 8).
+        private static RectTransform ffaTabOuterViewport;
         private static Sprite ffaFullDotSprite, ffaHalfDotSprite;
         private static readonly Vector3[] ffaHoverCorners = new Vector3[4];
         private static GUIStyle ffaGraphTitleStyle, ffaGraphLegendStyle, ffaGraphAxisStyle;
@@ -1297,13 +1305,18 @@ namespace CompetitiveRounds
             // reachable at any aspect (learning #199).
             var scroll=UIFactory.CreateScrollView("FfaScroll",outer.transform,spacing:6);
             UIFactory.AddLE(scroll.scrollGO,flexH:1);
+            ffaTabOuterViewport=scroll.content.transform.parent as RectTransform;
             var panel=new GameObject("FfaInner");panel.transform.SetParent(scroll.content.transform,false);panel.AddComponent<RectTransform>();
             UIFactory.AddVLG(panel,spacing:8,padL:10,padR:10,padT:8,padB:8);
 
             var ffaHdrRow=new GameObject("FfaHdrRow");ffaHdrRow.transform.SetParent(panel.transform,false);ffaHdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(ffaHdrRow,spacing:10);UIFactory.AddLE(ffaHdrRow,prefH:38,flexH:0);
-            UIFactory.CreateText("FfaH",ffaHdrRow.transform,"<b>FREE-FOR-ALL (3-10 players) - RANKED</b>",26f,C_GOLD,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,36));
-            UIFactory.CreateButton("FfaInfo",ffaHdrRow.transform,"Info",20f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.FfaTitle,ModeInfoText.Ffa),sizeDelta:new Vector2(110,34));
+            UIFactory.CreateText("FfaH",ffaHdrRow.transform,"<b>FREE-FOR-ALL (3-10 players) - RANKED</b>",26f,C_GOLD,UIFactory.AlignMidLeft,sizeDelta:new Vector2(700,36));
+            // Info button: one size (110x34/18f) and one position (right edge
+            // via flex spacer) across the 2v2/1v2/FFA headers — it used to be
+            // a different size at a different x on each tab (Sid, July 29).
+            var ffaHdrSp=new GameObject("FfaHdrSp");ffaHdrSp.transform.SetParent(ffaHdrRow.transform,false);ffaHdrSp.AddComponent<RectTransform>();UIFactory.AddLE(ffaHdrSp,flexW:1);
+            UIFactory.CreateButton("FfaInfo",ffaHdrRow.transform,"Info",18f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.FfaTitle,ModeInfoText.Ffa),sizeDelta:new Vector2(110,34));
             UIFactory.CreateText("FfaNote",panel.transform,"<color=#FFCC44>New mode - first playtest build.</color> <color=#888>Games are ranked from day one.</color>",18f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
 
             // Queue controls row.
@@ -1404,6 +1417,11 @@ namespace CompetitiveRounds
             UIFactory.AddLE(row.root,prefH:29,minH:29,flexH:0);
             row.txtRank  =UIFactory.CreateText("r", row.root.transform,"",20f,C_GOLD, UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[0],22));
             row.txtName  =UIFactory.CreateText("n", row.root.transform,"",20f,C_WHITE,UIFactory.AlignMidLeft,  sizeDelta:new Vector2(FFA_LB_COL_W[1],22));
+            // Truncate (mode 3), not the TMP default Overflow: a long
+            // "name [title]" combo was painting straight into the Rating
+            // column (galaxy ice report, July 29). Not Ellipsis — Gravity
+            // has no '…' glyph (#47) and would render a square.
+            UIFactory.SetOverflowMode(row.txtName,3);
             row.txtRating=UIFactory.CreateText("rt",row.root.transform,"",20f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[2],22));
             UIFactory.SetBold(row.txtRating,true);
             row.txtGames =UIFactory.CreateText("g", row.root.transform,"",18f,C_LABEL,UIFactory.AlignMidCenter,sizeDelta:new Vector2(FFA_LB_COL_W[3],22));
@@ -1549,6 +1567,9 @@ namespace CompetitiveRounds
             UIFactory.AddLE(line,prefH:25,minH:25,flexH:0);
             row.txtPlacement=CreateFfaTextCell("Place",line.transform,36,UIFactory.AlignMidLeft,16f,C_DIM);
             row.txtIdentity=CreateFfaTextCell("Identity",line.transform,260,UIFactory.AlignMidLeft,16f,C_WHITE,true,150);
+            // Truncate long name+title combos at the cell edge instead of
+            // painting over the score dots (same fix as the FFA leaderboard).
+            UIFactory.SetOverflowMode(row.txtIdentity,3);
 
             row.fullDotsGO=new GameObject("PointDots");
             row.fullDotsGO.transform.SetParent(line.transform,false);
@@ -1611,7 +1632,16 @@ namespace CompetitiveRounds
         private static string FfaSafeRich(string value)
         {
             if(string.IsNullOrEmpty(value))return "";
-            return value.Replace("&","&amp;").Replace("<","&lt;").Replace(">","&gt;");
+            // Control characters flatten to spaces (Codex Jul-29 find 9): a
+            // card/display name carrying raw line breaks would explode the
+            // one-line height estimates and the hover tooltip's CalcHeight.
+            // C0 AND C1 (U+0085 NEL!) AND the U+2028/U+2029 separators — all
+            // of which TMP treats as line control (round-2 find 5).
+            var sb=new StringBuilder(value.Length);
+            foreach(char ch in value)
+                sb.Append(ch<' '||(ch>=(char)0x7F&&ch<=(char)0x9F)
+                          ||ch==(char)0x2028||ch==(char)0x2029?' ':ch);
+            return sb.ToString().Replace("&","&amp;").Replace("<","&lt;").Replace(">","&gt;");
         }
 
         private static string FfaTitleHex(string value)
@@ -1636,18 +1666,44 @@ namespace CompetitiveRounds
             return -1;
         }
 
-        private static string BuildFfaCardsText(ApiClient.FfaRecentPlayer player)
+        // The inline line shows only the FINAL HAND (the cards still held at
+        // game end) — the full mixed-color stream wrapped 2-3 lines per player
+        // in long games and read badly (Sid, July 29 item 1). Replaced
+        // ("rolled") picks collapse into a red "+N replaced" chip; hovering
+        // the line shows the complete chronological list in a tooltip
+        // (hoverText, drawn by DrawFfaRecentHoverGraph's IMGUI pass).
+        private static string BuildFfaCardsText(ApiClient.FfaRecentPlayer player,out string hoverText)
         {
+            hoverText=null;
             if(player?.cards==null||player.cards.Count==0)return "";
+            int rolled=0;
             var sb=new StringBuilder("    <color=#667788>Cards:</color> ");
+            bool firstHeld=true;
             for(int i=0;i<player.cards.Count;i++)
             {
                 var card=player.cards[i];
-                if(i>0)sb.Append("<color=#667788>, </color>");
-                string color=card!=null&&card.rolled?"#FF6666":"#667788";
-                string name=FfaSafeRich(card?.name??"?");
-                sb.Append("<color=").Append(color).Append(">")
-                  .Append(name).Append("</color>");
+                if(card!=null&&card.rolled){rolled++;continue;}
+                if(!firstHeld)sb.Append("<color=#667788>, </color>");
+                firstHeld=false;
+                sb.Append("<color=#8FA0B0>").Append(FfaSafeRich(card?.name??"?")).Append("</color>");
+            }
+            if(firstHeld)sb.Append("<color=#667788>none held</color>");
+            if(rolled>0)
+            {
+                sb.Append("  <color=#FF6666>+").Append(rolled)
+                  .Append(" replaced</color> <color=#556270>(hover)</color>");
+                var hv=new StringBuilder("All picks (oldest first) - red = replaced:\n");
+                int onLine=0;
+                for(int i=0;i<player.cards.Count;i++)
+                {
+                    var card=player.cards[i];
+                    if(onLine>0)hv.Append(", ");
+                    string color=card!=null&&card.rolled?"#FF7777":"#DDDDDD";
+                    hv.Append("<color=").Append(color).Append(">")
+                      .Append(FfaSafeRich(card?.name??"?")).Append("</color>");
+                    if(++onLine>=4&&i<player.cards.Count-1){hv.Append('\n');onLine=0;}
+                }
+                hoverText=hv.ToString();
             }
             return sb.ToString();
         }
@@ -1770,12 +1826,15 @@ namespace CompetitiveRounds
                             ||(string.IsNullOrEmpty(match.winner_steam_id)&&placement==1);
                 Color dotColor=FfaPlayerColor(player.slot);
                 UIFactory.SetText(ui.txtPlacement,placement>0?$"#{placement}":"#?");
+                // Name first, THEN the title — every other surface renders
+                // "name [title]" (leaderboards, chat); this row was the one
+                // place with the order flipped (Sid, July 29 item 1).
                 string title=string.IsNullOrEmpty(player.title)?""
-                    :$"<color={FfaTitleHex(player.title_color)}>[{FfaSafeRich(Trunc(player.title,14))}]</color> ";
+                    :$" <color={FfaTitleHex(player.title_color)}>[{FfaSafeRich(Trunc(player.title,14))}]</color>";
                 string nameColor=winner?"#FFD700":"#FFFFFF";
                 string left=player.left_early?" <color=#888888>(left)</color>":"";
                 UIFactory.SetText(ui.txtIdentity,
-                    $"{title}<color={nameColor}>{FfaSafeRich(Trunc(player.display_name??"?",18))}</color>{left}");
+                    $"<color={nameColor}>{FfaSafeRich(Trunc(player.display_name??"?",18))}</color>{title}{left}");
 
                 int points=Math.Max(0,player.rounds_won);
                 int leftover=Math.Max(0,player.points_total-points*2);
@@ -1798,7 +1857,8 @@ namespace CompetitiveRounds
                 }
                 else UIFactory.SetText(ui.txtElo,"");
 
-                string cards=BuildFfaCardsText(player);
+                string cards=BuildFfaCardsText(player,out string cardsHover);
+                ui.cardsHoverText=cardsHover;
                 if(ui.cardsGO!=null)ui.cardsGO.SetActive(!string.IsNullOrEmpty(cards));
                 if(!string.IsNullOrEmpty(cards))UIFactory.SetText(ui.txtCards,cards);
                 ui.root.SetActive(true);
@@ -1820,8 +1880,16 @@ namespace CompetitiveRounds
             {
                 height+=27f;
                 if(player?.cards==null||player.cards.Count==0)continue;
+                // Inline line = held cards only (rolled ones collapse into a
+                // "+N replaced" chip) — count what actually renders.
                 int chars=11;
-                foreach(var card in player.cards)chars+=(card?.name?.Length??1)+2;
+                int rolled=0;
+                foreach(var card in player.cards)
+                {
+                    if(card!=null&&card.rolled){rolled++;continue;}
+                    chars+=(card?.name?.Length??1)+2;
+                }
+                if(rolled>0)chars+=22;
                 height+=Math.Max(1,(chars+89)/90)*20f;
             }
             return height+8f;
@@ -1868,21 +1936,41 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>Screen rect of `target` clipped to BOTH scroll masks that
+        /// can hide it — the Recent-FFAs list viewport AND the whole-tab outer
+        /// viewport. Rows scrolled out of view must not keep live hover
+        /// regions (#185: raw rect tests ignore mask clipping).</summary>
+        private static bool TryGetFfaViewportClippedRect(RectTransform target,out Rect rect)
+        {
+            rect=default(Rect);
+            if(!TryGetFfaScreenRect(target,out Rect raw))return false;
+            if(ffaRecentViewport!=null&&TryGetFfaScreenRect(ffaRecentViewport,out Rect clip))
+            {
+                float xMin=Mathf.Max(raw.xMin,clip.xMin);
+                float xMax=Mathf.Min(raw.xMax,clip.xMax);
+                float yMin=Mathf.Max(raw.yMin,clip.yMin);
+                float yMax=Mathf.Min(raw.yMax,clip.yMax);
+                if(xMax<=xMin||yMax<=yMin)return false;
+                raw=new Rect(xMin,yMin,xMax-xMin,yMax-yMin);
+            }
+            if(ffaTabOuterViewport!=null&&TryGetFfaScreenRect(ffaTabOuterViewport,out Rect oclip))
+            {
+                float xMin=Mathf.Max(raw.xMin,oclip.xMin);
+                float xMax=Mathf.Min(raw.xMax,oclip.xMax);
+                float yMin=Mathf.Max(raw.yMin,oclip.yMin);
+                float yMax=Mathf.Min(raw.yMax,oclip.yMax);
+                if(xMax<=xMin||yMax<=yMin)return false;
+                raw=new Rect(xMin,yMin,xMax-xMin,yMax-yMin);
+            }
+            rect=raw;
+            return true;
+        }
+
         private static bool TryGetFfaHeaderHoverRect(FfaRecentMatchRow row,out Rect rect)
         {
             rect=default(Rect);
-            if(row==null||row.graph==null||!TryGetFfaScreenRect(row.headerRect,out Rect header))return false;
-            if(ffaRecentViewport!=null&&TryGetFfaScreenRect(ffaRecentViewport,out Rect clip))
-            {
-                float xMin=Mathf.Max(header.xMin,clip.xMin);
-                float xMax=Mathf.Min(header.xMax,clip.xMax);
-                float yMin=Mathf.Max(header.yMin,clip.yMin);
-                float yMax=Mathf.Min(header.yMax,clip.yMax);
-                if(xMax<=xMin||yMax<=yMin)return false;
-                rect=new Rect(xMin,yMin,xMax-xMin,yMax-yMin);
-            }
-            else rect=header;
-            return true;
+            if(row==null||row.graph==null)return false;
+            return TryGetFfaViewportClippedRect(row.headerRect,out rect);
         }
 
         private static void EnsureFfaGraphStyles()
@@ -1982,27 +2070,79 @@ namespace CompetitiveRounds
                 if(Event.current==null||Event.current.type!=EventType.Repaint)return;
                 if(!isOpen||currentTab!=12)return;
                 Vector2 mouse=Event.current.mousePosition;
+                // Cards-line tooltips first (a cards line is more specific
+                // than its row's header; the rects never overlap).
+                string cardsTip=null;
                 FfaTimelineGraph hit=null;
-                for(int i=0;i<ffaRecentRows.Count;i++)
+                for(int i=0;i<ffaRecentRows.Count&&cardsTip==null;i++)
                 {
                     var row=ffaRecentRows[i];
                     if(row?.root==null||!row.root.activeInHierarchy)continue;
-                    if(TryGetFfaHeaderHoverRect(row,out Rect hover)&&hover.Contains(mouse))
+                    for(int p=0;p<row.players.Count;p++)
                     {
-                        hit=row.graph;
-                        break;
+                        var pu=row.players[p];
+                        if(pu?.cardsGO==null||!pu.cardsGO.activeInHierarchy)continue;
+                        if(string.IsNullOrEmpty(pu.cardsHoverText))continue;
+                        var cardsRt=pu.cardsGO.GetComponent<RectTransform>();
+                        if(cardsRt==null)continue;
+                        if(TryGetFfaViewportClippedRect(cardsRt,out Rect cr)&&cr.Contains(mouse))
+                        {
+                            cardsTip=pu.cardsHoverText;
+                            break;
+                        }
                     }
+                    if(cardsTip==null&&hit==null
+                       &&TryGetFfaHeaderHoverRect(row,out Rect hover)&&hover.Contains(mouse))
+                        hit=row.graph;
                 }
-                if(hit==null)return;
+                if(cardsTip==null&&hit==null)return;
                 int previousDepth=GUI.depth;
                 try
                 {
                     GUI.depth=-20000;
-                    DrawFfaTimelineGraph(hit,mouse);
+                    if(cardsTip!=null)DrawFfaCardsTooltip(cardsTip,mouse);
+                    else DrawFfaTimelineGraph(hit,mouse);
                 }
                 finally{GUI.depth=previousDepth;}
             }
             catch{}
+        }
+
+        private static GUIStyle ffaCardsTipStyle;
+        private static string ffaCardsTipCachedText;
+        private static float ffaCardsTipCachedHeight;
+        private static void DrawFfaCardsTooltip(string tip,Vector2 mouse)
+        {
+            if(ffaCardsTipStyle==null)
+            {
+                ffaCardsTipStyle=new GUIStyle(GUI.skin.label)
+                {
+                    fontSize=13,fontStyle=FontStyle.Bold,alignment=TextAnchor.UpperLeft,
+                    richText=true,wordWrap=true,clipping=TextClipping.Overflow
+                };
+                ffaCardsTipStyle.normal.textColor=Color.white;
+            }
+            const float width=470f,pad=10f;
+            // CalcHeight is exact but too expensive to re-run per Repaint over
+            // a long list (#237) — cache by content (only one tooltip can be
+            // hovered at a time, so a single slot suffices).
+            if(!ReferenceEquals(tip,ffaCardsTipCachedText))
+            {
+                ffaCardsTipCachedText=tip;
+                ffaCardsTipCachedHeight=ffaCardsTipStyle.CalcHeight(new GUIContent(tip),width-pad*2f);
+            }
+            float h=ffaCardsTipCachedHeight+pad*2f;
+            // Clamp BOTH edges: an extreme list can measure taller than the
+            // screen, and the Min alone would then place the box at negative
+            // Y (Codex Jul-29 find 9).
+            float x=Mathf.Max(8f,Mathf.Min(mouse.x+18f,Screen.width-width-8f));
+            float y=Mathf.Max(8f,Mathf.Min(mouse.y+14f,Screen.height-h-8f));
+            var box=new Rect(x,y,width,h);
+            var prev=GUI.color;
+            GUI.color=new Color(0.07f,0.08f,0.10f,0.96f);
+            GUI.DrawTexture(box,Texture2D.whiteTexture);
+            GUI.color=prev;
+            GUI.Label(new Rect(box.x+pad,box.y+pad,width-pad*2f,ffaCardsTipCachedHeight),tip,ffaCardsTipStyle);
         }
 
         // 2s queue traffic rides the internal throttles; recent + bets 10s,
@@ -2272,8 +2412,10 @@ namespace CompetitiveRounds
             UIFactory.AddVLG(panel,spacing:8,padL:20,padR:10,padT:8,padB:14);
             var o1HdrRow=new GameObject("O1HdrRow");o1HdrRow.transform.SetParent(panel.transform,false);o1HdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(o1HdrRow,spacing:10);UIFactory.AddLE(o1HdrRow,prefH:45,flexH:0);
-            UIFactory.CreateText("O1H",o1HdrRow.transform,"1v2 — Solo vs Duo",32f,C_GOLD,sizeDelta:new Vector2(842,43));
-            UIFactory.CreateButton("O1Info",o1HdrRow.transform,"Info",21f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.OvtTitle,ModeInfoText.Ovt),sizeDelta:new Vector2(124,38));
+            UIFactory.CreateText("O1H",o1HdrRow.transform,"1v2 — Solo vs Duo",32f,C_GOLD,sizeDelta:new Vector2(500,43));
+            // Standardized Info button (see the FFA header comment).
+            var o1HdrSp=new GameObject("O1HdrSp");o1HdrSp.transform.SetParent(o1HdrRow.transform,false);o1HdrSp.AddComponent<RectTransform>();UIFactory.AddLE(o1HdrSp,flexW:1);
+            UIFactory.CreateButton("O1Info",o1HdrRow.transform,"Info",18f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.OvtTitle,ModeInfoText.Ovt),sizeDelta:new Vector2(110,34));
             UIFactory.CreateText("O1Beta",panel.transform,"<color=#FFCC44>UNRANKED BETA</color> — single games, no series rating yet. Stats are tracked and will count once ranked launches.",19f,C_DIM,sizeDelta:new Vector2(915,29));
 
             // Queue controls row.
@@ -11822,13 +11964,18 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             thdrRow.transform.SetParent(panel.transform, false);
             thdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(thdrRow, spacing: 8);
-            UIFactory.AddLE(thdrRow, prefH: 30, flexH: 0);
+            UIFactory.AddLE(thdrRow, prefH: 38, flexH: 0);
             txtTeamHeader = UIFactory.CreateText("THdr", thdrRow.transform,
                 "<b>2v2 Ranked</b>  <color=#888>(separate Glicko, FF on, BO3 series)</color>",
-                20f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 28));
-            UIFactory.CreateButton("THdrInfo", thdrRow.transform, "Info", 14f, C_WHITE, C_BTN,
+                20f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 28));
+            // Standardized Info button (see the FFA header comment).
+            var thdrSp = new GameObject("THdrSp");
+            thdrSp.transform.SetParent(thdrRow.transform, false);
+            thdrSp.AddComponent<RectTransform>();
+            UIFactory.AddLE(thdrSp, flexW: 1);
+            UIFactory.CreateButton("THdrInfo", thdrRow.transform, "Info", 18f, C_WHITE, C_BTN,
                 () => ShowInfoPopup(ModeInfoText.TeamTitle, ModeInfoText.Team),
-                sizeDelta: new Vector2(84, 28));
+                sizeDelta: new Vector2(110, 34));
 
             // Status / queue panel — height is sum of children. Don't fix it; let VLG
             // size naturally so the button row below isn't clipped off-screen (the

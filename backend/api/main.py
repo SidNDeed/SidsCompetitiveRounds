@@ -612,6 +612,7 @@ async def team_queue_cleanup_loop():
                             text("DELETE FROM team_queue WHERE series_id = :sid"),
                             {"sid": sid},
                         )
+                        await _reconcile_team_series_bets(db, sid, "stale_queue_rows cancel")
                         print(f"[TEAM-QUEUE-CLEANUP] stale series cancelled + rows cleared: {sid}")
                 await db.commit()
         except Exception as e:
@@ -852,6 +853,7 @@ async def queue_cleanup_loop():
                     if upd.fetchall():
                         ffa_dead_ids.append(c["id"])
                 for lid in ffa_dead_ids:
+                    await _reconcile_ffa_lobby_bets(db, lid, "janitor dead lock")
                     print(f"[FFA-CLEANUP] Zero-game dead lobby canceled: {lid}")
                 if ffa_dead_ids:
                     await db.execute(
@@ -895,6 +897,7 @@ async def queue_cleanup_loop():
                               ) < NOW() - INTERVAL '25 minutes'
                         RETURNING l.id"""))
                 for r in ffa_dispersed.fetchall():
+                    await _reconcile_ffa_lobby_bets(db, r[0], "dispersed 25m close")
                     print(f"[FFA-CLEANUP] Dispersed lobby closed (no game in 25m): {r[0]}")
 
                 # Fast path for the whole lobby having quit ROUNDS: the presence
@@ -921,6 +924,7 @@ async def queue_cleanup_loop():
                     await db.execute(text(
                         "UPDATE ffa_lobbies SET status='completed', completed_at=NOW()"
                         " WHERE id=:lid AND status='active'"), {"lid": qrow["id"]})
+                    await _reconcile_ffa_lobby_bets(db, qrow["id"], "nobody online close")
                     print(f"[FFA-CLEANUP] Abandoned lobby closed (nobody online): {qrow['id']}")
 
                 ffa_done = await db.execute(
@@ -934,6 +938,7 @@ async def queue_cleanup_loop():
                                             AND q.last_polled >= NOW() - INTERVAL '30 minutes')
                         RETURNING l.id"""))
                 for r in ffa_done.fetchall():
+                    await _reconcile_ffa_lobby_bets(db, r[0], "played-out 3h close")
                     print(f"[FFA-CLEANUP] Played-out lobby closed: {r[0]}")
                 # Free every row pointing at a lobby that is no longer active.
                 # This is what actually un-sticks the player: closing the lobby
@@ -968,6 +973,105 @@ async def queue_cleanup_loop():
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] ffa sweep error: {e}")
+        # ── Stranded-bet reconciliation (bet-lifecycle backstop) ────────
+        # Wagers can outlive their lobby/series: a closure path without bet
+        # handling (the NotNic 500g class), a settle savepoint rollback on a
+        # completed series, or a cancel that raced. Every arm below is
+        # claim-based and idempotent, so it is safe beside the live settle
+        # paths; the age margins keep it clear of any in-flight completion
+        # transaction. One commit per entity — a transaction that holds at
+        # most one lobby/series' bettor rows can't chain deadlocks (#204).
+        try:
+            async with async_session() as db:
+                # FFA: unsettled bets whose lobby already closed. Reconcile =
+                # settle games with a recorded result, refund the rest (#241).
+                stranded_ffa = (await db.execute(text("""
+                    SELECT DISTINCT b.lobby_id FROM ffa_bets b
+                      JOIN ffa_lobbies l ON l.id = b.lobby_id
+                     WHERE b.settled_at IS NULL
+                       AND l.status <> 'active'
+                       AND b.created_at < NOW() - INTERVAL '10 minutes'
+                     LIMIT 10"""))).scalars().all()
+                for lid in stranded_ffa:
+                    await _reconcile_ffa_lobby_bets(db, lid, "stranded-bet sweep")
+                    await db.commit()
+                # 2v2: unsettled bets on a TERMINAL series. Explicit status
+                # list, not <> 'active' (Codex Jul-29 find 2): dc_incomplete /
+                # dc_paused are awaiting an admin decision — refunding there
+                # would strand the eventual valid payout, since completion
+                # selects only unsettled rows.
+                stranded_team = (await db.execute(text("""
+                    SELECT DISTINCT b.team_series_id FROM team_bets b
+                      JOIN team_series ts ON ts.id = b.team_series_id
+                     WHERE b.settled_at IS NULL
+                       AND ts.status IN ('completed','cancelled','canceled')
+                       AND b.created_at < NOW() - INTERVAL '10 minutes'
+                     LIMIT 10"""))).scalars().all()
+                for sid in stranded_team:
+                    await _reconcile_team_series_bets(db, sid, "stranded-bet sweep")
+                    await db.commit()
+                # ...and on an 'active' series that stopped producing games
+                # 60+ minutes ago — the forever-'active' husk class (see the
+                # account-deletion comment on orphaned shells). Mirrors the
+                # 1v1 stalled-series refund: stakes go back, the series row
+                # itself is the queue janitors' problem. A refunded bet stays
+                # refunded even if the series later completes (#107).
+                stalled_team = (await db.execute(text("""
+                    SELECT DISTINCT b.team_series_id FROM team_bets b
+                      JOIN team_series ts ON ts.id = b.team_series_id
+                     WHERE b.settled_at IS NULL
+                       AND ts.status = 'active'
+                       AND COALESCE((SELECT MAX(tm.created_at) FROM team_matches tm
+                                      WHERE tm.series_id = ts.id), ts.created_at)
+                           < NOW() - INTERVAL '60 minutes'
+                     LIMIT 10"""))).scalars().all()
+                for sid in stalled_team:
+                    # 'active' opted into the refund set HERE only — this is
+                    # the deliberate husk policy. The helper's NO KEY UPDATE
+                    # lock serializes against a completion/DC transition
+                    # already holding the series row — but a writer that
+                    # hasn't taken its lock yet can still land AFTER our
+                    # refund commits (it only requires a game-less hour plus
+                    # a ~ms interleaving). The outcome is the refund-sticky
+                    # policy (#107): stakes returned, never double-paid.
+                    await _reconcile_team_series_bets(
+                        db, sid, "stalled-active sweep",
+                        allow_refund_statuses=_TEAM_BET_REFUND_STATUSES + ("active",))
+                    await db.commit()
+                # 1v1: settle catch-up only — a completed, non-reversed series
+                # whose bet-settle savepoint rolled back. Refunds for stalled/
+                # abandoned 1v1 series stay the _prune_stale_series job.
+                stranded_1v1 = (await db.execute(text("""
+                    SELECT b.id AS bet_id, b.player_id, b.bet_on_player_id, b.amount,
+                           b.odds_multiplier, rs.winner_id, rs.id AS series_id
+                      FROM bets b
+                      JOIN ranked_series rs ON rs.id = b.series_id
+                     WHERE b.settled_at IS NULL
+                       AND rs.status = 'completed'
+                       AND rs.invalidated_at IS NULL
+                       AND rs.winner_id IS NOT NULL
+                       AND b.created_at < NOW() - INTERVAL '10 minutes'
+                     ORDER BY b.player_id::text, b.id
+                     LIMIT 20"""))).mappings().all()
+                for b in stranded_1v1:
+                    pay = (int(round(b["amount"] * float(b["odds_multiplier"])))
+                           if b["bet_on_player_id"] == b["winner_id"] else 0)
+                    claimed = (await db.execute(text(
+                        "UPDATE bets SET payout = :p, settled_at = NOW()"
+                        " WHERE id = :bid AND settled_at IS NULL RETURNING id"
+                    ), {"p": pay, "bid": b["bet_id"]})).scalar()
+                    if claimed is None:
+                        continue
+                    if pay > 0:
+                        await db.execute(text(
+                            "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = :pid"
+                        ), {"p": pay, "pid": b["player_id"]})
+                        db.add(GoldTransaction(player_id=b["player_id"], amount=pay,
+                                               reason="bet_win", reference_id=str(b["series_id"])))
+                    print(f"[BETS] janitor settled stuck bet {b['bet_id']} on completed series {b['series_id']} (payout {pay})")
+                    await db.commit()
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] stranded-bet sweep error: {e}")
 
 
 app = FastAPI(
@@ -11044,6 +11148,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                       invalidation_reason='member_deleted'
                 WHERE id=:sid AND status='active' AND spawn_confirmations < 4"""),
             {"sid": _sid})
+        await _reconcile_team_series_bets(db, _sid, "member deleted")
         await db.execute(text(
             """UPDATE team_queue SET status='searching', series_id=NULL, team_assigned=NULL,
                       room_name=NULL, matched_at=NULL
@@ -11079,13 +11184,15 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
             """UPDATE ffa_lobbies SET status='completed', completed_at=NOW()
                 WHERE id=:lid AND status='active' AND games_played > 0"""),
             {"lid": _lid})
-        await _refund_ffa_lobby_bets(db, _lid, "member deleted")
+        # Reconcile, not blanket-refund: a PLAYED lobby can hold bets whose
+        # game has a recorded winner (#241 — those settle, the rest refund).
+        await _reconcile_ffa_lobby_bets(db, _lid, "member deleted")
         await db.execute(text(
             """UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
                 WHERE series_id=:lid
                   AND EXISTS (SELECT 1 FROM ffa_lobbies l WHERE l.id=:lid
-                              AND l.invalidation_reason='member_deleted')"""),
+                              AND l.status <> 'active')"""),
             {"lid": _lid})
 
     # Steam sessions store the raw Steam ID (and authenticate as it) — purge
@@ -12961,6 +13068,7 @@ async def team_queue_leave(request: Request, steam_id: str = Query(...), db: Asy
                 """),
                 {"sid": r["series_id"]},
             )
+            await _reconcile_team_series_bets(db, r["series_id"], "pre_match_leaver")
         await db.execute(
             text("DELETE FROM team_queue WHERE player_id = :pid"),
             {"pid": player.id},
@@ -13201,6 +13309,7 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                     text("UPDATE team_series SET status='cancelled', invalidated_at=NOW(), invalidation_reason='ready_timeout' WHERE id = :sid"),
                     {"sid": me["series_id"]},
                 )
+                await _reconcile_team_series_bets(db, me["series_id"], "ready_timeout")
                 await db.commit()
                 return TeamQueuePollResponse(status="searching")
 
@@ -13809,6 +13918,7 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
             """),
             {"sid": sid_uuid},
         )
+        await _reconcile_team_series_bets(db, sid_uuid, "assembly_timeout")
         await db.commit()
         return {
             "status": "canceled",
@@ -14082,8 +14192,16 @@ async def _complete_team_series_with_ratings(
             for b in unsettled:
                 won = (b["bet_on_team"] == winner_team)
                 payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
-                await db.execute(text("UPDATE team_bets SET settled_at=NOW(), payout=:p WHERE id=:id"),
-                                 {"p": payout, "id": b["id"]})
+                # Claim-gated (Codex Jul-29 find 1): the SELECT above is a
+                # snapshot — a janitor reconcile can settle/refund this bet
+                # between it and here, and an unconditional UPDATE would
+                # overwrite that terminal state and pay a second time.
+                claimed = (await db.execute(text(
+                    "UPDATE team_bets SET settled_at=NOW(), payout=:p"
+                    " WHERE id=:id AND settled_at IS NULL RETURNING id"),
+                    {"p": payout, "id": b["id"]})).scalar()
+                if claimed is None:
+                    continue
                 if payout > 0:
                     await db.execute(text("UPDATE players SET gold_earned=COALESCE(gold_earned,0)+:p WHERE id=:pid"),
                                      {"p": payout, "pid": b["player_id"]})
@@ -14097,6 +14215,107 @@ async def _complete_team_series_with_ratings(
     await _lock_queue_rows_ordered(db, "team_queue", gids)
     await db.execute(text("DELETE FROM team_queue WHERE series_id = :sid"), {"sid": series_uuid})
     return new_ratings
+
+
+# Statuses on which _reconcile_team_series_bets may REFUND. Deliberately NOT
+# "anything but completed": dc_incomplete / dc_paused are awaiting an admin
+# decision — refunding there would strand a valid winning bet forever, because
+# the eventual completion only selects unsettled rows (Codex Jul-29 find 2).
+_TEAM_BET_REFUND_STATUSES = ("cancelled", "canceled")
+
+
+async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str,
+                                      allow_refund_statuses: tuple = _TEAM_BET_REFUND_STATUSES):
+    """Terminal bet resolution for a 2v2 series that is being cancelled/voided
+    (or is discovered already closed with unsettled bets — the janitor sweep).
+    A completed, non-invalidated series with a recorded winner SETTLES its
+    unsettled bets against that result (#241 — the settle savepoint can roll
+    back while the completion commits, leaving chargeable-but-unpaid winners);
+    a series in an allowed terminal-cancel status refunds the stake; ANY other
+    status (active, dc_incomplete, dc_paused, ...) is skipped — its lifecycle
+    isn't decided yet. The stalled-active janitor arm opts 'active' into the
+    refund set explicitly (the husk policy, mirroring the 1v1 stalled prune).
+
+    The series row is locked FOR NO KEY UPDATE first (#202: the weakest mode
+    that conflicts with everything we must serialize against): it conflicts
+    with the FOR UPDATE every completion path holds AND with the plain status
+    UPDATEs (report-dc's flip to dc_incomplete takes NO KEY UPDATE, which
+    KEY SHARE would have sailed past — Codex round-2 find 2), while staying
+    compatible with the FK KEY SHARE that team_bets/team_matches INSERTs take.
+    So an in-flight completion or DC transition commits before we classify,
+    and we then settle/skip against the real state instead of refunding it.
+    Accepted residual (round-2 find 1 / round-3 find 1): a series writer that
+    has not yet taken its series lock when the stalled sweep claims a refund
+    can still finish afterwards — report-dc between its synthetic-match
+    INSERT (FK KEY SHARE only) and the completion helper's FOR UPDATE, or the
+    non-forfeit DC path whose dc_incomplete flip was read-then-write. Both
+    need a game-less HOUR plus a ~ms interleaving, and the outcome is always
+    the documented refund-sticky policy (#107): stakes returned, never a
+    double-pay (every write is claimed), with the skip/settle decision made
+    against whatever state committed first.
+    Claim-first per bet (settled_at gate inside the UPDATE) so a concurrent
+    settle can never double-pay; gold direction mirrors the live paths (win:
+    gold_earned += payout; refund: gold_spent -= stake). Bounded per pass
+    (leftovers picked up by the janitor's next tick). Savepoint-contained,
+    never raises."""
+    try:
+        async with db.begin_nested():
+            srow = (await db.execute(text(
+                "SELECT status, winner_team, invalidated_at FROM team_series"
+                " WHERE id = :sid FOR NO KEY UPDATE"
+            ), {"sid": series_uuid})).mappings().first()
+            if srow is None:
+                return
+            settle_against = (srow["winner_team"]
+                              if (srow["status"] == "completed"
+                                  and srow["winner_team"] in (1, 2)
+                                  and srow["invalidated_at"] is None)
+                              else None)
+            if settle_against is None and srow["status"] not in allow_refund_statuses:
+                print(f"[TEAM-BETS] reconcile skipped for {series_uuid} ({reason}): "
+                      f"status '{srow['status']}' is not terminal here")
+                return
+            unsettled = (await db.execute(text(
+                "SELECT id, player_id, amount, odds_multiplier, bet_on_team"
+                "  FROM team_bets WHERE team_series_id = :sid AND settled_at IS NULL"
+                " ORDER BY player_id::text, id LIMIT 200"
+            ), {"sid": series_uuid})).mappings().all()
+            settled = refunded = 0
+            for b in unsettled:
+                if settle_against is not None:
+                    pay = (int(round(b["amount"] * float(b["odds_multiplier"])))
+                           if b["bet_on_team"] == settle_against else 0)
+                else:
+                    pay = b["amount"]   # payout == stake marks a refund (#107/#244)
+                claimed = (await db.execute(text(
+                    "UPDATE team_bets SET payout = :p, settled_at = NOW()"
+                    " WHERE id = :bid AND settled_at IS NULL RETURNING id"
+                ), {"p": pay, "bid": b["id"]})).scalar()
+                if claimed is None:
+                    continue
+                if settle_against is not None:
+                    settled += 1
+                    if pay > 0:
+                        await db.execute(text(
+                            "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :p WHERE id = :pid"
+                        ), {"p": pay, "pid": b["player_id"]})
+                        db.add(GoldTransaction(player_id=b["player_id"], amount=pay,
+                                               reason="team_bet_payout", reference_id=str(series_uuid)))
+                else:
+                    refunded += 1
+                    await db.execute(text(
+                        "UPDATE players SET gold_spent = GREATEST(0, COALESCE(gold_spent,0) - :amt) WHERE id = :pid"
+                    ), {"amt": b["amount"], "pid": b["player_id"]})
+                    db.add(GoldTransaction(player_id=b["player_id"], amount=b["amount"],
+                                           reason="team_bet_refund", reference_id=str(series_uuid)))
+            # Flush INSIDE the savepoint — an unflushed ORM add would survive
+            # the rollback and write a ledger row without its gold move (#187).
+            await db.flush()
+            if settled or refunded:
+                print(f"[TEAM-BETS] reconciled series {series_uuid} ({reason}): "
+                      f"{settled} settled, {refunded} refunded")
+    except Exception as ex:
+        print(f"[TEAM-BETS] reconcile failed for {series_uuid} ({reason}) — janitor retries: {ex}")
 
 
 @app.post("/api/v1/admin/team/series/{series_id}/resolve", tags=["Admin"])
@@ -14165,6 +14384,7 @@ async def admin_resolve_team_series(
         ), {"sid": sid_uuid})).scalars().all())
         await _lock_queue_rows_ordered(db, "team_queue", void_queue_ids)
         await db.execute(text("DELETE FROM team_queue WHERE series_id=:sid"), {"sid": sid_uuid})
+        await _reconcile_team_series_bets(db, sid_uuid, "admin_void")
         await db.commit()
         return {"status": "voided", "series_id": series_id}
 
@@ -14395,6 +14615,9 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
                invalidated_at = NOW(), invalidation_reason = :rsn
          WHERE id = :sid
     """), {"sid": sid, "rsn": (req.reason or "admin_reverse")[:64]})
+    # Unsettled bets on the now-voided result are refunded (settled bets are
+    # deliberately untouched — winnings clawback is a separate policy call).
+    await _reconcile_team_series_bets(db, sid, "admin_reverse")
     db.add(AdminAction(admin_steam_id=req.admin_steam_id, action="reverse_team_series",
                        target_series_id=sid, details={"reason": req.reason}))
     await db.commit()
@@ -16121,7 +16344,9 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
          RETURNING l.id
     """))).scalars().all()
     for _slid in stale:
-        await _refund_ffa_lobby_bets(db, _slid, "stale sweep")
+        # Reconcile, not blanket-refund: these lobbies HAVE recorded games,
+        # so an unsettled bet here can be a savepoint-failed win/loss (#241).
+        await _reconcile_ffa_lobby_bets(db, _slid, "stale sweep")
     me = await _lock_queue_group_for_player(db, "ffa_queue", steam_id)
     if me is None:
         await db.commit()
@@ -16142,10 +16367,7 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
                        room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
                  WHERE series_id = :lid AND player_id != :pid
             """), {"lid": lobby_id, "pid": me["player_id"]})
-            try:
-                await _refund_ffa_lobby_bets(db, lobby_id, "lobby dissolved")
-            except Exception as _rex:
-                print(f"[FFA-BETS] dissolve refund failed: {_rex}")
+            await _reconcile_ffa_lobby_bets(db, lobby_id, "lobby dissolved")
             dissolved = True
             print(f"[FFA-LOCK] lobby dissolved by leave (lobby {lobby_id}, leaver {steam_id})")
         elif lrow is not None and lrow["status"] == "active":
@@ -16172,7 +16394,7 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
                 "DELETE FROM ffa_queue WHERE series_id = :lid AND player_id != :pid"
             ), {"lid": lobby_id, "pid": me["player_id"]})
             if closed == "completed":
-                await _refund_ffa_lobby_bets(db, lobby_id, "sitting over (last members left)")
+                await _reconcile_ffa_lobby_bets(db, lobby_id, "sitting over (last members left)")
                 print(f"[FFA-LOCK] played lobby {lobby_id} closed — all but one member departed")
             else:
                 print(f"[FFA-LOCK] member left played lobby {lobby_id} (leaver {steam_id}) — lobby stays active for the survivors")
@@ -16361,28 +16583,10 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
             # Reconcile-before-refund (Codex sitting-over review find 3): a
             # report can commit while its bet-settlement savepoint rolled
             # back (the deliberate #187 split) — those bets are unsettled
-            # but their game HAS a recorded winner. Settle them against the
-            # recorded result first (same game-number logic as the report
-            # path's catch-up); refund only wagers on games never played.
-            try:
-                unsettled_games = (await db.execute(text(
-                    "SELECT DISTINCT game_number FROM ffa_bets"
-                    " WHERE lobby_id = :lid AND settled_at IS NULL"
-                ), {"lid": me["series_id"]})).scalars().all()
-                for sg in unsettled_games:
-                    past_winner = (await db.execute(text(
-                        "SELECT winner_id FROM ffa_matches"
-                        " WHERE lobby_id = :lid AND photon_room_id LIKE :sfx ESCAPE '\\'"
-                        "   AND invalidated_at IS NULL ORDER BY ended_at LIMIT 1"
-                    ), {"lid": me["series_id"], "sfx": f"%\\_r{int(sg)}"})).scalar()
-                    if past_winner is not None:
-                        await _settle_ffa_bets_for_game(db, me["series_id"], int(sg), past_winner)
-            except Exception as _rex:
-                print(f"[FFA-BETS] closure reconcile failed (refund covers): {_rex}")
-            try:
-                await _refund_ffa_lobby_bets(db, me["series_id"], "sitting over (all members back at menu)")
-            except Exception as _rex:
-                print(f"[FFA-BETS] sitting-over refund failed: {_rex}")
+            # but their game HAS a recorded winner. The shared helper settles
+            # them against the recorded result and refunds only wagers on
+            # games never played.
+            await _reconcile_ffa_lobby_bets(db, me["series_id"], "sitting over (all members back at menu)")
             await db.execute(text("DELETE FROM ffa_queue WHERE series_id = :lid"),
                              {"lid": me["series_id"]})
             await db.commit()
@@ -16395,10 +16599,7 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                     "UPDATE ffa_lobbies SET status='canceled', invalidation_reason=:rsn,"
                     "       invalidated_at=NOW() WHERE id=:lid AND status='active'"
                 ), {"lid": me["series_id"], "rsn": reason})
-                try:
-                    await _refund_ffa_lobby_bets(db, me["series_id"], "dead lock reset")
-                except Exception as _rex:
-                    print(f"[FFA-BETS] dead-lock refund failed: {_rex}")
+                await _reconcile_ffa_lobby_bets(db, me["series_id"], "dead lock reset")
             await db.execute(text("""
                 UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
                        room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
@@ -16877,14 +17078,26 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                "asec": tel.active_seconds if tel else None,
                "ft": tel.fps_timeline if tel else None, "pt2": tel.ping_timeline if tel else None,
                "ht": tel.hit_timeline if tel else None, "bt": tel.block_timeline if tel else None})
-        for i, c in enumerate(p.cards or []):
+        # Cap + sanitize (Codex Jul-29 adjacent finds): the cards list is
+        # client-supplied and outside the HMAC canonical — bound the row count
+        # (a real game never exceeds a few dozen picks) and strip control
+        # characters, which otherwise reach TMP as literal line breaks and
+        # wreck row-height estimates and tooltips.
+        for i, c in enumerate((p.cards or [])[:64]):
             nm = getattr(c, "card_name", None)
             if not nm:
                 continue
+            # Strip C0 AND C1 controls AND the Unicode line/paragraph
+            # separators — U+0085/U+2028/U+2029 are line breaks to TMP and
+            # survive a bare `< ' '` test (Codex round-2 find 5).
+            nm_clean = "".join(
+                " " if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F
+                        or ord(ch) in (0x2028, 0x2029)) else ch
+                for ch in str(nm))
             await db.execute(text(
                 "INSERT INTO ffa_match_cards (match_id, player_id, card_name, card_rarity,"
                 " pick_order, round_number, rolled) VALUES (:m, :p, :c, :r, :o, :rn, :rl)"
-            ), {"m": match_id, "p": pid, "c": str(nm)[:64],
+            ), {"m": match_id, "p": pid, "c": nm_clean[:64],
                 "r": (getattr(c, "card_rarity", None) or "")[:16] or None,
                 "rl": bool(getattr(c, "rolled", False)),
                 "o": getattr(c, "pick_order", i) or i,
@@ -17243,53 +17456,118 @@ def _ffa_room_game_no(room_id: str | None) -> int | None:
 
 async def _settle_ffa_bets_for_game(db: AsyncSession, lobby_id, game_no: int, winner_pid):
     """Pay/lose every unsettled bet on one specific game. Gold credit is a
-    single atomic UPDATE (#148)."""
+    single atomic UPDATE (#148). Each bet is CLAIMED first (settled_at set in
+    the same statement that is gated on settled_at IS NULL) so two concurrent
+    settle passes — e.g. two reports' catch-up loops, or a report racing the
+    stranded-bet janitor — can never both pay the same bet."""
     open_bets = (await db.execute(text(
         "SELECT id, player_id, bet_on_player_id, amount, odds_multiplier"
         "  FROM ffa_bets WHERE lobby_id = :lid AND game_number = :g AND settled_at IS NULL"
+        " ORDER BY player_id::text, id LIMIT 200"
     ), {"lid": lobby_id, "g": game_no})).mappings().all()
+    n = 0
     for b in open_bets:
-        if b["bet_on_player_id"] == winner_pid:
-            pay = int(round(b["amount"] * float(b["odds_multiplier"])))
+        pay = (int(round(b["amount"] * float(b["odds_multiplier"])))
+               if b["bet_on_player_id"] == winner_pid else 0)
+        claimed = (await db.execute(text(
+            "UPDATE ffa_bets SET payout = :p, settled_at = NOW()"
+            " WHERE id = :bid AND settled_at IS NULL RETURNING id"
+        ), {"p": pay, "bid": b["id"]})).scalar()
+        if claimed is None:
+            continue   # another pass got here first — it also moved the gold
+        n += 1
+        if pay > 0:
             await db.execute(text(
                 "UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = :pid"
             ), {"g": pay, "pid": b["player_id"]})
             db.add(GoldTransaction(player_id=b["player_id"], amount=pay,
                                    reason="ffa_bet_win", reference_id=str(lobby_id)))
-            await db.execute(text(
-                "UPDATE ffa_bets SET payout = :p, settled_at = NOW() WHERE id = :bid"
-            ), {"p": pay, "bid": b["id"]})
-        else:
-            await db.execute(text(
-                "UPDATE ffa_bets SET payout = 0, settled_at = NOW() WHERE id = :bid"
-            ), {"bid": b["id"]})
-    if open_bets:
-        print(f"[FFA-BETS] settled {len(open_bets)} bet(s) on lobby {lobby_id} game {game_no}")
+    if n:
+        print(f"[FFA-BETS] settled {n} bet(s) on lobby {lobby_id} game {game_no}")
 
 
-async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str):
-    """Refund every unsettled bet on a lobby (cancel/sweep paths). Payout ==
-    stake marks a refund (#107 display rule). Runs inside its OWN savepoint
-    and never raises (Codex round-2 review find 5: a refund deadlock used to
-    leave the CALLER's transaction aborted, killing the whole leave/cancel)."""
+async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_number: int | None = None):
+    """Refund unsettled bets on a lobby (cancel/sweep paths), optionally only
+    one game's. Payout == stake marks a refund (#107 display rule). Claim-first
+    like the settle (no double-refund across concurrent passes). Runs inside
+    its OWN savepoint and never raises (Codex round-2 review find 5: a refund
+    deadlock used to leave the CALLER's transaction aborted, killing the whole
+    leave/cancel)."""
     try:
         async with db.begin_nested():
+            game_filter = " AND game_number = :g" if game_number is not None else ""
+            params = {"lid": lobby_id}
+            if game_number is not None:
+                params["g"] = int(game_number)
             rows = (await db.execute(text(
-                "SELECT id, player_id, amount FROM ffa_bets WHERE lobby_id = :lid AND settled_at IS NULL"
-            ), {"lid": lobby_id})).mappings().all()
+                "SELECT id, player_id, amount FROM ffa_bets"
+                " WHERE lobby_id = :lid AND settled_at IS NULL"
+                + game_filter +
+                " ORDER BY player_id::text, id LIMIT 200"
+            ), params)).mappings().all()
+            n = 0
             for b in rows:
+                claimed = (await db.execute(text(
+                    "UPDATE ffa_bets SET payout = amount, settled_at = NOW()"
+                    " WHERE id = :bid AND settled_at IS NULL RETURNING id"
+                ), {"bid": b["id"]})).scalar()
+                if claimed is None:
+                    continue
+                n += 1
                 await db.execute(text(
                     "UPDATE players SET gold_spent = GREATEST(0, COALESCE(gold_spent,0) - :amt) WHERE id = :pid"
                 ), {"amt": b["amount"], "pid": b["player_id"]})
                 db.add(GoldTransaction(player_id=b["player_id"], amount=b["amount"],
                                        reason="ffa_bet_refund", reference_id=str(lobby_id)))
-                await db.execute(text(
-                    "UPDATE ffa_bets SET payout = amount, settled_at = NOW() WHERE id = :bid"
-                ), {"bid": b["id"]})
-            if rows:
-                print(f"[FFA-BETS] refunded {len(rows)} bet(s) on lobby {lobby_id} ({reason})")
+            # Flush INSIDE the savepoint — an unflushed ORM add would survive
+            # the rollback and write a ledger row without its gold move (#187).
+            await db.flush()
+            if n:
+                print(f"[FFA-BETS] refunded {n} bet(s) on lobby {lobby_id} ({reason})")
     except Exception as ex:
         print(f"[FFA-BETS] refund pass failed for {lobby_id} ({reason}) — retried at next closure event: {ex}")
+
+
+async def _reconcile_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str):
+    """Terminal bet resolution for a lobby that is closing (or already closed):
+    settle every unsettled bet whose game has a RECORDED result, refund only
+    the wagers on games that never happened (#241 — a blanket refund mis-pays
+    both sides of a played game whose settle savepoint rolled back). Safe on
+    zero-game lobbies (degrades to pure refund), idempotent (settled_at gate),
+    savepoint-contained, never raises."""
+    unresolved_games: list = []
+    try:
+        async with db.begin_nested():
+            games = (await db.execute(text(
+                "SELECT DISTINCT game_number FROM ffa_bets"
+                " WHERE lobby_id = :lid AND settled_at IS NULL ORDER BY game_number"
+            ), {"lid": lobby_id})).scalars().all()
+            for g in games:
+                winner = (await db.execute(text(
+                    "SELECT winner_id FROM ffa_matches"
+                    " WHERE lobby_id = :lid AND photon_room_id LIKE :sfx ESCAPE '\\'"
+                    "   AND invalidated_at IS NULL ORDER BY ended_at LIMIT 1"
+                ), {"lid": lobby_id, "sfx": f"%\\_r{int(g)}"})).scalar()
+                if winner is not None:
+                    await _settle_ffa_bets_for_game(db, lobby_id, int(g), winner)
+                else:
+                    unresolved_games.append(int(g))
+            # Flush the settle's ORM ledger adds inside the savepoint (#187).
+            await db.flush()
+    except Exception as ex:
+        # Do NOT fall through to the refund: with the settle pass rolled back,
+        # a refund would return stakes on games that DO have a recorded result
+        # (#241's exact mis-pay). The stranded-bet janitor sweep retries the
+        # whole reconcile on its next tick instead.
+        print(f"[FFA-BETS] closure reconcile failed for {lobby_id} ({reason}) — janitor retries: {ex}")
+        return
+    # Refund ONLY games with no recorded result — never a blanket pass over
+    # the leftovers (Codex round-2 find 7: with 200+ bets on one recorded
+    # game, the settle's per-pass cap leaves overflow unsettled, and a
+    # blanket refund would mis-pay it; scoped this way the overflow simply
+    # waits for the sweep's next tick to settle correctly).
+    for g in unresolved_games:
+        await _refund_ffa_lobby_bets(db, lobby_id, reason, game_number=g)
 
 
 @app.get("/api/v1/ffa/bettable", tags=["Betting"])
@@ -17931,11 +18209,18 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                 for b in unsettled:
                     won = (b["bet_on_team"] == winner_team)
                     payout = int(round(b["amount"] * b["odds_multiplier"])) if won else 0
-                    await db.execute(text("""
+                    # Claim-gated (Codex Jul-29 find 1): a janitor reconcile
+                    # can terminal-ize this bet between the snapshot SELECT
+                    # and here; an unconditional UPDATE would overwrite it and
+                    # double-pay.
+                    claimed = (await db.execute(text("""
                         UPDATE team_bets
                            SET settled_at = NOW(), payout = :p
-                         WHERE id = :id
-                    """), {"p": payout, "id": b["id"]})
+                         WHERE id = :id AND settled_at IS NULL
+                        RETURNING id
+                    """), {"p": payout, "id": b["id"]})).scalar()
+                    if claimed is None:
+                        continue
                     if payout > 0:
                         # Credit the bettor's gold.
                         await db.execute(text("""

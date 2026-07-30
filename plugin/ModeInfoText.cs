@@ -91,46 +91,80 @@ namespace CompetitiveRounds
 - Leaving mid-game is recorded.";
 
         public const string FfaTitle = "FFA - How It Works";
-        public const string Ffa = @"Free-for-all for 3-10 players. Every player is a team.
+        public const string Ffa = @"Free-for-all for 3-10 players. Every player is their own team.
+Standard ROUNDS scoring - first to 5 points takes the game.
 
 <color=#FFD94D><b>HOW TO PLAY</b></color>
 
 - The queue has no Elo band. Joining is consent to play.
+
 - At 3 players, a 25-second gather window begins.
   Up to 10 players can join. A full lobby starts at once.
-- The last player alive wins a half point.
-  2 half points make a point. The first to 5 points wins.
+
 - After each point, everyone except the point winner
   picks a card at the same time.
-- Nothing is ever picked for you. The pick window stays
-  open at least 45 seconds and extends while picks come
-  in (90 seconds max). Miss it and you get no card.
-- You can hold 5 cards.
-  Picking a 6th removes your oldest card.
 
-<color=#FFD94D><b>SCORING</b></color>
+- The pick timer is shown on screen. A pick landing
+  near the end grants everyone a little extra time.
+  When your timer hits zero, your highlighted card is
+  picked for you automatically. You always get a
+  card - skipping a pick is not possible.
+
+- You hold up to 5 cards.
+  Picking a 6th replaces your oldest card.
+
+<color=#FFD94D><b>RATING</b></color>
 
 - FFA is ranked with its own Glicko rating.
-- Placement uses points, then all half points earned
+
+- Placement uses points, then all round wins earned
   (spent ones included), then total kills.
-- Ties share a place using competition order: 1, 2, 2, 4.
-- Your rating is scored against the players placed nearest
-  to you (up to 4 of them), because beating or losing to a
-  neighbor says the most about your skill. This also keeps
-  one game from swinging your rating several times harder
-  in a 10-player lobby than in a 3-player one.
-- A tied placement counts as a draw. New ratings move fast
-  and settle down as you play more (standard Glicko).
+  Ties share a place using competition order: 1, 2, 2, 4.
+
+- Your rating is scored against the players placed
+  nearest to you (up to 4 of them), so one game can't
+  swing your rating several times harder in a 10-player
+  lobby than in a 3-player one.
+
+- A tied placement counts as a draw. New ratings move
+  fast and settle down as you play more.
 
 <color=#FFD94D><b>REWARDS</b></color>
 
-- XP starts at 300, plus 60 per player placed below you.
-- Winning multiplies that total: x1.5 in a 3-player game,
-  growing with lobby size up to x5 in a full 10.
-- XP converts to Gold at 100 XP = 1 Gold.
-- Spectators can bet Gold on FFA lobbies from the FFA tab.
-  Payouts scale with lobby size (up to x5) and use FFA
-  ratings; uncertain ratings restrict betting.
+- Each game pays 600 base XP, plus 90 XP per player
+  you placed above.
+
+- Placement multiplies that: up to x1.5 for winning a
+  3-player game, growing with lobby size to x5 for
+  winning a full 10. Lower places scale down smoothly;
+  last place keeps the base.
+
+- Placement Gold comes on top: 10-50 Gold by placement,
+  scaled by lobby size.
+
+- A stronger opposing field multiplies the XP part
+  (the same tier bonus as the other modes).
+
+- XP converts to Gold at 100 XP = 1 Gold, and level-ups
+  pay their usual bonus Gold. A level-up landing during
+  a game shows up inside that game's +g number - that is
+  how a last place can occasionally out-earn the winner.
+
+- Spectators can bet Gold on FFA lobbies from this tab.
+
+<color=#FFD94D><b>READING THE RECENT FFAS LIST</b></color>
+
+<color=#7FD4FF>Dots + N(P)</color> - Full points won.
+<color=#7FD4FF>Half dots + N(H)</color> - Round wins that
+  did not become one of that player's full points.
+<color=#7FD4FF>Nk</color> - Kills.
+<color=#7FD4FF>+xp +g</color> - That game's XP and Gold
+  (including any level-up bonus).
+<color=#7FD4FF>Green/red number</color> - FFA rating change.
+<color=#7FD4FF>Cards</color> - The hand held at game end.
+  <color=#FF6666>+N replaced</color> counts picks that were
+  pushed out by the 5-card cap - hover the line to see
+  every pick in order.
 
 <color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>
 
@@ -140,14 +174,13 @@ namespace CompetitiveRounds
 <color=#7FD4FF>Games</color> - Recorded FFA games played.
 <color=#7FD4FF>Wins</color> - Games finished in 1st place.
 <color=#7FD4FF>Top3</color> - Games finished in 1st, 2nd, or 3rd.
-<color=#7FD4FF>AvgPl</color> - Average finishing place over all games.
-  Lower is better. 1.0 means winning every game.
+<color=#7FD4FF>AvgPl</color> - Average finishing place. Lower is
+  better - 1.0 means winning every game.
 <color=#7FD4FF>WR</color> - Share of games won outright.
-  It is shown as a percent: 50% means half were wins.
 
 <color=#FFD94D><b>GOTCHAS</b></color>
 
 - Leaving mid-game is recorded.
-- A leaver keeps their tallies for placement.";
+  A leaver keeps their tallies for placement.";
     }
 }

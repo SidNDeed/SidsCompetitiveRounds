@@ -5,6 +5,48 @@
 Backend and bot changes in this block are **already live**. Client changes are built but not
 released — they ship with the next version.
 
+### FFA pick window (client, next release)
+
+- **Running out the pick timer no longer skips your pick.** When the on-screen countdown hits
+  zero, the card you have highlighted is picked automatically (card 1 if you never moved) and a
+  toast announces it. Skipping a pick used to be a way to protect a finished build from the
+  rolling 5-card cap, which defeated the point of the mode's card cycle. Nothing silent: the
+  timer is visible the whole time and the auto-pick is announced on screen.
+- The pick deadline is now published by the lobby's host clock, so every player's countdown and
+  auto-pick agree with the clock that actually closes the window — a slow-loading client can no
+  longer miss its forced pick to clock skew. (Mixed-version caveats until the minimum supported
+  version reaches this release: players on older builds don't auto-pick at all, and when the
+  lobby's host is an older build the deadline isn't shared, so this build falls back to a local
+  timer with a wider safety lead.)
+
+### Betting reliability (server, live)
+
+- **Bets can no longer be stranded when a lobby or series ends without a result.** Every way an
+  FFA lobby or 2v2 series closes now resolves its open bets: wagers on games that were actually
+  played settle against the recorded result, and wagers on games that never happened are
+  refunded. A background sweep also heals any bet that slipped through (including two
+  historical ones), so "charged but never resolved" can no longer persist.
+- 2v2 bets gained a refund path for cancelled or voided series — previously a cancelled series
+  destroyed the stake outright.
+- Settlement writes are claim-based on every path that touches FFA and 2v2 bets — a bet reaches
+  exactly one terminal state, so two concurrent resolution passes can never pay the same bet
+  twice. Series awaiting an admin decision after a disconnect are left untouched until the
+  decision lands.
+
+### FFA tab (client, next release)
+
+- Recent Ranked FFAs shows each player's **final hand** inline, with replaced picks collapsed
+  into a red "+N replaced" chip — hover the card line to see every pick in order. Long card
+  histories no longer wrap into multi-line blocks.
+- Titles render **after** the player name in Recent Ranked FFAs, matching every other surface.
+- Long name+title combinations no longer paint into the Rating column on the FFA leaderboard.
+- The Info button is the same size in the same place on the 2v2, 1v2 and FFA headers.
+- The FFA info popup was rewritten: it now explains the Recent FFAs display (points, unconverted
+  round wins, kills, replaced cards, rewards and rating change), documents the automatic pick,
+  carries the current reward numbers, and is spaced for reading. It also notes that a level-up
+  bonus lands inside that game's gold number — which is how a last place can occasionally
+  out-earn the winner.
+
 ### FFA gameplay
 
 - **Spawn positions were wrong in every 5+ player game.** The base game caches each spawn point as

@@ -32,22 +32,51 @@ namespace CompetitiveRounds
         public const int RoundsToWin = 5;
         public const int PointsToWinRound = 2;
         public const int CardCap = 5;
-        // Pick window (bug #92-#98): the old 25s CLIENT auto-pick silently
-        // confirmed card 0 for anyone who hadn't picked yet — with one human
-        // testing three seats it fired seconds after his own pick+key-spam,
-        // which read as "spamming space forces everyone's first card". Picks
-        // are NEVER made for a player now. The master closes the window
-        // adaptively instead: at least PickBase, extended by PickGrace after
-        // each received pick, hard-capped at PickCap; whoever hasn't picked
-        // by then simply gets no card that cycle.
+        // Pick window. Two design passes, both deliberate:
+        // - Bug #92-#98 killed the old 25s SILENT auto-pick (invisible timer;
+        //   with one human testing three seats it fired seconds after his own
+        //   pick+key-spam and read as "spamming space forces everyone's first
+        //   card").
+        // - Sid's July 29 correction: a player must NEVER be able to skip a
+        //   pick — "miss the window, get no card" let anyone protect a
+        //   finished build by ignoring the timer, defeating the rolling
+        //   5-card bar. So the pick is FORCED, but legibly: the countdown is
+        //   on the HUD the whole time, and when it hits zero the client
+        //   confirms the card the player has HIGHLIGHTED (card 0 if never
+        //   moved) and announces it in a toast. The master still closes the
+        //   window without a client that never published (crashed/stalled
+        //   seat) — that residual path keeps the "no card" toast.
+        // Master close rule: at least PickBase, extended by PickGrace after
+        // each received pick, hard-capped at PickCap.
         private const float PickBaseSeconds = 45f;
         private const float PickGraceSeconds = 20f;
         private const float PickCapSeconds = 90f;
         private const float ManifestWaitSeconds = 8f;
+        // The auto-confirm fires this many seconds BEFORE the deadline so the
+        // pick prop lands before the MASTER's copy of the rule closes the
+        // window. Two leads (Codex round-2 find 3a): tracking a
+        // master-published shared deadline the only slack needed is prop
+        // latency (5s is generous); under an OLD-version master we only have
+        // our LOCAL mirror, which inherits BoundedSyncUp's ~10s phase-entry
+        // skew — 12s covers skew + latency there. The HUD countdown is
+        // shifted by the same amount (PickSecondsLeft), so "0 on screen" and
+        // "card confirmed" are the same moment either way. Constants stay
+        // 45/90 for mixed-version lobbies.
+        private const float AutoPickLeadSeconds = 5f;
+        private const float AutoPickLeadFallbackSeconds = 12f;
 
         // Photon property keys (FFA pick-sync protocol; all values ASCII).
         private const string PropCycle = "cr_ffa_cyc";   // room: "{game}:{cycle}:{pid,pid,...}"
         private const string PropResult = "cr_ffa_res";  // room: "{game}:{cycle}:{pid=Card|pid=Card}"
+        // Master-published authoritative deadline in PHOTON SERVER TIME
+        // (Codex Jul-29 finds 3/6): per-client deadline mirrors inherit the
+        // full phase-entry skew (BoundedSyncUp tolerates ~10s), which could
+        // put a slow-entering client's auto-confirm AFTER the master's close.
+        // Sharing the deadline through the server clock collapses the skew to
+        // prop latency, which the 5s auto-pick lead covers many times over.
+        // A NEW prop key: old clients ignore it and keep their local mirror
+        // (their behaviour is unchanged either way — they have no auto-pick).
+        private const string PropDeadline = "cr_ffa_dl"; // room: "{game}:{cycle}:{photonTime}"
         // Player prop: "{roomNonce}:{game}:{cycle}:{CardName}". Review find 4:
         // Photon PLAYER properties survive room changes and every new FFA room
         // restarts at game 1/cycle 1 — without the room nonce, a stale "1:1:"
@@ -85,13 +114,25 @@ namespace CompetitiveRounds
         // Pick-window state for the HUD countdown (CompetitiveUI reads these).
         private static bool pickPhaseActive = false;
         private static float pickDeadlineRealtime = 0f;
+        // True while pickDeadlineRealtime tracks the master-published shared
+        // deadline (drives which auto-pick lead applies).
+        private static bool pickDeadlineShared = false;
         private static bool localPickOpen = false;     // local player's own pick UI is up
 
         public static bool PickPhaseActive => pickPhaseActive;
         public static bool LocalPickOpen => localPickOpen;
-        /// <summary>Seconds until the pick window closes (display only — the
-        /// master's own copy of the same rule is what actually closes it).</summary>
+        /// <summary>Seconds until the local pick auto-confirms — the real
+        /// deadline minus AutoPickLeadSeconds, so the HUD's "0" is exactly the
+        /// moment the highlighted card locks in. (The master's own unshifted
+        /// copy of the rule is what actually closes the window.)</summary>
+        private static float CurrentAutoPickLead =>
+            pickDeadlineShared ? AutoPickLeadSeconds : AutoPickLeadFallbackSeconds;
         public static float PickSecondsLeft =>
+            pickPhaseActive ? Mathf.Max(0f, pickDeadlineRealtime - CurrentAutoPickLead - Time.realtimeSinceStartup) : 0f;
+        /// <summary>Unshifted seconds until the window actually closes — for
+        /// surfaces that describe the WINDOW (the non-picker banner), not the
+        /// auto-confirm moment (Codex Jul-29 find 11).</summary>
+        public static float PickWindowSecondsLeft =>
             pickPhaseActive ? Mathf.Max(0f, pickDeadlineRealtime - Time.realtimeSinceStartup) : 0f;
 
         public class FfaLeaver
@@ -385,6 +426,7 @@ namespace CompetitiveRounds
             deckViewRebuilds.Clear();
             pickPhaseActive = false;
             pickDeadlineRealtime = 0f;
+            pickDeadlineShared = false;
             localPickOpen = false;
             try { FfaMapScale.Reset(); } catch { }
             try { FfaSpawnPoints.Clear(); } catch { }
@@ -955,14 +997,22 @@ namespace CompetitiveRounds
             // least PickBase, extended by PickGrace whenever a pick arrives
             // (someone is clearly still at the keyboard), capped at PickCap.
             // Every client mirrors the rule so the HUD countdown matches.
-            // Nobody is ever picked FOR (bug #92-#98) — a picker who misses
-            // the window gets no card this cycle.
+            // Connected pickers self-confirm their highlighted card
+            // AutoPickLead seconds before this deadline (see the constants
+            // comment), so only a crashed/stalled seat is ever finalized
+            // without a card.
             float deadline = phaseStart + PickBaseSeconds;
             int lastGotCount = 0;
             float lastCollect = -999f;
             bool wasMaster = PhotonNetwork.IsMasterClient;
             pickPhaseActive = true;
             pickDeadlineRealtime = deadline;
+            // The master's own deadline IS the authority; everyone else runs
+            // on the local mirror (long auto-pick lead) until the shared prop
+            // is first read.
+            pickDeadlineShared = wasMaster;
+            double lastPublishedPhotonDeadline = -1.0;
+            if (wasMaster) PublishSharedDeadline(game, cycle, deadline, ref lastPublishedPhotonDeadline);
             Dictionary<int, string> result = null;
             while (true)
             {
@@ -976,20 +1026,56 @@ namespace CompetitiveRounds
                     if (got.Count > lastGotCount)
                     {
                         lastGotCount = got.Count;
-                        deadline = Mathf.Min(phaseStart + PickCapSeconds,
-                                             Mathf.Max(deadline, now + PickGraceSeconds));
+                        // Extension may only ever move the deadline FORWARD
+                        // (round-3 find 3a): after a migration/adoption the
+                        // deadline can legitimately sit past OUR local
+                        // phaseStart+Cap, and the old Min-outside form would
+                        // clamp it backward — potentially behind `now`,
+                        // closing the window on the spot. The cap bounds the
+                        // EXTENSION TARGET, never the standing deadline.
+                        deadline = Mathf.Max(deadline,
+                                             Mathf.Min(phaseStart + PickCapSeconds,
+                                                       now + PickGraceSeconds));
                     }
                     // Master migration mid-cycle (Codex review find 4): the
                     // new master's local deadline can already be past (its
                     // phase clock started later/earlier than the old
                     // master's). Grant one grace window before finalizing so
                     // an in-flight pick isn't discarded on the handover.
+                    // Deliberately NOT clamped to the local phaseStart+Cap
+                    // (round-2 find 3b): an adopted shared deadline can sit
+                    // past OUR cap, and clamping would yank it backward —
+                    // potentially behind `now` — closing the window in the
+                    // handover instant.
                     if (PhotonNetwork.IsMasterClient && !wasMaster)
                     {
                         wasMaster = true;
-                        deadline = Mathf.Min(phaseStart + PickCapSeconds,
-                                             Mathf.Max(deadline, now + PickGraceSeconds));
+                        pickDeadlineShared = true;   // we are the authority now
+                        deadline = Mathf.Max(deadline, now + PickGraceSeconds);
                         Plugin.Log.LogInfo($"[FFA] pick cycle {cycle}: became master mid-cycle — extending window");
+                    }
+                    if (PhotonNetwork.IsMasterClient)
+                    {
+                        // Authoritative deadline: republished on every change
+                        // (initial, grace extensions, migration handover), so
+                        // every current client's countdown AND auto-confirm
+                        // track the clock that actually closes the window.
+                        // (An auto-pick arriving extends grace like a human
+                        // pick would — indistinguishable by design, since the
+                        // pick prop format is frozen for old masters. Bounded:
+                        // the moment every present picker is in, allIn closes
+                        // the window regardless of the extension.)
+                        PublishSharedDeadline(game, cycle, deadline, ref lastPublishedPhotonDeadline);
+                    }
+                    else
+                    {
+                        // Non-master: adopt the master's published deadline
+                        // when present; the local grace mirror above stays as
+                        // the fallback for an old-version master that never
+                        // publishes one (auto-pick then uses the LONG lead —
+                        // see AutoPickLeadFallbackSeconds).
+                        float shared = ReadSharedDeadline(game, cycle);
+                        if (shared > 0f) { deadline = shared; pickDeadlineShared = true; }
                     }
                     pickDeadlineRealtime = deadline;
                     if (PhotonNetwork.IsMasterClient)
@@ -1009,10 +1095,27 @@ namespace CompetitiveRounds
                             SetRoomProp(PropResult, sb.ToString());
                             if (!allIn)
                                 Plugin.Log.LogWarning($"[FFA] pick cycle {cycle} closed with {got.Count}/{manifest.Count} picks (window ended)");
+                            // Adopt what we just published as OUR result and
+                            // exit now (round-3 new-defect find): a master
+                            // that stalled past deadline+15 used to publish
+                            // here and then hit the bail watchdog in the SAME
+                            // iteration, replacing its own result with an
+                            // empty set — peers applied the picks, the master
+                            // applied none, and the decks diverged for the
+                            // rest of the game.
+                            result = got;
+                            break;
                         }
                     }
                 }
-                if (now - phaseStart > PickCapSeconds + 15f)
+                // Bail watchdog keys off the DEADLINE, not the local phase
+                // clock (round-2 find 3c): an early-entering client's local
+                // phaseStart+Cap can lapse while a later-entering master is
+                // still legitimately open — the deadline (shared when
+                // available) is the clock that tracks the actual close. The
+                // 20s phase-age floor keeps a very late entrant from bailing
+                // before it has even had a chance to read the result prop.
+                if (now > deadline + 15f && now - phaseStart > 20f)
                 {
                     // Belt-and-suspenders: master gone AND no result — proceed cardless.
                     Plugin.Log.LogWarning($"[FFA] pick cycle {cycle}: no result manifest — proceeding without picks");
@@ -1023,15 +1126,19 @@ namespace CompetitiveRounds
             }
             pickPhaseActive = false;
             pickDeadlineRealtime = 0f;
+            pickDeadlineShared = false;
 
             if (localUi != null) { try { gm.StopCoroutine(localUi); } catch { } }
             CleanupLocalPickUI();
 
             // The result is ground truth: a manifest picker missing from it
-            // missed the window (their UI just got torn down above).
+            // missed the window (their UI just got torn down above). With the
+            // auto-confirm this should only happen when our publish lost the
+            // race to a master whose phase clock ran well ahead of ours —
+            // log it loudly so repeat sightings surface the skew.
             if (iPick && localPlayer != null && !result.ContainsKey(localPlayer.PlayerID))
             {
-                Plugin.Log.LogInfo($"[FFA] cycle {cycle}: local pick missed the window — no card this cycle");
+                Plugin.Log.LogWarning($"[FFA] cycle {cycle}: local pick missed the window — no card this cycle (auto-confirm lost the close race?)");
                 try
                 {
                     CompetitiveUI.ShowNotification("Pick window closed - no card this round.",
@@ -1124,6 +1231,39 @@ namespace CompetitiveRounds
             catch { return null; }
         }
 
+        /// <summary>Master: publish the window deadline in Photon server time
+        /// (shared, monotone-enough clock). Republished only when it moved by
+        /// more than half a second so the prop table isn't spammed at 4 Hz.</summary>
+        private static void PublishSharedDeadline(int game, int cycle, float localDeadline, ref double lastPublished)
+        {
+            try
+            {
+                double photonDl = PhotonNetwork.Time + (localDeadline - Time.realtimeSinceStartup);
+                if (Math.Abs(photonDl - lastPublished) < 0.5) return;
+                lastPublished = photonDl;
+                SetRoomProp(PropDeadline, $"{game}:{cycle}:" +
+                    photonDl.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] deadline publish: {ex.Message}"); }
+        }
+
+        /// <summary>Any client: the master's published deadline converted to
+        /// local realtime, or -1 when absent/stale (old-version master).</summary>
+        private static float ReadSharedDeadline(int game, int cycle)
+        {
+            try
+            {
+                var props = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (props == null || !props.ContainsKey(PropDeadline)) return -1f;
+                var parts = (props[PropDeadline] as string ?? "").Split(new[] { ':' }, 3);
+                if (parts.Length != 3) return -1f;
+                if (int.Parse(parts[0]) != game || int.Parse(parts[1]) != cycle) return -1f;
+                double photonDl = double.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture);
+                return Time.realtimeSinceStartup + (float)(photonDl - PhotonNetwork.Time);
+            }
+            catch { return -1f; }
+        }
+
         /// <summary>Master-side: read each manifest picker's pick prop for this cycle.</summary>
         private static string RoomNonce()
         {
@@ -1178,6 +1318,13 @@ namespace CompetitiveRounds
                 if (!IsCardAllowedFor(localPlayer, c, candidates)) continue;
                 candidates.Add(c);
             }
+            // `shown` stays index-aligned with candidateObjs: a candidate
+            // whose visual failed to spawn is DROPPED, not silently kept —
+            // otherwise `selected` (an index into the visuals) would publish
+            // a different card than the one highlighted (Codex Jul-29
+            // adjacent find; matters double now that timeout confirms the
+            // highlighted card).
+            var shown = new List<CardInfo>();
             for (int i = 0; i < candidates.Count; i++)
             {
                 GameObject vis = null;
@@ -1196,7 +1343,7 @@ namespace CompetitiveRounds
                     if (col != null) col.enabled = false;
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] card visual spawn: {ex.Message}"); }
-                if (vis != null) { candidateObjs.Add(vis); localCardObjects.Add(vis); }
+                if (vis != null) { candidateObjs.Add(vis); localCardObjects.Add(vis); shown.Add(candidates[i]); }
             }
             if (candidateObjs.Count == 0) yield break;
 
@@ -1206,16 +1353,26 @@ namespace CompetitiveRounds
             int lastDir = 0;
             float started = Time.realtimeSinceStartup;
             int chosen = -1;
+            bool autoPicked = false;
             localPickOpen = true;
-            // No auto-pick, ever (bug #92-#98: the old 25s auto-confirm of
-            // card 0 was every "forced first card" report). If the window
-            // closes first, the outer phase stops this coroutine and the
-            // player simply gets no card this cycle. The 0.35s arm delay
-            // keeps a jump pressed during the transition (or any queued
-            // press on the very first frame) from insta-confirming card 0.
+            // The 0.35s arm delay keeps a jump pressed during the transition
+            // (or any queued press on the very first frame) from
+            // insta-confirming card 0.
             const float armDelay = 0.35f;
             while (chosen < 0)
             {
+                // Countdown expiry confirms the HIGHLIGHTED card (see the
+                // constants comment: a pick can never be skipped, but the
+                // timer is on the HUD and the confirm is announced — nothing
+                // silent, unlike the #92-#98 auto-pick this replaces). Guarded
+                // on armDelay so a degenerate short window can't insta-pick.
+                if (pickPhaseActive && PickSecondsLeft <= 0f
+                    && Time.realtimeSinceStartup - started > armDelay)
+                {
+                    chosen = selected;
+                    autoPicked = true;
+                    break;
+                }
                 var actions = localPlayer?.data?.playerActions;
                 if (actions != null)
                 {
@@ -1249,7 +1406,7 @@ namespace CompetitiveRounds
             }
 
             localPickOpen = false;
-            string cardName = candidates[chosen].gameObject.name.Replace("(Clone)", "");
+            string cardName = shown[chosen].gameObject.name.Replace("(Clone)", "");
             // Publish BEFORE any local application — application happens only
             // from the result manifest, identically on every client.
             try
@@ -1259,7 +1416,20 @@ namespace CompetitiveRounds
                 PhotonNetwork.LocalPlayer.SetCustomProperties(h);
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pick publish: {ex.Message}"); }
-            Plugin.Log.LogInfo($"[FFA] local pick published: {cardName} (cycle {cycle})");
+            Plugin.Log.LogInfo(autoPicked
+                ? $"[FFA] local pick AUTO-CONFIRMED at window expiry: {cardName} (cycle {cycle})"
+                : $"[FFA] local pick published: {cardName} (cycle {cycle})");
+            if (autoPicked)
+            {
+                try
+                {
+                    string display = shown[chosen].cardName;
+                    if (string.IsNullOrEmpty(display)) display = cardName;
+                    CompetitiveUI.ShowNotification($"Time's up - {display} picked automatically.",
+                        new Color(1f, 0.85f, 0.5f), 5f);
+                }
+                catch { }
+            }
             try { GameStateWatcher.RecordFfaLocalPick(cardName, RoundsTotalAll()); } catch { }
 
             // Visual feedback: chosen card pops, others leave.
