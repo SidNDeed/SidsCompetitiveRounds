@@ -23,6 +23,34 @@ Schema changes: migration **167** (`ffa_match_players.damage_dealt`, `damage_dea
 - **`/game` for FFA (#127):** discarded cards shown separately, real M:SS time axis, damage and
   blocks split apart, plus new kills and damage-dealt graphs.
 
+### Lifecycle sweep + match-report quarantine (July 30 incident)
+
+Two completed FFA games were destroyed: a timer closed the lobby mid-sitting and the report then
+came back `409 "Lobby is not active"`. The root cause is structural — the server only learns a
+game happened when the REPORT lands, at game END, so every timeout was blind for the whole
+duration of a live game. A 40-minute FFA is normal.
+
+- **Rejected reports are no longer thrown away.** A report rejected for a lifecycle reason is
+  captured whole in `match_report_quarantine` with an admin list / discard / accept surface.
+  Integrity failures (bad signature, unknown players, impossible scores) are still rejected
+  outright and never stored. **Accept records approval only — it never re-applies rating**,
+  because Glicko is order dependent.
+- **Timers now need positive evidence.** The presence ping carries `in_match=<group id>`; the
+  dispersed, quiet and sitting-over rules veto when a game is live rather than inferring "nothing
+  is happening" from silence. Bounded by a 3h ceiling, and it will not answer until the process
+  has outlived its TTL so a restart cannot make every group look idle.
+- **Windows retuned:** dispersed close scales with lobby size (60 min floor, 70 at 10 players),
+  husk sweeps 30 → 60 min, sitting-over 5 → 15 min in both the FFA and 1v2 copies.
+- **The client stopped deleting recoverable reports** — 429 (rate limited) and 401 (session
+  lapsed) were being treated as permanent outbox failures.
+- **Migration 168** restores the two destroyed games for all six affected players: ratings from a
+  full chronological replay of every recorded FFA match plus those two, validated by reproducing
+  the live ladder to within 0.1 elo when the two are excluded.
+
+Remaining audit items (2v2's worse variant, Leave invalidating a live game 1, two more blind FFA
+closers, 2v2's assembly clock) are listed in `docs/TODO.md` and detailed in
+`ai-collab/codex-lifecycle-sweep.md`.
+
 ## v1.35.2 — 2026-07-29 — FFA host lobbies, betting reliability, forced picks
 
 Everything below (previously accumulated as "Unreleased") ships in this version. Backend
