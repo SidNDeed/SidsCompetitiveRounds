@@ -421,6 +421,14 @@ def _group_game_in_progress(group_id) -> bool:
     Returns False when the evidence is not yet trustworthy (fresh process) — so
     callers must treat this as 'proof of life', never as 'proof of death'. Use it
     only to VETO a destructive action, never to trigger one.
+
+    Caller contract (Codex batch finds 2/4): this CONSERVATIVE variant (young
+    process => veto) belongs only to JANITOR closers, which re-fire every tick
+    and carry their own ceilings — a wrongly-vetoed close there costs minutes.
+    One-shot actors (leave dissolutions, the assembly state poll) must use
+    _group_game_positively_live below: their caller disappears after the
+    attempt, so a veto-on-ignorance there converts a failed assembly into a
+    permanent active husk nothing ever revisits.
     """
     if not group_id:
         return False
@@ -436,6 +444,25 @@ def _group_game_in_progress(group_id) -> bool:
         _in_match_seen.pop(str(group_id), None)
         return False
     return True
+
+
+def _group_game_positively_live(group_id) -> bool:
+    """POSITIVE in-game evidence for this group, regardless of process age.
+
+    For one-shot destructive paths whose actor never returns (leave
+    dissolutions, assembly cancels): there the conservative young-process veto
+    is worse than acting, because skipping the dissolve leaves an active husk
+    with no future caller, while acting merely reproduces today's shipped
+    behaviour. Only ABSENCE of evidence is restart-ambiguous — a heartbeat
+    received after the restart is real evidence and must count (Codex round-3
+    regression 1: gating positives on process age cancelled a live game whose
+    heartbeat had already arrived). The janitor's rowless-husk sweep is the
+    backstop either way.
+    """
+    if not group_id:
+        return False
+    at = _in_match_seen.get(str(group_id))
+    return at is not None and (time.monotonic() - at) <= IN_MATCH_TTL_SEC
 
 
 def _presence_is_online(steam_id: str | None) -> bool:
@@ -631,7 +658,8 @@ async def team_queue_cleanup_loop():
             async with async_session() as db:
                 stale_series = await db.execute(
                     text("""
-                        SELECT DISTINCT tq.series_id
+                        SELECT DISTINCT tq.series_id,
+                               (ts.created_at < NOW() - INTERVAL '3 hours') AS past_ceiling
                           FROM team_queue tq
                           JOIN team_series ts ON ts.id = tq.series_id
                          WHERE tq.series_id IS NOT NULL
@@ -642,6 +670,18 @@ async def team_queue_cleanup_loop():
                 )
                 for srow in stale_series.fetchall():
                     sid = srow[0]
+                    # July 30 lifecycle audit item 1 (2v2 half): clients STOP
+                    # polling once in-game (#247), so "no fresh poll" is the
+                    # NORMAL state of a live 2v2 — the only guard was
+                    # spawn_confirmations, and one lost spawn-confirm POST
+                    # (rate limit, transient) left a LIVE series at 3/4
+                    # forever, cancellable 60s in. Same bounded veto as the
+                    # FFA closers: in_match evidence wins unless the series is
+                    # past the 3h ceiling (client-supplied evidence must not
+                    # hold a dead row open forever).
+                    if _group_game_in_progress(str(sid)) and not srow[1]:
+                        print(f"[TEAM-QUEUE-CLEANUP] stale-series cancel VETOED, game in progress: {sid}")
+                        continue
                     # Freshness recheck AT UPDATE TIME (Codex review find): the
                     # discovery SELECT above is unlocked — a poll can refresh a
                     # 61s-stale heartbeat between it and this UPDATE. Cancel
@@ -678,6 +718,52 @@ async def team_queue_cleanup_loop():
                 await db.commit()
         except Exception as e:
             print(f"[TEAM-QUEUE-CLEANUP] series-cancel error: {e}")
+        try:
+            async with async_session() as db:
+                # Rowless-husk sweep (Codex batch finds 2/4/9): the stale-series
+                # sweep above JOINs team_queue, so an active series whose queue
+                # rows are already gone is invisible to it forever. Two real
+                # producers: a failed assembly whose cancel was heartbeat-vetoed
+                # while its rows aged out, and a mid-game leave whose game then
+                # died without a report. Quiet for 60+ minutes (longest prod 2v2
+                # game ~20 min, report gaps far below 60), no queue rows, no
+                # positive in-game evidence => cancel + reconcile. Deliberately
+                # skipped on a young process — this arm is itself the last
+                # resort, so deferring it a few minutes after a deploy is free,
+                # and it must never fire on restart-blinded evidence.
+                if _in_match_evidence_trustworthy():
+                    husks = (await db.execute(text("""
+                        SELECT ts.id FROM team_series ts
+                         WHERE ts.status = 'active'
+                           AND COALESCE(ts.room_issued_at, ts.created_at)
+                               < NOW() - INTERVAL '60 minutes'
+                           AND NOT EXISTS (SELECT 1 FROM team_matches tm
+                                            WHERE tm.series_id = ts.id
+                                              AND tm.created_at > NOW() - INTERVAL '60 minutes')
+                           AND NOT EXISTS (SELECT 1 FROM team_queue tq
+                                            WHERE tq.series_id = ts.id)
+                         LIMIT 10
+                    """))).scalars().all()
+                    for hsid in husks:
+                        if _group_game_positively_live(str(hsid)):
+                            continue
+                        # One short transaction per husk (#204 — a wide pass
+                        # holding bettor rows across series is exactly the
+                        # deadlock shape the per-player rebuild hit): cancel,
+                        # reconcile, commit, next.
+                        done = (await db.execute(text("""
+                            UPDATE team_series
+                               SET status='cancelled', invalidated_at=NOW(),
+                                   invalidation_reason='rowless_husk'
+                             WHERE id=:sid AND status='active'
+                             RETURNING id
+                        """), {"sid": hsid})).scalar()
+                        if done:
+                            await _reconcile_team_series_bets(db, hsid, "rowless husk sweep")
+                            print(f"[TEAM-QUEUE-CLEANUP] rowless active husk cancelled: {hsid}")
+                        await db.commit()
+        except Exception as e:
+            print(f"[TEAM-QUEUE-CLEANUP] rowless-husk error: {e}")
         try:
             async with async_session() as db:
                 # Stale-poll cleanup, SPLIT by whether the row still references
@@ -1035,19 +1121,11 @@ async def queue_cleanup_loop():
                     await _reconcile_ffa_lobby_bets(db, qrow["id"], "nobody online close")
                     print(f"[FFA-CLEANUP] Abandoned lobby closed (nobody online): {qrow['id']}")
 
-                ffa_done = await db.execute(
-                    text("""UPDATE ffa_lobbies l
-                        SET status = 'completed', completed_at = NOW()
-                        WHERE l.status = 'active'
-                          AND l.games_played > 0
-                          AND l.created_at < NOW() - INTERVAL '3 hours'
-                          AND NOT EXISTS (SELECT 1 FROM ffa_queue q
-                                          WHERE q.series_id = l.id
-                                            AND q.last_polled >= NOW() - INTERVAL '30 minutes')
-                        RETURNING l.id"""))
-                for r in ffa_done.fetchall():
-                    await _reconcile_ffa_lobby_bets(db, r[0], "played-out 3h close")
-                    print(f"[FFA-CLEANUP] Played-out lobby closed: {r[0]}")
+                # (Removed, July 30 audit item 3: a second 3h closer keyed on
+                # created_at + queue-poll staleness lived here. It was blind —
+                # locked players don't poll (#247), so the NOT EXISTS clause was
+                # nearly always satisfied — and fully redundant: the dispersed
+                # close above owns this case with a veto and its own 3h ceiling.)
                 # Free every row whose lobby has moved past its state. Explicit
                 # VALID state pairs, not a negative predicate (design review
                 # find 1: "<> 'active'" would eat the perfectly valid
@@ -1760,7 +1838,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.35.2"
+LATEST_MOD_VERSION = "1.35.4"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -6245,7 +6323,8 @@ async def queue_count(steam_id: str | None = Query(None), db: AsyncSession = Dep
 
 
 @app.get("/api/v1/presence/ping", tags=["Queue"])
-async def presence_ping(steam_id: str = Query(..., max_length=20),
+async def presence_ping(request: Request,
+                        steam_id: str = Query(..., max_length=20),
                         in_match: str | None = Query(None, max_length=64),
                         db: AsyncSession = Depends(get_db)):
     """Presence heartbeat (v1.29). The mod's always-on loop calls this every
@@ -6257,8 +6336,46 @@ async def presence_ping(steam_id: str = Query(..., max_length=20),
     # in_match=<lobby/series id> means "I am IN a game for this group right now".
     # Optional on purpose: pre-v1.35.3 clients never send it, and every consumer
     # treats its absence as "unknown", never as "no game" (_group_game_in_progress).
+    #
+    # Codex batch find 8: this is DESTRUCTION-VETO evidence, so it must be
+    # authenticated — an unauthenticated ping naming a public series id could
+    # hold any group open forever. Trust the claim only when (a) the pinger's
+    # session checks out (the client stamps X-Session-Token on every request)
+    # and (b) the pinger is a recorded MEMBER of the named group. A failed
+    # check silently drops the claim — the ping itself (presence, last_seen)
+    # is still honoured, and old clients never send in_match at all.
     if in_match:
-        _in_match_touch(in_match)
+        _im_ok = False
+        try:
+            # Python-side UUID validation first: a malformed id must not reach
+            # a CAST and poison the transaction the last_seen stamp below
+            # still needs (#235).
+            _gid = UUID(in_match)
+            await _check_steam_session(request, steam_id, db)
+            _im_ok = bool((await db.execute(text("""
+                SELECT EXISTS(
+                    SELECT 1 FROM team_series ts, players p
+                     WHERE ts.id = :gid AND p.steam_id = :sid
+                       AND p.id IN (ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id))
+                OR EXISTS(
+                    SELECT 1 FROM ovt_series os, players p
+                     WHERE os.id = :gid AND p.steam_id = :sid
+                       AND p.id IN (os.solo_id, os.duo_a_id, os.duo_b_id))
+                OR EXISTS(
+                    SELECT 1 FROM ffa_lobbies l, players p
+                     WHERE l.id = :gid AND p.steam_id = :sid
+                       AND p.id = ANY(l.member_ids))
+            """), {"gid": _gid, "sid": steam_id})).scalar())
+        except Exception:
+            _im_ok = False
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+        if _im_ok:
+            _in_match_touch(in_match)
+        else:
+            print(f"[PRESENCE] in_match claim rejected (unverified): {steam_id} -> {in_match}")
     if _presence_db_stamp_ok(steam_id):
         try:
             await db.execute(text(
@@ -13353,29 +13470,48 @@ async def team_queue_leave(request: Request, steam_id: str = Query(...), db: Asy
         # alone would strand the other 3. Cascade: cancel the whole series and
         # release the other 3 back to searching, rather than leave them locked
         # against a ghost teammate.
+        #
+        # July 30 lifecycle audit item 2: that cascade used to be UNCONDITIONAL,
+        # and the client fires this endpoint when a player quits mid-game — so
+        # one leaver cancelled a LIVE series (recorded games and all), destroyed
+        # its bets, and the survivors' next report 400'd. Cancel is legitimate
+        # only for a series that never produced a game AND has no live-game
+        # evidence (ready-up abandonment, failed assembly). A mid-game leave
+        # deletes the leaver's own row below and nothing else — the DC-report /
+        # grace machinery owns a played series' outcome, exactly as it does when
+        # a player disconnects without calling leave.
         if r and r["series_id"] and r["status"] in ("matched", "ready"):
-            await db.execute(
-                text("""
-                    UPDATE team_queue
-                    SET status='searching', series_id=NULL, team_assigned=NULL,
-                        room_name=NULL, room_region=NULL, ready=false,
-                        matched_at=NULL, joined_at=NOW()
-                    WHERE series_id = :sid AND player_id != :pid
-                """),
-                {"sid": r["series_id"], "pid": player.id},
-            )
-            # Mark the series invalidated so the post-lock /matches submit can't
-            # accidentally write to it after a no-show.
-            await db.execute(
-                text("""
-                    UPDATE team_series
-                    SET status='cancelled', invalidated_at=NOW(),
-                        invalidation_reason='pre_match_leaver'
-                    WHERE id = :sid AND status='active'
-                """),
+            games = (await db.execute(
+                text("SELECT COUNT(*) FROM team_matches WHERE series_id = :sid"),
                 {"sid": r["series_id"]},
-            )
-            await _reconcile_team_series_bets(db, r["series_id"], "pre_match_leaver")
+            )).scalar() or 0
+            if games == 0 and not _group_game_positively_live(str(r["series_id"])):
+                await db.execute(
+                    text("""
+                        UPDATE team_queue
+                        SET status='searching', series_id=NULL, team_assigned=NULL,
+                            room_name=NULL, room_region=NULL, ready=false,
+                            matched_at=NULL, joined_at=NOW()
+                        WHERE series_id = :sid AND player_id != :pid
+                    """),
+                    {"sid": r["series_id"], "pid": player.id},
+                )
+                # Mark the series invalidated so the post-lock /matches submit can't
+                # accidentally write to it after a no-show.
+                await db.execute(
+                    text("""
+                        UPDATE team_series
+                        SET status='cancelled', invalidated_at=NOW(),
+                            invalidation_reason='pre_match_leaver'
+                        WHERE id = :sid AND status='active'
+                    """),
+                    {"sid": r["series_id"]},
+                )
+                await _reconcile_team_series_bets(db, r["series_id"], "pre_match_leaver")
+            else:
+                print(f"[TEAM-QUEUE] mid-game leave by {steam_id} — series "
+                      f"{r['series_id']} left to the match pipeline "
+                      f"(games={games})")
         await db.execute(
             text("DELETE FROM team_queue WHERE player_id = :pid"),
             {"pid": player.id},
@@ -13658,8 +13794,12 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                            WHERE series_id = :sid"""),
                     {"rn": room_name, "rr": chosen_region, "sid": me["series_id"]},
                 )
+                # room_issued_at anchors the assembly deadline (migration 170):
+                # created_at is MATCH time and also had to cover the whole
+                # ready-up window, which made the deadline wrong by design.
                 await db.execute(
-                    text("UPDATE team_series SET photon_room_id = :rn, region = :rr WHERE id = :sid"),
+                    text("UPDATE team_series SET photon_room_id = :rn, region = :rr,"
+                         " room_issued_at = NOW() WHERE id = :sid"),
                     {"rn": room_name, "rr": chosen_region, "sid": me["series_id"]},
                 )
                 # Re-read so the response reflects the new room name.
@@ -14099,12 +14239,16 @@ async def team_queue_ready(request: Request, steam_id: str = Query(...), db: Asy
 # Match-assembly tracking (added v1.25.11). Each client posts spawn-confirm
 # when its auto-spawn override successfully creates the local Player. Server
 # bumps spawn_confirmations + records the player_id (idempotent). When state
-# is polled and the series has been active >15s with <4 confirmations, the
-# server cancels the series with reason='assembly_timeout' so all 4 clients
-# can bail to menu instead of sitting on the ready screen for 30s.
+# is polled with <4 confirmations past the deadline — measured from
+# room_issued_at since the July 30 audit (item 4) — the server cancels the
+# series with reason='assembly_timeout' so all 4 clients can bail to menu.
+# 180s from ROOM ISSUE: Photon region connect + room join + map load +
+# spawn + the confirm POST for the slowest of four clients, with the
+# in_match veto covering a live game whose confirm POST was lost. Until the
+# heartbeat-carrying client ships, this constant is the only protection.
 # ─────────────────────────────────────────────────────────────────────────
 
-_ASSEMBLY_DEADLINE_SECONDS = 60
+_ASSEMBLY_DEADLINE_SECONDS = 180
 
 
 def _verify_spawn_confirm_hmac(steam_id: str, series_id: str, signature: str) -> bool:
@@ -14174,11 +14318,12 @@ async def team_series_spawn_confirm(
 
 @app.get("/api/v1/team/series/{series_id}/state", tags=["Team Matches"])
 async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
-    """Per-series assembly + lifecycle state. Polled by clients during the
-    first ~20 seconds after ready_join. If the series has been active for
-    longer than the assembly deadline (15s) and fewer than 4 players have
-    posted spawn-confirm, transitions to status='canceled' with reason
-    'assembly_timeout' so all 4 clients can bail back to menu."""
+    """Per-series assembly + lifecycle state. Polled by clients after
+    ready_join. If the room has been issued for longer than the assembly
+    deadline (_ASSEMBLY_DEADLINE_SECONDS from room_issued_at) with fewer
+    than 4 spawn-confirms and no live-game evidence, transitions to
+    status='canceled' with reason 'assembly_timeout' so all 4 clients can
+    bail back to menu."""
     try:
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
@@ -14189,7 +14334,7 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
             SELECT id, status, created_at, spawn_confirmations,
                    invalidation_reason, completed_at,
                    dc_grace_until, dc_team_remaining, dc_player_id,
-                   t1_series_wins, t2_series_wins
+                   t1_series_wins, t2_series_wins, room_issued_at
               FROM team_series
              WHERE id = :sid
         """),
@@ -14207,13 +14352,24 @@ async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     s_dc_team = r[7]
     s_dc_player = r[8]
 
-    age_seconds = (datetime.now(timezone.utc) - s_created).total_seconds()
+    # July 30 lifecycle audit item 4: the deadline used to measure from
+    # created_at — MATCH time — so it also had to absorb ready-up (up to
+    # 120s), Photon connect, map load and spawn-confirm delivery, and a state
+    # poll right after room issue could cancel a healthy assembly off the
+    # exhausted earlier clock. Measure from room_issued_at (migration 170;
+    # COALESCE covers pre-migration rows with the old conservative anchor).
+    s_room_issued = r[11] or s_created
+    age_seconds = (datetime.now(timezone.utc) - s_room_issued).total_seconds()
 
     # Auto-cancel if the assembly deadline has passed and we still don't have 4.
+    # The in_match veto covers the "game is live but a spawn-confirm POST was
+    # lost" hole: a live game stuck at 3/4 confirmations must not be cancelled
+    # by this poll-driven timer.
     if (
         s_status == "active"
         and s_confirms < 4
         and age_seconds > _ASSEMBLY_DEADLINE_SECONDS
+        and not _group_game_positively_live(str(sid_uuid))
     ):
         await db.execute(
             text("""
@@ -15562,7 +15718,16 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
             "       (SELECT COUNT(*) FROM ovt_matches m WHERE m.series_id = s.id) AS games"
             "  FROM ovt_series s WHERE s.id = :sid FOR UPDATE"
         ), {"sid": me["series_id"]})).mappings().first()
-        if srow is not None and srow["status"] == "active" and int(srow["games"] or 0) == 0:
+        # July 30 lifecycle audit item 2: "zero recorded games" is true for the
+        # ENTIRE duration of live game 1 (reports land at game END), so one
+        # player quitting 30 minutes into game 1 used to dissolve the series
+        # under the other two and the reporter's result then 409'd. The
+        # in_match heartbeat veto separates "failed assembly" (dissolve, as
+        # before) from "game 1 is live" (leave the series to the match
+        # pipeline; only the leaver's own row is deleted below).
+        if (srow is not None and srow["status"] == "active"
+                and int(srow["games"] or 0) == 0
+                and not _group_game_positively_live(str(me["series_id"]))):
             await db.execute(text(
                 "UPDATE ovt_series SET status='canceled', invalidation_reason='assembly_timeout',"
                 "       invalidated_at=NOW() WHERE id=:sid AND status='active'"
@@ -15574,6 +15739,9 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
             """), {"sid": me["series_id"], "pid": me["player_id"]})
             dissolved = True
             print(f"[OVT-LOCK] lock dissolved by leave (series {me['series_id']}, leaver {steam_id})")
+        elif srow is not None and srow["status"] == "active" and int(srow["games"] or 0) == 0:
+            print(f"[OVT-LOCK] mid-game-1 leave by {steam_id} — series "
+                  f"{me['series_id']} left to the match pipeline")
     await db.execute(text(
         "DELETE FROM ovt_queue WHERE player_id = :pid"
     ), {"pid": me["player_id"]})
@@ -17209,29 +17377,47 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
     that room (Codex design find 4 — leaving them 'ready_join' would re-feed
     a dead room forever). Everyone's rows are deleted; they requeue fresh."""
     await _check_steam_session(request, steam_id, db)
-    # Housekeeping: played lobbies now outlive member leaves (find 2 above),
-    # so sweep any active lobby whose last recorded game is >2h old — the
-    # sitting is over, nobody is left to report against it.
-    # Bounded janitor (round-2 review find 8: unbounded global work inside a
-    # player's leave transaction) — departure-driven closure above is the
-    # primary mechanism; this only mops up crash leftovers, 10 at a time.
-    stale = (await db.execute(text("""
-        UPDATE ffa_lobbies l SET status='completed', completed_at=NOW()
-         WHERE l.id IN (
-            SELECT l2.id FROM ffa_lobbies l2
-             WHERE l2.status='active' AND COALESCE(l2.games_played, 0) > 0
-               AND NOT EXISTS (SELECT 1 FROM ffa_matches m
-                                WHERE m.lobby_id = l2.id
-                                  AND m.ended_at > NOW() - INTERVAL '2 hours')
-             LIMIT 10)
-         RETURNING l.id
-    """))).scalars().all()
-    for _slid in stale:
-        # Reconcile, not blanket-refund: these lobbies HAVE recorded games,
-        # so an unsettled bet here can be a savepoint-failed win/loss (#241).
-        await _reconcile_ffa_lobby_bets(db, _slid, "stale sweep")
+    # (Removed, July 30 audit item 3: this endpoint used to run a 2h "stale
+    # sweep" over UNRELATED active lobbies on every leave request. It was a
+    # blind closer — old activity, no live-game evidence, no veto — and the
+    # janitor's dispersed close is the single lifecycle authority now:
+    # size-scaled window, in_match veto, bounded 3h ceiling.)
     me = await _lock_queue_group_for_player(db, "ffa_queue", steam_id)
     if me is None:
+        # Codex round-3 residual 10: a member whose queue row is already gone
+        # (sweeps prune rows independently of the lobby) still needs their
+        # departure RECORDED, or the all-but-one closure arithmetic never
+        # completes and the roster looks fuller than it is. Membership comes
+        # from the lobby's frozen roster, not the row. Mark-only — closure
+        # stays with the row-carrying paths and the janitor.
+        #
+        # Round-4 find 4: scoped to the EXACT lobby the client's leave intent
+        # names — new clients always send expected_lobby_id, and without the
+        # scope a retried leave could mark a departure on a NEWER lobby the
+        # player joined meanwhile. A leave without a target marks nothing
+        # (old-client behaviour, unchanged).
+        if expected_lobby_id:
+            try:
+                marked = (await db.execute(text("""
+                    UPDATE ffa_lobbies l
+                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e
+                                             FROM unnest(l.departed_ids || p.id) e))
+                      FROM players p
+                     WHERE p.steam_id = :sid
+                       AND l.id = CAST(:lid AS uuid)
+                       AND l.status = 'active'
+                       AND p.id = ANY(l.member_ids)
+                       AND NOT (l.departed_ids @> ARRAY[p.id])
+                     RETURNING l.id
+                """), {"sid": steam_id, "lid": expected_lobby_id})).scalars().all()
+                if marked:
+                    print(f"[FFA-LOCK] rowless leaver {steam_id} marked departed on lobby {expected_lobby_id}")
+            except Exception as ex:
+                print(f"[FFA-LOCK] rowless departure mark failed for {steam_id}: {ex}")
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
         await db.commit()
         return {"status": "ok"}
     dissolved = False
@@ -17271,7 +17457,16 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
         lrow = (await db.execute(text(
             "SELECT l.status, l.games_played FROM ffa_lobbies l WHERE l.id = :lid FOR UPDATE"
         ), {"lid": lobby_id})).mappings().first()
-        if lrow is not None and lrow["status"] == "active" and int(lrow["games_played"] or 0) == 0:
+        # July 30 lifecycle audit item 2: games_played stays 0 for the WHOLE of
+        # live game 1 (reports land at game END), so "zero games" alone is not
+        # assembly-failure evidence — one player quitting 30 minutes into a
+        # 40-minute game 1 used to dissolve the lobby for everyone and the
+        # reporter's result then 409'd (the July 30 incident's second half).
+        # A zero-game lobby WITH live-game evidence takes the played-lobby
+        # departure path below instead.
+        if (lrow is not None and lrow["status"] == "active"
+                and int(lrow["games_played"] or 0) == 0
+                and not _group_game_positively_live(str(lobby_id))):
             await db.execute(text(
                 "UPDATE ffa_lobbies SET status='canceled', invalidation_reason='assembly_timeout',"
                 "       invalidated_at=NOW() WHERE id=:lid AND status='active'"
@@ -17285,28 +17480,55 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
             dissolved = True
             print(f"[FFA-LOCK] lobby dissolved by leave (lobby {lobby_id}, leaver {steam_id})")
         elif lrow is not None and lrow["status"] == "active":
-            # Played lobby: the lobby STAYS ACTIVE while >=2 members remain
-            # (closing it here made the survivors' final report 409 — the
-            # leaver's client fires this the moment they quit mid-game).
-            # Round-2 review find 6: the lobby TRACKS departures now — the
-            # bettable field excludes departed players, and the lobby closes
-            # deterministically when all-but-one member has left (queue rows
-            # can't drive closure; they get deleted/ghost-pruned).
-            closed = (await db.execute(text("""
-                UPDATE ffa_lobbies
-                   SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e)),
-                       status = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e)))
-                                          >= COALESCE(player_count, cardinality(member_ids)) - 1
-                                     THEN 'completed' ELSE status END,
-                       completed_at = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e)))
-                                                >= COALESCE(player_count, cardinality(member_ids)) - 1
-                                           THEN NOW() ELSE completed_at END
-                 WHERE id = :lid AND status = 'active'
-                 RETURNING status
-            """), {"lid": lobby_id, "pid": me["player_id"]})).scalar()
-            await db.execute(text(
-                "DELETE FROM ffa_queue WHERE series_id = :lid AND player_id != :pid"
-            ), {"lid": lobby_id, "pid": me["player_id"]})
+            # Played (or live-game-1) lobby: the lobby STAYS ACTIVE while >=2
+            # members remain (closing it here made the survivors' final report
+            # 409 — the leaver's client fires this the moment they quit
+            # mid-game). Round-2 review find 6: the lobby TRACKS departures —
+            # the bettable field excludes departed players, and the lobby
+            # closes deterministically when all-but-one member has left.
+            #
+            # Codex batch find 10: the survivors' queue rows are no longer
+            # deleted HERE. Deleting them at leave time stripped the
+            # cross-mode lock off players still mid-game, and a LATER leaver
+            # then had no row, so their leave hit the me-is-None path (which
+            # since round 3 marks departure from the frozen roster instead of
+            # dropping it). Rows still die with the lobby's own lifecycle
+            # (closure below, dispersed close, sitting-over) and the janitor's
+            # 60-min windows bound them regardless — "kept" means kept while
+            # the sitting is genuinely live, not immortal.
+            # Codex round-3 regression 7: all-but-one departures can land while
+            # the FINAL game's report is still in flight (leavers quit during
+            # the last game) — closing then quarantines the genuine report and
+            # refunds bets that should settle against it. With live-game
+            # evidence the leave only MARKS; the report's own completion path,
+            # or the dispersed sweep, closes the lobby afterwards.
+            game_live_now = _group_game_positively_live(str(lobby_id))
+            if game_live_now:
+                await db.execute(text("""
+                    UPDATE ffa_lobbies
+                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e))
+                     WHERE id = :lid AND status = 'active'
+                """), {"lid": lobby_id, "pid": me["player_id"]})
+                closed = "active"
+            else:
+                closed = (await db.execute(text("""
+                    UPDATE ffa_lobbies
+                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e)),
+                           status = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e)))
+                                              >= COALESCE(player_count, cardinality(member_ids)) - 1
+                                         THEN 'completed' ELSE status END,
+                           completed_at = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e)))
+                                                    >= COALESCE(player_count, cardinality(member_ids)) - 1
+                                               THEN NOW() ELSE completed_at END
+                     WHERE id = :lid AND status = 'active'
+                     RETURNING status
+                """), {"lid": lobby_id, "pid": me["player_id"]})).scalar()
+            if closed == "completed":
+                # The sitting is over — now the survivors' rows go too, so
+                # nobody stays locked out of other queues by a closed lobby.
+                await db.execute(text(
+                    "DELETE FROM ffa_queue WHERE series_id = :lid AND player_id != :pid"
+                ), {"lid": lobby_id, "pid": me["player_id"]})
             if closed == "completed":
                 await _reconcile_ffa_lobby_bets(db, lobby_id, "sitting over (last members left)")
                 print(f"[FFA-LOCK] played lobby {lobby_id} closed — all but one member departed")
@@ -17794,35 +18016,38 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         "SELECT * FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
     ), {"lid": lobby_uuid})).mappings().first()
     if lobby is None:
-        await _quarantine_report(
-            db, mode="ffa", reason="lobby_not_found", status_code=404, payload=report.model_dump(),
-            group_id=lobby_uuid, photon_room_id=report.photon_room_id,
-            reporter_id=id_by_steam.get(report.reported_by_steam_id),
-            player_ids=list(id_by_steam.values()))
+        # No row => the report cannot be bound to a real roster, so it is not
+        # quarantined (Codex round-3 out-of-scope find: capture-before-binding
+        # let anyone with the DLL secret fill the admin queue with invented
+        # payloads). The recoverable incident class — a live lobby closed
+        # mid-game — always leaves the row behind.
         raise HTTPException(404, "Lobby not found")
     # Review find 2: a canceled/completed lobby must not keep minting rated
     # games. Only a live lobby accepts reports.
+    members = list(lobby["member_ids"] or [])
+    member_set = set(members)
+    reported_ids = set(id_by_steam.values())
     if lobby["status"] != "active":
-        await _quarantine_report(
-            db, mode="ffa", reason=f"lobby_{lobby['status']}", status_code=409, payload=report.model_dump(),
-            group_id=lobby_uuid, photon_room_id=report.photon_room_id,
-            reporter_id=id_by_steam.get(report.reported_by_steam_id),
-            player_ids=list(id_by_steam.values()))
+        # Quarantine ONLY a report that binds to this lobby's frozen roster
+        # (exact member set, reporter among them) and respects the engine's
+        # win invariant — the same trust boundary the team path enforces.
+        _bound = (member_set
+                  and reported_ids == member_set
+                  and report.reported_by_steam_id in id_by_steam
+                  and max_rounds == FFA_ROUNDS_TO_WIN)
+        if _bound:
+            await _quarantine_report(
+                db, mode="ffa", reason=f"lobby_{lobby['status']}", status_code=409, payload=report.model_dump(),
+                group_id=lobby_uuid, photon_room_id=report.photon_room_id,
+                reporter_id=id_by_steam.get(report.reported_by_steam_id),
+                player_ids=list(id_by_steam.values()))
         raise HTTPException(409, "Lobby is not active")
     # Roster validation (review finds 1/3): member_ids is the lock-time roster
     # ORDERED BY SLOT (queue rows get pruned; this array doesn't). The report
     # must cover the roster EXACTLY — a subset would let a hostile reporter
     # drop whoever beat them and still bank rating/XP. Leavers stay in the
     # report with left_early=true, so a shrinking lobby is not a valid excuse.
-    members = list(lobby["member_ids"] or [])
-    member_set = set(members)
-    reported_ids = set(id_by_steam.values())
     if not member_set:
-        await _quarantine_report(
-            db, mode="ffa", reason="lobby_no_roster", status_code=409, payload=report.model_dump(),
-            group_id=lobby_uuid, photon_room_id=report.photon_room_id,
-            reporter_id=id_by_steam.get(report.reported_by_steam_id),
-            player_ids=list(id_by_steam.values()))
         raise HTTPException(409, "Lobby has no recorded roster")
     if reported_ids != member_set:
         raise HTTPException(403, "Report must cover exactly the lobby roster")
@@ -18956,8 +19181,42 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     )
     series = s_q.mappings().first()
     if not series:
+        # No row exists, so the report cannot be BOUND to a real roster —
+        # capturing it would let anyone with the DLL secret spam arbitrary
+        # payloads into the admin queue (Codex batch find 7). The July 30
+        # incident class (a live series cancelled mid-game) always leaves the
+        # row behind, so nothing recoverable is lost by rejecting outright.
         raise HTTPException(404, "team_series not found")
     if series["status"] != "active":
+        # July 30 lifecycle audit item 1: this rejection fires BEFORE the
+        # team_matches insert, so without capture the whole GAME is destroyed —
+        # strictly worse than the FFA shape (which at least keeps the series).
+        # Five paths can move a series off 'active' mid-game (janitor stale
+        # sweep, DC grace expiry, completion helper, admin resolve, member
+        # account deletion); quarantine the report like the FFA path does.
+        #
+        # Trust boundary (Codex batch find 7): capture ONLY a report whose
+        # four players are exactly the series' recorded members and whose
+        # reporter is one of them — the same binding the active path enforces
+        # later. HMAC + score sanity have already passed, and player rows
+        # resolve AFTER this gate, so the transaction has no writes to lose.
+        _q_rows = (await db.execute(
+            text("SELECT id, steam_id FROM players WHERE steam_id = ANY(:sids)"),
+            {"sids": list(steams)},
+        )).all()
+        _q_by_steam = {r.steam_id: r.id for r in _q_rows}
+        _series_members = {series["t1a_id"], series["t1b_id"],
+                          series["t2a_id"], series["t2b_id"]}
+        _bound = (len(_q_by_steam) == 4
+                  and set(_q_by_steam.values()) == _series_members
+                  and report.reported_by_steam_id in _q_by_steam)
+        if _bound:
+            await _quarantine_report(
+                db, mode="team", reason=f"series_{series['status']}",
+                status_code=400, payload=report.model_dump(),
+                group_id=series_uuid, photon_room_id=report.photon_room_id,
+                reporter_id=_q_by_steam.get(report.reported_by_steam_id),
+                player_ids=list(_q_by_steam.values()))
         raise HTTPException(400, f"team_series is {series['status']}")
 
     # Cross-series edge: two live series CAN share players (dc_incomplete husk
@@ -19005,6 +19264,28 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     reporter = by_steam.get(report.reported_by_steam_id)
     if not reporter:
         raise HTTPException(400, "Reporter must be one of the four participants")
+    # Roster binding (Codex round-3 out-of-scope find, pre-existing): the
+    # first-match slot realign below rewrites the stored t*_id slots to the
+    # CLIENT's grouping — without this set-equality check, one participant
+    # with a valid session could substitute three arbitrary registered
+    # players and mint a fabricated series result. Same rule the FFA report
+    # path has enforced since its review: the report may REORDER the locked
+    # roster, never change it.
+    #
+    # ACCEPTED residual (rounds 4+5, #242 cut): a member deleting their
+    # account mid-series desyncs the roster (their steam id resolves to a
+    # fresh tombstone UUID), so the sitting's remaining reports 403 here.
+    # Two successive "tolerate the tombstone pair" fixes each broke a
+    # DIFFERENT downstream consumer (the slot realign, then the completion
+    # block's delta_by_pid/slot_to_pid keying — which ALREADY KeyError'd on
+    # this scenario before the binding existed). The trigger is a player
+    # destroying their account mid-active-series; losing that sitting's
+    # remaining games is an acceptable consequence, and a strict gate is the
+    # only shape two review rounds could not break.
+    _series_member_set = {series["t1a_id"], series["t1b_id"],
+                          series["t2a_id"], series["t2b_id"]}
+    if {p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id} != _series_member_set:
+        raise HTTPException(403, "Report players must be exactly the series roster")
     # 2v2 reporter clearly has the mod installed.
     await _mark_mod_seen(db, reporter)
 
@@ -20185,6 +20466,30 @@ class _AdminQuarantineReq(BaseModel):
     note: str | None = None
 
 
+async def _quarantine_later_rated_count(db, mode: str, player_ids, since) -> int:
+    """How many results have been RATED for these participants since the
+    quarantined report was captured — in the rating system the report itself
+    would touch (Codex batch find 11: the check was FFA-only, so a 2v2
+    quarantine row could read 'safe to accept' while later 2v2 results made an
+    in-order apply impossible). FFA and 2v2 glicko are separate ladders, so
+    each mode checks only its own tables."""
+    pids = list(player_ids or [])
+    if not pids:
+        return 0
+    if mode == "team":
+        return (await db.execute(text("""
+            SELECT COUNT(*) FROM team_matches tm
+             WHERE tm.created_at > :since
+               AND (tm.t1a_id = ANY(:pids) OR tm.t1b_id = ANY(:pids)
+                    OR tm.t2a_id = ANY(:pids) OR tm.t2b_id = ANY(:pids))
+        """), {"pids": pids, "since": since})).scalar() or 0
+    return (await db.execute(text("""
+        SELECT COUNT(*) FROM ffa_match_players f
+          JOIN ffa_matches m ON m.id = f.match_id
+         WHERE f.player_id = ANY(:pids) AND m.ended_at > :since
+    """), {"pids": pids, "since": since})).scalar() or 0
+
+
 # ── Routes: match-report quarantine (July 30 lifecycle sweep) ──────────────
 # Sid: "if it fails again, send it to the admin tab instead of having it
 # straight deleted." Capture happens at the lifecycle rejection sites via
@@ -20223,11 +20528,8 @@ async def admin_list_quarantine(
         blocked = None
         try:
             async with db.begin_nested():
-                later = (await db.execute(text("""
-                    SELECT COUNT(*) FROM ffa_match_players f
-                      JOIN ffa_matches m ON m.id = f.match_id
-                     WHERE f.player_id = ANY(:pids) AND m.ended_at > :since
-                """), {"pids": list(r["player_ids"] or []), "since": r["created_at"]})).scalar() or 0
+                later = await _quarantine_later_rated_count(
+                    db, r["mode"], r["player_ids"], r["created_at"])
             if later:
                 blocked = (f"{later} later rated game(s) for these players — accepting now "
                            "would apply rating out of order; needs an ordered replay")
@@ -20236,16 +20538,22 @@ async def admin_list_quarantine(
         # Compose the human-readable result from the stored payload. Without
         # this the admin panel renders "score unavailable" on every row - and the
         # score is the single fact an admin needs to judge what they are about to
-        # re-apply to six players' ratings. The payload is the verbatim report,
-        # so this is derived, never trusted as authority.
+        # re-apply to the participants' ratings. The payload is the verbatim
+        # report, so this is derived, never trusted as authority.
         score = ""
         try:
             pl = r["payload"] if isinstance(r["payload"], dict) else _json.loads(r["payload"])
-            entries = sorted(
-                [(str(x.get("display_name") or "?")[:14], int(x.get("rounds_won") or 0))
-                 for x in (pl.get("players") or [])],
-                key=lambda t: -t[1])
-            score = " | ".join(f"{n} {v}" for n, v in entries[:10])
+            if r["mode"] == "team":
+                def _tn(k):
+                    return str((pl.get(k) or {}).get("display_name") or "?")[:12]
+                score = (f"{_tn('t1a')} + {_tn('t1b')} {int(pl.get('t1_rounds_won') or 0)}"
+                         f" | {_tn('t2a')} + {_tn('t2b')} {int(pl.get('t2_rounds_won') or 0)}")
+            else:
+                entries = sorted(
+                    [(str(x.get("display_name") or "?")[:14], int(x.get("rounds_won") or 0))
+                     for x in (pl.get("players") or [])],
+                    key=lambda t: -t[1])
+                score = " | ".join(f"{n} {v}" for n, v in entries[:10])
         except Exception:
             score = ""
         out.append({
@@ -20289,16 +20597,14 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     """
     await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
     row = (await db.execute(text(
-        "SELECT player_ids, created_at, status FROM match_report_quarantine"
+        "SELECT player_ids, created_at, status, mode FROM match_report_quarantine"
         " WHERE id = CAST(:qid AS UUID) FOR UPDATE"), {"qid": qid})).mappings().first()
     if row is None:
         raise HTTPException(404, "Not found")
     if row["status"] != "pending":
         raise HTTPException(409, "Already reviewed")
-    later = (await db.execute(text("""
-        SELECT COUNT(*) FROM ffa_match_players f JOIN ffa_matches m ON m.id = f.match_id
-         WHERE f.player_id = ANY(:pids) AND m.ended_at > :since
-    """), {"pids": list(row["player_ids"] or []), "since": row["created_at"]})).scalar() or 0
+    later = await _quarantine_later_rated_count(
+        db, row["mode"], row["player_ids"], row["created_at"])
     if later:
         # Re-checked under the row lock, not just at list time (#178/#208): the
         # admin may have been looking at a stale screen.

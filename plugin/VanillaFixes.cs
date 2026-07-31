@@ -202,19 +202,27 @@ namespace CompetitiveRounds
                 if (!healthRemoval) return;
                 if (!VanillaFixSupport.GameplayScope()) return;
 
-                // Adversarial-review find (Claude): healthRemoval ticks come
-                // from TWO gameplay surfaces — poison DoT (the desync being
-                // fixed) AND the Decay card, which spreads EVERY direct hit
-                // into healthRemoval ticks over stats.secondsToTakeDamageOver.
-                // Forcing ignoreBlock on a Decay holder would delete their
-                // block-the-spread mitigation (a real ranked balance change,
-                // not a desync fix). Exempt victims whose stats route direct
-                // damage through the DoT path; they keep vanilla behavior
-                // (including, rarely, the ghost-tick desync) until a designed
-                // decision says otherwise.
-                CharacterStatModifiers stats = __instance.GetComponent<CharacterStatModifiers>();
-                if (stats != null && stats.secondsToTakeDamageOver != 0f) return;
-
+                // Bug #135 (galaxy ice, July 30): "poison desync still
+                // happens". Root cause was this patch's own former exemption:
+                // victims whose stats route direct damage through the DoT path
+                // (Decay holders — stats.secondsToTakeDamageOver != 0) kept
+                // FULL vanilla per-replica block behavior for every
+                // healthRemoval tick, poison included. Proven from the
+                // reported lobby: all four clients ran the fix, and two of
+                // the four held Decay — the desync galaxy watched was a
+                // Decay-holding victim's ghost HP. FFA makes the exemption
+                // class common (more players x rolling card churn), which is
+                // why "it failed for FFA".
+                //
+                // The exemption existed to preserve block-the-spread
+                // mitigation, but that mitigation IS the desync: each replica
+                // applies its own local block window to its own local tick
+                // stream, and no client is authoritative. Blocking the DIRECT
+                // hit still prevents the entire Decay spread — only the
+                // unsyncable "block mid-spread to truncate remaining ticks"
+                // niche is removed. Balance call flagged to Sid on the bug
+                // report; revert by restoring the secondsToTakeDamageOver
+                // early-return above this line.
                 Block block = __instance.GetComponent<Block>();
                 if (!ignoreBlock && block != null && block.IsBlocking())
                 {

@@ -445,6 +445,15 @@ namespace CompetitiveRounds
             lastLocalPlaying = false;
         }
 
+        // NOTE on the arming-order race (Codex round-3 residual 12, ACCEPTED):
+        // on the exact frame the edge detector arms the window, a component
+        // Update that ran earlier in that frame can still act. The obvious
+        // "arm earlier" fixes are all worse: Revive and battleOngoing both
+        // fire during the fly-in, and anchoring there burns the window to
+        // ~0.37s of real protection (the original #119 measurement). The slop
+        // is one frame, defensive-input only, and the identical slop has
+        // existed for FIRE suppression since #119 with zero field reports.
+
         // ── Lifecycle ──
 
         /// <summary>New game in the room (game 1 AND rematches — invoked from
@@ -2259,5 +2268,76 @@ namespace CompetitiveRounds
             catch { return true; }   // fail OPEN - never strand a player unable to shoot
         }
     }
+
+    /// <summary>
+    /// Bug #136: extend the spawn grace to BLOCK, at the input layer.
+    ///
+    /// How a block actually replicates (SyncPlayerMovement decompile —
+    /// logs-snapshot/decompiled/full/Photon.Pun/SyncPlayerMovement.cs): the
+    /// OWNER's Block.Update reads input.shieldWasPressed -> TryBlock ->
+    /// RPCA_DoBlock locally; that invokes Block.BlockAction, which the
+    /// owner's SyncPlayerMovement subscribed with SendBlock -> RPC
+    /// "RPCAO_DoBlock" to Others. Remote replicas NEVER read input for
+    /// blocks (controlledElseWhere gates GeneralInput.Update, and the
+    /// movement sync stream carries direction/aim/jump only). So clearing
+    /// shieldWasPressed on the owner is complete and consistent: no local
+    /// block, therefore no BlockAction, therefore no RPC, therefore no
+    /// replica block anywhere. (Refines #92's "replicas simulate blocks from
+    /// replicated input" — the trigger is an owner-event RPC; only the block
+    /// EXECUTION is per-replica.) Same input layer vanilla's own lockInput
+    /// suppression uses (#254). shieldWasPressed is a per-frame edge flag,
+    /// so there is no state to strand: the first press after the window
+    /// works untouched.
+    /// </summary>
+    [HarmonyPatch(typeof(GeneralInput), "Update")]
+    internal class GeneralInput_FfaSpawnGrace_Patch
+    {
+        private static float lastDenyLog = -999f;
+
+        static void Postfix(GeneralInput __instance)
+        {
+            try
+            {
+                if (!FfaMode.SpawnGraceActive) return;
+                if (__instance == null || !__instance.shieldWasPressed) return;
+                var data = __instance.data;   // vanilla's own wiring (publicized)
+                if (data == null || data.view == null || !data.view.IsMine) return;
+                __instance.shieldWasPressed = false;
+                if (Time.realtimeSinceStartup - lastDenyLog > 1f)
+                {
+                    lastDenyLog = Time.realtimeSinceStartup;
+                    Plugin.Log.LogInfo($"[FFA-GRACE] block suppressed ({FfaMode.SpawnGraceLeft:F2}s left)");
+                }
+            }
+            catch { }   // fail OPEN - never strand a player unable to block
+        }
+    }
+
+    /// <summary>
+    /// Second gate for the block grace (Codex batch find 12): Unity gives no
+    /// ordering guarantee between GeneralInput.Update, the mod's grace-arming
+    /// Update and Block.Update, so on the exact arming frame a press could
+    /// slip past the input Postfix. TryBlock is safe to gate owner-side: a
+    /// skipped TryBlock never runs RPCA_DoBlock, so BlockAction never fires
+    /// and SyncPlayerMovement never relays the block RPC — no replica ever
+    /// disagrees (#268). Remote replicas never reach TryBlock at all (their
+    /// shieldWasPressed is never set online).
+    /// </summary>
+    [HarmonyPatch(typeof(Block), "TryBlock")]
+    internal class Block_FfaSpawnGrace_Patch
+    {
+        static bool Prefix(Block __instance)
+        {
+            try
+            {
+                if (!FfaMode.SpawnGraceActive) return true;
+                var data = __instance != null ? __instance.data : null;
+                if (data == null || data.view == null || !data.view.IsMine) return true;
+                return false;
+            }
+            catch { return true; }   // fail OPEN
+        }
+    }
+
 
 }

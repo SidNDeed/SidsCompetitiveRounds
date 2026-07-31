@@ -1,8 +1,114 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased — bug reports #125-#130
+## v1.35.4 — 2026-07-30 — rope objects, poison desync, block grace, FFA casual-wait
 
-Backend + bot deployed 2026-07-30. Client half is built locally and awaits a release.
+Everything previously accumulated as "Unreleased" ships in this version: bug reports
+**#125-#140** across two waves plus the July 30 lifecycle-audit closeout. Backend changes
+were deployed progressively through the day; the client half lands with this release.
+Schema changes: migrations **167** (FFA damage/kill telemetry), **168** (recover two wiped
+FFA games), **169** (match-report quarantine), **170** (`team_series.room_issued_at`),
+**171** (free a dispersed FFA sitting), **172** (publish Tattered Cape placement rev 2).
+
+> **Version note:** 1.35.3 was cut and its Thunderstore package uploaded, then two more
+> fixes landed from the #140 session analysis (the room-wide rope-scale gate and the 3-4
+> player FFA teleport guard). Thunderstore versions are immutable, so the corrected build
+> ships as 1.35.4 and supersedes it. 1.35.3 exists only as that superseded Thunderstore
+> package — there is no 1.35.3 GitHub release.
+
+Cosmetics: **Tattered Cape** ships an approved placement revision — it renders noticeably
+larger (scale 1.70 -> 2.15). The art itself is unchanged.
+
+### Found in Sid's 4-hour session log (#140)
+
+- **3- and 4-player FFA rounds could leave a player un-teleported after someone left.**
+  The guard that skips a departed player during the round-start teleport was tied to the
+  map-growth feature, and map growth only starts at 5 players — so in smaller lobbies the
+  base game's own loop ran, hit the departed player, and stopped, leaving everyone after
+  them standing wherever they were while the map changed underneath. The guard now covers
+  every FFA lobby size. The session log caught this race one step short of failing.
+
+### Bug reports #131-#138 + lifecycle audit closeout (July 30, second wave)
+
+### Client
+
+- **Rope-hung map objects no longer fall at round start on scaled FFA maps (#133/#134).**
+  Vanilla replaces every physics piece with a networked copy after the map enters, and the
+  re-parent preserved the copy's world SCALE — on a scaled FFA map the copy came out ~6%
+  smaller than the map around it, and a rope endpoint authored near the piece's edge missed
+  its attach probe (one missed endpoint is enough: the saw case keeps the rope but drops the
+  saw). The master's jointless piece then free-falls, synced to everyone. Proven from the
+  serialized map data: the two reported cases cross the miss threshold exactly between the
+  3% scaling of 1.35.0 and the 6% of 1.35.2. The networked copies now inherit the map's
+  scale factor, which restores both the attach geometry and the pieces' visual size.
+  **Capability-gated on the whole room**: these pieces are simulated by the room's host and
+  streamed to everyone, so a client applying the fix under a host that lacks it fights the
+  streamed positions with its larger colliders (Sid's live "boxes are vibrating" report from
+  the first mixed lobby). The rescale therefore applies only when every player in the room
+  is on this build — checking only the host was not enough, because the host can change
+  mid-map and silently invalidate that decision. A mixed room behaves exactly as before
+  (no vibration; ropes still break there until everyone updates).
+- **Poison desync root-caused and closed (#135).** The previous fix exempted victims whose
+  stats route damage through the damage-over-time path (Decay holders) — and every tick on
+  such a victim, plain poison included, kept vanilla's per-replica block behavior. Proven
+  from the reported lobby: all four clients ran the fix, two of the four held Decay. The
+  exemption is removed: DoT ticks now always apply on every replica. Blocking the direct
+  hit still prevents a Decay spread entirely; only the unsyncable "block mid-spread"
+  niche is gone — flagged as a deliberate balance call, easy to revert if Sid disagrees.
+- **The FFA spawn grace now covers block as well as fire (#136).** Suppressed at the input
+  layer (the only place that replicates), so every client agrees a grace-window block
+  never happened; the banner says fire AND block unlock together.
+- **Waiting in a casual game while sitting in an open FFA lobby is now allowed (#132).**
+  The lobby seat is only torn down when entering a COMPETITIVE room. When the host presses
+  Start, members get a 5-second on-screen countdown; anyone in a casual game is pulled out
+  immediately (marked as a deliberate exit, never a DC) and auto-joins with everyone else —
+  if the casual exit interrupts the join, it re-arms and retries within seconds.
+- **FFA score HUD restyled (#138, Stan's suggestion).** The translucent black backing box
+  is gone; names carry a drop shadow instead, and every unscored point renders as a tiny
+  grey dot so the first-to-5 target is legible at a glance.
+
+### Server & bot
+
+- **2v2 match reports rejected for lifecycle reasons are quarantined, not destroyed (audit
+  item 1).** A report landing on a cancelled series is captured whole in the same admin
+  quarantine the FFA path got on July 30 — previously the entire game was lost. Capture is
+  trust-bound: the four reported players must be exactly the series' recorded members with
+  the reporter among them, so the DLL secret cannot be used to spam the admin queue. The
+  quarantine list/accept surface now understands team reports (score rendering + a
+  mode-scoped "later rated results" eligibility check).
+- **A leave during a live game no longer cancels the group (audit item 2, all three
+  modes) — once the heartbeat-carrying client is the room's floor.** 2v2's leave cascade
+  only fires when the series has zero recorded games AND no verified in-game heartbeat;
+  1v2 and FFA zero-game dissolutions take the same rule, with FFA falling through to the
+  played-lobby departure path. A mid-game leaver is simply marked; the match pipeline owns
+  the outcome. On 1.35.2 clients (no heartbeat sender) leaves behave as before. FFA
+  survivors' queue rows are no longer deleted the moment someone leaves (the janitor's
+  own windows still bound their lifetime), later leavers are recorded even after their
+  row is pruned, and a lobby with a verifiably live game is never closed by the
+  all-but-one arithmetic.
+- **The in-game heartbeat is verified and means gameplay, not room occupancy.** The
+  presence ping's `in_match` claim only counts when the session token checks out and the
+  pinger is a recorded member of the named group, and the client only sends it while a
+  battle is actually ongoing. The ping fires as the game starts (with transport-failure
+  retry), shrinking the unprotected head of game 1 to seconds. Verification inherits the
+  Steam-auth enforcement ladder — accounts the ladder still treats leniently are verified
+  to the same (lesser) degree everywhere else is.
+- **Veto semantics split by caller shape.** Janitor closers (which re-fire and carry
+  ceilings) keep the conservative "young process = veto" rule; one-shot actors (leave
+  dissolutions, the assembly cancel) act only on trusted positive evidence — vetoing those
+  on ignorance converted failed assemblies into permanent husks. A new janitor arm cancels
+  rowless active 2v2 husks (60+ min quiet, no rows, no live evidence) as the last resort.
+- **Two blind FFA closers deleted (audit item 3):** the janitor's second 3-hour rule and
+  the 2-hour sweep that ran inside every leave request. The janitor's veto-aware dispersed
+  close is the single lifecycle authority now.
+- **2v2 assembly timeout measures from room issue, not match time (audit item 4).**
+  New `room_issued_at` stamp (migration 170); 180s deadline; the heartbeat covers a live
+  game whose spawn-confirm POST was lost. The janitor's 2v2 stale-series sweep takes the
+  conservative veto.
+- **Discord "How FFA works" FAQ updated for host lobbies and forced picks (#137).**
+
+### Bug reports #125-#130 (July 30, first wave)
+
+Backend + bot were deployed 2026-07-30; the client half ships here.
 Schema changes: migration **167** (`ffa_match_players.damage_dealt`, `damage_dealt_timeline`,
 `kill_timeline`, `absent`; applied).
 

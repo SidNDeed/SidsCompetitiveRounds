@@ -140,7 +140,12 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_detail_mini_flags",    DisplayName = "Rally Flags",      Slot = CharacterItemType.Detail, PngFile = "detail_mini_flags.png",    Scale = 1.0f, Offset = new Vector2(0f, 0.15f) },
             new CosmeticDef { Sku = "face_detail_dark_aura",     DisplayName = "Dark Aura",        Slot = CharacterItemType.Detail, PngFile = "detail_dark_aura.png",     Scale = 2.25f, Offset = new Vector2(0.032f, 1.17f), Fps = 7f },
             new CosmeticDef { Sku = "face_detail_energy_orbs",   DisplayName = "Energy Orbs",      Slot = CharacterItemType.Detail, PngFile = "detail_energy_orbs.png",   Scale = 1.0f, Offset = new Vector2(0f, 0.05f), Fps = 7f },
-            new CosmeticDef { Sku = "face_detail_tattered_cape", DisplayName = "Tattered Cape",    Slot = CharacterItemType.Detail, PngFile = "detail_tattered_cape.png", Scale = 1.7f, Offset = new Vector2(0f, -0.10f) },
+            // v1.35.3: placement revision 2 (artist-proposed, admin-approved) —
+            // scale 1.70 -> 2.15, offset unchanged. Art is byte-identical
+            // (md5 254dc7de...), so this is a pure placement republish; values
+            // copied verbatim from approved_render_* (#165 — never the mutable
+            // proposal columns), and migration 172 stamps published revision 2.
+            new CosmeticDef { Sku = "face_detail_tattered_cape", DisplayName = "Tattered Cape",    Slot = CharacterItemType.Detail, PngFile = "detail_tattered_cape.png", Scale = 2.15f, Offset = new Vector2(0f, -0.10f) },
             // July 15: Nix's animated crown — 13 frames @ 3.6fps (twinkling lights +
             // pulsing star; ~3.6s loop — slowed from 9fps per Sid, a calmer flash).
             // Widest animated set so far; exercises the __fN loader past 4 frames.

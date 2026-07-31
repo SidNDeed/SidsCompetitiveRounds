@@ -47,6 +47,7 @@ docs/learnings.md
 docs/deploy-reference.md
 docs/SECURITY_ACTION_ITEMS.md
 docs/https-migration.md
+docs/bug140-session-analysis.md
 scripts/
 
 # Dual-AI (Codex CLI) setup — LOCAL ONLY, same reason as the internal docs

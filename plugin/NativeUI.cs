@@ -10436,7 +10436,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
             string when = FormatAdminQuarantineTime(e.created_at);
             string mode = AdminDisplay(string.IsNullOrEmpty(e.mode) ? "unknown" : e.mode, 12);
-            string score = AdminDisplay(string.IsNullOrEmpty(e.score) ? "score unavailable" : e.score, 20);
+            /* Codex round-3 residual 11: 20 chars hid team 2 of a 2v2 score
+             * ("A + B 2 | C + D 1" runs ~30-55). The server composes and
+             * bounds the string (names pre-trimmed), so give it the room. */
+            string score = AdminDisplay(string.IsNullOrEmpty(e.score) ? "score unavailable" : e.score, 64);
             string room = AdminDisplay(string.IsNullOrEmpty(e.room) ? "room unavailable" : e.room, 24);
             string topLine = $"<color=#FFB46A>[{mode}]</color> {when}  <b>{score}</b>  <color=#778899>{room}</color>";
             string playersLine = $"Players: {players}";

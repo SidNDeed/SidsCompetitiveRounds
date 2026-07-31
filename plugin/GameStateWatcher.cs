@@ -1857,24 +1857,25 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo(
                             $"[QUEUE] Auto-declined pre-room 1v1 match after joining online room '{photonRoomId}'");
                     }
-                    // Open FFA host-lobby membership is exclusive ownership
-                    // (July 29 redesign, design review find 3): entering ANY
-                    // real online room means we're no longer waiting in that
-                    // lobby — leave it so the host can't lock us into a game
-                    // we can't join. Our OWN lock transition clears
-                    // OpenFfaLobbyId before the ffa_ room join, so this never
-                    // fires on the lobby's own game. ALL rooms count here
-                    // (vanilla casual included), unlike the 1v1-search case
-                    // above — a search can ride along a casual game, a lobby
-                    // seat cannot.
+                    // Open FFA host-lobby membership + room entry, bug #132
+                    // revision (Codex batch find 5 caught this hook still on
+                    // the old rule): a CASUAL room may carry an open lobby
+                    // seat — waiting in casual is Sid's design, and the Start
+                    // countdown pulls the member out when the lobby fires.
+                    // Only a COMPETITIVE room still evicts the seat (a lock
+                    // firing mid-ranked-game would yank the player, #150).
+                    // Our OWN lock transition clears OpenFfaLobbyId before
+                    // the ffa_ room join, so this never fires on the lobby's
+                    // own game.
                     if (!PhotonNetwork.OfflineMode
+                        && joinedCompetitiveRoom
                         && !string.IsNullOrEmpty(ApiClient.OpenFfaLobbyId))
                     {
                         Plugin.Log.LogInfo(
-                            $"[FFA-LOBBY] joined room '{photonRoomId}' while in an open lobby — leaving the lobby");
+                            $"[FFA-LOBBY] joined competitive room '{photonRoomId}' while in an open lobby — leaving the lobby");
                         try { ApiClient.FfaLeaveQueue(); } catch { }
                         CompetitiveUI.ShowNotification(
-                            "Left your FFA lobby - you joined a game",
+                            "Left your FFA lobby - you joined a competitive game",
                             Color.yellow,
                             5f);
                     }

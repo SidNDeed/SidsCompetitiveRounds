@@ -5288,7 +5288,27 @@ namespace CompetitiveRounds
             {
                 bool inRoom = false;
                 try { inRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
-                if (!inRoom)
+                // Bug #132: an OPEN lobby seat may ride along a CASUAL game
+                // (Sid's design — waiting in casual is allowed), and the poll
+                // is the only way that member ever sees the host press Start.
+                // Arm immediately: unlike the locked/roomless case there is no
+                // "give up" signal to protect, the row simply stays 'lobby'.
+                bool casualWithOpenSeat = false;
+                try
+                {
+                    casualWithOpenSeat = inRoom
+                        && !CompetitiveRoomDetect.IsCompetitiveRoom()
+                        && !string.IsNullOrEmpty(OpenFfaLobbyId)
+                        && string.IsNullOrEmpty(ActiveFfaLobbyId);
+                }
+                catch { }
+                if (casualWithOpenSeat)
+                {
+                    Plugin.Log.LogInfo("[FFA-LOBBY] waiting in a casual game with an open lobby seat -- resuming poll to catch the host's Start");
+                    IsFfaQueuePolling = true;
+                    _ffaRoomlessSince = -1f;
+                }
+                else if (!inRoom)
                 {
                     if (_ffaRoomlessSince < 0f) _ffaRoomlessSince = now;
                     // 20s of grace: the gap between the lock and actually being
@@ -6060,6 +6080,14 @@ namespace CompetitiveRounds
         public static IEnumerator PresenceLoop()
         {
             yield return new WaitForSeconds(15f);
+            // Codex batch find 3: with a flat 60s cadence, a game that starts
+            // just after a tick has NO in_match evidence for up to a minute —
+            // exactly the window in which a leave used to dissolve live game 1.
+            // The loop now wakes every 5s and sends early whenever the match
+            // group EDGE changes (battle started / group changed); steady state
+            // stays one ping per 60s.
+            string lastInMatchSent = null;
+            float lastPingAt = -999f;
             while (true)
             {
                 // July 21 item 4: keep a fresh Steam session (mints a web-API
@@ -6072,32 +6100,45 @@ namespace CompetitiveRounds
                     if (!string.IsNullOrEmpty(sid) && sid != "unknown")
                     {
                         string inMatch = GetPresenceMatchGroupId();
-                        string matchQuery = string.IsNullOrEmpty(inMatch)
-                            ? ""
-                            : $"&in_match={UnityWebRequest.EscapeURL(inMatch)}";
-                        Plugin.Instance.StartCoroutine(GetRequest(
-                            $"{baseUrl}/api/v1/presence/ping"
-                            + $"?steam_id={UnityWebRequest.EscapeURL(sid)}"
-                            + matchQuery,
-                            (success, response) =>
-                            {
-                                if (success)
+                        bool due = Time.realtimeSinceStartup - lastPingAt >= 60f;
+                        bool edge = !string.IsNullOrEmpty(inMatch) && inMatch != lastInMatchSent;
+                        if (due || edge)
+                        {
+                            lastPingAt = Time.realtimeSinceStartup;
+                            string sentInMatch = inMatch;
+                            string matchQuery = string.IsNullOrEmpty(inMatch)
+                                ? ""
+                                : $"&in_match={UnityWebRequest.EscapeURL(inMatch)}";
+                            Plugin.Instance.StartCoroutine(GetRequest(
+                                $"{baseUrl}/api/v1/presence/ping"
+                                + $"?steam_id={UnityWebRequest.EscapeURL(sid)}"
+                                + matchQuery,
+                                (success, response) =>
                                 {
-                                    int on = ExtractJsonInt(response, "online");
-                                    if (on != CachedOnlineCount)
+                                    // Codex round-3 residual 3: the edge marker
+                                    // advances only when the ping actually
+                                    // LANDED — a transport-failed edge retries
+                                    // on the next 5s tick instead of silently
+                                    // leaving game 1 unprotected for 60s.
+                                    if (success)
                                     {
-                                        CachedOnlineCount = on;
-                                        NativeUI.MarkDirty();
+                                        lastInMatchSent = sentInMatch;
+                                        int on = ExtractJsonInt(response, "online");
+                                        if (on != CachedOnlineCount)
+                                        {
+                                            CachedOnlineCount = on;
+                                            NativeUI.MarkDirty();
+                                        }
                                     }
-                                }
-                            }));
+                                }));
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
                     Plugin.Log.LogWarning($"[PRESENCE] tick failed: {ex.Message}");
                 }
-                yield return new WaitForSeconds(60f);
+                yield return new WaitForSeconds(5f);
             }
         }
 
@@ -6108,6 +6149,18 @@ namespace CompetitiveRounds
                 if (!CompetitiveRoomDetect.IsCompetitiveRoom()
                     || PhotonNetwork.CurrentRoom == null)
                     return null;
+                // Codex batch find 2: room OCCUPANCY is not gameplay. During
+                // assembly (3 of 4 joined, game never starts) an in_match claim
+                // would veto the very cancel that frees the group. Claim only
+                // while a battle is actually ongoing; the server's 210s TTL
+                // bridges pick phases, round transitions and the rematch flow,
+                // all far shorter than that.
+                try
+                {
+                    if (GameManager.instance == null || !GameManager.instance.battleOngoing)
+                        return null;
+                }
+                catch { return null; }
 
                 string room = PhotonNetwork.CurrentRoom.Name ?? "";
                 if (room.StartsWith("ffa_", StringComparison.Ordinal))
@@ -8440,11 +8493,28 @@ namespace CompetitiveRounds
                 CompetitiveUI.ShowNotification("Still leaving — try again in a moment.", new Color(1f, 0.6f, 0.2f));
                 return false;
             }
-            // Consent-at-join (#127/#150): never take a lobby membership from
-            // inside a live online room. OfflineMode lingers InRoom (#122).
-            bool inOnlineRoom = false;
-            try { inOnlineRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
-            if (inOnlineRoom)
+            // Codex round-3 regression 5: a locked membership (start countdown
+            // pending or lobby fired) must gate the browser buttons — a Join
+            // click bumps the queue generation, which silently invalidates the
+            // live delayed join even when the server rejects the new join.
+            if (!string.IsNullOrEmpty(ActiveFfaLobbyId))
+            {
+                CompetitiveUI.ShowNotification("Your FFA is already starting — leave it first if you meant to switch.", new Color(1f, 0.7f, 0.3f), 5f);
+                return false;
+            }
+            // Consent-at-join (#127/#150), narrowed for bug #132: taking an
+            // OPEN lobby seat while in a CASUAL game is allowed — waiting in
+            // casual is the whole point of Sid's design; the Start countdown
+            // pulls the member out when the lobby actually fires. Competitive
+            // rooms still refuse. OfflineMode lingers InRoom (#122).
+            bool inCompetitiveRoom = false;
+            try
+            {
+                inCompetitiveRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode
+                    && CompetitiveRoomDetect.IsCompetitiveRoom();
+            }
+            catch { }
+            if (inCompetitiveRoom)
             {
                 CompetitiveUI.ShowNotification("Finish or leave your current game first.", new Color(1f, 0.7f, 0.3f), 5f);
                 return false;
@@ -8475,14 +8545,20 @@ namespace CompetitiveRounds
                 _ffaLeaveIntent = false;
                 IsFfaQueuePolling = true; FfaQueueStatus = "lobby";
                 Plugin.Log.LogInfo($"[FFA-LOBBY] enrolled in lobby {OpenFfaLobbyId} (recovery={wasRecovery})");
-                // Level-triggered room exclusion (impl review find 3): if a
-                // vanilla game finished connecting while the enroll was in
-                // flight, we now hold a seat we cannot sit in — leave it.
-                bool inOnlineRoom = false;
-                try { inOnlineRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
-                if (inOnlineRoom)
+                // Level-triggered room exclusion (impl review find 3), now
+                // competitive-only (bug #132 — a casual game may carry an open
+                // seat): if a COMPETITIVE game finished connecting while the
+                // enroll was in flight, we hold a seat we cannot sit in.
+                bool inCompRoom = false;
+                try
                 {
-                    Plugin.Log.LogWarning("[FFA-LOBBY] enrolled while inside an online room — leaving the lobby");
+                    inCompRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode
+                        && CompetitiveRoomDetect.IsCompetitiveRoom();
+                }
+                catch { }
+                if (inCompRoom)
+                {
+                    Plugin.Log.LogWarning("[FFA-LOBBY] enrolled while inside a competitive room — leaving the lobby");
                     FfaLeaveQueue();
                     return;
                 }
@@ -8659,6 +8735,10 @@ namespace CompetitiveRounds
             string expectedLobby = !string.IsNullOrEmpty(OpenFfaLobbyId) ? OpenFfaLobbyId : ActiveFfaLobbyId;
             _ffaLeaveIntent = true;
             if (!string.IsNullOrEmpty(expectedLobby)) _ffaLeaveTargetLobby = expectedLobby;
+            // Bug #132 fencing: a leave abandons any pending start countdown.
+            _ffaJoinCountdownKey = null;
+            _ffaJoinCountdownActiveToken = 0;
+            CompetitiveUI.CancelFfaStartCountdown();
             IsFfaQueuePolling = false; FfaQueueCount = 0; FfaGatherSecondsLeft = -1;
             FfaLockedRoster = null;
             ActiveFfaLobbyId = null;
@@ -8773,6 +8853,13 @@ namespace CompetitiveRounds
                 }
                 if (status == "lobby")
                 {
+                    // A LOCK outranks a lobby-status response (Codex round-3
+                    // regression 2): a delayed pre-Start poll response landing
+                    // after ready_join would otherwise repopulate
+                    // OpenFfaLobbyId — and the room-entry hook then reads that
+                    // stale open seat as foreign and dissolves our own live
+                    // lobby the moment we enter its ffa_ room.
+                    if (!string.IsNullOrEmpty(ActiveFfaLobbyId)) return;
                     // Leave intent outranks membership (impl review find 2):
                     // the seat still existing means the leave never landed —
                     // retry it instead of re-adopting.
@@ -8786,14 +8873,24 @@ namespace CompetitiveRounds
                         }
                         return;
                     }
-                    // Level-triggered room exclusion (impl review find 3): a
-                    // lobby seat cannot ride along a live online game, and
-                    // this gate re-fires every poll — no missed edges.
-                    bool inRoomNow = false;
-                    try { inRoomNow = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
-                    if (inRoomNow)
+                    // Level-triggered room exclusion (impl review find 3),
+                    // narrowed for bug #132 (Snail + Sid's design): an OPEN
+                    // lobby seat is a waiting-room ticket, and waiting in a
+                    // CASUAL game is explicitly allowed — the seat only
+                    // becomes incompatible with a room when that room is
+                    // competitive (ranked/2v2/1v2/ffa/tournament), where a
+                    // lock firing mid-match would yank the player (#150).
+                    // The gate re-fires every poll — no missed edges.
+                    bool inCompetitiveRoomNow = false;
+                    try
                     {
-                        Plugin.Log.LogWarning("[FFA-LOBBY] in an online room while holding a lobby seat — leaving the lobby");
+                        inCompetitiveRoomNow = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode
+                            && CompetitiveRoomDetect.IsCompetitiveRoom();
+                    }
+                    catch { }
+                    if (inCompetitiveRoomNow)
+                    {
+                        Plugin.Log.LogWarning("[FFA-LOBBY] in a competitive room while holding a lobby seat — leaving the lobby");
                         FfaLeaveQueue();
                         return;
                     }
@@ -8835,6 +8932,9 @@ namespace CompetitiveRounds
                     // Authoritative terminal: the lobby we sat in is gone
                     // (disband, janitor, or we were pruned at start).
                     Plugin.Log.LogInfo($"[FFA-LOBBY] lobby closed server-side (was {OpenFfaLobbyId})");
+                    _ffaJoinCountdownKey = null;
+                    _ffaJoinCountdownActiveToken = 0;
+                    CompetitiveUI.CancelFfaStartCountdown();
                     OpenFfaLobbyId = null; FfaLobbyIsHost = false; FfaLobbyCanStart = false;
                     FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
                     IsFfaQueuePolling = false; FfaQueueStatus = "";
@@ -8853,18 +8953,59 @@ namespace CompetitiveRounds
                         NativeUI.MarkDirty();
                         return;
                     }
-                    // Consent guard: decline a lock that lands mid-game (#150).
-                    bool busyInRoom = false;
-                    try { busyInRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
-                    if (busyInRoom)
+                    // Countdown re-fire suppression (Codex batch find 6):
+                    // polling now stays ON through the 5s start countdown so a
+                    // REMOTE dissolution can still reach us — which means this
+                    // branch re-enters every ~2s while the countdown runs.
+                    // Same lobby+room with a live countdown is not a new
+                    // event: skip before the busy checks (or the casual-room
+                    // leave would re-fire) and without touching the
+                    // loop-breaker counter.
+                    string cdLobby = ExtractJsonString(resp, "lobby_id") ?? "";
+                    string cdRoom = ExtractJsonString(resp, "room_name") ?? "";
+                    if (_ffaJoinCountdownKey != null
+                        && _ffaJoinCountdownKey == cdLobby + "|" + cdRoom
+                        && _ffaJoinCountdownActiveToken != 0
+                        && Time.realtimeSinceStartup - _ffaJoinCountdownArmedAt < 12f)
                     {
-                        Plugin.Log.LogWarning("[FFA] ready_join landed while in another room — declining (leaving FFA queue)");
+                        return;
+                    }
+                    // Consent guard: decline a lock that lands mid-COMPETITIVE-game
+                    // (#150). A CASUAL room is different since bug #132: waiting
+                    // in casual with an open lobby seat is allowed, and the
+                    // host pressing Start is the consent — kick out of the
+                    // casual game immediately (Sid's design), then the 5s
+                    // countdown below runs before the FFA room join.
+                    bool busyInRoom = false, busyCasual = false;
+                    try
+                    {
+                        busyInRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode;
+                        busyCasual = busyInRoom && !CompetitiveRoomDetect.IsCompetitiveRoom();
+                    }
+                    catch { }
+                    if (busyInRoom && !busyCasual)
+                    {
+                        Plugin.Log.LogWarning("[FFA] ready_join landed while in a competitive room — declining (leaving FFA queue)");
                         FfaLeaveQueue();
                         CompetitiveUI.ShowNotification("FFA match found, but you're in a game — removed from the FFA queue.", new Color(1f, 0.7f, 0.3f), 7f);
                         NativeUI.MarkDirty();
                         return;
                     }
-                    IsFfaQueuePolling = false;
+                    if (busyCasual)
+                    {
+                        Plugin.Log.LogInfo("[FFA] host started the FFA while we're in a casual game — leaving it now (#132)");
+                        try
+                        {
+                            // Deliberate exit: never a DC loss on the casual tally.
+                            GameStateWatcher.LeavingForRanked = true;
+                            PhotonNetwork.LeaveRoom();
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] casual-room leave: {ex.Message}"); }
+                    }
+                    // NOTE: polling deliberately stays ON here (Codex batch
+                    // find 6) — it is the only channel that can tell us the
+                    // lobby was cancelled by ANOTHER member's leave during the
+                    // countdown. DelayedFfaRoomJoin turns it off at fire time.
                     ActiveFfaLobbyId = ExtractJsonString(resp, "lobby_id");
                     // The open-lobby membership just became a LOCKED lobby —
                     // clear the open belief or the room-join teardown would
@@ -8906,6 +9047,11 @@ namespace CompetitiveRounds
                             prejoin["p_id"] = FfaMySlot;
                             prejoin["t_id"] = FfaMySlot;   // FFA: every player own team
                             prejoin["u_id"] = sid;
+                            // Capability advert (rope-scale fix): the map-object
+                            // rescale keys off the MASTER's copy of this prop —
+                            // pre-join so it rides the Player record and can
+                            // never race a peer's map load (#79 pattern).
+                            prejoin[FfaMapScale.ScaleCapabilityProp] = 1;
                             if (PhotonNetwork.LocalPlayer != null)
                                 PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
                         }
@@ -8914,10 +9060,23 @@ namespace CompetitiveRounds
                         try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join pcolor publish: {ex.Message}"); }
                         try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join trail publish: {ex.Message}"); }
 
-                        Plugin.SetPendingRoom(room, region);
-                        Plugin.Log.LogInfo($"[FFA] Lobby locked! Room: {room} (region: {region ?? "auto"}) lobby={ActiveFfaLobbyId} slot={FfaMySlot} players={FfaLobbyPlayerCount}");
-                        CompetitiveUI.ShowNotification($"{FfaLobbyPlayerCount}-player FFA found! Joining...", Color.green, 5f);
+                        // Bug #132 (Sid's design): a 5-second on-screen countdown
+                        // between the host's Start and the actual room join, so
+                        // nobody — especially a member just yanked out of a
+                        // casual game — is teleported with zero warning. The
+                        // deferred join re-checks generation, leave intent AND
+                        // lobby identity so a Leave clicked during the countdown
+                        // or a remote dissolution observed by the (still-live)
+                        // poll wins over the join (#252e / Codex find 6).
+                        _ffaJoinCountdownKey = (ActiveFfaLobbyId ?? "") + "|" + room;
+                        int cdToken = ++_ffaJoinCountdownToken;
+                        _ffaJoinCountdownActiveToken = cdToken;
+                        _ffaJoinCountdownArmedAt = Time.realtimeSinceStartup;
+                        CompetitiveUI.ShowFfaStartCountdown(5f);
+                        Plugin.Log.LogInfo($"[FFA] Lobby locked! Room: {room} (region: {region ?? "auto"}) lobby={ActiveFfaLobbyId} slot={FfaMySlot} players={FfaLobbyPlayerCount} — joining in 5s");
+                        CompetitiveUI.ShowNotification($"{FfaLobbyPlayerCount}-player FFA starting in 5 seconds!", Color.green, 5f);
                         try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
+                        Plugin.Instance.StartCoroutine(DelayedFfaRoomJoin(room, region, gen, ActiveFfaLobbyId, cdToken, 5f));
                     }
                 }
                 else if (status == "not_in_queue" || status == "expired")
@@ -8928,6 +9087,9 @@ namespace CompetitiveRounds
                     // live commitment — stale lock state here caused repeated
                     // roomless-poll recovery loops and a QueueRoomJoiner that
                     // could still fire into a canceled Photon room.
+                    _ffaJoinCountdownKey = null;
+                    _ffaJoinCountdownActiveToken = 0;
+                    CompetitiveUI.CancelFfaStartCountdown();
                     ActiveFfaLobbyId = null;
                     FfaMySlot = -1; FfaLobbyPlayerCount = 0;
                     FfaLobbyIsHost = false; FfaLobbyCanStart = false;
@@ -8976,10 +9138,16 @@ namespace CompetitiveRounds
                     // failure path converts a truly-gone lobby into the
                     // explicit closed toast. Never auto-CREATE, and never the
                     // legacy gather queue — that mechanism is retired in this
-                    // client. Online-room gate as before (#122/#150).
+                    // client. Room gate matches the bug-#132 rule (Codex batch
+                    // find 13): a CASUAL room may carry an open seat, so it
+                    // must also be allowed to RECOVER one — the old
+                    // any-room gate left a pruned seat looping unrecoverable
+                    // for as long as the casual game lasted. Competitive rooms
+                    // still block (#122/#150).
                     if (status == "not_in_queue"
                         && !string.IsNullOrEmpty(OpenFfaLobbyId)
-                        && (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode)
+                        && (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode
+                            || !CompetitiveRoomDetect.IsCompetitiveRoom())
                         && Time.unscaledTime - _ffaLobbyRejoinAt > 60f)
                     {
                         _ffaLobbyRejoinAt = Time.unscaledTime;
@@ -8989,6 +9157,77 @@ namespace CompetitiveRounds
                 }
                 NativeUI.MarkDirty();
             }));
+        }
+
+        // Suppression key for countdown-window ready_join re-fires (the poll
+        // stays live through the countdown; Codex batch find 6). Ownership is
+        // TOKEN-scoped (round-3 regressions 4/8): a superseded coroutine must
+        // never clear a newer countdown's key/banner, and suppression keys off
+        // the pending token — not the UI clock — so a deadline expiring a
+        // frame before the coroutine wakes cannot admit a duplicate fire.
+        private static string _ffaJoinCountdownKey;
+        private static int _ffaJoinCountdownToken;        // monotonic issue counter
+        private static int _ffaJoinCountdownActiveToken;  // 0 = none pending
+        // Round-4 find 9: suppression must SELF-EXPIRE. The delayed-join
+        // coroutine can die with its host (a NetworkRestart tears coroutine
+        // hosts down) leaving the active token set forever — and a suppressed
+        // ready_join returns BEFORE the loop-breaker counter, so nothing else
+        // recovers. 12s > countdown (5s) + wake jitter, so a HEALTHY pending
+        // countdown is never deduplicated away; a dead one lapses and the next
+        // poll re-arms a fresh countdown (counting toward the loop-breaker).
+        private static float _ffaJoinCountdownArmedAt = -999f;
+
+        /// <summary>Bug #132: the FFA room join runs after the 5s start
+        /// countdown. Hosted on Plugin.Instance — NOTE the coroutine itself
+        /// can still die mid-wait (a NetworkRestart tears down in-flight
+        /// coroutines, #252e); the suppression TTL above is what recovers
+        /// from a dead pending countdown. Aborts
+        /// when: a newer countdown superseded this one, the queue generation
+        /// moved, an explicit leave was requested, the lobby belief changed
+        /// (a remote dissolution observed by the still-running poll nulls
+        /// ActiveFfaLobbyId — Codex find 6), a DIFFERENT mode armed the shared
+        /// pending-room slot, or we are already sitting in a competitive room
+        /// another flow joined (find 14 — never yank the player out of it).
+        /// Every abort clears the countdown banner (find 15).
+        ///
+        /// ACCEPTED residual (round-3 find 6): a remote dissolution landing
+        /// after our last ~2s poll observation but before the fire can still
+        /// send us into the dead Photon room. That window was the ENTIRE
+        /// pre-countdown behaviour (the join used to fire instantly with zero
+        /// re-checks), so the countdown strictly narrowed it; the lonely-room
+        /// watchdog recovers the tail.</summary>
+        private static IEnumerator DelayedFfaRoomJoin(string room, string region, int gen,
+                                                      string lobbyId, int myToken, float delay)
+        {
+            yield return new WaitForSecondsRealtime(delay);
+            if (_ffaJoinCountdownActiveToken != myToken)
+                yield break;   // superseded — the newer owner controls key/banner
+            _ffaJoinCountdownActiveToken = 0;
+            _ffaJoinCountdownKey = null;
+            string pendingNow = null;
+            try { pendingNow = Plugin.PendingRankedRoom; } catch { }
+            bool foreignPending = !string.IsNullOrEmpty(pendingNow) && pendingNow != room;
+            bool inCompetitiveRoomNow = false;
+            try
+            {
+                inCompetitiveRoomNow = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode
+                    && CompetitiveRoomDetect.IsCompetitiveRoom();
+            }
+            catch { }
+            if (gen != ffaGen || _ffaLeaveIntent
+                || string.IsNullOrEmpty(ActiveFfaLobbyId) || ActiveFfaLobbyId != lobbyId
+                || foreignPending || inCompetitiveRoomNow)
+            {
+                CompetitiveUI.CancelFfaStartCountdown();
+                Plugin.Log.LogInfo("[FFA] start countdown aborted ("
+                    + (foreignPending ? $"another join owns the room slot: {pendingNow}"
+                        : inCompetitiveRoomNow ? "already in a competitive room"
+                        : "leave requested, lobby gone, or queue lifecycle moved on")
+                    + ")");
+                yield break;
+            }
+            IsFfaQueuePolling = false;
+            Plugin.SetPendingRoom(room, region);
         }
 
         public static void UpdateFfaQueueList(bool force = false)

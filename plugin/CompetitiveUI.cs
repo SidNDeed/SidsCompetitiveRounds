@@ -223,6 +223,27 @@ namespace CompetitiveRounds
         private static int ffaPickBannerSeconds = -1;
         private static bool ffaPickBannerLocal;
 
+        // Bug #132: 5s "FFA starting" countdown between the host's Start and
+        // the room join. Realtime clock — the countdown must tick at menu
+        // timescale AND inside a casual game being left.
+        private static float ffaStartCountdownUntil = -999f;
+
+        public static void ShowFfaStartCountdown(float seconds)
+        {
+            ffaStartCountdownUntil = Time.realtimeSinceStartup + seconds;
+        }
+
+        public static bool FfaStartCountdownActive =>
+            Time.realtimeSinceStartup < ffaStartCountdownUntil;
+
+        /// <summary>Codex batch find 15: every path that abandons the pending
+        /// join must also retire the banner, or "FFA STARTING..." lies on
+        /// screen until the original deadline.</summary>
+        public static void CancelFfaStartCountdown()
+        {
+            ffaStartCountdownUntil = -999f;
+        }
+
         private static void DrawFfaScoreStrip()
         {
             if (Event.current == null) return;
@@ -230,7 +251,8 @@ namespace CompetitiveRounds
             {
                 bool inMatch = FfaMode.InFfaMatch;
                 bool pickActive = FfaMode.PickPhaseActive;
-                if (!inMatch && !pickActive)
+                bool startCountdown = Time.realtimeSinceStartup < ffaStartCountdownUntil;
+                if (!inMatch && !pickActive && !startCountdown)
                 {
                     ffaHudRowsCachedAt = -999f;
                     ffaHudRowExtent = 0;
@@ -447,16 +469,30 @@ namespace CompetitiveRounds
         {
             if (ffaHudRowExtent <= 0) return;
             Color previous = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.42f);
-            GUI.DrawTexture(ffaHudBackingRect, Texture2D.whiteTexture);
+            // Bug #138 (Stan via Sid): no backing box — the strip sits directly
+            // on the scene like vanilla's counter. Names keep their contrast
+            // via a 1px drop shadow instead.
 
             for (int slot = 0; slot < ffaHudRowExtent; slot++)
             {
                 var row = ffaHudRows[slot];
                 if (!row.active) continue;
-                GUI.color = new Color(row.nameColor.r, row.nameColor.g, row.nameColor.b,
-                    row.dead ? 0.5f : 1f);
+                float nameAlpha = row.dead ? 0.5f : 1f;
+                GUI.color = new Color(0f, 0f, 0f, 0.75f * nameAlpha);
+                GUI.Label(new Rect(row.nameRect.x + ffaHudScale, row.nameRect.y + ffaHudScale,
+                    row.nameRect.width, row.nameRect.height), row.name, ffaHudNameStyle);
+                GUI.color = new Color(row.nameColor.r, row.nameColor.g, row.nameColor.b, nameAlpha);
                 GUI.Label(row.nameRect, row.name, ffaHudNameStyle);
+
+                // Bug #138: every unscored point renders as a teeny grey dot
+                // (vanilla-style) so the win target is legible at a glance.
+                int placeholderFrom = row.fullDots + (row.halfDot ? 1 : 0);
+                GUI.color = new Color(0.62f, 0.62f, 0.62f, 0.55f);
+                float tinySize = ffaHudDotSize * 0.45f;
+                float tinyInset = (ffaHudDotSize - tinySize) * 0.5f;
+                for (int dot = placeholderFrom; dot < FfaMode.RoundsToWin; dot++)
+                    GUI.DrawTexture(new Rect(row.dotX + dot * ffaHudDotPitch + tinyInset,
+                        row.dotY + tinyInset, tinySize, tinySize), ffaFullDotTexture);
 
                 GUI.color = row.dotColor;
                 for (int dot = 0; dot < row.fullDots; dot++)
@@ -473,6 +509,23 @@ namespace CompetitiveRounds
         {
             if (!active)
             {
+                // Bug #132: the start countdown owns this slot between the
+                // host's Start and the room join. LOCAL styling with the live
+                // second — it is a call to act (your game is about to begin,
+                // possibly pulling you out of a casual room).
+                float cdLeft = ffaStartCountdownUntil - now;
+                if (cdLeft > 0f)
+                {
+                    int cdSec = Mathf.CeilToInt(cdLeft);
+                    if (cdSec != ffaPickBannerSeconds || !ffaPickBannerLocal
+                        || string.IsNullOrEmpty(ffaPickBannerText))
+                    {
+                        ffaPickBannerLocal = true;
+                        ffaPickBannerSeconds = cdSec;
+                        ffaPickBannerText = $"FFA STARTING IN {cdSec}...";
+                    }
+                    return;
+                }
                 // Bug #119: outside the pick phase this banner slot carries the
                 // spawn grace cue, so players can see WHY the trigger is dead
                 // for the first second of a round rather than reading it as a
@@ -482,7 +535,7 @@ namespace CompetitiveRounds
                 {
                     ffaPickBannerLocal = false;
                     ffaPickBannerSeconds = -1;
-                    ffaPickBannerText = "GET READY - hold fire";
+                    ffaPickBannerText = "GET READY - fire and block unlock in a moment";
                     return;
                 }
                 ffaPickBannerText = "";

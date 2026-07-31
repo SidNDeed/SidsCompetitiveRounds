@@ -50,6 +50,12 @@ services:
       db:
         condition: service_healthy
     environment:
+      # July 30: print() to a non-TTY stdout is BLOCK-buffered (~8KB), and with
+      # --no-access-log the stream is quiet enough that diagnostic [TAG] lines
+      # sat invisible for minutes-to-hours — a deploy verification chased a
+      # "missing" log line that was sitting in the buffer. Every app-level
+      # print flushes immediately with this set.
+      PYTHONUNBUFFERED: "1"
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       API_SECRET_KEY: ${API_SECRET_KEY}
       MATCH_HMAC_SECRET: ${MATCH_HMAC_SECRET}
@@ -90,6 +96,7 @@ services:
     depends_on:
       - api
     environment:
+      PYTHONUNBUFFERED: "1"
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       API_BASE_URL: http://api:8000
       LEADERBOARD_CHANNEL: ${LEADERBOARD_CHANNEL}

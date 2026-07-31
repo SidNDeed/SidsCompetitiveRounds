@@ -1418,18 +1418,21 @@ FAQ_ENTRIES = [
         "examples": ["how does ffa work", "how does free for all work", "what is ffa",
                      "how do i play ffa", "how does ffa scoring work", "is ffa ranked"],
         "answer": (
-            "**Free-for-all, 3-10 players, and it's fully RANKED.** Queue from "
-            "**F5 → Multiplayer → FFA → Join FFA Queue**.\n"
-            "• **Getting in** — no Elo band and no ready-up: joining *is* consent. Once 3 players are "
-            "searching a **25s gather window** opens, each new joiner adds ~20s (2 min hard cap), and a "
-            "full 10 locks instantly. The mod auto-connects everyone into the lobby.\n"
+            "**Free-for-all, 3-10 players, and it's fully RANKED.** Played from **host lobbies**: "
+            "**F5 → Multiplayer → FFA**, then **Create Lobby** or join an open one from the browser.\n"
+            "• **Getting in** — no Elo band and no ready-up: sitting in the lobby *is* consent. The "
+            "**host presses Start** once at least **3** players are in (up to **10**), and the mod "
+            "auto-connects everyone into the game. Several lobbies can be open at the same time; if "
+            "the host leaves, the longest-waiting member is promoted.\n"
             "• **Scoring** — everyone is their own team. Last player alive takes a **half point**; "
             "**2 halves = a point**; **first to 5 points** wins the game. The lobby keeps playing "
             "rematches until people leave.\n"
             "• **Cards** — after each point, everyone *except* the point winner picks **at the same "
-            "time**. Nothing is ever picked for you: the window stays open at least **45s** and extends "
-            "as picks land (90s max) — miss it and you get no card that round. You hold **5 cards**; "
-            "picking a 6th removes your oldest.\n"
+            "time**. The window allows up to **45s** (extending as picks land, 90s max) and closes "
+            "early once everyone has picked. **A pick can't be skipped**: when the on-screen "
+            "countdown hits zero, the card you have highlighted is picked for you automatically "
+            "(card 1 if you never moved) and a toast announces it. You hold **5 cards**; picking a "
+            "6th removes your oldest.\n"
             "• **Rating** — FFA has its **own Glicko rating and leaderboard**; your 1v1 elo is untouched. "
             "Placement is points, then total half points earned, then kills, and ties share a place "
             "(1, 2, 2, 4). You're rated against the **4 players placed nearest you**, so a 10-player "
@@ -1441,11 +1444,12 @@ FAQ_ENTRIES = [
             "• The map and its out-of-bounds edge **grow with the lobby**.\n"
             "• Spectators can **bet gold** on who wins the next game, from the FFA tab.\n"
             "Full rules in-game: **F5 → Multiplayer → FFA → Info**."),
-        "short": ("FFA is a RANKED 3-10 player free-for-all. F5 -> Multiplayer -> FFA -> Join FFA Queue: "
-                  "no elo band, no ready-up, the lobby locks ~25s after 3 are searching (instantly at 10). "
-                  "Last player alive takes a half point, 2 halves make a point, first to 5 points wins. "
-                  "After each point everyone but the point winner picks a card at the same time; you hold "
-                  "5 cards, a 6th drops your oldest. Own rating and leaderboard."),
+        "short": ("FFA is a RANKED 3-10 player free-for-all played from host lobbies. F5 -> Multiplayer "
+                  "-> FFA: create a lobby or join an open one, and the host presses Start once 3+ are in "
+                  "(up to 10). Last player alive takes a half point, 2 halves make a point, first to 5 "
+                  "points wins. After each point everyone but the point winner picks a card at the same "
+                  "time - the timer auto-picks your highlighted card, so a pick can't be skipped; you "
+                  "hold 5 cards, a 6th drops your oldest. Own rating and leaderboard."),
     },
     {
         "key": "how_1v2",

@@ -221,8 +221,26 @@ namespace CompetitiveRounds
                 try
                 {
                     float f = CurrentFactor;
-                    if (f <= 1.001f || !FfaMode.EngineActive()) return true;   // vanilla
+                    // Bug #140 analysis (HIGH): this used to early-out to vanilla
+                    // whenever f == 1, which is EXACTLY the case at 3 and 4
+                    // players (FactorFor clamps to 1.0 below 5) — i.e. the whole
+                    // lower half of FFA's supported range ran vanilla's
+                    // MovePlayers. That loop has no null check and no try/catch,
+                    // and StartCoroutine runs the first MoveNext SYNCHRONOUSLY,
+                    // so a departed player still sitting in PlayerManager.players
+                    // (FFA suppresses vanilla's leave teardown by design, #222)
+                    // throws and ABORTS the loop — every player at a higher index
+                    // never gets moved at all. That is the "stuck where I was
+                    // while the map changed" symptom, reached by a different route
+                    // than #45/#85. The live log caught the race one step short of
+                    // failing: the purge removed 2 dead entries immediately AFTER
+                    // MovePlayers had already run.
+                    //
+                    // So: in FFA this patch now always takes over the loop for its
+                    // null-skip, and the SCALE is applied only when there is one.
+                    if (!FfaMode.EngineActive()) return true;   // vanilla
                     if (__instance?.players == null || spawnPoints == null) return true;
+                    if (f < 1f) f = 1f;
 
                     // Bug #116 second half: the padded array repeats vanilla
                     // points, so any index whose target was already claimed this
@@ -233,7 +251,13 @@ namespace CompetitiveRounds
                     // per-half-point shuffle still decides who gets which of the
                     // real spawn points; extras just fill the clashes.
                     var used = new System.Collections.Generic.List<Vector3>();
-                    var extras = FfaSpawnPoints.Extras;
+                    // Extras are only scanned on a SCALED map (the SetStartPos
+                    // postfix returns before ScanForMap when f == 1), so the
+                    // cached list can still hold positions from an earlier,
+                    // larger map. Only consult it while scaling is actually
+                    // active; at 3-4 players vanilla's four distinct points
+                    // cannot clash anyway.
+                    var extras = f > 1.001f ? FfaSpawnPoints.Extras : null;
                     int nextExtra = 0;
                     for (int i = 0; i < __instance.players.Count && i < spawnPoints.Length; i++)
                     {
@@ -259,6 +283,149 @@ namespace CompetitiveRounds
                     // placement rather than killing the transition.
                     Plugin.Log.LogWarning($"[FFA-SCALE] MovePlayers: {ex.Message}");
                     return true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Bugs #133/#134: rope-hung crates and saws fell at round start on
+        /// scaled FFA maps.
+        ///
+        /// Vanilla replaces every authored physics piece with a networked copy
+        /// AFTER the map has entered: the master calls PhotonNetwork.Instantiate
+        /// at the placeholder's world position (correct — the placeholder is a
+        /// scaled child), and PhotonMapObject.Start re-parents the copy under
+        /// the map root with worldPositionStays: true. worldPositionStays
+        /// preserves world SCALE as well as position, so the copy keeps its
+        /// ORIGINAL prefab world scale (not generally 1 — observed 2, 5,
+        /// 3.1179) while every authored sibling carries the extra f — the
+        /// networked piece is (f-1)/f smaller than the placeholder it replaced.
+        ///
+        /// MapObjet_Rope then attaches by Collider2D.OverlapPoint(endpoint)
+        /// over map.allRigs (captured after the placeholders are destroyed, so
+        /// only the undersized copies remain). The endpoint sits at f*authored,
+        /// the copy's collider extents at 1*authored around a correct centre:
+        /// a rope endpoint authored within ~(f-1)/f of the collider edge
+        /// misses. ONE missed endpoint is enough to leave that piece
+        /// jointless (the level32 saw case: the box end still attaches, the
+        /// saw end misses, the saw falls); both missed destroys the rope
+        /// outright (the level41 crate case). Three frames later the copy's
+        /// physics enables with no joint and the master's piece free-falls,
+        /// which NetworkPhysicsObject syncs to everyone (non-owner copies
+        /// have gravityScale=0 on rope maps — the fall always originates on
+        /// the master). Codex extracted the serialized scene data and proved
+        /// the two reported cases cross the miss threshold exactly between
+        /// f=1.03 (v1.35.0) and f=1.06 (v1.35.2): level41 crate margin
+        /// +0.0044 -> -0.0099, level32 saw +0.0271 -> -0.0056; with this fix
+        /// both are comfortably inside at 1.06. A few tight corner
+        /// attachments were already failing at 1.03.
+        ///
+        /// Fix at the root: give the copy the map's factor. Multiply — not set
+        /// to one — so the original prefab scale is preserved. localScale is
+        /// multiplied while the body is still simulated=false (Start set
+        /// that), so the fixtures bake at the right size when IGo enables
+        /// physics. Positions need no correction: worldPositionStays already
+        /// preserved the correct scaled world pos. Mixed versions: scale is
+        /// never serialized, so an unpatched client keeps smaller colliders —
+        /// never WORSE than today's all-old behaviour, but fold this into the
+        /// staged MIN_MOD_VERSION raise for full consistency (Codex find 2).
+        /// </summary>
+        /// <summary>Capability key: this client rescales networked map objects
+        /// on scaled FFA maps. Published as a PLAYER prop pre-join (rides the
+        /// Photon Player record, so it is visible to every client from the
+        /// moment the player is — the #79-family pre-join pattern).</summary>
+        public const string ScaleCapabilityProp = "cr_msv2";
+
+        /// <summary>True when the CURRENT master client advertises the
+        /// rescale capability. The networked pieces are simulated by the
+        /// MASTER and streamed to everyone else, so the master's geometry is
+        /// the only one that may define collider sizes: a patched peer
+        /// rescaling under an unpatched master gets copies 6% larger than the
+        /// authoritative simulation, and every NetworkPhysicsObject snap then
+        /// fights local depenetration — Sid's "boxes are vibrating" report,
+        /// live, the day this patch first ran on one machine in a 1.35.2
+        /// lobby.
+        ///
+        /// EVERY player must advertise, not just the current master (bug #140
+        /// analysis): the gate is evaluated once per piece at
+        /// PhotonMapObject.Start and is never revisited, so a master HANDOFF
+        /// mid-map silently invalidates a master-only decision — pieces stay
+        /// scaled on patched peers while an unpatched client takes over the
+        /// authoritative simulation, reproducing the vibration. Sid's own
+        /// 4-hour session contained two genuine handoffs, so this is reachable,
+        /// not theoretical. Requiring the whole room makes any successor master
+        /// patched BY CONSTRUCTION.
+        ///
+        /// Degradation is deliberate and safe in both directions: a mixed room
+        /// scales nothing (exactly today's shipped behaviour — ropes still
+        /// break there, no new symptom), and an unpatched player who joins
+        /// mid-map keeps SMALLER colliders for the remainder of that one map,
+        /// which overlap less rather than more — the benign direction. The next
+        /// map load re-evaluates and the whole room agrees again.</summary>
+        private static bool RoomAdvertisesScaleCapability()
+        {
+            try
+            {
+                if (PhotonNetwork.OfflineMode) return true;
+                var players = PhotonNetwork.PlayerList;
+                if (players == null || players.Length == 0) return false;
+                foreach (var p in players)
+                {
+                    if (p == null) return false;
+                    var props = p.CustomProperties;
+                    if (props == null || !props.ContainsKey(ScaleCapabilityProp)) return false;
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        [HarmonyPatch(typeof(PhotonMapObject), "Start")]
+        class PhotonMapObject_Start_FfaScale_Patch
+        {
+            // One aggregate log line per map load (Codex find 4: per-object
+            // INFO on a 77-object map over a long sitting is thousands of
+            // redundant lines).
+            private static int lastLogMapId = int.MinValue;
+            private static int lastSkipLogMapId = int.MinValue;
+
+            static void Postfix(PhotonMapObject __instance)
+            {
+                try
+                {
+                    float f = CurrentFactor;
+                    if (f <= 1.001f || !FfaMode.EngineActive()) return;
+                    if (__instance == null || !__instance.photonSpawned) return;
+
+                    var t = __instance.transform;
+                    int mapId = 0;
+                    try { mapId = t.parent != null ? t.parent.GetInstanceID() : 0; }
+                    catch { }
+
+                    if (!RoomAdvertisesScaleCapability())
+                    {
+                        if (mapId != lastSkipLogMapId)
+                        {
+                            lastSkipLogMapId = mapId;
+                            Plugin.Log.LogInfo(
+                                "[FFA-SCALE] not every client in the room has the rescale capability — networked map objects stay vanilla-scaled this map");
+                        }
+                        return;
+                    }
+
+                    t.localScale = new Vector3(
+                        t.localScale.x * f, t.localScale.y * f, t.localScale.z);
+
+                    if (mapId != lastLogMapId)
+                    {
+                        lastLogMapId = mapId;
+                        Plugin.Log.LogInfo(
+                            $"[FFA-SCALE] networked map objects rescaled x{f:F2} (logged once per map)");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[FFA-SCALE] PhotonMapObject.Start: {ex.Message}");
                 }
             }
         }
