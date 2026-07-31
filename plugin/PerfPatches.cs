@@ -17,6 +17,7 @@
 using HarmonyLib;
 using Photon.Pun;
 using System.Collections.Generic;
+using System;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -509,25 +510,60 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(Screenshaker))]
     internal static class ScreenshakerDisablePatch
     {
-        private static bool ShakeOff =>
-            Plugin.ScreenShakeEnabled != null && !Plugin.ScreenShakeEnabled.Value;
+        /// <summary>Full / Reduced / Off (Sid's call on report #141).
+        ///
+        /// <para>Scaling the incoming impulse rather than touching
+        /// <c>Screenshaker.shakeforce</c> is deliberate: vanilla's
+        /// <c>LowerScreenshakePerPlayer</c> permanently halves that field once,
+        /// mid-game, when a lobby exceeds two players and then destroys itself.
+        /// Anything that caches and restores the field would either undo that
+        /// reduction or compound with it. The impulse is stateless, so both
+        /// systems compose.</para>
+        ///
+        /// <para>0.35 for Reduced: the shake is a spring-damper integrator
+        /// (<c>velocity += direction * shakeforce</c>), so the visible amplitude
+        /// scales linearly with the impulse — a third keeps the hit feedback
+        /// legible while removing the part people find nauseating.</para></summary>
+        internal static string Level
+        {
+            get
+            {
+                string v = Plugin.ScreenShakeStrength != null ? (Plugin.ScreenShakeStrength.Value ?? "") : "";
+                if (string.Equals(v, "Off", StringComparison.OrdinalIgnoreCase)) return "Off";
+                if (string.Equals(v, "Reduced", StringComparison.OrdinalIgnoreCase)) return "Reduced";
+                return "Full";
+            }
+        }
+
+        /// <summary>Cycles Full -> Reduced -> Off -> Full. No apply step needed —
+        /// the patch reads the level per impulse.</summary>
+        internal static void Cycle()
+        {
+            if (Plugin.ScreenShakeStrength == null) return;
+            Plugin.ScreenShakeStrength.Value =
+                Level == "Full" ? "Reduced" : Level == "Reduced" ? "Off" : "Full";
+        }
+
+        private static bool Scale(ref Vector2 feelDirection)
+        {
+            string lvl = Level;
+            if (lvl == "Full") return true;
+            if (lvl == "Off")
+            {
+                PerfGate.Hit("ScreenShakeBlocked");
+                return false;
+            }
+            feelDirection *= 0.35f;
+            PerfGate.Hit("ScreenShakeReduced");
+            return true;
+        }
 
         [HarmonyPrefix]
         [HarmonyPatch("OnGameFeel")]
-        static bool PreOnGameFeel()
-        {
-            if (!ShakeOff) return true;
-            PerfGate.Hit("ScreenShakeBlocked");
-            return false;
-        }
+        static bool PreOnGameFeel(ref Vector2 feelDirection) => Scale(ref feelDirection);
 
         [HarmonyPrefix]
         [HarmonyPatch("OnUIGameFeel")]
-        static bool PreOnUIGameFeel()
-        {
-            if (!ShakeOff) return true;
-            PerfGate.Hit("ScreenShakeBlocked");
-            return false;
-        }
+        static bool PreOnUIGameFeel(ref Vector2 feelDirection) => Scale(ref feelDirection);
     }
 }

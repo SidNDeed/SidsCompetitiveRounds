@@ -6648,11 +6648,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             screenShakeToggleBtn = SettingsToggle(dispBox.transform, "SShake", new Vector2(260, 28),
                 () =>
                 {
-                    Plugin.Log.LogInfo("[SETTINGS] Screen shake toggled");
-                    Plugin.ScreenShakeEnabled.Value = !Plugin.ScreenShakeEnabled.Value;
+                    ScreenshakerDisablePatch.Cycle();
+                    Plugin.Log.LogInfo($"[SETTINGS] Screen shake -> {ScreenshakerDisablePatch.Level}");
                     dirty = true;
                 },
-                "Camera screen shake on shots/hits/deaths. Off = a perfectly steady camera (local only).");
+                "Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. "
+                + "Off = a perfectly steady camera. Local only.");
             screenShakeToggleTxt = UIFactory.GetButtonText(screenShakeToggleBtn);
             chromAbToggleBtn = SettingsToggle(dispBox.transform, "SChromAb", new Vector2(260, 28),
                 () =>
@@ -6966,11 +6967,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         ? "Input overlay: <color=#88FF88>ON</color>"
                         : "Input overlay: <color=#FF9966>OFF</color>");
             // v1.32 items 7+8 labels.
-            if (screenShakeToggleTxt != null && Plugin.ScreenShakeEnabled != null)
+            if (screenShakeToggleTxt != null && Plugin.ScreenShakeStrength != null)
+            {
+                string _sl = ScreenshakerDisablePatch.Level;
+                string _sc = _sl == "Full" ? "#88FF88" : _sl == "Reduced" ? "#FFDD88" : "#FF9966";
                 UIFactory.SetText(screenShakeToggleTxt,
-                    Plugin.ScreenShakeEnabled.Value
-                        ? "Screen shake: <color=#88FF88>ON</color>"
-                        : "Screen shake: <color=#FF9966>OFF</color>");
+                    $"Screen shake: <color={_sc}>{_sl.ToUpperInvariant()}</color>");
+            }
             if (mapLightingToggleTxt != null && Plugin.MapLightingEnabled != null)
                 UIFactory.SetText(mapLightingToggleTxt,
                     Plugin.MapLightingEnabled.Value

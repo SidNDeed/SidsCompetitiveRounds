@@ -58,7 +58,8 @@ namespace CompetitiveRounds
         // v1.32 items 7+8 — standalone accessibility/FPS toggles. Deliberately
         // NOT under the Performance master switch: these are user preferences
         // that should survive a perf-master flip (map note, settings tab).
-        internal static ConfigEntry<bool> ScreenShakeEnabled;
+        internal static ConfigEntry<bool> ScreenShakeEnabled;      // legacy, migration source only
+        internal static ConfigEntry<string> ScreenShakeStrength;
         internal static ConfigEntry<bool> MapLightingEnabled;
         internal static ConfigEntry<bool> MapShadowsEnabled;
         internal static ConfigEntry<bool> AnimatedCosmetics;
@@ -355,11 +356,34 @@ namespace CompetitiveRounds
                 "Show a bottom-left WASD + Space + L/R-click input visualizer during matches. Keys glow red when pressed."
             );
 
+            // LEGACY. Kept bound so the one-time migration below can read what the
+            // player already chose; no longer consulted for enforcement.
             ScreenShakeEnabled = Config.Bind(
                 "UI", "ScreenShakeEnabled",
                 true,
-                "Camera screen shake on hits/deaths/shots. Turn OFF to disable all shake (local only — opponents still see theirs)."
+                "(Legacy — superseded by ScreenShakeStrength.) Camera screen shake on hits/deaths/shots."
             );
+            ScreenShakeStrength = Config.Bind(
+                "UI", "ScreenShakeStrength",
+                "Full",
+                "Camera screen shake on hits/deaths/shots. Full = vanilla. Reduced = softer. Off = none. "
+                + "Local only — opponents still see theirs. Valid values: Full, Reduced, Off."
+            );
+            // One-shot migration. A Config.Bind default is written to disk on first
+            // launch and never revisited (learning #190), so a player who had already
+            // turned shake OFF would silently get Full back the moment the new key
+            // appeared. Carry their choice across, exactly once.
+            try
+            {
+                if (!ScreenShakeEnabled.Value
+                    && string.Equals(ScreenShakeStrength.Value, "Full", StringComparison.OrdinalIgnoreCase))
+                {
+                    ScreenShakeStrength.Value = "Off";
+                    ScreenShakeEnabled.Value = true;   // consume it, so this cannot re-fire
+                    Log.LogInfo("[SETTINGS] migrated ScreenShakeEnabled=false -> ScreenShakeStrength=Off");
+                }
+            }
+            catch (Exception ex) { Log.LogWarning($"[SETTINGS] shake migration: {ex.Message}"); }
             MapLightingEnabled = Config.Bind(
                 "UI", "MapLightingEnabled",
                 true,
