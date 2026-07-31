@@ -2,7 +2,32 @@
 
 ## Unreleased
 
-Server-only so far — deployed to production on 2026-07-31, no client build required.
+Backend deployed to production on 2026-07-31. Schema: migrations **173** (free
+stranded FFA seats) and **174** (`queue_leases`). The **Leave All Queues** button
+needs a client build to reach players.
+
+### Added
+
+- **"Leave all queues" button, in Settings.** Removes you from every queue and lobby
+  in every mode at once. Use it if the game thinks you're still in a match you've
+  already left, or if joining a queue keeps saying you're busy. It doesn't affect a
+  game you're actually playing and never touches stats, gold or rating. It's in
+  Settings rather than on the queue tabs on purpose — the player who needs it is the
+  one whose queue tab is misbehaving. If the server can't be reached it keeps retrying
+  in the background, including after a restart.
+
+### Changed
+
+- **Being "in a queue" now expires on its own.** Previously the server considered you
+  busy because a row existed, and you only became free again if one of about fifteen
+  different cleanup routines remembered to remove it — several of which needed your
+  game to still be running and cooperating. If none of them fired, you stayed blocked
+  with no time limit, which is why this kept needing manual intervention. Your slot is
+  now a lease with an expiry that a live game continuously renews; when the games stop,
+  it lapses by itself. Nothing has to remember to clean up, so there is nothing left to
+  forget. Getting it wrong now frees you slightly early — you just requeue — instead of
+  locking you out indefinitely. This also fixed 2v2 specifically, where a stuck slot
+  previously had no time limit at all.
 
 ### Fixed
 

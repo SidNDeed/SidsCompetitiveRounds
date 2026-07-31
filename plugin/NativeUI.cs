@@ -6771,6 +6771,40 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // anyway and just left the bottom panels jammed against the next
             // item. Delete is still at the bottom because it's added last.)
 
+            // -- Leave all queues (bug report #124) --
+            // Deliberately HERE, in Settings, and not on the queue tabs: the
+            // player who needs it is the one whose queue tab is misbehaving,
+            // and the FFA tab in particular auto-joins on open. Settings is
+            // reachable from every state, including inside a match.
+            var escBox = UIFactory.CreatePanel("SEB", panel.transform, C_PANEL);
+            UIFactory.AddVLG(escBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);
+            UIFactory.AddLE(escBox, flexH: 0);
+            UIFactory.CreateText("SEL", escBox.transform,
+                "Leave All Queues", 17f, new Color(1f, 0.85f, 0.5f),
+                sizeDelta: new Vector2(700, 24));
+            UIFactory.CreateText("SED", escBox.transform,
+                "Removes you from every queue and lobby in every mode - 1v1, 2v2, 1v2 and FFA.\n" +
+                "Use this if the game thinks you're still in a match you've already left, or if joining " +
+                "a queue keeps telling you you're busy. It won't affect a game you're actually playing, " +
+                "and it never touches your stats, gold or rating.",
+                13f, C_DIM, sizeDelta: new Vector2(700, 56));
+            var escRow = new GameObject("SER");
+            escRow.transform.SetParent(escBox.transform, false);
+            escRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(escRow, spacing: 8, forceExpandH: true);
+            UIFactory.AddLE(escRow, prefH: 30, flexH: 0);
+            UIFactory.CreateButton("SEBtn", escRow.transform,
+                "Leave all queues", 14f, C_WHITE, new Color(0.42f, 0.32f, 0.12f, 0.9f),
+                () =>
+                {
+                    // No ClickGuard.Claim() here — CreateButton already guards
+                    // this control, and a second claim on the same key in the
+                    // same frame is always rejected (learning #158).
+                    ApiClient.EscapeAllQueues(null);
+                    dirty = true;
+                },
+                sizeDelta: new Vector2(200, 28));
+
             // -- Delete my data (last, so it's hard to click accidentally) --
             var delBox = UIFactory.CreatePanel("SDB", panel.transform, C_PANEL);
             UIFactory.AddVLG(delBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);

@@ -5224,6 +5224,10 @@ namespace CompetitiveRounds
         /// somehow fires later cannot touch the recovered state.</summary>
         public static void TickLeaveRecovery()
         {
+            // A persisted escape intent outranks every other recovery path and
+            // must run before them: they all try to reconcile a commitment the
+            // player has explicitly revoked.
+            TickEscapeRetry();
             float now = Time.realtimeSinceStartup;
             if (CurrentQueueState == QueueState.Leaving && now - rankedLeavingSince > LEAVE_STUCK_TIMEOUT)
             {
@@ -5330,6 +5334,139 @@ namespace CompetitiveRounds
         }
 
         private static float _ffaRoomlessSince = -1f;
+
+        // ── Escape hatch: "Leave all queues" (bug report #124) ──────────────
+        //
+        // The server side is a single DELETE of the player's queue lease, so
+        // nothing else can roll it back. This side's job is to make sure the
+        // request actually gets there, from a player whose client may be in
+        // any state at all — including one that has just been relaunched.
+        //
+        // The intent is PERSISTED, not held in a static. Every previous
+        // recovery mechanism here lived in a static that a relaunch cleared, a
+        // coroutine that NetworkRestart killed, or a tab ticker that only ran
+        // while the player was looking at the right screen. A player who quits
+        // in frustration is exactly the one who needs this to survive.
+        private const string ESCAPE_PREF = "cr_escape_pending";
+        private static float _escapeRetryAt = -999f;
+
+        public static bool EscapePending
+        {
+            get { try { return PlayerPrefs.GetInt(ESCAPE_PREF, 0) == 1; } catch { return false; } }
+            private set
+            {
+                try { PlayerPrefs.SetInt(ESCAPE_PREF, value ? 1 : 0); PlayerPrefs.Save(); }
+                catch { }
+            }
+        }
+
+        /// <summary>Revoke every queue commitment, in every mode. Safe to call
+        /// from any state; idempotent server-side.</summary>
+        public static void EscapeAllQueues(Action<bool, string> done = null)
+        {
+            EscapePending = true;
+            TearDownAllQueueBeliefs();
+            SendEscapeRequest(done);
+        }
+
+        /// <summary>Drop every local belief about being queued. Runs BEFORE the
+        /// request and again on success: the point of the button is that the
+        /// client stops acting queued immediately, and re-running it on the ack
+        /// catches anything a racing poll callback re-armed in between.</summary>
+        private static void TearDownAllQueueBeliefs()
+        {
+            try
+            {
+                // Bump every lifecycle generation first — in-flight poll and
+                // leave callbacks all check their gen and will now no-op
+                // instead of resurrecting the state we are about to clear.
+                queueGen++; teamGen++; ovtGen++; ffaGen++;
+
+                CurrentQueueState = QueueState.Idle;
+                IsQueuePolling = false;
+
+                IsTeamQueuePolling = false;
+                ActiveTeamSeriesId = null;
+
+                IsOvtQueuePolling = false;
+                OvtQueueStatus = "";
+                ActiveOvt1v2SeriesId = null;
+
+                IsFfaQueuePolling = false;
+                FfaQueueStatus = "";
+                FfaQueueCount = 0; FfaGatherSecondsLeft = -1;
+                ActiveFfaLobbyId = null; OpenFfaLobbyId = null;
+                FfaLockedRoster = null; FfaMySlot = -1; FfaLobbyPlayerCount = 0;
+                FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+                FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
+                _ffaLeaveIntent = false; _ffaLeaveTargetLobby = null;
+                _ffaJoinCountdownKey = null; _ffaJoinCountdownActiveToken = 0;
+                _ffaRoomlessSince = -1f;
+
+                try { CompetitiveUI.CancelFfaStartCountdown(); } catch { }
+                try { Plugin.ClearPendingFfaSlot(); } catch { }
+                // Any pending competitive room join dies with the commitment —
+                // otherwise QueueRoomJoiner still fires us into a room we just
+                // told the server we are not part of.
+                try
+                {
+                    string pend = Plugin.PendingRankedRoom ?? "";
+                    if (pend.StartsWith("ranked_") || pend.StartsWith("team_")
+                        || pend.StartsWith("ovt_") || pend.StartsWith("ffa_")
+                        || pend.StartsWith("sct-"))
+                        Plugin.ClearPendingRoom();
+                }
+                catch { }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[ESCAPE] teardown: {ex.Message}"); }
+            NativeUI.MarkDirty();
+        }
+
+        private static void SendEscapeRequest(Action<bool, string> done)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown")
+            {
+                // Keep the intent: identity resolves a few seconds after
+                // launch, and the retry in TickLeaveRecovery will pick it up.
+                done?.Invoke(false, "identity not resolved yet");
+                return;
+            }
+            _escapeRetryAt = Time.unscaledTime;
+            string url = $"{baseUrl}/api/v1/queues/escape?steam_id={UnityWebRequest.EscapeURL(sid)}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "", (ok, resp) =>
+            {
+                if (ok)
+                {
+                    EscapePending = false;
+                    TearDownAllQueueBeliefs();
+                    Plugin.Log.LogInfo($"[ESCAPE] released from all queues: {resp}");
+                    CompetitiveUI.ShowNotification("Left all queues.", Color.green, 4f);
+                }
+                else
+                {
+                    // Intent survives. Do NOT tell the player the server will
+                    // sort it out — that exact promise, made by the FFA leave
+                    // path while the server could not keep it, is what turned a
+                    // bug into weeks of "it says it cleared me and it never
+                    // does". We retry, and we say we are retrying.
+                    Plugin.Log.LogWarning($"[ESCAPE] failed, will keep retrying: {resp}");
+                    CompetitiveUI.ShowNotification("Couldn't reach the server - retrying in the background.",
+                                                   new Color(1f, 0.6f, 0.2f), 5f);
+                }
+                done?.Invoke(ok, resp);
+            }, maxRetries: 3, retryDelay: 2f));
+        }
+
+        /// <summary>Retry a pending escape from the always-on tick. Called from
+        /// TickLeaveRecovery so it keeps running with the menu closed, mid-game,
+        /// and across relaunches (the intent lives in PlayerPrefs).</summary>
+        private static void TickEscapeRetry()
+        {
+            if (!EscapePending) return;
+            if (Time.unscaledTime - _escapeRetryAt < 15f) return;
+            SendEscapeRequest(null);
+        }
 
         public static void JoinQueue(string steamId, string displayName, string region, bool rankedOnly)
         {
