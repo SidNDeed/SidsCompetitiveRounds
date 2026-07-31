@@ -1,3 +1,160 @@
+## v1.35.4 — 2026-07-30 — rope objects, poison desync, block grace, FFA casual-wait
+
+Everything previously accumulated as "Unreleased" ships in this version: bug reports
+**#125-#140** across two waves plus the July 30 lifecycle-audit closeout. Backend changes
+were deployed progressively through the day; the client half lands with this release.
+Schema changes: migrations **167** (FFA damage/kill telemetry), **168** (recover two wiped
+FFA games), **169** (match-report quarantine), **170** (`team_series.room_issued_at`),
+**171** (free a dispersed FFA sitting), **172** (publish Tattered Cape placement rev 2).
+
+> **Version note:** 1.35.3 was cut and its Thunderstore package uploaded, then two more
+> fixes landed from the #140 session analysis (the room-wide rope-scale gate and the 3-4
+> player FFA teleport guard). Thunderstore versions are immutable, so the corrected build
+> ships as 1.35.4 and supersedes it. 1.35.3 exists only as that superseded Thunderstore
+> package — there is no 1.35.3 GitHub release.
+
+Cosmetics: **Tattered Cape** ships an approved placement revision — it renders noticeably
+larger (scale 1.70 -> 2.15). The art itself is unchanged.
+
+### Found in Sid's 4-hour session log (#140)
+
+- **3- and 4-player FFA rounds could leave a player un-teleported after someone left.**
+  The guard that skips a departed player during the round-start teleport was tied to the
+  map-growth feature, and map growth only starts at 5 players — so in smaller lobbies the
+  base game's own loop ran, hit the departed player, and stopped, leaving everyone after
+  them standing wherever they were while the map changed underneath. The guard now covers
+  every FFA lobby size. The session log caught this race one step short of failing.
+
+### Bug reports #131-#138 + lifecycle audit closeout (July 30, second wave)
+
+### Client
+
+- **Rope-hung map objects no longer fall at round start on scaled FFA maps (#133/#134).**
+  Vanilla replaces every physics piece with a networked copy after the map enters, and the
+  re-parent preserved the copy's world SCALE — on a scaled FFA map the copy came out ~6%
+  smaller than the map around it, and a rope endpoint authored near the piece's edge missed
+  its attach probe (one missed endpoint is enough: the saw case keeps the rope but drops the
+  saw). The master's jointless piece then free-falls, synced to everyone. Proven from the
+  serialized map data: the two reported cases cross the miss threshold exactly between the
+  3% scaling of 1.35.0 and the 6% of 1.35.2. The networked copies now inherit the map's
+  scale factor, which restores both the attach geometry and the pieces' visual size.
+  **Capability-gated on the whole room**: these pieces are simulated by the room's host and
+  streamed to everyone, so a client applying the fix under a host that lacks it fights the
+  streamed positions with its larger colliders (Sid's live "boxes are vibrating" report from
+  the first mixed lobby). The rescale therefore applies only when every player in the room
+  is on this build — checking only the host was not enough, because the host can change
+  mid-map and silently invalidate that decision. A mixed room behaves exactly as before
+  (no vibration; ropes still break there until everyone updates).
+- **Poison desync root-caused and closed (#135).** The previous fix exempted victims whose
+  stats route damage through the damage-over-time path (Decay holders) — and every tick on
+  such a victim, plain poison included, kept vanilla's per-replica block behavior. Proven
+  from the reported lobby: all four clients ran the fix, two of the four held Decay. The
+  exemption is removed: DoT ticks now always apply on every replica. Blocking the direct
+  hit still prevents a Decay spread entirely; only the unsyncable "block mid-spread"
+  niche is gone — flagged as a deliberate balance call, easy to revert if Sid disagrees.
+- **The FFA spawn grace now covers block as well as fire (#136).** Suppressed at the input
+  layer (the only place that replicates), so every client agrees a grace-window block
+  never happened; the banner says fire AND block unlock together.
+- **Waiting in a casual game while sitting in an open FFA lobby is now allowed (#132).**
+  The lobby seat is only torn down when entering a COMPETITIVE room. When the host presses
+  Start, members get a 5-second on-screen countdown; anyone in a casual game is pulled out
+  immediately (marked as a deliberate exit, never a DC) and auto-joins with everyone else —
+  if the casual exit interrupts the join, it re-arms and retries within seconds.
+- **FFA score HUD restyled (#138, Stan's suggestion).** The translucent black backing box
+  is gone; names carry a drop shadow instead, and every unscored point renders as a tiny
+  grey dot so the first-to-5 target is legible at a glance.
+
+### Server & bot
+
+- **2v2 match reports rejected for lifecycle reasons are quarantined, not destroyed (audit
+  item 1).** A report landing on a cancelled series is captured whole in the same admin
+  quarantine the FFA path got on July 30 — previously the entire game was lost. Capture is
+  trust-bound: the four reported players must be exactly the series' recorded members with
+  the reporter among them, so the DLL secret cannot be used to spam the admin queue. The
+  quarantine list/accept surface now understands team reports (score rendering + a
+  mode-scoped "later rated results" eligibility check).
+- **A leave during a live game no longer cancels the group (audit item 2, all three
+  modes) — once the heartbeat-carrying client is the room's floor.** 2v2's leave cascade
+  only fires when the series has zero recorded games AND no verified in-game heartbeat;
+  1v2 and FFA zero-game dissolutions take the same rule, with FFA falling through to the
+  played-lobby departure path. A mid-game leaver is simply marked; the match pipeline owns
+  the outcome. On 1.35.2 clients (no heartbeat sender) leaves behave as before. FFA
+  survivors' queue rows are no longer deleted the moment someone leaves (the janitor's
+  own windows still bound their lifetime), later leavers are recorded even after their
+  row is pruned, and a lobby with a verifiably live game is never closed by the
+  all-but-one arithmetic.
+- **The in-game heartbeat is verified and means gameplay, not room occupancy.** The
+  presence ping's `in_match` claim only counts when the session token checks out and the
+  pinger is a recorded member of the named group, and the client only sends it while a
+  battle is actually ongoing. The ping fires as the game starts (with transport-failure
+  retry), shrinking the unprotected head of game 1 to seconds. Verification inherits the
+  Steam-auth enforcement ladder — accounts the ladder still treats leniently are verified
+  to the same (lesser) degree everywhere else is.
+- **Veto semantics split by caller shape.** Janitor closers (which re-fire and carry
+  ceilings) keep the conservative "young process = veto" rule; one-shot actors (leave
+  dissolutions, the assembly cancel) act only on trusted positive evidence — vetoing those
+  on ignorance converted failed assemblies into permanent husks. A new janitor arm cancels
+  rowless active 2v2 husks (60+ min quiet, no rows, no live evidence) as the last resort.
+- **Two blind FFA closers deleted (audit item 3):** the janitor's second 3-hour rule and
+  the 2-hour sweep that ran inside every leave request. The janitor's veto-aware dispersed
+  close is the single lifecycle authority now.
+- **2v2 assembly timeout measures from room issue, not match time (audit item 4).**
+  New `room_issued_at` stamp (migration 170); 180s deadline; the heartbeat covers a live
+  game whose spawn-confirm POST was lost. The janitor's 2v2 stale-series sweep takes the
+  conservative veto.
+- **Discord "How FFA works" FAQ updated for host lobbies and forced picks (#137).**
+
+### Bug reports #125-#130 (July 30, first wave)
+
+Backend + bot were deployed 2026-07-30; the client half ships here.
+Schema changes: migration **167** (`ffa_match_players.damage_dealt`, `damage_dealt_timeline`,
+`kill_timeline`, `absent`; applied).
+
+- **T chat works during combat again (#128).** It now opens any time the game is running; the
+  only thing that suppresses it is ROUNDS' own Enter chat actually being open. While the box has
+  focus the mod holds the game's own two input flags, so typing can't move you, shoot, ready you
+  up, or confirm a card pick. Also stops our Enter from toggling the vanilla chat open behind it.
+- **1v2 rewards are visible and scale with difficulty (#129).** 1v2 always paid, but nothing
+  displayed it and the every-5-levels bonus never fired for it. Added the display in three
+  places, granted the level bonus, and scaled rewards by seat, extra-pick handicap, opponent elo
+  and 1v2-leaderboard standing.
+- **Recent Series no longer eats teammate names (#126).** Two-name side labels shared one
+  character budget, so the second name could render as just "..".
+- **My Stats → Record covers 1v2 and FFA (#130).** 1v2 split by seat; FFA win rate, top-3 rate,
+  kills/game, average placement, and damage/game once games carry the new telemetry.
+- **Discord mentions resolve to names in the in-game chat (#125)**, and the bot can no longer be
+  used to ping the server via relayed in-game text.
+- **`/game` for FFA (#127):** discarded cards shown separately, real M:SS time axis, damage and
+  blocks split apart, plus new kills and damage-dealt graphs.
+
+### Lifecycle sweep + match-report quarantine (July 30 incident)
+
+Two completed FFA games were destroyed: a timer closed the lobby mid-sitting and the report then
+came back `409 "Lobby is not active"`. The root cause is structural — the server only learns a
+game happened when the REPORT lands, at game END, so every timeout was blind for the whole
+duration of a live game. A 40-minute FFA is normal.
+
+- **Rejected reports are no longer thrown away.** A report rejected for a lifecycle reason is
+  captured whole in `match_report_quarantine` with an admin list / discard / accept surface.
+  Integrity failures (bad signature, unknown players, impossible scores) are still rejected
+  outright and never stored. **Accept records approval only — it never re-applies rating**,
+  because Glicko is order dependent.
+- **Timers now need positive evidence.** The presence ping carries `in_match=<group id>`; the
+  dispersed, quiet and sitting-over rules veto when a game is live rather than inferring "nothing
+  is happening" from silence. Bounded by a 3h ceiling, and it will not answer until the process
+  has outlived its TTL so a restart cannot make every group look idle.
+- **Windows retuned:** dispersed close scales with lobby size (60 min floor, 70 at 10 players),
+  husk sweeps 30 → 60 min, sitting-over 5 → 15 min in both the FFA and 1v2 copies.
+- **The client stopped deleting recoverable reports** — 429 (rate limited) and 401 (session
+  lapsed) were being treated as permanent outbox failures.
+- **Migration 168** restores the two destroyed games for all six affected players: ratings from a
+  full chronological replay of every recorded FFA match plus those two, validated by reproducing
+  the live ladder to within 0.1 elo when the two are excluded.
+
+Remaining audit items (2v2's worse variant, Leave invalidating a live game 1, two more blind FFA
+closers, 2v2's assembly clock) are listed in `docs/TODO.md` and detailed in
+`ai-collab/codex-lifecycle-sweep.md`.
+
 ## v1.35.2 — 2026-07-29 — FFA host lobbies, betting reliability, forced picks
 
 Everything below (previously accumulated as "Unreleased") ships in this version. Backend
@@ -532,161 +689,6 @@ Settings tab with your log attached — that is what turns these into confirmed 
 - #78: casual phantom-series fix (see above).
 - #79: matchmaking "Press Jump to Join" mitigation (see above — not confirmed fixed).
 
-## v1.33.0 — RELEASED 2026-07-17 — July 17 mega-batch (rounds 1-3)
-
-### Round 3 (Sid's 10 items + first 1v2 forensics)
-
-### Client (mod)
-- **My Stats casual record fixed (item 8)**: the Record block recomputed casual W/L (and sweeps) by scanning the locally cached history — which v1.32.1's lazy loading truncated to the head 400 matches, so lifetime losses "vanished". Both lines now use the server's lifetime fields (`casual_wins/losses`, `sweeps_given/taken`); current-streak calcs stay window-based by design.
-- **Hit % undercount fixed (bug #77, Stan)**: the round-winning kill blow was dropped from `bullets_hit` — vanilla processes the lethal hit → round over → pick phase (flipping our phase flag) all before the counter's Postfix ran, so the pick-phase guard ate exactly one hit per round won, matching Stan's manual counts. Guard removed for hits (nothing can be fired during pick anyway); budget-exhausted drops now log `[HIT-DROP]`.
-- **2v2 tab scroll bounce fixed (bug #76, Sid)**: the leaderboard's inner ScrollRect consumed wheel events even with nothing to scroll (elastic bounce), starving the tab's outer scroll. The inner scroll now disables itself while its content fits its viewport (wheel bubbles to the tab scroll) and re-enables when the board genuinely needs it.
-- **1v2 phantom series plugged**: both 1v1 series-preflight sites now exclude `ovt_` rooms — the July 17 first live 1v2 session spawned six phantom 1v1 `ranked_series` rows pairing arbitrary trio members (the one 1v1 path the #146/#149 gate sweep missed).
-- **Admin Steam ID (item 10)**: leaderboard click-a-player detail shows the player's Steam ID to admins only, click-to-copy (first `systemCopyBuffer` use).
-- **Twins! (item 3)** added to the client achievement list.
-
-### Server (to deploy — no new migration required beyond 133)
-- **Twins! achievement (item 3)**: granted server-side to BOTH players when a game ends with identical 5-card multisets (duplicates counted; names normalized). 100g standard. Migration `133` backfills it retroactively from `match_cards` (same pattern as 113).
-- **Sync lock timing (item 9)**: `LOCK_OFFSET_HOURS` 6 → 48 — the winning time is now decided **2 days before the default start**, and only slots ≥ ~24h after the decision can win, so every player gets at least a day's notice of the final time. Availability-check DMs re-anchored to 24-96h **before lock** (they must be answerable before the time is decided); the sync availability embed now names the lock moment and points at the vote; pushback derives the next lock from the new default (a late tick can't erode the offset); tournament creation requires lock ≥ 72h out (sometimes skipping to the Saturday after next).
-- **1v2 janitor**: ovt husk queue rows and zero-game dead locks were only cleaned by poll-driven paths — with no 1v2 pollers, the July 17 leftovers dangled for 9+ hours. The periodic queue-cleanup loop now sweeps them (30-min windows, wide per learning #150 so a live game 1 can't be hit).
-
-### Round 2 (Sid's 4 items)
-
-### Client (mod)
-- **Custom cosmetics now shade with the scene (item 1)**: our face items rendered with Unity's default unlit sprite material while everything else in ROUNDS multiplies through the SFSS lightmap — so they sat at raw PNG brightness against a lighting-darkened scene (Galaxyice's cat "too bright, green eyes invisible"). Templates now adopt the vanilla item material (lazily borrowed from a vanilla face item; startup log verifies `shader=Sprites/SFSoftShadow`), so custom items darken/tint exactly like vanilla ones on every map skin, vanilla art, and the lighting-off perf mode.
-- **Tournament tab layout (item 2)**: the "Default start / Signups close" line no longer paints over the instructions (its LayoutElement now sizes to the wrapped text), and the 8 time slots render in two columns of 4. Prizes moved out of the static text into a live block. Instruction text refreshed: "have ROUNDS open" (not "keep this tab open"), couple-of-hours expectation, break/Play Now explanation, 5/10-min show-up windows, dropped the stale "cancelled under 8".
-- **Between-matches UX (item 2)**: my-match panel shows the break countdown + a **Play Now (skip break)** button; a slim in-game banner shows "Next match vs X in M:SS" during breaks.
-- **Tab scoreboard styled names fixed (item 4)**: rainbow/gradient nametags write per-char rich-text into Photon NickName; the Tab overlay truncated that markup mid-tag (broken literal tag, zero real characters). It now strips styling via `NametagStyler.Clean` before the 16-char truncation — full name, team-tint preserved.
-
-### Server (to deploy — migration `132`, then API+bot)
-- **Prizes scale with players (item 2)**: base = 8 players at DOUBLE the old 16-player tier (1st 1000g/5000xp, 2nd 600g/3000xp, 3rd 120g/150xp), growing linearly to 2x base at 16. Confirmed count snapshotted at lock (`tournaments.prize_player_count`); `_prize_amounts()` is the single source of truth — /current and /internal/watch carry computed numbers to the client and bot. Sync and async both.
-- **Between-rounds breaks (item 2)**: sync matches after round 1 enter `status='scheduled'` with a 7-min `scheduled_ready_at`; the no-show clock only starts when the match flips to `ready` (break can never forfeit anyone). New `POST /tournaments/{id}/matches/{mid}/play-now` — both players pressing it skips the break (row-locked against the simultaneous-press race). Round-flow facts, verified: round 2 otherwise activates the instant both prereq matches resolve; previously the only gap was the 30s tick.
-- Migration `132` — `prize_player_count`, `scheduled_ready_at`, `early_ok_signup_ids`.
-- Migration `130` reworked per Sid's call (was: silently seed default-time votes): now DMs existing voteless sync signups via `pending_dms` telling them to pick their times or be removed at lock, including the couple-of-hours heads-up.
-
-### Discord bot
-- **Break DM (item 2)**: when a next-round match schedules, both players get "Next up: vs X (round N). Starts <t:..:R>" with the live Discord countdown + the Play Now instructions.
-- **Prize displays are dynamic**: completion announcement and the tournament board embed use server-computed amounts; the board shows "Every signup past 8 grows the pot — 16 players doubles it!" during voting. Lock DM now says to plan for a couple of hours + mentions the skippable breaks. FAQ tournaments entry updated (agreement lock, prize scaling, ~2 hours).
-
-### Adversarial review pass (round 2 — 4 finder angles, per-finding verify, 28 agents)
-Confirmed and fixed before anything shipped:
-- **Queue/casual games during a break would have counted as tournament games** — the series row exists 7+ min before play and `_find_current_active_series` matched tournament series in ANY room, so two opponents passing the break in the 1v1 queue would advance the bracket off warmup games. Sync tournament series now only bind in their designated `sct-` room (async unchanged — any private lobby is its design), and queue join 409s while you have a sync match scheduled/ready.
-- **Players in a break read as "eliminated"** (and a bracket-reset GF read the LB champ as CHAMPION early) — `_compute_progress_labels` didn't know the `scheduled` state.
-- **/dm-opponent and /opp-online failed during the break** — exactly when the break DM tells players to coordinate Play Now.
-- **Bye-seeded top players' first match got a break** — a bye-fed W R2 at tournament start now goes straight to ready; the break only applies downstream of an actually-played match.
-- **Two-column slot labels overflowed their 158px cells** once tallies became public — labels drop the tz suffix (named in the row above), tallies compact to "(N)", wrap off, and fully-empty rows collapse.
-- **"best time: N/8" could count votes on dead slots** — the /current tally now filters to future slots like the lock does.
-- **"Prizes at 0 players"** on the board pre-signups — display floored at 8.
-- Old-client signup 400 now tells the player to update the mod; lock DM grace wording matches the real 5/10-min windows.
-
-### Round 1 (Sid's 7 items)
-
-### Client (mod)
-- **T-chat popup fixed (item 7)**: every line now renders at its measured wrapped height — no more clipped letters on the bottom row, and long messages show up to 3 wrapped lines ending in an explicit `... [see F5]` indicator instead of silently cutting mid-sentence. The backdrop grows to match.
-- **Artist tab sales log (item 1)**: new scrollable "Sales log" section — every purchase and gift of your items, newest first, with buyer, price paid, and your 30% cut per sale.
-- **Home tab cosmetics showcase (item 4)**: art doubled 38→76px, text 14→17pt, rows now scroll, and the list covers the last TWO cosmetic-update days (dates named in the caption and per row).
-- **Sync tournament voting is now mandatory (item 3)**: the time slots are pickable before signup and at least one is required to sign up (the vote rides the signup request); the header shows live "best time: N/8 agreed" progress. Save Votes still adjusts an existing signup.
-- **Sprout uses lopidav's original art (item 5)** — byte-for-byte his file, replacing the recreation that shipped with v1.30.
-- **Two Galaxyice cosmetics (item 6)**: Rounds Cat (static head-rider) and Star Spin — the first community-artist animated item (6-frame orbit, ~1s per lap).
-
-### Server (to deploy — migrations `128`-`131`, then API+bot)
-- **Chat flood control (item 7)**: WS chat now enforces 5 messages / 10s per sender plus an identical-message filter (20s window). Silent drops, checked before any DB work.
-- `GET /artist/{id}/sales` — per-purchase log (buyer, price, per-sale royalty, date), newest first.
-- `GET /shop/newest?batches=N` — restricts the newest-cosmetics list to the N most recent update days; entries now carry an `added` date.
-- **Sync tournament lock rework (item 3)**: signup requires ≥1 valid time-slot vote (recorded in the same transaction); the lock now requires `min_players` (8) votes agreeing on ONE slot — otherwise the whole tournament pushes back a week (feed post says why); when it locks, the agreed slot becomes the start time and every signup that didn't vote for it is removed, no penalty, with a feed post naming them. Force-start (everyone votes "now") bypasses the gate.
-- **`pending_dms` queue (migration `129`)** — generic one-off bot DM queue with the durable ack pattern; seeded with a DM to lopidav about the Sprout art fix.
-- Migration `128_galaxyice_cosmetics.sql` — Galaxyice artist role + both shop rows (born out-of-stock until the artist opens sales).
-
-### Discord bot
-- **New FAQ entries (item 2)**: hosting & netcode ("is orange the host", "is it peer to peer", "does hosting matter" — ROUNDS runs through Photon relays, no host advantage) and a dedicated blocking-tips entry; "how does the comp mod work" now routes to the what-is-this-mod answer.
-- **`pending_dms` drain loop** — own fully-guarded 60s loop; DMs the linked player, acks delivered/undeliverable; unparseable discord_ids flag undeliverable instead of poisoning the LIMIT-20 window.
-
-### Adversarial review pass (8-angle, pre-ship)
-The self-review on this batch surfaced and fixed, before anything shipped:
-- **Past slots could win the vote** — the earliest offered slots are already past at lock time (lock is default-6h, slots span default-24h..+18h); a popular past slot would have set the start time in the past, started the tournament within 30s, and mass no-show-forfeited the field. Lock tally now only counts slots ≥30 min in the future; signup/Save-Votes reject past slots; the client is only offered future slots.
-- **Pushback stranded every vote** — the +7d pushback regenerated all 8 slots while votes stayed pinned to the old timestamps, so carried signups could never re-aggregate (perpetual pushback) or got kicked wholesale next lock. Votes now translate +7d with the grid, and the pushback post says so.
-- **Legacy signups would have been kicked at the first post-deploy lock** — anyone signed up under optional voting has zero vote rows. Migration `130` seeds them with the default start time (the time they implicitly agreed to).
-- **Tallies were hidden pre-vote** — the old anti-snoop gate starved exactly the pre-signup players who now need to see which time is winning. Tallies are public during voting.
-- **Save Votes could self-kick** — clearing every checkbox deleted all votes and earned a silent kick at lock; the shared validate+replace helper (one write path for signup AND /time-vote) rejects empty sets, past slots, and duplicate slots (which previously 500'd on the PK).
-- **Re-signup silently dropped votes** — an already-signed-up client re-posting signup got a 200 while its slot picks were discarded; votes on the request are now recorded.
-- **Kicked players now get a direct DM** (via `pending_dms`) — they're exactly the cohort not watching the tab; a channel post alone would never reach them.
-- **Chat flood gate re-keyed to the connection** — keying by the client-supplied steam_id was spoofable per message; the dup filter now skips short lines ("gg" after each game is legit) and the bucket sweep is time-gated.
-- **Stale client vote-state reset** — checkbox picks are index-based; when the offered slots change (pushback/new week) frozen local edits now reset instead of silently retargeting onto different datetimes.
-- **Artist-item batch dates** — migration `131` adds `shop_items.released_at`, stamped when an artist first opens sales, so born-out-of-stock items land in the Home showcase under the day they became buyable (the Galaxyice debut would otherwise have aged out before ever appearing).
-- Perf: chat overlay layout scratch buffer (no per-OnGUI allocation), animated-thumbnail ticker skips ~94% of redundant reflection sets, chat-gate prune is time-gated.
-
-# Changelog
-
-## v1.32.1 — RELEASED 2026-07-16
-
-**Headline: a new Home landing tab + a FAQ auto-responder bot.**
-
-### Home tab
-The F5 menu now opens on a **Home** splash page:
-- **Latest Releases** — reads the #scr-releases channel live, so you see update notes the moment they're posted.
-- **Newest Cosmetics** — with real art thumbnails, animated frames included.
-- **Players** — who's online now and recently online, with titles and ratings. Hide yourself via **Settings → Appear offline**.
-- The **Discord Link** panel and **chat** moved here from My Stats.
-
-### Discord FAQ bot
-A new bot auto-answers common questions (how to play ranked, the modpack code, gambling, the economy, tournaments, becoming an artist, rank thresholds, and more) — in Discord server-wide AND in the in-game chat bridge. Ask in your own words. `/faq` lists every topic; it also does a live "how much elo vs @player" calculation and names the current top player.
-
-### /compare
-- **First / Prev / Next / Last** buttons page through every mutual game.
-- New **head-to-head top cards** section — each player's most-picked cards against the other.
-
-### My Stats
-- **History lazy-loads** so the page opens fast; pages fill in as you scroll, full page count still shown.
-- **Card Stats** and **Achievements** are now sub-tabs under My Stats.
-
-### Fixes
-- **Chat T-key** no longer disables itself after you use the in-game text chat (proper root-cause fix).
-
-## v1.32.0 — RELEASED 2026-07-14
-
-**Headline: the July 14 feature batch** — podium presence everywhere (top-3 leaderboard highlights + a dynamic sparkling 1st/2nd/3rd Place title + 3x XP for beating a podium holder), 1000g slayer achievements with back-pay, tournament Discord feeds + availability-check DMs with Yes/No buttons, four new FPS/accessibility settings, a reordered shop, and a big Discord bot expansion (reworked /rank + /stats, /mystats, /cards, /graph charts, head-to-head /compare, 50-row leaderboard, live tournament board).
-
-### Client (mod)
-- **Leaderboard podium highlights** — ranks 1-3 get persistent gold/silver/bronze row tints on the 1v1 board (click-select still overrides); 2v2 rank numbers and 1v2 rank tags read gold/silver/bronze too.
-- **Podium title sparkle** — "1st/2nd/3rd Place" titles render with per-character glitter that shimmers on the leaderboard (only the podium rows repaint on a 0.7s tick — never a full-board repaint) and glitters statically in match history / 2v2 lists.
-- **Four new Settings toggles** (standalone — not under the perf master): Screen shake (Harmony block at the Screenshaker receivers, local-only), Map lighting (full-bright, skips the whole SFSS lightmap pass), Map shadows (skips the shadow render pass, lighting stays), Animated cosmetics (freezes prismatic/chrome body colors, prism trail, map-skin shimmer, animated faces, and shop thumbnails to a static frame instantly — frozen clocks, never paused particles).
-- **Shop reordered** — tabs and All-tab sections now run Cosmetics → Name Styles → Maps → Titles → Trails → Body Color → Cursor → Effects → Other.
-- **Tournaments tab** — the Voting / Signups Open block reads bigger (state 24pt, times 17pt, instructions 14pt).
-- **Achievements** — "Unkillable" renamed to **"God Build"**; the tab now shows the real per-trophy gold (+1000g on the slayers).
-- Stale "Ranked x1.2" XP-toast label fixed to x1.5; new "Top 3 x3" label.
-
-### Server (to deploy)
-- **Slayer achievements pay 1000g** (per-key override; the unlock endpoint, inline grants, and admin grants all honor it) — migration `123` back-pays every existing earner to exactly 1000g per slayer trophy (computed delta per player; prod ledger was uneven — some earners were never paid at all by the 102 backfill).
-- **Top-3 XP multiplier** — beating a CURRENT top-3 leaderboard player now triples match XP (replaces the flat +150 for those wins; top-4/5 keeps +150). Podium set matches the visible board (min_matches=1, deleted_at filtered) on a 60s cache.
-- **Dynamic 'Podium' title** (`title_podium`, migration `123`) — resolves live to 1st/2nd/3rd Place in gold/silver/bronze at every render surface (leaderboards, match history, chat, 2v2, stats) and disappears entirely below 3rd; ownership auto-granted on entering the podium, never revoked. **En-route fix: achievement-unlocked titles (Sid Slayer / Stan Slayer) had NO equip surface since v1.29** — /shop/items now lists achievement-pool items you own, so all of them are finally equippable.
-- **Tournament Discord feed** — signup/leave posts with live counts + Discord-localized times, @-mention posts on quorum reached, pushback, and vote-moved start times (rides the acked channel-post bus).
-- **Availability-check DMs** (migration `124`) — 24-96h before a viable tournament, every confirmed signup gets a DM with Yes / No-remove-me buttons (restart-safe; No calls the real unsignup). Sync DMs restate the "just have ROUNDS open at the start time" contract; async DMs explain the 7-day-deadline scheduling so nobody thinks they need fixed availability. Pushbacks reset the notices so the new date gets a fresh ask.
-- Hardening: the client unlock endpoint now only accepts the 14 client-detected achievement keys (server-granted trophies can no longer be self-awarded), and a lean `/players/{id}/rating-history` endpoint feeds bot charts without the heavy stats query.
-
-### Discord bot
-- **/rank reworked** (ranked-only: rating/RD/peak, tier, series record, live streak, position, leave rate) and **/stats reworked** (general: totals, casual, level/XP, gold — hidden when hide_gold — hit%/block%, top cards, 2v2, FPS). Fixed en route: /stats top cards had been silently empty (read fields the API never served).
-- **New commands**: /mystats (the F5 page as an embed), /cards [player] [ranked|casual|all], /compare (2-4 players' ranked rating histories overlaid on a rendered chart, client-convention 1500 baseline).
-- **/lb shows 100 players per page** (multi-embed) and the channel board carries all 100 in one living message.
-- **Live tournament board** in scr-tournaments — one bottom-anchored living message with Sync + Async status, rosters, bracket progress, and podiums, updating every 2 min.
-- Availability-DM poller with server-side acks; channel posts now ping user mentions explicitly (and can never @everyone).
-
-### Adversarial review (27 agents, 6 dimensions): 21 raised / 18 confirmed (7 distinct) / 3 refuted — all fixed pre-ship
-- *(critical)* the availability-DM pipeline was dead on arrival: the bot read notice key `id` but the server serialized `notice_id` — every notice silently skipped, never acked, queue starved at 20 rows.
-- *(high)* the podium query filtered ≥5 counted matches while every visible board passes min_matches=1 — the sparkling title and x3 XP could attach to the player displayed at #4.
-- *(medium)* locked-phase leave posts announced the pre-vote default start time; pushed-back tournaments could never re-ask availability (unique-row dedup); the tournament board could exceed Discord's 6000-char message budget and freeze; concurrent /compare renders raced pyplot's global state; the slayer 1000g was reachable through the client-HMAC unlock endpoint.
-
-### Post-deploy feedback round (July 14, same day)
-- **Leaderboard title brackets** now take the title's color instead of inheriting the local player's green name color; **podium rows (1-3) get a thin dark SDF outline** on every cell so the pale rank-colored ratings stay readable over the gold/silver/bronze tints. Podium highlight alphas halved (were too strong behind text).
-- **/lb fixed**: showed 100/page but truncated mid-row around #67, and page 2 started at #201. Root cause was a server double-add of the page offset onto an already-absolute `ROW_NUMBER()` rank (fixed server-side); page size set to 50 for the command and the channel board, no mid-row truncation, board covers all ranked players.
-- **/compare reworked to head-to-head** (exactly 2 players: overall record, ranked/casual/series split, recent mutual games with each side's cards) and the multi-player Compare-tab charts moved to **/graph** (16 metrics: elo-over-time, hit/block %, cards-per-game, FPS, peak, XP, achievements, streaks, sweeps, bets, keys, game length, 2v2, top-cards, region pies).
-- **scr-tournaments board** now carries a "How it works" field per embed explaining sync (one sitting, ROUNDS open at start) vs async (7-day per-match deadlines, self-scheduled).
-
-### Known limitation
-- **"Disable map lighting" flattens the sky.** ROUNDS composes the scene as sprites × lightmap and the per-map sky color IS the lighting (the raw backdrop sprite is a fixed dark texture), so turning lighting off cannot preserve the colored sky. The toggle paints a flat slate backdrop, but on several default (non-custom-skin) maps the vanilla backdrop still reads dark/purple-tinted — the flat paint reaches `ArtHandler.m_background` but not every default map's backdrop source. Shipped as-is (opt-in, off by default); **"Disable map shadows" is the recommended perf toggle** — it's where the cost is and it keeps the scene fully lit and correct. A proper lighting-off backdrop fix is on the TODO.
-
-### Migrations (applied to prod 2026-07-14)
-- `123_slayer_gold_and_podium_title.sql` — slayer top-up (regicide 4 earners/3875g, stan_slayer 3/2900g) + Podium title seed (idempotent, re-run safe).
-- `124_tournament_notices.sql` — availability-DM queue table.
-
 ---
 
-*Older releases (v1.31.0 and earlier - the betting system, chat bridge, tournaments, cosmetics, and the road to here) are in the full changelog on GitHub: https://github.com/SidNDeed/SidsCompetitiveRounds/blob/main/docs/CHANGELOG.md*
+*Older releases (v1.33.0 and earlier - the betting system, chat bridge, tournaments, cosmetics, and the road to here) are in the full changelog on GitHub: https://github.com/SidNDeed/SidsCompetitiveRounds/blob/main/docs/CHANGELOG.md*
