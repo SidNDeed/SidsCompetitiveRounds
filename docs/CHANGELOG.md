@@ -1,5 +1,26 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased
+
+Server-only so far — deployed to production on 2026-07-31, no client build required.
+
+### Fixed
+
+- **"Perma stuck in the FFA queue", and locked out of every other queue with it
+  (#124/#139).** Leaving a locked FFA lobby has never once worked: the endpoint marks the
+  departure by concatenating the player's id onto the lobby's `departed_ids` array, and with
+  a plain bind parameter PostgreSQL types that parameter as an *array* rather than a single
+  id. The driver rejected it, the whole transaction rolled back, and the statement that
+  actually removes the player from the queue — the last line of the endpoint — never ran.
+  Every leave returned an error; 34 of 34 leave requests in one production log window
+  failed, with none succeeding. Because the leftover row reads as "this player is mid-match",
+  it also blocked them from joining 1v1, 2v2 and 1v2, and the game client's retry loop kept
+  the row looking permanently fresh so no automatic cleanup could ever reach it — hence the
+  repeating "the server will clear you shortly" message that never came true. Broken since
+  FFA shipped in v1.35.0; migrations 165 and 171 had been hand-clearing individual lobbies
+  without the cause being known. Schema/data: migration **173** frees any player still
+  stranded (2 freed on apply, plus 1 who escaped the moment the fix went live).
+
 ## v1.35.4 — 2026-07-30 — rope objects, poison desync, block grace, FFA casual-wait
 
 Everything previously accumulated as "Unreleased" ships in this version: bug reports

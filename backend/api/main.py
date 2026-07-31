@@ -17503,21 +17503,35 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
             # evidence the leave only MARKS; the report's own completion path,
             # or the dispersed sweep, closes the lobby afterwards.
             game_live_now = _group_game_positively_live(str(lobby_id))
+            # CAST(:pid AS uuid) is LOAD-BEARING, not decoration. departed_ids
+            # is uuid[], and with a bare bind parameter on the right Postgres
+            # resolves `||` as array||array and types the parameter as uuid[] —
+            # so asyncpg demands a list, gets a scalar UUID, and raises
+            # DataError. That aborts the transaction, the endpoint's trailing
+            # "DELETE FROM ffa_queue WHERE player_id = :pid" never runs, and the
+            # caller keeps a ready_join row that locks them out of EVERY queue
+            # in every mode. Shipped broken from v1.35.0 to v1.35.4: 34/34 leave
+            # requests in one prod log window were 500s and departed_ids was
+            # empty on 35 of 36 lobbies. Verified against prod:
+            #   ARRAY[]::uuid[] || $1              -> parameter_types {uuid[]}
+            #   ARRAY[]::uuid[] || CAST($1 AS uuid) -> parameter_types {uuid}
+            # The rowless-leaver UPDATE above is safe only because it concats a
+            # real column (p.id), whose type the parser already knows.
             if game_live_now:
                 await db.execute(text("""
                     UPDATE ffa_lobbies
-                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e))
+                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e))
                      WHERE id = :lid AND status = 'active'
                 """), {"lid": lobby_id, "pid": me["player_id"]})
                 closed = "active"
             else:
                 closed = (await db.execute(text("""
                     UPDATE ffa_lobbies
-                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e)),
-                           status = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e)))
+                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)),
+                           status = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)))
                                               >= COALESCE(player_count, cardinality(member_ids)) - 1
                                          THEN 'completed' ELSE status END,
-                           completed_at = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || :pid) e)))
+                           completed_at = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)))
                                                     >= COALESCE(player_count, cardinality(member_ids)) - 1
                                                THEN NOW() ELSE completed_at END
                      WHERE id = :lid AND status = 'active'
