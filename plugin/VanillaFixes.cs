@@ -202,6 +202,30 @@ namespace CompetitiveRounds
                 if (!healthRemoval) return;
                 if (!VanillaFixSupport.GameplayScope()) return;
 
+                // Mode-aware since the #143 rebuild. This patch is now the
+                // FALLBACK arm only.
+                //
+                //  * Authoritative rooms: the victim's client already made the
+                //    block decision once and its committed ticks arrive with
+                //    ignoreBlock: true set explicitly. Forcing it here as well
+                //    would be redundant, and worse, it would silently mask a
+                //    stray local DOT if one ever escaped the scheduler patch —
+                //    leave those visible instead.
+                //  * Offline / sandbox: there is exactly one simulation, so
+                //    vanilla's own block check is already consistent. Forcing
+                //    the bypass there was an unintended side effect of the
+                //    v1.34.5 desync fix and removed a real mechanic for no
+                //    benefit; offline now behaves like vanilla again.
+                //  * Online mixed rooms: unchanged v1.35.4 behaviour — ticks
+                //    bypass block so every replica agrees, because we cannot
+                //    make an unpatched peer honour a verdict.
+                if (PoisonSync.Authoritative) return;
+                try
+                {
+                    if (!Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.OfflineMode) return;
+                }
+                catch { }
+
                 // Bug #135 (galaxy ice, July 30): "poison desync still
                 // happens". Root cause was this patch's own former exemption:
                 // victims whose stats route direct damage through the DoT path

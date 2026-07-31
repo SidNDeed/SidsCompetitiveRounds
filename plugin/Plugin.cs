@@ -1146,6 +1146,16 @@ namespace CompetitiveRounds
             try { ApiClient.TickLeaveRecovery(); }
             catch { }
 
+            // Poison protocol upkeep (#143). Both are idempotent and cheap:
+            // Hook() attaches the Photon event listener once per session, and
+            // EnsureCapabilityPublished() re-publishes only when the room name
+            // changes. Driven from the always-on tick rather than a join hook
+            // so no join path can forget it — the capability MUST be visible to
+            // peers before the game latches its mode, or a fully-updated room
+            // silently falls back.
+            try { PoisonSync.Hook(); PoisonSync.EnsureCapabilityPublished(); }
+            catch { }
+
             // Poll 1v2 queue if searching. Must run here (not just from the
             // F5 tab ticker) — a player who queues and closes the menu would
             // otherwise never receive ready_join, and their stale row would
@@ -5522,7 +5532,27 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[BLOCK-RESET] error: {ex.Message}"); }
         }
 
-        static void Postfix() => RunSweep("StartGame v2");
+        // __state carries whether vanilla was ACTUALLY going to start a game.
+        // GM_ArmsRace.StartGame opens with `if (!GameManager.instance.isPlaying)`
+        // and PlayerJoined calls it on every join, so mid-combat joins reach this
+        // Postfix with vanilla having done nothing. Latching there would
+        // republish a new poison epoch underneath live streams and strand their
+        // in-flight ticks. Only a false -> true transition is a real game start.
+        static void Prefix(out bool __state)
+        {
+            bool playing = false;
+            try { playing = GameManager.instance != null && GameManager.instance.isPlaying; } catch { }
+            __state = !playing;
+        }
+
+        static void Postfix(bool __state)
+        {
+            RunSweep("StartGame v2");
+            if (!__state) return;
+            // Latch the poison protocol for THIS game (report #143). Decided
+            // once, before combat, never re-evaluated mid-game.
+            try { PoisonSync.LatchForGame("StartGame"); } catch { }
+        }
     }
 
     /// <summary>Rematch-path half of the block sweep (see RunSweep comment).
@@ -5570,6 +5600,9 @@ namespace CompetitiveRounds
         {
             yield return null;   // let Unity run the deferred OnDestroy chain
             GMArmsRaceStartGameBlockResetPatch.RunSweep("ResetCharacters (rematch, post-destroy)");
+            // Same-room rematches never fire StartGame (#138), so without this
+            // every game after the first would run on a stale poison latch.
+            try { PoisonSync.LatchForGame("ResetCharacters"); } catch { }
         }
     }
 
