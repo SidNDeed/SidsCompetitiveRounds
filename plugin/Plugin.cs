@@ -5503,12 +5503,50 @@ namespace CompetitiveRounds
 
     /// <summary>Rematch-path half of the block sweep (see RunSweep comment).
     /// Same-room rematches never fire StartGame; ResetCharacters is the hook
-    /// vanilla's IDoRematch DOES call, in the correct window. The sweep is
-    /// idempotent, so double-firing alongside StartGame on fresh rooms is fine.</summary>
+    /// vanilla's IDoRematch DOES call. The sweep is idempotent, so
+    /// double-firing alongside StartGame on fresh rooms is fine.
+    ///
+    /// <para>DEFERRED ONE FRAME, and that is the whole fix for reports #142 and
+    /// #144 ("shield charge did nothing all game"). The sweep only removes
+    /// entries whose delegate target is a DESTROYED object — but the teardown
+    /// it is cleaning up after is <c>CharacterStatModifiers.ResetStats</c>,
+    /// which calls <c>Object.Destroy</c> on every card-created host, and Unity
+    /// defers that to END OF FRAME. Running synchronously in this Postfix
+    /// therefore inspects components that are all still Unity-live, finds
+    /// nothing dead, and reports "scrubbed 0" — which is exactly what both
+    /// reporters' logs show immediately before the failure. The destroys then
+    /// run, <c>ShieldCharge.OnDestroy</c> NREs partway through (its unguarded
+    /// parent lookups), and its <c>"ShieldChargeCollide"</c> ChildRPC key
+    /// survives. Next game's <c>ShieldCharge.Start</c> does a plain
+    /// <c>Dictionary.Add</c> on that key, throws ArgumentException, and aborts
+    /// BEFORE its <c>Block.SuperFirstBlockAction += DoBlock</c> on the very
+    /// next line — so ordinary blocking still works and the charge never does.
+    ///
+    /// <para>The previous comment here asserted this hook ran "after the
+    /// teardown that created the zombies". It runs after the teardown CALL and
+    /// before the teardown's EFFECTS. The FFA rolling-removal path already had
+    /// this right — it yields a frame before sweeping, with a comment saying
+    /// why — so this is that same choreography, finally applied to the 1v1/2v2
+    /// rematch path. Timing budget is ample: IDoRematch starts DoStartGame
+    /// immediately, but DoStartGame waits 0.25s, loads a map, then waits
+    /// another second before the first pick.</para></summary>
     [HarmonyPatch(typeof(PlayerManager), "ResetCharacters")]
     class PlayerManagerResetCharactersBlockResetPatch
     {
-        static void Postfix() => GMArmsRaceStartGameBlockResetPatch.RunSweep("ResetCharacters (rematch)");
+        static void Postfix()
+        {
+            // Hosted on Plugin.Instance, never on a player or the PlayerManager:
+            // those are exactly the objects being torn down, and a coroutine on a
+            // destroyed host silently never resumes (#85).
+            try { Plugin.Instance.StartCoroutine(SweepNextFrame()); }
+            catch { GMArmsRaceStartGameBlockResetPatch.RunSweep("ResetCharacters (rematch, immediate fallback)"); }
+        }
+
+        static System.Collections.IEnumerator SweepNextFrame()
+        {
+            yield return null;   // let Unity run the deferred OnDestroy chain
+            GMArmsRaceStartGameBlockResetPatch.RunSweep("ResetCharacters (rematch, post-destroy)");
+        }
     }
 
     // ── Map color override (v1.22) ─────────────────────────────────────────
@@ -6338,27 +6376,70 @@ namespace CompetitiveRounds
                 try
                 {
                     bool on = Plugin.ChromaticAberrationEnabled == null || Plugin.ChromaticAberrationEnabled.Value;
+                    // Report #141: the toggle did nothing, and this list is why.
+                    // ArtHandler's profiles are NOT where the rendered aberration
+                    // lives. Vanilla's ChomaticAberrationFeeler grabs its settings
+                    // object in OnAwake from the volume IT is attached to — the
+                    // permanently-Default `Post_Main`, not the per-art
+                    // `Post_Background` — and then writes intensity every Update.
+                    // Sweeping only the art profiles is learning #262's bloom trap
+                    // repeated exactly: the BloomStrengthSetting note directly
+                    // below this class already warns that "the obvious
+                    // ChromaticAberrationSetting-shaped implementation ... changes
+                    // nothing at all", and that warning was about this code.
+                    //
+                    // So enumerate every LIVE volume instead of guessing which one
+                    // matters. `.profile` not `.sharedProfile` for the reason in
+                    // that same note: the Feeler's own `.profile` call has already
+                    // forced an internal clone, so writes to the shared asset are
+                    // invisible to the renderer.
+                    int touched = 0;
+                    foreach (var vol in UnityEngine.Object.FindObjectsOfType<PostProcessVolume>())
+                    {
+                        if (vol == null) continue;
+                        if (Set(vol.profile, on)) touched++;
+                    }
                     var ah = ArtHandler.instance;
                     if (ah != null)
                     {
-                        try { Set(ah.volume != null ? ah.volume.profile : null, on); } catch { }
-                        try { Set(ah.menuArt != null ? ah.menuArt.profile : null, on); } catch { }
-                        try { if (ah.arts != null) foreach (var a in ah.arts) Set(a != null ? a.profile : null, on); } catch { }
+                        // Kept: arts not currently mounted on a live volume still
+                        // need the flag asserted before they are swapped in.
+                        try { if (Set(ah.volume != null ? ah.volume.profile : null, on)) touched++; } catch { }
+                        try { if (Set(ah.menuArt != null ? ah.menuArt.profile : null, on)) touched++; } catch { }
+                        try { if (ah.arts != null) foreach (var a in ah.arts) if (Set(a != null ? a.profile : null, on)) touched++; } catch { }
                     }
-                    foreach (var clone in CustomMapColors.CachedClones) Set(clone, on);
+                    foreach (var clone in CustomMapColors.CachedClones) if (Set(clone, on)) touched++;
+                    if (!_caLogged)
+                    {
+                        _caLogged = true;
+                        Plugin.Log.LogInfo($"[CA-TOGGLE] on={on}; {touched} profile(s) carrying a ChromaticAberration found");
+                        if (touched == 0)
+                            Plugin.Log.LogWarning("[CA-TOGGLE] no ChromaticAberration found on any profile — the toggle will do nothing");
+                    }
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[CA-TOGGLE] apply failed: {ex.Message}"); }
             }
 
-            private static void Set(PostProcessProfile p, bool on)
+            private static bool _caLogged;
+
+            private static bool Set(PostProcessProfile p, bool on)
             {
-                if (p == null) return;
+                if (p == null) return false;
                 try
                 {
                     if (p.TryGetSettings<ChromaticAberration>(out var ca) && ca != null)
+                    {
+                        // `active`, not intensity: the Feeler rewrites
+                        // intensity.value every Update and would win, whereas
+                        // PostProcessLayer.OverrideSettings skips an inactive
+                        // effect outright, so the flip is instant both ways and
+                        // needs no vanilla-value caching.
                         ca.active = on;
+                        return true;
+                    }
                 }
                 catch { }
+                return false;
             }
         }
 
