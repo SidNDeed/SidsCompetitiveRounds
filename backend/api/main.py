@@ -1206,6 +1206,40 @@ async def queue_cleanup_loop():
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] ffa sweep error: {e}")
+        # ── Queue-lease hygiene (migration 174) ─────────────────────────
+        # Its OWN try/except: a raise here must not kill the sweeps after it
+        # (learning #228 — one shared handler once silently killed every sweep
+        # behind it for a day).
+        #
+        # Note what this is NOT. It is not a strand-recovery path; leases
+        # expire on read and a player is free the moment theirs lapses whether
+        # or not this ever runs. It only (a) reclaims table space and (b)
+        # releases a lease EARLY when its group has properly finished, so a
+        # normal sitting ending via a janitor close or the sitting-over heal
+        # frees its members immediately instead of after the 10-minute TTL.
+        try:
+            async with async_session() as db:
+                gone = await db.execute(text("""
+                    DELETE FROM queue_leases l
+                     WHERE l.expires_at <= NOW() - INTERVAL '10 minutes'
+                        OR (l.mode = 'ffa' AND l.group_id IS NOT NULL AND EXISTS (
+                              SELECT 1 FROM ffa_lobbies x
+                               WHERE x.id = l.group_id
+                                 AND x.status NOT IN ('active', 'open')))
+                        OR (l.mode = 'team' AND l.group_id IS NOT NULL AND EXISTS (
+                              SELECT 1 FROM team_series x
+                               WHERE x.id = l.group_id AND x.status <> 'active'))
+                        OR (l.mode = 'ovt' AND l.group_id IS NOT NULL AND EXISTS (
+                              SELECT 1 FROM ovt_series x
+                               WHERE x.id = l.group_id AND x.status <> 'active'))
+                    RETURNING mode
+                """))
+                n = len(gone.fetchall())
+                await db.commit()
+                if n:
+                    print(f"[LEASE-CLEANUP] released {n} finished/expired lease(s)")
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] lease sweep error: {e}")
         # ── Stranded-bet reconciliation (bet-lifecycle backstop) ────────
         # Wagers can outlive their lobby/series: a closure path without bet
         # handling (the NotNic 500g class), a settle savepoint rollback on a
@@ -6075,23 +6109,247 @@ _QUEUE_LOCK_LIVENESS_SQL = {
 }
 
 
+# ── Queue leases: exclusion EXPIRES BY DEFAULT (migration 174) ─────────────
+#
+# _QUEUE_LOCK_LIVENESS_SQL above is retained ONLY as documentation of the four
+# mutually-inconsistent definitions of "live" it used to arbitrate between
+# (ranked 90s freshness, team NO recency bound at all, ovt/ffa 15-minute
+# windows). It is no longer consulted by anything. Read the migration-174
+# header for why inference was replaced by a lease; the short version is that
+# a finished sitting and a live 40-minute game are the same database state, so
+# every predicate over that state was guessing, and guessing wrong in the
+# unrecoverable direction (blocked forever) instead of the recoverable one.
+#
+# TTLs. A lease must outlive the longest legitimate GAP between renewals, not
+# the longest game — a 40-minute game renews every 60s throughout and is never
+# at risk. The gaps that matter are assembly (Photon connect, region ping, map
+# load, up to 10 people readying up) and the between-games window where
+# battleOngoing is false (card picks, round transitions, the rematch flow).
+LEASE_TTL_ASSEMBLY = 15 * 60   # lock -> first battle. Generous: nothing has
+                               # started renewing yet at this point.
+LEASE_TTL_INGAME   = 15 * 60   # renewed by the authenticated 60s in_match
+                               # ping, so 10 missed pings before expiry. Also
+                               # the post-sitting bound: once battleOngoing
+                               # goes false for good, the lease dies ~10 min
+                               # later with no cleanup path involved.
+LEASE_TTL_POLLING  = 5 * 60    # renewed by a client actively polling its own
+                               # queue (ranked ready-up polls every 3s, open
+                               # FFA lobby members every ~2s).
+LEASE_MAX_INGAME_TOTAL = 3 * 60 * 60
+LEASE_MAX_LOBBY_SEAT = 2 * 60 * 60
+# Ceiling on TOTAL open-lobby seat life. Poll-renewal is driven by "a client is
+# running", not "a game is happening", so on its own it is exactly the kind of
+# self-sustaining renewer that produced the original bug — a client wedged in a
+# leave/poll retry loop would hold its own exclusion open forever. Two hours is
+# far past any real wait for a lobby to fill; after that the player re-enrols.
+
+_LEASE_MODE_FOR_TABLE = {
+    "ranked_queue": "ranked",
+    "team_queue": "team",
+    "ovt_queue": "ovt",
+    "ffa_queue": "ffa",
+}
+_LEASE_TABLE_FOR_MODE = {v: k for k, v in _LEASE_MODE_FOR_TABLE.items()}
+
+
+async def _lease_acquire(db: AsyncSession, player_id, mode: str,
+                         group_id=None, ttl_seconds: int = LEASE_TTL_ASSEMBLY):
+    """Grant (or supersede) this player's single queue commitment.
+
+    Always overwrites: acquiring a new commitment necessarily ends the old one,
+    and a fresh `generation` means any heartbeat still in flight for the
+    previous commitment can no longer renew it. Callers must run this in the
+    SAME transaction as the status write that locks the row, so a rolled-back
+    lock cannot leave a lease behind."""
+    gen = uuid.uuid4()
+    await db.execute(text("""
+        INSERT INTO queue_leases (player_id, mode, group_id, generation,
+                                  acquired_at, renewed_at, expires_at)
+        VALUES (:pid, :mode, :gid, :gen, clock_timestamp(), clock_timestamp(),
+                clock_timestamp() + make_interval(secs => :ttl))
+        ON CONFLICT (player_id) DO UPDATE
+           SET mode = EXCLUDED.mode, group_id = EXCLUDED.group_id,
+               generation = EXCLUDED.generation,
+               acquired_at = clock_timestamp(),
+               renewed_at = clock_timestamp(),
+               -- Recomputed from the CURRENT clock, NOT EXCLUDED.expires_at.
+               -- The VALUES list is evaluated BEFORE this statement waits on
+               -- the conflicting lease tuple, while acquired_at/renewed_at
+               -- above are evaluated after — so reusing EXCLUDED.expires_at
+               -- silently shortens the lease by however long the wait was,
+               -- and once the wait exceeds the TTL it makes
+               -- expires_at <= renewed_at, which violates the CHECK in
+               -- migration 174 and aborts the ENTIRE match formation.
+               expires_at = clock_timestamp() + make_interval(secs => :ttl)
+    """), {"pid": player_id, "mode": mode, "gid": group_id, "gen": gen,
+           "ttl": int(ttl_seconds)})
+    return gen
+
+
+# SCOPE NOTE — the double-lock race is NOT fixed here, deliberately.
+#
+# A player may legitimately search several modes at once (the cross-mode gate
+# blocks only LOCKED players), and the check every lock path runs first is an
+# unlocked read, so two matchmakers can both pass it and both lock the same
+# player. That is pre-existing; the lease neither causes it nor cures it.
+#
+# I tried two ways to cure it here and both were wrong. Refusing the second
+# claim looks right but does not help: the losing FORMATION still commits its
+# series and its other members' rows, so instead of one player in two matches
+# you get three players in a room whose fourth never arrives — strictly worse,
+# and repairing it needs a clean abort path in five different matchmakers.
+# A pre-read plus a warning was worse still: in the concurrent case both
+# pre-reads see no lease, so it stayed silent exactly when it mattered.
+#
+# So this supersedes unconditionally and claims nothing about that race. The
+# guarantee the lease DOES make is narrower and is the one that matters here:
+# no player can be excluded from queueing indefinitely. Fixing double-lock
+# properly is its own change.
+
+
+async def _lease_acquire_many(db: AsyncSession, player_ids, mode: str,
+                              group_id=None, ttl_seconds: int = LEASE_TTL_ASSEMBLY):
+    """Acquire for a whole group in ONE deterministic global order.
+
+    Ordering is mandatory, not tidiness. Two match formations that overlap on
+    two players (A and B) and acquire in opposite orders deadlock on the
+    queue_leases tuples — and `_lock_queue_rows_ordered` cannot help, because
+    it orders rows in the mode-specific queue table, a different relation.
+    Sorting by str(player_id) matches the canonical ordering this codebase
+    already uses for its other cross-row lock passes (#197/#202)."""
+    for pid in sorted({p for p in player_ids if p is not None}, key=str):
+        await _lease_acquire(db, pid, mode, group_id, ttl_seconds)
+
+
+async def _lease_renew(db: AsyncSession, player_id, mode: str, group_id=None,
+                       ttl_seconds: int = LEASE_TTL_INGAME,
+                       max_total_seconds: int | None = None) -> bool:
+    """Extend a lease that is STILL LIVE and still describes this commitment.
+
+    Deliberately cannot create or resurrect. Three guards, each load-bearing:
+      * `expires_at > statement_timestamp()` — an expired lease stays dead. Without it a
+        late heartbeat could re-block a player the system already freed, which
+        is precisely the unrecoverable direction this design exists to remove.
+      * mode + group match     — a heartbeat naming a stale group cannot extend
+        a lease since re-acquired for a different game.
+      * per-player only        — the caller renews THEIR OWN lease. One member
+        must never be able to renew the whole group, or a single lying client
+        holds everyone. Spoofing then costs only self-exclusion.
+      * max_total_seconds      — optional ceiling on TOTAL life since acquire,
+        for renewal sources that are merely "a client is running" rather than
+        "a game is happening". The 30-minute CHECK in migration 174 bounds one
+        extension, not a chain of them, so any renewer that a wedged client can
+        drive on its own MUST pass this or it can hold itself forever — the
+        very bug this design removes.
+    """
+    res = await db.execute(text("""
+        UPDATE queue_leases
+           SET renewed_at = clock_timestamp(),
+               expires_at = clock_timestamp() + make_interval(secs => :ttl)
+         WHERE player_id = :pid
+           AND mode = :mode
+           AND group_id IS NOT DISTINCT FROM :gid
+           -- clock_timestamp(), not NOW()/statement_timestamp(): both are
+           -- frozen before this statement waits on the lease tuple, so a
+           -- renewal that queued a second before expiry could resurrect a
+           -- lease that expired while it waited. clock_timestamp() re-reads
+           -- the wall clock at evaluation, which is the only reading that
+           -- makes "an expired lease stays dead" actually true.
+           AND expires_at > clock_timestamp()
+           AND (:cap IS NULL
+                OR acquired_at > clock_timestamp() - make_interval(secs => :cap))
+    """), {"pid": player_id, "mode": mode, "gid": group_id,
+           "ttl": int(ttl_seconds), "cap": (int(max_total_seconds)
+                                            if max_total_seconds else None)})
+    return (res.rowcount or 0) > 0
+
+
+async def _lease_release(db: AsyncSession, player_id) -> None:
+    """Drop this player's commitment. Single-responsibility BY DESIGN — it
+    touches no lobby, series, bet, host or partner state, so no bookkeeping
+    failure anywhere else can roll back a player's freedom (every strand this
+    system has produced came from bundling those into the same transaction)."""
+    await db.execute(text("DELETE FROM queue_leases WHERE player_id = :pid"),
+                     {"pid": player_id})
+
+
+async def _lease_release_by_steam(db: AsyncSession, steam_id: str,
+                                  expected_group: str | None = None) -> None:
+    """Revoke by steam_id for the leave endpoints, in its OWN COMMITTED
+    transaction, before the caller takes any other lock.
+
+    Both properties are load-bearing and were wrong in the first draft.
+
+    COMMITTED, not savepointed: a savepoint only stops THIS statement from
+    poisoning the outer transaction — the delete still rides that
+    transaction's fate, so any later lobby/bet/host bookkeeping failure rolls
+    the player's freedom back with it. That is precisely the failure-domain
+    coupling the lease exists to break (it is how 34 consecutive FFA leaves
+    freed nobody). It also fixes a real leak: team_queue_leave returns early
+    when the row is already gone, which would have discarded the release.
+
+    BEFORE any other lock: the leave paths take series/lobby then queue rows,
+    while the lock paths take series/lobby then queue rows then the lease. A
+    lease delete held across the leave's own group lock closes that cycle into
+    an ABBA deadlock. Committing first means the lease tuple is never held
+    while waiting for anything else.
+
+    `expected_group` fences a delayed retry: a leave aimed at lobby A must not
+    revoke the lease of lobby B the player has since joined (the membership
+    mutation below already has this fence; the release needs the same one)."""
+    try:
+        await db.execute(text("""
+            DELETE FROM queue_leases
+             WHERE player_id IN (SELECT id FROM players WHERE steam_id = :sid)
+               AND (CAST(:gid AS uuid) IS NULL
+                    OR group_id = CAST(:gid AS uuid))
+        """), {"sid": steam_id, "gid": expected_group})
+        await db.commit()
+    except Exception as ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        print(f"[LEASE] release failed for {steam_id} (will expire on its own): {ex}")
+
+
+async def _lease_live_mode(db: AsyncSession, player_id) -> str | None:
+    """The mode currently holding this player, or None. Expiry is evaluated
+    HERE, at read time — Postgres cannot enforce it with a CHECK or a partial
+    index (both require immutable expressions) and no trigger fires because
+    time passed. Every admission decision must route through this helper; a
+    new code path that tests queue-row existence instead reintroduces the
+    unbounded-strand bug that migration 174 removes."""
+    try:
+        async with db.begin_nested():
+            return (await db.execute(text(
+                "SELECT mode FROM queue_leases"
+                " WHERE player_id = :pid AND expires_at > clock_timestamp()"
+            ), {"pid": player_id})).scalar()
+    except Exception as ex:
+        # Savepoint, not a bare except (#235): during the window between the
+        # code deploy and migration 174 the table does not exist, and a plain
+        # try/except would poison the caller's whole transaction. Degrading to
+        # "not locked" is the safe direction — the worst case is a ghost
+        # searching row in another mode, which the evictions already handle.
+        print(f"[LEASE] liveness read failed (treating as free): {ex}")
+        return None
+
+
 async def _locked_in_other_queue(db: AsyncSession, player_id, joining_table: str) -> str | None:
-    """Name of another queue table where this player holds a LIVE locked row
-    (per _QUEUE_LOCK_LIVENESS_SQL), else None.
+    """Name of another queue table holding this player's LIVE lease, else None.
 
     Backstop for the eviction above (Codex post-release find 1): the 1v2/FFA
     clients auto-rejoin on not_in_queue, so a bare eviction would be undone by
     the very next rejoin tick — the JOIN itself must refuse while the player
     is genuinely mid-lobby elsewhere."""
-    for table in _CROSS_QUEUE_TABLES:
-        if table == joining_table:
-            continue
-        row = (await db.execute(
-            text(_QUEUE_LOCK_LIVENESS_SQL[table]), {"pid": player_id},
-        )).first()
-        if row is not None:
-            return table
-    return None
+    mode = await _lease_live_mode(db, player_id)
+    if mode is None:
+        return None
+    table = _LEASE_TABLE_FOR_MODE.get(mode)
+    if table is None or table == joining_table:
+        return None
+    return table
 
 
 async def _lock_queue_group_for_player(
@@ -6292,6 +6550,11 @@ async def queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSes
     """Leave the ranked queue."""
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
     await _check_steam_session(request, steam_id, db)
+    # Revoke the commitment FIRST and unconditionally (migration 174). The
+    # lease would lapse on its own, but an explicit leave should let the
+    # player queue elsewhere immediately, and it must work even when the row
+    # is already gone.
+    await _lease_release_by_steam(db, steam_id)
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if player:
@@ -6302,6 +6565,70 @@ async def queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSes
         await db.commit()
 
     return {"status": "left", "message": "Left ranked queue"}
+
+
+@app.post("/api/v1/queues/escape", tags=["Queue"])
+async def queues_escape(request: Request, steam_id: str = Query(...),
+                        db: AsyncSession = Depends(get_db)):
+    """Revoke EVERY queue commitment this player holds, in every mode.
+
+    Bug report #124 asked for a personal "kick me from all queues" button.
+    This is it, and its whole design is about what it REFUSES to do in the
+    authoritative transaction.
+
+    Every strand this system has produced came from bundling a player's
+    freedom into a transaction that also did lobby bookkeeping: cancel the
+    series, mark departed_ids, reset survivors, promote a host, settle bets.
+    Any one of those failing rolled back the row delete too — that is exactly
+    how the departed_ids type error kept 34 consecutive leave attempts from
+    freeing anybody. So transaction one here contains a single statement and
+    nothing else can ever roll it back:
+
+        DELETE FROM queue_leases WHERE player_id = :pid
+
+    That alone is sufficient, because the lease — not row existence — is the
+    sole admission authority (migration 174). The queue rows are then swept in
+    SEPARATE, individually-guarded transactions purely as hygiene; if every
+    one of them fails the player is still free.
+
+    Deliberately does NOT cancel lobbies/series or settle bets. A sitting the
+    player walked out of is owned by its own lifecycle, and a late match
+    report still validates against the frozen roster — so escaping can never
+    destroy a game that was actually played.
+
+    Idempotent: escaping when already free returns 200."""
+    await _check_steam_session(request, steam_id, db)
+    player = (await db.execute(
+        select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        return {"status": "ok", "freed": False, "note": "no such player"}
+
+    # ── Transaction 1: the freedom. One statement, no dependencies. ──
+    freed = False
+    try:
+        res = await db.execute(
+            text("DELETE FROM queue_leases WHERE player_id = :pid"),
+            {"pid": player.id})
+        freed = (res.rowcount or 0) > 0
+        await db.commit()
+    except Exception as ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        print(f"[ESCAPE] lease revoke FAILED for {steam_id}: {ex}")
+        raise HTTPException(503, "Couldn't reach the queue service — try again")
+
+    # NO synchronous row sweep. It is tempting — the rows are now husks — but
+    # a DELETE here cannot be made safe: its snapshot is taken before it waits
+    # on the row lock, so a match formation that commits in that window has its
+    # BRAND NEW queue row deleted by a decision made before that row existed,
+    # leaving a live lease with no row and a match that vanishes from the
+    # client's poll. The rows are explicitly not authoritative (the lease is),
+    # and the janitors already reap them, so the correct amount of extra work
+    # here is none.
+    print(f"[ESCAPE] {steam_id} released (lease_freed={freed})")
+    return {"status": "ok", "freed": freed}
 
 
 @app.get("/api/v1/queue/count", tags=["Queue"])
@@ -6346,26 +6673,43 @@ async def presence_ping(request: Request,
     # is still honoured, and old clients never send in_match at all.
     if in_match:
         _im_ok = False
+        _im_mode = None
+        _im_pid = None
         try:
             # Python-side UUID validation first: a malformed id must not reach
             # a CAST and poison the transaction the last_seen stamp below
             # still needs (#235).
             _gid = UUID(in_match)
             await _check_steam_session(request, steam_id, db)
-            _im_ok = bool((await db.execute(text("""
-                SELECT EXISTS(
-                    SELECT 1 FROM team_series ts, players p
-                     WHERE ts.id = :gid AND p.steam_id = :sid
-                       AND p.id IN (ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id))
-                OR EXISTS(
-                    SELECT 1 FROM ovt_series os, players p
-                     WHERE os.id = :gid AND p.steam_id = :sid
-                       AND p.id IN (os.solo_id, os.duo_a_id, os.duo_b_id))
-                OR EXISTS(
-                    SELECT 1 FROM ffa_lobbies l, players p
-                     WHERE l.id = :gid AND p.steam_id = :sid
-                       AND p.id = ANY(l.member_ids))
-            """), {"gid": _gid, "sid": steam_id})).scalar())
+            # Returns WHICH kind of group as well as whether membership holds,
+            # because this ping is also the queue lease's in-game renewal
+            # carrier (migration 174) and a lease renewal must name its mode.
+            _im_row = (await db.execute(text("""
+                SELECT p.id AS pid,
+                       CASE
+                         WHEN EXISTS(SELECT 1 FROM team_series ts
+                                      WHERE ts.id = :gid
+                                        AND p.id IN (ts.t1a_id, ts.t1b_id,
+                                                     ts.t2a_id, ts.t2b_id))
+                              THEN 'team'
+                         WHEN EXISTS(SELECT 1 FROM ovt_series os
+                                      WHERE os.id = :gid
+                                        AND p.id IN (os.solo_id, os.duo_a_id,
+                                                     os.duo_b_id))
+                              THEN 'ovt'
+                         WHEN EXISTS(SELECT 1 FROM ffa_lobbies l
+                                      WHERE l.id = :gid
+                                        AND p.id = ANY(l.member_ids))
+                              THEN 'ffa'
+                         ELSE NULL
+                       END AS mode
+                  FROM players p
+                 WHERE p.steam_id = :sid
+            """), {"gid": _gid, "sid": steam_id})).mappings().first()
+            if _im_row is not None and _im_row["mode"]:
+                _im_ok = True
+                _im_mode = _im_row["mode"]
+                _im_pid = _im_row["pid"]
         except Exception:
             _im_ok = False
             try:
@@ -6374,6 +6718,37 @@ async def presence_ping(request: Request,
                 pass
         if _im_ok:
             _in_match_touch(in_match)
+            # RENEW this caller's own lease only — never the group's. One
+            # member must not be able to hold three other people's exclusion
+            # open, so a client that lies about being in a battle can only
+            # keep ITSELF queue-locked. _lease_renew cannot create or
+            # resurrect, so a ping arriving after the lease already lapsed
+            # (or after an explicit escape) does not re-block the player.
+            try:
+                # max_total_seconds is the backstop on a renewer the SERVER
+                # cannot fully verify: it checks session + frozen-roster
+                # membership, but `battleOngoing` exists only in honest client
+                # code, so an authenticated member could otherwise ping its own
+                # old group forever and self-block indefinitely. 3h matches the
+                # hard ceiling the FFA janitor already uses and is far past the
+                # longest observed sitting.
+                await _lease_renew(db, _im_pid, _im_mode, _gid, LEASE_TTL_INGAME,
+                                   max_total_seconds=LEASE_MAX_INGAME_TOTAL)
+                # COMMIT HERE, explicitly. The only other commit in this
+                # endpoint is the players.last_seen stamp, which is throttled
+                # to one write per 5 minutes per player — so without this line
+                # four out of every five 60-second renewals executed, returned
+                # success, and were then silently ROLLED BACK at session close.
+                # The lease would have been renewed on a 5-minute cadence
+                # against a 10-minute expiry, i.e. two heartbeats of margin
+                # instead of ten, and a live game could have lost its lease.
+                await db.commit()
+            except Exception as _lex:
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                print(f"[LEASE] in_match renew failed for {steam_id}: {_lex}")
         else:
             print(f"[PRESENCE] in_match claim rejected (unverified): {steam_id} -> {in_match}")
     if _presence_db_stamp_ok(steam_id):
@@ -6945,6 +7320,15 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                 """),
                 {"opp_id": opp_id, "mat": matched_at, "pid": pid},
             )
+        # Lease, same transaction as the lock (migration 174). Renewed by the
+        # ranked poll, which runs every 3s through ready-up. 1v1 sends no
+        # in_match heartbeat (GetPresenceMatchGroupId covers ffa_/ovt_/team
+        # rooms only), so this lease lapses a few minutes into the match
+        # itself — strictly MORE generous than the 90s last_polled window it
+        # replaces, so no behaviour is lost. Acquired in sorted order, outside
+        # the loop, so two formations sharing a player cannot deadlock.
+        await _lease_acquire_many(db, [my_pid, opp["player_id"]], "ranked",
+                                  None, LEASE_TTL_POLLING)
         await db.commit()
 
         return QueuePollResponse(
@@ -11621,6 +12005,20 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
 
     # Steam sessions store the raw Steam ID (and authenticate as it) — purge
     # them so no live token outlives the account.
+    # Queue lease LAST, after every series/lobby lock pass above.
+    #
+    # Position is load-bearing, not stylistic. Match formation locks in the
+    # order lobby/series -> queue rows -> lease. Deleting the lease up front
+    # (where this first went) would hold the lease tuple while this function
+    # then waits for ffa_lobbies FOR NO KEY UPDATE — the exact inverse — so a
+    # concurrent FFA Start holding the lobby and waiting on the lease closes an
+    # ABBA cycle and one of the two transactions dies. Taking it here means the
+    # lease is the last thing acquired, matching everyone else.
+    #
+    # Needed at all because this endpoint ANONYMISES the players row rather
+    # than deleting it, so queue_leases' ON DELETE CASCADE never fires.
+    await db.execute(text("DELETE FROM queue_leases WHERE player_id = :pid"),
+                     {"pid": pid})
     await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text("DELETE FROM player_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
 
@@ -13460,6 +13858,7 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
 async def team_queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
     await _check_steam_session(request, steam_id, db)
+    await _lease_release_by_steam(db, steam_id)
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
     if player:
@@ -13948,6 +14347,9 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                     """),
                     {"sid": dc_row["id"], "t": t, "pid": pid},
                 )
+            await _lease_acquire_many(
+                db, [my_pid] + [p["player_id"] for p in present],
+                "team", dc_row["id"], LEASE_TTL_ASSEMBLY)
             # Flip the series back to active and clear DC fields so the next
             # match plays through normally.
             await db.execute(
@@ -14106,6 +14508,13 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             "all4": team1_ids + team2_ids,
         },
     )
+    # Lease all four in the same transaction as the lock (migration 174).
+    # Renewed by the authenticated in_match ping while the sitting is live;
+    # once battleOngoing stops for good it lapses on its own, which is what
+    # replaces team_queue's old predicate — the one that had NO recency bound
+    # at all and could therefore block a player indefinitely.
+    await _lease_acquire_many(db, team1_ids + team2_ids, "team", series_id,
+                              LEASE_TTL_ASSEMBLY)
     await db.commit()
 
     # Reload our row to figure out our team.
@@ -15653,6 +16062,19 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
     if _other:
         raise HTTPException(status_code=409,
                             detail="You're in a live match in another mode - finish it first")
+    # Same-mode husk clear as FFA (migration 174): the lease bounds the
+    # CROSS-mode block, but 1v2's own upsert preserves a locked row's
+    # lifecycle, so without this a player whose lease has lapsed stays
+    # unqueueable in 1v2 specifically — the permanent half of the strand, just
+    # in a different mode.
+    if await _lease_live_mode(db, player.id) is None:
+        _cleared = (await db.execute(text(
+            "UPDATE ovt_queue SET status='searching', series_id=NULL, side_assigned=NULL,"
+            "       room_name=NULL, room_region=NULL, matched_at=NULL"
+            " WHERE player_id = :pid AND status <> 'searching'"
+            " RETURNING status"), {"pid": player.id})).scalar()
+        if _cleared:
+            print(f"[LEASE] 1v2 join cleared an unleased '{_cleared}' husk for {req.steam_id}")
     # Snapshot ratings (1v2 rating if it exists, else 1v1 as fallback ordering hint).
     g = (await db.execute(text(
         "SELECT rating, rating_deviation, completed_series FROM glicko_ratings_1v2 WHERE player_id = :pid"
@@ -15708,8 +16130,10 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
     match pipeline owns its lifecycle."""
     # A8: session enforcement — HMAC alone is forgeable by anyone with the DLL secret.
     await _check_steam_session(request, steam_id, db)
+    await _lease_release_by_steam(db, steam_id)
     me = await _lock_queue_group_for_player(db, "ovt_queue", steam_id)
     if me is None:
+        await db.commit()
         return {"status": "ok"}
     dissolved = False
     if me["status"] in ("ready_join", "matched") and me["series_id"] is not None:
@@ -16061,6 +16485,8 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
              WHERE player_id=:pid
         """), {"sid": series_id, "side": this_side, "room": room, "reg": (region or "us")[:8],
                "pid": r["player_id"]})
+    await _lease_acquire_many(db, [r["player_id"] for r in lobby], "ovt",
+                              series_id, LEASE_TTL_ASSEMBLY)
     await db.commit()
     print(f"[OVT-LOCK] series {series_id} room {room} solo={solo['steam_id']} extra_pick={extra_pick}")
     # Post-commit, own transaction: a locked trio is out of every other queue.
@@ -17002,6 +17428,21 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     if _other:
         raise HTTPException(status_code=409,
                             detail="You're in a live match in another mode - finish it first")
+    # Clear an unleased husk BEFORE the upsert (migration 174). The upsert
+    # below deliberately preserves a LOCKED row's lifecycle, which is correct
+    # for a live lobby and catastrophic for a dead one: the row survives, the
+    # endpoint still answers {"status":"ok"}, and the client then shows
+    # "searching" while the server has it locked forever. That divergence is
+    # the FFA half of "stuck in the queue" — the player presses Join, is told
+    # it worked, and nothing happens, repeatedly.
+    if await _lease_live_mode(db, player.id) is None:
+        _cleared = (await db.execute(text(
+            "UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,"
+            "       room_name=NULL, room_region=NULL, matched_at=NULL"
+            " WHERE player_id = :pid AND status <> 'searching'"
+            " RETURNING status"), {"pid": player.id})).scalar()
+        if _cleared:
+            print(f"[LEASE] FFA join cleared an unleased '{_cleared}' husk for {req.steam_id}")
     g = (await db.execute(text(
         "SELECT rating, rating_deviation, games_played FROM glicko_ratings_ffa WHERE player_id = :pid"
     ), {"pid": player.id})).mappings().first()
@@ -17137,6 +17578,22 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
     mine = (await db.execute(text(
         "SELECT status, series_id FROM ffa_queue WHERE player_id = :pid FOR UPDATE"
     ), {"pid": player.id})).mappings().first()
+    # A locked row whose LEASE has lapsed is a husk, not a commitment
+    # (migration 174). Without this the cross-mode half of the strand would be
+    # fixed while the FFA half stayed permanent: the row still 409s every
+    # Create/Join, so the player watches everyone else queue FFA while their
+    # own button rejects them with no way to clear it. This is the specific
+    # "stuck in the ffa queue" half of bug reports #124 and #139.
+    if mine is not None and mine["status"] != "searching":
+        if await _lease_live_mode(db, player.id) is None:
+            await db.execute(text(
+                "UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,"
+                "       room_name=NULL, room_region=NULL, matched_at=NULL,"
+                "       joined_at=NOW(), last_polled=NOW()"
+                " WHERE player_id = :pid"), {"pid": player.id})
+            print(f"[LEASE] FFA enroll cleared an unleased {mine['status']} husk "
+                  f"for {req.steam_id} (lobby {mine['series_id']})")
+            mine = {"status": "searching", "series_id": None}
     if mine is not None and mine["status"] == "lobby":
         if mine["series_id"] == lobby_id:
             # Idempotent same-lobby rejoin — the client recovery path (find 6).
@@ -17148,6 +17605,7 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
     if mine is not None and mine["status"] not in ("searching",):
         raise HTTPException(409, "You're locked into another FFA game — finish or leave it first")
     snap = await _ffa_lobby_snapshot_fields(db, player.id)
+    _enrolled = False
     if mine is None:
         # ON CONFLICT DO NOTHING + re-check (impl review adjacent find): two
         # concurrent enrolls for the same account (double-click across PCs)
@@ -17164,6 +17622,7 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
                "reg": (req.region or "")[:8] or None, "lid": lobby_id, **snap})).scalar()
         if inserted is None:
             raise HTTPException(409, "Your queue state just changed — try again")
+        _enrolled = True
     else:
         # CAS: the WHERE re-checks 'searching' on the locked row — a legacy
         # gather cannot have flipped it under our lock, but the guard makes
@@ -17180,6 +17639,19 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
                "reg": (req.region or "")[:8] or None, "lid": lobby_id, **snap})).scalar()
         if flipped is None:
             raise HTTPException(409, "Your queue state just changed — try again")
+        _enrolled = True
+    # Open-lobby seat: short lease, renewed by this member's own ~2s poll. If
+    # they close the game while sitting in a lobby the seat frees itself in
+    # minutes instead of waiting on the 75s prune plus a lobby closure.
+    #
+    # Placed AFTER the if/else on purpose: it used to sit inside the `else`,
+    # so a player with NO existing ffa_queue row — i.e. anyone joining an open
+    # lobby fresh, the common case — got a membership with no lease at all.
+    # Cross-mode admission would then have considered them free for the whole
+    # open-lobby wait and another mode could have locked them out from under
+    # the host's Start.
+    if _enrolled:
+        await _lease_acquire(db, player.id, "ffa", lobby_id, LEASE_TTL_POLLING)
 
 
 @app.post("/api/v1/ffa/lobby/create", tags=["FFA Queue"])
@@ -17322,6 +17794,12 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
              WHERE player_id=:pid
         """), {"lid": lobby_id, "slot": slot, "room": room, "reg": (region or "us")[:8],
                "pid": r["player_id"]})
+    # Locked seats: assembly-length lease, then renewed by the authenticated
+    # in_match ping for as long as battles are actually running. Once the
+    # sitting genuinely ends nothing renews it and it lapses on its own -- no
+    # cleanup path has to fire, which is the whole point (migration 174).
+    await _lease_acquire_many(db, [r["player_id"] for r in ordered], "ffa",
+                              lobby_id, LEASE_TTL_ASSEMBLY)
     await db.commit()
     print(f"[FFA-LOBBY] host {req.steam_id} started lobby {lobby_id} room {room} n={len(ordered)}")
     await _evict_other_queue_searching(
@@ -17377,6 +17855,9 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
     that room (Codex design find 4 — leaving them 'ready_join' would re-feed
     a dead room forever). Everyone's rows are deleted; they requeue fresh."""
     await _check_steam_session(request, steam_id, db)
+    # Fenced on the lobby the client actually means, so a delayed retry for a
+    # finished lobby cannot revoke the lease of one joined since.
+    await _lease_release_by_steam(db, steam_id, expected_lobby_id)
     # (Removed, July 30 audit item 3: this endpoint used to run a 2h "stale
     # sweep" over UNRELATED active lobbies on every leave request. It was a
     # blind closer — old activity, no live-game evidence, no veto — and the
@@ -17503,6 +17984,7 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
             # evidence the leave only MARKS; the report's own completion path,
             # or the dispersed sweep, closes the lobby afterwards.
             game_live_now = _group_game_positively_live(str(lobby_id))
+            all_but_one = False
             # CAST(:pid AS uuid) is LOAD-BEARING, not decoration. departed_ids
             # is uuid[], and with a bare bind parameter on the right Postgres
             # resolves `||` as array||array and types the parameter as uuid[] —
@@ -17518,11 +18000,28 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
             # The rowless-leaver UPDATE above is safe only because it concats a
             # real column (p.id), whose type the parser already knows.
             if game_live_now:
-                await db.execute(text("""
+                # RETURNING the all-but-one test, not just performing the mark.
+                # Previously this branch hardcoded closed="active", so the
+                # threshold was never evaluated on the live-game path and the
+                # survivor-freeing DELETE below was unreachable from it. The
+                # comment above justified that by deferring to "the report's
+                # own completion path" — which does not exist: the only
+                # ffa_lobbies write in submit_ffa_match is
+                # `games_played = games_played + 1`. A crossed threshold was
+                # therefore recorded and then acted on by nobody, leaving the
+                # last survivor holding a ready_join row on a permanently
+                # 'active' lobby.
+                all_but_one = bool((await db.execute(text("""
                     UPDATE ffa_lobbies
                        SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e))
                      WHERE id = :lid AND status = 'active'
-                """), {"lid": lobby_id, "pid": me["player_id"]})
+                    RETURNING cardinality(departed_ids)
+                              >= COALESCE(player_count, cardinality(member_ids)) - 1
+                """), {"lid": lobby_id, "pid": me["player_id"]})).scalar())
+                # Still 'active' on purpose: the final game's report may be in
+                # flight, and closing here would quarantine it and refund bets
+                # that should settle. The survivors are released below without
+                # touching the lobby (round-3 regression 7 stands).
                 closed = "active"
             else:
                 closed = (await db.execute(text("""
@@ -17537,12 +18036,22 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                      WHERE id = :lid AND status = 'active'
                      RETURNING status
                 """), {"lid": lobby_id, "pid": me["player_id"]})).scalar()
-            if closed == "completed":
+            if closed == "completed" or all_but_one:
                 # The sitting is over — now the survivors' rows go too, so
                 # nobody stays locked out of other queues by a closed lobby.
+                # `all_but_one` covers the live-game branch, where the lobby
+                # deliberately stays 'active' for an in-flight report: the
+                # remaining player cannot reach N again in that room, so their
+                # seat is meaningless and holding it only strands them.
                 await db.execute(text(
                     "DELETE FROM ffa_queue WHERE series_id = :lid AND player_id != :pid"
                 ), {"lid": lobby_id, "pid": me["player_id"]})
+                # And their leases — the row is hygiene, the lease is the
+                # actual exclusion (migration 174).
+                await db.execute(text("""
+                    DELETE FROM queue_leases
+                     WHERE mode = 'ffa' AND group_id = :lid AND player_id != :pid
+                """), {"lid": lobby_id, "pid": me["player_id"]})
             if closed == "completed":
                 await _reconcile_ffa_lobby_bets(db, lobby_id, "sitting over (last members left)")
                 print(f"[FFA-LOCK] played lobby {lobby_id} closed — all but one member departed")
@@ -17714,6 +18223,50 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                              {"pid": me["player_id"]})
             await db.commit()
             return {"status": "lobby_closed", "queue_count": 0}
+        # Renew the OPEN-lobby seat from the poll. This is the one locked
+        # state where poll-renewal is correct: a member of an open lobby is
+        # definitionally sitting at the menu, and the seat is cheap to
+        # re-acquire if it lapses.
+        #
+        # DO NOT copy this into the ready_join branch below, however obvious
+        # it looks. A LOCKED row's lease must be renewed ONLY by evidence of
+        # an actual battle (the authenticated in_match ping). Renewing it from
+        # the poll would mean a client wedged in the leave/poll retry loop
+        # keeps its own exclusion alive forever — which is precisely the
+        # unbounded strand migration 174 exists to remove, reintroduced by a
+        # one-line "consistency" edit.
+        _seat_ok = True
+        try:
+            async with db.begin_nested():
+                _seat_ok = await _lease_renew(
+                    db, me["player_id"], "ffa", me["series_id"],
+                    LEASE_TTL_POLLING, max_total_seconds=LEASE_MAX_LOBBY_SEAT)
+        except Exception as _lex:
+            print(f"[LEASE] ffa lobby renew failed for {steam_id}: {_lex}")
+        if not _seat_ok:
+            # The seat has outlived the 2h ceiling (or its lease is gone). The
+            # first draft ignored this return value, which left the row fresh
+            # and the lease dead — so the player became cross-mode free, could
+            # start a game in another mode, and the FFA host pressing Start
+            # would then have yanked them straight back out. A capped seat has
+            # to actually END. 'lobby_closed' (not 'not_in_queue') is the right
+            # signal: the client tears the membership down and stops polling,
+            # whereas not_in_queue with OpenFfaLobbyId still set re-arms the
+            # auto-rejoin loop.
+            await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
+                             {"pid": me["player_id"]})
+            # FENCED to this lobby's FFA lease. A bare release would delete
+            # whatever lease exists — and _lease_renew returns false for
+            # "your lease now belongs to another mode" too, so an expired FFA
+            # seat whose player had since been claimed by a team formation
+            # would have had that live team lease deleted out from under them.
+            await db.execute(text(
+                "DELETE FROM queue_leases WHERE player_id = :pid"
+                "   AND mode = 'ffa' AND group_id = :lid"),
+                {"pid": me["player_id"], "lid": me["series_id"]})
+            await db.commit()
+            print(f"[LEASE] open-lobby seat expired for {steam_id} (lobby {me['series_id']})")
+            return {"status": "lobby_closed", "queue_count": 0}
         live = await _ffa_live_lobby_members(db, me["series_id"])
         host_id = _ffa_effective_host(lrow["host_player_id"], live)
         now_utc = datetime.now(timezone.utc)
@@ -17758,10 +18311,41 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         if zero_game_stale:
             mem_sids = (await db.execute(text(
                 "SELECT steam_id FROM ffa_queue WHERE series_id = :lid"
-            ), {"lid": me["series_id"]})).scalars().all()
+                "   AND steam_id <> :me"
+            ), {"lid": me["series_id"], "me": steam_id})).scalars().all()
+            # `steam_id <> :me` is LOAD-BEARING. This poll called
+            # _presence_touch(steam_id) at its top, so including the caller
+            # made members_online unconditionally True and the whole
+            # `zero_game_stale and not members_online` term dead code — a
+            # self-heal whose trigger could never fire (learning #247's shape,
+            # third occurrence in this subsystem). The question this asks is
+            # "is anyone ELSE still running the mod"; the caller demonstrably
+            # is, so their own presence answers nothing.
             members_online = any(_presence_is_online(s) for s in mem_sids)
         dead = (lrow is None or lrow["status"] != "active"
                 or (zero_game_stale and not members_online))
+        # ── Lease expiry frees the CALLER, and only the caller ─────────────
+        # Deliberately NOT folded into `dead` above, even though it reads like
+        # the same condition. `dead` cancels the LOBBY and reconciles its bets;
+        # routing an expired lease through it would mean a run of failed
+        # in_match heartbeats during a genuinely live sitting destroys that
+        # sitting for everyone — the exact class of bug that has repeatedly
+        # killed live games here (the 5m04s sitting-over close, the 25-minute
+        # dispersed close, the assembly_timeout cancel).
+        #
+        # The lease answers "is THIS player still committed", never "is this
+        # lobby still alive". So it drops one row and touches nothing else: no
+        # lobby status, no departed_ids, no bets, no survivors. A late match
+        # report still validates against the lobby's frozen roster, so being
+        # freed early can never cost a recorded game — which is what makes the
+        # expire-by-default direction safe (migration 174).
+        if not dead and await _lease_live_mode(db, me["player_id"]) is None:
+            await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
+                             {"pid": me["player_id"]})
+            await db.commit()
+            print(f"[LEASE] freed {steam_id} from lobby {me['series_id']} "
+                  f"(lease expired; lobby left untouched)")
+            return {"status": "not_in_queue", "queue_count": 0}
         # ── Sitting-over self-heal (July 28 "trapped in a dead lobby"
         # incident, Sid's directive). The queue-poll is the INVERSE in-game
         # heartbeat: clients only poll it from the MENU / assembly screens —
@@ -17945,6 +18529,12 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
              WHERE player_id=:pid
         """), {"lid": lobby_id, "slot": slot, "room": room, "reg": (region or "us")[:8],
                "pid": r["player_id"]})
+    # Locked seats: assembly-length lease, then renewed by the authenticated
+    # in_match ping for as long as battles are actually running. Once the
+    # sitting genuinely ends nothing renews it and it lapses on its own -- no
+    # cleanup path has to fire, which is the whole point (migration 174).
+    await _lease_acquire_many(db, [r["player_id"] for r in ordered], "ffa",
+                              lobby_id, LEASE_TTL_ASSEMBLY)
     await db.commit()
     print(f"[FFA-LOCK] lobby {lobby_id} room {room} n={len(ordered)} decider={steam_id}")
     # This gather is consumed — the next trio starts a fresh window.
