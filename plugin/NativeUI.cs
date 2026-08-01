@@ -1242,9 +1242,14 @@ namespace CompetitiveRounds
         };
         private sealed class FfaRecentPlayerRow
         {
-            public GameObject root, cardsGO, fullDotsGO, halfDotsGO, halfOverflowGO;
+            public GameObject root, cardsGO, statsGO, fullDotsGO, halfDotsGO, halfOverflowGO;
             public object txtPlacement, txtIdentity, txtPoints, txtHalfOverflow;
             public object txtHalves, txtKills, txtRewards, txtElo, txtCards;
+            // Separate elements per stat, not one string: each registers its
+            // OWN hover region so the right graph pops for the cell under the
+            // cursor, and a hover region is sized to its cell's rendered text
+            // rather than a shared full-width strip (learnings #90/#143).
+            public object txtHit, txtBlock, txtFps, txtPing;
             // Full chronological pick list for the hover tooltip; null/empty
             // when the inline line already shows everything (nothing rolled).
             public string cardsHoverText;
@@ -1607,6 +1612,21 @@ namespace CompetitiveRounds
             row.txtRewards=CreateFfaTextCell("Rewards",line.transform,128,UIFactory.AlignMidRight,15f,C_BLUE);
             row.txtElo=CreateFfaTextCell("Elo",line.transform,62,UIFactory.AlignMidRight,15f,C_LABEL);
 
+            // Per-player telemetry line, indented to sit under the name.
+            // Mirrors the 1v1 history row (Hit% / Block% / fps / ping), and
+            // each cell hovers to the same graphs 1v1 already draws.
+            var stats=new GameObject("Stats");
+            stats.transform.SetParent(row.root.transform,false);
+            stats.AddComponent<RectTransform>();
+            UIFactory.AddHLG(stats,spacing:6,forceExpandH:false);
+            UIFactory.AddLE(stats,prefH:19,minH:19,flexH:0);
+            CreateFfaTextCell("StatsPad",stats.transform,34,UIFactory.AlignMidLeft,13f,C_DIM);
+            row.txtHit=CreateFfaTextCell("Hit",stats.transform,104,UIFactory.AlignMidLeft,13f,C_LABEL);
+            row.txtBlock=CreateFfaTextCell("Block",stats.transform,112,UIFactory.AlignMidLeft,13f,C_LABEL);
+            row.txtFps=CreateFfaTextCell("Fps",stats.transform,74,UIFactory.AlignMidLeft,13f,C_LABEL);
+            row.txtPing=CreateFfaTextCell("Ping",stats.transform,74,UIFactory.AlignMidLeft,13f,C_LABEL);
+            row.statsGO=stats;
+
             row.txtCards=UIFactory.CreateText("Cards",row.root.transform,"",15f,new Color(0.4f,0.47f,0.55f),
                 UIFactory.AlignTopLeft,sizeDelta:new Vector2(0,20));
             UIFactory.SetWordWrap(row.txtCards,true);
@@ -1874,6 +1894,39 @@ namespace CompetitiveRounds
                 }
                 else UIFactory.SetText(ui.txtElo,"");
 
+                // Telemetry line. Rows predating the FFA telemetry migration
+                // carry nothing, so the whole line hides rather than showing a
+                // row of dashes.
+                bool hasCombat=player.bullets_fired>0||player.blocks_activated>0;
+                bool hasConn=player.fps_avg>0||player.ping_avg>0;
+                if(ui.statsGO!=null)ui.statsGO.SetActive(hasCombat||hasConn);
+                if(hasCombat||hasConn)
+                {
+                    string hitTxt="",blkTxt="",fpsTxt="",pingTxt="";
+                    if(player.bullets_fired>0)
+                        hitTxt=$"<color=#FF9988>Hit</color> {100f*player.bullets_hit/player.bullets_fired:F0}%";
+                    if(player.blocks_activated>0)
+                        blkTxt=$"<color=#99CCFF>Block</color> {100f*player.blocks_successful/player.blocks_activated:F0}%";
+                    if(player.fps_avg>0)fpsTxt=$"<color=#8FA3B8>{player.fps_avg} fps</color>";
+                    if(player.ping_avg>0)pingTxt=$"<color=#8FA3B8>{player.ping_avg} ms</color>";
+                    UIFactory.SetText(ui.txtHit,hitTxt);
+                    UIFactory.SetText(ui.txtBlock,blkTxt);
+                    UIFactory.SetText(ui.txtFps,fpsTxt);
+                    UIFactory.SetText(ui.txtPing,pingTxt);
+                    // Only register a region when the cell actually rendered
+                    // text: an EMPTY element has preferredWidth 0, which the
+                    // hover resolver treats as "no fraction" = a FULL-width
+                    // invisible hover trap across the row (1v1 review [8]).
+                    if(!string.IsNullOrEmpty(hitTxt))
+                        RegisterPairGraphRectFor(ui.txtHit,player.hit_timeline,false,false,null,match.timeline);
+                    if(!string.IsNullOrEmpty(blkTxt))
+                        RegisterPairGraphRectFor(ui.txtBlock,player.block_timeline,true,false,null,match.timeline);
+                    if(!string.IsNullOrEmpty(fpsTxt))
+                        RegisterTeleGraphRectFor(ui.txtFps,player.fps_timeline,null,false,null,match.timeline);
+                    if(!string.IsNullOrEmpty(pingTxt))
+                        RegisterTeleGraphRectFor(ui.txtPing,player.ping_timeline,null,true,null,match.timeline);
+                }
+
                 string cards=BuildFfaCardsText(player,out string cardsHover);
                 ui.cardsHoverText=cardsHover;
                 if(ui.cardsGO!=null)ui.cardsGO.SetActive(!string.IsNullOrEmpty(cards));
@@ -1896,6 +1949,12 @@ namespace CompetitiveRounds
             foreach(var player in match.players)
             {
                 height+=27f;
+                // The telemetry line only renders when the row actually has
+                // telemetry, so the estimate must use the same condition or
+                // the inner scroll is sized for content that is not there.
+                if(player!=null&&(player.bullets_fired>0||player.blocks_activated>0
+                                  ||player.fps_avg>0||player.ping_avg>0))
+                    height+=19f;
                 if(player?.cards==null||player.cards.Count==0)continue;
                 // Inline line = held cards only (rolled ones collapse into a
                 // "+N replaced" chip) — count what actually renders.

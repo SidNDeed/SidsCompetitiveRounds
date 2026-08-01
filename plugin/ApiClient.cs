@@ -8390,6 +8390,12 @@ namespace CompetitiveRounds
         {
             public string steam_id, display_name, title, title_color;
             public int slot, placement, rounds_won, points_total, kills, fps_avg, xp_gained, gold_gained;
+            // Per-player combat + connection telemetry. The server has always
+            // sent these on /ffa/recent; only this model omitted them, so the
+            // FFA tab was the one history surface without the stat line that
+            // 1v1 has had since v1.30. Timelines drive the hover graphs.
+            public int ping_avg, bullets_fired, bullets_hit, blocks_activated, blocks_successful;
+            public string fps_timeline, ping_timeline, hit_timeline, block_timeline;
             public bool left_early;
             public float rating_change;
             public bool has_rating_change;
@@ -9497,6 +9503,15 @@ namespace CompetitiveRounds
                                         points_total = ExtractJsonInt(pObj, "points_total"),
                                         kills = ExtractJsonInt(pObj, "kills"),
                                         fps_avg = ExtractJsonInt(pObj, "fps_avg"),
+                                        ping_avg = ExtractJsonInt(pObj, "ping_avg"),
+                                        bullets_fired = ExtractJsonInt(pObj, "bullets_fired"),
+                                        bullets_hit = ExtractJsonInt(pObj, "bullets_hit"),
+                                        blocks_activated = ExtractJsonInt(pObj, "blocks_activated"),
+                                        blocks_successful = ExtractJsonInt(pObj, "blocks_successful"),
+                                        fps_timeline = ExtractJsonString(pObj, "fps_timeline"),
+                                        ping_timeline = ExtractJsonString(pObj, "ping_timeline"),
+                                        hit_timeline = ExtractJsonString(pObj, "hit_timeline"),
+                                        block_timeline = ExtractJsonString(pObj, "block_timeline"),
                                         xp_gained = ExtractJsonInt(pObj, "xp_gained"),
                                         gold_gained = ExtractJsonInt(pObj, "gold_gained"),
                                         left_early = ExtractJsonBool(pObj, "left_early"),
