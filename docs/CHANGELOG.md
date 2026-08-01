@@ -1,10 +1,10 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased
+## v1.35.5 — 2026-07-31 — queue strand root cause, Leave All Queues, shield charge, display toggles
 
 Backend deployed to production on 2026-07-31. Schema: migrations **173** (free
 stranded FFA seats) and **174** (`queue_leases`). The **Leave All Queues** button
-needs a client build to reach players.
+now reaches players with this client build.
 
 ### Added
 
@@ -29,7 +29,49 @@ needs a client build to reach players.
   locking you out indefinitely. This also fixed 2v2 specifically, where a stuck slot
   previously had no time limit at all.
 
-### Fixed
+
+> **Minimum version raised to 1.35.4.** Older clients are asked to update before
+> they can play. The mod updates itself on launch; Thunderstore users update
+> through their mod manager.
+
+### Cosmetics
+
+Five new community face items ship with this release — **Brain Cane**, **Casi's
+mouth**, **Casicorn's Eyes**, **Little Pink Buddy** and **Sniper Medal**. Schema:
+migration **175**. Each artist opens their own sales from the Artist tab, so an
+item may show as not-yet-on-sale until they do.
+
+### Fixed (client)
+
+- **Shield Charge — and other block-attached card effects — could do nothing for
+  an entire game (#142/#144).** After a rematch, a leftover registration from the
+  previous game made the card's setup fail one step before it hooked into the
+  block system. Normal blocking kept working, so the card looked equipped and
+  simply had no effect. The cleanup that was meant to prevent this ran one frame
+  too early — before the game had actually finished destroying the old cards —
+  so it inspected them while they were still alive and cleaned up nothing.
+- **The chromatic aberration toggle did nothing (#141).** It was switching the
+  setting on a rendering layer that isn't the one being displayed. If you had it
+  off, you were still seeing the aberration — including the screen-wide pulse on
+  every hit, which reads as camera shake. Screen shake itself was never the
+  problem; that toggle was working correctly all along.
+
+### Changed (client)
+
+- **Screen shake is now Full / Reduced / Off** instead of on/off, matching the
+  glow setting. Reduced keeps the hit feedback at about a third strength. If you
+  already had shake turned off, that carries over automatically.
+
+### Known issue
+
+- **Blocking still does not cancel poison ticks (#143).** The rebuild that
+  restores it is written but deliberately not switched on: the mechanism that
+  tells everyone in a room to use it doesn't yet guarantee they all switch at
+  the same moment, and a room that's half-switched would show players different
+  health values — worse than the current behaviour, which is at least consistent
+  for everyone. Blocking the initial poison shot still avoids poison entirely.
+
+### Fixed (server)
 
 - **"Perma stuck in the FFA queue", and locked out of every other queue with it
   (#124/#139).** Leaving a locked FFA lobby has never once worked: the endpoint marks the

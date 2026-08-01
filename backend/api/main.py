@@ -1386,7 +1386,7 @@ app.include_router(tournaments_router)
 # compatibility carve-out around steam-session enforcement, so the floor climbs
 # until the carve-out is gone. 1.33.0 is stage one; raise to 1.34.0 once
 # players.mod_version shows adoption. Old clients get 426 → auto-update.
-MIN_MOD_VERSION = "1.33.0"
+MIN_MOD_VERSION = "1.35.4"
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
 # First client build with the fixed hit/block counting semantics (July 21:
@@ -1872,7 +1872,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.35.4"
+LATEST_MOD_VERSION = "1.35.5"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():

@@ -173,6 +173,16 @@ namespace CompetitiveRounds
             // PNGs were pulled from png_data with md5 verification.
             new CosmeticDef { Sku = "face_detail_ballooniphones", DisplayName = "Ballooniphones", Slot = CharacterItemType.Detail, PngFile = "Ballooniphones.png", Scale = 1.7f, Offset = new Vector2(-0.192f, 2.112f) },
             new CosmeticDef { Sku = "face_detail_soda_helm",      DisplayName = "Soda Helm",      Slot = CharacterItemType.Detail, PngFile = "SodaHelm.png",      Scale = 1.3f, Offset = new Vector2(-0.096f, 2.4f) },
+            // v1.35.5 batch. Scale/Offset copied verbatim from the APPROVED
+            // snapshot columns (approved_render_*), never the artist's mutable
+            // proposal — migration 175 aborts if the artist has revised the
+            // placement since this bundle was cut. PNGs pulled from png_data
+            // with md5 verified against the row before writing.
+            new CosmeticDef { Sku = "face_detail_brain_cane",        DisplayName = "Brain Cane",        Slot = CharacterItemType.Detail, PngFile = "detail_brain_cane.png",        Scale = 1.3f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_mouth_casi_s_mouth",       DisplayName = "Casi's mouth",      Slot = CharacterItemType.Mouth,  PngFile = "mouth_casi_s_mouth.png",       Scale = 1.3f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_eyes_casicorn_s_eyes",     DisplayName = "Casicorn's Eyes",   Slot = CharacterItemType.Eyes,   PngFile = "eyes_casicorn_s_eyes.png",     Scale = 1.3f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_little_pink_buddy", DisplayName = "Little Pink Buddy", Slot = CharacterItemType.Detail, PngFile = "detail_little_pink_buddy.png", Scale = 1.3f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_sniper_medal",      DisplayName = "Sniper Medal",      Slot = CharacterItemType.Detail, PngFile = "detail_sniper_medal.png",      Scale = 1.3f, Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();
