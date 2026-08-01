@@ -1,3 +1,91 @@
+## v1.35.5 — 2026-07-31 — queue strand root cause, Leave All Queues, shield charge, display toggles
+
+Backend deployed to production on 2026-07-31. Schema: migrations **173** (free
+stranded FFA seats) and **174** (`queue_leases`). The **Leave All Queues** button
+now reaches players with this client build.
+
+### Added
+
+- **"Leave all queues" button, in Settings.** Removes you from every queue and lobby
+  in every mode at once. Use it if the game thinks you're still in a match you've
+  already left, or if joining a queue keeps saying you're busy. It doesn't affect a
+  game you're actually playing and never touches stats, gold or rating. It's in
+  Settings rather than on the queue tabs on purpose — the player who needs it is the
+  one whose queue tab is misbehaving. If the server can't be reached it keeps retrying
+  in the background, including after a restart.
+
+### Changed
+
+- **Being "in a queue" now expires on its own.** Previously the server considered you
+  busy because a row existed, and you only became free again if one of about fifteen
+  different cleanup routines remembered to remove it — several of which needed your
+  game to still be running and cooperating. If none of them fired, you stayed blocked
+  with no time limit, which is why this kept needing manual intervention. Your slot is
+  now a lease with an expiry that a live game continuously renews; when the games stop,
+  it lapses by itself. Nothing has to remember to clean up, so there is nothing left to
+  forget. Getting it wrong now frees you slightly early — you just requeue — instead of
+  locking you out indefinitely. This also fixed 2v2 specifically, where a stuck slot
+  previously had no time limit at all.
+
+
+> **Minimum version raised to 1.35.4.** Older clients are asked to update before
+> they can play. The mod updates itself on launch; Thunderstore users update
+> through their mod manager.
+
+### Cosmetics
+
+Five new community face items ship with this release — **Brain Cane**, **Casi's
+mouth**, **Casicorn's Eyes**, **Little Pink Buddy** and **Sniper Medal**. Schema:
+migration **175**. Each artist opens their own sales from the Artist tab, so an
+item may show as not-yet-on-sale until they do.
+
+### Fixed (client)
+
+- **Shield Charge — and other block-attached card effects — could do nothing for
+  an entire game (#142/#144).** After a rematch, a leftover registration from the
+  previous game made the card's setup fail one step before it hooked into the
+  block system. Normal blocking kept working, so the card looked equipped and
+  simply had no effect. The cleanup that was meant to prevent this ran one frame
+  too early — before the game had actually finished destroying the old cards —
+  so it inspected them while they were still alive and cleaned up nothing.
+- **The chromatic aberration toggle did nothing (#141).** It was switching the
+  setting on a rendering layer that isn't the one being displayed. If you had it
+  off, you were still seeing the aberration — including the screen-wide pulse on
+  every hit, which reads as camera shake. Screen shake itself was never the
+  problem; that toggle was working correctly all along.
+
+### Changed (client)
+
+- **Screen shake is now Full / Reduced / Off** instead of on/off, matching the
+  glow setting. Reduced keeps the hit feedback at about a third strength. If you
+  already had shake turned off, that carries over automatically.
+
+### Known issue
+
+- **Blocking still does not cancel poison ticks (#143).** The rebuild that
+  restores it is written but deliberately not switched on: the mechanism that
+  tells everyone in a room to use it doesn't yet guarantee they all switch at
+  the same moment, and a room that's half-switched would show players different
+  health values — worse than the current behaviour, which is at least consistent
+  for everyone. Blocking the initial poison shot still avoids poison entirely.
+
+### Fixed (server)
+
+- **"Perma stuck in the FFA queue", and locked out of every other queue with it
+  (#124/#139).** Leaving a locked FFA lobby has never once worked: the endpoint marks the
+  departure by concatenating the player's id onto the lobby's `departed_ids` array, and with
+  a plain bind parameter PostgreSQL types that parameter as an *array* rather than a single
+  id. The driver rejected it, the whole transaction rolled back, and the statement that
+  actually removes the player from the queue — the last line of the endpoint — never ran.
+  Every leave returned an error; 34 of 34 leave requests in one production log window
+  failed, with none succeeding. Because the leftover row reads as "this player is mid-match",
+  it also blocked them from joining 1v1, 2v2 and 1v2, and the game client's retry loop kept
+  the row looking permanently fresh so no automatic cleanup could ever reach it — hence the
+  repeating "the server will clear you shortly" message that never came true. Broken since
+  FFA shipped in v1.35.0; migrations 165 and 171 had been hand-clearing individual lobbies
+  without the cause being known. Schema/data: migration **173** frees any player still
+  stranded (2 freed on apply, plus 1 who escaped the moment the fix went live).
+
 ## v1.35.4 — 2026-07-30 — rope objects, poison desync, block grace, FFA casual-wait
 
 Everything previously accumulated as "Unreleased" ships in this version: bug reports
