@@ -53,28 +53,33 @@ def _E(mu: float, mu_j: float, phi_j: float) -> float:
     return 1.0 / (1.0 + math.exp(-_g(phi_j) * (mu - mu_j)))
 
 
-def _compute_variance(mu: float, opponents: list[Opponent]) -> float:
+def _compute_variance(mu: float, opponents: list[Opponent],
+                      weights: list[float] | None = None) -> float:
     """
     Step 3: Compute the estimated variance of the player's rating
-    based on game outcomes.
+    based on game outcomes. A weight w on an outcome makes it count as w
+    observations (w=1.0 everywhere reproduces vanilla Glicko-2 exactly).
     """
     v_inv = 0.0
-    for opp in opponents:
+    for i, opp in enumerate(opponents):
+        w = weights[i] if weights is not None else 1.0
         g_phi = _g(opp.phi)
         e = _E(mu, opp.mu, opp.phi)
-        v_inv += g_phi * g_phi * e * (1.0 - e)
+        v_inv += w * g_phi * g_phi * e * (1.0 - e)
     return 1.0 / v_inv if v_inv > 0 else float("inf")
 
 
-def _compute_delta(mu: float, opponents: list[Opponent], v: float) -> float:
+def _compute_delta(mu: float, opponents: list[Opponent], v: float,
+                   weights: list[float] | None = None) -> float:
     """
     Step 4: Compute the estimated improvement in rating.
     """
     total = 0.0
-    for opp in opponents:
+    for i, opp in enumerate(opponents):
+        w = weights[i] if weights is not None else 1.0
         g_phi = _g(opp.phi)
         e = _E(mu, opp.mu, opp.phi)
-        total += g_phi * (opp.score - e)
+        total += w * g_phi * (opp.score - e)
     return v * total
 
 
@@ -127,6 +132,7 @@ def calculate_new_rating(
     volatility: float,
     opponents: list[tuple[float, float, float]],
     tau: float = 0.5,
+    weights: list[float] | None = None,
 ) -> tuple[float, float, float]:
     """
     Calculate a player's new Glicko-2 rating after a rating period.
@@ -138,12 +144,27 @@ def calculate_new_rating(
         opponents: List of (opponent_rating, opponent_rd, score) tuples
                    where score is 1.0=win, 0.0=loss, 0.5=draw
         tau: System constant controlling volatility change (0.3 to 1.2)
+        weights: Optional per-outcome weights, positionally matching
+                 `opponents`. A weight w makes that outcome count as w games
+                 (it scales BOTH the variance accumulator and the update sum).
+                 None, or all-1.0, reproduces the unweighted math EXACTLY —
+                 1v1/2v2/cron call sites pass nothing and are byte-identical.
+                 Used by configurable-score-target FFA: w(N) = min(1, (N-1)/4)
+                 so a short first-to-3 moves ratings less than a first-to-5.
 
     Returns:
         Tuple of (new_rating, new_rd, new_volatility) on Glicko-1 scale.
     """
     # Step 1: Convert to Glicko-2 scale
     mu, phi = rating_to_glicko2(rating, rd)
+
+    if weights is not None:
+        if len(weights) != len(opponents):
+            raise ValueError("weights must match opponents positionally")
+        # An all-zero weight vector means "no effective games": take the
+        # no-games branch rather than dividing by a zero variance.
+        if opponents and not any(w > 0 for w in weights):
+            opponents = []
 
     # If no games played, only RD increases (Step 6 shortcut)
     if not opponents:
@@ -158,10 +179,10 @@ def calculate_new_rating(
         opps.append(Opponent(mu=opp_mu, phi=opp_phi, score=score))
 
     # Step 3: Compute variance
-    v = _compute_variance(mu, opps)
+    v = _compute_variance(mu, opps, weights)
 
     # Step 4: Compute improvement
-    delta = _compute_delta(mu, opps, v)
+    delta = _compute_delta(mu, opps, v, weights)
 
     # Step 5: Determine new volatility
     new_sigma = _new_volatility(volatility, phi, v, delta, tau)
@@ -173,10 +194,11 @@ def calculate_new_rating(
     new_phi = 1.0 / math.sqrt(1.0 / (phi_star * phi_star) + 1.0 / v)
 
     update_sum = 0.0
-    for opp in opps:
+    for i, opp in enumerate(opps):
+        w = weights[i] if weights is not None else 1.0
         g_phi = _g(opp.phi)
         e = _E(mu, opp.mu, opp.phi)
-        update_sum += g_phi * (opp.score - e)
+        update_sum += w * g_phi * (opp.score - e)
 
     new_mu = mu + new_phi * new_phi * update_sum
 

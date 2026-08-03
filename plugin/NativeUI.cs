@@ -306,7 +306,23 @@ namespace CompetitiveRounds
         }
 
         public static object CreateText(string name,Transform parent,string text,float fontSize,Color color,int alignment=AlignTopLeft,Vector2? sizeDelta=null,bool richText=true,bool raycastTarget=false)
-        {var go=new GameObject(name);go.transform.SetParent(parent,false);var rt=go.AddComponent<RectTransform>();Vector2 sz=sizeDelta??new Vector2(200,24);rt.sizeDelta=sz;if(sz.x>0&&sz.y>0)AddLE(go,prefW:sz.x,prefH:sz.y);var tmp=go.AddComponent(tTMP);try{UnicodeFallback.EnsureCharacters(text);}catch{}pTmpText?.SetValue(tmp,richText?_BoldWrap(text):text);/* Bug batch item 12: global floor — below ~12pt the Gravity SDF font drops thin glyphs (l, i, -) even in bold. */fontSize=Mathf.Max(fontSize,12f);pTmpFontSize?.SetValue(tmp,fontSize);pTmpColor?.SetValue(tmp,color);pTmpRichText?.SetValue(tmp,richText);pTmpRaycastTarget?.SetValue(tmp,raycastTarget);if(tmpFont!=null)pTmpFont?.SetValue(tmp,tmpFont);pTmpCharSpacing?.SetValue(tmp,1.0f);try{pTmpFontStyle?.SetValue(tmp,Enum.ToObject(pTmpFontStyle.PropertyType,1));}catch{}try{var at=pTmpAlignment?.PropertyType;if(at!=null)pTmpAlignment.SetValue(tmp,Enum.ToObject(at,alignment));}catch{}return tmp;}
+        {var go=new GameObject(name);go.transform.SetParent(parent,false);var rt=go.AddComponent<RectTransform>();Vector2 sz=sizeDelta??new Vector2(200,24);rt.sizeDelta=sz;
+        /* L10n prerequisite (localization-design §2.8): minH ALONGSIDE prefH —
+         * a VLG child with no minH compresses toward zero under height
+         * pressure and TMP's default Overflow keeps painting the full glyph
+         * run over its neighbours (#199's mechanism, and translated strings
+         * average +30% length). */
+        if(sz.x>0&&sz.y>0)AddLE(go,prefW:sz.x,prefH:sz.y,minH:sz.y);
+        /* L10n chokepoint (see SetText): translate, then register glyphs. */
+        text=I18n.Tr(text);
+        var tmp=go.AddComponent(tTMP);try{UnicodeFallback.EnsureCharacters(text);}catch{}pTmpText?.SetValue(tmp,richText?_BoldWrap(text):text);/* Bug batch item 12: global floor — below ~12pt the Gravity SDF font drops thin glyphs (l, i, -) even in bold. */fontSize=Mathf.Max(fontSize,12f);pTmpFontSize?.SetValue(tmp,fontSize);pTmpColor?.SetValue(tmp,color);pTmpRichText?.SetValue(tmp,richText);pTmpRaycastTarget?.SetValue(tmp,raycastTarget);if(tmpFont!=null)pTmpFont?.SetValue(tmp,tmpFont);pTmpCharSpacing?.SetValue(tmp,1.0f);try{pTmpFontStyle?.SetValue(tmp,Enum.ToObject(pTmpFontStyle.PropertyType,1));}catch{}try{var at=pTmpAlignment?.PropertyType;if(at!=null)pTmpAlignment.SetValue(tmp,Enum.ToObject(at,alignment));}catch{}
+        /* Default every text to Truncate (3), NEVER Ellipsis: TMP's ellipsis
+         * inserts U+2026, which the static Gravity atlas lacks -> box (#47).
+         * Overflow (the TMP default) is how over-long text paints over its
+         * neighbours. Callers that need wrapping tall bodies set their own
+         * mode after creation, exactly as before. */
+        SetOverflowMode(tmp,3);
+        return tmp;}
 
         public static GameObject CreateButton(string name,Transform parent,string label,float fontSize,Color textColor,Color bgColor,UnityEngine.Events.UnityAction onClick,Vector2? sizeDelta=null)
         {
@@ -333,6 +349,11 @@ namespace CompetitiveRounds
         public static void AddLE(GameObject go,float minW=-1,float minH=-1,float prefW=-1,float prefH=-1,float flexW=-1,float flexH=-1){if(tLE==null)return;var le=go.AddComponent(tLE);if(minW>=0)pLEMinW?.SetValue(le,minW);if(minH>=0)pLEMinH?.SetValue(le,minH);if(prefW>=0)pLEPrefW?.SetValue(le,prefW);if(prefH>=0)pLEPrefH?.SetValue(le,prefH);if(flexW>=0)pLEFlexW?.SetValue(le,flexW);if(flexH>=0)pLEFlexH?.SetValue(le,flexH);}
         // Update an EXISTING LayoutElement's preferredHeight (AddLE would stack a second component).
         public static void SetPrefH(GameObject go,float prefH){if(tLE==null||go==null)return;var le=go.GetComponent(tLE);if(le!=null)pLEPrefH?.SetValue(le,prefH);}
+        /* Codex v1.36 client find 9: CreateText now pins minH=sizeDelta.y (the
+         * L10n anti-compression floor), so any DYNAMIC resize site must move
+         * minH along with prefH or Unity clamps the child at its build-time
+         * minimum and the row overflows its neighbours again. */
+        public static void SetMinH(GameObject go,float minH){if(tLE==null||go==null)return;var le=go.GetComponent(tLE);if(le!=null)pLEMinH?.SetValue(le,minH);}
         public static void SetPrefWH(GameObject go,float prefW,float prefH){if(tLE==null||go==null)return;var le=go.GetComponent(tLE);if(le==null)return;pLEPrefW?.SetValue(le,prefW);pLEPrefH?.SetValue(le,prefH);}
         // Make an EXISTING panel clickable (Button on its own Image) — same wiring as
         // CreateButton but without spawning a new GO. Child buttons still win raycasts.
@@ -345,7 +366,20 @@ namespace CompetitiveRounds
         }
         public static Component CreateFillBar(string name,Transform parent,Color bgColor,Color fillColor,float height=8f){var bgGO=new GameObject(name+"_BG");bgGO.transform.SetParent(parent,false);bgGO.AddComponent<RectTransform>();AddLE(bgGO,prefH:height,flexH:0);bgGO.AddComponent(tImage);pImgColor?.SetValue(bgGO.GetComponent(tImage),bgColor);var fGO=new GameObject(name+"_Fill");fGO.transform.SetParent(bgGO.transform,false);var fRT=fGO.AddComponent<RectTransform>();fRT.anchorMin=Vector2.zero;fRT.anchorMax=new Vector2(0f,1f);fRT.offsetMin=Vector2.zero;fRT.offsetMax=Vector2.zero;fGO.AddComponent(tImage);pImgColor?.SetValue(fGO.GetComponent(tImage),fillColor);return fRT;}
         public static void SetFill(Component f,float a){if(f==null)return;var rt=f as RectTransform;if(rt!=null)rt.anchorMax=new Vector2(Mathf.Clamp01(a),1f);}
-        public static void SetText(object t,string s){if(t==null)return;/* Make sure any non-ASCII glyph in this string exists in the runtime fallback atlas before TMP lays it out, else it renders as a box (Sid: "several players have boxes for their names"). No-ops for pure-ASCII text. */try{UnicodeFallback.EnsureCharacters(s);}catch{}pTmpText?.SetValue(t,_BoldWrap(s??""));}
+        public static void SetText(object t,string s){if(t==null)return;
+            /* L10n chokepoint: translate BEFORE the glyph registration and the
+             * bold wrap — the catalogue keys are the raw English source, and
+             * the fallback atlas must learn the TRANSLATED glyphs. Unknown
+             * strings pass through untouched (I18n.Tr is identity for en). */
+            s=I18n.Tr(s);
+            /* Make sure any non-ASCII glyph in this string exists in the runtime fallback atlas before TMP lays it out, else it renders as a box (Sid: "several players have boxes for their names"). No-ops for pure-ASCII text. */try{UnicodeFallback.EnsureCharacters(s);}catch{}pTmpText?.SetValue(t,_BoldWrap(s??""));}
+        /* Codex v1.36 client find 15: USER-AUTHORED values (display names,
+         * item names) must never pass through I18n.Tr — a player literally
+         * named "Done." would render as "Hecho." in Spanish. Same glyph
+         * registration and bold wrap as SetText, no catalogue lookup. Any
+         * site whose whole payload is a raw user string uses this. */
+        public static void SetTextRaw(object t,string s){if(t==null)return;
+            try{UnicodeFallback.EnsureCharacters(s);}catch{}pTmpText?.SetValue(t,_BoldWrap(s??""));}
         public static void SetColor(object t,Color c){if(t!=null)pTmpColor?.SetValue(t,c);}
         public static void SetBold(object t,bool b){if(t==null)return;try{var tp=pTmpFontStyle?.PropertyType;if(tp!=null)pTmpFontStyle.SetValue(t,Enum.ToObject(tp,b?1:0));}catch{}}
         public static void SetWordWrap(object t,bool on){if(t==null||tTMP==null)return;try{var p=tTMP.GetProperty("enableWordWrapping",BindingFlags.Public|BindingFlags.Instance);p?.SetValue(t,on);}catch{}}
@@ -693,6 +727,9 @@ namespace CompetitiveRounds
             if(builtThisOpen)
                 try{UIFactory.tCanvas?.GetMethod("ForceUpdateCanvases",BindingFlags.Public|BindingFlags.Static)?.Invoke(null,null);}catch{}
             isOpen=true;dirty=true;RefreshData();ApiClient.ResetQueueCountTimer();Plugin.Log.LogInfo($"[NATIVE] Opened competitive page (inGame={inGameMode})");
+            // L10n D2 ask-once: fires only while ModLanguage is the unset
+            // sentinel; any choice writes the config and it never asks again.
+            try { MaybeShowLanguagePrompt(); } catch { }
         }
 
         public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
@@ -913,7 +950,7 @@ namespace CompetitiveRounds
             foreach (var r in _podiumLbRows)
             {
                 if (r == null || r.Length < 4 || r[0] == null) continue;
-                UIFactory.SetText(r[0],
+                UIFactory.SetTextRaw(r[0],
                     $"{(string)r[1]} {PodiumSparkleSpan((string)r[2], (string)r[3], _podiumTick)}");
             }
         }
@@ -947,7 +984,16 @@ namespace CompetitiveRounds
             }
         }
 
-        private static void FindMainMenuGroup(){var all=UnityEngine.Object.FindObjectsOfType<ListMenuButton>();Type tt=null;PropertyInfo tp=null;foreach(var a in AppDomain.CurrentDomain.GetAssemblies()){tt=a.GetType("TMPro.TMP_Text");if(tt!=null)break;}if(tt!=null)tp=tt.GetProperty("text",BindingFlags.Public|BindingFlags.Instance);foreach(var b in all){if(tp==null)break;try{var tc=b.GetComponentInChildren(tt,true);if(tc==null)continue;if((tp.GetValue(tc)as string??"").Trim().ToUpper()=="QUIT"){mainMenuGroup=b.transform.parent.gameObject;Plugin.Log.LogInfo($"[NATIVE] Found main menu group: {mainMenuGroup.name}");return;}}catch{}}Plugin.Log.LogWarning("[NATIVE] Could not find QUIT button");}
+        private static void FindMainMenuGroup(){
+            // QuitButton COMPONENT anchor first (locale-independent — the
+            // text=="QUIT" match fails on every non-English ROUNDS install
+            // because the game localizes the label; same fix as
+            // MainMenuInjector). Text match kept only as a fallback.
+            var all=UnityEngine.Object.FindObjectsOfType<ListMenuButton>();
+            foreach(var b in all){try{if(b!=null&&b.GetComponent<QuitButton>()!=null){mainMenuGroup=b.transform.parent.gameObject;Plugin.Log.LogInfo($"[NATIVE] Found main menu group (component anchor): {mainMenuGroup.name}");return;}}catch{}}
+            Type tt=null;PropertyInfo tp=null;foreach(var a in AppDomain.CurrentDomain.GetAssemblies()){tt=a.GetType("TMPro.TMP_Text");if(tt!=null)break;}if(tt!=null)tp=tt.GetProperty("text",BindingFlags.Public|BindingFlags.Instance);
+            foreach(var b in all){if(tp==null)break;try{var tc=b.GetComponentInChildren(tt,true);if(tc==null)continue;if((tp.GetValue(tc)as string??"").Trim().ToUpper()=="QUIT"){mainMenuGroup=b.transform.parent.gameObject;Plugin.Log.LogInfo($"[NATIVE] Found main menu group: {mainMenuGroup.name}");return;}}catch{}}
+            Plugin.Log.LogWarning("[NATIVE] Could not find QUIT button");}
         private static Transform FindCanvasAbove(Transform from){Transform c=from;while(c!=null){if(UIFactory.tCanvas!=null&&c.GetComponent(UIFactory.tCanvas)!=null){Plugin.Log.LogInfo($"[NATIVE] Found Canvas: {c.gameObject.name}");return c;}c=c.parent;}return from.parent??from;}
         private static void EnsureOverlayCanvas(){if(overlayCanvasGO!=null)return;overlayCanvasGO=new GameObject("CR_OverlayCanvas");overlayCanvasGO.hideFlags=HideFlags.HideAndDontSave;UnityEngine.Object.DontDestroyOnLoad(overlayCanvasGO);if(UIFactory.tCanvas!=null){var cv=overlayCanvasGO.AddComponent(UIFactory.tCanvas);var bf=BindingFlags.Public|BindingFlags.Instance;UIFactory.tCanvas.GetProperty("renderMode",bf)?.SetValue(cv,Enum.ToObject(UIFactory.tCanvas.GetProperty("renderMode",bf).PropertyType,0));UIFactory.tCanvas.GetProperty("sortingOrder",bf)?.SetValue(cv,30000);}if(UIFactory.tCanvasScaler!=null){var sc=overlayCanvasGO.AddComponent(UIFactory.tCanvasScaler);var bf=BindingFlags.Public|BindingFlags.Instance;var smp=UIFactory.tCanvasScaler.GetProperty("uiScaleMode",bf);if(smp!=null)smp.SetValue(sc,Enum.ToObject(smp.PropertyType,1));UIFactory.tCanvasScaler.GetProperty("referenceResolution",bf)?.SetValue(sc,new Vector2(1920,1080));}if(UIFactory.tGR!=null)overlayCanvasGO.AddComponent(UIFactory.tGR);Plugin.Log.LogInfo("[NATIVE] Created persistent overlay Canvas");}
 
@@ -1047,7 +1093,7 @@ namespace CompetitiveRounds
         private static void BuildRankedRow(Transform parent)
         {
             var row=new GameObject("RankedRow");row.transform.SetParent(parent,false);row.AddComponent<RectTransform>();UIFactory.AddHLG(row,spacing:10,padL:4,padR:4,forceExpandH:true);UIFactory.AddLE(row,prefH:26,minH:26,flexH:0);
-            var pn=UIFactory.CreateText("PName",row.transform,ApiClient.CachedPlayerStats?.display_name??MatchTracker.LocalDisplayName??"",20f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,28));UIFactory.SetBold(pn,true);txtTopLeftName=pn;
+            var pn=UIFactory.CreateText("PName",row.transform,"",20f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,28));/* find 15: user-authored name never passes the translating CreateText — raw write after build. */UIFactory.SetTextRaw(pn,ApiClient.CachedPlayerStats?.display_name??MatchTracker.LocalDisplayName??"");UIFactory.SetBold(pn,true);txtTopLeftName=pn;
             txtRankedStatus=UIFactory.CreateText("RS",row.transform,"RANKED: OFF",18f,Color.gray,UIFactory.AlignMidLeft,sizeDelta:new Vector2(140,28));UIFactory.SetBold(txtRankedStatus,true);
             qSearchBtn=UIFactory.CreateButton("Search",row.transform,"Search Ranked",15f,C_WHITE,C_BTN,()=>{var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.JoinQueue(id,MatchTracker.LocalDisplayName,null,false);},sizeDelta:new Vector2(130,26));
             qCancelBtn=UIFactory.CreateButton("Cancel",row.transform,"Cancel",15f,C_WHITE,C_BTN,()=>ApiClient.LeaveQueue(MatchTracker.LocalSteamId),sizeDelta:new Vector2(70,26));
@@ -1178,6 +1224,14 @@ namespace CompetitiveRounds
         // ── FFA tab (live — first playtest build, ranked from day one) ─────
         private static object txtFfaStatus, txtFfaLobbyHeader, txtFfaLobbyBody, txtFfaLbHeader, txtFfaRecentHeader, txtFfaRecentPage;
         private static GameObject ffaJoinBtn, ffaLeaveBtn, ffaStartBtn, ffaBetPanel, ffaBetContainer;
+        private static GameObject langToggleBtn; private static object langToggleTxt;   // L10n picker
+        // v1.36 host settings row (visible while sitting in an OPEN lobby;
+        // controls interactable for the host only, labels visible to all).
+        private static GameObject ffaSettingsRow;
+        private static object txtFfaCfgTarget, txtFfaCfgPicks, txtFfaCfgCap;
+        private static GameObject ffaCfgSameBtn, ffaCfgRankedBtn;
+        private static readonly List<GameObject> ffaCfgHostBtns = new List<GameObject>();
+        private static float ffaCfgTickAt;   // 1s dirty ticker while lock countdown live (#62)
         private static GameObject ffaBrowserContainer;
         private sealed class FfaBrowserRow
         {
@@ -1326,13 +1380,16 @@ namespace CompetitiveRounds
 
             var ffaHdrRow=new GameObject("FfaHdrRow");ffaHdrRow.transform.SetParent(panel.transform,false);ffaHdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(ffaHdrRow,spacing:10);UIFactory.AddLE(ffaHdrRow,prefH:38,flexH:0);
-            UIFactory.CreateText("FfaH",ffaHdrRow.transform,"<b>FREE-FOR-ALL (3-10 players) - RANKED</b>",26f,C_GOLD,UIFactory.AlignMidLeft,sizeDelta:new Vector2(700,36));
+            // No static "- RANKED" claim (find 12): v1.36 lobbies can be
+            // toggled Casual by the host, so the header stays neutral and the
+            // ranked/casual truth lives on the settings row + status line.
+            UIFactory.CreateText("FfaH",ffaHdrRow.transform,"<b>FREE-FOR-ALL (3-10 players)</b>",26f,C_GOLD,UIFactory.AlignMidLeft,sizeDelta:new Vector2(700,36));
             // Info button: one size (110x34/18f) and one position (right edge
             // via flex spacer) across the 2v2/1v2/FFA headers — it used to be
             // a different size at a different x on each tab (Sid, July 29).
             var ffaHdrSp=new GameObject("FfaHdrSp");ffaHdrSp.transform.SetParent(ffaHdrRow.transform,false);ffaHdrSp.AddComponent<RectTransform>();UIFactory.AddLE(ffaHdrSp,flexW:1);
             UIFactory.CreateButton("FfaInfo",ffaHdrRow.transform,"Info",18f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.FfaTitle,ModeInfoText.Ffa),sizeDelta:new Vector2(110,34));
-            UIFactory.CreateText("FfaNote",panel.transform,"<color=#FFCC44>New mode - first playtest build.</color> <color=#888>Games are ranked from day one.</color>",18f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
+            UIFactory.CreateText("FfaNote",panel.transform,"<color=#FFCC44>New mode - first playtest build.</color> <color=#888>Ranked by default - the lobby host can switch to Casual.</color>",18f,C_DIM,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,29));
 
             // Lobby controls row (July 29 redesign: host-controlled lobbies
             // replace the auto-gather queue — Sid's spec).
@@ -1341,6 +1398,43 @@ namespace CompetitiveRounds
             ffaJoinBtn=UIFactory.CreateButton("FfaCreate",ctl.transform,"Create Lobby",18f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.FfaCreateLobby();dirty=true;},sizeDelta:new Vector2(184,36));
             ffaStartBtn=UIFactory.CreateButton("FfaStart",ctl.transform,"Start Game",18f,C_WHITE,new Color(0.55f,0.42f,0.10f,0.95f),()=>{ApiClient.FfaStartLobby();dirty=true;},sizeDelta:new Vector2(158,36));
             ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",18f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(103,36));
+
+            /* v1.36 host settings row (ffa-configurable-lobbies §1). Compact
+             * -/value/+ clusters; each press sends ONLY that field and adopts
+             * the server's clamped echo (§7d), so an out-of-floor value snaps
+             * back visibly. Candidates knob deliberately absent (locked at 5
+             * this release, §9c). */
+            ffaSettingsRow=new GameObject("FfaCfg");ffaSettingsRow.transform.SetParent(panel.transform,false);ffaSettingsRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(ffaSettingsRow,spacing:5);UIFactory.AddLE(ffaSettingsRow,prefH:36,flexH:0);
+            ffaCfgHostBtns.Clear();
+            Action<string,string,Func<int>,int,int> mkStepper=(label,field,get,min,max)=>{
+                UIFactory.CreateText("L_"+field,ffaSettingsRow.transform,label,17f,C_LABEL,UIFactory.AlignMidRight,sizeDelta:new Vector2(label.Length*11+18,30));
+                var minus=UIFactory.CreateButton("M_"+field,ffaSettingsRow.transform,"-",18f,C_WHITE,C_BTN,()=>{int v=Mathf.Clamp(get()-1,min,max);ApiClient.FfaSetLobbySetting(field,v);dirty=true;},sizeDelta:new Vector2(30,30));
+                var valTxt=UIFactory.CreateText("V_"+field,ffaSettingsRow.transform,"?",19f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(30,30));
+                var plus=UIFactory.CreateButton("P_"+field,ffaSettingsRow.transform,"+",18f,C_WHITE,C_BTN,()=>{int v=Mathf.Clamp(get()+1,min,max);ApiClient.FfaSetLobbySetting(field,v);dirty=true;},sizeDelta:new Vector2(30,30));
+                ffaCfgHostBtns.Add(minus);ffaCfgHostBtns.Add(plus);
+                if(field=="score_target")txtFfaCfgTarget=valTxt;
+                else if(field=="initial_picks")txtFfaCfgPicks=valTxt;
+                else txtFfaCfgCap=valTxt;
+            };
+            mkStepper("First to:","score_target",()=>ApiClient.FfaLobbyCfgTarget,3,10);
+            mkStepper("Opening draws:","initial_picks",()=>ApiClient.FfaLobbyCfgPicks,1,4);
+            mkStepper("Max cards:","card_cap",()=>ApiClient.FfaLobbyCfgCap,3,6);
+            /* The two BOOLEAN settings render their value inside the button
+             * label, so unlike the steppers (separate label + value texts)
+             * hiding the button hides the VALUE too. They are therefore NOT
+             * in ffaCfgHostBtns (find 12): members keep seeing them, and the
+             * click handler host-gates with a toast (the server 403 is still
+             * the real gate, §7b). */
+            ffaCfgSameBtn=UIFactory.CreateButton("FfaCfgSame",ffaSettingsRow.transform,"Same Cards: OFF",16f,C_WHITE,C_BTN,
+                ()=>{if(!ApiClient.FfaLobbyIsHost){CompetitiveUI.ShowNotification("Only the host can change lobby settings.",C_DIM,3f);return;}
+                     ApiClient.FfaSetLobbySetting("same_card_rule",0,!ApiClient.FfaLobbyCfgSame,true);dirty=true;},sizeDelta:new Vector2(172,30));
+            ffaCfgRankedBtn=UIFactory.CreateButton("FfaCfgRk",ffaSettingsRow.transform,"Ranked",16f,C_WHITE,C_BTN,
+                ()=>{if(!ApiClient.FfaLobbyIsHost){CompetitiveUI.ShowNotification("Only the host can change lobby settings.",C_DIM,3f);return;}
+                     ApiClient.FfaSetLobbySetting("is_ranked",0,!ApiClient.FfaLobbyCfgRanked,true);dirty=true;},sizeDelta:new Vector2(110,30));
+            var ffaCfgSp=new GameObject("FfaCfgSp");ffaCfgSp.transform.SetParent(ffaSettingsRow.transform,false);ffaCfgSp.AddComponent<RectTransform>();UIFactory.AddLE(ffaCfgSp,flexW:1);
+            ffaSettingsRow.SetActive(false);
+
             txtFfaStatus=UIFactory.CreateText("FfaSt",panel.transform,"Browse open lobbies below, or create your own.",20f,C_LABEL,UIFactory.AlignMidLeft,sizeDelta:new Vector2(1035,31));
 
             // Lobby panel: browser (open lobbies + Join buttons) when idle,
@@ -2248,6 +2342,13 @@ namespace CompetitiveRounds
                 ffaLbRefreshAt=Time.unscaledTime+30f;
                 ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);
             }
+            // 1s dirty ticker while the settings-lock countdown is live, or
+            // the "Start in Ns" label freezes between polls (#62's class).
+            if(ApiClient.FfaLobbyLockRemaining>0f&&Time.unscaledTime>=ffaCfgTickAt)
+            {
+                ffaCfgTickAt=Time.unscaledTime+1f;
+                dirty=true;
+            }
         }
 
         private static void RefreshFfaTab()
@@ -2267,9 +2368,33 @@ namespace CompetitiveRounds
                 bool showStart=inLobby&&ApiClient.FfaLobbyIsHost&&!ffaLocked&&!inFfaRoom&&st!="leaving";
                 ffaStartBtn.SetActive(showStart);
                 if(showStart)
-                    UIFactory.SetText(UIFactory.GetButtonText(ffaStartBtn),ApiClient.FfaLobbyCanStart
+                {
+                    float lockS=ApiClient.FfaLobbyLockRemaining;
+                    UIFactory.SetText(UIFactory.GetButtonText(ffaStartBtn),
+                        lockS>0.5f?$"Start in {Mathf.CeilToInt(lockS)}s"
+                        :ApiClient.FfaLobbyCanStart
                         ?$"Start Game ({ApiClient.FfaLobbyMemberCount}/{ApiClient.FfaLobbyMaxPlayers})"
                         :$"Start (need {ApiClient.FfaLobbyMinPlayers}+)");
+                }
+            }
+            // v1.36 settings row: values for everyone, controls host-only.
+            // The server check is the real gate (§7b) — this is decoration.
+            if(ffaSettingsRow!=null)
+            {
+                bool showCfg=inLobby&&!ffaLocked&&!inFfaRoom&&st!="leaving";
+                ffaSettingsRow.SetActive(showCfg);
+                if(showCfg)
+                {
+                    UIFactory.SetText(txtFfaCfgTarget,ApiClient.FfaLobbyCfgTarget.ToString());
+                    UIFactory.SetText(txtFfaCfgPicks,ApiClient.FfaLobbyCfgPicks.ToString());
+                    UIFactory.SetText(txtFfaCfgCap,ApiClient.FfaLobbyCfgCap.ToString());
+                    UIFactory.SetText(UIFactory.GetButtonText(ffaCfgSameBtn),
+                        ApiClient.FfaLobbyCfgSame?"Same Cards: ON":"Same Cards: OFF");
+                    UIFactory.SetText(UIFactory.GetButtonText(ffaCfgRankedBtn),
+                        ApiClient.FfaLobbyCfgRanked?"Ranked":"Casual");
+                    bool host=ApiClient.FfaLobbyIsHost;
+                    foreach(var b in ffaCfgHostBtns)if(b!=null)b.SetActive(host);
+                }
             }
             if(ffaLeaveBtn!=null)ffaLeaveBtn.SetActive((polling||ffaLocked||inLobby)&&!inFfaRoom);
             if(txtFfaStatus!=null)
@@ -2335,7 +2460,7 @@ namespace CompetitiveRounds
                         ?$"{nameDisplay} {PodiumSparkleSpan(e.title,col,0)}"
                         :$"{nameDisplay} <color={col}>[{Trunc(e.title,12)}]</color>";
                 }
-                UIFactory.SetText(row.txtName,nameDisplay);
+                UIFactory.SetTextRaw(row.txtName,nameDisplay);
                 UIFactory.SetColor(row.txtName,me?C_GREEN:C_WHITE);
                 if(e.rd>0)UIFactory.SetText(row.txtRating,$"{e.rating} <size=72%><color=#9AA0A6>~{e.rd}</color></size>");
                 else UIFactory.SetText(row.txtRating,$"{e.rating}");
@@ -2416,7 +2541,7 @@ namespace CompetitiveRounds
                     playerUi.steamId=player.steam_id;
                     playerUi.displayName=player.display_name??"Player";
                     playerUi.gameNumber=lobby.game_number;
-                    UIFactory.SetText(playerUi.txtName,FfaSafeRich(Trunc(playerUi.displayName,28)));
+                    UIFactory.SetTextRaw(playerUi.txtName,FfaSafeRich(Trunc(playerUi.displayName,28)));
                     UIFactory.SetText(playerUi.txtRating,$"{player.rating}");
                     UIFactory.SetText(playerUi.txtOdds,"x"+player.odds_multiplier.ToString(
                         "0.00",System.Globalization.CultureInfo.InvariantCulture));
@@ -3611,6 +3736,19 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     realName = (nField?.GetValue(ci) as string) ?? cardName;
                     var rv = rField?.GetValue(ci); rarity = rv != null ? rv.ToString() : "Unknown";
                     description = (dField?.GetValue(ci) as string) ?? "";
+                    // L10n interim layer: the game's OWN localized card text
+                    // (StringTableCards, active locale) wins when present;
+                    // the raw English fields above and the CARD_DESC_FALLBACK
+                    // dict below stay as the fallback chain (the table lacks
+                    // entries for some cards — never delete the dicts).
+                    try
+                    {
+                        var locN = CardTextLocalizer.DisplayName(canonical ?? cardName);
+                        if (!string.IsNullOrEmpty(locN)) realName = locN;
+                        var locD = CardTextLocalizer.Description(canonical ?? cardName);
+                        if (!string.IsNullOrEmpty(locD)) description = locD;
+                    }
+                    catch { }
                     statsList = sField?.GetValue(ci) as Array;
 
                     // Hardcoded fallback dictionary — covers cards whose
@@ -3826,6 +3964,73 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // future long-form help text) as an on-demand overlay instead of a
         // permanent 600-unit text stack that overflows small windows. Modeled on
         // ShowCardPreview: dim click-anywhere-to-close backdrop + centered panel.
+        // ── L10n ask-once language prompt (D2: no silent auto-detect — the OS
+        // suggestion is pre-highlighted, the player confirms; asked exactly
+        // once, changeable later in Settings). Same modal discipline as the
+        // info popup (#141/#200: backdrop absorbs uGUI, LangPromptOpen is
+        // OR'd into ClickHandler.ModalBlockInput by CompetitiveUI's single
+        // writer). No dismiss without choosing: one of the three IS English.
+        private static GameObject langPromptGO;
+        public static bool LangPromptOpen => langPromptGO != null;
+        public static void MaybeShowLanguagePrompt()
+        {
+            try
+            {
+                if (Plugin.ModLanguage == null || Plugin.ModLanguage.Value != I18n.LOCALE_UNSET) return;
+                if (langPromptGO != null) return;
+                EnsureOverlayCanvas();
+                string suggest = I18n.SuggestFromOs();
+                langPromptGO = new GameObject("CR_LangPrompt");
+                langPromptGO.hideFlags = HideFlags.HideAndDontSave;
+                langPromptGO.transform.SetParent(overlayCanvasGO.transform, false);
+                var rt = langPromptGO.AddComponent<RectTransform>();
+                rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
+                rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+                var bd = UIFactory.CreatePanel("BD", langPromptGO.transform, new Color(0f, 0f, 0f, 0.55f));
+                var bdRT = bd.GetComponent<RectTransform>();
+                bdRT.anchorMin = Vector2.zero; bdRT.anchorMax = Vector2.one;
+                bdRT.offsetMin = Vector2.zero; bdRT.offsetMax = Vector2.zero;
+                var bdImg = bd.GetComponent(UIFactory.tImage);
+                if (bdImg != null) UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(bdImg, true);
+                var box = UIFactory.CreatePanel("Box", langPromptGO.transform, new Color(0.10f, 0.12f, 0.16f, 0.97f));
+                var boxRT = box.GetComponent<RectTransform>();
+                boxRT.anchorMin = new Vector2(0.5f, 0.5f); boxRT.anchorMax = new Vector2(0.5f, 0.5f);
+                boxRT.pivot = new Vector2(0.5f, 0.5f);
+                boxRT.sizeDelta = new Vector2(560, 250);
+                UIFactory.AddVLG(box, spacing: 12, padL: 26, padR: 26, padT: 20, padB: 20);
+                // Trilingual title — a player who can't read English must
+                // still recognise theirs. Bypasses the catalogue by design.
+                UIFactory.CreateText("LPTitle", box.transform,
+                    "Language  /  Idioma  /  Язык", 26f, C_GOLD, UIFactory.AlignMidCenter,
+                    sizeDelta: new Vector2(500, 36));
+                Action<string, string> mk = (code, label) =>
+                {
+                    bool suggested = code == suggest;
+                    var b = UIFactory.CreateButton("LP_" + code, box.transform,
+                        suggested ? label + "  <color=#88FF88><</color>" : label,
+                        20f, C_WHITE,
+                        suggested ? new Color(0.22f, 0.40f, 0.22f, 0.95f) : C_BTN,
+                        () =>
+                        {
+                            Plugin.ModLanguage.Value = code;
+                            I18n.SetLocale(code);
+                            try { UnityEngine.Object.Destroy(langPromptGO); } catch { }
+                            langPromptGO = null;
+                            // Hot-switch through the public page path (§2.3).
+                            Close();
+                            if (pageGO != null) UnityEngine.Object.Destroy(pageGO);
+                            pageBuilt = false;
+                            Open();
+                        }, sizeDelta: new Vector2(500, 40));
+                    UIFactory.AddLE(b, prefH: 40, minH: 40, flexH: 0);
+                };
+                mk("en", "English");
+                mk("es", "Español");
+                mk("ru", "Русский");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[I18N] lang prompt: " + ex.Message); }
+        }
+
         // While open, InfoPopupOpen feeds CompetitiveUI's ModalBlockInput OR so
         // raw-input ClickHandlers behind the backdrop can't fire (learning #141);
         // the backdrop's own handler carries bypassModalBlock so closing works.
@@ -4930,10 +5135,17 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // the panel (pending bets always show — they're live money).
                 if (!b.settled || settledShown >= 3 || !BetWithinDays(b, 3)) continue;
                 settledShown++;
-                if (b.payout == b.amount)
+                // Prefer the server's EXPLICIT state (#244; Codex round-4
+                // find 5): payout==amount inference mislabels a floored 1g
+                // FFA win as a refund. The equality fallback survives only
+                // for an old server that doesn't send `state` yet.
+                string st = b.state;
+                if (string.IsNullOrEmpty(st))
+                    st = b.payout == b.amount ? "refunded" : b.payout > 0 ? "won" : "lost";
+                if (st == "refunded")
                     sb.Append($"<color=#BBB>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name} - refunded, series never finished</color>\n");
-                else if (b.payout > 0)
-                    sb.Append($"<color=#66DD66>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name} - WON {b.payout - b.amount:N0} gold</color>\n");
+                else if (st == "won")
+                    sb.Append($"<color=#66DD66>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name} - WON {Math.Max(0, b.payout - b.amount):N0} gold</color>\n");
                 else
                     sb.Append($"<color=#DD7777>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name} - LOST</color>\n");
             }
@@ -6146,7 +6358,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (!used) continue;
                 shopArtistBtnNames[i] = names[i];
                 bool active = string.IsNullOrEmpty(names[i]) ? shopArtistFilter == null : shopArtistFilter == names[i];
-                UIFactory.SetText(shopArtistBtnTexts[i], string.IsNullOrEmpty(names[i]) ? "All" : names[i]);
+                if (string.IsNullOrEmpty(names[i])) UIFactory.SetText(shopArtistBtnTexts[i], "All"); else UIFactory.SetTextRaw(shopArtistBtnTexts[i], names[i]);  /* find 15: artist names are user-authored */
                 UIFactory.SetImageColor(shopArtistBtns[i], active ? C_TABACT : C_BTN);
                 UIFactory.SetColor(shopArtistBtnTexts[i], active ? C_WHITE : C_LABEL);
             }
@@ -6317,7 +6529,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
                 if (it.kind == "face")
                     desc += "  <color=#888>(equip in the character editor)</color>";
-                UIFactory.SetText(r.txtDesc, desc);
+                // Raw (find 15): community-item descriptions are ARTIST-
+                // authored (and stay source-language per design Q4) — an
+                // unsuffixed one is a whole-payload user string that must
+                // not hit the translation catalogue.
+                UIFactory.SetTextRaw(r.txtDesc, desc);
                 // Recycled row - if it was previously showing a glow / typeface preview,
                 // restore the originals in the same order as apply (font first, glow second).
                 NametagFontRenderer.ApplyFontToLabel(r.txtDesc, "", shopPreviewOriginalFonts);
@@ -6714,6 +6930,31 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 "Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. "
                 + "Off = a perfectly steady camera. Local only.");
             screenShakeToggleTxt = UIFactory.GetButtonText(screenShakeToggleBtn);
+            langToggleBtn = SettingsToggle(dispBox.transform, "SLang", new Vector2(260, 28),
+                () =>
+                {
+                    // Cycle en -> es -> ru -> en. Hot-switch goes through the
+                    // PUBLIC page path (localization-design §2.3: Close ->
+                    // destroy page -> pageBuilt=false -> Open; never just flip
+                    // pageBuilt — Tick's early-return would strand Escape).
+                    string cur = Plugin.ModLanguage.Value;
+                    string next = cur == "en" || cur == I18n.LOCALE_UNSET ? "es" : cur == "es" ? "ru" : "en";
+                    Plugin.ModLanguage.Value = next;
+                    I18n.SetLocale(next);
+                    Plugin.Log.LogInfo($"[SETTINGS] Language -> {next}");
+                    Close();
+                    if (pageGO != null) UnityEngine.Object.Destroy(pageGO);
+                    pageBuilt = false;
+                    Open();
+                },
+                "Mod display language. Machine-translated drafts until community moderators review them - card text in matches follows ROUNDS' own language setting.", 34f);
+            langToggleTxt = UIFactory.GetButtonText(langToggleBtn);
+            // Translator portal handoff (§2.5): browser-based because the IME
+            // gap means some translators cannot type their script in-game.
+            var portalBtn = SettingsToggle(dispBox.transform, "SPortal", new Vector2(260, 28),
+                () => ApiClient.OpenTranslatePortal(),
+                "Help translate the mod: opens the web portal in your browser. Needs a translate grant from an admin to submit.", 34f);
+            UIFactory.SetText(UIFactory.GetButtonText(portalBtn), "Translate SCR (web portal)");
             chromAbToggleBtn = SettingsToggle(dispBox.transform, "SChromAb", new Vector2(260, 28),
                 () =>
                 {
@@ -7059,6 +7300,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.ChromaticAberrationEnabled.Value
                         ? "Chromatic aberration: <color=#88FF88>ON</color>"
                         : "Chromatic aberration: <color=#FF9966>OFF</color>");
+            if (langToggleTxt != null && Plugin.ModLanguage != null)
+            {
+                // Language names stay in their OWN language (never translated
+                // away — a player stuck in the wrong locale must still find
+                // theirs). The label itself bypasses the catalogue.
+                string lv = Plugin.ModLanguage.Value;
+                string lname = lv == "es" ? "Español" : lv == "ru" ? "Русский" : "English";
+                UIFactory.SetText(langToggleTxt, $"Language: <color=#88CCFF>{lname}</color>");
+            }
 
             // ── Perf section labels (v1.26.8) ──
             if (_perfSectionHeaderTxt != null)
@@ -7257,7 +7507,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         at panel build time from CachedPlayerStats which could be empty/wrong (e.g., display_name
         defaulted to steam_id during the get_or_create_player initial creation). User reported
         "all of my names are showing up as the steam id instead of the name in the top left". */
-        if(txtTopLeftName!=null){string nm=!string.IsNullOrEmpty(s.display_name)&&s.display_name!=s.steam_id?s.display_name:(MatchTracker.LocalDisplayName??s.display_name??"");UIFactory.SetText(txtTopLeftName,nm);}
+        if(txtTopLeftName!=null){string nm=!string.IsNullOrEmpty(s.display_name)&&s.display_name!=s.steam_id?s.display_name:(MatchTracker.LocalDisplayName??s.display_name??"");UIFactory.SetTextRaw(txtTopLeftName,nm);}
         UIFactory.SetText(txtRating,$"{s.rating:F0}");UIFactory.SetText(txtRD,$"RD: {s.rating_deviation:F0}    Peak: {s.peak_rating:F0}");UIFactory.SetText(txtLevel,$"Level {s.level}");if(s.level<100&&s.xp_for_next_level>0){UIFactory.SetText(txtXPProg,$"{s.xp_into_level}/{s.xp_for_next_level} XP");UIFactory.SetFill(xpFill,(float)s.xp_into_level/s.xp_for_next_level);}else{UIFactory.SetText(txtXPProg,"MAX");UIFactory.SetFill(xpFill,1f);}UIFactory.SetText(txtTotalXP,$"{s.total_xp:N0} XP");var history=ApiClient.CachedMatchHistory;var sR=history?.FindAll(m=>m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();var sC=history?.FindAll(m=>!m.is_ranked)??new List<ApiClient.MatchHistoryEntry>();
 /* Casual W/L + sweeps come from the SERVER stats, not a local history scan:
  * since the v1.32.1 lazy history load the cache only holds the head ~400
@@ -7673,7 +7923,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             }
         }
 
-        private static void RefreshLeaderboard(){_podiumLbRows.Clear();string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}/* July 22 item 8: search filter (whole board is client-side; ~500 cap). Reset to page 0 when the query changes. */if(lbSearchField!=null)UIFactory.SetText(lbSearchField,"");string lbQ=(lbSearch??"").Trim();if(lbQ!=lbSearchLast){lbSearchLast=lbQ;lbPage=0;}if(lbQ.Length>0)entries.RemoveAll(e=>e.display_name==null||e.display_name.IndexOf(lbQ,StringComparison.OrdinalIgnoreCase)<0);int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,20);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){_podiumLbRows.Add(new object[]{row.txtName,_lbName,e.title,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(e.title,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}UIFactory.SetText(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;/* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetText(txtLBCount,lbQ.Length>0?$"{entries.Count} of {board.total_players} players":$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?$"Rank: <b><color={(string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color)}>{ps.rank_name}</color></b>   ":"";string detail=$"\n{_rkLine}Rating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked (series): {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
+        private static void RefreshLeaderboard(){_podiumLbRows.Clear();string[]hL={"#","Lv","Player","Rating","W","L","W/L","Gold"};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetText(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}/* July 22 item 8: search filter (whole board is client-side; ~500 cap). Reset to page 0 when the query changes. */if(lbSearchField!=null)UIFactory.SetText(lbSearchField,"");string lbQ=(lbSearch??"").Trim();if(lbQ!=lbSearchLast){lbSearchLast=lbQ;lbPage=0;}if(lbQ.Length>0)entries.RemoveAll(e=>e.display_name==null||e.display_name.IndexOf(lbQ,StringComparison.OrdinalIgnoreCase)<0);int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,20);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){_podiumLbRows.Add(new object[]{row.txtName,_lbName,e.title,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(e.title,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}/* SetTextRaw (find 15): a bare display name must never hit the translation catalogue — a player literally named "Done." would render as "Hecho.". */UIFactory.SetTextRaw(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;/* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetText(txtLBCount,lbQ.Length>0?$"{entries.Count} of {board.total_players} players":$"{board.total_players} players ranked");lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetText(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>Level {ps.level}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?$"Rank: <b><color={(string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color)}>{ps.rank_name}</color></b>   ":"";string detail=$"\n{_rkLine}Rating: {ps.rating:F0}   RD: {ps.rating_deviation:F0}   Peak: {ps.peak_rating:F0}\n{ps.total_matches} matches ({ps.wins}W / {ps.losses}L)  WR: {(ps.total_matches>0?ps.wins*100f/ps.total_matches:0):F0}%\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=$"<color=#FFD94D>Ranked (series): {ps.ranked_series_wins}W / {ps.ranked_series_losses}L</color>\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=$"<color={dcCol}>Leave: {dc}/{totalRanked} ({pct:F0}%)</color>\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?$"<color=#FF9988>Hit:</color> {(float)ps.bullets_hit*100f/ps.bullets_fired:F1}% <color=#888>({ps.bullets_hit}/{ps.bullets_fired})</color>":"<color=#FF9988>Hit:</color> -";string blkLine=ps.blocks_activated>0?$"<color=#99CCFF>Block:</color> {(float)ps.blocks_successful*100f/ps.blocks_activated:F1}% <color=#888>({ps.blocks_successful}/{ps.blocks_activated})</color>":"<color=#99CCFF>Block:</color> -";detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
  * earlier client-side iteration over CachedMatchHistory which was
  * limited to the viewer's most-recent 500 matches and silently dropped
  * H2H rows for older opponents. */if(selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=ps.h2h_ranked_wins,h2hL=ps.h2h_ranked_losses,h2hCW=ps.h2h_casual_wins,h2hCL=ps.h2h_casual_losses,h2hSW=ps.h2h_series_wins,h2hSL=ps.h2h_series_losses;int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+=$"\n<b>vs You:</b> <color={h2hColor}>{h2hAll}W - {h2hAllL}L ({h2hAll+h2hAllL} games)</color>\n";if(h2hSW+h2hSL>0)detail+=$"  Ranked Series: {h2hSW}W / {h2hSL}L\n";if(h2hCW+h2hCL>0)detail+=$"  Casual: {h2hCW}W / {h2hCL}L\n";}}/* Mod version this player was last seen running (X-Mod-Version
@@ -9769,10 +10019,12 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     else
                     {
                         // Missing-art fallback — solid colored placeholder
-                        // with the card name written across it.
+                        // with the card name written across it (localized
+                        // when the game has a translation — L10n interim).
                         pImgColor?.SetValue(imgComp, new Color(0.20f, 0.22f, 0.26f, 1f));
+                        string missNm = CardTextLocalizer.DisplayName(c.card_name) ?? c.card_name ?? "?";
                         UIFactory.CreateText("Miss", imgGO.transform,
-                            $"<b>{Trunc(c.card_name ?? "?", 14)}</b>",
+                            $"<b>{Trunc(missNm, 14)}</b>",
                             22f, C_WHITE, UIFactory.AlignMidCenter, sizeDelta: new Vector2(IMG_W - 8, 60));
                     }
                     UIFactory.AddLE(imgGO, prefW: IMG_W, minW: IMG_W, prefH: IMG_H, minH: IMG_H, flexW: 0, flexH: 0);
@@ -9910,12 +10162,24 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         // -- Chat --------------------------------------------------
         /// <summary>Called from the background ChatClient thread. Appends a formatted
         /// line to the log with thread-safety.</summary>
-        // Highest server chat id we've rendered. Server messages carry their DB
-        // row id (v1.28.3); the scrollback refetch that ChatClient fires on
-        // EVERY reconnect used to re-append all 50 recent entries to the log —
-        // each WS blip re-printed old chat (one of #30's "duplicated" reports).
-        // Local echoes carry no id and always render.
-        private static int _lastChatIdSeen = 0;
+        // Render dedup for server chat ids (v1.28.3 stopped reconnect-replay
+        // re-prints — one of #30's "duplicated" reports). §2.6 changed the
+        // SHAPE from a monotonic high-water mark to a bounded seen-id SET:
+        // after a locale switch subscribes a new channel, its scrollback
+        // refetch contains ids OLDER than the mark, and a high-water compare
+        // would silently swallow the entire channel's history (the exact
+        // hazard called out in localization-design §2.6). Local echoes carry
+        // no id and always render.
+        private static readonly HashSet<int> _seenChatIds = new HashSet<int>();
+        private static readonly Queue<int> _seenChatOrder = new Queue<int>();
+        private const int SEEN_CHAT_CAP = 600;
+        // Wave-2 find 15: local echoes carry no id, so a locale-change
+        // scrollback refetch re-delivers the sender's own recent lines with
+        // their server ids and they render as duplicates. Remember recent
+        // echoes by (name|message); a server row matching one is consumed
+        // silently, exactly once.
+        private static readonly List<KeyValuePair<string, DateTime>> _recentEchoes =
+            new List<KeyValuePair<string, DateTime>>();
 
         public static void OnChatMessage(string json)
         {
@@ -9927,12 +10191,46 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 int rating = ExtractChatIntField(json, "rating");
                 string title = ExtractChatField(json, "title");
                 string titleColor = ExtractChatField(json, "title_color");
+                string channel = ExtractChatField(json, "channel");
                 if (string.IsNullOrEmpty(message)) return;
                 int chatId = ExtractChatIntField(json, "id");
+                // Echo key includes STEAM identity + channel (round-3 find
+                // N11: two players can share a display name — name|message
+                // alone let another Alex's real "gg" consume our marker and
+                // vanish).
+                string echoKey = ExtractChatField(json, "steam_id") + "|"
+                    + (string.IsNullOrEmpty(channel) ? "global" : channel)   // pre-179 rows carry no channel
+                    + "|" + name + "|" + message;
                 if (chatId > 0)
                 {
-                    if (chatId <= _lastChatIdSeen) return;  // already rendered (reconnect replay)
-                    _lastChatIdSeen = chatId;
+                    // OnChatMessage runs from both the WS background thread and
+                    // the scrollback coroutine — guard the set like chatLines.
+                    lock (chatLinesLock)
+                    {
+                        if (!_seenChatIds.Add(chatId)) return;  // already rendered
+                        _seenChatOrder.Enqueue(chatId);
+                        while (_seenChatOrder.Count > SEEN_CHAT_CAP)
+                            _seenChatIds.Remove(_seenChatOrder.Dequeue());
+                        // Consume a matching recent local echo (find 15): this
+                        // server row IS that echo, already rendered.
+                        for (int e = _recentEchoes.Count - 1; e >= 0; e--)
+                        {
+                            if ((DateTime.UtcNow - _recentEchoes[e].Value).TotalMinutes > 3)
+                            { _recentEchoes.RemoveAt(e); continue; }
+                            if (_recentEchoes[e].Key == echoKey)
+                            { _recentEchoes.RemoveAt(e); return; }
+                        }
+                    }
+                }
+                else if (source == "ingame")
+                {
+                    // An id-less ingame line is our own local echo — remember
+                    // it so its persisted twin (scrollback refetch) dedupes.
+                    lock (chatLinesLock)
+                    {
+                        _recentEchoes.Add(new KeyValuePair<string, DateTime>(echoKey, DateTime.UtcNow));
+                        while (_recentEchoes.Count > 20) _recentEchoes.RemoveAt(0);
+                    }
                 }
                 // Local mute filter. Hides messages from any name in MutedChatNames.
                 // Case-insensitive comparison so /mute Sid matches "sid" too.
@@ -9946,6 +10244,11 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 if (message.Length > CHAT_LINE_MAX_CHARS)
                     message = message.Substring(0, CHAT_LINE_MAX_CHARS - 3) + "...";
                 string prefix = source == "discord" ? "<color=#A0B4FF>[D]</color>" : "<color=#B0FFB0>[game]</color>";
+                // §2.6: language-channel messages get a [RU]/[ES] tag beside
+                // the source tag. Scrollback ordering merges both streams
+                // into the one flat list — no tabs, no per-channel panels.
+                if (!string.IsNullOrEmpty(channel) && channel != "global")
+                    prefix += $"<color=#FFB56B>[{channel.ToUpperInvariant()}]</color>";
                 string ratingTag = rating > 0 ? $" <color=#CCCCCC>({rating})</color>" : "";
                 string titleTag = "";
                 if (!string.IsNullOrEmpty(title))
@@ -10028,6 +10331,70 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[MUTE] {ex.Message}"); }
+        }
+
+        /// <summary>"/report &lt;name&gt; [reason]" — §2.6's v1 moderation
+        /// groundwork: no moderation UI exists yet (D16), but a report files a
+        /// bug_report-shaped row with the reporter's local chat log lines
+        /// mentioning that name, so the v1 window produces EVIDENCE instead of
+        /// nothing. Local-log evidence only (what this player actually saw).</summary>
+        internal static void HandleReportCommand(string text)
+        {
+            try
+            {
+                string rest = text.Substring("/report ".Length).Trim();
+                if (rest.Length == 0) { AppendSystemChatLine("Usage: /report <name> [reason]  (quote multi-word names: /report \"Bad Actor\" reason)"); return; }
+                // Quoted names carry spaces (wave-2 find 14): /report "Bad
+                // Actor" reason. Unquoted keeps first-token semantics.
+                string name, reason;
+                if (rest[0] == '"')
+                {
+                    int endQ = rest.IndexOf('"', 1);
+                    if (endQ < 0) { AppendSystemChatLine("Unclosed quote - usage: /report \"Multi Word Name\" [reason]"); return; }
+                    name = rest.Substring(1, endQ - 1).Trim();
+                    reason = rest.Substring(endQ + 1).Trim();
+                    if (name.Length == 0) { AppendSystemChatLine("Usage: /report <name> [reason]"); return; }
+                }
+                else
+                {
+                    int sp = rest.IndexOf(' ');
+                    name = sp < 0 ? rest : rest.Substring(0, sp);
+                    reason = sp < 0 ? "" : rest.Substring(sp + 1).Trim();
+                }
+                var lines = new List<string>();
+                lock (chatLinesLock)
+                {
+                    for (int i = Math.Max(0, chatLines.Count - 80); i < chatLines.Count; i++)
+                        if (chatLines[i].Line.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0)
+                            lines.Add(chatLines[i].Line);
+                }
+                string evidence = string.Join("\n", lines.ToArray());
+                if (evidence.Length > 4000) evidence = evidence.Substring(evidence.Length - 4000);
+                AppendSystemChatLine($"Filing chat report against '{name}'...");
+                ApiClient.SubmitBugReport(GameStateWatcher.LocalSteamId,
+                    GameStateWatcher.LocalDisplayName ?? "",
+                    $"CHAT REPORT against '{name}'" + (reason.Length > 0 ? $": {reason}" : ""),
+                    null, "low", "chat_report",
+                    evidence.Length > 0 ? evidence : null,
+                    (ok, _) => AppendSystemChatLine(ok
+                        ? $"Report filed against '{name}'. An admin will review it."
+                        : "Report failed to send - try again in a moment."));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[CHAT-REPORT] {ex.Message}"); }
+        }
+
+        /// <summary>Quick-chat phrase line (localization-design §2.6). The
+        /// phrase arrives already rendered in THIS client's locale; the name
+        /// is Photon NickName, already bracket-neutralised by the caller.</summary>
+        internal static void AddQuickChatLine(string name, string phrase)
+        {
+            string line = $"<color=#8FC9FF>[Q]</color> <b>{Escape(name)}</b>: {Escape(phrase)}";
+            lock (chatLinesLock)
+            {
+                chatLines.Add(new ChatEntry { Line = line, AddedUtc = DateTime.UtcNow });
+                while (chatLines.Count > CHAT_LOG_MAX) chatLines.RemoveAt(0);
+            }
+            MarkDirty();
         }
 
         // Adds a local-only system line to the chat log (gold-tinted, no broadcast).
@@ -10129,10 +10496,19 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 if (c == '\\' && p + 1 < json.Length)
                 {
                     char n = json[p + 1];
-                    if (n == 'n') sb.Append('\n');
-                    else if (n == 't') sb.Append('\t');
-                    else sb.Append(n);
-                    p += 2;
+                    if (n == 'n') { sb.Append('\n'); p += 2; }
+                    else if (n == 't') { sb.Append('\t'); p += 2; }
+                    else if (n == 'r') { sb.Append('\r'); p += 2; }
+                    // \uXXXX decode (wave-2 find 7): the server may escape
+                    // non-ASCII (older builds, or any dumps without
+                    // ensure_ascii=False) — without this, Привет rendered as
+                    // literal u041fu0440... on every remote client.
+                    else if (n == 'u' && p + 5 < json.Length
+                             && ushort.TryParse(json.Substring(p + 2, 4),
+                                 System.Globalization.NumberStyles.HexNumber,
+                                 System.Globalization.CultureInfo.InvariantCulture, out var u))
+                    { sb.Append((char)u); p += 6; }
+                    else { sb.Append(n); p += 2; }
                 }
                 else if (c == '"') break;
                 else { sb.Append(c); p++; }
@@ -10494,10 +10870,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             var players = UIFactory.CreateText($"AQP{idx}", info.transform, "", 12f, C_WHITE, UIFactory.AlignTopLeft, sizeDelta: new Vector2(680, 54));
             var reason = UIFactory.CreateText($"AQR{idx}", info.transform, "", 12f, new Color(1f, 0.75f, 0.55f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(680, 20));
             var blocked = UIFactory.CreateText($"AQX{idx}", info.transform, "", 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(680, 20));
-            UIFactory.SetWordWrap(top, false); UIFactory.SetOverflowMode(top, 1);
-            UIFactory.SetWordWrap(players, true); UIFactory.SetOverflowMode(players, 1);
-            UIFactory.SetWordWrap(reason, false); UIFactory.SetOverflowMode(reason, 1);
-            UIFactory.SetWordWrap(blocked, false); UIFactory.SetOverflowMode(blocked, 1);
+            // Truncate (3), not Ellipsis (1): TMP's ellipsis inserts U+2026,
+            // which the static Gravity atlas lacks — renders as a box (#47).
+            UIFactory.SetWordWrap(top, false); UIFactory.SetOverflowMode(top, 3);
+            UIFactory.SetWordWrap(players, true); UIFactory.SetOverflowMode(players, 3);
+            UIFactory.SetWordWrap(reason, false); UIFactory.SetOverflowMode(reason, 3);
+            UIFactory.SetWordWrap(blocked, false); UIFactory.SetOverflowMode(blocked, 3);
 
             var actions = new GameObject("AQActions"); actions.transform.SetParent(row.transform, false); actions.AddComponent<RectTransform>();
             UIFactory.AddVLG(actions, spacing: 4);
@@ -10683,7 +11061,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     UIFactory.tLE.GetProperty("flexibleWidth", BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, 1f);
                     UIFactory.tLE.GetProperty("minWidth", BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, 240f);
                 }
-                UIFactory.SetOverflowMode(txt, 1);   // TMP TextOverflowModes.Ellipsis
+                // Truncate (3), not Ellipsis (1) — ellipsis inserts U+2026,
+                // absent from the static Gravity atlas -> box glyph (#47).
+                UIFactory.SetOverflowMode(txt, 3);
             }
             // Decisions live in the evidence viewer so admins see the telemetry
             // before choosing Cheat or False positive.
@@ -11234,7 +11614,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             tMyMatchPanel = UIFactory.CreatePanel("TMM", left.transform, C_PANEL);
             UIFactory.AddVLG(tMyMatchPanel, spacing: 3, padL: 10, padR: 10, padT: 6, padB: 6);
             UIFactory.AddLE(tMyMatchPanel, flexH: 0);
-            txtTMyMatch = UIFactory.CreateText("TMMTxt", tMyMatchPanel.transform, "", 17f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(400, 26));
+            // Two-line height (find 10): the break-coordination variant
+            // ("... both press Play Now to skip the break") wraps past one
+            // 26-unit line, and the global Truncate default was cutting the
+            // instruction. 54 fits two full 17pt lines; a rare 3-line
+            // translation truncates cleanly instead of overpainting.
+            txtTMyMatch = UIFactory.CreateText("TMMTxt", tMyMatchPanel.transform, "", 17f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(400, 54));
             UIFactory.SetBold(txtTMyMatch, true); UIFactory.SetWordWrap(txtTMyMatch, true);
             // Room code is shown so players can manually rejoin via ROUNDS' private-lobby
             // flow if the auto-connect hits a region mismatch or transient Photon glitch.
@@ -11786,7 +12171,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             Color nameColor = isWinner ? new Color(0.95f, 1f, 0.7f) : isLoser ? new Color(0.55f, 0.55f, 0.55f) : new Color(0.92f, 0.95f, 1f);
 
             string nameText = isWinner ? $"<b>{playerName}</b>" : playerName;
-            UIFactory.CreateText("N", row.transform, nameText, 13f, nameColor, UIFactory.AlignMidLeft, sizeDelta: new Vector2(cellW - 36, h));
+            // Build empty + raw-write (round-3 find N13): the non-winner
+            // branch is a BARE user-authored name, and CreateText's
+            // translation chokepoint would rename a player literally called
+            // "Done." to "Hecho.".
+            var nTmp = UIFactory.CreateText("N", row.transform, "", 13f, nameColor, UIFactory.AlignMidLeft, sizeDelta: new Vector2(cellW - 36, h));
+            UIFactory.SetTextRaw(nTmp, nameText);
             // Position name with left padding.
             var nGo = row.transform.Find("N");
             if (nGo != null)
@@ -12240,7 +12630,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     else if (s.ready) status = "<color=#60FF60>ready</color>";
                     else status = $"<color=#888>{s.penalty_at_signup * 100f:0}% pen</color>";
                     UIFactory.SetText(texts[0], seed);
-                    UIFactory.SetText(texts[1], name);
+                    // Raw (find 15): a bare user-authored name must never
+                    // pass the translation catalogue.
+                    UIFactory.SetTextRaw(texts[1], name);
                     UIFactory.SetText(texts[2], status);
                     row.SetActive(true);
                     signupIdx++;
@@ -13376,7 +13768,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         ? $"{nameDisplay} {PodiumSparkleSpan(e.title, col, 0)}"
                         : $"{nameDisplay} <color={col}>[{Trunc(e.title, 12)}]</color>";
                 }
-                UIFactory.SetText(row.txtName, nameDisplay);
+                UIFactory.SetTextRaw(row.txtName, nameDisplay);
                 UIFactory.SetColor(row.txtName, me ? C_GREEN : C_WHITE);
                 // Show 2v2 elo WITH rating deviation (±RD) so confidence is visible.
                 // Lower RD = more settled rating. Dim/smaller so it doesn't crowd
@@ -13837,6 +14229,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         var sz = rt.sizeDelta;
                         rt.sizeDelta = new Vector2(sz.x, contentH);
                         UIFactory.SetPrefH(c.gameObject, contentH);
+                        // minH must follow (find 9): CreateText baked
+                        // minH=200 from the build-time sizeDelta and a min
+                        // beats a smaller pref in Unity layout.
+                        UIFactory.SetMinH(c.gameObject, contentH);
                     }
                     resizeText(row.txtCardsLeft);
                     resizeText(row.txtCardsRight);

@@ -144,6 +144,20 @@ def _dts(dt: Optional[datetime]) -> str:
 
 # ── Helpers ───────────────────────────────────────────────────────
 
+async def _player_id_banned(db: AsyncSession, player_id) -> bool:
+    """Active-ban check by player UUID (round-18 find 2): tournaments create
+    RankedSeries rows and sct-* rooms, so they are formation surfaces under
+    the no-new-pairing-after-ban invariant. Inline query — importing main's
+    helper would be circular."""
+    if player_id is None:
+        return False
+    row = (await db.execute(text(
+        "SELECT 1 FROM player_bans pb JOIN players p ON p.steam_id = pb.steam_id"
+        " WHERE p.id = :pid AND pb.unbanned_at IS NULL LIMIT 1"
+    ), {"pid": player_id})).scalar()
+    return row is not None
+
+
 async def _get_player_by_steam(db: AsyncSession, steam_id: str) -> Player:
     result = await db.execute(select(Player).where(Player.steam_id == steam_id))
     player = result.scalar_one_or_none()
@@ -568,6 +582,25 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         TournamentSignup.is_speculative == False,  # noqa: E712
     ))
     signups = (await db.execute(q)).scalars().all()
+    # Round-18 find 2: a ban committed after signup must not reach the
+    # bracket — filter here, where the roster is decided. (Bans DURING the
+    # locked/running phase are handled at match activation instead.)
+    # Round-20 SCOPE NOTE: this is deliberately a point read, NOT
+    # serialization with admin_ban. A ban committing inside this exact
+    # transaction's window can still bracket its target once; cleanup is
+    # the activation-time banned->forfeited check for pending matches plus
+    # the no-show sweep's ban override for ready matches (round-21 find 1).
+    # Rounds 19-20 tried to close the window with advisory identity locks
+    # and each attempt created a new reachable deadlock class in the
+    # tick/voting planes (review r20 findings 5-8) — the milliseconds-wide
+    # residual on this low-stakes surface is the better trade (#242).
+    _unbanned = []
+    for _s in signups:
+        if await _player_id_banned(db, _s.player_id):
+            print(f"[TOURNAMENT] lock: excluding banned signup {_s.id}")
+        else:
+            _unbanned.append(_s)
+    signups = _unbanned
 
     pushback_reason = None
     if len(signups) < t.min_players:
@@ -595,6 +628,11 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
                                       AND ts.player_id = v.player_id
             WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
+              -- round-19 find 1: a banned entrant's vote must not push a
+              -- slot over the threshold the ELIGIBLE roster cannot reach
+              AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                               JOIN players p ON p.steam_id = pb.steam_id
+                              WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
             GROUP BY v.slot_ts ORDER BY votes DESC
         """), {"tid": t.id, "min_start": min_start})).all()
         agree_count = 0
@@ -608,10 +646,11 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             pushback_reason = (f"no upcoming start time reached {t.min_players} "
                                f"votes (the best slot had {agree_count})")
 
-    if pushback_reason is not None:
+    async def _push_back(reason: str) -> None:
         # Pushback path. Status stays "voting" so the cron re-enters this
-        # function next week. lock_at, voting_closes_at, default_start_ts
-        # all advance by 7 days. For async tournaments default_start_ts
+        # function next week. (Round-20 find 1: factored into a closure so
+        # the post-kick eligible-minimum recheck can push back too.)
+        # lock_at, voting_closes_at, default_start_ts all advance by 7 days. For async tournaments default_start_ts
         # equals lock_at (they begin the moment signups close); for sync,
         # default_start_ts is a separate scheduled time we also push.
         push = timedelta(days=7)
@@ -648,7 +687,7 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
                      "WHERE tournament_id = :tid AND slot_ts <= :now"),
                 {"tid": t.id, "now": now},
             )
-        print(f"[TOURNAMENT] {t.id} pushback ({pushback_reason}) — "
+        print(f"[TOURNAMENT] {t.id} pushback ({reason}) — "
               f"pushing lock_at to {t.lock_at.isoformat()} "
               f"(kind={t.kind}). Status stays voting.")
         # Discord feed (v1.32): the pushback keeps status='voting' so the
@@ -667,7 +706,7 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             await _queue_channel_post(
                 db,
                 f"{prefix} {_kind_label(t.kind)} tournament has been pushed "
-                f"back: {pushback_reason}. {when_sentence}{carried}")
+                f"back: {reason}. {when_sentence}{carried}")
         except Exception as e:
             print(f"[TOURNAMENT] pushback feed post failed: {e}")
         # Adversarial review fix: the availability-check notices are deduped by
@@ -685,6 +724,10 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             )
         except Exception as e:
             print(f"[TOURNAMENT] pushback notice reset failed: {e}")
+        return
+
+    if pushback_reason is not None:
+        await _push_back(pushback_reason)
         return
 
     # Item 3 (sync, non-force): lock in the agreed slot, then remove every
@@ -747,7 +790,22 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
             except Exception as e:
                 print(f"[TOURNAMENT] kick feed post failed: {e}")
         # Reload the confirmed set — kicks + promotions changed it.
+        # Re-apply the BAN filter (round-19 find 1: this reload restored a
+        # banned entrant the initial filter had excluded).
         signups = (await db.execute(q)).scalars().all()
+        signups = [s for s in signups
+                   if not await _player_id_banned(db, s.player_id)]
+        # Round-20 find 1: kicks + speculative promotions + the ban filter
+        # can drop the eligible roster below the minimum AFTER the initial
+        # gate passed — a below-minimum bracket must push back, not lock.
+        # (The allocation itself still counts banned rows when deciding
+        # confirmed-vs-speculative — accepted residual: an eligible player
+        # can stay speculative while activation forfeits the banned one.)
+        if len(signups) < t.min_players:
+            await _push_back(
+                f"not enough eligible players after lock filtering "
+                f"({len(signups)} of {t.min_players} required)")
+            return
 
     # Prizes scale with the locked player count (item 2). prize_tier is kept
     # populated for legacy readers, but _pay_prizes and every display surface
@@ -828,6 +886,11 @@ async def lock_tournament(db: AsyncSession, t: Tournament, force: bool = False) 
         FROM tournament_signups ts
         LEFT JOIN glicko_ratings gr ON gr.player_id = ts.player_id
         WHERE ts.tournament_id = :tid AND ts.is_speculative = FALSE
+          -- round-19 find 1: the bracket-input set must equal the filtered
+          -- roster, or signup_by_id KeyErrors on the banned extra row
+          AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                           JOIN players p ON p.steam_id = pb.steam_id
+                          WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
     """)
     erows = (await db.execute(eq, {"tid": t.id, "default_rating": GLICKO2_DEFAULT_RATING})).all()
     bracket_inputs = [SignupInput(
@@ -951,6 +1014,11 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
     if not pending:
         return
 
+    # Round-20 SCOPE NOTE: the banned->forfeited check below is a point
+    # read, not serialization with admin_ban (see the matching note in
+    # lock_tournament — the identity-lock attempts created tick-plane
+    # deadlocks and were removed, #242).
+
     # Pre-fetch all matches for prereq lookup.
     allq = select(TournamentMatch).where(TournamentMatch.tournament_id == tournament_id)
     by_id = {m.id: m for m in (await db.execute(allq)).scalars().all()}
@@ -961,6 +1029,21 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         return pre.p1_signup_id if pre.winner_signup_id == pre.p2_signup_id else pre.p2_signup_id
 
     for m in pending:
+        # Round-24 find 3: normalize a legacy one-prerequisite GF_RESET
+        # (prereq_match_ids=[GF], prereq_roles=["W"]) to the two-role
+        # encoding before generic resolution. The OLD API could persist
+        # that shape in the migration-183-to-deploy window (pre-183 the
+        # insert aborted on VARCHAR(4), so prod has none historically);
+        # its single "W" role resolves one value and the resolver would
+        # stamp p2=None, wedging the reset forever. Rewriting the arrays
+        # here lets the standard resolver reconstruct WB-vs-LB on the
+        # next pass — self-healing, idempotent.
+        if (m.bracket_side == "GF_RESET"
+                and len(list(m.prereq_match_ids or [])) == 1):
+            _gf_id = list(m.prereq_match_ids)[0]
+            m.prereq_match_ids = [_gf_id, _gf_id]
+            m.prereq_roles = ["L", "W"]
+            print(f"[TOURNAMENT] normalized legacy one-prereq GF_RESET {m.id}")
         prereq_ids = list(m.prereq_match_ids or [])
         # Break eligibility (item 2): only matches downstream of a PLAYED
         # match get the breather. A bye-fed W R2 at tournament start (top
@@ -1000,17 +1083,27 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             p1_sig = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p1_signup_id))).scalar_one_or_none()
         if m.p2_signup_id:
             p2_sig = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p2_signup_id))).scalar_one_or_none()
+        # Round-18 find 2: a ban during the bracket phase becomes a FORFEIT
+        # right here, before this match can mint a series/sct-* room — the
+        # existing forfeit machinery then advances the opponent exactly as
+        # for a no-show.
+        for _sig in (p1_sig, p2_sig):
+            if _sig is not None and not _sig.forfeited                     and await _player_id_banned(db, _sig.player_id):
+                _sig.forfeited = True
+                print(f"[TOURNAMENT] activation: banned signup {_sig.id} forfeited")
         p1_ff = p1_sig is not None and p1_sig.forfeited
         p2_ff = p2_sig is not None and p2_sig.forfeited
         if p1_ff and not p2_ff and m.p2_signup_id:
             m.winner_signup_id = m.p2_signup_id
             m.status = "forfeit"
             m.ended_at = now
+            await _apply_terminal_transitions(db, m, m.winner_signup_id)
             continue
         if p2_ff and not p1_ff and m.p1_signup_id:
             m.winner_signup_id = m.p1_signup_id
             m.status = "forfeit"
             m.ended_at = now
+            await _apply_terminal_transitions(db, m, m.winner_signup_id)
             continue
         if p1_ff and p2_ff:
             # Both no-showed. Downstream matches need a winner_signup_id to
@@ -1029,6 +1122,7 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             m.status = "double_forfeit"
             m.winner_signup_id = winner_id
             m.ended_at = now
+            await _apply_terminal_transitions(db, m, winner_id)
             continue
 
         if not (m.p1_signup_id and m.p2_signup_id):
@@ -1083,53 +1177,51 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
             m.ready_deadline_at = now + timedelta(seconds=grace)
 
 
-async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> None:
-    """Call from main.py after a tournament series completes. Marks the match
-    winner, sets placed_rank for eliminated players, activates downstream matches,
-    and closes the tournament if the final + TP are both done.
+async def _apply_terminal_transitions(db: AsyncSession, m: TournamentMatch, winner_signup_id):
+    """Bracket-progression + (series-decided only) podium transitions for a
+    match that just reached a terminal state. Called from every terminal-
+    resolution site (series completion via the report hook, activation
+    forfeits, no-show sweep forfeits) so the bracket record is coherent.
 
-    Idempotent on re-entry: if the match is already marked completed, returns
-    without re-assigning placed_rank or triggering prizes a second time. This
-    protects against double-invocation from a retried /matches POST or a tick
-    racing with the series completion hook."""
-    now = datetime.now(timezone.utc)
-
-    # Find the match + series. with_for_update() serializes concurrent
-    # advance_tournament_match invocations (e.g. tick + /matches hook racing
-    # within the same millisecond). The second caller waits for the first to
-    # commit, then sees the status guard below and returns cleanly. (Review #4)
-    mq = select(TournamentMatch).where(TournamentMatch.series_id == series_id).with_for_update()
-    m = (await db.execute(mq)).scalar_one_or_none()
-    if not m:
-        return  # not a tournament match
-
-    # Status guard: already advanced, don't re-process.
-    if m.status in ("completed", "forfeit", "double_forfeit"):
+    ROUND-34 CUT — read before "improving" this: podium fields, placed
+    ranks, and therefore prizes/trophy authority are minted ONLY when
+    m.status == 'completed' (series-decided, reached solely through the
+    report hook's atomic validity-checked advance). Forfeit/double_forfeit
+    terminals advance the bracket exactly as HEAD does — status + winner +
+    (for an LB-champion GF) the GF_RESET row — and mint NOTHING: rounds
+    33-35 proved that paying forfeit-decided or revoked-provenance gates
+    turns any ancestor reversal into a candidate-only wrong payout, and
+    HEAD's pay-nothing-on-forfeit behavior was its safety. A forfeit-
+    created GF_RESET is bracket bookkeeping: its seats carry persistent
+    forfeited flags, so activation resolves it by forfeit — it is never
+    played and never mints (and a PLAYED reset's mint revalidates its GF
+    provenance, round-35 find 1)."""
+    winner_sig = (await db.execute(select(TournamentSignup).where(
+        TournamentSignup.id == winner_signup_id))).scalar_one_or_none()
+    if winner_sig is None:
+        print(f"[TOURNAMENT] terminal: winner signup {winner_signup_id} not found "
+              f"for match {m.id} — skipping placement transitions")
         return
-
-    sq = select(RankedSeries).where(RankedSeries.id == series_id)
-    series = (await db.execute(sq)).scalar_one()
-    if series.status != "completed" or not series.winner_id:
-        return
-
-    # Map series winner back to signup. Defensive: tolerate missing signup row
-    # (e.g. manual cleanup) rather than exploding the whole match handler.
-    winner_sig_q = select(TournamentSignup).where(and_(
-        TournamentSignup.tournament_id == m.tournament_id,
-        TournamentSignup.player_id == series.winner_id,
-    ))
-    winner_sig = (await db.execute(winner_sig_q)).scalar_one_or_none()
-    if not winner_sig:
-        print(f"[TOURNAMENT] advance: winner signup not found for series {series_id}, "
-              f"match {m.id} — tournament state may be inconsistent")
-        return
-    m.winner_signup_id = winner_sig.id
-    m.status = "completed"
-    m.ended_at = now
-
     loser_signup_id = m.p1_signup_id if winner_sig.id == m.p2_signup_id else m.p2_signup_id
     t = await _get_tournament(db, m.tournament_id)
     total_rounds = _total_rounds_for(t)
+    # Round-34 cut: podium fields, placed ranks — and therefore prizes and
+    # trophy authority — are minted ONLY for SERIES-decided terminals
+    # (status 'completed', which reaches here solely via the report hook's
+    # atomic advance, whose series was validity-checked under its locked
+    # read). Forfeit/double_forfeit terminals advance the BRACKET exactly
+    # as HEAD does (status + winner + GF_RESET creation) and mint nothing:
+    # rounds 33-34 proved that monetizing forfeit-decided gates turns
+    # every ancestor/partial-series reversal into a candidate-only wrong
+    # payout, and the completion-vs-reversal serializability that would
+    # license it is the same lock-plane problem rounds 24-31 proved
+    # unbuildable here. HEAD's pay-nothing-on-forfeit behavior was its
+    # safety; we keep it deliberately.
+    _mint_podium = m.status == "completed"
+    # Round-36 find 1: when a played GF_RESET mints, the caller must
+    # re-validate the authorizing GF series AFTER every award write (the
+    # last possible wait point) — this return value carries that series id.
+    _recheck_sid = None
 
     # Placement assignment — differs by FORMAT, not kind. Both sync and async
     # can run double-elim; only the legacy single_elim_bo3 path uses the old
@@ -1140,12 +1232,44 @@ async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> No
         # below; we postpone finalizing 1st/2nd until bracket_reset is skipped
         # or GF_RESET completes.
         if m.bracket_side == "GF_RESET":
-            t.winner_signup_id = winner_sig.id
-            t.runner_up_signup_id = loser_signup_id
-            winner_sig.placed_rank = 1
-            loser_sig = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == loser_signup_id))).scalar_one_or_none()
-            if loser_sig:
-                loser_sig.placed_rank = 2
+            if _mint_podium:
+                # Round-35 find 1: revalidate RESET PROVENANCE. This is the
+                # one payable path that exists in the candidate but not in
+                # HEAD (HEAD could never create a playable reset — width
+                # abort pre-183, seat-wipe post-183), so its authority chain
+                # cannot be inherited-by-identity: the reset only EXISTS
+                # because its GF series said the LB champion won. This read
+                # catches every COMMITTED reversal; an IN-FLIGHT reversal is
+                # invisible to it (round-36 find 1: participant overlap only
+                # ORDERS our later prize writes after the reversal — it does
+                # not re-validate), so the id is also returned to the caller
+                # for a FINAL recheck after every award write, past the last
+                # possible wait point, with rollback on failure.
+                _gf_ok = True
+                _gf_ids = list(m.prereq_match_ids or [])
+                if _gf_ids:
+                    _gf_row = (await db.execute(select(TournamentMatch).where(
+                        TournamentMatch.id == _gf_ids[0]))).scalar_one_or_none()
+                    if _gf_row is not None and _gf_row.series_id is not None:
+                        _gf_inv = (await db.execute(text(
+                            "SELECT 1 FROM ranked_series WHERE id = :sid "
+                            "AND invalidated_at IS NOT NULL LIMIT 1"),
+                            {"sid": str(_gf_row.series_id)})).first()
+                        if _gf_inv:
+                            _gf_ok = False
+                            print(f"[TOURNAMENT] GF_RESET {m.id} completed but its "
+                                  f"authorizing GF series {_gf_row.series_id} was "
+                                  f"REVERSED — podium NOT minted (bracket status "
+                                  f"stands); admin follow-up required")
+                        else:
+                            _recheck_sid = _gf_row.series_id
+                if _gf_ok:
+                    t.winner_signup_id = winner_sig.id
+                    t.runner_up_signup_id = loser_signup_id
+                    winner_sig.placed_rank = 1
+                    loser_sig = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == loser_signup_id))).scalar_one_or_none()
+                    if loser_sig:
+                        loser_sig.placed_rank = 2
         elif m.bracket_side == "GF":
             # GF has two prereqs: WB final (role W) and LB final (role W). If
             # GF winner came from the LB side, they force a bracket reset.
@@ -1176,8 +1300,15 @@ async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> No
                     slot_idx=0,
                     p1_signup_id=wb_champ,   # WB champ (had no prior loss)
                     p2_signup_id=lb_champ,   # LB champ (won the first GF)
-                    prereq_match_ids=[m.id],
-                    prereq_roles=["W"],
+                    # Round-23 find 2: BOTH contributions, [GF loser, GF
+                    # winner] — activation's generic prereq resolver
+                    # OVERWRITES p1/p2 from these, and the old single
+                    # ["W"] entry resolved one value, stamping p2 = None
+                    # and wedging the reset forever (its two-seat guard
+                    # skips seatless matches). L+W reconstructs WB champ
+                    # vs LB champ, matching the prefill.
+                    prereq_match_ids=[m.id, m.id],
+                    prereq_roles=["L", "W"],
                     is_bye=False,
                     status="pending",
                     deadline_at=reset_deadline,
@@ -1185,7 +1316,7 @@ async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> No
                 )
                 db.add(reset_row)
                 print(f"[TOURNAMENT] Bracket reset triggered for {t.id}: LB champ {lb_champ} forced GF_RESET")
-            else:
+            elif _mint_podium:
                 # WB champ held — tournament over, they're 1st.
                 t.winner_signup_id = winner_sig.id
                 t.runner_up_signup_id = loser_signup_id
@@ -1201,7 +1332,7 @@ async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> No
                 TournamentMatch.bracket_side == "GF",
             ))
             gf = (await db.execute(dq)).scalar_one_or_none()
-            if gf and m.id in (gf.prereq_match_ids or []):
+            if _mint_podium and gf and m.id in (gf.prereq_match_ids or []):
                 # LB final loser = 3rd place
                 t.third_place_signup_id = loser_signup_id
                 loser_sig = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == loser_signup_id))).scalar_one_or_none()
@@ -1209,7 +1340,9 @@ async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> No
                     loser_sig.placed_rank = 3
     else:
         # Sync single-elim placement logic (unchanged from Phase 1).
-        if m.bracket_side == "W" and m.round == total_rounds:
+        if not _mint_podium:
+            pass
+        elif m.bracket_side == "W" and m.round == total_rounds:
             t.winner_signup_id = winner_sig.id
             t.runner_up_signup_id = loser_signup_id
             winner_sig.placed_rank = 1
@@ -1223,9 +1356,150 @@ async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> No
             if loser_sig:
                 loser_sig.placed_rank = 4
 
-    # Fire downstream activation + possible tournament completion.
+    return _recheck_sid
+
+
+
+class _ResetProvenanceReversed(Exception):
+    """Module-private: raised inside advance's SAVEPOINT when the final
+    provenance recheck finds the authorizing GF series reversed. Rolls back
+    exactly the tournament-advance work (round-37 find 1: a ROOT session
+    rollback expires EVERY persistent identity in the shared session —
+    rollback expiration ignores expire_on_commit=False — and the report
+    hook's response construction then dies on expired attribute access.
+    A savepoint rollback expires only the identities dirtied inside it:
+    the match/tournament/signup rows this saga touched, none of which the
+    hook reads afterward)."""
+
+
+async def advance_tournament_match(db: AsyncSession, series_id: uuid.UUID) -> None:
+    """Call from main.py after a tournament series completes. Marks the match
+    winner, sets placed_rank for eliminated players, activates downstream matches,
+    and closes the tournament if the final + TP are both done.
+
+    Idempotent on re-entry: if the match is already marked completed, returns
+    without re-assigning placed_rank or triggering prizes a second time. This
+    protects against double-invocation from retried /matches POSTs (the
+    report hook is this function's only runtime caller since round 33)."""
+    now = datetime.now(timezone.utc)
+
+    # Find the match + series. with_for_update() serializes concurrent
+    # advance_tournament_match invocations (retried /matches POSTs racing
+    # within the same millisecond — the report hook is this function's ONLY
+    # runtime caller since round 33 deleted the sweep-side recovery). The
+    # second caller waits for the first to commit, then sees the status
+    # guard below and returns cleanly. (Review #4)
+    mq = select(TournamentMatch).where(TournamentMatch.series_id == series_id).with_for_update()
+    m = (await db.execute(mq)).scalar_one_or_none()
+    if not m:
+        return  # not a tournament match
+
+    # Status guard: already advanced, don't re-process.
+    if m.status in ("completed", "forfeit", "double_forfeit"):
+        return
+
+    # SCOPE NOTE (rounds 24-27, the finalization lock saga): this read is
+    # deliberately LOCK-FREE. Every locked variant proved worse: a series
+    # lock inverted players-before-series vs reversal (r25 f1); sorted
+    # participant prelocks ABBA'd third-place advance vs semifinal
+    # reversal through out-of-pair podium writes (r26 f1); splitting the
+    # transaction to release those locks made completion non-idempotent
+    # (double podium payout, r27 f1) and let a crash-then-reversal
+    # permanently contradict the bracket (r27 f2); sorting the prize pass
+    # ABBA'd against participant-then-bettor writers (r27 f3 — the #204
+    # wide-locker class). The single-transaction, no-early-player-lock
+    # shape below is HEAD's, which has none of those edges, PLUS two
+    # lock-free improvements: populate_existing (the report-hook session
+    # holds this series in its identity map with expire_on_commit=False
+    # and would otherwise read a stale pre-reversal invalidated_at) and
+    # the invalidated_at guard itself. RESIDUAL, pre-existing-equivalent
+    # (r25 review: HEAD "has the same identity-map failure and also
+    # advances that winner"): a reversal committing between this fresh
+    # read and this transaction's commit still advances the just-reversed
+    # winner — same window HEAD's report hook always had.
+    sq = (select(RankedSeries).where(RankedSeries.id == series_id)
+          .execution_options(populate_existing=True))
+    series = (await db.execute(sq)).scalar_one()
+    if (series.status != "completed" or not series.winner_id
+            or series.invalidated_at is not None):
+        return
+
+    # Map series winner back to signup. Defensive: tolerate missing signup row
+    # (e.g. manual cleanup) rather than exploding the whole match handler.
+    winner_sig_q = select(TournamentSignup).where(and_(
+        TournamentSignup.tournament_id == m.tournament_id,
+        TournamentSignup.player_id == series.winner_id,
+    ))
+    winner_sig = (await db.execute(winner_sig_q)).scalar_one_or_none()
+    if not winner_sig:
+        print(f"[TOURNAMENT] advance: winner signup not found for series {series_id}, "
+              f"match {m.id} — tournament state may be inconsistent")
+        return
+    # Round-38 find 1: cache the id as a PLAIN SCALAR before the savepoint —
+    # the veto rollback expires `m` (dirtied inside the savepoint), and an
+    # f-string reading m.id in the handler would raise MissingGreenlet and
+    # swallow the actionable log.
+    _m_id = m.id
+    try:
+        # Everything from the first mutation through the final provenance
+        # recheck lives in ONE SAVEPOINT (#187/#235 house pattern) so a
+        # provenance veto retracts exactly this saga's writes without
+        # expiring the caller's earlier-committed identities (see
+        # _ResetProvenanceReversed).
+        async with db.begin_nested():
+            await _advance_terminal_phase(db, m, winner_sig, now)
+    except _ResetProvenanceReversed:
+        print(f"[TOURNAMENT] advance ROLLED BACK for reset match {_m_id}: "
+              f"authorizing GF series was reversed mid-advance — this "
+              f"transaction's top-two mint, completion, and prize writes "
+              f"are retracted (previously committed placements, e.g. an "
+              f"earlier third place, survive); admin follow-up required")
+        return
+
+
+async def _advance_terminal_phase(db: AsyncSession, m: TournamentMatch,
+                                  winner_sig, now) -> None:
+    """The mutating tail of advance_tournament_match, isolated so the
+    caller can run it inside a savepoint (round-37 find 1)."""
+    m.winner_signup_id = winner_sig.id
+    m.status = "completed"
+    m.ended_at = now
+
+    # Placement / prize / bracket-reset transitions — shared with every
+    # forfeit-resolution site (round-22 find 2).
+    _gf_recheck_sid = await _apply_terminal_transitions(db, m, winner_sig.id)
+
+    # Fire downstream activation + possible tournament completion — ONE
+    # transaction with the terminal work above (r27 f1/f2: the split made
+    # completion non-idempotent and crash-divisible; single-transaction
+    # visibility is what makes "last match terminal" and "completed +
+    # prizes" atomic, exactly-once by construction).
+    t = await _get_tournament(db, m.tournament_id)
     await _activate_ready_matches(db, m.tournament_id)
     await _maybe_complete_tournament(db, t)
+
+    # Round-36 find 1: FINAL provenance recheck for a minted reset podium,
+    # placed AFTER every award write — i.e. past the last statement that
+    # can WAIT on the reversal's held player rows. Outcomes (round-37
+    # audit): (a) the GF reversal committed before this statement
+    # (including the schedule where our prize UPDATE waited behind its
+    # player locks and resumed after its commit) — this fresh READ
+    # COMMITTED statement sees invalidated_at and the raise below rolls
+    # back the whole savepointed saga; (b) the reversal has not committed
+    # — it is blocked on a player row our prize writes hold until OUR
+    # commit, so completion wins the serialization and the reversal
+    # becomes an ordinary post-completion reversal; (c) opposite partial
+    # lock acquisition can deadlock, which Postgres resolves by aborting
+    # ONE whole transaction — either way no unauthorized podium commits.
+    # Ordering-after-invalidation is thereby converted into
+    # validation-after-every-wait.
+    if _gf_recheck_sid is not None:
+        _gf_inv2 = (await db.execute(text(
+            "SELECT 1 FROM ranked_series WHERE id = :sid "
+            "AND invalidated_at IS NOT NULL LIMIT 1"),
+            {"sid": str(_gf_recheck_sid)})).first()
+        if _gf_inv2:
+            raise _ResetProvenanceReversed()
 
 
 def _total_rounds_for(t: Tournament) -> int:
@@ -1288,8 +1562,66 @@ async def _maybe_complete_tournament(db: AsyncSession, t: Tournament) -> None:
         if tp_m and tp_m.status not in finished_states:
             return
 
-    t.status = "completed"
-    t.ended_at = datetime.now(timezone.utc)
+    # Round-34 NOTE: no authority scan here, by design. Podium fields are
+    # minted ONLY by the report hook's atomic series-decided advance (see
+    # _apply_terminal_transitions), so every payable podium and its
+    # reversal windows have exactly HEAD's shape — forfeit-decided gates
+    # complete with a null podium and pay nothing, which is logged below.
+    # Round-29 find 1: EXACTLY-ONCE completion claim as a compare-and-set.
+    # The tick's _run unit loads its Tournament object BEFORE the per-match
+    # sweep's internal commits; with expire_on_commit=False that resident
+    # object can still read status='running' after a report hook already
+    # completed and paid this tournament — an ORM assignment here would
+    # then pay the podium a SECOND time. The CAS re-evaluates its WHERE on
+    # the CURRENT row version (waiting on any in-flight completer's row
+    # lock first), so exactly one transaction ever claims the flip, with
+    # no dependence on ORM freshness and no extra lock edge — HEAD's
+    # autoflushed UPDATE took this same row lock at this same point.
+    _claim = await db.execute(text(
+        "UPDATE tournaments SET status = 'completed', ended_at = NOW() "
+        "WHERE id = :tid AND status = 'running'"), {"tid": t.id})
+    if (_claim.rowcount or 0) != 1:
+        return  # someone else completed it (or state moved) — do NOT pay
+    # Round-30 find 1: the claimant must pay from an AUTHORITATIVE
+    # post-placement podium view, not the resident object — another
+    # transaction (the report hook) may have committed winner/runner while
+    # this session's resident Tournament still holds pre-placement NULLs,
+    # and _pay_prizes silently skips null signup ids, stranding those
+    # awards forever (no later completer can pass the CAS). The safety
+    # chain here: autoflush first pushes THIS transaction's own pending
+    # placement mutations (e.g. a just-resolved TP's third place) down to
+    # the row; stale-but-CLEAN attributes are NOT dirty and never flush,
+    # so resident NULLs cannot clobber committed values; populate_existing
+    # then overwrites the resident identity with the merged current row —
+    # our CAS'd status, our flushed placements, and every other
+    # transaction's committed placements together.
+    t = (await db.execute(select(Tournament).where(Tournament.id == t.id)
+         .execution_options(populate_existing=True))).scalar_one()
+    _absent = [n for n, v in (("1st", t.winner_signup_id),
+                              ("2nd", t.runner_up_signup_id),
+                              ("3rd", t.third_place_signup_id)) if v is None]
+    if _absent:
+        # Round-35 find 2: name EXACTLY which placements are absent, and
+        # claim "no prizes" only when all three are — a valid partial
+        # podium (e.g. a played TP under a forfeit-decided final) still
+        # pays its non-null ranks below, and an operator told "no prizes
+        # paid" could double-award them manually.
+        # Round-36 find 2: this log cannot INFER why a placement is null —
+        # forfeit-decided gates and the reset provenance veto both produce
+        # nulls, and telling an operator "award manually" after a veto
+        # would restore exactly what the veto withheld. Point at the
+        # authoritative earlier [TOURNAMENT] lines instead.
+        if len(_absent) == 3:
+            print(f"[TOURNAMENT] {t.id} completed WITHOUT a podium — no "
+                  f"prizes paid, by design (unminted placements: forfeit-"
+                  f"decided gates or a provenance veto — check earlier "
+                  f"[TOURNAMENT] lines for the cause BEFORE any manual award)")
+        else:
+            print(f"[TOURNAMENT] {t.id} completed with a PARTIAL podium — "
+                  f"missing: {', '.join(_absent)} (unminted: forfeit-decided "
+                  f"gate(s) or a provenance veto — see earlier [TOURNAMENT] "
+                  f"lines). Present placements ARE paid normally below — do "
+                  f"NOT manually re-award those.")
     await _pay_prizes(db, t)
 
 
@@ -1298,7 +1630,15 @@ async def _pay_prizes(db: AsyncSession, t: Tournament) -> None:
     by the bot watching for new completed tournament rows (separate task #26).
     Amounts scale with the confirmed player count snapshotted at lock
     (prize_player_count); legacy rows without it fall back to counting the
-    surviving signups."""
+    surviving signups.
+
+    Grants run in PODIUM order inside the caller's completion transaction —
+    deliberately HEAD's shape. Do NOT sort these by player id and do NOT
+    split them into their own transactions: both "improvements" were built
+    and refuted in review rounds 26-27 (sorted order ABBA'd against
+    participant-then-bettor writers; the split made completion
+    non-idempotent and crash-divisible). See the SCOPE NOTE in
+    advance_tournament_match for the full saga."""
     n = t.prize_player_count
     if not n:
         n = (await db.execute(
@@ -1321,12 +1661,13 @@ async def _pay_prizes(db: AsyncSession, t: Tournament) -> None:
                 UPDATE players SET gold_earned = gold_earned + :g WHERE id = :pid
             """), {"g": g, "pid": sig.player_id})
             await db.execute(text("""
-                INSERT INTO gold_transactions (player_id, amount, reason, created_at)
-                VALUES (:pid, :g, :reason, NOW())
-            """), {"pid": sig.player_id, "g": g, "reason": f"tournament_rank_{rank_idx + 1}"})
+                INSERT INTO gold_transactions (player_id, amount, reason, reference_id, created_at)
+                VALUES (:pid, :g, :reason, :ref, NOW())
+            """), {"pid": sig.player_id, "g": g,
+                   "reason": f"tournament_rank_{rank_idx + 1}", "ref": str(t.id)})
         if x:
             await db.execute(text("""
-                UPDATE players SET total_xp = total_xp + :x WHERE id = :pid
+                UPDATE players SET total_xp = COALESCE(total_xp, 0) + :x WHERE id = :pid
             """), {"x": x, "pid": sig.player_id})
 
     await do_grant(t.winner_signup_id, 0)
@@ -1561,6 +1902,198 @@ async def tournament_tick() -> None:
             print(f"[TOURNAMENT-TICK] Outer error: {e}")
 
 
+async def _decided_series_takes_precedence(db: AsyncSession, m: TournamentMatch) -> bool:
+    """True when the match's RankedSeries is a VALID committed result —
+    completed, winner set, NOT administratively invalidated (round-24
+    find 2: reversal keeps status='completed' and the winner populated;
+    only invalidated_at records it). A True answer means the sweep must
+    LEAVE THE MATCH STRICTLY ALONE — never forfeit over the durable
+    result (round-23 find 3), and never advance it from the sweep either
+    (rounds 29-32: every sweep-side recovery variant opened a new
+    authority or deadlock edge; resolution belongs to the advance hook
+    or an admin)."""
+    if m.series_id is None:
+        return False
+    row = (await db.execute(text(
+        "SELECT 1 FROM ranked_series WHERE id = :sid "
+        "AND status = 'completed' AND winner_id IS NOT NULL "
+        "AND invalidated_at IS NULL LIMIT 1"),
+        {"sid": str(m.series_id)})).first()
+    return row is not None
+
+
+async def _resolve_overdue_match(db: AsyncSession, m: TournamentMatch, now: datetime) -> None:
+    """Resolve ONE overdue ready match (decided-series SKIP / ban forfeit /
+    no-show forfeit — the sweep never advances a series itself, see the
+    detector's docstring). Extracted from the sweep loop so each match
+    runs in its own transaction (round-26 find 2, #204): the caller locks
+    the row, calls this, and commits — the sweep's forfeit branches take
+    no player or series locks at all."""
+    # Round-23 find 3, FINAL FORM (rounds 29-32): a COMMITTED deciding
+    # series result is authoritative over everything below — the sweep
+    # must not FORFEIT over it (that would contradict the durable winner:
+    # submit_match commits the series before its advance hook runs, so a
+    # ban or a crashed hook can land in that gap while the match still
+    # reads 'ready'). But the sweep must not ADVANCE it either: five
+    # review rounds proved every sweep-side recovery variant opened a new
+    # authority or deadlock edge (reversal races r29/r30/r32, payout
+    # deadlock r31, forfeit-reset provenance masking r32 — the recovery
+    # transaction kept acquiring things no ordering could cover). The
+    # sweep's whole contract here is DETECTION: skip, log loudly, leave
+    # resolution to the advance hook (normal path) or an admin (crashed
+    # hook — the conservative wedge is rare, visible, and exactly HEAD's
+    # behavior for this state; #288: prefer under-application to
+    # unilateral recovery, put residual risk in detection).
+    if await _decided_series_takes_precedence(db, m):
+        print(f"[TOURNAMENT] SWEEP SKIP match {m.id}: decided series "
+              f"{m.series_id} present but unadvanced (crashed hook?) — "
+              f"leaving it strictly alone; admin follow-up if it stays wedged")
+        return
+    p1 = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p1_signup_id))).scalar_one_or_none()
+    p2 = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p2_signup_id))).scalar_one_or_none()
+    # Round-21 find 1 + round-22 find 1: an active ban is the tournament
+    # ban lifecycle's forfeit trigger (post-ban games record casual and
+    # never attach to this series, so heartbeats alone would wedge the
+    # match forever) — but the ban must never weaken the INNOCENT
+    # seat's protections. Exactly-one-banned resolves immediately and
+    # independently: the innocent seat wins by forfeit regardless of
+    # its transient heartbeat state, and is never flagged. Round 21's
+    # version disabled the in-play grace for BOTH seats, letting a 120s
+    # heartbeat gap (crash/relaunch — the case the grace exists for)
+    # double-forfeit the innocent leader.
+    p1_banned = p1 is not None and await _player_id_banned(db, p1.player_id)
+    p2_banned = p2 is not None and await _player_id_banned(db, p2.player_id)
+    if p1_banned != p2_banned:
+        # Round-24 find 1: re-check AFTER observing the ban — ban-visible
+        # implies any deciding series committed first (shared identity-
+        # lock plane) and is visible to this fresh statement. Action is
+        # skip-and-log, never advance (see the top-of-function note).
+        if await _decided_series_takes_precedence(db, m):
+            print(f"[TOURNAMENT] SWEEP SKIP match {m.id}: decided series "
+              f"{m.series_id} present but unadvanced (crashed hook?) — "
+              f"leaving it strictly alone; admin follow-up if it stays wedged")
+            return
+        winner_sid = m.p2_signup_id if p1_banned else m.p1_signup_id
+        if winner_sid is not None:
+            banned_sig = p1 if p1_banned else p2
+            if banned_sig is not None:
+                banned_sig.forfeited = True
+                await _recompute_player_penalty(db, banned_sig.player_id)
+            m.winner_signup_id = winner_sid
+            m.status = "forfeit"
+            m.ended_at = now
+            await _apply_terminal_transitions(db, m, winner_sid)
+            return
+        # Defensive: no opposing seat to award — fall through; the
+        # banned seat still reads as not-ready below.
+    series_started = False
+    if p1_banned and p2_banned:
+        # Both banned: no in-play grace (their games no longer record);
+        # straight to the mutual branch's deterministic carrier.
+        if m.series_id is not None:
+            series_started = (await db.execute(
+                text("SELECT 1 FROM matches WHERE series_id = :sid LIMIT 1"),
+                {"sid": str(m.series_id)})).first() is not None
+        p1_ready = False
+        p2_ready = False
+    else:
+        # Neither seat banned (the one-banned case resolved above):
+        # PRODUCTION behavior, untouched — the 45-minute in-play grace
+        # applies unconditionally.
+        if m.series_id is not None:
+            recent = (await db.execute(
+                text("SELECT 1 FROM matches WHERE series_id = :sid "
+                     "AND ended_at > NOW() - INTERVAL '45 minutes' LIMIT 1"),
+                {"sid": str(m.series_id)})).first()
+            if recent:
+                return  # BO3 actively in progress — not a no-show
+            series_started = (await db.execute(
+                text("SELECT 1 FROM matches WHERE series_id = :sid LIMIT 1"),
+                {"sid": str(m.series_id)})).first() is not None
+        # Round-23 find 4: production loaded the signup rows AFTER the
+        # grace queries, so a /ready heartbeat committing during them
+        # was observed. The rows above were loaded early for the ban
+        # check; re-read at the decision point with populate_existing
+        # (a plain re-select returns the identity-mapped object with
+        # its STALE attributes) so an irreversible forfeit never fires
+        # on a pre-grace snapshot.
+        p1 = (await db.execute(select(TournamentSignup).where(
+            TournamentSignup.id == m.p1_signup_id)
+            .execution_options(populate_existing=True))).scalar_one_or_none()
+        p2 = (await db.execute(select(TournamentSignup).where(
+            TournamentSignup.id == m.p2_signup_id)
+            .execution_options(populate_existing=True))).scalar_one_or_none()
+        p1_ready = bool(p1 and p1.ready_at and (now - p1.ready_at).total_seconds() <= READY_STALE_SECONDS) and not p1_banned
+        p2_ready = bool(p2 and p2.ready_at and (now - p2.ready_at).total_seconds() <= READY_STALE_SECONDS) and not p2_banned
+    if p1_ready and p2_ready:
+        return  # both ready, client will start match
+    # Round-24 find 1 (tail): last-moment authority recheck before the
+    # irreversible no-show writes — a deciding result that committed
+    # during this iteration's queries must never be forfeited over.
+    # Action is skip-and-log (see the top-of-function note). NOTE: this
+    # NARROWS (does not close) the pre-existing HEAD race for the no-ban
+    # case — a report can still commit between this statement and the
+    # writes below.
+    if await _decided_series_takes_precedence(db, m):
+        print(f"[TOURNAMENT] SWEEP SKIP match {m.id}: decided series "
+              f"{m.series_id} present but unadvanced (crashed hook?) — "
+              f"leaving it strictly alone; admin follow-up if it stays wedged")
+        return
+    # Flag forfeit AND refresh the cached penalty inline so the UI sees
+    # the updated pct immediately next refresh, not next time the player
+    # signs up for something.
+    if not p1_ready and p1:
+        p1.forfeited = True
+        await _recompute_player_penalty(db, p1.player_id)
+    if not p2_ready and p2:
+        p2.forfeited = True
+        await _recompute_player_penalty(db, p2.player_id)
+    if p1_ready and not p2_ready:
+        m.winner_signup_id = m.p1_signup_id
+        m.status = "forfeit"
+        m.ended_at = now
+        await _apply_terminal_transitions(db, m, m.winner_signup_id)
+    elif p2_ready and not p1_ready:
+        m.winner_signup_id = m.p2_signup_id
+        m.status = "forfeit"
+        m.ended_at = now
+        await _apply_terminal_transitions(db, m, m.winner_signup_id)
+    else:
+        # Mutual no-show. If the BO3 was STARTED, the series-score leader
+        # advances (July 20 item 7 — enforces the async 7-day deadline by
+        # score and never punishes a mid-BO3 leader for the leaver);
+        # otherwise/at even score, the same penalty-aware tiebreak as
+        # _activate_ready_matches — bracket progresses either way.
+        winner_id = None
+        if series_started and p1 and p2:
+            # Round-34 find 1 (bracket-only half): an INVALIDATED series'
+            # preserved partial score is not carrier authority — fall to the
+            # penalty/UUID tiebreak instead. (The monetization half is closed
+            # structurally: double_forfeit never mints podium.)
+            srow = (await db.execute(
+                text("SELECT player1_id, player2_id, p1_series_wins, p2_series_wins "
+                     "FROM ranked_series WHERE id = :sid "
+                     "AND invalidated_at IS NULL"),
+                {"sid": str(m.series_id)})).first()
+            if srow is not None and srow.p1_series_wins != srow.p2_series_wins:
+                leader_pid = srow.player1_id if srow.p1_series_wins > srow.p2_series_wins else srow.player2_id
+                if p1.player_id == leader_pid:
+                    winner_id = m.p1_signup_id
+                elif p2.player_id == leader_pid:
+                    winner_id = m.p2_signup_id
+        if winner_id is None:
+            winner_id = m.p1_signup_id
+            if p1 and p2:
+                if p2.penalty_at_signup < p1.penalty_at_signup:
+                    winner_id = m.p2_signup_id
+                elif p1.penalty_at_signup == p2.penalty_at_signup and str(m.p2_signup_id) < str(m.p1_signup_id):
+                    winner_id = m.p2_signup_id
+        m.status = "double_forfeit"
+        m.winner_signup_id = winner_id
+        m.ended_at = now
+        await _apply_terminal_transitions(db, m, winner_id)
+
+
 async def _apply_no_show_forfeits(db: AsyncSession, tournament_id: uuid.UUID) -> None:
     """For every 'ready' match past ready_deadline_at, check both signups'
     ready_at heartbeats. If a signup isn't ready, mark it forfeited; if only
@@ -1579,74 +2112,29 @@ async def _apply_no_show_forfeits(db: AsyncSession, tournament_id: uuid.UUID) ->
     gone, the series-score LEADER advances (penalty tiebreak only at even
     score) so a mid-BO3 leader isn't punished by the leaver."""
     now = datetime.now(timezone.utc)
-    q = select(TournamentMatch).where(and_(
+    # Round-26 find 2 (#204): ONE match per transaction. The old shape
+    # locked every overdue match up front and retained each advancement's
+    # player/series locks until the tick unit's single commit — unordered
+    # match iteration then made the AGGREGATE player acquisition sequence
+    # unordered, a reachable cross-pair ABBA against sorted reversal.
+    # Now: snapshot the ids unlocked, then per match re-lock + re-verify
+    # (#208) + resolve + COMMIT, releasing everything between matches.
+    mid_rows = (await db.execute(select(TournamentMatch.id).where(and_(
         TournamentMatch.tournament_id == tournament_id,
         TournamentMatch.status == "ready",
         TournamentMatch.ready_deadline_at <= now,
-    )).with_for_update()
-    for m in (await db.execute(q)).scalars().all():
-        series_started = False
-        if m.series_id is not None:
-            recent = (await db.execute(
-                text("SELECT 1 FROM matches WHERE series_id = :sid "
-                     "AND ended_at > NOW() - INTERVAL '45 minutes' LIMIT 1"),
-                {"sid": str(m.series_id)})).first()
-            if recent:
-                continue  # BO3 actively in progress — not a no-show
-            series_started = (await db.execute(
-                text("SELECT 1 FROM matches WHERE series_id = :sid LIMIT 1"),
-                {"sid": str(m.series_id)})).first() is not None
-        p1 = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p1_signup_id))).scalar_one_or_none()
-        p2 = (await db.execute(select(TournamentSignup).where(TournamentSignup.id == m.p2_signup_id))).scalar_one_or_none()
-        p1_ready = p1 and p1.ready_at and (now - p1.ready_at).total_seconds() <= READY_STALE_SECONDS
-        p2_ready = p2 and p2.ready_at and (now - p2.ready_at).total_seconds() <= READY_STALE_SECONDS
-        if p1_ready and p2_ready:
-            continue  # both ready, client will start match
-        # Flag forfeit AND refresh the cached penalty inline so the UI sees
-        # the updated pct immediately next refresh, not next time the player
-        # signs up for something.
-        if not p1_ready and p1:
-            p1.forfeited = True
-            await _recompute_player_penalty(db, p1.player_id)
-        if not p2_ready and p2:
-            p2.forfeited = True
-            await _recompute_player_penalty(db, p2.player_id)
-        if p1_ready and not p2_ready:
-            m.winner_signup_id = m.p1_signup_id
-            m.status = "forfeit"
-            m.ended_at = now
-        elif p2_ready and not p1_ready:
-            m.winner_signup_id = m.p2_signup_id
-            m.status = "forfeit"
-            m.ended_at = now
-        else:
-            # Mutual no-show. If the BO3 was STARTED, the series-score leader
-            # advances (July 20 item 7 — enforces the async 7-day deadline by
-            # score and never punishes a mid-BO3 leader for the leaver);
-            # otherwise/at even score, the same penalty-aware tiebreak as
-            # _activate_ready_matches — bracket progresses either way.
-            winner_id = None
-            if series_started and p1 and p2:
-                srow = (await db.execute(
-                    text("SELECT player1_id, player2_id, p1_series_wins, p2_series_wins "
-                         "FROM ranked_series WHERE id = :sid"),
-                    {"sid": str(m.series_id)})).first()
-                if srow is not None and srow.p1_series_wins != srow.p2_series_wins:
-                    leader_pid = srow.player1_id if srow.p1_series_wins > srow.p2_series_wins else srow.player2_id
-                    if p1.player_id == leader_pid:
-                        winner_id = m.p1_signup_id
-                    elif p2.player_id == leader_pid:
-                        winner_id = m.p2_signup_id
-            if winner_id is None:
-                winner_id = m.p1_signup_id
-                if p1 and p2:
-                    if p2.penalty_at_signup < p1.penalty_at_signup:
-                        winner_id = m.p2_signup_id
-                    elif p1.penalty_at_signup == p2.penalty_at_signup and str(m.p2_signup_id) < str(m.p1_signup_id):
-                        winner_id = m.p2_signup_id
-            m.status = "double_forfeit"
-            m.winner_signup_id = winner_id
-            m.ended_at = now
+    )))).scalars().all()
+    for _mid in mid_rows:
+        m = (await db.execute(select(TournamentMatch)
+             .where(TournamentMatch.id == _mid)
+             .with_for_update()
+             .execution_options(populate_existing=True))).scalar_one_or_none()
+        if (m is None or m.status != "ready"
+                or m.ready_deadline_at is None or m.ready_deadline_at > now):
+            await db.commit()
+            continue
+        await _resolve_overdue_match(db, m, now)
+        await db.commit()
 
 
 async def _check_and_trigger_force_start(db: AsyncSession, t: Tournament) -> bool:
@@ -1766,6 +2254,15 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: Asy
     if t.status != "voting":
         raise HTTPException(status_code=400, detail=f"Tournament not accepting signups (status={t.status})")
     player = await _get_player_by_steam(db, req.steam_id)
+    # Round-19 find 2: take the shared per-identity advisory lock so the
+    # ban check below is ordered against admin_ban's commit rather than
+    # being a READ COMMITTED point read.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                     {"sid": req.steam_id})
+    # Round-18 find 2: banned players cannot sign up — the bracket would
+    # otherwise pair them into new series/rooms after the ban.
+    if await _player_id_banned(db, player.id):
+        raise HTTPException(status_code=409, detail="Banned players cannot sign up")
     # Discord linkage is required so the bot can DM match-ready notifications
     # + role-ping for tournament matches. The earlier hotfix that dropped this
     # gate was reverted in v1.26.8 — the real reported bug was that the

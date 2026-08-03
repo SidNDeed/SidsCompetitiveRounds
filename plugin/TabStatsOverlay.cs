@@ -330,7 +330,11 @@ namespace CompetitiveRounds
                     var display = row.cards[row.count++];
                     // Uppercase only the cached GUI text; lookup identity stays canonical.
                     display.canonicalName = canonicalName;
-                    display.content.text = Trunc(rawName, 12).ToUpperInvariant()
+                    // L10n interim: localized display name when the game has
+                    // one (cache is primed at menu time — this path renders
+                    // mid-match and must never trigger the first table scan).
+                    string shownName = CardTextLocalizer.DisplayNameIfCached(canonicalName) ?? rawName;
+                    display.content.text = Trunc(shownName, 12).ToUpperInvariant()
                         .Replace("<", "(").Replace(">", ")");
                 }
             }

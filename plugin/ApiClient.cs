@@ -1208,6 +1208,9 @@ namespace CompetitiveRounds
             // Item 6 polish: the matchup's other player + when the bet was placed.
             public string vs_name;
             public string created_at;
+            // v1.36: server's EXPLICIT outcome (open|won|lost|refunded) —
+            // mode-aware, replaces the payout==amount inference (#244).
+            public string state;
         }
 
         public static List<ActiveSeriesEntry> CachedActiveSeries { get; private set; }
@@ -1440,6 +1443,7 @@ namespace CompetitiveRounds
                             b.payout         = ExtractJsonInt(chunk, "payout");
                             b.vs_name        = ExtractJsonString(chunk, "vs_name");
                             b.created_at     = ExtractJsonString(chunk, "created_at");
+                            b.state          = ExtractJsonString(chunk, "state");
                             if (!string.IsNullOrEmpty(b.series_id)) list.Add(b);
                         }
                     }
@@ -1865,28 +1869,95 @@ namespace CompetitiveRounds
 
         /// <summary>Pulls recent chat scrollback so the log isn't empty on a fresh connect.
         /// Each entry dispatches through ChatClient.OnMessage to share the render path.</summary>
+        /// <summary>Launch-time i18n pack overlay fetch (§2.2). The response
+        /// is applied through I18n.ApplyPack (format gate first) and cached
+        /// for offline launches only when it parsed cleanly.</summary>
+        private static int _i18nPackGen;
+
+        public static void FetchI18nPack()
+        {
+            // Locale captured HERE (wave-2 find 8): the callback must apply
+            // and cache under the locale it FETCHED for — a slow response
+            // arriving after a locale switch is dropped by ApplyPack's
+            // expected-locale check, never installed under the new one.
+            // The GENERATION guard (round-3 find N15) closes the ABA hole
+            // locale equality can't: ES -> RU -> ES leaves two live ES
+            // fetches, and the OLDER response finishing last would overwrite
+            // the newer pack. Only the newest fetch may install.
+            string loc = I18n.Locale;
+            if (loc == I18n.LOCALE_EN || Plugin.Instance == null) return;
+            int gen = ++_i18nPackGen;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/i18n/pack/{loc}",
+                (success, response) =>
+                {
+                    if (gen != _i18nPackGen) return;   // superseded fetch
+                    if (!success || string.IsNullOrEmpty(response)) return;
+                    try { if (I18n.ApplyPack(response, loc)) I18n.CachePack(response, loc); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[I18N] pack fetch apply failed: {ex.Message}"); }
+                }));
+        }
+
+        /// <summary>Portal handoff (§2.5): mint a short-TTL portal session and
+        /// open the browser with the token in the URL FRAGMENT. Refused on a
+        /// plaintext base URL — the token is a real credential.</summary>
+        public static void OpenTranslatePortal()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                CompetitiveUI.ShowNotification("Portal needs the HTTPS endpoint - this install is on a plaintext fallback.", Color.yellow, 6f);
+                return;
+            }
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/i18n/portal-session",
+                $"{{\"steam_id\":\"{Escape(sid)}\"}}",
+                (success, response) =>
+                {
+                    string token = success ? ExtractJsonString(response, "token") : null;
+                    if (string.IsNullOrEmpty(token))
+                    {
+                        CompetitiveUI.ShowNotification("Portal session failed - are you signed in to Steam?", Color.yellow, 5f);
+                        return;
+                    }
+                    Application.OpenURL($"{baseUrl}/translate#token={token}");
+                }));
+        }
+
         public static void FetchRecentChat(int limit = 50)
         {
+            // §2.6: scrollback only for the channels this client subscribes
+            // to (global + the locale channel). Values come from a closed
+            // set, so no URL-encoding concern.
+            string chans = ChatClient.LocaleChannel == null
+                ? "global" : "global," + ChatClient.LocaleChannel;
             Plugin.Instance.StartCoroutine(GetRequest(
-                $"{baseUrl}/api/v1/chat/recent?limit={limit}",
+                $"{baseUrl}/api/v1/chat/recent?limit={limit}&channels={chans}",
                 (success, response) =>
                 {
                     if (!success || string.IsNullOrEmpty(response)) return;
                     try
                     {
-                        // Response: {"messages":[{"source":..., "message":..., ...}, ...]}
-                        // Split on "source": marker so each object is one OnMessage call.
-                        var parts = response.Split(new[] { "{\"source\"" }, StringSplitOptions.None);
-                        for (int i = 1; i < parts.Length; i++)
+                        // Response: {"messages":[{"source":..., ...}, ...]}.
+                        // STRING-AWARE slicing (wave-2 find 13 / #156): names
+                        // and messages are user-authored — a literal "} in a
+                        // name truncated the old '"}'-scan mid-object. The
+                        // existing string-aware helpers do the walk properly.
+                        int mStart = response.IndexOf("\"messages\"", StringComparison.Ordinal);
+                        int arrStart = mStart >= 0 ? response.IndexOf('[', mStart) : -1;
+                        int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(response, arrStart) : -1;
+                        int n = 0;
+                        if (arrStart >= 0 && arrEnd > arrStart)
                         {
-                            string chunk = "{\"source\"" + parts[i];
-                            // Trim to closing brace (crude but matches existing parsers)
-                            int close = chunk.IndexOf("\"}");
-                            if (close < 0) continue;
-                            string obj = chunk.Substring(0, close + 2);
-                            try { ChatClient.OnMessage?.Invoke(obj); } catch { }
+                            foreach (string obj in SliceTopLevelObjects(
+                                response.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                            {
+                                n++;
+                                try { ChatClient.OnMessage?.Invoke(obj); } catch { }
+                            }
                         }
-                        Plugin.Log.LogInfo($"[CHAT] Scrollback loaded: {parts.Length - 1} messages");
+                        Plugin.Log.LogInfo($"[CHAT] Scrollback loaded: {n} messages");
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[CHAT] Scrollback parse error: {ex.Message}"); }
                 }
@@ -5399,7 +5470,7 @@ namespace CompetitiveRounds
                 FfaLockedRoster = null; FfaMySlot = -1; FfaLobbyPlayerCount = 0;
                 FfaLobbyIsHost = false; FfaLobbyCanStart = false;
                 FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
-                _ffaLeaveIntent = false; _ffaLeaveTargetLobby = null;
+                _ffaLeaveIntent = false; _ffaLeaveTargetLobby = null; _ffaLeaveCause = "";
                 _ffaJoinCountdownKey = null; _ffaJoinCountdownActiveToken = 0;
                 _ffaRoomlessSince = -1f;
 
@@ -7744,7 +7815,7 @@ namespace CompetitiveRounds
             }));
         }
 
-        public static void OvtLeaveQueue()
+        public static void OvtLeaveQueue(string cause = "")
         {
             string sid = MatchTracker.LocalSteamId;
             if (OvtQueueStatus == "leaving") return; // leave already in flight
@@ -7768,7 +7839,8 @@ namespace CompetitiveRounds
             _ovtLeavingSince = Time.realtimeSinceStartup;
             NativeUI.MarkDirty();
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
-                $"{baseUrl}/api/v1/ovt/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}", "",
+                $"{baseUrl}/api/v1/ovt/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}"
+                    + (string.IsNullOrEmpty(cause) ? "" : $"&cause={UnityWebRequest.EscapeURL(cause)}"), "",
                 (ok, resp) =>
                 {
                     if (gen != ovtGen) return;  // watchdog recovered / new lifecycle
@@ -8493,6 +8565,19 @@ namespace CompetitiveRounds
         public static string OpenFfaLobbyId = null;
         public static bool FfaLobbyIsHost = false;
         public static bool FfaLobbyCanStart = false;
+        // v1.36 lobby config mirror for the settings panel (display values —
+        // the server row is the authority; these track the open-lobby poll).
+        public static int FfaLobbyCfgTarget = 5;
+        public static int FfaLobbyCfgPicks = 1;
+        public static int FfaLobbyCfgCap = 5;
+        public static bool FfaLobbyCfgSame = false;
+        public static bool FfaLobbyCfgRanked = true;
+        // Settings-lock countdown: server sends REMAINING seconds (#180);
+        // anchored to unscaledTime locally for a smooth per-second label.
+        public static int FfaLobbySettingsLockSeconds = 0;
+        private static float _ffaLobbyLockAnchorAt = -999f;
+        public static float FfaLobbyLockRemaining =>
+            Mathf.Max(0f, FfaLobbySettingsLockSeconds - (Time.unscaledTime - _ffaLobbyLockAnchorAt));
         public static int FfaLobbyMemberCount = 0;
         public static int FfaLobbyMinPlayers = 3;
         public static int FfaLobbyMaxPlayers = 10;
@@ -8545,6 +8630,11 @@ namespace CompetitiveRounds
         // after FfaLeaveQueue) so the stuck-leave watchdog can restore the
         // belief and re-arm the poll-driven retry.
         private static string _ffaLeaveTargetLobby = null;
+        // Durable leave CAUSE (round-10 find 1): the in_room_exit attestation
+        // must survive the same coroutine-death/retry boundary the target
+        // does — a cause-free retry would let the server reclassify a known
+        // in-room departure as failed assembly. Cleared with intent/target.
+        private static string _ffaLeaveCause = "";
         // Ambiguity window after a transport-failed enroll: keep polling so a
         // late-committing create/join surfaces instead of hiding a seat.
         private static float _ffaAmbiguousPollUntil = -999f;
@@ -8685,6 +8775,20 @@ namespace CompetitiveRounds
             {
                 string lid = ExtractJsonString(resp, "lobby_id");
                 OpenFfaLobbyId = string.IsNullOrEmpty(lid) ? intendedLobbyId : lid;
+                // Per-lobby mirror validity (round-2 find 13): the Cfg*
+                // mirrors otherwise hold the PREVIOUS lobby's values until
+                // the first membership poll returns — the Info popup would
+                // show 10/3 from the lobby just left. Take the enroll
+                // response's config when present (the server echoes the row);
+                // fall back to defaults, which the poll corrects in ~2s.
+                int ecT = ExtractJsonInt(resp, "score_target");
+                int ecP = ExtractJsonInt(resp, "initial_picks");
+                int ecC = ExtractJsonInt(resp, "card_cap");
+                FfaLobbyCfgTarget = ecT > 0 ? ecT : 5;
+                FfaLobbyCfgPicks = ecP > 0 ? ecP : 1;
+                FfaLobbyCfgCap = ecC > 0 ? ecC : 5;
+                FfaLobbyCfgSame = ExtractJsonBool(resp, "same_card_rule");
+                FfaLobbyCfgRanked = !resp.Contains("\"lobby_ranked\":false");
                 _ffaLeaveIntent = false;
                 IsFfaQueuePolling = true; FfaQueueStatus = "lobby";
                 Plugin.Log.LogInfo($"[FFA-LOBBY] enrolled in lobby {OpenFfaLobbyId} (recovery={wasRecovery})");
@@ -8809,6 +8913,49 @@ namespace CompetitiveRounds
             }));
         }
 
+        /// <summary>Host changes one lobby setting. Sends ONLY the changed
+        /// field; the server validates + clamps and returns the effective
+        /// values, which we adopt immediately so the panel reflects reality
+        /// (§7d clamp-up contract) without waiting for the next poll.</summary>
+        public static void FfaSetLobbySetting(string field, int intValue, bool boolValue = false, bool isBool = false)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            if (_ffaLobbyActionInFlight && Time.realtimeSinceStartup - _ffaLobbyActionAt > 30f)
+                _ffaLobbyActionInFlight = false;
+            if (_ffaLobbyActionInFlight) return;
+            int gen = ffaGen;
+            FfaLobbyActionBegin(); int actionGen = _ffaLobbyActionGen;
+            string val = isBool ? (boolValue ? "true" : "false") : intValue.ToString();
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/lobby/settings",
+                $"{{\"steam_id\":\"{sid}\",\"{field}\":{val}}}", (ok, resp) =>
+            {
+                FfaLobbyActionEnd(actionGen);
+                if (gen != ffaGen) return;
+                if (!ok)
+                {
+                    Plugin.Log.LogWarning($"[FFA-LOBBY] settings change failed: {resp}");
+                    CompetitiveUI.ShowNotification(DetailOr(resp, "Couldn't change that setting."),
+                        new Color(1f, 0.6f, 0.2f), 5f);
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                int t = ExtractJsonInt(resp, "score_target"); if (t > 0) FfaLobbyCfgTarget = t;
+                int p = ExtractJsonInt(resp, "initial_picks"); if (p > 0) FfaLobbyCfgPicks = p;
+                int c = ExtractJsonInt(resp, "card_cap"); if (c > 0) FfaLobbyCfgCap = c;
+                FfaLobbyCfgSame = ExtractJsonBool(resp, "same_card_rule");
+                FfaLobbyCfgRanked = !resp.Contains("\"lobby_ranked\":false");
+                // A real change arms the 60s server gate — mirror it now; the
+                // next poll re-syncs the authoritative remainder.
+                if (resp.Contains("\"changed\":[") && !resp.Contains("\"changed\":[]"))
+                {
+                    FfaLobbySettingsLockSeconds = 60;
+                    _ffaLobbyLockAnchorAt = Time.unscaledTime;
+                }
+                NativeUI.MarkDirty();
+            }));
+        }
+
         public static void FetchFfaLobbies(bool force = false)
         {
             if (!force && Time.unscaledTime - _ffaLobbiesLastAt < 3f) return;
@@ -8866,10 +9013,22 @@ namespace CompetitiveRounds
             UpdateFfaQueuePoll(force: true);
         }
 
-        public static void FfaLeaveQueue()
+        /// <summary>cause (round-9 gate): "in_room_exit" when fired by the
+        /// room-exit hook (the leaver was demonstrably IN the ffa_ room, so
+        /// the server must never classify it as failed assembly); anything
+        /// else / empty = pre-room (menu leave, decline, watchdog).</summary>
+        public static void FfaLeaveQueue(string cause = "")
         {
             string sid = MatchTracker.LocalSteamId;
+            // Durable-cause bookkeeping (round-10 finds 1+3): a tagged call
+            // records/upgrades the stored cause even when a leave is already
+            // in flight (the room-exit hook fires AFTER a teardown's own
+            // leave and used to be discarded whole); an untagged call
+            // inherits it so every retry path re-sends the attestation.
+            if (cause == "in_room_exit") _ffaLeaveCause = cause;
             if (FfaQueueStatus == "leaving") return;
+            if (string.IsNullOrEmpty(cause)) cause = _ffaLeaveCause;
+            else _ffaLeaveCause = cause;
             // Capture the expected target BEFORE any clears (impl review find
             // 2: the old order captured after clearing ActiveFfaLobbyId, so a
             // locked-lobby leave carried no expected id and no recovery
@@ -8901,6 +9060,8 @@ namespace CompetitiveRounds
             string url = $"{baseUrl}/api/v1/ffa/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}";
             if (!string.IsNullOrEmpty(expectedLobby))
                 url += $"&expected_lobby_id={UnityWebRequest.EscapeURL(expectedLobby)}";
+            if (!string.IsNullOrEmpty(cause))
+                url += $"&cause={UnityWebRequest.EscapeURL(cause)}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "",
                 (ok, resp) =>
                 {
@@ -8910,6 +9071,7 @@ namespace CompetitiveRounds
                         OpenFfaLobbyId = null;
                         _ffaLeaveIntent = false;
                         _ffaLeaveTargetLobby = null;
+                        _ffaLeaveCause = "";
                         Plugin.Log.LogInfo("[FFA] Left FFA queue/lobby");
                     }
                     else
@@ -9045,6 +9207,15 @@ namespace CompetitiveRounds
                     FfaLobbyMemberCount = ExtractJsonInt(resp, "player_count");
                     int minP = ExtractJsonInt(resp, "min_players"); if (minP > 0) FfaLobbyMinPlayers = minP;
                     int maxP = ExtractJsonInt(resp, "max_players"); if (maxP > 0) FfaLobbyMaxPlayers = maxP;
+                    // v1.36 lobby config + settings-lock (flat scalars, #73;
+                    // absent on an old server -> zeros keep the defaults).
+                    int cfgT = ExtractJsonInt(resp, "score_target"); if (cfgT > 0) FfaLobbyCfgTarget = cfgT;
+                    int cfgP = ExtractJsonInt(resp, "initial_picks"); if (cfgP > 0) FfaLobbyCfgPicks = cfgP;
+                    int cfgC = ExtractJsonInt(resp, "card_cap"); if (cfgC > 0) FfaLobbyCfgCap = cfgC;
+                    FfaLobbyCfgSame = ExtractJsonBool(resp, "same_card_rule");
+                    FfaLobbyCfgRanked = !resp.Contains("\"lobby_ranked\":false");
+                    FfaLobbySettingsLockSeconds = Math.Max(0, ExtractJsonInt(resp, "settings_lock_seconds"));
+                    _ffaLobbyLockAnchorAt = Time.unscaledTime;
                     try
                     {
                         var members = new List<FfaLobbyMemberEntry>();
@@ -9113,6 +9284,44 @@ namespace CompetitiveRounds
                     {
                         return;
                     }
+                    // Mid-game rejoin refusal (Codex round-4 find F1): a
+                    // ready_join carrying game_in_progress means a battle is
+                    // LIVE among the other members while WE are at the menu —
+                    // i.e. we are the crashed/relaunched seat. A reset client
+                    // cannot reconstruct the missed deck/phase state (its
+                    // roster spot is already frozen as departed for
+                    // reporting, #227), so joining now only desyncs the room.
+                    // The gate excludes a client already IN that room (the
+                    // post-ready_join cancel-detector polls through game 1's
+                    // start — that client must not tear itself down).
+                    {
+                        bool inThatRoom = false;
+                        try
+                        {
+                            inThatRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode
+                                && PhotonNetwork.CurrentRoom?.Name == cdRoom;
+                        }
+                        catch { }
+                        if (!inThatRoom && resp.Contains("\"game_in_progress\":true"))
+                        {
+                            Plugin.Log.LogWarning("[FFA] ready_join for a lobby whose game is LIVE — refusing rejoin (relaunched seat)");
+                            FfaLeaveQueue();
+                            CompetitiveUI.ShowNotification("Your FFA match continued without you - you've been removed from it.", new Color(1f, 0.7f, 0.3f), 8f);
+                            NativeUI.MarkDirty();
+                            return;
+                        }
+                        // STARTUP-UNKNOWN (round-5 gate find): the server just
+                        // restarted and cannot yet say whether a game is live.
+                        // Neither join NOR leave — wait; the next poll (2-3s)
+                        // re-asks, and the server's window resolves within
+                        // ~210s worst case. Acting on unknown was what made
+                        // an API restart dissolve every fresh FFA.
+                        if (!inThatRoom && resp.Contains("\"game_in_progress\":null"))
+                        {
+                            Plugin.Log.LogInfo("[FFA] ready_join with game_in_progress UNKNOWN (server just restarted) — waiting for the next poll");
+                            return;
+                        }
+                    }
                     // Consent guard: decline a lock that lands mid-COMPETITIVE-game
                     // (#150). A CASUAL room is different since bug #132: waiting
                     // in casual with an open lobby seat is allowed, and the
@@ -9162,6 +9371,23 @@ namespace CompetitiveRounds
                     string region = ExtractJsonString(resp, "room_region");
                     var roster = ExtractTeamMemberList(resp, "players");
                     FfaLockedRoster = roster;
+                    // v1.36 frozen lobby config — flat scalars (#73), from the
+                    // server's row (the authority). Absent fields (old server)
+                    // extract as 0/false and the setter's clamps keep defaults.
+                    try
+                    {
+                        int cfgTarget = ExtractJsonInt(resp, "score_target");
+                        int cfgCand = ExtractJsonInt(resp, "card_candidates");
+                        int cfgPicks = ExtractJsonInt(resp, "initial_picks");
+                        int cfgCap = ExtractJsonInt(resp, "card_cap");
+                        bool cfgSame = ExtractJsonBool(resp, "same_card_rule");
+                        bool cfgRanked = !resp.Contains("\"lobby_ranked\":false");
+                        if (cfgTarget > 0)
+                            FfaMode.SetPendingConfig(cfgTarget, cfgCand > 0 ? cfgCand : 5,
+                                cfgPicks > 0 ? cfgPicks : 1, cfgCap > 0 ? cfgCap : 5,
+                                cfgSame, cfgRanked);
+                    }
+                    catch (Exception cfgEx) { Plugin.Log.LogWarning($"[FFA] config parse: {cfgEx.Message}"); }
 
                     if (!string.IsNullOrEmpty(room))
                     {
@@ -9195,6 +9421,10 @@ namespace CompetitiveRounds
                             // pre-join so it rides the Player record and can
                             // never race a peer's map load (#79 pattern).
                             prejoin[FfaMapScale.ScaleCapabilityProp] = 1;
+                            // Config/same-card feature level (v1.36): the
+                            // same-card engine runs only when EVERY room member
+                            // advertises this (#273 all-players rule).
+                            prejoin[FfaCardSequence.CapabilityProp] = FfaCardSequence.FeatureLevel;
                             if (PhotonNetwork.LocalPlayer != null)
                                 PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
                         }
@@ -9253,6 +9483,7 @@ namespace CompetitiveRounds
                     {
                         _ffaLeaveIntent = false;
                         _ffaLeaveTargetLobby = null;
+                        _ffaLeaveCause = "";
                         OpenFfaLobbyId = null;
                         NativeUI.MarkDirty();
                         return;
@@ -9882,7 +10113,11 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning("[FFA-REPORT] not enough players to report");
                 return;
             }
-            bool isRanked = true;
+            // §6 casual path: the lobby's ranked flag (from the frozen server
+            // row via the poll payload) replaces the old hardcoded literal.
+            // The server ANDs this signed claim against its own row either
+            // way — a wrong value here can only downgrade, never upgrade.
+            bool isRanked = FfaMode.LobbyRanked;
             var sb = new StringBuilder();
             sb.Append("{");
             sb.Append($"\"lobby_id\":\"{Escape(lobbyId)}\",");
@@ -9893,8 +10128,10 @@ namespace CompetitiveRounds
                 if (i > 0) sb.Append(",");
                 sb.Append("{");
                 sb.Append($"\"steam_id\":\"{Escape(p.steamId)}\",\"display_name\":\"{Escape(p.displayName ?? "Player")}\",");
-                // kills is a placement TIE-BREAK only and rides OUTSIDE the
-                // frozen ffa: HMAC canonical (learning #213 — never extend it).
+                // kills is display/telemetry only (no longer a placement
+                // tie-break — it rides OUTSIDE the frozen ffa: HMAC canonical
+                // (learning #213 — never extend it), so the server refuses to
+                // let an unsigned field reorder placements).
                 sb.Append($"\"slot\":{p.slot},\"rounds_won\":{p.rounds}," +
                           $"\"points_total\":{p.points},\"kills\":{Math.Max(0, p.kills)}," +
                           $"\"left_early\":{(p.leftEarly ? "true" : "false")}," +
@@ -9911,6 +10148,25 @@ namespace CompetitiveRounds
                 sb.Append("\"cards\":[");
                 AppendCards(sb, p.cards ?? new List<MatchTracker.CardPickData>());
                 sb.Append("]");
+                // §10 offer baseline: the reporter attaches ITS OWN offered
+                // candidates only (other seats' offers are unknowable client-
+                // side when the same-card rule is off). Outside the canonical.
+                if (p.steamId == reporterSteam && FfaMode.LocalOffers.Count > 0)
+                {
+                    sb.Append(",\"card_offers\":[");
+                    int oc = 0;
+                    foreach (var off in FfaMode.LocalOffers)
+                    {
+                        if (off == null || string.IsNullOrEmpty(off.CardName)) continue;
+                        // 512 covers the structural max (~450 offers in a
+                        // 10-player first-to-10 — Codex find 9; matches the
+                        // server's truncation bound).
+                        if (oc >= 512) break;
+                        if (oc++ > 0) sb.Append(",");
+                        sb.Append($"{{\"card_name\":\"{Escape(off.CardName)}\",\"round_number\":{Math.Max(1, off.Round)},\"was_picked\":{(off.Picked ? "true" : "false")}}}");
+                    }
+                    sb.Append("]");
+                }
                 if (p.telemetry != null)
                 {
                     var t = p.telemetry;

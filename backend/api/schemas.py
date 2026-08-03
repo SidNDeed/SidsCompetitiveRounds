@@ -1015,7 +1015,20 @@ class FfaPlayerEntry(BaseModel):
     # score can't dodge the loss.
     absent: bool = False
     fps: int | None = Field(None, ge=0, le=10000)
-    cards: list[CardPick] = Field(default_factory=list)
+    # Generous hard bounds (reject only absurd bodies — the quarantine path
+    # persists full payloads, so unbounded lists are a storage-inflation
+    # primitive; Codex v1.36 find 6/9). The honest structural max at 10
+    # players / first-to-10 is ~90 picks and ~450 offers; the award loops
+    # truncate at 128/512.
+    cards: list[CardPick] = Field(default_factory=list, max_length=256)
+    # Per-draw offered candidates (§10 of the config-lobby spec: FFA reported
+    # no offers at all, so every candidate-count question was answered from
+    # 1v1-extrapolated data — this is the pre/post baseline). Outside the
+    # frozen ffa: HMAC canonical; absent from pre-v1.36 clients. Only the
+    # REPORTER can know every seat's offers under the same-card rule; in
+    # private-roll games each client only knows its own, so entries here are
+    # best-effort and bounded.
+    card_offers: list[CardOfferEntry] = Field(default_factory=list, max_length=1024)
     telemetry: TeamPlayerTelemetry | None = None
 
 

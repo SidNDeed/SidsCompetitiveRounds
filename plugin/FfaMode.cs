@@ -29,9 +29,77 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class FfaMode
     {
-        public const int RoundsToWin = 5;
-        public const int PointsToWinRound = 2;
-        public const int CardCap = 5;
+        // ── Per-lobby config (v1.36 configurable lobbies) ──
+        // Was `const` — a const is INLINED into the shipped DLL, which is how
+        // the July-30 destroyed-reports class happened (an old client silently
+        // plays to 5 while the server expects the row's value). Now static,
+        // stamped from the server's ready_join poll payload (the authoritative
+        // frozen row — identical for every member), re-asserted as a room prop
+        // by the master, and reset to defaults on room leave. The server
+        // validates reports against ITS row regardless of what we hold.
+        public static int RoundsToWin = 5;
+        public const int PointsToWinRound = 2;   // not configurable
+        public static int CardCap = 5;
+        public static int InitialPicks = 1;      // TOTAL opening draws (base 1 + knob)
+        public static int CardCandidates = 5;    // knob LOCKED at 5 for v1.36 (§9c)
+        public static bool SameCardRule = false;
+        public static bool LobbyRanked = true;
+        // Room prop: master re-asserts the frozen config in-room so a client
+        // whose poll payload predates a late settings write still pins the
+        // same rule set. Format "target:cand:picks:cap:sameCard:ranked".
+        private const string PropConfig = "cr_ffa_cfg";
+
+        public static void SetPendingConfig(int scoreTarget, int candidates, int initialPicks,
+                                            int cardCap, bool sameCard, bool ranked)
+        {
+            RoundsToWin = Mathf.Clamp(scoreTarget, 3, 10);
+            CardCandidates = Mathf.Clamp(candidates, 1, 5);
+            InitialPicks = Mathf.Clamp(initialPicks, 1, 6);
+            CardCap = Mathf.Clamp(cardCap, 3, 6);
+            SameCardRule = sameCard;
+            LobbyRanked = ranked;
+            Plugin.Log.LogInfo($"[FFA-CFG] pending config: target={RoundsToWin} cand={CardCandidates} picks={InitialPicks} cap={CardCap} same={SameCardRule} ranked={LobbyRanked}");
+        }
+
+        public static void ResetConfigToDefaults()
+        {
+            RoundsToWin = 5; CardCandidates = 5; InitialPicks = 1;
+            CardCap = 5; SameCardRule = false; LobbyRanked = true;
+        }
+
+        private static void MasterPublishConfig()
+        {
+            try
+            {
+                if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
+                var h = new ExitGames.Client.Photon.Hashtable();
+                h[PropConfig] = $"{RoundsToWin}:{CardCandidates}:{InitialPicks}:{CardCap}:{(SameCardRule ? 1 : 0)}:{(LobbyRanked ? 1 : 0)}";
+                PhotonNetwork.CurrentRoom.SetCustomProperties(h);
+            }
+            catch { }
+        }
+
+        private static void LatchConfigFromRoom()
+        {
+            // Latched once per game entry, idempotent (config is frozen per
+            // lobby). Prefer the room prop when present; the pending statics
+            // (server poll) are the fallback AND normally identical, because
+            // both trace to the same frozen row.
+            try
+            {
+                var room = PhotonNetwork.CurrentRoom;
+                var raw = room?.CustomProperties != null && room.CustomProperties.ContainsKey(PropConfig)
+                    ? room.CustomProperties[PropConfig] as string : null;
+                if (string.IsNullOrEmpty(raw)) return;
+                var p = raw.Split(':');
+                if (p.Length < 6) return;
+                int st, cc, ip, cap, sc, rk;
+                if (int.TryParse(p[0], out st) && int.TryParse(p[1], out cc) && int.TryParse(p[2], out ip)
+                    && int.TryParse(p[3], out cap) && int.TryParse(p[4], out sc) && int.TryParse(p[5], out rk))
+                    SetPendingConfig(st, cc, ip, cap, sc != 0, rk != 0);
+            }
+            catch { }
+        }
         // Pick window. Two design passes, both deliberate:
         // - Bug #92-#98 killed the old 25s SILENT auto-pick (invisible timer;
         //   with one human testing three seats it fired seconds after his own
@@ -135,6 +203,13 @@ namespace CompetitiveRounds
         public static float PickWindowSecondsLeft =>
             pickPhaseActive ? Mathf.Max(0f, pickDeadlineRealtime - Time.realtimeSinceStartup) : 0f;
 
+        /// <summary>Local player's offered candidates this GAME (§10 offer
+        /// baseline — cleared in OnGameStart/OnRoomLeft, sent on the report's
+        /// own entry only; other seats' offers are unknowable here when the
+        /// same-card rule is off).</summary>
+        public class OfferRecord { public string CardName; public int Round; public bool Picked; }
+        public static readonly List<OfferRecord> LocalOffers = new List<OfferRecord>();
+
         public class FfaLeaver
         {
             public string displayName;
@@ -185,18 +260,20 @@ namespace CompetitiveRounds
         public static int PointsTotalFor(int teamId) { return pointsTotal.TryGetValue(teamId, out var v) ? v : 0; }
         public static int KillsFor(int teamId) { return kills.TryGetValue(teamId, out var v) ? v : 0; }
 
-        /// <summary>Placement order (Sid's item 3): points (rounds) desc, then
-        /// ALL half points earned incl. spent ones (pointsTotal) desc, then
-        /// total kills desc, then slot for stability. 0 = tied placement
-        /// (shares a place, competition ranking). Used by the game-over
-        /// placement, the report payload ordering and the score HUD.</summary>
+        /// <summary>Placement order: points (rounds) desc, then ALL half
+        /// points earned incl. spent ones (pointsTotal) desc. 0 = tied
+        /// placement (shares a place, competition ranking). Used by the
+        /// game-over placement, the report payload ordering and the score HUD.
+        /// Kills are deliberately NOT a tie-break any more — they ride
+        /// outside the signed HMAC canonical, so the server stopped honoring
+        /// them for placement (a forged kill count could reorder ratings);
+        /// this mirror keeps the client's displayed placement identical to
+        /// what the server rates. Kills remain display/telemetry only.</summary>
         public static int ComparePlacement(int teamA, int teamB)
         {
             int c = RoundsFor(teamB).CompareTo(RoundsFor(teamA));
             if (c != 0) return c;
-            c = PointsTotalFor(teamB).CompareTo(PointsTotalFor(teamA));
-            if (c != 0) return c;
-            return KillsFor(teamB).CompareTo(KillsFor(teamA));
+            return PointsTotalFor(teamB).CompareTo(PointsTotalFor(teamA));
         }
 
         // ── Damage dealt + per-player timelines (bug #127 / #130) ────────
@@ -486,6 +563,30 @@ namespace CompetitiveRounds
             freshGameCancelFired = false;
             deckViewRebuilds.Clear();
             matchStartRealtime = Time.realtimeSinceStartup;
+            // v1.36 config + same-card sequence lifecycle. Config latch is
+            // idempotent (frozen per lobby); the seed publish is derived so a
+            // master-migration republish can never fork it.
+            LatchConfigFromRoom();
+            try { MasterPublishConfig(); } catch { }
+            try { FfaCardSequence.OnGameStart(); } catch { }
+            // In-room capability republish WITH the pool hash (find 3): the
+            // pre-join advert can only carry the level; the hash needs the
+            // loaded card pool. Every client does this, so a mixed-pool room
+            // fails the gate on every seat uniformly.
+            try { FfaCardSequence.PublishCapabilityWithHash(); } catch { }
+            try { FfaCardSequence.MasterPublishSeed(gameNumber); } catch { }
+            LocalOffers.Clear();
+            // §8 settings banner during load-in — reads the statics the
+            // engine itself runs on, AFTER the latch, so it cannot disagree
+            // with the rules in force.
+            try
+            {
+                string cfgLine = $"FIRST TO {RoundsToWin}   -   {InitialPicks} OPENING DRAW{(InitialPicks == 1 ? "" : "S")}   -   {CardCap}-CARD HAND"
+                    + (SameCardRule ? "   -   SAME CARDS FOR EVERYONE" : "")
+                    + (LobbyRanked ? "" : "   -   CASUAL (UNRATED)");
+                CompetitiveUI.ShowFfaSettingsBanner(cfgLine, 9f);
+            }
+            catch { }
             // Review find 1 (critical): FFA can't ride the vanilla match-start
             // path (it keys on a log marker + the vanilla p1/p2 fields, which
             // never move here), so arm the watcher's per-game state explicitly
@@ -526,6 +627,10 @@ namespace CompetitiveRounds
             try { FfaMapScale.Reset(); } catch { }
             try { FfaSpawnPoints.Clear(); } catch { }
             ClearSpawnGrace();
+            try { FfaCardSequence.OnRoomLeft(); } catch { }
+            ResetConfigToDefaults();
+            LocalOffers.Clear();
+            GameStartedInRoom = false;
         }
 
         /// <summary>Capture a leaver's tallies before Photon destroys their
@@ -890,7 +995,17 @@ namespace CompetitiveRounds
                     new Color(1f, 0.8f, 0.4f), 7f);
             }
             catch { }
-            try { ApiClient.FfaLeaveQueue(); } catch { }
+            // NO cause tag (round-11 find 4): this is the FRESH-game
+            // no-quorum cancel — nothing was or will be reported, and the
+            // zero-game dissolution is the DESIRED outcome. The round-10
+            // in_room_exit tag landed here by an old_string shape collision
+            // (learning #220's bulk-edit trap, again) and would have left a
+            // dead active parent awaiting a report that cannot exist.
+            // GameStartedInRoom resets FIRST so the generic room-exit hook
+            // (firing after NetworkRestart) cannot re-tag this leave, and
+            // the durable-cause store is cleared of any earlier upgrade.
+            GameStartedInRoom = false;
+            try { ApiClient.FfaLeaveQueue("fresh_cancel"); } catch { }
             try { NetworkConnectionHandler.instance.NetworkRestart(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
         }
@@ -911,7 +1026,10 @@ namespace CompetitiveRounds
                     new Color(1f, 0.8f, 0.4f), 7f);
             }
             catch { }
-            try { ApiClient.FfaLeaveQueue(); } catch { }
+            // in_room_exit (round-10 find 3): this teardown runs AFTER a
+            // recorded game with the reporter's POST possibly still in
+            // flight — the pre-room dissolution must never eat that report.
+            try { ApiClient.FfaLeaveQueue("in_room_exit"); } catch { }
             try { NetworkConnectionHandler.instance.NetworkRestart(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
         }
@@ -947,8 +1065,15 @@ namespace CompetitiveRounds
         }
 
         /// <summary>DoStartGame replacement body — game 1 and every rematch.</summary>
+        /// <summary>True once a game ACTUALLY STARTED in the current ffa_
+        /// room (round-10 find 4): the room-exit hook attests in_room_exit
+        /// from THIS, not from mere room occupancy — a pre-start exit from a
+        /// never-filled room must stay eligible for assembly dissolution.</summary>
+        public static bool GameStartedInRoom { get; private set; }
+
         public static IEnumerator FfaDoStartGame(GM_ArmsRace gm)
         {
+            GameStartedInRoom = true;
             OnGameStart();
             PurgeDepartedPlayers("game start");
             // Bug #104 + review find 12: below the 3-player minimum, wait
@@ -976,7 +1101,11 @@ namespace CompetitiveRounds
                             new Color(1f, 0.8f, 0.4f), 7f);
                     }
                     catch { }
-                    try { ApiClient.FfaLeaveQueue(); } catch { }
+                    // in_room_exit (round-11 find 3): the rematch abort
+                    // runs AFTER game 1 recorded, with the reporter's POST
+                    // possibly still in flight — same report-preserving rule
+                    // as EndSittingBelowMinimum.
+                    try { ApiClient.FfaLeaveQueue("in_room_exit"); } catch { }
                     try { NetworkConnectionHandler.instance.NetworkRestart(); }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
                     yield break;
@@ -996,8 +1125,16 @@ namespace CompetitiveRounds
             yield return new WaitForSecondsRealtime(1f);
             if (gm.pickPhase)
             {
-                // Initial draw: EVERYONE picks one card, simultaneously.
-                yield return FfaPickPhase(gm, -1);
+                // Initial draw: EVERYONE picks, simultaneously. InitialPicks
+                // (config: base 1 + host knob, floored server-side at
+                // clamp(C+1-N,1,C) — §7d) runs as K SEQUENTIAL cycles, never
+                // one cycle with K picks: sequential gets clean protocol
+                // namespaces (each cycle its own PropCycle/PropResult) and
+                // correct duplicate filtering for free, and avoids the #225
+                // same-frame double-apply class entirely (§4d).
+                int openingDraws = Mathf.Clamp(InitialPicks, 1, 6);
+                for (int od = 0; od < openingDraws; od++)
+                    yield return FfaPickPhase(gm, -1);
             }
             // Same leave-race fencing as FfaTransition (Codex review find 5):
             // a picker leaving as the opening draw resolves would otherwise
@@ -1060,6 +1197,29 @@ namespace CompetitiveRounds
             }
             pickerIds.Sort();
 
+            // §8c drift recovery — FINAL SHAPE after three review rounds
+            // (wave-2 round-3 find N6 closed the book on cache adoption).
+            // Adoption acts on FRESH EVIDENCE ONLY, ahead-only:
+            //  (b) mid-wait, the cycle prop CHANGES to an ahead identity
+            //      (a fresh publish is current by construction);
+            //  (d) the master's pick-evidence detector (quorum of the other
+            //      pickers) + the non-master fresh-prop watch in the result
+            //      loop.
+            // There is deliberately NO adoption from a STABLE cached prop
+            // (the round-2/round-3 draft): a cached value can be the
+            // PREVIOUS cycle whose manifest, picks, AND result all still
+            // exist, and every hold/grace scheme Codex reviewed still let
+            // the master collect stale picks and finalize the old namespace.
+            // The population that needed cache adoption — a mid-game
+            // rejoiner with reset counters — does not exist: FFA rooms never
+            // readmit mid-game (roster frozen at start, leavers purged and
+            // reported departed), so every present client's local counters
+            // are continuous. A successor master that LAGGED (missed a
+            // cycle) is corrected by (d) the moment peers publish picks.
+            System.Func<int, int, bool> aheadOfLocal =
+                (g, c) => g > game || (g == game && c > cycle);
+            string rawCycleAtEntry = ReadRawRoomProp(PropCycle);
+
             if (PhotonNetwork.IsMasterClient)
                 SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
 
@@ -1069,17 +1229,68 @@ namespace CompetitiveRounds
             {
                 manifest = ReadCycleManifest(game, cycle);
                 if (manifest != null) break;
+                string rawNow = ReadRawRoomProp(PropCycle);
+                if (rawNow != null && rawNow != rawCycleAtEntry)
+                {
+                    var adopted = ParseCycleProp(rawNow);
+                    if (adopted != null && aheadOfLocal(adopted.Item1, adopted.Item2))
+                    {
+                        Plugin.Log.LogWarning($"[FFA] cycle identity drift: local {game}:{cycle} vs master {adopted.Item1}:{adopted.Item2} — adopting");
+                        game = adopted.Item1;
+                        cycle = adopted.Item2;
+                        gameNumber = game;
+                        cycleNumber = cycle;
+                        manifest = adopted.Item3;
+                        break;
+                    }
+                }
                 // Master migration: if the original master died before
                 // publishing, the new master publishes.
                 if (PhotonNetwork.IsMasterClient && Time.realtimeSinceStartup - phaseStart > 2f)
                     SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
                 yield return null;
             }
+            // No timeout adoption from the (possibly stale) cached prop —
+            // see the §8c decision comment above (round-3 find N6).
             if (manifest == null)
             {
                 Plugin.Log.LogWarning($"[FFA] pick cycle {cycle}: no manifest after {ManifestWaitSeconds}s — using local picker set");
                 manifest = pickerIds;
             }
+
+            // Same-card sequence: latch once per game at the FIRST pick phase
+            // (the seed prop has had the whole first round to propagate), then
+            // consume one draw index for EVERY manifest picker — the manifest
+            // is the agreed offer event, so a crashed seat's index advances
+            // too (§4c.3: consume-on-offer). The residual: a client that hit
+            // the manifest TIMEOUT above consumed from its LOCAL picker set,
+            // which can skew ITS OWN indexes only — candidates are private,
+            // picks travel by name, so nothing desyncs beyond that screen's
+            // fairness for this game.
+            try { FfaCardSequence.MasterPublishSeed(game); } catch { }
+            // Poll the latch to ITS OWN verdict (round-4 find F2: a 3s caller
+            // ceiling truncated the latch's 8s pending budget — a property
+            // arriving at 3.2s still split shared/private). LatchForGame owns
+            // the deadline (it latches fallback at 8s of pending); the 12s
+            // caller ceiling is only a belt against a throwing latch, above
+            // the 8s budget by construction. Normal case resolves <1s; the
+            // pick window is ~25s.
+            {
+                float latchWait = Time.realtimeSinceStartup;
+                while (true)
+                {
+                    bool latched = true;
+                    try
+                    {
+                        FfaCardSequence.LatchForGame(game);
+                        latched = FfaCardSequence.IsLatchedFor(game);
+                    }
+                    catch { }
+                    if (latched || Time.realtimeSinceStartup - latchWait > 12f) break;
+                    yield return null;
+                }
+            }
+            try { FfaCardSequence.ConsumeOffers(manifest); } catch { }
 
             // Local player picks?
             var localPlayer = LocalPlayer();
@@ -1109,6 +1320,25 @@ namespace CompetitiveRounds
             double lastPublishedPhotonDeadline = -1.0;
             if (wasMaster) PublishSharedDeadline(game, cycle, deadline, ref lastPublishedPhotonDeadline);
             Dictionary<int, string> result = null;
+            // Round-2 find 2: the cached-result short-circuit must not bypass
+            // the drift detector — a drifted master could otherwise consume a
+            // stale result for its old identity before ever observing peers'
+            // ahead picks. One detector pass BEFORE the first result read.
+            if (PhotonNetwork.IsMasterClient)
+            {
+                var pre = DetectAheadPickIdentity(manifest, game, cycle);
+                if (pre != null)
+                {
+                    Plugin.Log.LogWarning($"[FFA] master identity {game}:{cycle} behind peers' {pre.Item1}:{pre.Item2} at result entry — adopting");
+                    game = pre.Item1; cycle = pre.Item2;
+                    gameNumber = game; cycleNumber = cycle;
+                    SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
+                }
+            }
+            // Snapshot for the non-master watch below (round-4 find F1: a
+            // STABLE cached prop is not evidence — only a CHANGE observed
+            // during this loop is a fresh publish).
+            string rawCycleAtResultEntry = ReadRawRoomProp(PropCycle);
             while (true)
             {
                 result = ReadCycleResult(game, cycle);
@@ -1117,6 +1347,43 @@ namespace CompetitiveRounds
                 if (now - lastCollect > 0.25f)   // prop-table reads throttled
                 {
                     lastCollect = now;
+                    // Master drift self-heal (find 2): if two+ peers publish
+                    // picks under an identity strictly AHEAD of ours, we are
+                    // the drifted one — adopt it and republish the manifest
+                    // so the phase converges instead of running one behind.
+                    if (PhotonNetwork.IsMasterClient)
+                    {
+                        var ahead = DetectAheadPickIdentity(manifest, game, cycle);
+                        if (ahead != null)
+                        {
+                            Plugin.Log.LogWarning($"[FFA] master identity {game}:{cycle} is behind peers' {ahead.Item1}:{ahead.Item2} — adopting and republishing");
+                            game = ahead.Item1;
+                            cycle = ahead.Item2;
+                            gameNumber = game;
+                            cycleNumber = cycle;
+                            SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
+                        }
+                    }
+                    else
+                    {
+                        // Non-master drift watch — CHANGE-TRIGGERED (round-4
+                        // find F1: a stable cached value is not evidence; a
+                        // publish observed DURING this loop is fresh by
+                        // construction). Catches a lagged continuous client
+                        // the master-only detector can't help.
+                        string rawNow = ReadRawRoomProp(PropCycle);
+                        var np = rawNow != rawCycleAtResultEntry ? ParseCycleProp(rawNow) : null;
+                        if (np != null && (np.Item1 > game || (np.Item1 == game && np.Item2 > cycle)))
+                        {
+                            Plugin.Log.LogWarning($"[FFA] non-master identity {game}:{cycle} behind authoritative {np.Item1}:{np.Item2} — adopting");
+                            game = np.Item1;
+                            cycle = np.Item2;
+                            gameNumber = game;
+                            cycleNumber = cycle;
+                            if (np.Item3 != null) manifest = np.Item3;
+                            lastGotCount = 0;
+                        }
+                    }
                     var got = CollectPicks(manifest, game, cycle);
                     if (got.Count > lastGotCount)
                     {
@@ -1284,6 +1551,36 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] SetRoomProp {key}: {ex.Message}"); }
         }
 
+        private static string ReadRawRoomProp(string key)
+        {
+            try
+            {
+                var props = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (props == null || !props.ContainsKey(key)) return null;
+                return props[key] as string;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Parse a PropCycle value into (game, cycle, pickerIds), or
+        /// null. Used by the §8c drift-adoption path, which needs the fields
+        /// WITHOUT the local-identity equality check.</summary>
+        private static Tuple<int, int, List<int>> ParseCycleProp(string raw)
+        {
+            try
+            {
+                var parts = (raw ?? "").Split(new[] { ':' }, 3);
+                if (parts.Length != 3) return null;
+                int g, c;
+                if (!int.TryParse(parts[0], out g) || !int.TryParse(parts[1], out c)) return null;
+                var ids = new List<int>();
+                foreach (var s in parts[2].Split(','))
+                    if (int.TryParse(s, out var v)) ids.Add(v);
+                return Tuple.Create(g, c, ids);
+            }
+            catch { return null; }
+        }
+
         private static List<int> ReadCycleManifest(int game, int cycle)
         {
             try
@@ -1386,6 +1683,54 @@ namespace CompetitiveRounds
             return got;
         }
 
+        /// <summary>Master self-heal for the drifted-successor case (Codex
+        /// client review find 2): a master whose own identity is BEHIND sees
+        /// its collect find nothing, while peers' pick props carry the true
+        /// (game, cycle). When two or more manifest peers publish picks under
+        /// one identity strictly ahead of ours, that identity wins. Returns
+        /// the majority (game, cycle) or null.</summary>
+        private static Tuple<int, int> DetectAheadPickIdentity(List<int> manifest, int game, int cycle)
+        {
+            try
+            {
+                string noncePrefix = RoomNonce() + ":";
+                var counts = new Dictionary<string, int>();
+                foreach (var pid in manifest)
+                {
+                    var pl = PlayerManager.instance?.GetPlayerWithID(pid);
+                    var props = pl?.data?.view?.Owner?.CustomProperties;
+                    if (props == null || !props.ContainsKey(PropPick)) continue;
+                    string v = props[PropPick] as string ?? "";
+                    if (!v.StartsWith(noncePrefix)) continue;
+                    var parts = v.Substring(noncePrefix.Length).Split(new[] { ':' }, 3);
+                    if (parts.Length != 3) continue;
+                    int g, c;
+                    if (!int.TryParse(parts[0], out g) || !int.TryParse(parts[1], out c)) continue;
+                    if (g > game || (g == game && c > cycle))
+                    {
+                        string key = g + ":" + c;
+                        counts[key] = (counts.TryGetValue(key, out var n) ? n : 0) + 1;
+                    }
+                }
+                // Quorum (round-2 find 2): with a 2-picker cycle only ONE
+                // other picker exists, so a flat >=2 is unreachable there —
+                // require agreement from every OTHER manifest peer, capped
+                // at 2 (a lone forged prop can then only sway a 2-picker
+                // cycle, where it is also the only evidence available).
+                int quorum = Math.Min(2, Math.Max(1, manifest.Count - 1));
+                foreach (var kv in counts)
+                {
+                    if (kv.Value >= quorum)
+                    {
+                        var p = kv.Key.Split(':');
+                        return Tuple.Create(int.Parse(p[0]), int.Parse(p[1]));
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
         // ── Local pick UI ──
 
         private static readonly List<GameObject> localCardObjects = new List<GameObject>();
@@ -1395,23 +1740,51 @@ namespace CompetitiveRounds
             var choice = CardChoice.instance;
             if (choice == null) yield break;
             // Card slot anchors: vanilla CardChoice's own children transforms.
-            var slots = new List<Transform>();
+            // The 5 anchors are a fanned arc; taking the FIRST k would leave a
+            // left-shifted, tilted half-hand, so sub-5 counts use a SYMMETRIC
+            // index table (§4a). The candidates knob is server-locked at 5
+            // for v1.36 (§9c), so today idx always yields all five — the
+            // table is the reviewed-and-ready half of the future knob.
+            var allSlots = new List<Transform>();
             for (int i = 0; i < choice.transform.childCount && i < 5; i++)
-                slots.Add(choice.transform.GetChild(i));
-            if (slots.Count == 0) yield break;
+                allSlots.Add(choice.transform.GetChild(i));
+            if (allSlots.Count == 0) yield break;
+            var slots = allSlots;
+            int wantCount = Mathf.Clamp(CardCandidates, 1, allSlots.Count);
+            if (wantCount < allSlots.Count && allSlots.Count == 5)
+            {
+                int[][] symmetric = {
+                    new[] { 2 },            // 1 candidate: centre
+                    new[] { 1, 3 },         // 2: inner pair
+                    new[] { 1, 2, 3 },      // 3: inner trio
+                    new[] { 0, 1, 3, 4 },   // 4: skip centre
+                };
+                slots = new List<Transform>();
+                foreach (var si in symmetric[wantCount - 1]) slots.Add(allSlots[si]);
+            }
 
             try { ArtHandler.instance.SetSpecificArt(choice.cardPickArt); } catch { }
 
-            // Local candidates (own RNG — candidates are per-picker private).
+            // Candidates: TWO STREAMS (§7e ⚠ box). Same-card rule active →
+            // the deterministic shared sequence (every client computes an
+            // identical Sk for draw k). Otherwise → the private per-client
+            // roll below, exactly as shipped — reproducibility must never
+            // leak into this path or the rule could not be switched off.
             var candidates = new List<CardInfo>();
             var candidateObjs = new List<GameObject>();
-            int guard = 0;
-            while (candidates.Count < slots.Count && guard++ < 200)
+            bool sharedDraw = false;
+            try { sharedDraw = FfaCardSequence.TryGetCandidates(localPlayer, slots.Count, candidates); }
+            catch (Exception sqx) { Plugin.Log.LogWarning($"[FFA-SEQ] shared draw failed: {sqx.Message}"); candidates.Clear(); }
+            if (!sharedDraw)
             {
-                var c = PickRandomCard(choice);
-                if (c == null) break;
-                if (!IsCardAllowedFor(localPlayer, c, candidates)) continue;
-                candidates.Add(c);
+                int guard = 0;
+                while (candidates.Count < slots.Count && guard++ < 200)
+                {
+                    var c = PickRandomCard(choice);
+                    if (c == null) break;
+                    if (!IsCardAllowedFor(localPlayer, c, candidates)) continue;
+                    candidates.Add(c);
+                }
             }
             // `shown` stays index-aligned with candidateObjs: a candidate
             // whose visual failed to spawn is DROPPED, not silently kept —
@@ -1533,6 +1906,23 @@ namespace CompetitiveRounds
                 catch { }
             }
             try { GameStateWatcher.RecordFfaLocalPick(cardName, RoundsTotalAll()); } catch { }
+            // §10 offer baseline: log what THIS client was offered this draw
+            // (own offers only — the report attaches them for the local entry;
+            // candidate counts were previously invisible to the server).
+            try
+            {
+                int offerRound = Math.Max(1, RoundsTotalAll() + 1);
+                for (int i = 0; i < shown.Count && i < candidateObjs.Count; i++)
+                {
+                    LocalOffers.Add(new OfferRecord
+                    {
+                        CardName = CardRarityLookup.GetCanonicalName(shown[i].gameObject.name),
+                        Round = offerRound,
+                        Picked = (i == chosen),
+                    });
+                }
+            }
+            catch { }
 
             // Visual feedback: chosen card pops, others leave.
             for (int i = 0; i < candidateObjs.Count; i++)

@@ -382,6 +382,10 @@ class Bet(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     settled_at = Column(DateTime(timezone=True), nullable=True)
     payout = Column(Integer, nullable=True)
+    # 'won' | 'lost' | 'refunded' — stamped by the settling code path
+    # (migration 180). Immutable settlement cause; the ledger prefers it over
+    # any payout arithmetic (Codex v1.36 find 16).
+    settlement_kind = Column(String(10), nullable=True)
 
     __table_args__ = (UniqueConstraint("player_id", "series_id", name="uq_bet_player_series"),)
 
@@ -647,7 +651,9 @@ class TournamentMatch(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tournament_id = Column(UUID(as_uuid=True), ForeignKey("tournaments.id", ondelete="CASCADE"), nullable=False)
     round = Column(SmallInteger, nullable=False)
-    bracket_side = Column(String(4), nullable=False, default="W")
+    # String(16), not (4): 'GF_RESET' is 8 chars — migration 183 widened the
+    # column (the VARCHAR(4) made every bracket-reset insert abort).
+    bracket_side = Column(String(16), nullable=False, default="W")
     slot_idx = Column(SmallInteger, nullable=False)
     p1_signup_id = Column(UUID(as_uuid=True), ForeignKey("tournament_signups.id", ondelete="SET NULL"), nullable=True)
     p2_signup_id = Column(UUID(as_uuid=True), ForeignKey("tournament_signups.id", ondelete="SET NULL"), nullable=True)

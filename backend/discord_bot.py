@@ -29,6 +29,31 @@ LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL", "0"))
 SERIES_LOG_CHANNEL_ID = int(os.getenv("SERIES_LOG_CHANNEL", "0"))
 QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
 CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
+# ── Chat channel split (localization-design §2.6 / D5) ─────────────────────
+# CHAT_CHANNELS maps chat-channel language codes to Discord channel ids:
+#   "global:<id>,ru:<id>,es:<id>"
+# Defaults: the existing bridge channel stays `global`; ru/es are the two
+# channels created for D5. Unmapped languages or unresolvable channels relay
+# into GLOBAL with a "[RU]" prefix and log once — never drop.
+def _parse_chat_channels(raw: str) -> dict:
+    out = {"global": CHAT_CHANNEL_ID,
+           "ru": 1533218251205775360,
+           "es": 1533218515019108353}
+    for tok in (raw or "").split(","):
+        tok = tok.strip()
+        if not tok or ":" not in tok:
+            continue
+        lang, _, cid = tok.partition(":")
+        lang = lang.strip().lower()
+        cid = cid.strip()
+        if lang and cid.isdigit():
+            out[lang] = int(cid)
+    return out
+
+
+CHAT_CHAN_BY_LANG = _parse_chat_channels(os.getenv("CHAT_CHANNELS", ""))
+CHAT_LANG_BY_CHAN = {v: k for k, v in CHAT_CHAN_BY_LANG.items()}
+_chat_route_warned: set = set()
 ADMIN_CHANNEL_ID = int(os.getenv("ADMIN_CHANNEL", "1495392567687250061"))  # #scr-admin — anti-cheat flags
 TOURNAMENT_CHANNEL_ID = int(os.getenv("TOURNAMENT_CHANNEL", "0"))  # set to enable #tournaments announcements
 # Channel for new mod-release announcements. Bot polls the public GitHub
@@ -412,6 +437,8 @@ async def backfill_discord_usernames():
 import re as _faq_re
 import time as _faq_time
 import difflib as _faq_difflib
+import os as _faq_os   # block-local like the others: the harness execs ONLY
+                       # this region, so module-scope imports don't exist here
 
 FAQ_INFO_CHANNEL = "<#1159243585309384805>"       # #ranked-information
 FAQ_INSTALL_CHANNEL = "<#1491701002267791401>"    # #scr-competitive-rounds-how-to-install
@@ -420,6 +447,43 @@ FAQ_MODPACKS_CHANNEL = "<#1137271024132571156>"    # #mod-packs
 FAQ_MODPACK_CODE = "019f642f-9c88-f5f7-5199-41b4b7d30ebf"
 FAQ_THUNDERSTORE_URL = "https://thunderstore.io/c/rounds/p/Team_Sid/SidsCompetitiveRounds/"
 FAQ_HELPER_NAME = "SCR Helper"
+
+# Auto-responder channel scoping. Comma-separated channel ids in the
+# FAQ_CHANNEL_ALLOWLIST env var; empty/unset = answer in every guild channel
+# (the shipped default — Sid, 2026-08-01).
+# Parse rules (Codex FAQ review find 7): blank/unset is GLOBAL; a CONFIGURED
+# value with any invalid token logs loudly, and if NO valid ids survive the
+# responder fails CLOSED (answers nowhere) so a typo'd allowlist is noticed
+# immediately instead of silently reverting to global. ASCII-digit full match
+# only — str.isdigit() accepts superscripts that int() then rejects at
+# import time, which would prevent the bot from starting.
+def _faq_parse_allowlist(raw: str):
+    raw = (raw or "").strip()
+    if not raw:
+        return frozenset(), False          # unset → global
+    ids, bad = set(), []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if _faq_re.fullmatch(r"[0-9]{1,20}", tok):
+            try:
+                ids.add(int(tok))
+                continue
+            except Exception:
+                pass
+        bad.append(tok)
+    if bad or not ids:
+        # A nonblank value that yields ZERO valid ids (e.g. just ",") is a
+        # misconfiguration even with no individually-invalid token — it fails
+        # closed, so it must ALWAYS log (Codex round-2 find 23).
+        print(f"[FAQ] ERROR: FAQ_CHANNEL_ALLOWLIST={raw!r} invalid token(s) {bad!r} — "
+              + ("using the valid ids only" if ids else "failing CLOSED (no auto-answers)"))
+    return frozenset(ids), True            # configured (possibly empty = closed)
+
+
+_FAQ_CHANNEL_ALLOWLIST, _FAQ_ALLOWLIST_CONFIGURED = _faq_parse_allowlist(
+    _faq_os.environ.get("FAQ_CHANNEL_ALLOWLIST", ""))
 
 _FAQ_KEY_COOLDOWN = 180.0   # same topic, same channel/scope
 _FAQ_USER_COOLDOWN = 20.0   # any topic, same asker
@@ -440,17 +504,44 @@ def _faq_rate_ok(scope, key, user_key) -> bool:
     return True
 
 
+# URLs: explicit schemes; scheme-less dotted hostnames with a PATH or QUERY
+# (any TLD — `example.co/ffa/rules` and `example.com?ffa=rules` are links,
+# Codex FAQ review find 10); bare hostnames only on the common-TLD allowlist
+# so "e.g." and file names survive.
+_FAQ_URL_RE = _faq_re.compile(
+    r"(?:https?|steam)://\S+"
+    r"|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+[/?]\S*"
+    r"|\b[a-z0-9-]+\.(?:io|com|net|org|gg|dev)(?:/\S*)?", _faq_re.I)
+_FAQ_CODE_FENCE_RE = _faq_re.compile(r"```.*?```", _faq_re.S)
+_FAQ_CODE_INLINE_RE = _faq_re.compile(r"`([^`\n]{1,60})`")
+
+
 def _faq_norm(text: str) -> str:
-    """Lowercase, strip mention/emoji tokens and curly quotes, collapse spaces."""
+    """Lowercase, strip code/URLs/mention tokens and curly quotes, collapse spaces."""
     t = (text or "").lower()
-    t = _faq_re.sub(r"<[@#:][^>]{0,40}>", " ", t)   # <@id> <#id> <:emoji:id>
+    t = _FAQ_CODE_FENCE_RE.sub(" ", t)    # fenced code is never a question
+    t = _FAQ_CODE_INLINE_RE.sub(r"\1", t) # inline code KEEPS its content — "how
+                                          # does `ffa` work?" must not lose its
+                                          # topic (find 16); only delimiters go
+    # URLs become a PLACEHOLDER token, not a deletion (Codex round-2 find 13):
+    # "how do i install <unbound url>" must not normalize into the objectless
+    # "how do i install" and receive SCR's installer answer. The token must
+    # contain NO substring any pattern matches — round-3 find 4: "xlinkx"
+    # carried `link` into the link_account arm. "zzz" appears in no pattern
+    # and no example, so it can bridge neither layer.
+    t = _FAQ_URL_RE.sub(" zzz ", t)
+    # Custom emoji parsed STRUCTURALLY (find 19: name+id can exceed a flat 40
+    # chars — Discord allows 32-char names + 19-digit ids), then the generic
+    # mention forms.
+    t = _faq_re.sub(r"<a?:[A-Za-z0-9_~]{1,64}:[0-9]{5,25}>", " ", t)
+    t = _faq_re.sub(r"<[@#][^>]{0,40}>", " ", t)
     t = t.replace("’", "'").replace("‘", "'")
     t = _faq_re.sub(r"\s+", " ", t).strip()
     return t
 
 
 _FAQ_QUESTION_RE = _faq_re.compile(
-    r"(\?|^(how|what|whats|what's|where|when|who|whos|who's|why|can|could|does|do|is|are|any|which|help|"
+    r"(\?|^(how|what|whats|what's|where|wheres|where's|when|who|whos|who's|why|can|could|does|do|is|are|any|which|help|"
     r"explain|list|show|fastest)\b"
     r"|\b(how do i|how to|what is|where is|can i|does the|is there|anyone know))")
 
@@ -465,6 +556,18 @@ _FAQ_FUZZY_STOPWORDS = frozenset({
     "it", "me", "my", "of", "on", "please", "safe", "series", "some",
     "system", "the", "there", "this", "to", "we", "what",
     "whats", "where", "which", "who", "why", "with", "work", "works", "you",
+    # Ambient in a gaming Discord -- these must never be the ONLY shared topic
+    # token, or scaffolding picks the entry ("how do i type in game" -> betting
+    # via game~games). "get" moving here is why "how do i get more gold" must
+    # stay in the harness -- it still passes because "gold" is an exact token.
+    "game", "games", "gaming", "rounds", "round", "play", "playing", "played",
+    "guys", "lol", "pls", "plz", "thing", "things", "stuff", "new", "know",
+    "want", "wanna", "got", "get", "one", "way", "time", "good", "bad", "best",
+    "more", "less",   # "how do i get more game modes" bridged to more_gold on
+                      # the bare token "more" (Codex find-12 residual probe)
+    "not", "working", # "is not working?" (emoji stripped away) fuzzy-bridged
+                      # to mods_not_working with zero real topic — the mods
+                      # examples still bridge on scr/mods exact tokens
 })
 
 
@@ -487,7 +590,18 @@ def _faq_topics_overlap(left: set, right: set) -> bool:
         return False
     for a in left:
         for b in right:
-            if a == b or _faq_difflib.SequenceMatcher(None, a, b).ratio() >= 0.84:
+            # 0.90 for normal-length tokens, not 0.84: 0.84 admits
+            # singular/plural bridges (game/games = 0.888) which let pure
+            # scaffolding pick an entry; 0.90 still admits real typos
+            # (instal/install = 0.923, thunderstor/thunderstore = 0.956).
+            # SHORT topics (<=5 chars) keep 0.84 — a one-edit typo on a short
+            # word can't reach 0.90 (gro/grow = 0.857, groww/grow = 0.888 —
+            # Codex find 14), and the ambient short words that made 0.84
+            # dangerous (game/games/play) are stopworded out before this gate.
+            if a == b:
+                return True
+            thresh = 0.84 if min(len(a), len(b)) <= 5 else 0.90
+            if _faq_difflib.SequenceMatcher(None, a, b).ratio() >= thresh:
                 return True
     return False
 
@@ -678,9 +792,9 @@ FAQ_ENTRIES = [
         "key": "elo_delta",
         "title": "Elo gain/loss calculator",
         "patterns": [
-            r"how (much|many) (elo|rating|points?).{0,40}(gain|lose|get|win|drop)",
-            r"(gain|lose|win|get|drop).{0,25}(elo|rating|points?).{0,30}(against|vs|playing|if i (beat|play|lose))",
-            r"(elo|rating).{0,20}(gain|lose|change).{0,30}(against|vs)",
+            r"how \b(much|many)\b \b(elo|ratings?|points?)\b.{0,40}\b(gain|lose|get|win|drop)\b",
+            r"\b(gain|lose|win|get|drop)\b.{0,25}\b(elo|ratings?|points?)\b.{0,30}(against|vs|playing|if i \b(beat|play|lose)\b)",
+            r"\b(elo|ratings?)\b.{0,20}\b(gain|lose|change)\b.{0,30}\b(against|vs)\b",
         ],
         "examples": ["how much elo will i gain if i play against @player",
                      "how much rating do i lose against @player"],
@@ -692,9 +806,11 @@ FAQ_ENTRIES = [
         "key": "top_player",
         "title": "Who's the top player?",
         "patterns": [
-            r"who('?s| is|s)\b.{0,20}(best|top|highest|number ?(one|1)|#? ?1)",
+            # (?!\d) closes the numeric arms — "who is #10 / 12th / number 10"
+            # matched through the leading digit (Codex round-2 find 20).
+            r"who('?s| is|s)\b.{0,20}(best|top|highest|number ?(one|1(?!\d))|#? ?1(?!\d))",
             r"(best|top|highest.rated) player",
-            r"who'?s?\b.{0,25}rank(ed)? ?(1|one|first)\b",
+            r"who'?s?\b.{0,25}rank(ed)? ?\b(1|one|first)\b",
         ],
         "examples": ["who is the best player", "who is the top player here"],
         "handler": _faq_top_player,
@@ -703,9 +819,9 @@ FAQ_ENTRIES = [
         "key": "community_modpacks",
         "title": "Community mod packs",
         "patterns": [
-            r"(cool|good|balanced|fun|recommended|recommend|best).{0,30}mod ?packs?",
-            r"mod ?packs?.{0,25}(cool|good|balanced|fun|recommended|recommend|best)",
-            r"where.{0,25}(find|get|see).{0,20}mod ?packs?",
+            r"\b(cool|good|balanced|fun|recommended|recommend|best)\b.{0,30}mod ?packs?",
+            r"mod ?packs?.{0,25}\b(cool|good|balanced|fun|recommended|recommend|best)\b",
+            r"where.{0,25}\b(find|get|see)\b.{0,20}mod ?packs?",
         ],
         "examples": ["is there a cool balanced mod pack", "where can i find community mod packs"],
         "answer": (f"Yes — browse {FAQ_MODPACKS_CHANNEL}. That channel is for community ROUNDS mod packs "
@@ -718,8 +834,8 @@ FAQ_ENTRIES = [
         "title": "SCR modpack code",
         "patterns": [
             r"mod ?pack.{0,20}code",
-            r"(r2modman|thunderstore).{0,20}(profile|import).{0,10}code",
-            r"(scr|competitive).{0,20}(profile|mod ?pack)",
+            r"\b(r2modman|thunderstore)\b.{0,20}\b(profile|import)\b.{0,10}code",
+            r"\b(scr|competitive)\b.{0,20}(profile|mod ?pack)",
             r"profile (import )?code",
         ],
         "examples": ["what is the modpack code", "is there a modpack code"],
@@ -734,8 +850,8 @@ FAQ_ENTRIES = [
         "key": "mods_not_working",
         "title": "SCR mod not working — checklist",
         "patterns": [
-            r"(scr|competitive rounds|sid'?s competitive rounds|the scr mod|this mod|the mod).{0,40}(not|isn'?t|won'?t|wont|stopped|broken|doesn'?t|dont|don'?t).{0,20}(work|load|show|start|open|run)",
-            r"(not|isn'?t|won'?t|wont|stopped|broken|doesn'?t).{0,20}(scr|competitive rounds|the scr mod|this mod|the mod).{0,15}(work|load|show|start|open|run)",
+            r"(scr|competitive rounds|sid'?s competitive rounds|the scr mod|this mod|the mod).{0,40}\b(not|cannot|can'?t|isn'?t|won'?t|wont|stopped|broken|doesn'?t|dont|don'?t)\b.{0,20}\b(work(?:s|ed|ing)?|load(?:s|ed|ing)?|show(?:s|n|ed|ing)?|start(?:s|ed|ing)?|open(?:s|ed|ing)?|run(?:s|ning)?)\b",
+            r"\b(not|cannot|can'?t|isn'?t|won'?t|wont|stopped|broken|doesn'?t)\b.{0,20}(scr|competitive rounds|the scr mod|this mod|the mod).{0,15}\b(work(?:s|ed|ing)?|load(?:s|ed|ing)?|show(?:s|n|ed|ing)?|start(?:s|ed|ing)?|open(?:s|ed|ing)?|run(?:s|ning)?)\b",
             r"(scr|the scr mod|the mod|this mod) (is )?disabled",
             r"f5 (does nothing|not work|doesn'?t work|wont work|won'?t work)",
         ],
@@ -757,8 +873,8 @@ FAQ_ENTRIES = [
         "key": "general_mods_not_working",
         "title": "ROUNDS mods not working",
         "patterns": [
-            r"\bmy mods?\b.{0,35}(not|isn'?t|aren'?t|won'?t|wont|stopped|broken|doesn'?t|dont|don'?t).{0,20}(work|load|show|start|open|run)",
-            r"\bmods\b.{0,30}(not|aren'?t|won'?t|wont|stopped|broken|dont|don'?t).{0,20}(work|load|show|start|open|run)",
+            r"\bmy mods?\b.{0,35}\b(not|cannot|can'?t|isn'?t|aren'?t|won'?t|wont|stopped|broken|doesn'?t|dont|don'?t)\b.{0,20}\b(work(?:s|ed|ing)?|load(?:s|ed|ing)?|show(?:s|n|ed|ing)?|start(?:s|ed|ing)?|open(?:s|ed|ing)?|run(?:s|ning)?)\b",
+            r"\bmods\b.{0,30}\b(not|aren'?t|won'?t|wont|stopped|broken|dont|don'?t)\b.{0,20}\b(work(?:s|ed|ing)?|load(?:s|ed|ing)?|show(?:s|n|ed|ing)?|start(?:s|ed|ing)?|open(?:s|ed|ing)?|run(?:s|ning)?)\b",
             r"help.{0,20}(my )?mods?\b",
         ],
         "examples": ["my mods aren't working", "help my rounds mods won't load"],
@@ -772,16 +888,16 @@ FAQ_ENTRIES = [
         "key": "vanilla_lobbies",
         "title": "Vanilla lobbies & normal matchmaking",
         "patterns": [
-            r"(can|could|will|do|does).{0,35}(play|join|use).{0,25}(vanilla|normal|regular|unmodded|casual).{0,20}(lobby|lobbies|lobbys|matchmaking|quick ?match|players?)",
-            r"(does|is).{0,15}(normal|regular|vanilla).{0,15}matchmaking.{0,15}(work|still)",
-            r"play with.{0,25}(friends|people|players).{0,20}without.{0,15}mod",
-            r"(still )?play.{0,15}(against|with).{0,15}(vanilla|unmodded|normal) players?",
-            r"play.{0,15}(randos|randoms|random people|random players).{0,35}(scr|competitive|mod)",
+            r"\b(can|could|will|do|does)\b.{0,35}\b(play|join|use)\b.{0,25}\b(vanilla|normal|regular|unmodded|casual)\b.{0,20}(lobby|lobbies|lobbys|matchmaking|quick ?match|players?)",
+            r"\b(does|is)\b.{0,15}\b(normal|regular|vanilla)\b.{0,15}matchmaking.{0,15}\b(work(?:s|ed|ing)?|still)\b",
+            r"play with.{0,25}\b(friends|people|players)\b.{0,20}without.{0,15}mod",
+            r"(still )?play.{0,15}\b(against|with)\b.{0,15}\b(vanilla|unmodded|normal)\b players?",
+            r"play.{0,15}(randos|randoms|random people|random players).{0,35}\b(scr|competitive|mods?)\b",
             # Bare phrasing without a play/join/use verb, e.g. "do vanilla
             # lobbies still work?" — deliberately NOT matching "casual
             # matchmaking" (that was the false positive), so this requires
             # vanilla/unmodded/regular/normal paired with an actual lobby word.
-            r"(vanilla|unmodded|regular|normal) (lobby|lobbies|lobbys)",
+            r"\b(vanilla|unmodded|regular|normal)\b \b(lobbys?|lobbies|lobbys)\b",
         ],
         "examples": ["can i still play in vanilla lobbies", "does normal matchmaking still work",
                      "do vanilla lobbies still work", "can i play random people with the scr mod"],
@@ -794,10 +910,14 @@ FAQ_ENTRIES = [
         "key": "other_mods",
         "title": "Compatibility with other mods",
         "patterns": [
-            r"(work|compatible|compatibility|use|run).{0,25}other mods",
-            r"other mods.{0,25}(work|compatible|allowed|ok)",
-            r"can i (use|run|add|install).{0,20}(another|other|more) mods?",
-            r"(willow|pykess|unbound|moddingutils).{0,20}(work|compatible)",
+            r"\b(work(?:s|ed|ing)?|compatible|compatibility|incompatible|incompatibility|us(?:e|es|ed|ing)|run(?:s|ning)?)\b.{0,25}other mods",
+            r"other mods.{0,25}\b(work(?:s|ed|ing)?|compatible|allowed|ok)\b",
+            r"can i \b(us(?:e|es|ed|ing)|run(?:s|ning)?|add(?:s|ed|ing)?|install(?:s|ed|ing)?)\b.{0,20}\b(another|other|more)\b mods?",
+            # "how do i install another mod" — the compatibility answer, not
+            # the SCR install walkthrough (this entry sits above `install`, so
+            # it wins; Codex find-2 residual).
+            r"\bhow\b[^.?!,]{0,15}\b(install|add|use|run)(?:s|es|ed|d|ing)?\b[^.?!,]{0,10}\b(another|other|more|second)\b[^.?!,]{0,8}\bmods?\b",
+            r"\b(willow|pykess|unbound|moddingutils)\b.{0,20}\b(work(?:s|ed|ing)?|compatible)\b",
         ],
         "examples": ["does the mod work with other mods", "can i use other mods with this"],
         "answer": ("**No** — there are no compatible mods, and all other mods are blacklisted. SCR is a competitive "
@@ -811,9 +931,9 @@ FAQ_ENTRIES = [
         "key": "gambling",
         "title": "How betting works",
         "patterns": [
-            r"how.{0,25}(gambling|betting|bets?|gamble|wager).{0,15}(work|works)",
+            r"how.{0,25}\b(gambling|betting|bets?|gambl(?:e|es|ed|ing)|wager(?:s|ed|ing)?)\b.{0,15}\b(work(?:s|ed|ing)?|works)\b",
             r"(explain|what is).{0,15}(the )?(gambling|betting|bets? system)",
-            r"how (do|can) i (bet|gamble|wager)",
+            r"how \b(do|can)\b i \b(bet(?:s|ting)?|gambl(?:e|es|ed|ing)|wager(?:s|ed|ing)?)\b",
         ],
         "examples": ["how does the gambling system work", "how do i bet on games"],
         "answer": ("You bet **gold** on other players' **live ranked series**:\n"
@@ -832,10 +952,10 @@ FAQ_ENTRIES = [
         "key": "game_not_counted",
         "title": "Why didn't my game count as ranked?",
         "patterns": [
-            r"(game|match|series|win).{0,30}(didn'?t|didnt|not|never|no).{0,15}(count|record|show|track|register)",
-            r"missing (game|match|elo|rating|series)",
-            r"(didn'?t|didnt|not) (get|gain|lose) (any )?(elo|rating)",
-            r"why.{0,15}(casual|unranked).{0,25}(instead|not ranked)",
+            r"\b(games?|match(?:es)?|series|win(?:s|ning)?)\b.{0,30}\b(didn'?t|didnt|not|never|no)\b.{0,15}\b(count(?:s|ed|ing)?|record(?:s|ed|ing)?|show(?:s|n|ed|ing)?|track(?:s|ed|ing)?|register(?:s|ed|ing)?)\b",
+            r"missing \b(games?|match(?:es)?|elo|ratings?|series)\b",
+            r"\b(didn'?t|didnt|not)\b \b(get|gain|lose)\b (any )?\b(elo|ratings?)\b",
+            r"why.{0,15}\b(casual|unranked)\b.{0,25}(instead|not ranked)",
         ],
         "examples": ["why didn't my game count as ranked", "my match didn't record"],
         "require_question": False,
@@ -852,7 +972,7 @@ FAQ_ENTRIES = [
         "key": "grow_card",
         "title": "How Grow works",
         "patterns": [
-            r"how.{0,15}\bgrow\b.{0,12}(work|works)",
+            r"how.{0,15}\bgrow\b.{0,12}\b(work(?:s|ed|ing)?|works)\b",
             r"\bgrow\b.{0,25}(fps|frame ?rate|frames?|frame based)",
             r"(fps|frame ?rate|frames?|frame based).{0,25}\bgrow\b",
         ],
@@ -867,9 +987,9 @@ FAQ_ENTRIES = [
         "key": "ranked_explained",
         "title": "How ranked works",
         "patterns": [
-            r"how (does|do) (the )?(ranked|ranks|rank|rating|elo( system)?|ranking|glicko|series) (system )?work",
+            r"how \b(does|do)\b (the )?(ranked|ranks|rank|rating|elo( system)?|ranking|glicko|series) (system )?work",
             r"(explain|what is) (ranked|the ranked system|ranks|elo|the elo system|glicko)",
-            r"what.{0,10}(bo3|best of (3|three))",
+            r"what.{0,10}(bo3|best of \b(3|three)\b)",
         ],
         "examples": ["how does ranked work", "how do ranks work", "explain the ranked system",
                      "how does the elo system work"],
@@ -889,9 +1009,9 @@ FAQ_ENTRIES = [
         "title": "What is a ranked series?",
         "patterns": [
             r"what('?s| is) (a |the )?(ranked )?series",
-            r"ranked series.{0,15}(mean|work|works)",
-            r"how (does|do) (a |the )?(ranked )?series work",
-            r"what('?s| is) (a )?(bo3|best of (3|three))",
+            r"ranked series.{0,15}\b(mean|work(?:s|ed|ing)?|works)\b",
+            r"how \b(does|do)\b (a |the )?(ranked )?series work",
+            r"what('?s| is) (a )?(bo3|best of \b(3|three)\b)",
         ],
         "examples": ["what is a series", "what does ranked series mean"],
         "answer": ("A **series** is a best-of-3 set of full ROUNDS games against the same opponent. The first "
@@ -904,8 +1024,10 @@ FAQ_ENTRIES = [
         "key": "turn_off_ranked",
         "title": "Playing casual only",
         "patterns": [
-            r"(turn|switch|toggle).{0,10}(off|disable).{0,10}ranked",
-            r"ranked off\b",
+            r"\b(turn|switch|toggle)\b.{0,10}\b(off|disable)\b.{0,10}ranked",
+            # was a bare `ranked off` (RC5) — now needs a turn/keep/how clause
+            r"\b(turn|turning|switch|toggle|leave|keep)\b[^.?!,]{0,10}\branked off\b",
+            r"\bhow\b[^.?!,]{0,15}\branked off\b",
             r"play (only )?casuals? only",
             r"(disable|opt out of) ranked",
         ],
@@ -918,9 +1040,9 @@ FAQ_ENTRIES = [
         "key": "how_2v2",
         "title": "How 2v2 works",
         "patterns": [
-            r"how.{0,25}(play|do|start|queue|join).{0,10}2 ?v ?2",
-            r"2 ?v ?2.{0,20}(work|works|queue|ranked|rating)",
-            r"(team|duo) (ranked|queue)",
+            r"how.{0,25}\b(play(?:s|ed|ing)?|do|start(?:s|ed|ing)?|queues?|join(?:s|ed|ing)?)\b.{0,10}2 ?v ?2",
+            r"2 ?v ?2.{0,20}\b(work(?:s|ed|ing)?|works|queues?|ranked|ratings?)\b",
+            r"\b(team|duo)\b \b(ranked|queues?)\b",
         ],
         "examples": ["how do i play 2v2s", "how does 2v2 ranked work"],
         "answer": ("**F5 → Multiplayer → 2v2.** Two queues:\n"
@@ -937,8 +1059,8 @@ FAQ_ENTRIES = [
         "key": "questions_channel",
         "title": "Questions & ranked information",
         "patterns": [
-            r"(is there|where('?s| is)).{0,20}(a )?(questions?|help|information|info).{0,12}channel",
-            r"(questions?|ask questions?).{0,20}(channel|where)",
+            r"(is there|where('?s| is)).{0,20}(a )?\b(questions?|help|information|info)\b.{0,12}channel",
+            r"(questions?|ask questions?).{0,20}\b(channel|where)\b",
         ],
         "examples": ["is there a questions channel", "where should i ask ranked questions"],
         "answer": (f"Start with {FAQ_INFO_CHANNEL}. It has the ranked overview and is the right place to find "
@@ -948,18 +1070,24 @@ FAQ_ENTRIES = [
         "key": "room_codes",
         "title": "Joining with a room code",
         "patterns": [
-            r"(join|enter|input|type|use).{0,20}(a )?room ?codes?",
-            r"room ?codes?.{0,25}(join|enter|input|type|use|work|works)",
-            r"what (do|should) i do with.{0,15}(the )?room ?code",
-            r"(special way|how).{0,25}(meet up|play together).{0,35}(mod|online|room|code)",
-            r"(meet up|connect).{0,35}(type|enter).{0,20}(online|room|code)",
+            r"\b(join(?:s|ed|ing)?|enter(?:s|ed|ing)?|input|type|us(?:e|es|ed|ing))\b.{0,20}(a )?room ?codes?",
+            r"room ?codes?.{0,25}\b(join(?:s|ed|ing)?|enter(?:s|ed|ing)?|input|type|us(?:e|es|ed|ing)|work(?:s|ed|ing)?|works)\b",
+            r"what \b(do|should)\b i do with.{0,15}(the )?room ?code",
+            r"(special way|how).{0,25}(meet up|play together).{0,35}\b(mods?|online|room|codes?)\b",
+            r"(meet up|connect).{0,35}\b(type|enter(?:s|ed|ing)?)\b.{0,20}\b(online|room|codes?)\b",
         ],
         "examples": ["how do i join room codes", "what do i do with the room code",
                      "do i type the room code into online like before"],
-        "answer": ("For a private match, use ROUNDS' normal flow: **Online → Private → Join**, then enter the "
-                   "**6-letter room code** exactly as the host sent it. Both players should use the same Photon "
-                   "region.\n"
-                   "SCR's ranked queue needs no manual code — click **Ready** and the mod auto-connects you. "
+        # Join half verified against the decompile (DevConsole.Send ->
+        # JoinRoom; the code's first character IS the region and JoinRoom
+        # forces it). Host half is Sid's own description of the menu.
+        "answer": ("To **host**: main menu → **Online → Host Room** — it shows your **6-character room code**; "
+                   "send that to the other player(s).\n"
+                   "To **join**: at the ROUNDS main menu press **Enter**, type the code exactly as the host "
+                   "sent it, and press **Enter** again. The first character of the code is the host's region "
+                   "and the game switches you to it automatically — no need to match regions manually. "
+                   "(On controller, the join-room prompt is on the same menu.)\n"
+                   "SCR's ranked queue needs no code at all — click **Ready** and the mod auto-connects you. "
                    "Private-room games still count as ranked when both players have SCR running and ranked enabled."),
     },
     {
@@ -967,7 +1095,7 @@ FAQ_ENTRIES = [
         "title": "How to play ranked",
         "patterns": [
             r"how.{0,30}\b(play|start|queue|join|get into)\b.{0,15}ranked",
-            r"how.{0,20}(play|join|start).{0,20}(here|competitive|comp|scr)",
+            r"how.{0,20}\b(play(?:s|ed|ing)?|join(?:s|ed|ing)?|start(?:s|ed|ing)?)\b.{0,20}\b(here|competitive|comp|scr)\b",
             r"where.{0,20}(ranked )?queue",
         ],
         "examples": ["how do i play ranked here", "how do I queue for ranked"],
@@ -985,7 +1113,7 @@ FAQ_ENTRIES = [
         "title": "How tournaments work",
         "patterns": [
             r"how.{0,20}tournaments?.{0,15}work",
-            r"(next|when|upcoming).{0,20}tournament",
+            r"\b(next|when|upcoming)\b.{0,20}tournament",
             r"(sign ?up|join|enter).{0,20}tournament",
             r"tournament.{0,20}(sign ?up|signups?|join|enter|schedule)",
         ],
@@ -1006,9 +1134,9 @@ FAQ_ENTRIES = [
         "key": "more_gold",
         "title": "Getting more gold",
         "patterns": [
-            r"how (do|can) (i|you) (get|earn|make|farm).{0,10}(more )?gold",
-            r"(need|want).{0,10}more gold",
-            r"(earn|farm|grind).{0,10}gold (fast|quick)",
+            r"how \b(do|can)\b \b(i|you)\b \b(get|earn|make|farm)\b.{0,10}(more )?gold",
+            r"\b(need|want)\b.{0,10}more gold",
+            r"\b(earn(?:s|ed|ing)?|farm(?:s|ed|ing)?|grind(?:s|ing)?)\b.{0,10}gold \b(fast|quick)\b",
         ],
         "examples": ["how do i get more gold", "fastest way to earn gold"],
         "answer": ("Best gold sources:\n"
@@ -1028,9 +1156,9 @@ FAQ_ENTRIES = [
         "key": "xp_gold",
         "title": "XP & gold system",
         "patterns": [
-            r"how.{0,20}(xp|gold|economy|level(ing|s)?).{0,20}(work|works|system)",
-            r"(explain|what is).{0,20}(the )?(xp|gold|economy|level)",
-            r"how (much|many) xp",
+            r"how.{0,20}(xp|gold|economy|level(ing|s)?).{0,20}\b(work(?:s|ed|ing)?|works|system)\b",
+            r"(explain|what is).{0,20}(the )?\b(xp|gold|economy|level)\b",
+            r"how \b(much|many)\b xp",
         ],
         "examples": ["how does the xp gold system work", "explain the economy"],
         "answer": ("**XP per game** (multipliers stack):\n"
@@ -1051,10 +1179,10 @@ FAQ_ENTRIES = [
         "key": "artist",
         "title": "Making cosmetics / becoming an artist",
         "patterns": [
-            r"(make|create|submit|upload|add).{0,20}(a )?cosmetics?",
-            r"(become|be) an? artist",
-            r"how.{0,25}(cosmetics?|skins?|faces?).{0,20}(made|submit|created|into the (game|shop))",
-            r"my (art|drawing|design).{0,25}(game|mod|shop)",
+            r"\b((?:mak(?:e|es|ing)|made)|creat(?:e|es|ed|ing)|submit(?:s|ted|ting)?|upload(?:s|ed|ing)?|add(?:s|ed|ing)?)\b.{0,20}(a )?cosmetics?",
+            r"\b(become|be)\b an? artist",
+            r"how.{0,25}\b(cosmetics?|skins?|faces?)\b.{0,20}(made|submit|created|into the \b(game|shop)\b)",
+            r"my \b(art|drawing|design)\b.{0,25}\b(game|mod|shop)\b",
         ],
         "examples": ["how do i make cosmetics", "how do i become an artist"],
         "answer": ("**DM Sid** with some art you'd like to upload — that's the whole application.\n"
@@ -1072,10 +1200,12 @@ FAQ_ENTRIES = [
         "key": "bug_report",
         "title": "Filing a bug report",
         "patterns": [
-            r"(submit|file|report|make|send).{0,15}(a )?bug",
-            r"bug report",
-            r"report.{0,15}(a )?(bug|issue|glitch|problem)",
-            r"where.{0,20}report.{0,15}(bugs?|issues?)",
+            r"\b(submit(?:s|ted|ting)?|file|report(?:s|ed|ing)?|(?:mak(?:e|es|ing)|made)|send)\b.{0,15}(a )?bug",
+            # was a bare `bug report` (RC5) — now needs how/where intent
+            r"\b(how|where)\b[^.?!,]{0,18}\bbug reports?\b",
+            r"\bbug reports?\b[^.?!,]{0,15}\b(how|where|work|works|channel|button)\b",
+            r"report.{0,15}(a )?\b(bugs?|issues?|glitch(?:es)?|problems?)\b",
+            r"where.{0,20}report.{0,15}\b(bugs?|issues?)\b",
         ],
         "examples": ["how do i submit a bug report", "where do i report bugs"],
         "answer": ("**F5 → Settings → Report a Bug.** Describe what happened and **tick the \"attach log\" box** — "
@@ -1088,22 +1218,55 @@ FAQ_ENTRIES = [
         "key": "rank_roles",
         "title": "Elo requirements for rank roles",
         "patterns": [
-            r"(elo|rating).{0,30}(requirement|threshold|needed|need|for).{0,20}(each )?(rank|role|tier)",
-            r"what (elo|rating).{0,20}(is|for|do you need).{0,20}(master|grand ?master|advanced|intermediate|beginner)",
-            r"(rank|discord) roles?.{0,15}(elo|rating|requirement|threshold)",
-            r"how.{0,15}(get|earn).{0,20}(master|grand ?master|advanced) role",
+            r"\b(elo|ratings?)\b.{0,30}\b(requirement|threshold|needed|need(?:s|ed|ing)?|for)\b.{0,20}(each )?\b(rank|role|tier)\b",
+            r"what \b(elo|ratings?)\b.{0,20}(is|for|do you need).{0,20}(master|grand ?master|advanced|intermediate|beginner)",
+            r"\b(ranks?|discord)\b roles?.{0,15}\b(elo|ratings?|requirement|threshold)\b",
+            r"how.{0,15}\b(get|earn)\b.{0,20}(master|grand ?master|advanced) role",
+            # §5a coverage: "what are the (elo) ranks", "list the ranks",
+            # "how much elo is master" (Sid's own question missed).
+            r"\bwhat\b[^.?!,]{0,15}\b(are|is)\b[^.?!,]{0,18}\b(all )?(the )?(elo |rating )?(ranks|rank names|rank list|tiers|roles)\b",
+            r"\b(list|show|name)\b[^.?!,]{0,15}\b(all )?(the )?(ranks|rank roles|tiers)\b",
+            r"\bwhat\b[^.?!,]{0,12}\b(elo|rating)\b[^.?!,]{0,12}\b(is|for|do i need|do you need)\b[^.?!,]{0,12}\b(master|grand ?master|advanced|intermediate|beginner)\b",
+            r"\bhow much elo\b[^.?!,]{0,12}\b(is|for)\b[^.?!,]{0,12}\b(master|grand ?master|advanced|intermediate|beginner)\b",
+            r"\b(elo|rating)\b[^.?!,]{0,14}\b(ranks|tiers|ladder)\b",
+            r"\b(ranks?|roles?)\b\s+(requirements?|thresholds?|cut ?offs?)\b",
         ],
         "examples": ["what are the elo requirements for each discord rank role",
-                     "what rating do i need for master"],
+                     "what rating do i need for master", "what are the elo ranks"],
+        # Mode-qualified asks ("ffa rating tiers", "tournament elo ladder")
+        # skip this entry — its thresholds are explicitly live 1v1 rating and
+        # would be wrong for them (Codex find 13). A forward lookahead cannot
+        # see qualifiers BEFORE the regex match position, so exclusion is an
+        # entry-level check over the WHOLE normalized message; the message
+        # then falls through to LATER entries (how_ffa picks up "what are the
+        # ffa rating tiers" with the FFA overview, which covers its rating).
+        # COEXISTENCE, not linker grammar (round-3 find 8: "what are the elo
+        # ranks when playing ffa" escaped an in/for/of allowlist): if rank
+        # vocabulary and a non-1v1 mode qualifier appear ANYWHERE in the same
+        # message, this 1v1-thresholds answer is the wrong one — skip the
+        # entry and let the mode entries (or silence) take it.
+        "exclude": [
+            # Complete canonical alias set per mode (round-4 find 1: "solo vs
+            # duo" is the mode's own spelling and escaped a 1v2-only list).
+            r"(?=.*\b(ffa|2 ?v ?2|1 ?v ?2|2 ?v ?1|solo (vs|versus|v|against) duo|one (v|vs|versus) two|tournaments?|free ?-? ?for ?-? ?alls?)\b)"
+            r"(?=.*\b(elo|rating|ranks?|tiers?|ladder|roles?)\b)",
+        ],
         "answer": _rank_roles_faq_answer(),
     },
     {
         "key": "thunderstore",
         "title": "Thunderstore page",
         "patterns": [
-            r"thunderstore",
-            r"r2modman.{0,25}(download|install|get|find)",
-            r"mod manager.{0,20}(install|download|find)",
+            # Was a bare `thunderstore` keyword — it fired on any message
+            # containing the substring, including pasted URLs (RC5). Now
+            # requires intent context in the same clause. WEAK relation words
+            # (on/to/from/via) additionally need an SCR referent — "is unbound
+            # on thunderstore" is a question about another mod (Codex find 12).
+            r"\b(it|the mod|scr|this|the update|sids? ?competitive ?rounds)\b[^.?!,]{0,12}\b(on|to|from|via)\b[^.?!,]{0,10}\bthunderstore\b",
+            r"\b(link|page|url|get|got|download|install|update[ds]?|available|release[ds]?|upload(ed)?)\b[^.?!,]{0,20}\bthunderstore\b",
+            r"\bthunderstore\b[^.?!,]{0,20}\b(link|page|url|version|download|install|profile|release|update)\b",
+            r"\br2modman\b[^.?!,]{0,25}\b(download|install|get|find)\b",
+            r"\bmod manager\b[^.?!,]{0,20}\b(install|download|find)\b",
         ],
         "examples": ["can i get the mod on thunderstore", "is it on thunderstore"],
         "answer": (f"Yes: {FAQ_THUNDERSTORE_URL}\n"
@@ -1116,7 +1279,7 @@ FAQ_ENTRIES = [
         "key": "achievements",
         "title": "Achievements",
         "patterns": [
-            r"(what|list|which|show).{0,15}(are )?(the )?achievements",
+            r"\b(what|list|which|show(?:s|n|ed|ing)?)\b.{0,15}(are )?(the )?achievements",
             r"achievements?.{0,20}(list|are there|exist|available)",
             r"how.{0,15}(do )?achievements.{0,10}work",
         ],
@@ -1129,9 +1292,9 @@ FAQ_ENTRIES = [
         "key": "discord_steam_lookup",
         "title": "Finding a linked Steam name",
         "patterns": [
-            r"(find|see|check|look ?up).{0,30}(steam|rounds).{0,20}(name|account).{0,30}(discord|linked)",
-            r"(steam|rounds).{0,20}(name|account).{0,25}(linked|connected).{0,15}discord",
-            r"discord.{0,20}(linked|connected).{0,20}(steam|rounds).{0,15}(name|account)",
+            r"(find|see|check|look ?up).{0,30}\b(steam|rounds)\b.{0,20}\b(name|account)\b.{0,30}\b(discord|linked)\b",
+            r"\b(steam|rounds)\b.{0,20}\b(name|account)\b.{0,25}\b(linked|connected)\b.{0,15}discord",
+            r"discord.{0,20}\b(linked|connected)\b.{0,20}\b(steam|rounds)\b.{0,15}\b(name|account)\b",
         ],
         "examples": ["how do i find the steam name linked to discord",
                      "can i look up a discord user's rounds name"],
@@ -1144,10 +1307,12 @@ FAQ_ENTRIES = [
         "key": "link_account",
         "title": "Linking your account",
         "patterns": [
-            r"how.{0,20}link.{0,25}(account|discord|steam)",
-            r"link my (account|discord|steam)",
-            r"(connect|sync).{0,20}(discord|steam|account)",
-            r"link code",
+            r"how.{0,20}\blink(?:s|ed|ing)?\b.{0,25}\b(account|discord|steam)\b",
+            r"link my \b(account|discord|steam)\b",
+            r"\b(connect(?:s|ed|ing)?|sync(?:s|ed|ing)?)\b.{0,20}\b(discord|steam|account)\b",
+            # was a bare `link code` (RC5) — now needs get/use/where intent
+            r"\b(get|need|use|enter|where|what|whats|what's|how)\b[^.?!,]{0,15}\blink code\b",
+            r"\blink code\b[^.?!,]{0,15}\b(work|works|where|expired?)\b",
         ],
         "examples": ["how do i link my account", "how do i connect discord to the mod"],
         "answer": ("1. In ROUNDS, press **F5** and find the **Discord Link** panel → click **Get Link Code**.\n"
@@ -1159,9 +1324,9 @@ FAQ_ENTRIES = [
         "key": "install_safety",
         "title": "Is SCR safe to install?",
         "patterns": [
-            r"(is|are).{0,15}(the )?(scr|mod|installer|competitive rounds).{0,20}(safe|legit|virus|malware)",
-            r"(safe|legit).{0,20}(install|download|run).{0,15}(scr|the mod|installer|competitive rounds)",
-            r"(installer|scr).{0,15}(virus|malware)",
+            r"\b(is|are)\b.{0,15}(the )?(scr|mod|installer|competitive rounds).{0,20}\b(safe|legit|virus|malware)\b",
+            r"\b(safe|legit)\b.{0,20}\b(install(?:s|ed|ing)?|download(?:s|ed|ing)?|run(?:s|ning)?)\b.{0,15}(scr|the mod|installer|competitive rounds)",
+            r"\b(installer|scr)\b.{0,15}\b(virus|malware)\b",
         ],
         "examples": ["is the mod safe to install", "is the installer safe"],
         "answer": ("**Yes, when you get it from the official SCR release pins or official Thunderstore page.** "
@@ -1175,10 +1340,22 @@ FAQ_ENTRIES = [
         "key": "install",
         "title": "Installing the mod",
         "patterns": [
-            r"how.{0,20}(install|download|get|set ?up).{0,25}(the )?(mod|scr|competitive)",
-            r"where.{0,20}(download|get).{0,20}(the )?mod",
+            r"how.{0,20}(install|download|get|set ?up).{0,25}(the )?\b(mods?|scr|competitive)\b",
+            r"where.{0,20}\b(download(?:s|ed|ing)?|get(?:s|ting)?)\b.{0,20}(the )?mod",
+            # §5c coverage: bare "how do i install" — objectless, so the verb
+            # must END the question (or take only it/this/the mod/scr): with a
+            # free tail this rule stole "how do i install custom maps" and,
+            # via `get`, "how do i get titles" (Codex FAQ review find 2 —
+            # `get` is banned from the objectless form entirely).
+            # Harmless trailing platform/politeness/method modifiers allowed
+            # (round-2 find 22: "how do i install manually?" went unanswered)
+            # WITHOUT reopening arbitrary objects like "custom maps".
+            r"\bhow\b[^.?!,]{0,15}\b(do|can)\b[^.?!,]{0,8}\b(i|you|u)\b[^.?!,]{0,8}\b(install|download)\b(\s+(it|this|the mod|scr))?( (manually|please|pls|now|on (windows|steam|pc)))?\s*[?!.]*$",
+            r"\bhow (to|do i) (install|download)( it| this| the mod| scr)?( (manually|please|pls|now|on (windows|steam|pc)))?\s*[?!.]*$",
+            r"\bwhere\b[^.?!,]{0,15}\b(do i |can i |to )?\b(download|get|find)\b[^.?!,]{0,12}\b(the )?(mod|scr|it)\b",
         ],
-        "examples": ["how do i install the mod", "where do i download this"],
+        "examples": ["how do i install the mod", "where do i download this",
+                     "how do i install"],
         "answer": (f"Full walkthrough: {FAQ_INSTALL_CHANNEL}\n"
                    "**Option A — installer (recommended):** grab `CompetitiveRoundsInstaller.exe` from the pinned "
                    "post in #releases, close ROUNDS, run it. It finds your Steam install and sets up everything. "
@@ -1192,9 +1369,9 @@ FAQ_ENTRIES = [
         "key": "rounds_version",
         "title": "Which ROUNDS version?",
         "patterns": [
-            r"(what|which).{0,15}version.{0,20}(of )?rounds",
+            r"\b(what|which)\b.{0,15}version.{0,20}(of )?rounds",
             r"old.?rounds.?for.?mods",
-            r"(beta|branch).{0,20}(rounds|steam).{0,15}(mod|scr)",
+            r"\b(beta|branch)\b.{0,20}\b(rounds|steam)\b.{0,15}\b(mod|scr)\b",
         ],
         "examples": ["what version of rounds do i need", "do i need old rounds for mods"],
         "answer": ("**SCR runs on the current ROUNDS (v1.1.2), default Steam branch** — no beta needed.\n"
@@ -1211,11 +1388,11 @@ FAQ_ENTRIES = [
             r"(what happens?|happens?).{0,25}(disconnect|dc\b|rage ?quit|leaver?|leaves)",
             r"opponent.{0,15}(left|dc'?d|dc\b|disconnected|quit)",
             r"rage ?quit",
-            r"(dc|disconnect|leave).{0,20}(penalty|count|percent)",
-            r"(resolv(?:e|ing)|finish|settle|complete).{0,30}(ranked )?(game|match|series).{0,30}(left|leave|dc|disconnect)",
-            r"(ranked )?(game|match|series).{0,30}(someone|player|opponent).{0,20}(left|leave|dc|disconnect)",
-            r"(count|counts).{0,15}(as )?(a )?(loss|lose).{0,20}(if|when).{0,12}(i )?(dc|disconnect|leave)",
-            r"(dc|disconnect|leave).{0,20}(count|counts).{0,15}(as )?(a )?(loss|lose)",
+            r"\b(dc|disconnect|(?:leav(?:e|es|ing)|left))\b.{0,20}\b(penalty|count(?:s|ed|ing)?|percent)\b",
+            r"(resolv(?:e|ing)|finish|settle|complete).{0,30}(ranked )?\b(games?|match(?:es)?|series)\b.{0,30}\b(left|(?:leav(?:e|es|ing)|left)|dc|disconnect)\b",
+            r"(ranked )?\b(games?|match(?:es)?|series)\b.{0,30}\b(someone|players?|opponent)\b.{0,20}\b(left|(?:leav(?:e|es|ing)|left)|dc|disconnect)\b",
+            r"\b(count(?:s|ed|ing)?|counts)\b.{0,15}(as )?(a )?\b(loss|lose)\b.{0,20}\b(if|when)\b.{0,12}(i )?\b(dc|disconnect|(?:leav(?:e|es|ing)|left))\b",
+            r"\b(dc|disconnect|(?:leav(?:e|es|ing)|left))\b.{0,20}\b(count(?:s|ed|ing)?|counts)\b.{0,15}(as )?(a )?\b(loss|lose)\b",
         ],
         "examples": ["what happens if someone disconnects", "my opponent rage quit",
                      "does it count as a loss if i disconnect"],
@@ -1235,9 +1412,9 @@ FAQ_ENTRIES = [
         "key": "open_menu",
         "title": "Opening the competitive menu",
         "patterns": [
-            r"(open|show|access).{0,20}(competitive |mod )?(menu|overlay|hub)",
-            r"what (does|is) f ?5",
-            r"where.{0,20}(my )?(stats|leaderboard|shop).{0,10}in ?.?game",
+            r"\b(open(?:s|ed|ing)?|show(?:s|n|ed|ing)?|access)\b.{0,20}(competitive |mod )?\b(menu|overlay|hub)\b",
+            r"what \b(does|is)\b f ?5",
+            r"where.{0,20}(my )?\b(stats|leaderboard|shop)\b.{0,10}in ?.?game",
         ],
         "examples": ["how do i open the competitive menu", "where do i see my stats in game"],
         "answer": ("**F5** toggles the competitive menu in ROUNDS — queue, stats, leaderboard, shop, achievements, "
@@ -1248,11 +1425,24 @@ FAQ_ENTRIES = [
         "key": "chat",
         "title": "In-game chat",
         "patterns": [
-            r"(in ?.?game|t) ?chat",
+            # the old `(in ?.?game|t) ?chat` had an unanchored bare `t` — any
+            # word ending in "t" followed by "chat" matched. Folded into the
+            # explicit list below.
+            r"\bin ?-? ?game ?chat\b",
+            r"\bt ?chat\b",
             r"how.{0,20}chat.{0,20}(work|in ?game)",
-            r"(mute|block).{0,20}(chat|someone|player|him|her|them)",
+            r"\b(mut(?:e|es|ed|ing)|block(?:s|ed|ing)?)\b.{0,20}\b(chat|someone|players?|him|her|them)\b",
+            # §5b coverage: "how do i type in game" (was answered with
+            # betting). The verb needs a chat/in-game CONTEXT or the question
+            # to end there — a free tail stole "how do i type faster" and the
+            # bare `with` stole "what type works with grow" (Codex find 11).
+            r"\bhow\b[^.?!,]{0,18}\b(do|can)\b[^.?!,]{0,10}\b(i|you|u|we)\b[^.?!,]{0,10}\b(type|talk|chat|speak|message|write)\b[^.?!,]{0,10}\b(in ?-? ?game|in game|in chat|to (the )?(other|enemy)( player)?s?)\b",
+            r"\bhow\b[^.?!,]{0,18}\b(do|can)\b[^.?!,]{0,10}\b(i|you|u|we)\b[^.?!,]{0,6}\b(type|talk|chat)\b\s*[?!.]*$",
+            r"\b(type|talk|chat|message)\b[^.?!,]{0,12}\b(in ?-? ?game|in game|in chat|to (the )?(other|enemy))\b",
+            r"\bis there\b[^.?!,]{0,12}\b(a )?(in ?-? ?game )?chat\b",
         ],
-        "examples": ["how does the in-game chat work", "how do i mute someone in chat"],
+        "examples": ["how does the in-game chat work", "how do i mute someone in chat",
+                     "how do i type in game"],
         "answer": ("Press **T** in-game to chat. Messages bridge both ways with the in-game-chat channel on this "
                    "Discord, so in-game and Discord folks see each other.\n"
                    "Moderation is local: `/mute name`, `/unmute name`, `/muted` (list) — typed in the in-game chat box."),
@@ -1261,8 +1451,8 @@ FAQ_ENTRIES = [
         "key": "platforms",
         "title": "Platform support",
         "patterns": [
-            r"(work|play|run).{0,15}on.{0,10}(mac|linux|steam ?deck|proton)",
-            r"(mac|linux|steam ?deck|proton).{0,15}(support|work)",
+            r"\b(work|play|run)\b.{0,15}on.{0,10}(mac|linux|steam ?deck|proton)",
+            r"(mac|linux|steam ?deck|proton).{0,15}\b(support|work(?:s|ed|ing)?)\b",
         ],
         "examples": ["does it work on steam deck", "mac support?"],
         "answer": ("Officially **Windows only** (ROUNDS on Steam, current version). Mac isn't supported. "
@@ -1273,9 +1463,12 @@ FAQ_ENTRIES = [
         "key": "booster",
         "title": "Server booster perks",
         "patterns": [
-            r"(boost|booster).{0,25}(perk|get|reward|gold|benefit)",
-            r"(what|anything).{0,15}(for|from).{0,15}boost(ing)?",
-            r"server boost",
+            r"\b(boost(?:s|ed|ing)?|booster)\b.{0,25}\b(perks?|get(?:s|ting)?|rewards?|gold|benefits?)\b",
+            r"\b(what|anything)\b.{0,15}\b(for|from)\b.{0,15}boost(ing)?",
+            # was a bare `server boost` (RC5) — now needs a perks/rewards
+            # clause. give/get removed: "does server boosting give us more
+            # emoji slots" is a Discord-native question (Codex find 18).
+            r"\bserver boost(er|ing)?s?\b[^.?!,]{0,18}\b(perks?|rewards?|gold|benefits?|worth)\b",
         ],
         "examples": ["what do boosters get", "booster perks?"],
         "answer": ("Server boosters get **2000 gold/month**, granted automatically (one grant per member per month). "
@@ -1285,9 +1478,9 @@ FAQ_ENTRIES = [
         "key": "titles",
         "title": "Titles",
         "patterns": [
-            r"(get|earn|equip|unlock).{0,15}titles?",
-            r"what (are|is).{0,10}titles?",
-            r"titles?.{0,15}(work|list|available)",
+            r"\b(get(?:s|ting)?|earn(?:s|ed|ing)?|equip(?:s|ped|ping)?|unlock(?:s|ed|ing)?)\b.{0,15}titles?",
+            r"what \b(are|is)\b.{0,10}titles?",
+            r"titles?.{0,15}\b(work(?:s|ed|ing)?|list|available)\b",
         ],
         "examples": ["how do i get titles", "what are titles"],
         "answer": ("Titles render next to your name (leaderboard, chat, match history). Sources:\n"
@@ -1301,10 +1494,13 @@ FAQ_ENTRIES = [
         "key": "leaderboard_where",
         "title": "Where's the leaderboard?",
         "patterns": [
-            r"(where|how).{0,20}(see|view|check|find).{0,20}(the )?(leaderboard|rankings?|standings)",
-            r"leaderboard.{0,10}(link|channel|where)",
+            r"\b(where|how)\b.{0,20}\b(see|view|check|find)\b.{0,20}(the )?\b(leaderboard|rankings?|standings)\b",
+            r"leaderboard.{0,10}\b(link(?:s|ed|ing)?|channel|where)\b",
+            # §5d coverage: "wheres the leaderboard" (no apostrophe)
+            r"\bwhere('?s| is|s)?\b[^.?!,]{0,15}\b(the )?(leaderboard|leader board|rankings?|standings)\b",
+            r"\b(leaderboard|leader board)\b[^.?!,]{0,12}\b(where|link|channel|find|see)\b",
         ],
-        "examples": ["where can i see the leaderboard"],
+        "examples": ["where can i see the leaderboard", "wheres the leaderboard"],
         "answer": ("• In-game: **F5 → Leaderboard** (with live series + betting panel).\n"
                    "• Discord: the **#scr-leaderboard** channel (living board, updates every 10 min) or `/lb`.\n"
                    "Boards need 1+ recorded match to show a player."),
@@ -1313,10 +1509,10 @@ FAQ_ENTRIES = [
         "key": "bullet_hitboxes",
         "title": "Why a bullet can look far from you",
         "patterns": [
-            r"(hit|damage|killed).{0,35}bullet.{0,35}(nowhere|far|close|near|miss|touch)",
-            r"bullet.{0,35}(nowhere|far|not|wasn'?t|wasnt).{0,25}(near|close|touch|hit).{0,20}(me|player)",
-            r"(weird|bad|wrong).{0,15}(bullet )?(hitbox|hitboxes|hits|collision)",
-            r"(desync|lag).{0,20}(bullet|hitbox|hit)",
+            r"\b(hit(?:s|ting)?|damage|killed)\b.{0,35}bullet.{0,35}\b(nowhere|far|close|near|miss|touch(?:es|ed|ing)?)\b",
+            r"bullet.{0,35}\b(nowhere|far|not|wasn'?t|wasnt)\b.{0,25}\b(near|close|touch(?:es|ed|ing)?|hit(?:s|ting)?)\b.{0,20}\b(me|players?)\b",
+            r"\b(weird|bad|wrong)\b.{0,15}(bullet )?\b(hitbox|hitboxes|hits|collision)\b",
+            r"\b(desync|lag)\b.{0,20}\b(bullet|hitbox|hit(?:s|ting)?)\b",
         ],
         "examples": ["why do bullets hit me when they look nowhere close",
                      "why are the bullet hitboxes weird"],
@@ -1331,11 +1527,11 @@ FAQ_ENTRIES = [
         "key": "hosting",
         "title": "Hosting & netcode",
         "patterns": [
-            r"(is|does).{0,12}orange.{0,15}host",
+            r"\b(is|does)\b.{0,12}orange.{0,15}host",
             r"peer.{0,3}to.{0,3}peer|\bp2p\b",
             r"who('?s| is|s)?\b.{0,12}(the )?host(ing)?\b",
-            r"(matter|advantage|difference).{0,20}\bhost",
-            r"host.{0,15}(matter|advantage)",
+            r"\b(matter|advantage|difference)\b.{0,20}\bhost",
+            r"host.{0,15}\b(matter|advantage)\b",
         ],
         "examples": ["is orange the host", "is the game peer to peer",
                      "does it matter who hosts", "is there a host advantage"],
@@ -1351,8 +1547,8 @@ FAQ_ENTRIES = [
         "key": "what_is_scr",
         "title": "What is this mod?",
         "patterns": [
-            r"(what|who).{0,15}(is|made|created|runs).{0,15}(scr|this mod|competitive rounds|sid'?s)",
-            r"what.{0,10}(does )?(the|this) mod (do|add)",
+            r"\b(what|who)\b.{0,15}\b(is|made|created|runs)\b.{0,15}(scr|this mod|competitive rounds|sid'?s)",
+            r"what.{0,10}(does )?\b(the|this)\b mod \b(do|add)\b",
             r"how('?s| does| do)?.{0,12}(comp(etitive)?|scr|ranked|this|the) ?mod.{0,10}work",
         ],
         "examples": ["what is this mod", "who made this mod", "how does the comp mod work"],
@@ -1367,8 +1563,8 @@ FAQ_ENTRIES = [
         "title": "Blocking better",
         "patterns": [
             r"(learn|get better|improve|git gud|better).{0,20}block",
-            r"block(ing)?.{0,15}(tips|better|guide|timing)",
-            r"how.{0,20}block (better|well|good)",
+            r"block(ing)?.{0,15}\b(tips|better|guide|timing)\b",
+            r"how.{0,20}block \b(better|well|good)\b",
         ],
         "examples": ["how can i learn to block better", "any tips for blocking"],
         "answer": ("1. **React to the bullet, not the trigger** — block just before the shot reaches you, "
@@ -1384,9 +1580,9 @@ FAQ_ENTRIES = [
         "key": "get_better",
         "title": "Getting better",
         "patterns": [
-            r"how.{0,20}(get|be(come)?|git).{0,10}(better|gud|good)",
-            r"how.{0,15}(do|can) i improve",
-            r"(any )?tips.{0,20}(for )?(improv|better|new|beginner)",
+            r"how.{0,20}(get|be(come)?|git).{0,10}\b(better|gud|good)\b",
+            r"how.{0,15}\b(do|can)\b i improve",
+            r"(any )?tips.{0,20}(for )?\b(improv(?:e|es|ed|ing)|better|new|beginner)\b",
         ],
         "examples": ["how can i get better", "any tips for improving"],
         "answer": ("1. **Fix your setup first** — FPS drops and monitor refresh issues cost more games than bad "
@@ -1407,58 +1603,118 @@ FAQ_ENTRIES = [
     # mid-table they would steal "how do i report a bug in ffa" from bug_report
     # and "how do tournaments work in ffa" from tournaments.
     {
+        # Sits immediately ABOVE how_ffa so a rating-specific FFA question gets
+        # the rating answer, not the 12-line generic FFA wall ("right topic,
+        # wrong answer" — Snail's placement question). Still below
+        # bug_report/tournaments like the rest of the broad FFA cluster.
+        "key": "ffa_rating",
+        "title": "FFA rating & placement",
+        "patterns": [
+            r"\b(ffa|free ?for ?all)\b[^.?!,]{0,30}\b(elo|rating|glicko|mmr)\b[^.?!,]{0,30}\b(lose|lost|gain|gained|change|work|works|drop)\b",
+            r"\b(lose|lost|gain|gained|drop)\b[^.?!,]{0,25}\b(elo|rating|points?)\b[^.?!,]{0,25}\b(ffa|free ?for ?all)\b",
+            # ffa qualifier REQUIRED in the same sentence (Codex find 3:
+            # "does tournament placement matter" / "does spawn position
+            # matter" were stealing this answer and burning its cooldown).
+            r"\b(does|do|is)\b[^.?!,]{0,25}\b(placement|place|position|where i (finish|place))\b[^.?!,]{0,25}\b(matter|affect|change|effect)\b[^.?!]{0,25}\b(ffa|free ?for ?all)\b",
+            r"\b(ffa|free ?for ?all)\b[^.?!]{0,30}\b(does|do|is)?\b[^.?!,]{0,15}\b(placement|place|position)\b[^.?!,]{0,25}\b(matter|affect|change|effect)\b",
+            r"\b(lose|lost|gain|drop)\b[^.?!]{0,35}\b(same|less|more|depends?|matter|closer|scale[sd]?)\b[^.?!]{0,40}\b(ffa|free ?for ?all)\b",
+            r"\b(ffa|free ?for ?all)\b[^.?!]{0,40}\b(lose|lost|gain|drop)\b[^.?!]{0,35}\b(same|less|more|depends?|matter|closer)\b",
+            r"\b(ffa|free ?for ?all)\b[^.?!,]{0,25}\b(rating|elo)\b[^.?!,]{0,25}\b(calculated|determined|based)\b",
+            r"\bwhy\b[^.?!,]{0,10}\b(did|do)\b[^.?!,]{0,8}\bi\b[^.?!,]{0,8}\b(lose|gain)\b[^.?!,]{0,12}\b(elo|rating)\b[^.?!,]{0,12}\b(in )?(ffa|free ?for ?all)\b",
+        ],
+        "examples": ["how does ffa rating work", "does placement affect rating in ffa",
+                     "do i lose less elo if i place higher in ffa"],
+        "answer": ("**Yes — placement matters.** FFA has its own Glicko rating, and you are scored "
+                   "**pairwise against the (up to) 4 players placed nearest you**: each of those is a "
+                   "'win' if you finished above them and a 'loss' if you finished below. Finishing "
+                   "higher generally helps — it changes which neighbours you're compared against and "
+                   "how many of those comparisons you win — though the exact movement also depends on "
+                   "those opponents' ratings, and mid-field placements can come out very close.\n"
+                   "• **Placement** is points, then total half-points earned, and ties share a place "
+                   "(1, 2, 2, 4).\n"
+                   "• Comparisons are capped at your 4 placement-neighbours, so a 10-player lobby "
+                   "doesn't swing your rating harder than a small one.\n"
+                   "• Like all Glicko: new/uncertain ratings move more, established ones move less."),
+    },
+    {
         "key": "how_ffa",
         "title": "How FFA works",
         "patterns": [
-            r"(what|how|hows|where|when|why|can|does|do|is|explain|tell).{0,40}\bffa\b",
-            r"\bffa\b.{0,30}(work|works|mode|rules?|scor(e|ing)|rating|ranked|rank|queue|lobby|placement|points?|cards?|xp|gold|leaderboard|players?)",
-            r"(what|how|explain).{0,25}\bfree ?-? ?for ?-? ?alls?\b",
-            r"\bfree ?-? ?for ?-? ?alls?\b.{0,30}(work|works|mode|rules?|scor(e|ing)|rating|ranked|queue|lobby|match)",
+            # [^.?!,]{0,22} instead of .{0,40}: the interrogative and the topic
+            # must live in the SAME clause, and bare can/do/is/when/why are no
+            # longer standalone triggers (they matched inside "ran-do-mising",
+            # "can we get an ffa going", "why is ffa dead" — the RC1/RC2 class).
+            r"\b(what|whats|what's|how|hows|how's|explain|tell me about)\b[^.?!,]{0,22}\bffa\b",
+            r"\bffa\b[^.?!,]{0,22}\b(work|works|rules?|scoring|explained)\b",
+            r"\bis\s+ffa\b[^.?!,]{0,15}\b(ranked|rated|elo|live|out|playable|free)\b",
+            r"\bhow\s+\b(do|can)\b\s+\b(i|you|we)\b[^.?!,]{0,12}\b(play|join|start|queue|host)\b[^.?!,]{0,12}\bffa\b",
+            r"\b(what|how|explain)\b[^.?!,]{0,20}\bfree ?-? ?for ?-? ?alls?\b",
+            r"\bfree ?-? ?for ?-? ?alls?\b[^.?!,]{0,22}\b(work|works|rules?|scoring)\b",
+            # Narrow navigation/reward/board coverage the F4 rewrite dropped
+            # (Codex find 8) — the answer explicitly contains all of these.
+            r"\bwhere('s| is)?\b[^.?!,]{0,12}\bffa\b",
+            r"\bffa\b[^.?!,]{0,18}\b(gold|xp|leaderboards?|boards?|rewards?)\b",
+            r"\b(xp|gold)\b[^.?!,]{0,12}\b(from|in|for)\b[^.?!,]{0,6}\bffa\b",
         ],
         "examples": ["how does ffa work", "how does free for all work", "what is ffa",
                      "how do i play ffa", "how does ffa scoring work", "is ffa ranked"],
         "answer": (
-            "**Free-for-all, 3-10 players, and it's fully RANKED.** Played from **host lobbies**: "
+            "**Free-for-all, 3-10 players, ranked by default.** Played from **host lobbies**: "
             "**F5 → Multiplayer → FFA**, then **Create Lobby** or join an open one from the browser.\n"
             "• **Getting in** — no Elo band and no ready-up: sitting in the lobby *is* consent. The "
             "**host presses Start** once at least **3** players are in (up to **10**), and the mod "
-            "auto-connects everyone into the game. Several lobbies can be open at the same time; if "
-            "the host leaves, the longest-waiting member is promoted.\n"
+            "auto-connects everyone into the game. If the host leaves, the longest-waiting member "
+            "is promoted.\n"
+            "• **Host settings** — the host can tune the lobby before starting: **score target "
+            "(first to 3-10, default 5)**, opening draws, **max cards held (3-6, default 5)**, the "
+            "**Same Cards rule** (everyone's Nth draw offers identical candidates — no draw-luck "
+            "arguments), and **ranked or casual**. After any change the lobby can't start for 60s "
+            "so everyone can read what changed; the rules show in a banner at game start.\n"
             "• **Scoring** — everyone is their own team. Last player alive takes a **half point**; "
-            "**2 halves = a point**; **first to 5 points** wins the game. The lobby keeps playing "
+            "**2 halves = a point**; first to the score target wins. The lobby keeps playing "
             "rematches until people leave.\n"
             "• **Cards** — after each point, everyone *except* the point winner picks **at the same "
-            "time**. The window allows up to **45s** (extending as picks land, 90s max) and closes "
-            "early once everyone has picked. **A pick can't be skipped**: when the on-screen "
-            "countdown hits zero, the card you have highlighted is picked for you automatically "
-            "(card 1 if you never moved) and a toast announces it. You hold **5 cards**; picking a "
-            "6th removes your oldest.\n"
-            "• **Rating** — FFA has its **own Glicko rating and leaderboard**; your 1v1 elo is untouched. "
-            "Placement is points, then total half points earned, then kills, and ties share a place "
-            "(1, 2, 2, 4). You're rated against the **4 players placed nearest you**, so a 10-player "
-            "lobby doesn't swing your rating harder than a 3-player one.\n"
-            "• **Rewards** — **600 XP** plus **90 per player you finish above**, all multiplied by how "
-            "much of the field you outplaced (up to **×1.5** in a 3-player lobby and **×5** in a full "
-            "10) and by the usual opponent-tier bonus. On top of that every player banks **placement "
-            "gold** — 1st down to last, scaled by lobby size. 100 XP = 1 extra gold.\n"
+            "time**. **A pick can't be skipped**: at zero the highlighted card is picked "
+            "automatically and a toast announces it. Exceeding the card cap replaces your oldest.\n"
+            "• **Rating** — ranked FFA has its **own Glicko rating and leaderboard**; your 1v1 elo is "
+            "untouched. Placement is points, then total half points earned, and ties share a place "
+            "(1, 2, 2, 4). You're rated against the **4 players placed nearest you**. Casual "
+            "lobbies never touch ratings.\n"
+            "• **Rewards** — pay is **metered on the fighting**: decisive rounds are the work "
+            "unit, and elapsed time caps how quickly they can be cashed in, which keeps stall "
+            "tactics to a bounded edge over normal play. Bigger lobbies pay a better rate — a "
+            "full 10-player FFA is the best gold rate in the game. Placement shapes your share "
+            "(1st ≈ 5× last), the opponent-tier bonus applies, and 100 XP = 1 extra gold. "
+            "Casual lobbies pay reduced rewards.\n"
             "• The map and its out-of-bounds edge **grow with the lobby**.\n"
-            "• Spectators can **bet gold** on who wins the next game, from the FFA tab.\n"
+            "• Spectators can **bet gold** on ranked lobbies from the FFA tab.\n"
             "Full rules in-game: **F5 → Multiplayer → FFA → Info**."),
-        "short": ("FFA is a RANKED 3-10 player free-for-all played from host lobbies. F5 -> Multiplayer "
-                  "-> FFA: create a lobby or join an open one, and the host presses Start once 3+ are in "
-                  "(up to 10). Last player alive takes a half point, 2 halves make a point, first to 5 "
-                  "points wins. After each point everyone but the point winner picks a card at the same "
-                  "time - the timer auto-picks your highlighted card, so a pick can't be skipped; you "
-                  "hold 5 cards, a 6th drops your oldest. Own rating and leaderboard."),
+        # KEEP UNDER ~460 CHARS: _post_ingame_chat hard-cuts at 490 and a
+        # too-long short truncates mid-word on every single answer (Codex
+        # round-3 find 12; the harness asserts the bound now).
+        "short": ("FFA is a 3-10 player free-for-all played from host lobbies (ranked by "
+                  "default). F5 -> Multiplayer -> FFA: create or join a lobby; the host starts "
+                  "at 3+ and can tune score target (3-10), card cap (3-6), Same Cards, and "
+                  "ranked/casual. Half point per round survived, 2 halves = a point, first to "
+                  "the target wins. Picks can't be skipped - the timer confirms your highlighted "
+                  "card. Pay is metered on decisive rounds; own rating and board."),
     },
     {
         "key": "how_1v2",
         "title": "How 1v2 works",
         "patterns": [
-            r"(what|how|where|when|can|is|does|do|explain).{0,25}\b(1 ?v ?2|2 ?v ?1)\b",
-            r"\b(1 ?v ?2|2 ?v ?1)\b.{0,25}(work|works|play|queue|ranked|rating|available|live|beta|mode|rules?|scor(e|ing)|xp|gold)",
-            r"(what|how|where|when|can|is).{0,20}solo (vs|versus|v|against) duo",
-            r"(what|how|explain).{0,20}\bone (v|vs|versus) two\b",
+            # Same-clause bounds as how_ffa; "does anyone want to play 1v2" was
+            # the observed FP shape here.
+            r"\b(what|whats|what's|how|hows|explain|tell me about)\b[^.?!,]{0,22}\b(1 ?v ?2|2 ?v ?1)\b",
+            r"\b(1 ?v ?2|2 ?v ?1)\b[^.?!,]{0,22}\b(work|works|rules?|scoring|ranked|rated|explained)\b",
+            r"\bhow\s+\b(do|can)\b\s+\b(i|you|we)\b[^.?!,]{0,12}\b(play|join|start|queue)\b[^.?!,]{0,12}\b(1 ?v ?2|2 ?v ?1)\b",
+            r"\b(what|how|explain)\b[^.?!,]{0,20}\bsolo \b(vs|versus|v|against)\b duo\b",
+            r"\bhow\s+\b(does|do)\b[^.?!,]{0,12}\bsolo \b(vs|versus|v|against)\b duo\b[^.?!,]{0,12}\bwork\b",
+            r"\b(what|how|explain)\b[^.?!,]{0,20}\bone \b(v|vs|versus)\b two\b",
+            # Narrow navigation/reward/status coverage (Codex find 8).
+            r"\bwhere('s| is)?\b[^.?!,]{0,12}\b(1 ?v ?2|2 ?v ?1)\b",
+            r"\b(1 ?v ?2|2 ?v ?1)\b[^.?!,]{0,18}\b(gold|xp|leaderboards?|boards?|rewards?)\b",
+            r"\bis\s+(1 ?v ?2|2 ?v ?1)\b[^.?!,]{0,15}\b(ranked|rated|live|out|beta|playable)\b",
         ],
         "examples": ["how does 1v2 work", "what is 1v2", "how do i play 1v2",
                      "how does solo vs duo work", "how does 2v1 work"],
@@ -1473,34 +1729,119 @@ FAQ_ENTRIES = [
             "solo draws **2 cards on the opening pick only**.\n"
             "• **Rating** — 1v2 is still an **unranked beta**, so no rating is applied yet. Every game is "
             "fully recorded so the mode can be rated retroactively when it graduates.\n"
-            "• **Rewards** — **500 XP** per game (**750** for a win), plus **40g** each to the series "
-            "winners and **20g** to the losers. 100 XP = 1 gold.\n"
+            "• **Rewards** — **500 XP base** per game, multiplied up by a win (×1.5), playing the "
+            "solo side, skipping the extra-pick handicap, and the opponent-tier bonus — a solo win "
+            "against average-rated opponents lands around **2000 XP**. Series gold is **40g/20g** "
+            "win/lose, scaled by opponent tier. 100 XP = 1 gold.\n"
             "• **Boards** — the tab has separate **Solo** and **Duo** activity boards (W-L / win rate in "
             "that role); you appear only on boards for roles you've actually played.\n"
             "Full rules in-game: **F5 → Multiplayer → 1v2 → Info**."),
         "short": ("1v2 is solo vs duo, best-of-3 (first side to 2 wins). F5 -> Multiplayer -> 1v2 -> "
                   "Join 1v2 Lobby: consent queue, no elo band, no ready-up, it locks once 3 are searching. "
-                  "Side: Any/Solo/Duo picks your role; Solo Extra Initial Pick gives the solo 2 cards on the "
-                  "FIRST draw if any of the three turn it on. UNRANKED beta - no rating yet, but every game "
-                  "is recorded. 500 XP a game (750 on a win), 40g/20g series."),
+                  "Side: Any/Solo/Duo picks your role; Solo Extra Initial Pick gives the solo 2 cards "
+                  "on the FIRST draw if anyone turns it on. UNRANKED beta - recorded, no rating yet. "
+                  "500 XP base a game times win/solo/handicap/tier bonuses; 40g/20g series gold "
+                  "scaled by opponent tier."),
     },
 ]
 
 for _e in FAQ_ENTRIES:
     _e["compiled"] = [_faq_re.compile(p) for p in _e["patterns"]]
+    _e["compiled_exclude"] = [_faq_re.compile(p) for p in _e.get("exclude", [])]
     _e["examples_norm"] = [_faq_norm(x) for x in _e.get("examples", [])]
     _e["example_topics"] = [_faq_topic_tokens(x) for x in _e["examples_norm"]]
 
 
-def _faq_find_match(content: str):
-    """Return the best FAQ entry for a message, or None. Regex layer first
+# Messages that are question-SHAPED but are not questions for the bot: requests
+# aimed at a human, opinion polls, LFG pings, banter. Checked before any entry,
+# because a wrong answer also burns the 180s topic cooldown and silences the
+# real asker (see _faq_rate_ok). Silence beats a wrong answer: a miss costs
+# nothing (a human answers), a false hit costs twice.
+# TUNING KNOB: keep this one flat commented list so a new pattern is a
+# one-line addition, and keep the vetoed-print so logs:bot shows what got
+# vetoed and why.
+_FAQ_VETO = [
+    # request aimed at a person. ACTION verbs only -- "do/give/help/look/check/
+    # tell/send" must NEVER be in this list: "can you do the thunderstore link?"
+    # is a real, answerable question. The middle is a TEMPERED gap (Codex FAQ
+    # review find 5): an explanation frame ("could you TELL ME how to disable
+    # ranked") is a question about the action, not a request to perform it,
+    # so the gap may not cross tell/explain/show/teach/know.
+    # The tempered gap recognizes explanation GRAMMAR, not bare tokens (Codex
+    # round-2 find 16): "could you tell SID to refund X" is a real request —
+    # only "tell/show ME/US ..." or "explain/know how to" turn the sentence
+    # into a question about the action.
+    (r"\b(would|will|could|can|cud|plz|pls)\s+(you|u|ya|sid|we)\b"
+     r"(?:(?!\b(?:tell (?:me|us)|show (?:me|us)|teach (?:me|us)|explain|know how to)\b)[^?]){0,40}"
+     r"\b(consider|add|make|fix|kick|ban|remove|delete|change|revert|nerf|buff|"
+     r"implement|enable|disable|reset|restart|unban|refund)\b", "request-to-human"),
+    (r"\b(please|pls|plz)\b"
+     r"(?:(?!\b(?:tell (?:me|us)|show (?:me|us)|teach (?:me|us)|explain|know how to)\b).){0,30}"
+     r"\b(fix|add|kick|ban|remove|change|revert)\b", "request-to-human"),
+    # opinion / social. play/played were removed (find 5): "does anyone know
+    # how to play ffa" is informational; genuine play-LFG is caught below.
+    # Temper on the "know how to" instruction frame only — "do you know how
+    # people like X" is still an opinion poll (round-2 find 16).
+    (r"\b(do|did|does)\s+(you|u|yall|y'?all|anyone|any1|everyone)\b"
+     r"(?:(?!\bknow how to\b)[^?]){0,25}"
+     r"\b(like|liked|likes|think|thought|enjoy|enjoyed|prefer|hate|love)\b", "opinion"),
+    (r"\bwhat\s+(do|did)\s+(you|u|yall|y'?all|everyone|people)\s+think\b", "opinion"),
+    (r"\b(thoughts|opinions)\s+on\b", "opinion"),
+    # looking for a game. First-person SINGULAR is deliberately absent from
+    # the subject list (find 1): "can i play/get/do X" is a capability
+    # question ("can i play random people with the scr mod", "can i get the
+    # mod on thunderstore"), not game-forming.
+    (r"\b(anyone|any1|someone|somebody|who)\s+(wanna|want|wants|wanted|up for|down for|tryna|trying to)\b", "lfg"),
+    # LFG requires a GAME-FORMING OBJECT right after the verb (round-2 find
+    # 17): "can anyone play in vanilla lobbies?" is a capability question —
+    # the prepositions/articles that follow decide, not the subject.
+    (r"\bcan\s+(we|someone|somebody|anyone)\s+(get|do|play|start|join|run|have)\s+"
+     r"(a |an |another |some )?(ffa|1 ?v ?2|2 ?v ?2|game|match|lobby|round|one)\b"
+     r"(?![^.?!]{0,30}\b(in|with|without|against|on)\b)", "lfg"),
+    (r"\bwe\s+need\s+\d+\b|\b\d+\s+more\s+(for|needed)\b|\bneed\s+\d+\s+more\b", "lfg"),
+    (r"\b(join|queue|hop|get)\s+(in|on|up|me)?\s*(pls|plz|please)\b", "lfg"),
+    # "who's down/up" is LFG; "who's in" only with an LFG tail — "who's in
+    # rank 1?" is a leaderboard question (find 5).
+    (r"\bwho'?s?\s+(down|up)\b", "lfg"),
+    (r"\bwho'?s?\s+in\s*(for\b|to\b|\?|$)", "lfg"),
+    # banter / rhetorical. The when-returns veto exempts tournaments ("when
+    # will tournaments return" is a schedule question the tournaments entry
+    # answers); the discourse-marker veto only fires when no interrogative
+    # follows ("lol how do i install the mod?" is a real question).
+    (r"\b(when|whenever)\b(?![^.?!]{0,40}\btournaments?\b).{0,30}\b(returns?|comes? back|again|for the \w+ time)\b", "banter"),
+    (r"\bis\s+\w+\s+(dead|dying)\b", "banter"),
+    # The starter list mirrors _FAQ_QUESTION_RE (round-2 find 18: a narrower
+    # copy vetoed "lol is the mod safe?" / "bruh when will tournaments
+    # return?" — maintain ONE definition's worth of starters here).
+    (r"^(gg|lol|lmao|nice|wow|damn|bruh)\b(?!.{0,80}\b(how|what|whats|where|wheres|when|who|whos|why|can|could|does|do|is|are|any|which|help|explain|list|show|fastest)\b)", "banter"),
+    # a live support problem, not a rules question -- a human must handle it
+    (r"\b(stuck|bugged|broken|glitched)\b.{0,25}\b(queue|lobby|match|game)\b", "support-not-faq"),
+    # service status
+    (r"\bthunderstore\b.{0,15}\b(down|broken|offline|dead)\b", "service-status"),
+]
+_FAQ_VETO_C = [(_faq_re.compile(p), why) for p, why in _FAQ_VETO]
+
+
+def _faq_find_match(content: str, apply_veto: bool = True):
+    """Return the best FAQ entry for a message, or None. Veto layer first
+    (intent filter — auto-responder only; /faq passes apply_veto=False because
+    an explicit invocation is explicit consent), then the regex layer
     (ordered, first hit wins), then fuzzy vs canonical examples."""
     norm = _faq_norm(content)
     if not (8 <= len(norm) <= 400):
         return None
+    if apply_veto:
+        for rx, why in _FAQ_VETO_C:
+            if rx.search(norm):
+                print(f"[FAQ] vetoed ({why}): {norm[:80]}")
+                return None
     question_like = _faq_question_like(norm)
     for e in FAQ_ENTRIES:
         if not question_like and e.get("require_question", True):
+            continue
+        # Entry-level exclusion (whole-message): the message falls through to
+        # LATER entries rather than being dropped.
+        if e["compiled_exclude"] and any(x.search(norm) for x in e["compiled_exclude"]):
             continue
         for rx in e["compiled"]:
             if rx.search(norm):
@@ -1509,13 +1850,20 @@ def _faq_find_match(content: str):
         best, best_ratio = None, 0.0
         norm_topics = _faq_topic_tokens(norm)
         for e in FAQ_ENTRIES:
+            # Whole-message exclusion applies to BOTH matching layers (Codex
+            # round-2 find 14: "what are the 2v2 elo ranks" skipped
+            # rank_roles' regex pass and then fuzzy-matched it anyway).
+            if e["compiled_exclude"] and any(x.search(norm) for x in e["compiled_exclude"]):
+                continue
             for ex, ex_topics in zip(e["examples_norm"], e["example_topics"]):
                 if not _faq_topics_overlap(norm_topics, ex_topics):
                     continue
                 r = _faq_difflib.SequenceMatcher(None, norm, ex).ratio()
                 if r > best_ratio:
                     best, best_ratio = e, r
-        if best is not None and best_ratio >= 0.78:
+        # 0.82 (was 0.78) — safety margin against scaffolding-similarity
+        # matches now that the topic gate is the real filter.
+        if best is not None and best_ratio >= 0.82:
             return best
     return None
 
@@ -1852,10 +2200,12 @@ def _faq_embed(entry, answer_text: str) -> discord.Embed:
     return embed
 
 
-async def _post_ingame_chat(text_msg: str) -> bool:
+async def _post_ingame_chat(text_msg: str, channel: str = "global") -> bool:
     """Send a line into the in-game chat as the helper bot (via /chat/post —
     same path the Discord relay uses; broadcasts to all connected mod clients
-    and persists to scrollback)."""
+    and persists to scrollback). `channel` keeps a FAQ answer in the SAME
+    room its question came from (wave-2 find 11); the server collapses
+    unknown values to global."""
     if http_session is None or not API_SECRET_KEY:
         return False
     try:
@@ -1864,6 +2214,7 @@ async def _post_ingame_chat(text_msg: str) -> bool:
             json={
                 "discord_id": str(bot.user.id) if bot.user else "0",
                 "display_name": FAQ_HELPER_NAME,
+                "channel": (channel or "global"),
                 "message": text_msg[:490],
             },
             headers={"X-Internal-Key": API_SECRET_KEY},
@@ -1966,8 +2317,22 @@ async def _maybe_answer_faq_discord(message: discord.Message) -> None:
         return
     if message.guild is None:
         return  # DMs are the bug-report follow-up flow
+    # Channel scoping: FAQ_CHANNEL_ALLOWLIST env, comma-separated channel ids.
+    # Unset = answer everywhere (Sid's current call, 2026-08-01); configured =
+    # only listed channels (fail-CLOSED when configured-but-empty after a
+    # parse error). /faq always works everywhere regardless.
+    if _FAQ_ALLOWLIST_CONFIGURED and message.channel.id not in _FAQ_CHANNEL_ALLOWLIST:
+        return
     entry = _faq_find_match(content)
     if entry is None:
+        # Build the real-world coverage-gap list: one greppable line per
+        # question-shaped message nobody answered ([FAQ-MISS]), paired with
+        # the [FAQ] vetoed(...) line so one log pull shows both what the bot
+        # wrongly answered and what it wrongly ignored. Whitespace-collapsed
+        # so an embedded newline can't forge a second log line (find 17).
+        if _faq_question_like(_faq_norm(content)):
+            one_line = " ".join((content or "").split())[:120]
+            print(f"[FAQ-MISS] #{getattr(message.channel, 'name', message.channel.id)}: {one_line}")
         return
     if not _faq_rate_ok(message.channel.id, entry["key"], message.author.id):
         return
@@ -1980,9 +2345,14 @@ async def _maybe_answer_faq_discord(message: discord.Message) -> None:
     except Exception as ex:
         print(f"[FAQ] discord reply failed: {ex}")
         return
-    # Question asked in the chat-bridge channel: the question was relayed
-    # in-game, so deliver a short ASCII answer there too.
-    if CHAT_CHANNEL_ID and message.channel.id == CHAT_CHANNEL_ID:
+    # Question asked in a chat-bridge channel: the question was relayed
+    # in-game, so deliver a short ASCII answer there too — on the SAME
+    # in-game channel the bridge maps this Discord channel to (find 11).
+    _msg_chan_id = getattr(message.channel, "id", 0)
+    _bridge_lang = CHAT_LANG_BY_CHAN.get(_msg_chan_id)
+    if _bridge_lang is not None:
+        await _post_ingame_chat(_faq_short_text(entry, answer), channel=_bridge_lang)
+    elif CHAT_CHANNEL_ID and _msg_chan_id == CHAT_CHANNEL_ID:
         await _post_ingame_chat(_faq_short_text(entry, answer))
 
 
@@ -2012,14 +2382,20 @@ async def _maybe_answer_faq_ingame(data: dict) -> None:
     answer = await _faq_resolve_answer(entry, None)
     if not answer:
         return
-    sent = await _post_ingame_chat(_faq_short_text(entry, answer))
+    # Answer on the QUESTION's channel (wave-2 find 11): an RU question gets
+    # its short answer in RU's room, and the full-answer mirror goes to the
+    # RU Discord channel (falling back to the legacy global bridge).
+    _q_chan = str(data.get("channel") or "global").lower()
+    sent = await _post_ingame_chat(_faq_short_text(entry, answer), channel=_q_chan)
     if sent:
-        print(f"[FAQ] answered '{entry['key']}' in-game for {data.get('display_name')}")
-    # Mirror the full answer into the Discord bridge channel so both sides of
-    # the conversation see it (the in-game question itself was just relayed).
-    if CHAT_CHANNEL_ID:
+        print(f"[FAQ] answered '{entry['key']}' in-game [{_q_chan}] for {data.get('display_name')}")
+    # Mirror the full answer into the matching Discord bridge channel so both
+    # sides of the conversation see it (the in-game question itself was just
+    # relayed there by the chat bridge).
+    _mirror_id = CHAT_CHAN_BY_LANG.get(_q_chan) or CHAT_CHANNEL_ID
+    if _mirror_id:
         try:
-            channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
+            channel = bot.get_channel(_mirror_id) or await bot.fetch_channel(_mirror_id)
             if channel is not None:
                 asker = discord.utils.escape_markdown(data.get("display_name") or "player")
                 await channel.send(content=f"-# answering **{asker}** (in-game):",
@@ -2164,7 +2540,9 @@ async def cmd_faq(ctx, *, topic: str = ""):
                               color=0x5865F2)
         await ctx.send(embed=embed)
         return
-    entry = _faq_find_by_title(topic) or _faq_find_match(topic) or _faq_find_match(topic + "?")
+    entry = (_faq_find_by_title(topic)
+             or _faq_find_match(topic, apply_veto=False)
+             or _faq_find_match(topic + "?", apply_veto=False))
     if entry is None:
         if len(title_matches) > 1:
             suggestions = ", ".join(
@@ -2205,10 +2583,13 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         await bot.process_commands(message)
         return
-    if CHAT_CHANNEL_ID and message.channel and message.channel.id == CHAT_CHANNEL_ID:
+    # §2.6: ANY mapped bridge channel relays, tagged with its language code
+    # (the old single-channel check generalized — global keeps its id).
+    _relay_lang = CHAT_LANG_BY_CHAN.get(getattr(message.channel, "id", 0)) if message.channel else None
+    if _relay_lang:
         content = _discord_chat_plain_content(message)
         display = getattr(message.author, "global_name", None) or message.author.name
-        print(f"[CHAT] Discord msg from {display}: {content[:60]} (session={http_session is not None}, key={'set' if API_SECRET_KEY else 'MISSING'})")
+        print(f"[CHAT] Discord msg from {display} [{_relay_lang}]: {content[:60]} (session={http_session is not None}, key={'set' if API_SECRET_KEY else 'MISSING'})")
         if content and http_session is not None and API_SECRET_KEY:
             try:
                 async with http_session.post(
@@ -2217,12 +2598,13 @@ async def on_message(message: discord.Message):
                         "discord_id": str(message.author.id),
                         "display_name": display,
                         "message": content,
+                        "channel": _relay_lang,
                     },
                     headers={"X-Internal-Key": API_SECRET_KEY},
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     body = await resp.text()
-                    print(f"[CHAT] Relay Discord→API: status={resp.status} body={body[:100]}")
+                    print(f"[CHAT] Relay Discord→API [{_relay_lang}]: status={resp.status} body={body[:100]}")
             except Exception as e:
                 print(f"[CHAT] Failed to relay Discord -> API: {e}")
     # A plain (non-command) DM to the bot is treated as a follow-up on one of
@@ -2322,13 +2704,34 @@ async def _forward_ingame_to_discord(data: dict) -> bool:
     rating_str = f" ({rating:.0f})" if isinstance(rating, (int, float)) else ""
     title = data.get("title")
     title_str = f" [{title}]" if title else ""
-    channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
+    # §2.6 routing: the entry's channel decides the Discord destination.
+    # Unmapped language or unresolvable channel → GLOBAL with a "[RU]"-style
+    # prefix and a once-per-key log — never drop.
+    lang = str(data.get("channel") or "global").lower()
+    dest_id = CHAT_CHAN_BY_LANG.get(lang)
+    lang_prefix = ""
+    channel = None
+    if dest_id:
+        try:
+            channel = bot.get_channel(dest_id) or await bot.fetch_channel(dest_id)
+        except Exception:
+            channel = None
+    if channel is None:
+        if lang != "global":
+            lang_prefix = f"[{lang.upper()}] "
+            if lang not in _chat_route_warned:
+                _chat_route_warned.add(lang)
+                print(f"[CHAT] channel for '{lang}' unmapped/unresolvable — relaying into global with a prefix")
+        try:
+            channel = bot.get_channel(CHAT_CHANNEL_ID) or await bot.fetch_channel(CHAT_CHANNEL_ID)
+        except Exception:
+            channel = None
     if channel is None:
         print(f"[CHAT] Channel {CHAT_CHANNEL_ID} not resolvable")
         return False
     try:
         await channel.send(
-            f"**{discord.utils.escape_markdown(name)}"
+            f"{lang_prefix}**{discord.utils.escape_markdown(name)}"
             f"{discord.utils.escape_markdown(title_str)}"
             f"{rating_str}** (in-game): "
             f"{discord.utils.escape_markdown(content)[:1900]}",

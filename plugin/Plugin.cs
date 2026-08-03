@@ -38,6 +38,8 @@ namespace CompetitiveRounds
 
         // Config entries
         internal static ConfigEntry<string> ApiBaseUrl;
+        internal static ConfigEntry<string> ModLanguage;      // L10n v1 (D2)
+        internal static ConfigEntry<bool> PseudoLocaleEnabled;
         // Security A2: admin HMAC secret — NEVER compiled into the DLL. Empty
         // for every normal player; a server admin pastes the value (delivered
         // out-of-band, matches the server's ADMIN_HMAC_SECRET) into their own
@@ -314,6 +316,33 @@ namespace CompetitiveRounds
                 "Show in-game notifications for match results"
             );
 
+            // Localization v1 (D2: asked once, changeable in Settings). The
+            // "unset" sentinel drives the one-time first-launch prompt with
+            // the OS-culture suggestion pre-selected; the prompt writes the
+            // choice here and it is never asked again. Values: en, es, ru
+            // (qps = pseudo-locale, dev-only via PseudoLocale below).
+            ModLanguage = Config.Bind(
+                "UI", "Language",
+                I18n.LOCALE_UNSET,
+                "Mod display language: en, es, ru (unset = ask on next launch)"
+            );
+            PseudoLocaleEnabled = Config.Bind(
+                "UI", "PseudoLocale",
+                false,
+                "Dev: render every catalogued string bracketed+widened to surface untranslated/overflowing text"
+            );
+            try
+            {
+                I18nCatalogues.Install();
+                if (PseudoLocaleEnabled.Value) I18n.SetLocale(I18n.LOCALE_PSEUDO);
+                else if (ModLanguage.Value != I18n.LOCALE_UNSET) I18n.SetLocale(ModLanguage.Value);
+                // unset -> stays English until the ask-once prompt answers.
+                // Server-pack overlay (§2.2): cached copy immediately (works
+                // offline); the fresh fetch rides ApiClient's init below.
+                I18n.LoadCachedPack();
+            }
+            catch (Exception i18nEx) { Log.LogWarning("[I18N] init: " + i18nEx.Message); }
+
             ShowFps = Config.Bind(
                 "UI", "ShowFps",
                 true,
@@ -541,6 +570,18 @@ namespace CompetitiveRounds
             {
                 Log.LogWarning($"Harmony patching bootstrap failed (mod will work without it): {ex.Message}");
             }
+
+            // Stage the authoritative-poison capability NOW, before anything can
+            // connect. It must ride the Photon join operation itself — that is the
+            // entire basis for the protocol needing no activation barrier, because
+            // a property delivered with a player's Player object cannot be observed
+            // late by anyone who can act on that player. Must run AFTER Harmony
+            // patching so PatchesLive is known: advertising an authority we cannot
+            // deliver is worse than not advertising at all.
+            // Hook() here as well as from the tick: the tick is gated behind
+            // modDisabled/startup, and a client that advertises authority but never
+            // subscribed to the commit path would never apply its OWN damage.
+            try { PoisonSync.StageCapability("Awake"); PoisonSync.Hook(); } catch { }
 
             // Create persistent object with maximum protection
             if (!spawned)
@@ -1146,15 +1187,16 @@ namespace CompetitiveRounds
             try { ApiClient.TickLeaveRecovery(); }
             catch { }
 
-            // Poison protocol upkeep (#143). Both are idempotent and cheap:
+            // Poison protocol upkeep (#143/#151). Both are idempotent and cheap:
             // Hook() attaches the Photon event listener once per session, and
-            // EnsureCapabilityPublished() re-publishes only when the room name
-            // changes. Driven from the always-on tick rather than a join hook
-            // so no join path can forget it — the capability MUST be visible to
-            // peers before the game latches its mode, or a fully-updated room
-            // silently falls back.
-            try { PoisonSync.Hook(); PoisonSync.EnsureCapabilityPublished(); }
+            // Tick() retries the pre-join capability stage and keeps the roster
+            // view fresh. Driven from the always-on tick rather than a join hook
+            // so no join path can forget it.
+            try { PoisonSync.Hook(); PoisonSync.Tick(); }
             catch { }
+            // Quick-chat (§2.6) rides Photon event code 48 — same
+            // EventReceived hook pattern as PoisonSync (code 47).
+            try { QuickChat.Hook(); } catch { }
 
             // Poll 1v2 queue if searching. Must run here (not just from the
             // F5 tab ticker) — a player who queues and closes the menu would
@@ -1212,6 +1254,11 @@ namespace CompetitiveRounds
                             Plugin.Log.LogError($"[COMPAT]   - {m}");
                         Plugin.Log.LogError("[COMPAT] Mod DISABLED to ensure competitive integrity.");
                         Plugin.modDisabled = true;
+                        // Awake already staged the poison-authority capability, and
+                        // modDisabled stops the tick that would subscribe us to the
+                        // commit path — withdraw it so peers do not wait on verdicts
+                        // this client will never publish.
+                        try { PoisonSync.RevokeCapability(); } catch { }
                         return;
                     }
                 }
@@ -1245,6 +1292,14 @@ namespace CompetitiveRounds
 
             // Wire the chat pipe so incoming messages reach the UI log.
             ChatClient.OnMessage = NativeUI.OnChatMessage;
+            // §2.6: a mid-session locale switch re-declares the socket's
+            // channel set and refetches scrollback for the new channel.
+            I18n.LocaleChanged += ChatClient.ResubscribeAndRefresh;
+            // §2.2: fetch the pack overlay for the (possibly new) locale.
+            // ApplyPack deliberately does NOT re-fire LocaleChanged, so this
+            // cannot recurse.
+            I18n.LocaleChanged += ApiClient.FetchI18nPack;
+            ApiClient.FetchI18nPack();
 
             // If the user already granted consent in a previous session, open the chat WS now.
             // Fresh installs stay offline until the consent modal gets a Yes.
@@ -1947,6 +2002,11 @@ namespace CompetitiveRounds
 
         public void OnPlayerEnteredRoom(Photon.Realtime.Player p)
         {
+            // Poison protocol: re-evaluate whether every peer speaks it, and arm
+            // the roster quarantine. Ungated — a joiner in ANY room type matters,
+            // and the persistent tick is only a backstop for a missed callback.
+            try { PoisonSync.NoteRosterChange("PlayerEntered"); } catch { }
+
             // Republish our cr_face every time a new player joins the room.
             // This fixes the "two characters missing in card-pick" bug where
             // a peer joined after our OnJoinedRoom-time publish so they never
@@ -1979,6 +2039,11 @@ namespace CompetitiveRounds
             // this on every remaining seat, so the ally AND both opponents all
             // see who left. Display-only; every report path below is untouched.
             try { GameStateWatcher.NotifyPlayerLeftRoom(p); } catch { }
+            // Poison protocol: arm the roster quarantine. The "we saw an incapable
+            // peer" flag is deliberately STICKY for the room and is NOT cleared
+            // here — a peer that appears briefly and leaves must not re-enable
+            // block honouring underneath a stream it already partially simulated.
+            try { PoisonSync.NoteRosterChange("PlayerLeft"); } catch { }
             if (!Diag2v2.IsActive()) return;
             try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
             catch { }
@@ -4122,22 +4187,45 @@ namespace CompetitiveRounds
             var allButtons = UnityEngine.Object.FindObjectsOfType<ListMenuButton>();
             if (allButtons == null || allButtons.Length == 0) return;
 
-            // Find a main menu button by checking TMP text for known labels
+            // Anchor on the QuitButton COMPONENT, not the rendered text:
+            // ROUNDS localizes the label (ru/ja/es render as their own words)
+            // and auto-selects locale from the OS culture, so the old
+            // text=="QUIT" match returned null on every non-English install —
+            // the mod's menu entry was never created and those players never
+            // found F5 either. The component is locale-independent and the
+            // mod already knows it (it destroys it on the clone below).
             ListMenuButton quitButton = null;
             foreach (var btn in allButtons)
             {
                 try
                 {
-                    var tmpComp = btn.GetComponentInChildren(cachedTmpType, true);
-                    if (tmpComp == null) continue;
-                    string text = (textProp.GetValue(tmpComp) as string ?? "").Trim().ToUpper();
-                    if (text == "QUIT")
+                    if (btn != null && btn.GetComponent<QuitButton>() != null)
                     {
                         quitButton = btn;
                         break;
                     }
                 }
                 catch { }
+            }
+            if (quitButton == null)
+            {
+                // Literal-text fallback (pre-fix behavior) in case a future
+                // game build moves the component off the ListMenuButton GO.
+                foreach (var btn in allButtons)
+                {
+                    try
+                    {
+                        var tmpComp = btn.GetComponentInChildren(cachedTmpType, true);
+                        if (tmpComp == null) continue;
+                        string text = (textProp.GetValue(tmpComp) as string ?? "").Trim().ToUpper();
+                        if (text == "QUIT")
+                        {
+                            quitButton = btn;
+                            break;
+                        }
+                    }
+                    catch { }
+                }
             }
 
             if (quitButton == null)
@@ -4491,6 +4579,10 @@ namespace CompetitiveRounds
 
                 if (lookup.Count > 0)
                     Plugin.Log.LogInfo($"[RARITY] Card rarity lookup built: {lookup.Count} entries ({allCards.Length} CardInfo objects scanned)");
+                // Warm the localized card-text cache HERE (menu-time, right
+                // after the canonical map it keys off exists) so the in-match
+                // hold-Tab path never pays the first localized-table load.
+                try { CardTextLocalizer.Prime(); } catch { }
             }
             catch (Exception ex)
             {
@@ -5532,26 +5624,15 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[BLOCK-RESET] error: {ex.Message}"); }
         }
 
-        // __state carries whether vanilla was ACTUALLY going to start a game.
-        // GM_ArmsRace.StartGame opens with `if (!GameManager.instance.isPlaying)`
-        // and PlayerJoined calls it on every join, so mid-combat joins reach this
-        // Postfix with vanilla having done nothing. Latching there would
-        // republish a new poison epoch underneath live streams and strand their
-        // in-flight ticks. Only a false -> true transition is a real game start.
-        static void Prefix(out bool __state)
-        {
-            bool playing = false;
-            try { playing = GameManager.instance != null && GameManager.instance.isPlaying; } catch { }
-            __state = !playing;
-        }
-
-        static void Postfix(bool __state)
+        // The __state false->true transition dance that used to live here existed
+        // ONLY to protect the old per-game poison latch from GM_ArmsRace.StartGame
+        // being re-entered by PlayerJoined on every join (#143). The rewritten
+        // protocol has nothing to latch — capability is per-room and immutable, and
+        // per-stream state resets at Revive — so the transition detection went with
+        // it. The block sweep below is idempotent and wants to run on every call.
+        static void Postfix()
         {
             RunSweep("StartGame v2");
-            if (!__state) return;
-            // Latch the poison protocol for THIS game (report #143). Decided
-            // once, before combat, never re-evaluated mid-game.
-            try { PoisonSync.LatchForGame("StartGame"); } catch { }
         }
     }
 
@@ -5600,9 +5681,6 @@ namespace CompetitiveRounds
         {
             yield return null;   // let Unity run the deferred OnDestroy chain
             GMArmsRaceStartGameBlockResetPatch.RunSweep("ResetCharacters (rematch, post-destroy)");
-            // Same-room rematches never fire StartGame (#138), so without this
-            // every game after the first would run on a stale poison latch.
-            try { PoisonSync.LatchForGame("ResetCharacters"); } catch { }
         }
     }
 

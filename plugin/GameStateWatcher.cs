@@ -1873,7 +1873,9 @@ namespace CompetitiveRounds
                     {
                         Plugin.Log.LogInfo(
                             $"[FFA-LOBBY] joined competitive room '{photonRoomId}' while in an open lobby — leaving the lobby");
-                        try { ApiClient.FfaLeaveQueue(); } catch { }
+                        // Pre-room cause: this is an open-lobby SEAT being
+                        // abandoned, not an exit from the ffa_ room itself.
+                        try { ApiClient.FfaLeaveQueue("seat_abandon"); } catch { }
                         CompetitiveUI.ShowNotification(
                             "Left your FFA lobby - you joined a competitive game",
                             Color.yellow,
@@ -2081,7 +2083,11 @@ namespace CompetitiveRounds
                     // FfaLeaveQueue closes/dissolves it server-side and clears
                     // ActiveFfaLobbyId + the pending slot. Idempotent when
                     // several members leave at sitting end.
-                    try { ApiClient.FfaLeaveQueue(); } catch { }
+                    // in_room_exit only when a game ACTUALLY STARTED here
+                    // (round-10 find 4): occupancy of a never-filled room is
+                    // not assembly, and tagging it would refuse the
+                    // dissolution that frees the other seats.
+                    try { ApiClient.FfaLeaveQueue(FfaMode.GameStartedInRoom ? "in_room_exit" : ""); } catch { }
                     try { Plugin.ClearPendingFfaSlot(); } catch { }
                     try { FfaMode.OnRoomLeft(); } catch { }
                 }
@@ -2165,8 +2171,11 @@ namespace CompetitiveRounds
                         // server-side (cancels the series, resets the other two
                         // rows to searching) and clears the local lock state —
                         // otherwise the husk re-feeds this dead room forever.
-                        if (isOvtRoom) { try { ApiClient.OvtLeaveQueue(); } catch { } }
-                        if (isFfaRoom) { try { ApiClient.FfaLeaveQueue(); } catch { } }
+                        // Cause deliberately NOT in_room_exit (round-9): the
+                        // room never assembled — dissolution is the correct
+                        // outcome, and the in-room fence must not veto it.
+                        if (isOvtRoom) { try { ApiClient.OvtLeaveQueue("assembly_bail"); } catch { } }
+                        if (isFfaRoom) { try { ApiClient.FfaLeaveQueue("assembly_bail"); } catch { } }
                         try { NetworkConnectionHandler.instance.NetworkRestart(); }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[QUEUE-STALL] NetworkRestart failed: {ex.Message}"); }
                     }

@@ -15,6 +15,23 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, float> LastErrors = new Dictionary<string, float>();
         private static readonly Dictionary<string, int> DiagnosticCounts = new Dictionary<string, int>();
 
+        /// <summary>STRICT scope: only rooms where EVERY client is guaranteed to be
+        /// running this mod — mod-issued rooms (queue/tournament/FFA) plus offline.
+        ///
+        /// Use this ONLY where correctness requires every client in the room to apply
+        /// the same patch, i.e. where a half-applied patch is WORSE than no patch.
+        /// Today that is exactly one site: PoisonGhostPatch's ignoreBlock override.
+        ///
+        /// DO NOT widen CompetitiveRoomDetect.IsCompetitiveRoom() to reach privately
+        /// hosted room-code games. It is load-bearing elsewhere for queue lifecycle,
+        /// the in_match destruction veto, PopUpHandler auto-continue and the 2v2 spawn
+        /// sort — widening it there has side effects that have nothing to do with
+        /// gameplay patches. Use AnyGameScope() instead.
+        ///
+        /// Bug #151: nine patch classes used to sit behind this gate, which silently
+        /// excluded privately hosted room-code games — 580 of 920 ranked matches in a
+        /// 30-day window (63%). Everything that does NOT require room-wide unanimity
+        /// has since moved to AnyGameScope() or been ungated outright.</summary>
         internal static bool GameplayScope()
         {
             try
@@ -24,6 +41,26 @@ namespace CompetitiveRounds
             catch (Exception ex)
             {
                 LogError("GameplayScope", ex);
+                return false;
+            }
+        }
+
+        /// <summary>BROAD scope: any actual game, however the room was created —
+        /// mod-issued, private room code, public quickplay, or offline sandbox.
+        ///
+        /// Correct for any fix whose effect is LOCAL and IDEMPOTENT, i.e. one that
+        /// cannot make two clients disagree about anything outliving a round
+        /// transition. A patch under this gate is safe with an unpatched peer in the
+        /// room because it never asks that peer to do anything.</summary>
+        internal static bool AnyGameScope()
+        {
+            try
+            {
+                return PhotonNetwork.OfflineMode || PhotonNetwork.InRoom;
+            }
+            catch (Exception ex)
+            {
+                LogError("AnyGameScope", ex);
                 return false;
             }
         }
@@ -131,7 +168,8 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!VanillaFixSupport.GameplayScope()) return;
+                // Ungated (#151): a leaked local GameObject is not mode-specific, and
+                // nothing here is networked or cross-client.
                 var go = __instance.mostRecentlySpawnedObject;
                 if (go == null || !go.name.StartsWith("VE_Radar")) return;
                 if (go.GetComponent<RemoveAfterSeconds>() != null) return;
@@ -150,7 +188,14 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!VanillaFixSupport.GameplayScope()) return;
+                // AnyGameScope since #151: auto-fire is purely LOCAL input behaviour —
+                // nothing about it crosses the wire, so an unpatched peer keeping the
+                // vanilla latch cannot desync anything. Learning #198 originally scoped
+                // this to competitive rooms out of an asymmetry concern about public
+                // quickplay; that reasoning does not reach privately hosted rated games,
+                // where both players have the mod and today a vanilla bug silently
+                // poisons their guns for the rest of the room with no repair at all.
+                if (!VanillaFixSupport.AnyGameScope()) return;
                 if (!__instance.dontAllowAutoFire) return;
 
                 __instance.dontAllowAutoFire = false;
@@ -200,26 +245,38 @@ namespace CompetitiveRounds
             try
             {
                 if (!healthRemoval) return;
+
+                // ── THIS GATE MUST STAY STRICT. Do not "fix" it to AnyGameScope. ──
+                //
+                // Bug #151 widened eight sibling patches out of GameplayScope because
+                // it excluded privately hosted room-code games. This one is the
+                // deliberate exception, and widening it makes things WORSE.
+                //
+                // The bypass is only correct when EVERY client in the room forces it.
+                // In a room where only some clients do, the modded victim ignores its
+                // block while a block-aware peer honours it — so the two disagree on
+                // the ENTIRE blocked set, instead of the ~1 boundary tick they
+                // disagree on today. Only mod-issued rooms guarantee unanimity.
+                //
+                // Private room-code games are served by the authoritative protocol
+                // (PoisonSync) instead, which needs no unanimity because the decision
+                // is made once by the victim rather than agreed room-wide.
                 if (!VanillaFixSupport.GameplayScope()) return;
 
-                // Mode-aware since the #143 rebuild. This patch is now the
-                // FALLBACK arm only.
+                // FALLBACK ARM ONLY. Three cases route past this patch:
                 //
-                //  * Authoritative rooms: the victim's client already made the
-                //    block decision once and its committed ticks arrive with
-                //    ignoreBlock: true set explicitly. Forcing it here as well
-                //    would be redundant, and worse, it would silently mask a
-                //    stray local DOT if one ever escaped the scheduler patch —
-                //    leave those visible instead.
-                //  * Offline / sandbox: there is exactly one simulation, so
-                //    vanilla's own block check is already consistent. Forcing
-                //    the bypass there was an unintended side effect of the
-                //    v1.34.5 desync fix and removed a real mechanic for no
-                //    benefit; offline now behaves like vanilla again.
-                //  * Online mixed rooms: unchanged v1.35.4 behaviour — ticks
-                //    bypass block so every replica agrees, because we cannot
-                //    make an unpatched peer honour a verdict.
-                if (PoisonSync.Authoritative) return;
+                //  * Capable victim: its own client already made the block decision
+                //    once, and its committed ticks arrive with ignoreBlock: true set
+                //    explicitly. Forcing it here too would be redundant and would mask
+                //    a stray local DOT if one ever escaped the scheduler — leave those
+                //    visible.
+                //  * Offline / sandbox: one simulation, so vanilla's own block check is
+                //    already consistent. Forcing the bypass there removed a real
+                //    mechanic for no benefit.
+                //  * Online, incapable victim: unchanged v1.35.4 behaviour — ticks
+                //    bypass block so every replica agrees, because we cannot make an
+                //    unpatched peer honour a verdict.
+                if (PoisonSync.CapableVictim(__instance.GetComponent<PhotonView>())) return;
                 try
                 {
                     if (!Photon.Pun.PhotonNetwork.InRoom || Photon.Pun.PhotonNetwork.OfflineMode) return;
@@ -293,7 +350,10 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!VanillaFixSupport.GameplayScope()) return;
+                // AnyGameScope since #151: this CONVERGES a non-owner's stale root to
+                // the authoritative value the RPC itself carries. It removes divergence
+                // rather than creating it, so a mixed roster is harmless.
+                if (!VanillaFixSupport.AnyGameScope()) return;
 
                 Transform root = __instance.transform.root;
                 if (root == null) return;
@@ -360,7 +420,7 @@ namespace CompetitiveRounds
             try
             {
                 if (viewID != -1 || colliderID < 0) return;
-                if (!VanillaFixSupport.GameplayScope()) return;
+                // Ungated (#151): log-only.
 
                 PhotonView view = __instance.GetComponent<PhotonView>();
                 if (view == null || view.IsMine) return;
@@ -409,7 +469,7 @@ namespace CompetitiveRounds
             try
             {
                 if (!string.Equals(key, "DrillStop", StringComparison.Ordinal)) return;
-                if (!VanillaFixSupport.GameplayScope()) return;
+                // Ungated (#151): log-only.
 
                 PhotonView view = __instance.GetComponent<PhotonView>();
                 if (view == null || view.IsMine) return;
@@ -543,7 +603,13 @@ namespace CompetitiveRounds
             try
             {
                 if (!healthRemoval) return true;
-                if (!VanillaFixSupport.GameplayScope()) return true;
+                // AnyGameScope since #151. battleOngoing is driven false by
+                // RPCA_NextRound (an All-RPC) on every client, and the transition ends
+                // in RevivePlayers() -> health reset everywhere, so any mixed-roster
+                // disagreement inside the window is erased before combat resumes.
+                // Widening strictly REDUCES the number of clients that apply
+                // transition-window ticks.
+                if (!VanillaFixSupport.AnyGameScope()) return true;
                 if (GameManager.instance == null || GameManager.instance.battleOngoing) return true;
 
                 VanillaFixSupport.DiagLimited(
@@ -571,7 +637,11 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!VanillaFixSupport.GameplayScope()) return true;
+                // AnyGameScope since #151. The round advance is master-gated
+                // (GM_ArmsRace only RPCs RPCA_NextRound when IsMasterClient) and rides
+                // one All-RPC, so a split roster cannot diverge here — it only decides,
+                // per-master, whether the fix applies at all.
+                if (!VanillaFixSupport.AnyGameScope()) return true;
                 if (GameManager.instance == null || GameManager.instance.battleOngoing) return true;
 
                 VanillaFixSupport.DiagLimited(
@@ -603,7 +673,8 @@ namespace CompetitiveRounds
     /// activeInHierarchy guard vanilla's own HealthHandler.Revive has:
     /// RPCA_SendForceOverTime / RPCA_SendForceTowardsPointOverTime land from
     /// the same hit-volley that just killed the player (RPCA_Die SetActive
-    /// false first), DamageOverTime.TakeDamageOverTime is the DOT-tick twin,
+    /// false first), the DamageOverTime tick twin (now folded into
+    /// PoisonDotSchedulerPatch — see the note where DeadPlayerDotPatch used to be),
     /// and CardChoiceVisuals.Hide fires while its GO is already hidden at
     /// round->pick transitions. Skipping while inactive changes nothing —
     /// Unity already refuses the StartCoroutine — it just stops the error
@@ -616,7 +687,9 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!VanillaFixSupport.GameplayScope()) return true;
+                // Ungated (#151): Unity already refuses a StartCoroutine on an inactive
+                // GameObject, so this is provably zero behavioural change — pure log
+                // noise removal. Nothing to keep mode-scoped.
                 if (__instance != null && !__instance.gameObject.activeInHierarchy)
                 {
                     VanillaFixSupport.DiagLimited(
@@ -646,7 +719,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!VanillaFixSupport.GameplayScope()) return true;
+                // Ungated (#151) — see DeadPlayerForcePatch.
                 if (__instance != null && !__instance.gameObject.activeInHierarchy)
                     return false;
             }
@@ -662,29 +735,16 @@ namespace CompetitiveRounds
         }
     }
 
-    [HarmonyPatch(typeof(DamageOverTime), "TakeDamageOverTime")]
-    internal static class DeadPlayerDotPatch
-    {
-        [HarmonyPrefix]
-        private static bool BeforeDotTick(DamageOverTime __instance)
-        {
-            try
-            {
-                if (!VanillaFixSupport.GameplayScope()) return true;
-                if (__instance != null && !__instance.gameObject.activeInHierarchy)
-                    return false;
-            }
-            catch (Exception ex) { VanillaFixSupport.LogError("DeadPlayerDot", ex); }
-            return true;
-        }
-
-        [HarmonyCleanup]
-        private static Exception Cleanup(MethodBase original, Exception exception)
-        {
-            if (original != null) return exception;
-            return VanillaFixSupport.Cleanup("DeadPlayerDot", exception);
-        }
-    }
+    // DeadPlayerDotPatch used to live here — a second Harmony Prefix on
+    // DamageOverTime.TakeDamageOverTime whose only job was to skip the call while the
+    // host GameObject was inactive. It has been FOLDED into
+    // PoisonDotSchedulerPatch.Prefix (PoisonSync.cs) as step 1 and the class deleted.
+    //
+    // This is not tidying. Two prefixes on one method have UNDEFINED relative order,
+    // and Harmony skips every subsequent prefix once one returns false — so with the
+    // poison scheduler also prefixing this method, whichever ran first would silently
+    // decide whether the other ran at all. One merged prefix removes the hazard
+    // outright and makes the ordering explicit and reviewable.
 
     [HarmonyPatch(typeof(CardChoiceVisuals), "Hide")]
     internal static class InactiveVisualsHidePatch
@@ -694,7 +754,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (!VanillaFixSupport.GameplayScope()) return true;
+                // Ungated (#151) — see DeadPlayerForcePatch.
                 if (__instance != null && !__instance.gameObject.activeInHierarchy)
                     return false;
             }
@@ -867,6 +927,39 @@ namespace CompetitiveRounds
         {
             if (original != null) return exception;
             return VanillaFixSupport.Cleanup("CardPickChatInputGuard", exception);
+        }
+    }
+
+    /// <summary><para>Quality-of-life (Sid, 2026-08-01, alongside the room-code
+    /// FAQ correction): when the player hosts a private room (Online → Host
+    /// Room), copy the 6-character room code to the clipboard the moment
+    /// vanilla displays it, and say so. <c>LoadingScreen.SetRoomCode</c> is
+    /// the exact display moment (HostPrivateRoom's connected callback calls
+    /// it right after CreateRoom), so the hook can never fire for a join or
+    /// a mod-issued queue room — those paths never call SetRoomCode.</para></summary>
+    [HarmonyPatch(typeof(LoadingScreen), "SetRoomCode")]
+    internal static class HostRoomCodeClipboardPatch
+    {
+        [HarmonyPostfix]
+        private static void AfterSetRoomCode(string roomCode)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(roomCode)) return;
+                GUIUtility.systemCopyBuffer = roomCode;
+                CompetitiveUI.ShowNotification(
+                    $"Room code {roomCode} copied to clipboard - paste it to your friends!",
+                    new Color(0.6f, 1f, 0.6f), 6f);
+                Plugin.Log.LogInfo($"[HOSTROOM] room code {roomCode} copied to clipboard");
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("HostRoomCodeClipboard", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("HostRoomCodeClipboard", exception);
         }
     }
 }

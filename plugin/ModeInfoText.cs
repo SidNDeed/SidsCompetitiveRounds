@@ -91,8 +91,24 @@ namespace CompetitiveRounds
 - Leaving mid-game is recorded.";
 
         public const string FfaTitle = "FFA - How It Works";
-        public const string Ffa = @"Free-for-all for 3-10 players. Every player is their own team.
-Standard ROUNDS scoring - first to 5 points takes the game.
+        // Config source for the prose (Codex v1.36 client find 13): while
+        // sitting in an OPEN lobby, FfaMode's engine statics are not yet
+        // latched (that happens at ready_join / the room prop) — the live
+        // values are ApiClient's lobby-poll mirrors, which is exactly the
+        // reading-window the Info button exists for. In-room / locked, the
+        // engine statics ARE the truth. Display-only: the poll never mutates
+        // engine state.
+        private static int FfaTargetNow =>
+            ApiClient.OpenFfaLobbyId != null ? ApiClient.FfaLobbyCfgTarget : FfaMode.RoundsToWin;
+        private static int FfaCapNow =>
+            ApiClient.OpenFfaLobbyId != null ? ApiClient.FfaLobbyCfgCap : FfaMode.CardCap;
+        // A PROPERTY, not a const (v1.36 configurable lobbies, §7a): the
+        // score target and card cap are per-lobby now, and a const would bake
+        // "5" into prose forever. Evaluated at Info-click time, so it renders
+        // the CURRENT lobby's numbers when the player is in one and the
+        // defaults otherwise.
+        public static string Ffa => @"Free-for-all for 3-10 players. Every player is their own team.
+Standard ROUNDS scoring - first to " + FfaTargetNow + @" points takes the game.
 
 <color=#FFD94D><b>HOW TO PLAY</b></color>
 
@@ -114,15 +130,32 @@ Standard ROUNDS scoring - first to 5 points takes the game.
   picked for you automatically. You always get a
   card - skipping a pick is not possible.
 
-- You hold up to 5 cards.
-  Picking a 6th replaces your oldest card.
+- You hold up to " + FfaCapNow + @" cards.
+  Picking one more replaces your oldest card.
+
+<color=#FFD94D><b>HOST SETTINGS</b></color>
+
+- The host can tune the lobby before starting: score
+  target (3-10), opening draws, max cards held (3-6),
+  the Same Cards rule, and ranked/casual.
+
+- Same Cards rule: everyone's Nth card draw offers the
+  SAME candidates, in the same order - if you and a rival
+  were offered identical cards all game, no result can be
+  blamed on draw luck. One-copy cards (like Phoenix)
+  appear at most once per game for everyone.
+
+- After a settings change the lobby cannot start for 60
+  seconds (and briefly after someone new joins), so
+  everyone can read what changed. Casual lobbies pay
+  reduced rewards and never touch ratings.
 
 <color=#FFD94D><b>RATING</b></color>
 
 - FFA is ranked with its own Glicko rating.
 
 - Placement uses points, then all round wins earned
-  (spent ones included), then total kills.
+  (spent ones included).
   Ties share a place using competition order: 1, 2, 2, 4.
 
 - Your rating is scored against the players placed
@@ -135,19 +168,19 @@ Standard ROUNDS scoring - first to 5 points takes the game.
 
 <color=#FFD94D><b>REWARDS</b></color>
 
-- Each game pays 600 base XP, plus 90 XP per player
-  you placed above.
+- Pay is metered on the FIGHTING, not on flat per-game
+  numbers: decisive rounds are the work unit, and
+  elapsed time caps how fast they cash in - stall
+  tactics are held to a bounded edge, and longer,
+  bigger games pay more.
 
-- Placement multiplies that: up to x1.5 for winning a
-  3-player game, growing with lobby size to x5 for
-  winning a full 10. Lower places scale down smoothly;
-  last place keeps the base.
+- Bigger lobbies pay a better rate per minute, and a
+  10-player FFA is the best gold rate in the game.
 
-- Placement Gold comes on top: 10-50 Gold by placement,
-  scaled by lobby size.
-
-- A stronger opposing field multiplies the XP part
-  (the same tier bonus as the other modes).
+- Your placement shapes your share: 1st earns about
+  five times last place's cut. Part pays as XP, part as
+  Placement Gold, and a stronger opposing field
+  multiplies the pot (the usual tier bonus).
 
 - XP converts to Gold at 100 XP = 1 Gold, and level-ups
   pay their usual bonus Gold. A level-up landing during
@@ -167,7 +200,7 @@ Standard ROUNDS scoring - first to 5 points takes the game.
 <color=#7FD4FF>Green/red number</color> - FFA rating change.
 <color=#7FD4FF>Cards</color> - The hand held at game end.
   <color=#FF6666>+N replaced</color> counts picks that were
-  pushed out by the 5-card cap - hover the line to see
+  pushed out by the card cap - hover the line to see
   every pick in order.
 
 <color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>

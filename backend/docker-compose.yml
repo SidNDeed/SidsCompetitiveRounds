@@ -105,6 +105,12 @@ services:
       CHAT_CHANNEL: ${CHAT_CHANNEL:-1492022404829020230}
       RELEASES_CHANNEL: ${RELEASES_CHANNEL:-1498731888813277294}
       API_SECRET_KEY: ${API_SECRET_KEY}
+      # FAQ auto-responder channel scoping (unset = global; see discord_bot.py)
+      FAQ_CHANNEL_ALLOWLIST: ${FAQ_CHANNEL_ALLOWLIST:-}
+      # §2.6 chat-split channel map "global:<id>,ru:<id>,es:<id>" (wave-2
+      # find 22: the bot reads this but compose never passed it through —
+      # an .env override silently did nothing). Unset = compiled defaults.
+      CHAT_CHANNELS: ${CHAT_CHANNELS:-}
 
 volumes:
   pgdata:

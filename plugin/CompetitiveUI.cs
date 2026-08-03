@@ -36,6 +36,12 @@ namespace CompetitiveRounds
         public static void ShowNotification(string text, Color color, float duration = 5f)
         {
             if (!Plugin.ShowNotifications.Value) return;
+            // L10n chokepoint for the IMGUI toast surface (Codex client
+            // review find 7): these render via GUI.Label, never through
+            // UIFactory, so without this the exact catalogue entries for
+            // toast strings were unreachable. Tr is identity for unknown /
+            // interpolated strings.
+            try { text = I18n.Tr(text); } catch { }
             notifText = text;
             notifColor = color;
             notifTimer = duration;
@@ -44,6 +50,7 @@ namespace CompetitiveRounds
         public static void QueueNotification(string text, Color color, float duration = 5f)
         {
             if (!Plugin.ShowNotifications.Value) return;
+            try { text = I18n.Tr(text); } catch { }
             notifQueue.Add(new QueuedNotif { text = text, color = color, dur = duration });
         }
 
@@ -125,6 +132,7 @@ namespace CompetitiveRounds
             DrawMatchStatus();
             DrawInGameChat();
             DrawChatInput();
+            DrawQuickChat();   // §2.6 key-based quick-chat (Y in an online room)
             DrawAdminPrompt();
             DrawConfirm();
             DrawBugReportModal();
@@ -169,12 +177,17 @@ namespace CompetitiveRounds
                            || artistPromptOpen || artistPickerOpen || playerSearchOpen || cosTestOpen || cosReviewOpen
                            || cosReleaseOpen
                            || flagEvidenceOpen
-                          || adminPromptOpen || NativeUI.LfpPromptOpen;
+                          || adminPromptOpen || NativeUI.LfpPromptOpen
+                          // Wave-2 find 10: the quick-chat popup can overlap
+                          // live F5 buttons — a phrase click must not ALSO
+                          // fire the shop/queue control underneath, on
+                          // EITHER input path.
+                          || quickChatOpen;
             NativeUI.SetClickBlocker(anyModal);
             // InfoPopupOpen: the uGUI info popup's backdrop absorbs EventSystem
             // clicks itself, but raw-polling ClickHandlers behind it need this
             // flag (learning #141); its own backdrop sets bypassModalBlock.
-            ClickHandler.ModalBlockInput = anyModal || NativeUI.InfoPopupOpen || !Plugin.DataConsentAsked;
+            ClickHandler.ModalBlockInput = anyModal || NativeUI.InfoPopupOpen || NativeUI.LangPromptOpen || !Plugin.DataConsentAsked;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
         }
@@ -285,6 +298,7 @@ namespace CompetitiveRounds
                 RefreshFfaHudLayout();
                 if (inMatch) DrawFfaScoreRows();
                 DrawFfaPickBanner(now);
+                DrawFfaSettingsBanner(now);
             }
             catch { }
         }
@@ -422,16 +436,22 @@ namespace CompetitiveRounds
             return new Color(raw.r, raw.g, raw.b, 1f);
         }
 
+        private static int ffaHudLayoutTarget = -1;
         private static void RefreshFfaHudLayout()
         {
             int width = Screen.width;
             int height = Screen.height;
+            // Score target joined the cache key in v1.36: RoundsToWin is
+            // per-lobby config now, and the dot-strip width derives from it —
+            // a config change between sittings must rebuild the layout (§4b).
             if (width == ffaHudScreenWidth && height == ffaHudScreenHeight
-                && ffaHudLayoutExtent == ffaHudRowExtent) return;
+                && ffaHudLayoutExtent == ffaHudRowExtent
+                && ffaHudLayoutTarget == FfaMode.RoundsToWin) return;
 
             ffaHudScreenWidth = width;
             ffaHudScreenHeight = height;
             ffaHudLayoutExtent = ffaHudRowExtent;
+            ffaHudLayoutTarget = FfaMode.RoundsToWin;
             ffaHudScale = height / 1080f;
             float paddingX = 6f * ffaHudScale;
             float paddingY = 4f * ffaHudScale;
@@ -559,6 +579,49 @@ namespace CompetitiveRounds
                     ? $"PICK YOUR CARD - {ffaPickBannerSeconds}s"
                     : $"Card picks close in {ffaPickBannerSeconds}s";
             }
+        }
+
+        // ── v1.36 settings banner (§7c/§8): the lobby's rules in force, shown
+        // large during load-in at every game start. Fed by FfaMode.OnGameStart
+        // AFTER the config latch, so it reads the same statics the engine
+        // reads and cannot disagree with the rules actually applied. ──
+        private static string ffaCfgBannerText = "";
+        private static float ffaCfgBannerUntil;
+        private static Vector2 ffaCfgBannerSize;
+        private static GUIStyle ffaCfgBannerStyle;
+
+        public static void ShowFfaSettingsBanner(string text, float seconds)
+        {
+            ffaCfgBannerText = text ?? "";
+            ffaCfgBannerUntil = Time.realtimeSinceStartup + seconds;
+            ffaCfgBannerSize = Vector2.zero;   // re-measure on next draw
+        }
+
+        private static void DrawFfaSettingsBanner(float now)
+        {
+            if (string.IsNullOrEmpty(ffaCfgBannerText) || now > ffaCfgBannerUntil) return;
+            if (Event.current.type != EventType.Repaint) return;   // #162
+            if (ffaCfgBannerStyle == null)
+            {
+                ffaCfgBannerStyle = new GUIStyle(GUI.skin.label)
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontSize = Mathf.Max(14, Mathf.RoundToInt(19f * (Screen.height / 1080f))),
+                    fontStyle = FontStyle.Bold,
+                    clipping = TextClipping.Overflow,   // #143 — IMGUI metrics run tall
+                };
+            }
+            if (ffaCfgBannerSize == Vector2.zero)
+                ffaCfgBannerSize = ffaCfgBannerStyle.CalcSize(new GUIContent(ffaCfgBannerText));
+            float w = ffaCfgBannerSize.x + 34f, h = ffaCfgBannerSize.y + 14f;
+            var rect = new Rect((Screen.width - w) * 0.5f, ffaPickBannerRect.yMax + 8f, w, h);
+            float fade = Mathf.Clamp01(ffaCfgBannerUntil - now);   // last second fades out
+            Color previous = GUI.color;
+            GUI.color = new Color(0.10f, 0.13f, 0.20f, 0.90f * fade);
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = new Color(1f, 0.86f, 0.30f, fade);
+            GUI.Label(rect, ffaCfgBannerText, ffaCfgBannerStyle);
+            GUI.color = previous;
         }
 
         private static void DrawFfaPickBanner(float now)
@@ -4349,7 +4412,7 @@ namespace CompetitiveRounds
         /// and achievement input gates need this rather than just our own box:
         /// a left-click to place the caret in ROUNDS' Enter chat still counted as
         /// a shot fired, which is the accuracy DENOMINATOR (#137).</summary>
-        public static bool AnyChatTyping => chatInputOpen || IsVanillaChatTypingRaw();
+        public static bool AnyChatTyping => chatInputOpen || quickChatOpen || IsVanillaChatTypingRaw();
 
         // The vanilla box's own truth, unmasked — used both by AnyChatTyping and
         // as the authoritative value to restore isTyping to when we let go.
@@ -4470,6 +4533,7 @@ namespace CompetitiveRounds
                 if (Time.unscaledTime - chatDrawStampedAt < 0.5f) return;
                 Plugin.Log.LogWarning("[CHAT] chat box went unrendered for >0.5s — "
                                       + "force-closing and releasing the input lock");
+                quickChatOpen = false;   // the popup shares the lock (§2.6)
                 CloseChatInput();
             }
             catch { }
@@ -4527,13 +4591,26 @@ namespace CompetitiveRounds
                 || NativeUI.LfpPromptOpen
                 // July 12 round 2 item 4: the artist input / roster picker / player
                 // search modals all take typed text — 't' there must not open chat.
-                || ArtistPromptOpen) { CloseChatInput(); return; }
+                || ArtistPromptOpen) { quickChatOpen = false; CloseChatInput(); return; }
 
             var ev = Event.current;
             if (!chatInputOpen)
             {
-                // Assert-from-state: if we don't own the box we don't own the lock.
-                SetGameplayInputLock(false);
+                // Quick-chat guardian (#255 pattern): DrawQuickChat runs LATER
+                // in the DrawUI chain, so a throw between here and there could
+                // leave quickChatOpen set with nothing rendering it — and this
+                // method's lock assert below would hold gameplay input hostage.
+                // DrawChatInput is the reliable early runner, so it polices the
+                // popup's liveness stamp.
+                if (quickChatOpen && Time.unscaledTime - quickChatDrawStampedAt > 2f)
+                {
+                    Plugin.Log.LogWarning("[QUICKCHAT] popup went unrendered for >2s — force-closing");
+                    quickChatOpen = false;
+                }
+                // Assert-from-state, SINGLE WRITER (#200): the desired lock
+                // state is the union of every IMGUI surface that owns typing/
+                // clicking — currently the T-chat box and the quick-chat popup.
+                SetGameplayInputLock(quickChatOpen);
                 // Vanilla's Enter chat owns the keyboard while it's open — T there
                 // is a literal 't' in their message, not our hotkey (bug #128).
                 if (IsVanillaChatTyping()) return;
@@ -4593,6 +4670,15 @@ namespace CompetitiveRounds
                 {
                     cancel = true; ev.Use();
                 }
+                else if (ev.keyCode == KeyCode.Tab && ChatClient.LocaleChannel != null)
+                {
+                    // §2.6: cycle the SEND channel (global <-> the locale
+                    // channel). Only exists when the locale has a channel;
+                    // English clients keep plain Tab-does-nothing behavior.
+                    ChatClient.SendChannel = ChatClient.SendChannel == "global"
+                        ? ChatClient.LocaleChannel : "global";
+                    ev.Use();
+                }
             }
 
             // Position: above the F5 menu's bottom bar (Discord/GitHub/Refresh buttons
@@ -4603,7 +4689,10 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(x - 6, y - 24, w + 12, h + 30),
                 Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.82f), 0, 0);
             GUI.Label(new Rect(x, y - 22, w, 20),
-                "Chat  —  Enter to send, Esc to cancel");
+                ChatClient.LocaleChannel != null
+                    ? I18n.TrF("Chat [{0}]  -  Enter to send, Esc to cancel, Tab switches channel",
+                               ChatClient.SendChannel.ToUpperInvariant())
+                    : I18n.Tr("Chat  —  Enter to send, Esc to cancel"));
 
             GUI.SetNextControlName("CRChat");
             chatInputText = GUI.TextField(new Rect(x, y, w, h), chatInputText ?? "", 480, chatStyle);
@@ -4624,6 +4713,12 @@ namespace CompetitiveRounds
                     {
                         NativeUI.HandleMuteCommand(text);
                     }
+                    else if (text.StartsWith("/report ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // §2.6 v1 moderation groundwork: files a bug-report row
+                        // with the local chat lines mentioning that name.
+                        NativeUI.HandleReportCommand(text);
+                    }
                     else
                     {
                         ChatClient.Send(GameStateWatcher.LocalSteamId,
@@ -4637,6 +4732,86 @@ namespace CompetitiveRounds
             else if (cancel)
             {
                 CloseChatInput();
+            }
+        }
+
+        // ── Quick chat (§2.6 — key-based canned phrases) ─────────
+        // Y in an online room opens a phrase list; click or 1-9/0 sends the
+        // phrase KEY over Photon (QuickChat.Send); every recipient renders it
+        // in their OWN locale. While open, the same gameplay-input lock as the
+        // T-chat box is held (asserted by DrawChatInput, the single writer),
+        // so a click on a phrase can never also fire the gun.
+        private static bool quickChatOpen = false;
+        private static float quickChatDrawStampedAt = -999f;
+        public static bool IsQuickChatOpen => quickChatOpen;
+
+        private static void DrawQuickChat()
+        {
+            // Liveness stamp read by DrawChatInput's guardian.
+            quickChatDrawStampedAt = Time.unscaledTime;
+            if (!Plugin.DataConsentGranted) { quickChatOpen = false; return; }
+            // Same modal-typing exclusions as the chat box: Y must type into
+            // those inputs, not open the popup — and an already-open popup
+            // yields to them.
+            if (chatInputOpen || bugModalOpen || logViewerOpen || bugAdminOpen
+                || compareSearchFocused || lbSearchFocused
+                || NativeUI.CustomBetPromptOpen || NativeUI.LfpPromptOpen
+                || ArtistPromptOpen) { quickChatOpen = false; return; }
+            if (IsVanillaChatTyping()) { quickChatOpen = false; return; }
+
+            bool inRoom = false;
+            try { inRoom = Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode; } catch { }
+            var ev = Event.current;
+
+            if (!quickChatOpen)
+            {
+                if (inRoom && ev != null && ev.type == EventType.KeyDown
+                    && ev.keyCode == KeyCode.Y && !IsAnotherTextInputActive())
+                {
+                    quickChatOpen = true;
+                    ev.Use();
+                }
+                return;
+            }
+            if (!inRoom) { quickChatOpen = false; return; }
+
+            if (ev != null && ev.type == EventType.KeyDown)
+            {
+                if (ev.keyCode == KeyCode.Escape || ev.keyCode == KeyCode.Y)
+                {
+                    quickChatOpen = false; ev.Use(); return;
+                }
+                int sel = -1;
+                if (ev.keyCode >= KeyCode.Alpha1 && ev.keyCode <= KeyCode.Alpha9)
+                    sel = ev.keyCode - KeyCode.Alpha1;
+                else if (ev.keyCode == KeyCode.Alpha0) sel = 9;
+                if (sel >= 0 && sel < QuickChat.Phrases.Length)
+                {
+                    QuickChat.Send(sel);
+                    quickChatOpen = false; ev.Use(); return;
+                }
+            }
+
+            int n = QuickChat.Phrases.Length;
+            const int cols = 2;
+            int rows = (n + cols - 1) / cols;
+            float bw = 250, bh = 26, pad = 6;
+            float w = cols * bw + pad * 3, h = rows * (bh + 4) + 38;
+            float x = 20, y = Screen.height - h - 150;
+            GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.85f), 0, 0);
+            GUI.Label(new Rect(x + 8, y + 6, w - 16, 20),
+                I18n.Tr("Quick chat - click a phrase (or keys 1-0). Y/Esc closes."));
+            for (int i = 0; i < n; i++)
+            {
+                int c = i % cols, r = i / cols;
+                var rect = new Rect(x + pad + c * (bw + pad), y + 30 + r * (bh + 4), bw, bh);
+                string digit = i < 10 ? $"{(i + 1) % 10}. " : "";
+                if (GUI.Button(rect, digit + I18n.Tr(QuickChat.Phrases[i])))
+                {
+                    QuickChat.Send(i);
+                    quickChatOpen = false;
+                }
             }
         }
 

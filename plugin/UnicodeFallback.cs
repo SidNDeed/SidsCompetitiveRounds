@@ -66,10 +66,31 @@ namespace CompetitiveRounds
                 string fontsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
                 if (string.IsNullOrEmpty(fontsDirectory) || !Directory.Exists(fontsDirectory))
                     fontsDirectory = @"C:\Windows\Fonts";
+                // Proton/Steam Deck (Codex v1.36 client find 11): the Windows
+                // fonts dir may be missing or nearly empty (a Wine prefix
+                // ships almost nothing), but Font.GetPathsToOSFonts() still
+                // enumerates real font FILES via the platform's own font
+                // system (GDI under Wine bridges to host fontconfig), and
+                // those paths feed the same FontEngine.LoadFontFace pipeline.
+                // So: dir + OS-paths are BOTH consulted; Linux-common
+                // Cyrillic-capable families (DejaVu/Liberation/Noto) join
+                // every candidate list instead of throwing "no fallback".
+                if (!Directory.Exists(fontsDirectory)) fontsDirectory = null;
+                string[] osFontPaths = GetOsFontPaths();
+                if (fontsDirectory == null && osFontPaths.Length == 0)
+                    throw new InvalidOperationException(
+                        "font selection failed: no OS fonts directory and no OS font paths (Proton/non-Windows?)");
 
-                string latinPath = FindFirstExisting(fontsDirectory, new[]
+                string latinPath = FindFont(fontsDirectory, osFontPaths, new[]
                 {
-                    "seguiui.ttf", "arial.ttf", "tahoma.ttf"
+                    // "segoeui.ttf" — the old first entry was the TYPO
+                    // "seguiui.ttf" (no such file anywhere), so the Latin
+                    // fallback was silently Arial in production.
+                    "segoeui.ttf", "arial.ttf", "tahoma.ttf",
+                    // Linux/Proton host fonts — all three cover Latin-ext +
+                    // Greek + Cyrillic, which is what the ru locale needs.
+                    "DejaVuSans.ttf", "LiberationSans-Regular.ttf",
+                    "NotoSans-Regular.ttf", "FreeSans.ttf"
                 });
                 if (latinPath == null)
                     throw new InvalidOperationException("font selection failed: no Latin fallback file found");
@@ -85,9 +106,10 @@ namespace CompetitiveRounds
                 // symbol font must not roll back the whole install.
                 try
                 {
-                    string symbolPath = FindFirstExisting(fontsDirectory, new[]
+                    string symbolPath = FindFont(fontsDirectory, osFontPaths, new[]
                     {
-                        "seguisym.ttf", "cambria.ttc"
+                        "seguisym.ttf", "cambria.ttc",
+                        "NotoSansSymbols-Regular.ttf", "NotoSansSymbols2-Regular.ttf"
                     });
                     if (symbolPath != null
                         && !string.Equals(symbolPath, latinPath, StringComparison.OrdinalIgnoreCase))
@@ -106,14 +128,18 @@ namespace CompetitiveRounds
                 // some systems point several of these at the same file.
                 var cjkFamilies = new[]
                 {
-                    new[] { "msyh.ttc", "msyh.ttf", "simsun.ttc" },      // Chinese
-                    new[] { "YuGothM.ttc", "meiryo.ttc", "msgothic.ttc" }, // Japanese
-                    new[] { "malgun.ttf", "gulim.ttc", "batang.ttc" },   // Korean
+                    new[] { "msyh.ttc", "msyh.ttf", "simsun.ttc",        // Chinese
+                            "NotoSansCJK-Regular.ttc", "NotoSansCJKsc-Regular.otf",
+                            "WenQuanYiMicroHei.ttf" },
+                    new[] { "YuGothM.ttc", "meiryo.ttc", "msgothic.ttc", // Japanese
+                            "NotoSansCJKjp-Regular.otf" },
+                    new[] { "malgun.ttf", "gulim.ttc", "batang.ttc",     // Korean
+                            "NotoSansCJKkr-Regular.otf" },
                 };
                 var chosen = new List<string>();
                 for (int fi = 0; fi < cjkFamilies.Length; fi++)
                 {
-                    string cjkPath = FindFirstExisting(fontsDirectory, cjkFamilies[fi]);
+                    string cjkPath = FindFont(fontsDirectory, osFontPaths, cjkFamilies[fi]);
                     if (cjkPath == null) continue;
                     bool dup = false;
                     for (int ci = 0; ci < chosen.Count; ci++)
@@ -632,6 +658,46 @@ namespace CompetitiveRounds
             {
                 string path = Path.Combine(directory, candidates[i]);
                 if (File.Exists(path)) return path;
+            }
+            return null;
+        }
+
+        /// <summary>Unity's platform font enumeration — returns real file
+        /// paths on Windows AND Linux/Proton (find 11). Empty array on any
+        /// failure so callers can treat it as "nothing extra found".</summary>
+        private static string[] GetOsFontPaths()
+        {
+            try { return Font.GetPathsToOSFonts() ?? new string[0]; }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[FONT] GetPathsToOSFonts failed: " + UnwrapMessage(ex));
+                return new string[0];
+            }
+        }
+
+        /// <summary>Candidate resolution in PREFERENCE order: for each
+        /// candidate filename, check the fonts directory (when present),
+        /// then the OS-enumerated path list by case-insensitive filename.
+        /// Candidate order is the priority order — a dir miss for candidate
+        /// 0 must not let candidate 2 win via the directory before the OS
+        /// list has been tried for candidate 0.</summary>
+        private static string FindFont(string directory, string[] osPaths, string[] candidates)
+        {
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                if (directory != null)
+                {
+                    string path = Path.Combine(directory, candidates[i]);
+                    if (File.Exists(path)) return path;
+                }
+                for (int p = 0; p < osPaths.Length; p++)
+                {
+                    string file;
+                    try { file = Path.GetFileName(osPaths[p]); } catch { continue; }
+                    if (string.Equals(file, candidates[i], StringComparison.OrdinalIgnoreCase)
+                        && File.Exists(osPaths[p]))
+                        return osPaths[p];
+                }
             }
             return null;
         }

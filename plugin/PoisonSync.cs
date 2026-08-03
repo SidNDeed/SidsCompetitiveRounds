@@ -1,48 +1,113 @@
-// PoisonSync.cs — authoritative damage-over-time ticks (bug report #143).
+// PoisonSync.cs — victim-authoritative damage-over-time ticks (bug reports #143, #151).
 //
+// ─────────────────────────────────────────────────────────────────────────────
 // THE PROBLEM
 //
-// Vanilla: an unblocked poison hit starts a DamageOverTime coroutine, and it
-// starts one on EVERY client (RayHitPoison.DoHitEffect runs per replica). Each
-// tick calls HealthHandler.DoDamage(..., ignoreBlock: false), and DoDamage
-// early-returns while the victim is blocking. So each replica judges each tick
-// against ITS OWN copy of the victim's block timing — and block activation
-// reaches replicas at different moments (SyncPlayerMovement relays
-// RPCAO_DoBlock on the owner's BlockAction, and vanilla can delay that by 200ms
-// via delayOtherActions, plus network latency). Clients therefore disagree
-// about which ticks landed, which is the ghost-HP desync.
+// Vanilla runs poison as a LOCAL SIMULATION ON EVERY CLIENT. RayHitPoison
+// .DoHitEffect executes per replica and each starts its own DamageOverTime
+// coroutine; every tick calls HealthHandler.DoDamage(..., ignoreBlock: false),
+// which early-returns while THAT replica sees the victim blocking. Block
+// activation reaches replicas at different moments (the owner's input fires
+// TryBlock; SyncPlayerMovement relays RPCAO_DoBlock to Others, and vanilla can
+// delay that by 200ms via delayOtherActions, plus latency). Replicas therefore
+// disagree about which ticks landed. data.health is never networked and
+// `damageDealt += dpt` runs BEFORE the blockable call, so a dropped tick is
+// permanent and never reconciles. That is the ghost-HP desync.
 //
-// v1.34.5 fixed the desync by forcing ignoreBlock = true on every healthRemoval
-// tick. Everyone agreed, but blocking stopped negating poison at all — reported
-// by Stan and Archnith as #143. That trade was flagged at the time; Sid has now
-// chosen to rebuild it properly.
+// v1.34.5 bought agreement by forcing ignoreBlock = true on every healthRemoval
+// tick (VanillaFixes.PoisonGhostPatch). Everyone agreed; blocking stopped
+// negating poison at all (#143). Sid has asked for both properties at once.
 //
-// THE DESIGN
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DESIGN — "Victim-Keyed Authority"
 //
-// The victim's own client is the only one that knows its block window without
+// The victim's own client is the only one that knows its block window with no
 // network translation, so it is the authority. It runs the ONLY damage
-// coroutine, decides blocked/not-blocked per tick, and publishes the verdict.
+// coroutine, decides blocked/not-blocked per tick, and publishes each verdict.
 // Every client — INCLUDING THE AUTHORITY — applies damage only when that
-// published verdict arrives. That "the event is the sole commit path" rule is
-// what stops the authority double-applying, and it means a lost packet delays
-// damage rather than diverging it (the events are reliable, so it arrives).
+// published verdict arrives. "The event is the sole commit path" is what stops
+// the authority double-applying, and it means a lost packet delays damage
+// rather than diverging it (events are reliable, so it arrives).
 //
 // A blocked tick is CONSUMED, not deferred: vanilla does `damageDealt += dpt`
-// BEFORE the blockable DoDamage call, so blocking permanently erases that slice
-// and the poison still ends at its original time. Sid confirmed that reading.
+// BEFORE the blockable call, so blocking permanently erases that slice and the
+// poison still ends at its original time. Sid confirmed that reading.
 //
-// MIXED LOBBIES
+// ─────────────────────────────────────────────────────────────────────────────
+// WHY THERE IS NO ACTIVATION BARRIER — and why one is not needed
 //
-// This only works if everyone is running it, so it is gated on every player in
-// the room advertising the capability. If anyone is on an older build the room
-// silently keeps v1.35.4 behaviour (ticks ignore block, no desync) — a client
-// cannot make an unpatched peer stop its own coroutine or honour our verdict,
-// and half-applying the protocol would be far worse than not applying it
-// (learning #269: a physics/geometry change under a mixed roster produced
-// visible jitter for exactly this reason).
+// The previous attempt published the mode as a ROOM property decided by the
+// master, and was shipped INERT because that is only EVENTUALLY consistent: at
+// game start client A could already see AUTH while B still saw nothing, so A
+// suppressed its local DOT for a victim publishing no verdicts (or B ran a
+// local DOT for a victim whose verdicts A was obeying). Health divergence —
+// strictly worse than the compromise it replaced. A proposal/ACK handshake does
+// NOT fix that; it just moves the same race onto the "now ACTIVE" broadcast.
 //
-// The mode is LATCHED per game and never re-evaluated mid-combat, so a player
-// joining or leaving cannot flip the protocol underneath a live poison stream.
+// So the room-global mode is gone. The protocol selector is a per-player
+// property that is DELIVERED INSIDE THE SAME PHOTON OPERATION THAT CREATES THE
+// VICTIM'S Player OBJECT:
+//
+//   * staged BEFORE joining (a pure local Merge — Player.SetCustomProperties
+//     takes the RoomReference == null && IsLocal branch and sends nothing), then
+//     snapshotted by LoadBalancingClient into the join op as parameter 249;
+//   * a client that joins LATER reads it out of the join RESPONSE, in
+//     ReadoutProperties for every actor, before OnJoinedRoom fires;
+//   * a client already present reads it from EV_JOIN, where CreatePlayer is
+//     called WITH the property hashtable — the Player object is constructed
+//     with it — before OnPlayerEnteredRoom fires.
+//
+// Handling a stream on victim V requires V's PhotonView to exist locally, which
+// requires having processed V's EV_JOIN. Therefore every client that can act on
+// V has necessarily held cap(V) for the entire preceding lifetime of the room.
+//
+// The mode is not "observed at the same instant" — it is NOT OBSERVABLE BEFORE
+// USE, which is strictly stronger and is why this is not the failed handshake
+// one level down. There is no epoch, no master, no per-game latch, and nothing
+// to re-evaluate — which makes learnings #138 (StartGame skips rematches), #143
+// (PlayerJoined re-enters StartGame) and #273 (a master-keyed gate goes stale
+// mid-map) inapplicable here rather than merely handled.
+//
+// Consequence: V never writes the property in-room, so it is immutable for the
+// room's lifetime. NEVER add an in-room SetCustomProperties for it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// MIXED LOBBIES — HonorBlock()
+//
+// A client cannot make an unpatched peer stop its local coroutine or honour a
+// verdict. So the victim decides whether to HONOUR its own block, per tick:
+//
+//   * Every peer capable  -> honour. Full protocol; blocking negates ticks and
+//     every client applies the identical committed set.
+//   * Some peer incapable, in a MOD-ISSUED room -> do NOT honour; publish every
+//     tick blocked=false. That peer is running PoisonGhostPatch's forced
+//     ignoreBlock, so it applies the full set; capable observers apply the full
+//     set from events; the victim applies the full set from its own echo. Same
+//     tick SET as v1.35.5 (about one round-trip later, and health converges
+//     exactly at stream end).
+//   * Some peer incapable, in a PRIVATE room-code game -> honour anyway.
+//     PoisonGhostPatch does NOT run there (#151), so that peer is block-AWARE
+//     and lands on nearly the same set as the victim; divergence is boundary
+//     ticks. Publishing blocked=false instead would make them disagree on the
+//     ENTIRE blocked set — strictly worse.
+//
+// HonorBlock is read by NOBODY but the victim, so a wrong answer cannot
+// desynchronise any client's DECISION — it can only shade which verdicts get
+// published, which everyone then obeys identically. Its conservative direction
+// is therefore free, which is what makes a 3s roster quarantine affordable.
+//
+// Rollout property, and it is the point: because the fallback is PER-VICTIM
+// rather than per-room, this needs no coordination. The moment a room happens
+// to contain only patched clients, blocking starts negating poison in it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// OUTER SAFETY BOUND
+//
+// PlayerManager.Move ends with `data.isPlaying = true; data.healthHandler
+// .Revive();` and Revive() does health = MaxHealth, dot.StopAllCoroutines() and
+// Block.sinceBlock = +Infinity. MovePlayers runs that for EVERY player on EVERY
+// client, and RevivePlayers() does the same in both transition paths. NOTHING
+// this file can produce survives a round boundary. That is load-bearing.
 
 using HarmonyLib;
 using ExitGames.Client.Photon;
@@ -57,120 +122,498 @@ namespace CompetitiveRounds
 {
     internal static class PoisonSync
     {
-        /// <summary>Room-scoped player property advertising that this client
-        /// speaks the authoritative-tick protocol. Versioned: a future protocol
-        /// change must bump this rather than reuse it, or two incompatible
-        /// implementations will both claim capability.</summary>
-        // ── NOT YET ACTIVE ────────────────────────────────────────────────
+        // ── Protocol identity ─────────────────────────────────────────────
         //
-        // Everything below is complete and reviewed EXCEPT the activation
-        // barrier, so it is force-disabled and changes nothing at runtime.
-        //
-        // What is missing, from the second adversarial review: publishing the
-        // mode as a room property makes it EVENTUALLY consistent, not
-        // atomically activated. Photon guarantees one server-ordered final
-        // value, not simultaneous observation - so for a short window at game
-        // start client A can already see {epoch 1, AUTH} while B still sees
-        // nothing and runs FALLBACK. A then suppresses its local DOT for a
-        // victim who is publishing no verdicts, and B runs vanilla ticks that A
-        // never applies. That is health divergence, which is strictly worse
-        // than the known trade this feature exists to remove.
-        //
-        // Closing it needs a real activation barrier: publish {epoch, mode,
-        // exact roster} as a PROPOSAL, have every roster member acknowledge it,
-        // and only then activate - pinning the decision for the whole game
-        // rather than live-reading it per tick. Late joiners additionally need
-        // the current per-life counters, which are RPC-derived and therefore
-        // start at zero for anyone who missed the deaths.
-        //
-        // Until that exists this ships inert. Poison keeps v1.35.4 behaviour
-        // (ticks bypass block, every client agrees), which is a known and
-        // stable trade rather than a possible desync.
-        internal static bool ProtocolEnabled = false;
-
-        internal const string CapabilityProp = "cr_pois1";
+        // The KEY carries the protocol version. cr_pois1 meant "I speak the
+        // room-global-mode protocol" and must NEVER be reused — a client
+        // advertising that key answers a different question. Any future
+        // SEMANTIC change gets cr_pois3 plus a MIN_MOD_VERSION raise; additive
+        // wire fields are fine within a key because unknown trailing elements
+        // are ignored by the length checks below.
+        internal const string CapabilityProp = "cr_pois2";
+        private const int CapabilityValue = 1;
         private const byte EventCode = 47;          // Photon custom codes are 0-199
-        private const byte Protocol = 1;
+        private const byte Protocol = 2;
 
-        // ── Mode latch: ONE decision, published by the master ──────────────
+        // ── THERE IS NO WATCHDOG. This is deliberate; do not add one back. ──
         //
-        // Every client MUST reach the same answer. My first version had each
-        // client compute it from the player properties it had received so far,
-        // and Codex was right that this splits: capability props propagate
-        // asynchronously and StartGame runs at client-local times, so A can see
-        // both capabilities and latch AUTH while B has not yet seen A's and
-        // latches FALLBACK. Then B runs its own vanilla DOT *and* applies A's
-        // authoritative events — double poison — while A suppresses its local
-        // DOT for a victim who never publishes verdicts, so that poison
-        // vanishes. Split-brain in both directions.
+        // Two review rounds were spent on a watchdog that let a replica give up
+        // on a silent victim and apply the stream locally. It is not
+        // implementable, for a reason that is structural rather than a tuning
+        // problem: an observer CANNOT DISTINGUISH "the victim stalled and its
+        // header is late" from "the victim started a new stream". Both arrive as
+        // a header stamped after the observer gave up. Round 1 caught the late
+        // header double-applying the stream; the fix stamped the stream's START
+        // instead of its publish time — and round 2 correctly pointed out there
+        // is no yield between those two statements, so they are the SAME INSTANT
+        // and the fix was vacuous. A doubled stream is not a cosmetic error:
+        // HealthHandler.DoDamage RPCs RPCA_Die to ALL from ANY replica whose
+        // local health crosses zero, with no ownership check, so an over-damaged
+        // observer ends the round for the whole room.
         //
-        // So the master computes it once and publishes {epoch, mode} as a ROOM
-        // property; everyone else adopts it verbatim. Room properties are
-        // server-ordered and reliable, and the publish happens at game start
-        // while DoStartGame still has ~1.25s of map load and wait ahead of it,
-        // so it is settled long before the first shot. Absent or stale prop =
-        // FALLBACK, which is the safe direction.
-        internal const string RoomModeProp = "cr_poismode";
+        // What a watchdog was supposed to buy — bounding a modified client that
+        // advertises capability and then publishes nothing — it never actually
+        // bought: such a client only has to publish ONE verdict per stream to
+        // stamp liveness and disarm it, then go quiet.
+        //
+        // Every honest way a capable victim can stop publishing is ALREADY
+        // covered without one:
+        //   * disconnects -> its GameObject is Photon-destroyed, ShadowDot exits
+        //     on view == null;
+        //   * dies -> RPCA_Die is an All-RPC and calls dot.StopAllCoroutines() on
+        //     every client, killing the shadow too;
+        //   * its patch failed to attach -> it never staged cr_pois2, so
+        //     CapableVictim is false and no shadow ever starts;
+        //   * it hitches -> the verdicts are LATE, not absent, and they arrive.
+        //
+        // If a victim does go permanently silent, nobody applies that stream —
+        // including the victim, which commits on its own echo. Everyone agrees on
+        // "no damage". Under-damage, but CONSISTENT, which is the property that
+        // matters and the one the ship criterion is written about.
+        //
+        // The residual cheat surface is handled by DETECTION instead, and the
+        // guarantee is narrower than it first looks — state it precisely rather
+        // than let the next reader assume more:
+        //
+        //   * DETECTED: a victim that goes WHOLLY silent. Liveness is tracked per
+        //     ACTOR (_lastHeardServerTs), so this is an actor-level property.
+        //   * NOT DETECTED: selective suppression. A victim with two concurrent
+        //     streams — trivially reachable, since Decay routes every direct hit
+        //     through the DoT path at 0.25s intervals — can publish stream A
+        //     honestly while suppressing stream B, and A's verdicts keep B's
+        //     observer quiet.
+        //
+        // Per-STREAM keying would not close that: one forged verdict per stream
+        // disarms a per-stream detector too, for the same zero damage and zero
+        // log, so it would buy one packet of friction in exchange for putting
+        // per-stream correlation bookkeeping back into a coroutine that rounds 1
+        // and 2 proved expensive to keep. If selective-suppression detection is
+        // ever wanted, the sound place is an aggregate comparison (streams
+        // scheduled by observers vs headers ever received per victim) reported to
+        // the server, not a per-shadow timer that can only emit a log line.
+        //
+        // A log line cannot desynchronise anything, which is the whole reason
+        // this is the entire extent of the mechanism.
+        private const int SilenceReportMs = 1500;
 
-        internal static bool Authoritative
+        // A roster change (someone joined or left) may not have propagated to
+        // us yet, so for a short window after one we refuse to honour block.
+        // Conservative here is free — see the HonorBlock note in the header.
+        private const float RosterQuarantineSeconds = 3f;
+
+        // ── Capability: staged once, pre-join, never written in-room ───────
+
+        /// <summary>Set by PoisonDotSchedulerPatch's Harmony cleanup only when the
+        /// patch actually attached. Learning #83: a diagnostic — or in this case an
+        /// entire authority — can silently fail to attach. Advertising an authority
+        /// we cannot deliver would make every peer wait on verdicts we never send,
+        /// manufacturing the exact ghost-HP bug this file exists to remove.</summary>
+        internal static bool PatchesLive;
+
+        private static bool _staged;
+        private static bool _stageFailedPermanently;
+
+        /// <summary>Stage the capability property BEFORE ever joining a room, so it
+        /// rides the join operation itself. Called from Plugin.Awake (after Harmony
+        /// patching, so PatchesLive is known) and retried from the persistent tick.
+        ///
+        /// The two state rules here are load-bearing:
+        ///
+        ///  * REFUSE while in a room. An in-room write is a network op that arrives
+        ///    on peers at some later time — exactly the eventual-consistency hole
+        ///    this design exists to avoid.
+        ///  * Retry ONLY while Disconnected/PeerCreated. `!InRoom` is ALSO true
+        ///    mid-join, and a merge landing after LoadBalancingClient snapshots
+        ///    enterRoomParamsCache but before room entry would be present locally
+        ///    and NEVER delivered to peers — a silently false-capable client, which
+        ///    is the worst state this protocol can be in. Disconnected/PeerCreated
+        ///    provably precede any connect.</summary>
+        internal static void StageCapability(string source)
         {
-            get
+            try
             {
-                try
+                if (_staged || _stageFailedPermanently) return;
+                if (!PatchesLive)
                 {
-                    if (!ProtocolEnabled) return false;
-                    if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return false;
-                    return ReadRoomMode(out _, out bool auth) && auth;
+                    _stageFailedPermanently = true;
+                    Plugin.Log.LogError("[POISON-CAP] scheduler patch did NOT attach — "
+                        + "authoritative poison disabled for this session (falling back to v1.35.5 behaviour)");
+                    return;
                 }
-                catch { return false; }
+
+                if (PhotonNetwork.InRoom)
+                {
+                    Plugin.Log.LogError("[POISON-CAP] refusing to stage while in a room ("
+                        + source + ") — an in-room write is the racy path this protocol forbids");
+                    return;
+                }
+
+                ClientState st = PhotonNetwork.NetworkClientState;
+                if (st != ClientState.Disconnected && st != ClientState.PeerCreated)
+                    return;   // mid-connect: wait for a clean moment, do not merge now
+
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, CapabilityValue }
+                });
+                _staged = true;
+                Plugin.Log.LogInfo("[POISON-CAP] staged " + CapabilityProp + "=" + CapabilityValue
+                    + " pre-join (" + source + ", state=" + st + ")");
+            }
+            catch (Exception ex)
+            {
+                _stageFailedPermanently = true;
+                Plugin.Log.LogError("[POISON-CAP] staging failed, authoritative poison disabled "
+                    + "for this session: " + ex.Message);
             }
         }
 
-        internal static int Epoch
+        /// <summary>Withdraw the advertisement. Called when the compat check disables
+        /// the mod, which happens after Awake has already staged it. Peers must stop
+        /// treating us as an authority, or they will suppress their own simulation of
+        /// our damage-over-time and wait for verdicts we will never send.</summary>
+        internal static void RevokeCapability()
         {
-            get { ReadRoomMode(out int e, out _); return e; }
-        }
-
-        private static bool ReadRoomMode(out int epoch, out bool auth)
-        {
-            epoch = 0; auth = false;
             try
             {
-                var props = PhotonNetwork.CurrentRoom?.CustomProperties;
-                if (props == null) return false;
-                if (!props.TryGetValue(RoomModeProp, out object v)) return false;
-                var a = v as object[];
-                if (a == null || a.Length < 2) return false;
-                epoch = (int)a[0];
-                auth = ((byte)a[1]) == 1;
-                return true;
+                if (!_staged) return;
+                _staged = false;
+                _stageFailedPermanently = true;   // never re-stage this session
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, 0 }
+                });
+                Plugin.Log.LogWarning("[POISON-CAP] revoked " + CapabilityProp
+                    + " — mod disabled, falling back to vanilla poison entirely");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[POISON-CAP] revoke failed: " + ex.Message); }
+        }
+
+        // Memoised per (room, actor). Actor numbers are per-room, so the cache
+        // must be dropped whenever the room changes.
+        private static string _capRoom = "";
+        private static readonly Dictionary<int, bool> _capCache = new Dictionary<int, bool>();
+
+        /// <summary>Does this view's OWNER speak the authoritative protocol?
+        ///
+        /// THE ONE INPUT that decides every client's protocol branch. It is a pure
+        /// function of a property delivered with the owner's Player object, so every
+        /// client — including the owner itself — computes the same answer at every
+        /// instant at which it could act. The victim deliberately reads its OWN
+        /// capability through this same accessor rather than a private bool, so
+        /// "am I authoritative" and "is V authoritative" are literally the same read
+        /// of the same delivered value.</summary>
+        internal static bool CapableVictim(PhotonView view)
+        {
+            try
+            {
+                // If OUR scheduler patch did not attach we cannot participate at
+                // all, so every victim must read as incapable to us. That is not a
+                // semantic muddle — it is the only self-consistent answer: staging
+                // is gated on the same flag, so peers already treat us as incapable,
+                // and PoisonGhostPatch must fall through to its v1.35.5 behaviour
+                // rather than deferring to a protocol we are not running. Without
+                // this, a failed attach means we run vanilla's DoT loop AND apply
+                // every committed verdict — 2x damage on this client.
+                if (!PatchesLive) return false;
+                // Same reasoning for the compat kill-switch. Plugin.modDisabled is
+                // set from Update() when another plugin is detected, which is AFTER
+                // Awake staged our capability — and modDisabled also stops the tick
+                // that calls Hook(), so such a client would advertise authority,
+                // suppress vanilla through the scheduler, and never subscribe to its
+                // own commit path. Its own poison would then apply on every screen
+                // but its own. Reading every victim as incapable puts us fully back
+                // on vanilla; RevokeCapability() below stops peers waiting on us.
+                if (Plugin.modDisabled) return false;
+                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return false;
+                if (view == null) return false;
+                var owner = view.Owner;
+                if (owner == null) return false;
+
+                string room = PhotonNetwork.CurrentRoom != null ? (PhotonNetwork.CurrentRoom.Name ?? "") : "";
+                if (room != _capRoom) { _capRoom = room; _capCache.Clear(); }
+
+                bool cached;
+                if (_capCache.TryGetValue(owner.ActorNumber, out cached)) return cached;
+
+                bool ok = false;
+                var props = owner.CustomProperties;
+                object v;
+                if (props != null && props.TryGetValue(CapabilityProp, out v) && v is int)
+                    ok = ((int)v) == CapabilityValue;
+
+                _capCache[owner.ActorNumber] = ok;
+                return ok;
             }
             catch { return false; }
         }
 
-        // ── Stream + dedup state ──────────────────────────────────────────
+        // ── Roster awareness (victim-private, feeds HonorBlock only) ───────
+        private static bool _sawIncapablePeer;
+        private static float _lastRosterChange = -999f;
+        private static string _rosterRoom = "";
+        private static string _tickRoom = "";
+        private static float _lastScan = -999f;
+        private static int _lastRosterCount = -1;
+
+        /// <summary>Per-frame upkeep, driven from the always-on persistent tick so no
+        /// join path can forget it.
+        ///
+        /// Note carefully what does NOT happen here: the periodic re-scan must not
+        /// stamp the roster quarantine. Stamping it every tick would hold
+        /// HonorBlock() at false forever and silently disable the entire feature —
+        /// the quarantine exists to cover the window after a roster CHANGE, not to
+        /// be re-armed continuously.</summary>
+        internal static void Tick()
+        {
+            try
+            {
+                StageCapability("tick");
+
+                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode)
+                {
+                    // Edge-triggered, not every menu frame.
+                    if (_tickRoom != "") ResetForRoomExit();
+                    _tickRoom = "";
+                    _lastRosterCount = -1;
+                    return;
+                }
+
+                string room = PhotonNetwork.CurrentRoom != null ? (PhotonNetwork.CurrentRoom.Name ?? "") : "";
+                if (room != _tickRoom)
+                {
+                    // Room-to-room without passing through the menu (rare, but a
+                    // rejoin can look like this) — same reset, same reason.
+                    if (_tickRoom != "") ResetForRoomExit();
+                    _tickRoom = room;
+                    _lastRosterCount = PhotonNetwork.PlayerList != null ? PhotonNetwork.PlayerList.Length : 0;
+                    NoteRosterChange("room-change");
+                    return;
+                }
+
+                if (Time.unscaledTime - _lastScan < 1f) return;
+                _lastScan = Time.unscaledTime;
+
+                int n = PhotonNetwork.PlayerList != null ? PhotonNetwork.PlayerList.Length : 0;
+                if (n != _lastRosterCount)
+                {
+                    // Belt and braces: we also hook the room callbacks, but a
+                    // missed callback must not leave us honouring block with an
+                    // unpatched peer present.
+                    _lastRosterCount = n;
+                    NoteRosterChange("count-change");
+                    return;
+                }
+
+                ScanRoster("periodic");
+            }
+            catch { }
+        }
+
+        /// <summary>Called from the room callbacks and the persistent tick. The
+        /// incapable flag is STICKY for the room: a peer that appears briefly and
+        /// leaves must not re-enable block honouring underneath a stream it already
+        /// partially simulated.</summary>
+        internal static void NoteRosterChange(string why)
+        {
+            try
+            {
+                string room = PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
+                    ? (PhotonNetwork.CurrentRoom.Name ?? "") : "";
+                if (room != _rosterRoom)
+                {
+                    _rosterRoom = room;
+                    _sawIncapablePeer = false;   // new room, fresh judgement
+                    _capCache.Clear();
+                    _lastSeq.Clear();
+                }
+                _lastRosterChange = Time.unscaledTime;
+                ScanRoster(why);
+            }
+            catch { }
+        }
+
+        private static void ScanRoster(string why)
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
+                var list = PhotonNetwork.PlayerList;
+                if (list == null || list.Length == 0) return;
+
+                bool anyIncapable = false;
+                var detail = new List<string>();
+                foreach (var p in list)
+                {
+                    bool ok = false;
+                    if (p != null && p.CustomProperties != null)
+                    {
+                        object v;
+                        if (p.CustomProperties.TryGetValue(CapabilityProp, out v) && v is int)
+                            ok = ((int)v) == CapabilityValue;
+                    }
+                    if (!ok) anyIncapable = true;
+                    detail.Add((p != null ? p.ActorNumber : -1) + ":" + (ok ? "y" : "n"));
+                }
+
+                if (anyIncapable && !_sawIncapablePeer)
+                {
+                    _sawIncapablePeer = true;
+                    Plugin.Log.LogInfo("[POISON-CAP] room=" + _rosterRoom + " incapable peer present ("
+                        + why + ") caps=" + string.Join(",", detail.ToArray()));
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Would an INCAPABLE peer in this room be forcing ignoreBlock?
+        ///
+        /// Deliberately NOT VanillaFixSupport.GameplayScope(), even though that is
+        /// the predicate PoisonGhostPatch itself uses. GameplayScope routes through
+        /// CompetitiveRoomDetect.IsCompetitiveRoom(), whose ffa_ arm additionally
+        /// requires FfaMode.EngineActive() — LOCAL state. Two victims in one room
+        /// could then answer differently, which would make them honour block
+        /// differently: not a health divergence (only the victim reads this), but a
+        /// fairness inconsistency. The question here is purely about the ROOM'S
+        /// IDENTITY, which every client reads identically, so test that directly.</summary>
+        private static bool PeerWouldForceBypass()
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return false;
+                var props = PhotonNetwork.CurrentRoom.CustomProperties;
+                if (props != null && props.ContainsKey("cr_ff")) return true;
+                string n = PhotonNetwork.CurrentRoom.Name ?? "";
+                return n.StartsWith("ranked_") || n.StartsWith("team_") || n.StartsWith("sct-")
+                    || n.StartsWith("ovt_") || n.StartsWith("ffa_");
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Victim-private. Consumed by nobody else — see the header note on
+        /// why its conservative direction is free.</summary>
+        private static bool HonorBlock()
+        {
+            try
+            {
+                if (Time.unscaledTime - _lastRosterChange < RosterQuarantineSeconds) return false;
+                if (!_sawIncapablePeer) return true;         // everyone speaks the protocol
+                return !PeerWouldForceBypass();             // private room: peer is block-aware
+            }
+            catch { return false; }
+        }
+
+        // ── Per-stream state ──────────────────────────────────────────────
         private static int _nextStream = 1;
-        private static readonly HashSet<long> _applied = new HashSet<long>();
-        // Keyed by (viewId, stream), not stream alone: stream numbers restart at
-        // 1 per victim, so a bare stream key merges two players' streams and any
-        // "applied=N" readout describes both at once.
-        private static readonly Dictionary<long, int[]> _streamTally = new Dictionary<long, int[]>();
+        private static int _nextSeq = 1;
         private static bool _hooked;
+
+        // Receiver-side high-water dedup, per SENDER. Same-sender reliable
+        // channel-0 delivery is FIFO, so one int per sender replaces the old
+        // unbounded HashSet + bit-packed key entirely.
+        private static readonly Dictionary<int, int> _lastSeq = new Dictionary<int, int>();
+
+        // Receiver-side stream records, keyed (viewId, streamId).
+        private sealed class StreamRec
+        {
+            public Vector2 Slice;
+            public Color Color;
+            public int AttackerId;
+            public bool Lethal;
+            public byte DamageSource;
+            public int Accepted;
+            public int Blocked;
+            public int Applied;
+        }
+        private static readonly Dictionary<long, StreamRec> _streams = new Dictionary<long, StreamRec>();
+
+        // Last time (server clock) we heard ANY verdict from this actor.
+        private static readonly Dictionary<int, int> _lastHeardServerTs = new Dictionary<int, int>();
+
+        // Revive fence: verdicts whose stream began before the victim's most
+        // recent revive are dropped. Defaults to "unset" so a late joiner drops
+        // nothing — that absence is exactly the gap that made the old per-life
+        // counter unusable.
+        private static readonly Dictionary<int, int> _reviveServerTs = new Dictionary<int, int>();
+
+        private static long StreamKey(int viewId, int streamId)
+            => ((long)viewId << 32) ^ (uint)streamId;
+
+        /// <summary>Quantise the stream total so the authority, every shadow and the
+        /// audio loop all enumerate the SAME number of ticks. RayHitPoison passes
+        /// `damage * transform.forward / count` and transform.forward can differ by
+        /// an ULP between replicas — enough to flip the final
+        /// `while (damageDealt &lt; damageToDeal)` iteration. One helper, so the three
+        /// call sites cannot drift apart.</summary>
+        internal static float Quantise(float magnitude)
+            => Mathf.Round(magnitude * 1000f) / 1000f;
+
+        /// <summary>PhotonNetwork.ServerTimestamp is an int of milliseconds and WRAPS
+        /// roughly every 24.8 days. Every comparison must be unchecked subtraction —
+        /// `a > b` is wrong across the wrap and would fence off every verdict for
+        /// about as long as it takes someone to notice.</summary>
+        private static bool ServerTsAfter(int a, int b) { unchecked { return (a - b) > 0; } }
+
+        /// <summary>Sequence-number ordering. Same unchecked-subtraction shape as
+        /// ServerTsAfter and for the same reason (a monotonic counter that would wrap
+        /// at int.MaxValue), but kept as a separate name because a seq is not a
+        /// timestamp and reading `ServerTsAfter(seq, last)` at the call site invited
+        /// exactly that confusion.</summary>
+        private static bool SeqAfter(int a, int b) { unchecked { return (a - b) > 0; } }
+
+        internal static void ResetForView(int viewId)
+        {
+            try
+            {
+                _reviveServerTs[viewId] = PhotonNetwork.ServerTimestamp;
+                var dead = new List<long>();
+                foreach (var kv in _streams)
+                    if ((int)(kv.Key >> 32) == viewId) dead.Add(kv.Key);
+                foreach (var k in dead) _streams.Remove(k);
+            }
+            catch { }
+        }
+
+        /// <summary>Drop every scrap of per-room state. Actor numbers and ViewIDs are
+        /// per-room and BOTH get recycled, so carrying any of this across a room
+        /// boundary means attributing one person's capability, sequence numbers or
+        /// liveness to a different person. Called on the room-EXIT edge — keying the
+        /// reset on the room NAME is not enough, because ROUNDS room codes and
+        /// mod-issued names can repeat.</summary>
+        private static void ResetForRoomExit()
+        {
+            try
+            {
+                _capCache.Clear();
+                _capRoom = "";
+                _lastSeq.Clear();
+                _streams.Clear();
+                _lastHeardServerTs.Clear();
+                _reviveServerTs.Clear();
+                _sawIncapablePeer = false;
+                _rosterRoom = "";
+                _lastRosterChange = -999f;
+            }
+            catch { }
+        }
 
         // ── Tick sound ────────────────────────────────────────────────────
         // Sonigon (SoundEvent / SoundManager) is deliberately NOT referenced by
         // the csproj — same house rule as UnityEngine.UI and TMPro — so the
         // SoundEvent stays an `object` and is played by reflection.
         //
-        // Audio is deliberately NOT authoritative. My first version cached the
-        // SoundEvent per victim and played it on the commit path, which was
-        // wrong three ways: overlapping poison and Decay streams overwrote each
-        // other's sound, blocked ticks fell silent (vanilla plays the sound
-        // BEFORE attempting the blockable damage, so a blocked tick still
-        // ticks audibly), and a recycled ViewID in a later room could play the
-        // previous occupant's sound. Ticks do not need network-consistent
-        // timing to sound right, so every replica just runs its own local
-        // sound loop on the same schedule — which is exactly what vanilla did.
+        // Audio is deliberately NOT authoritative and never rides the commit
+        // path. Vanilla plays the sound BEFORE attempting the blockable damage,
+        // so a blocked tick still ticks audibly; keeping audio local preserves
+        // that for free, and avoids three bugs a cached-per-victim SoundEvent
+        // caused in the first draft (overlapping poison and Decay streams
+        // overwriting each other, blocked ticks falling silent, and a recycled
+        // ViewID replaying a previous occupant's sound).
         private static System.Reflection.MethodInfo _playMi;
         private static object _soundManager;
 
@@ -209,8 +652,7 @@ namespace CompetitiveRounds
             // Mirrors vanilla's float accumulation rather than CeilToInt(total /
             // interval): repeated addition of dpt can run one iteration more
             // than the division suggests, so the tidier arithmetic would drop
-            // the last tick's sound on some damage values. Same loop shape as
-            // the damage path, so the two can never disagree on count.
+            // the last tick's sound on some damage values.
             float dealt = 0f;
             float dpt = magnitude / total * interval;
             if (dpt <= 0f) yield break;
@@ -223,116 +665,6 @@ namespace CompetitiveRounds
             }
         }
 
-        // ── Capability publish ────────────────────────────────────────────
-        private static string _publishedFor = "";
-
-        /// <summary>Publish our capability once per room. Called from the
-        /// always-on tick rather than a join hook so it cannot be missed by a
-        /// join path that forgot to call it — and re-publishing is a no-op
-        /// because we key on the room name.</summary>
-        internal static void EnsureCapabilityPublished()
-        {
-            try
-            {
-                if (!ProtocolEnabled) return;
-                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
-                string room = PhotonNetwork.CurrentRoom?.Name ?? "";
-                if (room == _publishedFor) return;
-                var props = new ExitGames.Client.Photon.Hashtable { { CapabilityProp, (int)Protocol } };
-                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
-                _publishedFor = room;
-                Plugin.Log.LogInfo($"[POISON-MODE] advertised {CapabilityProp}={Protocol} for room {room}");
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[POISON-MODE] publish failed: {ex.Message}"); }
-        }
-
-        private static bool EveryoneCapable(out string detail)
-        {
-            detail = "";
-            try
-            {
-                var list = PhotonNetwork.PlayerList;
-                if (list == null || list.Length == 0) { detail = "no players"; return false; }
-                var parts = new List<string>();
-                bool all = true;
-                foreach (var p in list)
-                {
-                    object v = null;
-                    bool ok = p != null && p.CustomProperties != null
-                              && p.CustomProperties.TryGetValue(CapabilityProp, out v)
-                              && v is int && (int)v >= Protocol;
-                    parts.Add($"{(p != null ? p.ActorNumber : -1)}:{(ok ? "y" : "n")}");
-                    if (!ok) all = false;
-                }
-                detail = string.Join(",", parts.ToArray());
-                return all;
-            }
-            catch (Exception ex) { detail = "error " + ex.Message; return false; }
-        }
-
-        /// <summary>Decide the protocol for the game that is about to start.
-        /// Called from GM_ArmsRace.StartGame AND PlayerManager.ResetCharacters —
-        /// same-room rematches bypass StartGame entirely (#138), and a rematch
-        /// that silently kept a stale latch would be a protocol split.</summary>
-        internal static void LatchForGame(string source)
-        {
-            try
-            {
-                if (!ProtocolEnabled) return;
-                // Local per-game caches reset on EVERY client; only the shared
-                // decision itself is master-owned.
-                _applied.Clear();
-                _streamTally.Clear();
-                _lifeGen.Clear();
-
-                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode)
-                {
-                    Plugin.Log.LogInfo($"[POISON-MODE] OFFLINE-VANILLA ({source}) — vanilla block behaviour, untouched");
-                    return;
-                }
-                if (!PhotonNetwork.IsMasterClient)
-                {
-                    ReadRoomMode(out int e0, out bool a0);
-                    Plugin.Log.LogInfo($"[POISON-MODE] adopting master decision epoch={e0} "
-                                       + $"mode={(a0 ? "AUTH" : "FALLBACK")} ({source})");
-                    return;
-                }
-
-                bool all = EveryoneCapable(out string caps);
-                int epoch = 0;
-                ReadRoomMode(out epoch, out _);
-                epoch++;
-                var props = new ExitGames.Client.Photon.Hashtable
-                {
-                    { RoomModeProp, new object[] { epoch, (byte)(all ? 1 : 0) } }
-                };
-                PhotonNetwork.CurrentRoom.SetCustomProperties(props);
-                Plugin.Log.LogInfo($"[POISON-MODE] MASTER published epoch={epoch} "
-                                   + $"mode={(all ? "AUTH" : "FALLBACK")} caps={caps} ({source})");
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning($"[POISON-MODE] latch failed: {ex.Message}");
-            }
-        }
-
-        // ── Per-life generation ───────────────────────────────────────────
-        // A reliable event raised just before a death can arrive just after the
-        // revive, and would then damage the NEW life at full health. The game
-        // epoch cannot catch that — point and round transitions revive without
-        // any new game starting. Deaths are the right clock: RPCA_Die and
-        // RPCA_Die_Phoenix are both RpcTarget.All, so a counter driven off them
-        // increments identically on every client with no extra traffic.
-        private static readonly Dictionary<int, int> _lifeGen = new Dictionary<int, int>();
-
-        internal static int LifeGen(int viewId)
-            => _lifeGen.TryGetValue(viewId, out int g) ? g : 0;
-
-        internal static void BumpLife(int viewId)
-        {
-            _lifeGen[viewId] = LifeGen(viewId) + 1;
-        }
-
         // ── Photon event wiring ───────────────────────────────────────────
         internal static void Hook()
         {
@@ -342,15 +674,8 @@ namespace CompetitiveRounds
                 PhotonNetwork.NetworkingClient.EventReceived += OnEvent;
                 _hooked = true;
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[POISON-SYNC] hook failed: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[POISON-SYNC] hook failed: " + ex.Message); }
         }
-
-        // viewId is in the key because every victim's authority numbers its own
-        // streams from 1 — without it, two players poisoned at once collide on
-        // (stream 1, tick 0) and the second victim's ticks are silently deduped
-        // away as duplicates.
-        private static long DedupKey(int epoch, int viewId, int stream, int tick)
-            => ((long)epoch << 44) ^ ((long)viewId << 24) ^ ((long)stream << 10) ^ (uint)tick;
 
         private static bool Raise(object[] payload)
         {
@@ -362,16 +687,34 @@ namespace CompetitiveRounds
                     // and commits down the same path as everyone else. Applying
                     // locally at send time instead would give the authority a
                     // different code path, a different ordering, and a second
-                    // application when the echo arrives.
+                    // application when the echo arrives. (Note this is NOT the
+                    // same as PUN's RpcTarget.All, which executes locally on the
+                    // sender about one round-trip early — a trap next door.)
                     new RaiseEventOptions { Receivers = ReceiverGroup.All },
                     SendOptions.SendReliable);
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning($"[POISON-AUTH] raise threw: {ex.Message}");
+                Plugin.Log.LogWarning("[POISON-AUTH] raise threw: " + ex.Message);
                 return false;
             }
         }
+
+        // Wire format. TYPE 0 carries the stream header AND tick 0's verdict, so
+        // there is no interval between "a stream exists" and "tick 0 is decided"
+        // — which is what gives the watchdog its full margin.
+        //
+        //  TYPE 0: 0, PROTO, viewId, streamId, startTs, sliceX, sliceY,
+        //          colR, colG, colB, attackerPlayerId, lethal, damageSource,
+        //          blocked0, seq                                      (15)
+        //  TYPE 1: 1, PROTO, viewId, streamId, tickIndex, blocked, seq  (7)
+        //
+        // `position` and `damagingWeapon` are deliberately absent: verified
+        // against the decompile, HealthHandler.DoDamage's body never reads
+        // either. attackerPlayerId STAYS — it drives DealtDamage, i.e. lifesteal,
+        // refreshOnDamage, sinceDealtDamage and lastDamagedPlayer. Real gameplay.
+        private const byte TypeHeader = 0;
+        private const byte TypeTick = 1;
 
         private static void OnEvent(EventData e)
         {
@@ -379,244 +722,410 @@ namespace CompetitiveRounds
             try
             {
                 var a = e.CustomData as object[];
-                if (a == null || a.Length < 17) return;
-                if ((byte)a[0] != Protocol) return;
+                if (a == null || a.Length < 7) return;
+                if (!(a[0] is byte) || !(a[1] is byte)) return;
+                if ((byte)a[1] != Protocol) return;
 
-                int epoch = (int)a[1];
+                byte kind = (byte)a[0];
+                // Length must be validated for THIS kind before any indexed read
+                // below — the seq read alone is at index 14 on a header.
+                if (kind == TypeHeader) { if (a.Length < 15) return; }
+                else if (kind == TypeTick) { if (a.Length < 7) return; }
+                else return;
+
                 int viewId = (int)a[2];
-                int stream = (int)a[3];
-                int tick = (int)a[4];
-                bool blocked = (bool)a[5];
-                int lifeGen = (int)a[15];
-                int dmgSource = (int)a[16];
+                int streamId = (int)a[3];
 
-                // Only the victim may speak for the victim. Without this any
-                // client could forge ticks against anyone.
                 var view = PhotonView.Find(viewId);
                 if (view == null) return;
+
+                // Only the victim may speak for the victim. Without this, any
+                // client could forge ticks against anyone.
                 if (view.Owner == null || view.Owner.ActorNumber != e.Sender)
                 {
-                    Plugin.Log.LogWarning($"[POISON-SYNC] REJECT forged tick: sender={e.Sender} "
-                                          + $"owner={(view.Owner != null ? view.Owner.ActorNumber : -1)} view={viewId}");
-                    return;
-                }
-                if (epoch != Epoch) return;   // stale game (shared, master-owned)
-                // Stale LIFE: the victim died between this tick being raised and
-                // it arriving. Applying it now would damage a freshly revived
-                // player at full health for a hit they took in a previous life.
-                if (lifeGen != LifeGen(viewId))
-                {
-                    Plugin.Log.LogInfo($"[POISON-SYNC] stale-life drop v{viewId}/s{stream}/t{tick} "
-                                       + $"(tick life={lifeGen}, now={LifeGen(viewId)})");
+                    Plugin.Log.LogWarning("[POISON-SYNC] REJECT forged tick: sender=" + e.Sender
+                        + " owner=" + (view.Owner != null ? view.Owner.ActorNumber : -1) + " view=" + viewId);
                     return;
                 }
 
-                long key = DedupKey(epoch, viewId, stream, tick);
-                if (!_applied.Add(key)) return;   // reliable retransmit
+                // Fail closed on any capability disagreement. By the atomicity
+                // theorem a sender that passes the ownership guard above is read as
+                // capable by every receiver, so in the healthy case this is a
+                // provable no-op — it exists so that a FUTURE non-atomic read (or a
+                // client whose own scheduler failed to attach, which CapableVictim
+                // now reports as incapable) drops verdicts instead of applying them
+                // on top of a vanilla loop it is also running.
+                if (!CapableVictim(view)) return;
 
-                long tkey = ((long)viewId << 24) ^ (uint)stream;
-                if (!_streamTally.TryGetValue(tkey, out var tally))
-                { tally = new int[3]; _streamTally[tkey] = tally; }
-                tally[blocked ? 1 : 0]++;
+                int seq = (int)a[kind == TypeHeader ? 14 : 6];
+                int last;
+                if (_lastSeq.TryGetValue(e.Sender, out last) && !SeqAfter(seq, last)) return;
+                _lastSeq[e.Sender] = seq;
 
-                if (blocked) return;   // consumed, no damage — the vanilla semantic
+                long key = StreamKey(viewId, streamId);
+                StreamRec rec;
 
-                var hh = view.GetComponent<HealthHandler>();
-                if (hh == null) return;
-
-                var damage = new Vector2((float)a[6], (float)a[7]);
-                var pos = new Vector2((float)a[8], (float)a[9]);
-                var color = new Color((float)a[10], (float)a[11], (float)a[12], 1f);
-                int attackerId = (int)a[13];
-                bool lethal = (bool)a[14];
-
-                Player attacker = null;
-                GameObject weapon = null;
-                try
+                if (kind == TypeHeader)
                 {
-                    if (attackerId >= 0)
+                    int startTs = (int)a[4];
+
+                    // Revive fence. A verdict raised just before a death can
+                    // arrive just after the revive and would otherwise damage a
+                    // freshly revived player at full health. One room-wide clock,
+                    // seconds of margin (death -> point animation -> MapTransition
+                    // -> Revive), and unset by default so a late joiner drops
+                    // nothing.
+                    int reviveTs;
+                    if (_reviveServerTs.TryGetValue(viewId, out reviveTs) && ServerTsAfter(reviveTs, startTs))
                     {
-                        foreach (var p in PlayerManager.instance.players)
-                            if (p != null && p.PlayerID == attackerId) { attacker = p; break; }
-                        if (attacker != null && attacker.data != null && attacker.data.weaponHandler != null
-                            && attacker.data.weaponHandler.gun != null)
-                            weapon = attacker.data.weaponHandler.gun.gameObject;
+                        Plugin.Log.LogInfo("[POISON-SYNC] revive-fence drop v" + viewId + "/s" + streamId);
+                        return;
                     }
-                }
-                catch { }
 
-                // ignoreBlock: true — the block decision was already made, once,
-                // by the only client entitled to make it. Re-checking here would
-                // reintroduce the per-replica disagreement this exists to remove.
-                float hpBefore = 0f;
-                try { var cd = view.GetComponent<CharacterData>(); if (cd != null) hpBefore = cd.health; } catch { }
-                hh.DoDamage(damage, pos, color, weapon, attacker,
-                            healthRemoval: true, lethal: lethal, ignoreBlock: true,
-                            damageSource: (HealthHandler.DamageSource)dmgSource);
-                // Count APPLIED only when HP actually moved. DoDamage silently
-                // no-ops while dead/respawning, and a tally that counts the call
-                // rather than the effect reads as agreement when there is none.
-                try
-                {
-                    var cd2 = view.GetComponent<CharacterData>();
-                    if (cd2 != null && cd2.health < hpBefore - 0.0001f) tally[2]++;
+                    _lastHeardServerTs[e.Sender] = PhotonNetwork.ServerTimestamp;
+                    rec = new StreamRec
+                    {
+                        Slice = new Vector2((float)a[5], (float)a[6]),
+                        Color = new Color((float)a[7], (float)a[8], (float)a[9], 1f),
+                        AttackerId = (int)a[10],
+                        Lethal = (bool)a[11],
+                        DamageSource = (byte)a[12],
+                    };
+                    _streams[key] = rec;
+                    Apply(view, rec, (bool)a[13], viewId, streamId, 0);
+                    return;
                 }
-                catch { }
+
+                if (!_streams.TryGetValue(key, out rec))
+                {
+                    // Reliable delivery means this is not a lost header — it was
+                    // revive-fenced, orphan-fenced or deduped, so this stream is
+                    // deliberately not ours to apply.
+                    return;
+                }
+                _lastHeardServerTs[e.Sender] = PhotonNetwork.ServerTimestamp;
+                Apply(view, rec, (bool)a[5], viewId, streamId, (int)a[4]);
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[POISON-SYNC] apply failed: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[POISON-SYNC] apply failed: " + ex.Message); }
         }
 
-        /// <summary>The authority's replacement for vanilla's DOT loop. Mirrors
-        /// vanilla arithmetic exactly (no rounded tick count, no clamped final
-        /// tick) so totals and durations are unchanged; the only difference is
-        /// that the block verdict is decided here and published instead of being
-        /// re-derived by every replica.</summary>
+        private static void Apply(PhotonView view, StreamRec rec, bool blocked,
+                                  int viewId, int streamId, int tick)
+        {
+            if (blocked) { rec.Blocked++; return; }   // consumed, no damage — the vanilla semantic
+            rec.Accepted++;
+
+            var hh = view.GetComponent<HealthHandler>();
+            if (hh == null)
+            {
+                // Permanent single-client under-damage with no retry — a failure
+                // the pre-protocol baseline structurally could not have. Never
+                // swallow this quietly.
+                Plugin.Log.LogError("[POISON-SYNC] DROPPED tick v" + viewId + "/s" + streamId
+                    + "/t" + tick + ": no HealthHandler — this client will read low on damage");
+                return;
+            }
+
+            Player attacker = null;
+            try
+            {
+                if (rec.AttackerId >= 0 && PlayerManager.instance != null)
+                    foreach (var p in PlayerManager.instance.players)
+                        if (p != null && p.PlayerID == rec.AttackerId) { attacker = p; break; }
+            }
+            catch { }
+
+            float hpBefore = 0f;
+            try { var cd = view.GetComponent<CharacterData>(); if (cd != null) hpBefore = cd.health; } catch { }
+
+            // ignoreBlock: true — the block decision was already made, once, by
+            // the only client entitled to make it. Re-checking here would
+            // reintroduce the per-replica disagreement this file exists to remove.
+            hh.DoDamage(rec.Slice, Vector2.zero, rec.Color, null, attacker,
+                        healthRemoval: true, lethal: rec.Lethal, ignoreBlock: true,
+                        damageSource: (HealthHandler.DamageSource)rec.DamageSource);
+
+            // Count APPLIED only when HP actually moved. DoDamage silently no-ops
+            // while dead/respawning, and a tally that counts the CALL rather than
+            // the EFFECT reads as agreement when there is none.
+            try
+            {
+                var cd2 = view.GetComponent<CharacterData>();
+                if (cd2 != null && cd2.health < hpBefore - 0.0001f) rec.Applied++;
+            }
+            catch { }
+        }
+
+        /// <summary>Vanilla's float loop exactly (no rounded tick count, no clamped
+        /// final tick) so totals and durations are unchanged. The only difference is
+        /// that the block verdict is decided HERE, once, and published — instead of
+        /// being re-derived by every replica against its own copy of the block
+        /// window.</summary>
         internal static IEnumerator AuthoritativeDot(
-            DamageOverTime host, HealthHandler health, CharacterData data, PhotonView view,
-            Vector2 damage, Vector2 position, float time, float interval, Color color,
+            DamageOverTime host, CharacterData data, PhotonView view,
+            Vector2 damage, float time, float interval, Color color,
             Player damagingPlayer, bool lethal, int damageSource)
         {
             int stream = _nextStream++;
-            int epoch = Epoch;
             int viewId = view.ViewID;
-            int lifeGen = LifeGen(viewId);
             int attackerId = damagingPlayer != null ? damagingPlayer.PlayerID : -1;
-            float damageDealt = 0f;
-            float damageToDeal = damage.magnitude;
+
+            // STREAM START, captured before the loop and before any raise — NOT the
+            // publish time. Load-bearing for the observer's orphan fence: a victim
+            // that stalls is precisely the case that trips a watchdog, and a
+            // publish-time stamp on the late header would fall AFTER the observer
+            // gave up and defeat the fence entirely.
+            int streamStartTs = PhotonNetwork.ServerTimestamp;
+
+            float damageToDeal = Quantise(damage.magnitude);
             float dpt = damageToDeal / time * interval;
-            int tick = 0;
-            int blockedCount = 0;
-            int failedSends = 0;
+            if (dpt <= 0f) yield break;
+
+            Vector2 slice = damage.normalized * dpt;
+            float damageDealt = 0f;
+            int tick = 0, blockedCount = 0, failedSends = 0;
+            bool honor = HonorBlock();
 
             while (damageDealt < damageToDeal)
             {
+                if (host == null || data == null || view == null) yield break;
+                // Narrow the emit-then-die race to sub-frame. Receivers also
+                // no-op via DoDamage's own guard, but not emitting is cheaper.
+                if (data.dead || !data.isPlaying) yield break;
+
                 damageDealt += dpt;
+
                 bool blocked = false;
                 float sinceBlock = -1f;
                 try
                 {
-                    var block = data != null ? data.block : null;
-                    if (block != null) { blocked = block.IsBlocking(); sinceBlock = block.sinceBlock; }
+                    var block = data.block;
+                    if (block != null)
+                    {
+                        sinceBlock = block.sinceBlock;
+                        blocked = block.IsBlocking() && honor;
+                    }
                 }
                 catch { }
                 if (blocked) blockedCount++;
 
-                Vector2 slice = damage.normalized * dpt;
-                bool sent = Raise(new object[]
+                bool sent;
+                if (tick == 0)
                 {
-                    Protocol, epoch, viewId, stream, tick, blocked,
-                    slice.x, slice.y, position.x, position.y,
-                    color.r, color.g, color.b, attackerId, lethal,
-                    lifeGen, damageSource
-                });
+                    sent = Raise(new object[]
+                    {
+                        TypeHeader, Protocol, viewId, stream, streamStartTs,
+                        slice.x, slice.y, color.r, color.g, color.b,
+                        attackerId, lethal, (byte)damageSource, blocked, _nextSeq++
+                    });
+                }
+                else
+                {
+                    sent = Raise(new object[]
+                    {
+                        TypeTick, Protocol, viewId, stream, tick, blocked, _nextSeq++
+                    });
+                }
+
                 if (!sent)
                 {
                     // RaiseEvent can return false WITHOUT throwing. The tick is
-                    // already consumed, and the event is the sole commit path,
-                    // so a dropped send is silent damage loss for everyone. Log
-                    // it loudly; never fall back to applying locally, which
-                    // would damage only this client and recreate the divergence
-                    // this whole design exists to remove.
+                    // already consumed and the event is the sole commit path, so
+                    // a dropped send is consistent under-damage for EVERYONE
+                    // including us. Log it loudly; NEVER fall back to applying
+                    // locally, which would damage only this client and recreate
+                    // the divergence this whole design exists to remove.
                     failedSends++;
-                    Plugin.Log.LogWarning("[POISON-AUTH] SEND FAILED e" + epoch + "/v" + viewId
-                                          + "/s" + stream + "/t" + tick + " - tick lost for everyone");
+                    Plugin.Log.LogWarning("[POISON-AUTH] SEND FAILED v" + viewId + "/s" + stream
+                        + "/t" + tick + " — tick lost for everyone");
                 }
                 if (blocked)
-                    Plugin.Log.LogInfo($"[POISON-AUTH] BLOCK e{epoch}/v{viewId}/s{stream}/t{tick} "
-                                       + $"sinceBlock={sinceBlock:F3} dmg={dpt:F2}");
+                    Plugin.Log.LogInfo("[POISON-AUTH] BLOCK v" + viewId + "/s" + stream + "/t" + tick
+                        + " sinceBlock=" + sinceBlock.ToString("0.000") + " dmg=" + dpt.ToString("0.00"));
+
                 tick++;
                 yield return new WaitForSeconds(interval / TimeHandler.timeScale);
             }
 
-            long tkey = ((long)viewId << 24) ^ (uint)stream;
-            _streamTally.TryGetValue(tkey, out var tally);
-            Plugin.Log.LogInfo($"[POISON-SYNC] COMPLETE e{epoch}/v{viewId}/s{stream} life={lifeGen} "
-                               + $"sent={tick} blocked={blockedCount} failedSends={failedSends} "
-                               + $"recvAccepted={(tally != null ? tally[0] : -1)} "
-                               + $"recvBlocked={(tally != null ? tally[1] : -1)} "
-                               + $"hpApplied={(tally != null ? tally[2] : -1)}");
+            StreamRec rec;
+            _streams.TryGetValue(StreamKey(viewId, stream), out rec);
+            Plugin.Log.LogInfo("[POISON-SYNC] COMPLETE v" + viewId + "/s" + stream
+                + " honor=" + honor + " sent=" + tick + " blocked=" + blockedCount
+                + " failedSends=" + failedSends
+                + " recvAccepted=" + (rec != null ? rec.Accepted : -1)
+                + " recvBlocked=" + (rec != null ? rec.Blocked : -1)
+                + " hpApplied=" + (rec != null ? rec.Applied : -1));
+        }
+
+        /// <summary>A replica's PURE OBSERVER for the victim's stream. It applies
+        /// NOTHING and it can apply nothing — the committed events are the sole
+        /// commit path, which is what makes every client agree by construction.
+        ///
+        /// Its only job is to notice a capable victim that produces no verdicts at
+        /// all and say so once, for the anti-cheat pipeline. A log line cannot
+        /// desynchronise anyone, which is exactly why this is the whole of it:
+        /// every version of this coroutine that also APPLIED damage was a health
+        /// divergence bug (see the SilenceReportMs note at the top of the file).
+        ///
+        /// It exists as a coroutine rather than a timer because vanilla's RPCA_Die,
+        /// RPCA_Die_Phoenix and Revive all call dot.StopAllCoroutines() on the host,
+        /// so a stream that legitimately ends early takes its observer with it and
+        /// cannot produce a false report.</summary>
+        internal static IEnumerator ShadowDot(
+            DamageOverTime host, CharacterData data, PhotonView view,
+            Vector2 damage, float time, float interval)
+        {
+            int viewId = view.ViewID;
+            int actor = view.Owner != null ? view.Owner.ActorNumber : -1;
+            int anchor = PhotonNetwork.ServerTimestamp;
+
+            float damageToDeal = Quantise(damage.magnitude);
+            float dpt = damageToDeal / time * interval;
+            if (dpt <= 0f) yield break;
+
+            float damageDealt = 0f;
+            bool reported = false;
+
+            while (damageDealt < damageToDeal)
+            {
+                if (host == null || data == null || view == null) yield break;
+                damageDealt += dpt;
+
+                if (!reported)
+                {
+                    int heard;
+                    bool heardSince = _lastHeardServerTs.TryGetValue(actor, out heard)
+                                      && ServerTsAfter(heard, anchor);
+                    if (!heardSince
+                        && ServerTsAfter(PhotonNetwork.ServerTimestamp, unchecked(anchor + SilenceReportMs)))
+                    {
+                        reported = true;
+                        Plugin.Log.LogWarning("[POISON-SILENT] capable victim view=" + viewId
+                            + " actor=" + actor + " has published no verdict " + SilenceReportMs
+                            + "ms into a damage-over-time stream — its damage is not being applied "
+                            + "on ANY client. Expected only on a severe client stall; if it repeats "
+                            + "for one player, treat as a possible modified client.");
+                    }
+                }
+
+                yield return new WaitForSeconds(interval / TimeHandler.timeScale);
+            }
         }
     }
 
-    /// <summary>Per-life clock for the poison protocol. Both death RPCs are
-    /// RpcTarget.All, so every client increments in lockstep with no extra
-    /// traffic - which is what lets a receiver reject a tick that was raised
-    /// during the victim's PREVIOUS life and arrived after the revive.</summary>
-    [HarmonyPatch(typeof(HealthHandler))]
-    internal static class HealthHandlerLifeGenPatch
+    /// <summary>Revive is where health is re-synchronised across every client
+    /// anyway, so it is the natural reset point for all per-stream state. It fires
+    /// on every client for every player at every round and game start, via
+    /// PlayerManager.RevivePlayers() and PlayerManager.Move.</summary>
+    [HarmonyPatch(typeof(HealthHandler), "Revive")]
+    internal static class PoisonReviveFencePatch
     {
         [HarmonyPostfix]
-        [HarmonyPatch("RPCA_Die")]
-        static void AfterDie(HealthHandler __instance) => Bump(__instance);
-
-        [HarmonyPostfix]
-        [HarmonyPatch("RPCA_Die_Phoenix")]
-        static void AfterPhoenix(HealthHandler __instance) => Bump(__instance);
-
-        static void Bump(HealthHandler hh)
+        private static void AfterRevive(HealthHandler __instance)
         {
             try
             {
-                var v = hh != null ? hh.GetComponent<PhotonView>() : null;
-                if (v != null) PoisonSync.BumpLife(v.ViewID);
+                var v = __instance != null ? __instance.GetComponent<PhotonView>() : null;
+                if (v != null) PoisonSync.ResetForView(v.ViewID);
             }
             catch { }
         }
     }
 
-    /// <summary>Replaces vanilla's per-replica DOT scheduler when the room is
-    /// running the authoritative protocol.</summary>
+    /// <summary>The single scheduler for the ENTIRE damage-over-time surface.
+    ///
+    /// DamageOverTime.TakeDamageOverTime has exactly two callers in the game —
+    /// RayHitPoison.DoHitEffect (poison bullets) and HealthHandler.TakeDamageOverTime
+    /// (the Decay branch, which routes EVERY direct hit on a Decay holder through
+    /// the DoT path). Both funnel through here, so a capable victim gets both.
+    ///
+    /// The inactive-GameObject guard that used to be VanillaFixes.DeadPlayerDotPatch
+    /// is folded in as step 1. Two prefixes on one method have UNDEFINED relative
+    /// order and Harmony skips subsequent prefixes once one returns false, so
+    /// splitting them would let whichever ran first silently decide whether the
+    /// other ran at all.</summary>
     [HarmonyPatch(typeof(DamageOverTime), "TakeDamageOverTime")]
-    internal static class DamageOverTimeAuthoritativePatch
+    internal static class PoisonDotSchedulerPatch
     {
         // object[] __args rather than a typed SoundEvent parameter: Sonigon is
         // not referenced by the csproj, and __args keeps the Prefix
         // signature-agnostic anyway (learning #83).
-        static bool Prefix(DamageOverTime __instance, Vector2 damage, Vector2 position,
-                           float time, float interval, Color color,
-                           Player damagingPlayer, bool lethal,
-                           HealthHandler.DamageSource damageSource, object[] __args)
+        private static bool Prefix(DamageOverTime __instance, Vector2 damage,
+                                   float time, float interval, Color color,
+                                   Player damagingPlayer, bool lethal,
+                                   HealthHandler.DamageSource damageSource, object[] __args)
         {
             try
             {
-                if (!PoisonSync.Authoritative) return true;   // vanilla + the fallback patch
+                // 1. Ex-DeadPlayerDotPatch. Unity refuses a StartCoroutine on an
+                //    inactive GameObject anyway, so this only removes log noise —
+                //    and SetActive(false) rides RPCA_Die, an All-RPC, so every
+                //    client agrees on it.
+                if (__instance == null || !__instance.gameObject.activeInHierarchy) return false;
+
                 if (time <= 0f || interval <= 0f) return true;
 
                 var view = __instance.GetComponent<PhotonView>();
-                var health = __instance.GetComponent<HealthHandler>();
                 var data = __instance.GetComponent<CharacterData>();
-                if (view == null || health == null || data == null) return true;
+                if (view == null || data == null) return true;
 
-                // Tick AUDIO is local and unauthoritative, so EVERY replica runs
-                // it regardless of who commits the damage. Vanilla plays the
-                // sound before attempting the blockable damage, so a blocked
-                // tick still ticks audibly - keeping audio off the commit path
-                // preserves that for free.
+                // ─────────────────────────────────────────────────────────────
+                // THE BRANCH BELOW IS A PURE FUNCTION OF cap(V) AND MUST STAY
+                // THAT WAY. Do not add a roster check, a room check, a "is
+                // everyone updated" check, or anything else that different
+                // clients can evaluate differently — that is exactly the
+                // split-brain that kept the previous version switched off.
+                // Whether the VICTIM honours its own block is decided inside
+                // AuthoritativeDot (HonorBlock), where only the victim reads it.
+                // ─────────────────────────────────────────────────────────────
+                // Returning true hands the whole call back to vanilla, INCLUDING its
+                // own tick audio — so nothing above this line may have started ours.
+                if (!PoisonSync.CapableVictim(view)) return true;   // vanilla + PoisonGhostPatch
+
+                // Tick AUDIO is local and unauthoritative, so every client runs it
+                // regardless of who commits the damage — same cadence and count as
+                // vanilla, including for blocked ticks (vanilla plays the sound
+                // before attempting the blockable damage). Started only now, on the
+                // paths that return false and therefore suppress vanilla's own loop.
                 object snd = (__args != null && __args.Length > 5) ? __args[5] : null;
                 if (snd != null)
                     __instance.StartCoroutine(PoisonSync.LocalTickSound(
-                        __instance, data, snd, damage.magnitude, time, interval));
+                        __instance, data, snd, PoisonSync.Quantise(damage.magnitude), time, interval));
 
+                // Hosted on the DamageOverTime component deliberately: vanilla's
+                // RPCA_Die, RPCA_Die_Phoenix and Revive all call
+                // dot.StopAllCoroutines(), so our streams inherit that cleanup.
                 if (!view.IsMine)
                 {
-                    // A replica must not simulate the victim's poison at all.
-                    // It will receive each committed tick as an event.
+                    __instance.StartCoroutine(PoisonSync.ShadowDot(
+                        __instance, data, view, damage, time, interval));
                     return false;
                 }
 
-                // Hosted on the DamageOverTime component deliberately: vanilla's
-                // death and revive paths already call dot.StopAllCoroutines(), so
-                // our stream inherits that cleanup for free.
                 __instance.StartCoroutine(PoisonSync.AuthoritativeDot(
-                    __instance, health, data, view, damage, position, time, interval,
-                    color, damagingPlayer, lethal, (int)damageSource));
+                    __instance, data, view, damage, time, interval, color,
+                    damagingPlayer, lethal, (int)damageSource));
                 return false;
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning($"[POISON-SYNC] scheduler failed, using vanilla: {ex.Message}");
+                // A capable victim must NEVER silently end up with no damage at
+                // all. Falling through to vanilla is the self-healing direction.
+                Plugin.Log.LogError("[POISON-SYNC] scheduler failed, using vanilla: " + ex.Message);
                 return true;
             }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(System.Reflection.MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null)
+            {
+                PoisonSync.PatchesLive = true;
+                VanillaFixSupport.Cleanup("PoisonDotScheduler", null);
+            }
+            return exception;
         }
     }
 }

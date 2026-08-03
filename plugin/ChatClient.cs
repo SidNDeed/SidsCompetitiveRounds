@@ -41,6 +41,63 @@ namespace CompetitiveRounds
         /// <summary>Invoked for each received message (raw JSON text). Called from a background thread.</summary>
         public static Action<string> OnMessage;
 
+        // ── §2.6 chat split ──────────────────────────────────────
+        // Subscribe to a SET (global + the locale channel), send to ONE.
+        // SendChannel is UI-owned (Tab cycles it in the chat box); it self-
+        // collapses to global whenever the locale channel disappears.
+
+        /// <summary>The language channel this locale is entitled to, or null
+        /// (en/pseudo have only global).</summary>
+        public static string LocaleChannel
+        {
+            get
+            {
+                string loc = I18n.Locale;
+                return (loc == "ru" || loc == "es") ? loc : null;
+            }
+        }
+
+        private static string sendChannel = "global";
+        public static string SendChannel
+        {
+            get
+            {
+                if (sendChannel != "global" && sendChannel != LocaleChannel)
+                    sendChannel = "global";
+                return sendChannel;
+            }
+            set { sendChannel = (value == LocaleChannel && value != null) ? value : "global"; }
+        }
+
+        private static string SubscribeJson()
+        {
+            string lc = LocaleChannel;
+            return lc == null
+                ? "{\"type\":\"subscribe\",\"channels\":[\"global\"]}"
+                : "{\"type\":\"subscribe\",\"channels\":[\"global\",\"" + lc + "\"]}";
+        }
+
+        // Subscribe state is a DIRTY FLAG, never queued content (round-3
+        // find N12): a queued frame captures the locale at enqueue time, and
+        // a failed send requeues at the TAIL — a stale RU frame could drain
+        // after a fresh EN one and win the socket's final state. The sender
+        // computes SubscribeJson() at SEND time, so a retry always carries
+        // the current channel set.
+        private static volatile bool subscribeDirty;
+
+        /// <summary>Locale changed mid-session: narrow/widen this socket's
+        /// channel set and refetch scrollback so the newly-subscribed
+        /// channel's history appears (the render-side dedup is a seen-id SET,
+        /// not a high-water mark, precisely so this refetch isn't swallowed).</summary>
+        public static void ResubscribeAndRefresh()
+        {
+            SendChannel = sendChannel;   // collapse if now-invalid
+            if (!running) return;
+            subscribeDirty = true;
+            try { sendSignal?.Release(); } catch { }
+            try { ApiClient.FetchRecentChat(50); } catch { }
+        }
+
         public static void Connect()
         {
             if (running) return;
@@ -79,10 +136,15 @@ namespace CompetitiveRounds
             // server before the socket died, the server drops the repeat instead
             // of double-relaying it to Discord + other players (bug #30/#34).
             string nonce = Guid.NewGuid().ToString("N");
+            // §2.6: send to ONE channel. SendChannel self-validates against
+            // the current locale; the server additionally collapses unknown
+            // values to global (never drops).
+            string channel = SendChannel;
             string outbound =
                 "{\"steam_id\":\"" + JsonEscape(steamId ?? "") + "\"," +
                 "\"display_name\":\"" + JsonEscape(displayName ?? "") + "\"," +
                 "\"client_msg_id\":\"" + nonce + "\"," +
+                "\"channel\":\"" + channel + "\"," +
                 "\"message\":\"" + JsonEscape(message) + "\"}";
             sendQueue.Enqueue(outbound);
             try { sendSignal?.Release(); } catch { }
@@ -102,6 +164,7 @@ namespace CompetitiveRounds
                 "\"rating\":" + rating + "," +
                 "\"title\":\"" + JsonEscape(title) + "\"," +
                 "\"title_color\":\"" + JsonEscape(titleColor) + "\"," +
+                "\"channel\":\"" + channel + "\"," +
                 "\"message\":\"" + JsonEscape(message) + "\"}";
             try { OnMessage?.Invoke(echo); } catch { }
         }
@@ -173,6 +236,22 @@ namespace CompetitiveRounds
                     wssConnectFailures = 0;
                     Plugin.Log.LogInfo($"[CHAT] WS connected: {wsUrl}");
                     backoffSec = 2;
+
+                    // §2.6: declare this socket's channel set on every
+                    // (re)connect. DIRECT send, not the queue (wave-2 find
+                    // 21): a reconnect with an offline message backlog would
+                    // otherwise drain the backlog BEFORE the subscribe frame,
+                    // leaving the server's all-channels default live for that
+                    // window. Safe: SendLoop hasn't been started yet, so no
+                    // concurrent SendAsync exists.
+                    try
+                    {
+                        var subBytes = Encoding.UTF8.GetBytes(SubscribeJson());
+                        await socket.SendAsync(new ArraySegment<byte>(subBytes),
+                            WebSocketMessageType.Text, true, token);
+                    }
+                    catch (Exception subEx)
+                    { Plugin.Log.LogWarning($"[CHAT] subscribe frame failed: {subEx.Message}"); }
 
                     // Populate scrollback the first time we connect in a session.
                     try { ApiClient.FetchRecentChat(50); } catch { }
@@ -256,6 +335,26 @@ namespace CompetitiveRounds
             {
                 try { await sendSignal.WaitAsync(token); }
                 catch { return; }
+
+                // Subscribe-dirty first, computed FRESH at send time (N12) —
+                // ahead of any queued data so a channel change is never
+                // outrun by the backlog.
+                if (subscribeDirty)
+                {
+                    subscribeDirty = false;
+                    var subJson = SubscribeJson();
+                    var subBytes = Encoding.UTF8.GetBytes(subJson);
+                    try
+                    {
+                        await ws.SendAsync(new ArraySegment<byte>(subBytes), WebSocketMessageType.Text, true, token);
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[CHAT] subscribe send failed: {ex.Message}");
+                        subscribeDirty = true;   // retried (fresh) after reconnect
+                        return;
+                    }
+                }
 
                 while (sendQueue.TryDequeue(out var json))
                 {

@@ -9,10 +9,12 @@ import contextvars
 import hashlib
 import hmac
 import math
+import decimal as _decimal
 import os
 import random
 import re as _re
 import secrets
+import unicodedata as _unicodedata
 import string
 import time
 import urllib.request as _urlreq
@@ -25,7 +27,7 @@ import json as _json
 from pydantic import BaseModel, Field
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -403,6 +405,9 @@ def _presence_online_ids() -> list[str]:
 _in_match_seen: dict[str, float] = {}          # group_id -> monotonic
 IN_MATCH_TTL_SEC = 210                          # 3.5x the 60s ping cadence
 _PROCESS_STARTED_AT = time.monotonic()
+# Wall-clock twin of the monotonic start stamp — lets DB timestamps (lobby
+# lock times) be compared against "did this happen after our restart".
+_PROCESS_STARTED_WALL = datetime.now(timezone.utc)
 
 
 def _in_match_touch(group_id: str | None) -> None:
@@ -892,6 +897,12 @@ async def queue_cleanup_loop():
                 ).mappings().all()
                 dead_series_ids = []
                 for c in dead_cand:
+                    # Boot guard (round-6 gate class): the presence map is
+                    # process-local and EMPTY for ~210s after a restart —
+                    # absence proves nothing there. Deferring costs one
+                    # janitor tick; the sweep re-fires every minute.
+                    if not _in_match_evidence_trustworthy():
+                        break
                     if any(_presence_is_online(s) for s in (c["sids"] or [])):
                         continue
                     upd = await db.execute(
@@ -948,14 +959,18 @@ async def queue_cleanup_loop():
                 husk_result = await db.execute(
                     text("""DELETE FROM ovt_queue
                         WHERE player_id IN (
-                            SELECT player_id FROM ovt_queue
-                            -- 60, not 30 (lifecycle sweep, July 30): FFA games run
-                            -- to 40+ minutes and clients stop polling once in a
-                            -- room, so a 30-minute husk sweep deletes the queue
-                            -- rows of a LIVE game - taking the cross-mode lock,
-                            -- the recovery path and leave semantics with them.
-                            WHERE last_polled < NOW() - INTERVAL '60 minutes'
-                            FOR UPDATE SKIP LOCKED
+                            SELECT q.player_id FROM ovt_queue q
+                            LEFT JOIN ovt_series s ON s.id = q.series_id
+                            -- Same structural rule as the FFA husk sweep
+                            -- (Codex round-7 gate): a ready_join row under an
+                            -- ACTIVE series is a live-game seat, never a
+                            -- husk — no fixed age can distinguish a long
+                            -- game 1 from abandonment, but the parent's
+                            -- status can.
+                            WHERE q.last_polled < NOW() - INTERVAL '60 minutes'
+                              AND NOT (q.status = 'ready_join'
+                                       AND s.status = 'active')
+                            FOR UPDATE OF q SKIP LOCKED
                         )
                         RETURNING steam_id, status"""))
                 for r in husk_result.fetchall():
@@ -994,6 +1009,11 @@ async def queue_cleanup_loop():
                 ).mappings().all()
                 ffa_dead_ids = []
                 for c in ffa_dead_cand:
+                    # Boot guard — same rule as the ovt sweep above (round-6
+                    # gate class): an empty post-restart presence map is not
+                    # evidence of death.
+                    if not _in_match_evidence_trustworthy():
+                        break
                     if any(_presence_is_online(s) for s in (c["sids"] or [])):
                         continue
                     upd = await db.execute(
@@ -1064,8 +1084,15 @@ async def queue_cleanup_loop():
                     # elapsed-time predicate alone is not authority to destroy a
                     # sitting, and a set-based UPDATE gives no chance to veto a
                     # row that has live-game evidence.
+                    # Both windows scale with the lobby's frozen score target
+                    # (a first-to-10 game runs ~2x a first-to-5 — §4b: these
+                    # constants were calibrated for first-to-5 and would
+                    # janitor-close a live long game). GREATEST(1.0, ...)
+                    # means a short target never TIGHTENS the window below
+                    # today's values.
                     text("""SELECT l.id,
-                                   (l.created_at < NOW() - INTERVAL '3 hours') AS past_ceiling
+                                   (l.created_at < NOW() - (INTERVAL '1 hour' * 3
+                                        * GREATEST(1.0, COALESCE(l.score_target, 5) / 5.0))) AS past_ceiling
                               FROM ffa_lobbies l
                         WHERE l.status = 'active'
                           AND COALESCE(
@@ -1073,7 +1100,8 @@ async def queue_cleanup_loop():
                                   WHERE m.lobby_id = l.id),
                                 l.created_at
                               ) < NOW() - (INTERVAL '1 minute'
-                                           * GREATEST(60, COALESCE(l.player_count, 5) * 7))"""))
+                                           * GREATEST(60, COALESCE(l.player_count, 5) * 7)
+                                           * GREATEST(1.0, COALESCE(l.score_target, 5) / 5.0))"""))
                 for r in ffa_dispersed.fetchall():
                     # The veto is BOUNDED. in_match evidence is client-supplied,
                     # so a client that keeps naming a stale lobby id (its static
@@ -1187,14 +1215,22 @@ async def queue_cleanup_loop():
                 ffa_husks = await db.execute(
                     text("""DELETE FROM ffa_queue
                         WHERE player_id IN (
-                            SELECT player_id FROM ffa_queue
-                            -- 60, not 30 (lifecycle sweep, July 30): FFA games run
-                            -- to 40+ minutes and clients stop polling once in a
-                            -- room, so a 30-minute husk sweep deletes the queue
-                            -- rows of a LIVE game - taking the cross-mode lock,
-                            -- the recovery path and leave semantics with them.
-                            WHERE last_polled < NOW() - INTERVAL '60 minutes'
-                            FOR UPDATE SKIP LOCKED
+                            SELECT q.player_id FROM ffa_queue q
+                            LEFT JOIN ffa_lobbies l ON l.id = q.series_id
+                            -- A ready_join row under an ACTIVE lobby is a
+                            -- LIVE-GAME SEAT, not a husk, no matter how old
+                            -- its poll stamp is — clients stop queue-polling
+                            -- the moment they're in a room, and a first-to-10
+                            -- game 1 can outrun ANY fixed age (the 30->60min
+                            -- bump was a patch on this exact hole; Codex
+                            -- round-7 gate closed it structurally). Every
+                            -- dead lobby eventually leaves 'active' (lease
+                            -- expiry, dead-lock/dispersed closes), which
+                            -- unlocks these rows for the next tick.
+                            WHERE q.last_polled < NOW() - INTERVAL '60 minutes'
+                              AND NOT (q.status = 'ready_join'
+                                       AND l.status = 'active')
+                            FOR UPDATE OF q SKIP LOCKED
                         )
                         RETURNING steam_id, status"""))
                 for r in ffa_husks.fetchall():
@@ -1321,12 +1357,12 @@ async def queue_cleanup_loop():
                      ORDER BY b.player_id::text, b.id
                      LIMIT 20"""))).mappings().all()
                 for b in stranded_1v1:
-                    pay = (int(round(b["amount"] * float(b["odds_multiplier"])))
-                           if b["bet_on_player_id"] == b["winner_id"] else 0)
+                    won = b["bet_on_player_id"] == b["winner_id"]
+                    pay = int(round(b["amount"] * float(b["odds_multiplier"]))) if won else 0
                     claimed = (await db.execute(text(
-                        "UPDATE bets SET payout = :p, settled_at = NOW()"
+                        "UPDATE bets SET payout = :p, settled_at = NOW(), settlement_kind = :k"
                         " WHERE id = :bid AND settled_at IS NULL RETURNING id"
-                    ), {"p": pay, "bid": b["bet_id"]})).scalar()
+                    ), {"p": pay, "k": "won" if won else "lost", "bid": b["bet_id"]})).scalar()
                     if claimed is None:
                         continue
                     if pay > 0:
@@ -1414,6 +1450,17 @@ _VERSION_GATE_BYPASS = frozenset({
     "/api/v1/chat/post",      # internal bot relay; authenticated by X-Internal-Key instead
     "/api/v1/chat/recent",    # bot uses this for scrollback on WS reconnect too
     "/api/v1/admin/maintenance/status",  # public-readable so even pre-version-check clients can probe
+    # Portal + release-tool i18n routes (wave-2 finds 2+3): the callers are a
+    # BROWSER (bearer portal token) and the release sync script (admin HMAC)
+    # — neither is the mod, so the mod-version gate would 426 every request
+    # before its real auth even ran. Each route carries its own auth.
+    "/api/v1/i18n/grants/mine",
+    "/api/v1/i18n/keys",
+    "/api/v1/i18n/proposals",
+    "/api/v1/i18n/review",
+    "/api/v1/i18n/revert",
+    "/api/v1/admin/i18n/grants",
+    "/api/v1/admin/i18n/sync-keys",
 })
 
 
@@ -1456,15 +1503,38 @@ _RL_SENSITIVE_PREFIXES = (
     "/api/v1/shop/purchase", "/api/v1/queue/join", "/api/v1/team/queue/join",
     "/api/v1/players/block", "/api/v1/players/unblock", "/api/v1/mod/toggle-ranked",
     "/api/v1/auth/steam",  # token minting — throttle floods (July 21)
+    "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
+    "/api/v1/ffa/bets",
+    # L10n mutating paths ONLY (localization-design §2.5): never the bare
+    # "/api/v1/i18n/" prefix — startswith matching would put the launch-time
+    # pack fetch in the 20-per-10s bucket and two players behind one NAT
+    # would break each other's language.
+    "/api/v1/i18n/proposals", "/api/v1/i18n/review",
+    "/api/v1/i18n/revert",   # committed delete of a live entry (wave-2 find 20)
 )
 _RL_MAX_BODY = 16 * 1024 * 1024   # 16 MB hard cap (log clamp is 12 MB)
 _RL_LAST_PRUNE = [0.0]
 
 
+# Rate limiting has its OWN, smaller bypass (Codex wave-2 round-3 find N1):
+# reusing _VERSION_GATE_BYPASS here silently exempted every portal/tool i18n
+# route from BOTH buckets and the body-size gate the moment they were excused
+# from the version check — the two gates excuse different things (no mod
+# version vs no abuse ceiling) and must never share a list.
+_RATE_LIMIT_BYPASS = frozenset({
+    "/api/v1/mod-version",
+    "/api/v1/health",
+    "/api/v1/healthz",
+    "/api/v1/chat/post",      # bot relay — X-Internal-Key exempts it anyway
+    "/api/v1/chat/recent",
+    "/api/v1/admin/maintenance/status",
+})
+
+
 @app.middleware("http")
 async def rate_limit_gate(request: Request, call_next):
     path = request.url.path
-    if (not path.startswith("/api/v1/")) or path in _VERSION_GATE_BYPASS \
+    if (not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS \
             or path.startswith("/api/v1/internal/"):
         return await call_next(request)
     internal_key = request.headers.get("X-Internal-Key")
@@ -2761,6 +2831,16 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     _mod_room = bool(report.photon_room_id) and (
         report.photon_room_id.lower().startswith("ranked_")
         or report.photon_room_id.lower().startswith("sct-"))
+    # Round-19 find 3, the DIRECT route: a claimed-ranked report (or a
+    # mod-room exemption) with a banned participant must also stay casual —
+    # no new post-ban ranked series through ANY report shape. Unlike the
+    # ranked-disabled branch below, a live series does NOT keep this ranked:
+    # a ban is an administrative revocation, not a mid-series consent race.
+    if report.is_ranked and ((await _is_banned(db, p1.steam_id)) is not None
+                             or (await _is_banned(db, p2.steam_id)) is not None):
+        print(f"[MATCH] downgraded to casual: participant banned "
+              f"(room={report.photon_room_id})")
+        report.is_ranked = False
     if report.is_ranked and not _mod_room and (not p1.ranked_enabled or not p2.ranked_enabled):
         # Bug #47: an ACTIVE series is the durable consent record for the
         # sitting — both players were ranked-enabled when preflight created it.
@@ -2777,7 +2857,14 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                   f"{p1.steam_id if not p1.ranked_enabled else ''} {p2.steam_id if not p2.ranked_enabled else ''} "
                   f"(room={report.photon_room_id})")
             report.is_ranked = False
-    elif not report.is_ranked and not _mod_room:
+    elif (not report.is_ranked and not _mod_room
+          # Round-19 find 3: the upgrade path must not reverse a BAN-caused
+          # downgrade — preflight answers not_ranked for a banned
+          # participant, and this branch was upgrading the resulting casual
+          # report straight back to ranked (creating the post-ban series the
+          # whole invariant forbids). Banned participant => stays casual.
+          and (await _is_banned(db, p1.steam_id)) is None
+          and (await _is_banned(db, p2.steam_id)) is None):
         # Bug #47, other direction: the client's matchIsRanked snapshot races
         # (opponent Photon props lost on join, /mod/check vs preflight-registration
         # race, opponent's startup ranked-sync landing mid-game) and the FIRST
@@ -4292,11 +4379,24 @@ async def get_player_stats(
         avg_game_seconds = 0
     bets_won = bets_lost = bet_gold_net = 0
     try:
+        # settlement_kind is AUTHORITATIVE when stamped (round-10 find 5): a
+        # 1g win whose payout rounds to the stake was counted neither won nor
+        # lost by the arithmetic. NULL (pre-180) rows keep the legacy math.
         bet_row = (await db.execute(text(
-            "SELECT COUNT(*) FILTER (WHERE b.payout > b.amount)              AS won, "
-            "       COUNT(*) FILTER (WHERE COALESCE(b.payout, -1) = 0)       AS lost, "
-            "       COALESCE(SUM(CASE WHEN b.payout > b.amount THEN b.payout - b.amount "
-            "                         WHEN b.payout = 0 THEN -b.amount ELSE 0 END), 0) AS net "
+            "SELECT COUNT(*) FILTER (WHERE COALESCE(b.settlement_kind,"
+            "               CASE WHEN b.payout > b.amount THEN 'won'"
+            "                    WHEN COALESCE(b.payout, -1) = 0 THEN 'lost' END) = 'won') AS won, "
+            "       COUNT(*) FILTER (WHERE COALESCE(b.settlement_kind,"
+            "               CASE WHEN b.payout > b.amount THEN 'won'"
+            "                    WHEN COALESCE(b.payout, -1) = 0 THEN 'lost' END) = 'lost') AS lost, "
+            "       COALESCE(SUM(CASE WHEN COALESCE(b.settlement_kind,"
+            "                               CASE WHEN b.payout > b.amount THEN 'won'"
+            "                                    WHEN b.payout = 0 THEN 'lost' END) = 'won'"
+            "                         THEN b.payout - b.amount "
+            "                         WHEN COALESCE(b.settlement_kind,"
+            "                               CASE WHEN b.payout > b.amount THEN 'won'"
+            "                                    WHEN b.payout = 0 THEN 'lost' END) = 'lost'"
+            "                         THEN -b.amount ELSE 0 END), 0) AS net "
             "  FROM bets b WHERE b.player_id = :pid AND b.settled_at IS NOT NULL"
         ), {"pid": player.id})).mappings().first()
         if bet_row:
@@ -4378,6 +4478,11 @@ async def get_player_stats(
             #           are excluded explicitly because post-migration they DO
             #           carry a real 0. ffa_damage_games is sent alongside so the
             #           client can tell "no data" from a legitimate 0.0 average.
+            # RANKED scope only (Codex v1.36 find 8): games/wins/placement
+            # come from glicko_ratings_ffa, which only ranked games advance —
+            # mixing casual match rows into these sums made a 1-ranked-game
+            # profile display telemetry from 2 games over a denominator of 1.
+            # A casual/ranked split display can come later; consistency first.
             krow = (await db.execute(text("""
                 SELECT SUM(fmp.kills)::float AS ksum,
                        COUNT(*) FILTER (WHERE NOT fmp.absent) AS played_rows,
@@ -4387,6 +4492,7 @@ async def get_player_stats(
                   FROM ffa_match_players fmp
                   JOIN ffa_matches fm ON fm.id = fmp.match_id
                  WHERE fmp.player_id = :pid AND fm.invalidated_at IS NULL
+                   AND fm.is_ranked
             """), {"pid": player.id})).mappings().first()
             if krow:
                 _kden = ffa_games or int(krow["played_rows"] or 0)
@@ -5712,6 +5818,23 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
             raise HTTPException(status_code=401, detail="ticket_verification_failed")
         print(f"[STEAM-AUTH] verified ticket for {req.steam_id} "
               f"(mod_version={req.mod_version})")
+    # ── Identity-lock lattice (round-13 finds 2+6): the external Steam call
+    # above takes up to ~6s, and a ban or account deletion can commit inside
+    # that window AFTER the early ban check. A session row is repopulating
+    # AUTHORITY, so the insert serializes on the shared per-identity advisory
+    # lock (the same one deletion/ban/portal paths hold) and re-reads BOTH
+    # revocation states after the await. Deletion rewrites players.steam_id,
+    # so its durable tombstone is the deleted_steam_ids hash table — a
+    # missing player row alone proves nothing (players are created lazily).
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                     {"sid": req.steam_id})
+    await _check_ban_or_raise(db, req.steam_id)
+    if MATCH_HMAC_SECRET:
+        _tombed = (await db.execute(text(
+            "SELECT 1 FROM deleted_steam_ids WHERE steam_id_hash = :h"
+        ), {"h": _hash_steam_id(req.steam_id)})).scalar()
+        if _tombed:
+            raise HTTPException(status_code=410, detail="account_deleted")
     # Key unset OR verified: issue the opaque token. Only the sha256 is stored.
     token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
@@ -5738,8 +5861,14 @@ async def steam_auth(req: SteamAuthRequest, db: AsyncSession = Depends(get_db)):
         # Savepoint (learning #187): without it a failure here aborts the
         # whole transaction and the session INSERT below dies too.
         async with db.begin_nested():
+            # CALLER-SCOPED (round-14 find 3): a global prune here runs while
+            # holding THIS identity's advisory lock but deletes OTHER
+            # identities' tuples — opposite scan order vs a concurrent
+            # targeted ban/deletion purge is a tuple-level ABBA. Each
+            # identity now prunes only its own dead rows at its next auth.
             await db.execute(text(
-                "DELETE FROM steam_sessions WHERE expires_at < NOW() - INTERVAL '1 day'"))
+                "DELETE FROM steam_sessions WHERE steam_id = :sid"
+                "   AND expires_at < NOW() - INTERVAL '1 day'"), {"sid": req.steam_id})
     except Exception as ex:
         print(f"[STEAM-AUTH] prune failed (ignored): {type(ex).__name__}")
     await db.execute(text(
@@ -6245,7 +6374,13 @@ async def _lease_renew(db: AsyncSession, player_id, mode: str, group_id=None,
     res = await db.execute(text("""
         UPDATE queue_leases
            SET renewed_at = clock_timestamp(),
-               expires_at = clock_timestamp() + make_interval(secs => :ttl)
+               -- CAST is load-bearing (#275): a bare parameter inside
+               -- named-argument make_interval() (and in ":cap IS NULL"
+               -- below) gives asyncpg's prepare NO type context ->
+               -- AmbiguousParameterError -> EVERY renewal failed from the
+               -- day this shipped (fail-open by design, so it presented
+               -- as silent early lease expiry, not an outage).
+               expires_at = clock_timestamp() + make_interval(secs => CAST(:ttl AS integer))
          WHERE player_id = :pid
            AND mode = :mode
            AND group_id IS NOT DISTINCT FROM :gid
@@ -6256,8 +6391,8 @@ async def _lease_renew(db: AsyncSession, player_id, mode: str, group_id=None,
            -- the wall clock at evaluation, which is the only reading that
            -- makes "an expired lease stays dead" actually true.
            AND expires_at > clock_timestamp()
-           AND (:cap IS NULL
-                OR acquired_at > clock_timestamp() - make_interval(secs => :cap))
+           AND (CAST(:cap AS integer) IS NULL
+                OR acquired_at > clock_timestamp() - make_interval(secs => CAST(:cap AS integer)))
     """), {"pid": player_id, "mode": mode, "gid": group_id,
            "ttl": int(ttl_seconds), "cap": (int(max_total_seconds)
                                             if max_total_seconds else None)})
@@ -6448,6 +6583,26 @@ def compute_elo_range(wait_seconds: int) -> int:
         return 100
 
 
+async def _enrollment_identity_gate(db: AsyncSession, steam_id: str) -> None:
+    """Round-14 find 1: every queue/lobby ENROLLMENT writer joins the
+    identity-lock lattice. Takes the shared per-identity advisory lock (held
+    through commit) and re-reads ban + deletion-tombstone state UNDER it —
+    so an enrollment either commits wholly before a deletion/ban sweep (and
+    is swept) or observes the committed revocation and rejects. The
+    tombstone check also blocks the 1v1/team auto-create paths from
+    resurrecting a deleted identity. Global lock order: identity ->
+    lobby/series -> queue -> lease (deletion takes identity FIRST too)."""
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                     {"sid": steam_id})
+    await _check_ban_or_raise(db, steam_id)
+    if MATCH_HMAC_SECRET:
+        _tombed = (await db.execute(text(
+            "SELECT 1 FROM deleted_steam_ids WHERE steam_id_hash = :h"
+        ), {"h": _hash_steam_id(steam_id)})).scalar()
+        if _tombed:
+            raise HTTPException(status_code=410, detail="account_deleted")
+
+
 @app.post("/api/v1/queue/join", tags=["Queue"])
 async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """
@@ -6456,8 +6611,8 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
     """
     await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
-    # Banned players can't queue. Let them load the leaderboard so they see the status.
-    await _check_ban_or_raise(db, req.steam_id)
+    # Identity gate (round-14 find 1): lock + ban/tombstone re-read under it.
+    await _enrollment_identity_gate(db, req.steam_id)
     # Get or create the player (auto-register on first queue join)
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
@@ -7185,6 +7340,31 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         if my_ready and opp_ready:
             room_just_generated = not room_name
             if not room_name:
+                # ALL-member ban recheck at room issuance (round-17 find 2):
+                # a ban committing after U readied leaves U's ready row
+                # retained — issuing the room here would freeze a banned
+                # player into a live series. Dissolve HERE, under the pair
+                # locks this branch already holds: innocent back to
+                # searching, banned row deleted (unmatchable thereafter —
+                # the candidate scan excludes bans).
+                _pair = [(my_pid, steam_id), (opp["player_id"], opp["steam_id"])]
+                _banned_pids = [p for p, s in _pair
+                                if (await _is_banned(db, s)) is not None]
+                if _banned_pids:
+                    for _pp, _ps in _pair:
+                        if _pp in _banned_pids:
+                            await db.execute(text(
+                                "DELETE FROM ranked_queue WHERE player_id = :pid"), {"pid": _pp})
+                        else:
+                            await db.execute(text("""
+                                UPDATE ranked_queue
+                                SET status = 'searching', matched_with = NULL,
+                                    room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
+                                WHERE player_id = :pid"""), {"pid": _pp})
+                    await db.commit()
+                    return QueuePollResponse(
+                        status="not_in_queue" if my_pid in _banned_pids else "searching",
+                        wait_time=wait_seconds)
                 room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
                 # Pick region: use our region (first poller), fallback to opponent's, fallback to "us"
                 chosen_region = entry["region"] or opp["region"] or "us"
@@ -7257,6 +7437,16 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         )
 
     # ── SEARCHING state: try to find a match ──
+    # CALLER-side ban gate (round-17 find 1): the candidate predicate only
+    # covers the SELECTED opponent — a banned caller whose row was reset to
+    # searching (or whose client keeps polling) must not form a pair either.
+    # Delete the row and answer not_in_queue; the enrollment gate refuses a
+    # rejoin.
+    if (await _is_banned(db, steam_id)) is not None:
+        await db.execute(text("DELETE FROM ranked_queue WHERE player_id = :pid"),
+                         {"pid": my_pid})
+        await db.commit()
+        return QueuePollResponse(status="not_in_queue", wait_time=0)
     elo_range = compute_elo_range(wait_seconds)
     my_rating = entry["rating"]
     min_rating = my_rating - elo_range
@@ -7299,6 +7489,12 @@ async def queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
               AND player_id NOT IN (
                   SELECT blocker_id FROM player_blocks WHERE blocked_id = :pid
               )
+              -- Round-16 finds 1-3: matchability is DECIDED here, so the
+              -- ban exclusion lives here — no purge/reset race can make a
+              -- banned row matchable when the scan itself refuses it.
+              AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                               WHERE pb.steam_id = ranked_queue.steam_id
+                                 AND pb.unbanned_at IS NULL)
             ORDER BY ABS(rating - :my_rating)
             LIMIT 1
             FOR UPDATE SKIP LOCKED
@@ -7419,7 +7615,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     # the matched_at reset below from letting polls see a half-state) — plain read.
     opp_result = await db.execute(
         text("""
-            SELECT player_id, ready, room_name, region
+            SELECT player_id, steam_id, ready, room_name, region
             FROM ranked_queue WHERE player_id = :oid
         """),
         {"oid": entry["matched_with"]},
@@ -7444,6 +7640,25 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         room_name = entry["room_name"] or opp["room_name"]
         room_generated = False
         if not room_name:
+            # ALL-member ban recheck at room issuance (round-17 find 2) —
+            # same dissolution as the poll's both-ready branch, under the
+            # pair locks this endpoint already ordered.
+            _pair = [(player.id, steam_id), (opp["player_id"], opp["steam_id"])]
+            _banned_pids = [p for p, s in _pair
+                            if (await _is_banned(db, s)) is not None]
+            if _banned_pids:
+                for _pp, _ps in _pair:
+                    if _pp in _banned_pids:
+                        await db.execute(text(
+                            "DELETE FROM ranked_queue WHERE player_id = :pid"), {"pid": _pp})
+                    else:
+                        await db.execute(text("""
+                            UPDATE ranked_queue
+                            SET status = 'searching', matched_with = NULL,
+                                room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
+                            WHERE player_id = :pid"""), {"pid": _pp})
+                await db.commit()
+                raise HTTPException(409, "match dissolved (participant banned)")
             room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
             room_generated = True
             chosen_region = entry["region"] or (opp["region"] if opp else None) or "us"
@@ -7988,7 +8203,7 @@ async def get_recent_series(
     if series_ids:
         bet_rows = (await db.execute(text(
             "SELECT b.series_id::text AS series_id, b.amount, b.payout, b.odds_multiplier, "
-            "       b.settled_at, "
+            "       b.settled_at, b.settlement_kind, "
             "       bp.display_name AS bettor_name, bp.steam_id AS bettor_steam_id, "
             "       bo.display_name AS bet_on_name, bo.steam_id AS bet_on_steam_id "
             "FROM bets b "
@@ -7998,12 +8213,15 @@ async def get_recent_series(
             "ORDER BY b.settled_at DESC NULLS LAST, b.created_at DESC"
         ), {"ids": series_ids})).mappings().all()
         for br in bet_rows:
-            # Refunded bets (payout == stake, from the stalled-series refund)
-            # are not wins or losses — hide them entirely. Rendering them with
-            # `won: payout > amount` showed refunds as LOSSES (bug #41:
-            # lopidav "lost" a bet on a cross-session series whose bets had
-            # been refunded mid-way).
-            if br["payout"] is not None and br["payout"] == br["amount"]:
+            # Refunded bets are not wins or losses — hide them entirely.
+            # settlement_kind is authoritative when stamped (round-10 find 5:
+            # payout==amount also matches a legitimate 1g floored WIN, which
+            # this feed was hiding); the arithmetic stays as the pre-180
+            # legacy fallback (bug #41's rule).
+            _sk = br["settlement_kind"]
+            if _sk == "refunded":
+                continue
+            if _sk is None and br["payout"] is not None and br["payout"] == br["amount"]:
                 continue
             bets_by_series.setdefault(br["series_id"], []).append({
                 "bettor_name": br["bettor_name"],
@@ -8013,7 +8231,8 @@ async def get_recent_series(
                 "odds_multiplier": round(br["odds_multiplier"] or 1.0, 2),
                 "bet_on_name": br["bet_on_name"],
                 "bet_on_steam_id": br["bet_on_steam_id"],
-                "won": (br["payout"] or 0) > br["amount"],
+                "won": (_sk == "won") if _sk is not None
+                       else (br["payout"] or 0) > br["amount"],
             })
 
     series_list = []
@@ -8055,33 +8274,63 @@ async def get_recent_series(
 # TODO (hardening, not in scope yet): per-connection rate limiting,
 # HMAC on the send path, chat_messages persistence for scrollback.
 
+# Channel floor + shipped set (localization-design §2.6/D5). `global` is
+# MANDATORY: at 10-60 DAU a hard partition would leave every language room
+# empty and kill chat rather than improve it — clients may HIDE global
+# locally but every socket stays subscribed to it server-side.
+CHAT_CHANNELS_ALLOWED = ("global", "ru", "es")
+
+
 class _ChatManager:
+    """Subscribe to a SET of channels, send to ONE (§2.6). Every accepted
+    socket starts subscribed to the full allowed set — the mandatory-global
+    floor plus both language rooms — and a client that wants a narrower feed
+    sends {"type":"subscribe","channels":[...]}; `global` is silently added
+    back if omitted. Pre-channel clients never send the control frame and
+    therefore see everything, exactly like today (safe skew in both
+    directions: old client + new server = current behavior)."""
+
     def __init__(self):
-        self._connections: set[WebSocket] = set()
+        self._subs: dict[WebSocket, set[str]] = {}
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
-        self._connections.add(ws)
+        self._subs[ws] = set(CHAT_CHANNELS_ALLOWED)
 
     def disconnect(self, ws: WebSocket):
-        self._connections.discard(ws)
+        self._subs.pop(ws, None)
 
-    async def broadcast(self, message: dict, exclude: WebSocket | None = None):
-        payload = _json.dumps(message)
+    def subscribe(self, ws: WebSocket, channels) -> set[str]:
+        wanted = {str(c).lower() for c in (channels or []) if str(c).lower() in CHAT_CHANNELS_ALLOWED}
+        wanted.add("global")   # the floor is not opt-out-able server-side
+        if ws in self._subs:
+            self._subs[ws] = wanted
+        return wanted
+
+    async def broadcast(self, message: dict, exclude: WebSocket | None = None,
+                        channel: str = "global"):
+        # ensure_ascii=False (wave-2 find 7): the default \uXXXX escaping
+        # corrupted every non-ASCII chat message on remote mod clients, whose
+        # hand-rolled reader doesn't decode unicode escapes. Sending real
+        # UTF-8 makes the wire text byte-for-byte what the player typed.
+        # (The client reader ALSO decodes \uXXXX now — belt and braces.)
+        payload = _json.dumps(message, ensure_ascii=False)
         dead = []
-        for ws in list(self._connections):
+        for ws, subs in list(self._subs.items()):
             if ws is exclude:
+                continue
+            if channel not in subs:
                 continue
             try:
                 await ws.send_text(payload)
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            self._connections.discard(ws)
+            self._subs.pop(ws, None)
 
     @property
     def count(self) -> int:
-        return len(self._connections)
+        return len(self._subs)
 
 
 chat_manager = _ChatManager()
@@ -8102,8 +8351,8 @@ async def _persist_chat(entry: dict) -> tuple[int | None, str | None]:
         async with async_session() as db:
             row = (await db.execute(
                 text(
-                    "INSERT INTO chat_messages (source, steam_id, discord_id, display_name, message) "
-                    "VALUES (:source, :steam_id, :discord_id, :display_name, :message) "
+                    "INSERT INTO chat_messages (source, steam_id, discord_id, display_name, message, channel) "
+                    "VALUES (:source, :steam_id, :discord_id, :display_name, :message, :channel) "
                     "RETURNING id, created_at"
                 ),
                 {
@@ -8112,6 +8361,7 @@ async def _persist_chat(entry: dict) -> tuple[int | None, str | None]:
                     "discord_id": entry.get("discord_id"),
                     "display_name": entry.get("display_name", "")[:64],
                     "message": entry.get("message", "")[:500],
+                    "channel": entry.get("channel", "global"),
                 },
             )).first()
             await db.commit()
@@ -8265,7 +8515,8 @@ async def get_recent_multimode_series(
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     entries: list[dict] = []
 
-    def _bet_state(payout, amount, settled_at, odds) -> str:
+    def _bet_state(payout, amount, settled_at, odds, floors: bool = False,
+                   settlement_kind: str | None = None) -> str:
         """Explicit state, never a bool. `payout > amount` as a win test renders
         a REFUND as a loss (#107), and production has carried both an unsettled
         bet on a finished lobby and refunded rows - so 'open' has to be a real
@@ -8274,16 +8525,32 @@ async def get_recent_multimode_series(
         `payout == amount` is AMBIGUOUS on its own: a refund returns the stake,
         but so does a tiny win, because settlement rounds - a 1g bet at the
         x1.10 minimum pays int(round(1.10)) == 1. Comparing against the winning
-        payout the stored odds would have produced disambiguates it, so a small
-        winner is no longer reported to the player as a refund.
+        payout the stored odds would have produced disambiguates it.
+
+        `floors` is the MODE'S settlement rounding (Codex round-4 find 6): FFA
+        floors (EV-safe, round-3 find 11), 1v1/2v2 round. A mode-blind
+        both-candidates set turned some real 2v2 refunds into "won" — the
+        caller must say which rule its rows settled under.
         """
         if settled_at is None or payout is None:
             return "open"
+        # Persisted cause is AUTHORITATIVE when stamped (round-10 find 5 —
+        # a refund-sticky bet on a later-completed series must never be
+        # re-derived as 'won'); the arithmetic below is the pre-180 legacy
+        # fallback only.
+        if settlement_kind in ("won", "lost", "refunded"):
+            return settlement_kind
         p, a = int(payout), int(amount)
         if p == 0:
             return "lost"
         try:
-            win_payout = int(round(a * float(odds or 0)))
+            _od = odds or 0
+            if floors:
+                # exact decimal floor — NUMERIC arrives as Decimal; float()
+                # would re-introduce the 28.999... class (round-4 find 4)
+                win_payout = int(a * _od)
+            else:
+                win_payout = int(round(a * float(_od)))
         except Exception:
             win_payout = -1
         if p == a and p != win_payout:
@@ -8310,7 +8577,8 @@ async def get_recent_multimode_series(
     if t_ids:
         for b in (await db.execute(text("""
             SELECT b.team_series_id, b.bet_on_team, b.amount, b.payout, b.settled_at,
-                   b.odds_multiplier, p.display_name AS bettor_name, p.steam_id AS bettor_steam_id
+                   b.odds_multiplier, b.settlement_kind,
+                   p.display_name AS bettor_name, p.steam_id AS bettor_steam_id
               FROM team_bets b JOIN players p ON p.id = b.player_id
              WHERE b.team_series_id = ANY(:ids)
         """), {"ids": t_ids})).mappings().all():
@@ -8333,7 +8601,8 @@ async def get_recent_multimode_series(
                 "bet_on_label": (t1 if b["bet_on_team"] == 1 else t2),
                 "amount": int(b["amount"]), "payout": b["payout"],
                 "odds_multiplier": float(b["odds_multiplier"] or 0),
-                "state": _bet_state(b["payout"], b["amount"], b["settled_at"], b["odds_multiplier"]),
+                "state": _bet_state(b["payout"], b["amount"], b["settled_at"], b["odds_multiplier"],
+                                    settlement_kind=b["settlement_kind"]),
             } for b in t_bets.get(r["id"], [])],
         })
 
@@ -8382,6 +8651,7 @@ async def get_recent_multimode_series(
             SELECT b.lobby_id, b.game_number, b.amount, b.payout, b.settled_at,
                    b.odds_multiplier,
                    p.display_name AS bettor_name, p.steam_id AS bettor_steam_id,
+                   b.settlement_kind,
                    t.display_name AS target_name
               FROM ffa_bets b
               JOIN players p ON p.id = b.player_id
@@ -8406,7 +8676,10 @@ async def get_recent_multimode_series(
                 "bet_on_label": b["target_name"],
                 "amount": int(b["amount"]), "payout": b["payout"],
                 "odds_multiplier": float(b["odds_multiplier"] or 0),
-                "state": _bet_state(b["payout"], b["amount"], b["settled_at"], b["odds_multiplier"]),
+                # FFA rows settle by FLOOR (round-3 find 11) — the state
+                # helper must judge them under that rule (round-4 find 6).
+                "state": _bet_state(b["payout"], b["amount"], b["settled_at"], b["odds_multiplier"], floors=True,
+                                    settlement_kind=b["settlement_kind"]),
             } for b in blist],
         })
 
@@ -8435,6 +8708,13 @@ async def ws_chat(ws: WebSocket):
             # App-level keepalive — silently ignore, don't broadcast.
             if data.get("type") == "ping":
                 continue
+            # §2.6 subscribe control frame: narrows this socket's channel SET
+            # (global is silently re-added — the mandatory floor). Clients
+            # that never send it stay on the full set = today's behavior.
+            if data.get("type") == "subscribe":
+                got = chat_manager.subscribe(ws, data.get("channels"))
+                print(f"[CHAT] subscriber channels -> {sorted(got)}")
+                continue
             message = str(data.get("message", ""))[:500].strip()
             steam_id = str(data.get("steam_id", ""))[:20]
             display_name = str(data.get("display_name", ""))[:64]
@@ -8449,6 +8729,11 @@ async def ws_chat(ws: WebSocket):
             if client_msg_id and not _claim_chat_nonce(steam_id, client_msg_id):
                 print(f"[CHAT] dropped resend (nonce {client_msg_id[:12]}) from {display_name}")
                 continue
+            # §2.6: channel of THIS message (send to ONE). Unknown values
+            # collapse to global — never drop.
+            channel = str(data.get("channel", "global")).lower()
+            if channel not in CHAT_CHANNELS_ALLOWED:
+                channel = "global"
             # Flood/duplicate gate (item 7) — keyed by the connection (id(ws))
             # so a spoofed steam_id can't dodge it, and before the ban lookup
             # so spam bursts never turn into DB load.
@@ -8468,6 +8753,7 @@ async def ws_chat(ws: WebSocket):
                 "title": meta["title"],
                 "title_color": meta["title_color"],
                 "message": message,
+                "channel": channel,
             }
             # Persist FIRST so the broadcast carries the row's id + created_at —
             # the bot's dedup key. Fall back to a broadcast-time stamp (no id)
@@ -8476,9 +8762,9 @@ async def ws_chat(ws: WebSocket):
             out["timestamp"] = created_iso or datetime.now(timezone.utc).isoformat()
             if mid is not None:
                 out["id"] = mid
-            print(f"[CHAT] <- ingame {display_name}({meta['rating']}): {message[:80]}")
+            print(f"[CHAT] <- ingame {display_name}({meta['rating']}) [{channel}]: {message[:80]}")
             # Exclude the sender so they don't double-render (local echo on the client covers it).
-            await chat_manager.broadcast(out, exclude=ws)
+            await chat_manager.broadcast(out, exclude=ws, channel=channel)
     except WebSocketDisconnect:
         print(f"[CHAT] subscriber disconnected")
         chat_manager.disconnect(ws)
@@ -8517,6 +8803,11 @@ async def post_chat_from_discord(
         except Exception as e:
             print(f"[CHAT] ban-check failed for discord {discord_id}: {e}")
     meta = await _lookup_chat_meta(discord_id=discord_id) if discord_id else {"rating": None, "title": None, "title_color": None}
+    # §2.6: the bot maps its Discord channel to a chat channel; unmapped or
+    # unknown values collapse to global (never drop).
+    channel = str(payload.get("channel", "global")).lower()
+    if channel not in CHAT_CHANNELS_ALLOWED:
+        channel = "global"
     out = {
         "source": "discord",
         "discord_id": discord_id,
@@ -8525,27 +8816,37 @@ async def post_chat_from_discord(
         "title": meta["title"],
         "title_color": meta["title_color"],
         "message": message,
+        "channel": channel,
     }
     mid, created_iso = await _persist_chat(out)
     out["timestamp"] = created_iso or datetime.now(timezone.utc).isoformat()
     if mid is not None:
         out["id"] = mid
-    print(f"[CHAT] <- discord {out['display_name']}({meta['rating']}): {message[:80]} (subs={chat_manager.count})")
-    await chat_manager.broadcast(out)
+    print(f"[CHAT] <- discord {out['display_name']}({meta['rating']}) [{channel}]: {message[:80]} (subs={chat_manager.count})")
+    await chat_manager.broadcast(out, channel=channel)
     return {"status": "posted", "subscribers": chat_manager.count}
 
 
 @app.get("/api/v1/chat/recent", tags=["Chat"])
 async def get_recent_chat(
     limit: int = Query(50, ge=1, le=200),
+    channels: str = Query("", max_length=64),
     db: AsyncSession = Depends(get_db),
 ):
     """Scrollback for clients just connecting. Returns most-recent first, newest-last
-    so the client can append directly to its display log."""
+    so the client can append directly to its display log.
+
+    `channels` is a comma list filtered to the allowed set; empty/absent means
+    ALL channels (pre-channel clients and the bot keep today's behavior).
+    Soft-deleted rows are excluded — the deleted_at column ships ahead of any
+    removal UI (D16 groundwork) precisely so this filter exists from day one."""
+    _want = [c for c in (channels or "").lower().split(",") if c in CHAT_CHANNELS_ALLOWED]
+    _chan_filter = "AND cm.channel = ANY(:chans) " if _want else ""
     # Join to current rating + active title so scrollback shows them too.
     rows = (await db.execute(
         text(
             "SELECT cm.id, cm.source, cm.steam_id, cm.discord_id, cm.display_name, cm.message, cm.created_at, "
+            "       cm.channel, "
             "       ROUND(gr.rating)::int AS rating, p.id::text AS player_id, "
             "       si.name AS title, si.preview_color AS title_color, si.sku AS title_sku "
             "FROM chat_messages cm "
@@ -8554,9 +8855,11 @@ async def get_recent_chat(
             "   (cm.steam_id IS NULL AND cm.discord_id IS NOT NULL AND p.discord_id = cm.discord_id) "
             "LEFT JOIN glicko_ratings gr ON gr.player_id = p.id AND p.deleted_at IS NULL "
             "LEFT JOIN shop_items si ON si.id = p.active_title_id "
+            "WHERE cm.deleted_at IS NULL "
+            + _chan_filter +
             "ORDER BY cm.created_at DESC LIMIT :limit"
         ),
-        {"limit": limit},
+        ({"limit": limit, "chans": _want} if _want else {"limit": limit}),
     )).mappings().all()
     # Key order is LOAD-BEARING for the mod's manual parser (learning #25 /
     # CLAUDE.md): the client splits entries on the literal '{"source"' (so
@@ -8581,11 +8884,893 @@ async def get_recent_chat(
             "rating": r["rating"],
             "title": _title,
             "title_color": _tcolor,
+            # STRING value, strictly mid-object: the client's manual parser
+            # requires "source" first and a string-valued key LAST (#25/#156
+            # key-order contract documented above) — channel satisfies both.
+            "channel": r["channel"] or "global",
             "message": r["message"],
             "timestamp": r["created_at"].isoformat() if r["created_at"] else None,
         })
     entries.reverse()
     return {"messages": entries}
+
+
+# ── Routes: Localization (v1.36, localization-design §2.3/§2.5) ──────
+# Live catalogue + proposal/review flow + grants + the translator portal.
+# Auth model: the in-game client mints a short-TTL portal session over HTTPS
+# (X-Session-Token proven), the portal SPA carries it as a NON-COOKIE bearer
+# header (X-Portal-Token) — no cookies anywhere, so there is no ambient
+# credential for a same-origin injected fetch to ride. Every read and write
+# is grant-checked server-side (that is what makes "moderators see only their
+# languages" real rather than cosmetic).
+
+I18N_LANGS = ("es", "ru")
+I18N_PACK_FORMAT = 1
+# Terms locked by the glossary check: if the SOURCE contains one, the target
+# must carry it verbatim (they are proper nouns/metric names on every board).
+I18N_GLOSSARY_LOCKED = ("Elo", "Glicko", "RD")
+I18N_PORTAL_TTL_MIN = 45
+# Contribution terms revision recorded on every proposal (D15). Bump when the
+# wording shown in the portal changes.
+I18N_LICENSE_TERMS_REV = "v1"
+
+# Per-language allowed script ranges (validator check 4). Everything shares
+# the base: ASCII printable + newline + Latin-1 punctuation/letters.
+_I18N_BASE_OK = lambda o: (0x20 <= o <= 0x7E) or o == 0x0A or (0xA0 <= o <= 0x17F) or o in (0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2026)
+_I18N_LANG_OK = {
+    "es": lambda o: _I18N_BASE_OK(o),
+    "ru": lambda o: _I18N_BASE_OK(o) or (0x0400 <= o <= 0x04FF),
+}
+# Rejected outright in any language: zero-width, bidi overrides, isolates,
+# and the normally-invisible soft hyphen (wave-2 find 16 — it defeats the
+# URL/mention scans by splitting their tokens invisibly).
+_I18N_FORBIDDEN = (set(range(0x200B, 0x2010)) | set(range(0x202A, 0x202F))
+                   | set(range(0x2066, 0x206A)) | {0x00AD})
+
+
+def _i18n_extract_tags(s: str) -> list:
+    """Ordered TMP tag tokens — mirrors the client's ExtractTags exactly."""
+    tags, i = [], 0
+    while i < len(s):
+        lt = s.find("<", i)
+        if lt < 0:
+            break
+        gt = s.find(">", lt + 1)
+        if gt < 0:
+            break
+        tags.append(s[lt:gt + 1])
+        i = gt + 1
+    return tags
+
+
+# A stray '<' may only be the decorative ARROW shape ("< BACK", "< Prev"):
+# followed by whitespace or end-of-string. Anything else is a tag PREFIX that
+# UIFactory._BoldWrap completes into a LIVE tag by appending "</b>" — an
+# injection the tag-sequence compare structurally cannot see, because tag
+# extraction on BOTH sides requires a closing '>' before it counts anything.
+_I18N_STRAY_LT_BAD = _re.compile(r"<(?!\s|$)")
+
+
+def _i18n_markup_residue(s: str) -> str:
+    """`s` with every COMPLETE tag token removed, so any '<'/'>' left in the
+    result is a STRAY bracket rather than markup."""
+    out, i = [], 0
+    while i < len(s):
+        lt = s.find("<", i)
+        if lt < 0:
+            break
+        gt = s.find(">", lt + 1)
+        if gt < 0:
+            break
+        out.append(s[i:lt])
+        i = gt + 1
+    out.append(s[i:])
+    return "".join(out)
+
+
+def _i18n_validate(source: str, target: str, language: str) -> list:
+    """Server-side validator (§2.5) — runs identically at submit AND approve.
+    Returns a list of human-readable errors; empty = valid."""
+    errors = []
+    if not target or not target.strip():
+        errors.append("empty target")
+        return errors
+    if len(target) > max(len(source) * 3, len(source) + 40):
+        errors.append("target too long vs source (ratio cap)")
+    # 1. Placeholder arity/identity.
+    for d in range(10):
+        ph = "{" + str(d) + "}"
+        if source.count(ph) != target.count(ph):
+            errors.append(f"placeholder {ph} count differs from source")
+    # 2. TMP tag multiset — ordered sequence incl. exact hex values. THE
+    #    injection vector: mismatches don't throw, they silently bleed.
+    _src_tags, _tgt_tags = _i18n_extract_tags(source), _i18n_extract_tags(target)
+    if _src_tags != _tgt_tags:
+        errors.append("rich-text tag sequence differs from source")
+    #    2b. STRAY brackets (adversarial review F1/F2). Shape, not count: an
+    #    incomplete "<color=#FF0000 ATRAS" passes 2 above (no closing '>', so
+    #    NEITHER side extracts a tag) and our own bold-wrap then supplies the
+    #    '>' at render time, producing a live tag we never authorised. Count
+    #    is a CEILING rather than an equality so a decorative arrow may be
+    #    dropped or replaced ("< BACK" -> "ATRAS" / "<< ATRAS") — only ADDING
+    #    brackets is refused.
+    _s_res, _t_res = _i18n_markup_residue(source), _i18n_markup_residue(target)
+    if _I18N_STRAY_LT_BAD.search(_t_res):
+        errors.append("a '<' here would be read as the start of a formatting "
+                      "tag - remove it (a '<' used as an arrow must be "
+                      "followed by a space)")
+    elif _t_res.count("<") > _s_res.count("<") or _t_res.count(">") > _s_res.count(">"):
+        errors.append("extra '<' or '>' character: these are reserved for formatting")
+    #    2c. TAGS-ONLY target (review F3): "<b></b>" is neither empty nor
+    #    whitespace, passes the sequence compare, and ships a BLANK label —
+    #    92 of the 95 tagged sources accepted one before this guard. Gated on
+    #    a matching sequence so it can never mask a real tag error, and it
+    #    still permits an individually empty span ("<b></b>text"), which a
+    #    positional editor legitimately produces.
+    if _src_tags == _tgt_tags and _s_res.strip() and not _t_res.strip():
+        errors.append("the translation has no text - only the formatting tags "
+                      "were submitted. Type the translated words between them.")
+    # 4. Charset allowlist + universal forbids (zero-width, bidi overrides).
+    ok = _I18N_LANG_OK.get(language, _I18N_BASE_OK)
+    for ch in target:
+        o = ord(ch)
+        if o in _I18N_FORBIDDEN or (o < 0x20 and o != 0x0A):
+            errors.append(f"forbidden control/invisible char U+{o:04X}")
+            break
+        if not ok(o):
+            errors.append(f"char U+{o:04X} outside the {language} script allowlist")
+            break
+    # 5. No URLs, no @-mentions. ANY-length scheme (round-3 find N10:
+    #    "x://" is a valid one-letter scheme) and unicode-aware mention
+    #    match (@Игрок — \w is unicode in Python).
+    low = target.lower()
+    if _re.search(r"\b[a-z][a-z0-9+.-]*://", low) or "www." in low:
+        errors.append("URLs are not allowed in translations")
+    if _re.search(r"@\w", target):
+        errors.append("@-mentions are not allowed in translations")
+    # 4b. Mixed-script confusables (find 16 / N10): a single WORD mixing
+    #     Cyrillic and Latin letters is the classic homoglyph shape (Pаypal
+    #     with a Cyrillic а). Script detection via unicodedata names so
+    #     Latin-1/Extended-A letters (é, ñ, ő) count as Latin too.
+    for w in _re.findall(r"[^\W\d_]+", target):
+        has_cyr = has_lat = False
+        for ch in w:
+            nm = _unicodedata.name(ch, "")
+            if nm.startswith("CYRILLIC"):
+                has_cyr = True
+            elif nm.startswith("LATIN"):
+                has_lat = True
+        if has_cyr and has_lat:
+            errors.append(f"mixed Cyrillic/Latin inside one word ('{w[:20]}')")
+            break
+    # 6. Glossary-locked terms survive verbatim.
+    for term in I18N_GLOSSARY_LOCKED:
+        if _re.search(r"\b" + _re.escape(term) + r"\b", source) and term not in target:
+            errors.append(f"locked term '{term}' missing from target")
+    return errors
+
+
+async def _i18n_role(db: AsyncSession, steam_id: str, language: str, scope: str):
+    """'admin' | 'moderator' | None. Admins pass every language (D3), and the
+    audit records the role distinctly."""
+    if await _is_admin(db, steam_id):
+        return "admin"
+    row = (await db.execute(text(
+        "SELECT 1 FROM language_grants WHERE steam_id = :sid AND language_code = :lang"
+        "  AND scope = :scope AND revoked_at IS NULL LIMIT 1"
+    ), {"sid": steam_id, "lang": language, "scope": scope})).scalar()
+    return "moderator" if row else None
+
+
+async def _portal_auth(request: Request, db: AsyncSession) -> str:
+    """Validate X-Portal-Token → steam_id. Token is IP-bound and short-TTL."""
+    token = request.headers.get("X-Portal-Token") or ""
+    if not token or len(token) > 64:
+        raise HTTPException(401, "portal session required")
+    row = (await db.execute(text(
+        "SELECT steam_id, bound_ip, expires_at FROM i18n_portal_sessions WHERE token = :t"
+    ), {"t": token})).mappings().first()
+    if row is None or row["expires_at"] < datetime.now(timezone.utc):
+        raise HTTPException(401, "portal session expired")
+    client_ip = request.client.host if request.client else ""
+    if row["bound_ip"] != client_ip:
+        raise HTTPException(401, "portal session invalid for this address")
+    # SERIALIZE against deletion/ban (round-11 find 1, the #207 advisory
+    # pattern): an already-authorized portal mutation could otherwise commit
+    # AFTER a deletion that swept this identity. The per-identity advisory
+    # xact lock is also taken by the deletion/ban sweeps, so whichever side
+    # wins, the other observes its committed effects in the rechecks below —
+    # which therefore run AFTER the lock (the #197/#208 reread rule).
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                     {"sid": row["steam_id"]})
+    # RE-READ the token row AFTER the lock (round-12 find 4 — the pre-lock
+    # read could predate a purging sweep that committed while we waited).
+    row = (await db.execute(text(
+        "SELECT steam_id, bound_ip, expires_at FROM i18n_portal_sessions WHERE token = :t"
+    ), {"t": token})).mappings().first()
+    if row is None or row["expires_at"] < datetime.now(timezone.utc):
+        raise HTTPException(401, "portal session expired")
+    # Independent fail-closed on revoked identities (round-10 find 2): the
+    # deletion/ban paths purge portal sessions, but a race or missed path
+    # must not leave a live token speaking for a dead or banned account.
+    # (Deletion rewrites steam_id, so a deleted account's token resolves to
+    # NO live player row — prow is None covers it.)
+    prow = (await db.execute(text(
+        "SELECT deleted_at FROM players WHERE steam_id = :sid"
+    ), {"sid": row["steam_id"]})).mappings().first()
+    if prow is None or prow["deleted_at"] is not None:
+        raise HTTPException(401, "portal session revoked")
+    if await _is_banned(db, row["steam_id"]) is not None:
+        raise HTTPException(401, "portal session revoked")
+    return row["steam_id"]
+
+
+def _require_https(request: Request) -> None:
+    """Refuse the portal handoff over plaintext (§2.5): 8443 is served in the
+    clear by design, and a leaked bearer token there is a real credential.
+
+    Wave-2 find 17 threat-model note: a direct 8443 client CAN spoof this
+    header — but the only token that exposes is the spoofer's own, over the
+    spoofer's own cleartext connection, and their X-Session-Token already
+    travelled the same wire. The check's real job is refusing the DEFAULT
+    plaintext-fallback mod client (which never sends the header), and that
+    it does. `request.url.scheme` is also accepted so a future
+    --proxy-headers uvicorn config hardens this for free."""
+    proto = (request.headers.get("X-Forwarded-Proto") or "").lower()
+    if proto != "https" and request.url.scheme != "https":
+        raise HTTPException(400, "portal requires the HTTPS endpoint")
+
+
+@app.post("/api/v1/i18n/portal-session", tags=["I18n"])
+async def i18n_portal_session(payload: dict, request: Request,
+                              db: AsyncSession = Depends(get_db)):
+    """In-game handoff: mint a short-TTL, IP-bound portal token. Requires a
+    verified Steam session and HTTPS. The client opens the portal with the
+    token in the URL FRAGMENT (never a query param — fragments don't reach
+    server logs)."""
+    _require_https(request)
+    steam_id = str(payload.get("steam_id", ""))[:20]
+    # Same per-identity serialization as _portal_auth (round-11 find 1): a
+    # mint racing a ban/deletion sweep must either land before it (and be
+    # swept) or observe it (and fail the session check below).
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                     {"sid": steam_id})
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(401, "steam session required")
+    # Round-12 find 4: a Steam session can outlive a ban by racing it — the
+    # mint must check the ban ITSELF (under the lock), or a token minted
+    # while banned becomes usable after an unban.
+    if await _is_banned(db, steam_id) is not None:
+        raise HTTPException(403, "banned")
+    # Round-13 find 2 defense-in-depth: no live player, no portal token — a
+    # deletion-raced session must not mint a raw-identity portal row.
+    _mint_live = (await db.execute(text(
+        "SELECT 1 FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
+    ), {"sid": steam_id})).scalar()
+    if not _mint_live:
+        raise HTTPException(403, "player not found (or deleted)")
+    token = secrets.token_urlsafe(32)
+    client_ip = request.client.host if request.client else ""
+    await db.execute(text(
+        "INSERT INTO i18n_portal_sessions (token, steam_id, bound_ip, expires_at)"
+        " VALUES (:t, :sid, :ip, NOW() + (:ttl || ' minutes')::interval)"
+    ), {"t": token, "sid": steam_id, "ip": client_ip, "ttl": str(I18N_PORTAL_TTL_MIN)})
+    # Opportunistic expiry sweep — CALLER-SCOPED (round-14 find 3: a global
+    # delete under this identity's advisory lock could tuple-deadlock a
+    # concurrent targeted ban/deletion purge of another identity).
+    await db.execute(text(
+        "DELETE FROM i18n_portal_sessions WHERE steam_id = :sid"
+        "   AND expires_at < NOW() - INTERVAL '1 day'"), {"sid": steam_id})
+    await db.commit()
+    return {"token": token, "ttl_minutes": I18N_PORTAL_TTL_MIN}
+
+
+@app.get("/api/v1/i18n/pack/{locale}", tags=["I18n"])
+async def i18n_pack(locale: str, db: AsyncSession = Depends(get_db)):
+    """Launch-time catalogue overlay (public read). The client checks the
+    integer `format` BEFORE parsing the body and enforces min_mod_version.
+    Sensitive keys ship only once APPROVED (they stay embedded-English until
+    a human signs off — §2.5's containment)."""
+    locale = (locale or "").lower()[:8]
+    if locale not in I18N_LANGS:
+        return {"format": I18N_PACK_FORMAT, "locale": locale, "entries": []}
+    rows = (await db.execute(text(
+        "SELECT k.msgctxt, e.target, e.state FROM i18n_entries e"
+        " JOIN i18n_keys k ON k.key_id = e.key_id"
+        " WHERE e.language_code = :lang AND k.retired_at IS NULL"
+        "   AND (k.sensitive IS FALSE OR e.state = 'approved')"
+        " ORDER BY k.key_id"
+    ), {"lang": locale})).mappings().all()
+    return {
+        "format": I18N_PACK_FORMAT,
+        "locale": locale,
+        "min_mod_version": "1.36.0",
+        "entries": [{"s": r["msgctxt"], "t": r["target"], "st": r["state"]} for r in rows],
+    }
+
+
+@app.get("/api/v1/i18n/grants/mine", tags=["I18n"])
+async def i18n_my_grants(request: Request, db: AsyncSession = Depends(get_db)):
+    steam_id = await _portal_auth(request, db)
+    if await _is_admin(db, steam_id):
+        return {"steam_id": steam_id, "admin": True,
+                "languages": [{"language_code": l, "scope": "translate"} for l in I18N_LANGS]}
+    rows = (await db.execute(text(
+        "SELECT language_code, scope FROM language_grants"
+        " WHERE steam_id = :sid AND revoked_at IS NULL ORDER BY language_code"
+    ), {"sid": steam_id})).mappings().all()
+    return {"steam_id": steam_id, "admin": False,
+            "languages": [dict(r) for r in rows]}
+
+
+@app.get("/api/v1/i18n/keys", tags=["I18n"])
+async def i18n_keys(request: Request, lang: str = Query(...),
+                    db: AsyncSession = Depends(get_db)):
+    """Portal key list for one language. Staleness is DERIVED here (#205):
+    approved_source_hash != the key's CURRENT source_hash."""
+    steam_id = await _portal_auth(request, db)
+    lang = lang.lower()[:8]
+    if await _i18n_role(db, steam_id, lang, "translate") is None:
+        raise HTTPException(403, "no translate grant for this language")
+    rows = (await db.execute(text(
+        "SELECT k.key_id, k.namespace, k.msgctxt, k.source_hash, k.sensitive, k.max_px,"
+        "       e.target, e.state, e.approved_source_hash,"
+        "       (SELECT COUNT(*) FROM i18n_proposals p WHERE p.key_id = k.key_id"
+        "          AND p.language_code = :lang AND p.status = 'pending') AS pending"
+        "  FROM i18n_keys k"
+        "  LEFT JOIN i18n_entries e ON e.key_id = k.key_id AND e.language_code = :lang"
+        " WHERE k.retired_at IS NULL ORDER BY k.namespace, k.key_id"
+    ), {"lang": lang})).mappings().all()
+    return {"language": lang, "keys": [{
+        "key_id": r["key_id"], "namespace": r["namespace"], "source": r["msgctxt"],
+        "sensitive": r["sensitive"], "max_px": r["max_px"],
+        "target": r["target"], "state": r["state"], "pending": r["pending"],
+        "stale": bool(r["target"] and r["state"] == "approved"
+                      and r["approved_source_hash"] != r["source_hash"]),
+    } for r in rows]}
+
+
+@app.post("/api/v1/i18n/proposals", tags=["I18n"])
+async def i18n_propose(payload: dict, request: Request,
+                       db: AsyncSession = Depends(get_db)):
+    steam_id = await _portal_auth(request, db)
+    key_id = str(payload.get("key_id", ""))[:16]
+    lang = str(payload.get("language_code", "")).lower()[:8]
+    target = str(payload.get("target", ""))[:4000]
+    # D15 (wave-2 find 5): no assent, no proposal — the recorded grant is
+    # what makes an approved translation distributable. STRICT boolean
+    # (round-3 find N2): the JSON string "false" is truthy in Python, and
+    # recording assent=true over an express false would forge the evidence
+    # this field exists to provide.
+    if payload.get("license_assent") is not True:
+        raise HTTPException(422, "license assent required (tick the contribution box)")
+    role = await _i18n_role(db, steam_id, lang, "translate")
+    if role is None:
+        raise HTTPException(403, "no translate grant for this language")
+    key = (await db.execute(text(
+        "SELECT msgctxt, source_hash FROM i18n_keys WHERE key_id = :k AND retired_at IS NULL"
+    ), {"k": key_id})).mappings().first()
+    if key is None:
+        raise HTTPException(404, "unknown key")
+    errors = _i18n_validate(key["msgctxt"], target, lang)
+    if errors:
+        raise HTTPException(422, "; ".join(errors[:4]))
+    pid = (await db.execute(text(
+        "INSERT INTO i18n_proposals (key_id, language_code, source_hash,"
+        " proposed_target, proposer_steam_id, license_assent, license_terms_rev,"
+        " assented_at) VALUES (:k, :lang, :sh, :t, :sid, TRUE, :rev, NOW())"
+        " RETURNING id"
+    ), {"k": key_id, "lang": lang, "sh": key["source_hash"], "t": target,
+        "sid": steam_id, "rev": I18N_LICENSE_TERMS_REV})).scalar()
+    await db.execute(text(
+        "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code,"
+        " key_id, action, detail) VALUES (:sid, :role, :lang, :k, 'propose', :d)"
+    ), {"sid": steam_id, "role": role, "lang": lang, "k": key_id,
+        "d": f"proposal {pid}"})
+    await db.commit()
+    return {"proposal_id": pid, "status": "pending"}
+
+
+@app.get("/api/v1/i18n/proposals", tags=["I18n"])
+async def i18n_proposal_queue(request: Request, lang: str = Query(...),
+                              status: str = Query("pending"),
+                              db: AsyncSession = Depends(get_db)):
+    steam_id = await _portal_auth(request, db)
+    lang = lang.lower()[:8]
+    if await _i18n_role(db, steam_id, lang, "translate") is None:
+        raise HTTPException(403, "no translate grant for this language")
+    status = status if status in ("pending", "approved", "rejected", "superseded") else "pending"
+    rows = (await db.execute(text(
+        "SELECT p.id, p.key_id, p.proposed_target, p.proposer_steam_id, p.created_at,"
+        "       p.source_hash, k.msgctxt, k.source_hash AS current_hash, k.sensitive"
+        "  FROM i18n_proposals p JOIN i18n_keys k ON k.key_id = p.key_id"
+        " WHERE p.language_code = :lang AND p.status = :st"
+        " ORDER BY p.created_at LIMIT 200"
+    ), {"lang": lang, "st": status})).mappings().all()
+    return {"language": lang, "proposals": [{
+        "id": r["id"], "key_id": r["key_id"], "source": r["msgctxt"],
+        "target": r["proposed_target"], "proposer": r["proposer_steam_id"],
+        "created_at": r["created_at"].isoformat(), "sensitive": r["sensitive"],
+        "source_changed_since": r["source_hash"] != r["current_hash"],
+    } for r in rows]}
+
+
+@app.post("/api/v1/i18n/review", tags=["I18n"])
+async def i18n_review(payload: dict, request: Request,
+                      db: AsyncSession = Depends(get_db)):
+    """Approve → live immediately (§2.5). The validator re-runs against the
+    CURRENT source at approve time — never trust the submit verdict; the
+    source may have changed since. Sensitive keys are admin-approve-only.
+    Self-approval is allowed, flagged, and audited (a single-moderator
+    language must be shippable)."""
+    steam_id = await _portal_auth(request, db)
+    pid = int(payload.get("proposal_id", 0) or 0)
+    action = str(payload.get("action", ""))
+    note = str(payload.get("note", ""))[:500]
+    if action not in ("approve", "reject"):
+        raise HTTPException(400, "action must be approve|reject")
+    # Row-lock the proposal so two reviewers can't both decide it.
+    prop = (await db.execute(text(
+        "SELECT p.id, p.key_id, p.language_code, p.proposed_target, p.proposer_steam_id,"
+        "       p.status FROM i18n_proposals p WHERE p.id = :pid FOR UPDATE"
+    ), {"pid": pid})).mappings().first()
+    if prop is None:
+        raise HTTPException(404, "unknown proposal")
+    if prop["status"] != "pending":
+        raise HTTPException(409, f"already {prop['status']}")
+    lang = prop["language_code"]
+    role = await _i18n_role(db, steam_id, lang, "translate")
+    if role is None:
+        raise HTTPException(403, "no translate grant for this language")
+    key = (await db.execute(text(
+        "SELECT msgctxt, source_hash, sensitive FROM i18n_keys"
+        " WHERE key_id = :k AND retired_at IS NULL"
+    ), {"k": prop["key_id"]})).mappings().first()
+    if key is None:
+        raise HTTPException(409, "key retired since proposal")
+    if action == "approve":
+        if key["sensitive"] and role != "admin":
+            raise HTTPException(403, "sensitive keys are admin-approve-only")
+        errors = _i18n_validate(key["msgctxt"], prop["proposed_target"], lang)
+        if errors:
+            raise HTTPException(422, "re-validation failed: " + "; ".join(errors[:4]))
+        self_app = prop["proposer_steam_id"] == steam_id
+        await db.execute(text(
+            "INSERT INTO i18n_entries (key_id, language_code, target, state,"
+            " approved_source_hash, approved_by_steam_id, self_approved, updated_at)"
+            " VALUES (:k, :lang, :t, 'approved', :sh, :by, :selfa, NOW())"
+            " ON CONFLICT (key_id, language_code) DO UPDATE SET"
+            "   target = EXCLUDED.target, state = 'approved',"
+            "   approved_source_hash = EXCLUDED.approved_source_hash,"
+            "   approved_by_steam_id = EXCLUDED.approved_by_steam_id,"
+            "   self_approved = EXCLUDED.self_approved, updated_at = NOW()"
+        ), {"k": prop["key_id"], "lang": lang, "t": prop["proposed_target"],
+            "sh": key["source_hash"], "by": steam_id, "selfa": self_app})
+        # Older pending proposals for the same key+lang are decided by this.
+        await db.execute(text(
+            "UPDATE i18n_proposals SET status = 'superseded', reviewed_by_steam_id = :by,"
+            " reviewed_at = NOW() WHERE key_id = :k AND language_code = :lang"
+            " AND status = 'pending' AND id <> :pid"
+        ), {"by": steam_id, "k": prop["key_id"], "lang": lang, "pid": pid})
+    await db.execute(text(
+        "UPDATE i18n_proposals SET status = :st, reviewed_by_steam_id = :by,"
+        " reviewed_at = NOW(), review_note = :note WHERE id = :pid"
+    ), {"st": "approved" if action == "approve" else "rejected",
+        "by": steam_id, "note": note or None, "pid": pid})
+    await db.execute(text(
+        "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code,"
+        " key_id, action, detail) VALUES (:sid, :role, :lang, :k, :act, :d)"
+    ), {"sid": steam_id, "role": role, "lang": lang, "k": prop["key_id"],
+        "act": action, "d": f"proposal {pid}" + (" (self-approved)" if action == "approve" and prop["proposer_steam_id"] == steam_id else "")})
+    await db.commit()
+    return {"proposal_id": pid, "status": "approved" if action == "approve" else "rejected"}
+
+
+@app.post("/api/v1/i18n/revert", tags=["I18n"])
+async def i18n_revert(payload: dict, request: Request,
+                      db: AsyncSession = Depends(get_db)):
+    """One-call revert (§2.5): drop the live entry so the client falls back
+    to the embedded catalogue (machine draft or English)."""
+    steam_id = await _portal_auth(request, db)
+    key_id = str(payload.get("key_id", ""))[:16]
+    lang = str(payload.get("language_code", "")).lower()[:8]
+    role = await _i18n_role(db, steam_id, lang, "translate")
+    if role is None:
+        raise HTTPException(403, "no translate grant for this language")
+    n = (await db.execute(text(
+        "DELETE FROM i18n_entries WHERE key_id = :k AND language_code = :lang RETURNING key_id"
+    ), {"k": key_id, "lang": lang})).scalar()
+    await db.execute(text(
+        "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code,"
+        " key_id, action, detail) VALUES (:sid, :role, :lang, :k, 'revert', NULL)"
+    ), {"sid": steam_id, "role": role, "lang": lang, "k": key_id})
+    await db.commit()
+    return {"reverted": n is not None}
+
+
+_I18N_PORTAL_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCR Translate</title><style>
+body{font-family:system-ui,sans-serif;background:#14161c;color:#dde;margin:0;padding:16px}
+/* Centered reading column: full-bleed rows made long source strings span the
+   whole monitor, which is unreadable on a wide display and puts the Propose
+   button a screen away from the text it belongs to. */
+body>*{max-width:1100px;margin-left:auto;margin-right:auto}
+h1{font-size:20px;color:#ffd94d}button{background:#2a3242;color:#dde;border:1px solid #445;
+border-radius:4px;padding:6px 12px;cursor:pointer;margin:2px}button:hover{background:#39435a}
+textarea{width:100%;min-height:64px;background:#1c2029;color:#dde;border:1px solid #445;box-sizing:border-box}
+.key{border:1px solid #333a48;border-radius:6px;padding:10px;margin:8px 0;background:#191d26}
+.src{white-space:pre-wrap;color:#9ad0ff}.tgt{white-space:pre-wrap;color:#b0ffb0}
+/* Locked formatting tags. Distinct colour + lock glyph = "you cannot change
+   this"; they are plain spans, never inputs, so the tag text can only ever
+   come from the SOURCE string (the submit path re-reads the captured tag
+   array, never the DOM). */
+.tl-tag{display:inline-block;background:#3a2c14;color:#ffc46b;border:1px solid #6b5220;
+border-radius:3px;padding:0 4px;margin:0 2px;font-family:ui-monospace,monospace;font-size:11px;
+user-select:none;cursor:not-allowed}
+.tl-row{display:flex;flex-wrap:wrap;align-items:center;gap:3px;margin:6px 0}
+.tl-run{flex:1 1 120px;min-width:90px;background:#1c2029;color:#dde;border:1px solid #445;padding:5px}
+.tl-note{font-size:11px;color:#889;margin:2px 0}
+.tl-warn{font-size:11px;color:#ffc46b;margin:2px 0;min-height:14px}
+.badge{font-size:11px;border-radius:3px;padding:1px 6px;margin-left:6px}
+.b-machine{background:#5a4a18}.b-approved{background:#1e4a24}.b-stale{background:#5a1e1e}
+.b-sensitive{background:#4a1e3a}.b-pending{background:#1e3a5a}
+.err{color:#ff8888;white-space:pre-wrap}.muted{color:#889}#filter{margin:8px 0}
+input[type=text]{background:#1c2029;color:#dde;border:1px solid #445;padding:5px}
+</style></head><body>
+<h1>Sid's Competitive ROUNDS — Translation Portal</h1>
+<div id="auth" class="muted">Checking session…</div>
+<div id="langs"></div>
+<div id="assentRow" style="display:none;margin:8px 0"><label>
+<input type="checkbox" id="assent"> I license my submitted translations to the
+project for distribution with the mod (recorded per proposal).</label></div>
+<div id="filter"></div><div id="queue"></div><div id="list"></div>
+<script>
+"use strict";
+// Token arrives in the URL FRAGMENT (never a query param, never a cookie) and
+// lives only in JS memory. Every rendered field goes through textContent —
+// Steam display names and proposals are hostile input.
+const TOKEN=(location.hash||"").replace(/^#token=/,"");history.replaceState(null,"",location.pathname);
+const api=(p,opt)=>fetch("/api/v1/i18n"+p,Object.assign({headers:{"X-Portal-Token":TOKEN,
+  "Content-Type":"application/json"}},opt||{})).then(async r=>{
+  if(!r.ok)throw new Error(await r.text());return r.json()});
+const el=(tag,cls,txt)=>{const e=document.createElement(tag);if(cls)e.className=cls;
+  if(txt!==undefined)e.textContent=txt;return e};
+
+// ── Tag-locked editor ────────────────────────────────────────────────────
+// tokenize() MUST mirror _i18n_extract_tags()/_i18n_markup_residue() in
+// main.py: the server compares the ORDERED tag sequence of source vs target
+// and rejects any difference. Deliberately a naive '<'..'>' scan and NOT a
+// regex - /<[^<>]*>/ disagrees with the server on shapes like "<a<b>".
+// Never pairs or nests: one live source string has 3 <color=> opens and 2
+// </color> closes, so any tree parser dies on it.
+// INVARIANT: runs.length === tags.length + 1, and assemble(tokenize(s)) === s.
+function tokenize(s){
+  const runs=[],tags=[];let i=0,cut=0;
+  while(i<s.length){
+    const lt=s.indexOf("<",i);if(lt<0)break;
+    const gt=s.indexOf(">",lt+1);if(gt<0)break;
+    runs.push(s.slice(cut,lt));tags.push(s.slice(lt,gt+1));
+    i=gt+1;cut=i;
+  }
+  runs.push(s.slice(cut));
+  return {runs:runs,tags:tags};
+}
+function assemble(runs,tags){
+  let out="";
+  for(let i=0;i<runs.length;i++){out+=runs[i];if(i<tags.length)out+=tags[i];}
+  return out;
+}
+// Final gate on READ as well as on input: an extension autofill or a
+// scripted .value write can bypass every event handler, and for the five
+// "< BACK"-style sources a raw '<' is the actual injection vector.
+function readRun(b){return b.value.replace(/[<>]/g,"");}
+
+function mkEditor(source,current){
+  const tok=tokenize(source);
+  const wrap=el("div");
+  // No tags -> keep the plain textarea (310 of 405 strings; do not regress
+  // the common case, and the five "< BACK" pager strings live here too).
+  if(tok.tags.length===0){
+    const ta=el("textarea");ta.value=current||"";wrap.appendChild(ta);
+    return {node:wrap,value:function(){return ta.value;},error:function(){return "";}};
+  }
+  // Prefill only when the existing translation has the SAME tag skeleton;
+  // otherwise start empty rather than silently scattering old text into the
+  // wrong spans.
+  let pre=null;
+  if(current){
+    const ct=tokenize(current);
+    if(ct.tags.length===tok.tags.length&&ct.tags.join("")===tok.tags.join(""))pre=ct.runs;
+  }
+  const note=el("div","tl-note",
+    "Formatting tags are locked - type only the words. Empty boxes are allowed "+
+    "(a language may not need text in every span).");
+  wrap.appendChild(note);
+  const row=el("div","tl-row");
+  const warn=el("div","tl-warn","");
+  const boxes=[];
+  for(let i=0;i<tok.runs.length;i++){
+    const b=el("input","tl-run");b.type="text";
+    b.value=pre?pre[i]:"";
+    b.placeholder=tok.runs[i].trim()?tok.runs[i]:"(no text here)";
+    bindRun(b,warn);
+    boxes.push(b);row.appendChild(b);
+    if(i<tok.tags.length){
+      const chip=el("span","tl-tag",tok.tags[i]);
+      chip.title="Locked formatting - copied from the English source";
+      row.appendChild(chip);
+    }
+  }
+  wrap.appendChild(row);wrap.appendChild(warn);
+  return {
+    node:wrap,
+    value:function(){return assemble(boxes.map(readRun),tok.tags);},
+    error:function(){
+      const srcHasText=tok.runs.some(function(r){return r.trim()!=="";});
+      const anyText=boxes.some(function(b){return readRun(b).trim()!=="";});
+      // The server rejects a tags-only target (it would ship a blank label);
+      // say so here instead of letting them find out via a 422.
+      if(srcHasText&&!anyText)return "Type the translation into the boxes - "+
+        "submitting only the tags would ship a blank label.";
+      return "";
+    }
+  };
+}
+// Strip '<'/'>' as they are typed, and SAY SO - silent character deletion is
+// its own bug class. Composition-aware so CJK/IME input is not mangled.
+function bindRun(node,warnEl){
+  let composing=false;
+  function scrub(){
+    if(composing)return;
+    const v=node.value;
+    if(v.indexOf("<")<0&&v.indexOf(">")<0){return;}
+    const cut=node.selectionStart==null?v.length:node.selectionStart;
+    const keep=v.slice(0,cut).replace(/[<>]/g,"").length;
+    node.value=v.replace(/[<>]/g,"");
+    try{node.setSelectionRange(keep,keep);}catch(e){}
+    if(warnEl)warnEl.textContent="< and > are reserved for formatting and were removed.";
+  }
+  node.addEventListener("compositionstart",function(){composing=true;});
+  node.addEventListener("compositionend",function(){composing=false;scrub();});
+  node.addEventListener("input",function(){if(!composing&&warnEl&&node.value.indexOf("<")<0&&node.value.indexOf(">")<0)warnEl.textContent="";scrub();});
+  node.addEventListener("blur",scrub);
+  node.addEventListener("paste",function(){setTimeout(scrub,0);});
+  node.addEventListener("drop",function(){setTimeout(scrub,0);});
+}
+
+let LANG=null,VIEW="all";
+async function boot(){
+  const a=document.getElementById("auth");
+  if(!TOKEN){a.textContent="No session token. Open the portal from the in-game Settings tab.";return}
+  try{
+    const g=await api("/grants/mine");
+    a.textContent="Signed in as "+g.steam_id+(g.admin?" (admin)":"");
+    const langs=document.getElementById("langs");langs.textContent="";
+    const seen=new Set();
+    g.languages.forEach(l=>{if(l.scope!=="translate"||seen.has(l.language_code))return;
+      seen.add(l.language_code);
+      const b=el("button",null,l.language_code.toUpperCase());
+      b.onclick=()=>{LANG=l.language_code;loadKeys();loadQueue()};langs.appendChild(b)});
+    if(seen.size)document.getElementById("assentRow").style.display="";
+    if(!seen.size)a.textContent+=" — no translate grants. Ask an admin for one.";
+  }catch(e){a.textContent="Session invalid or expired — reopen from in-game. ("+e.message+")"}
+}
+function filterBar(){
+  const f=document.getElementById("filter");f.textContent="";
+  [["all","All"],["missing","Untranslated"],["stale","Stale"],["pending","Has pending"]].forEach(([v,label])=>{
+    const b=el("button",null,label);if(v===VIEW)b.style.background="#4a5a7a";
+    b.onclick=()=>{VIEW=v;loadKeys()};f.appendChild(b)});
+  const s=el("input");s.type="text";s.placeholder="search source text";s.id="q";
+  s.oninput=()=>renderKeys();f.appendChild(s);
+}
+let KEYS=[],KEYS_LANG=null,LOAD_GEN=0;
+async function loadKeys(){
+  filterBar();
+  // Generation + captured-language discipline (wave-2 find 12): a stale
+  // slower response must never overwrite a newer language's rows, and every
+  // proposal submits the language its ROW came from, not the mutable global.
+  const gen=++LOAD_GEN,lang=LANG;
+  const d=await api("/keys?lang="+lang);
+  if(gen!==LOAD_GEN)return;
+  KEYS=d.keys;KEYS_LANG=d.language;renderKeys();
+}
+function renderKeys(){
+  const list=document.getElementById("list");list.textContent="";
+  const q=(document.getElementById("q")||{value:""}).value.toLowerCase();
+  let shown=0;
+  KEYS.forEach(k=>{
+    if(VIEW==="missing"&&k.target)return;
+    if(VIEW==="stale"&&!k.stale)return;
+    if(VIEW==="pending"&&!k.pending)return;
+    if(q&&k.source.toLowerCase().indexOf(q)<0)return;
+    if(++shown>200)return;
+    const box=el("div","key");
+    const head=el("div",null,k.namespace+" · "+k.key_id);head.className="muted";
+    if(k.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive"));
+    if(k.state)head.appendChild(el("span","badge b-"+k.state,k.state));
+    if(k.stale)head.appendChild(el("span","badge b-stale","stale"));
+    if(k.pending)head.appendChild(el("span","badge b-pending",k.pending+" pending"));
+    box.appendChild(head);
+    box.appendChild(el("div","src",k.source));
+    // Only on the untagged path: beside the chips this would show a STALE
+    // tag skeleton the translator is likely to copy from (review find).
+    if(k.target&&k.source.indexOf("<")<0)box.appendChild(el("div","tgt",k.target));
+    // Tag-locked editor: formatting tags render as non-editable chips and
+    // the translator only ever types plain text. The submitted string is
+    // reassembled from the SOURCE's captured tag array, so markup cannot be
+    // authored here at all (the server enforces the same rule independently
+    // — this is UX, not the security boundary).
+    const ed=mkEditor(k.source,k.target||"");box.appendChild(ed.node);
+    const send=el("button",null,"Propose");
+    const msg=el("div","err","");
+    const rowLang=KEYS_LANG;   // find 12: bind the row's language, not the global
+    send.onclick=async()=>{msg.textContent="";
+      if(!document.getElementById("assent").checked){
+        msg.className="err";msg.textContent="Tick the contribution-licence box above first.";return}
+      const edErr=ed.error();
+      if(edErr){msg.className="err";msg.textContent=edErr;return}
+      try{await api("/proposals",{method:"POST",body:JSON.stringify(
+        {key_id:k.key_id,language_code:rowLang,target:ed.value(),license_assent:true})});
+        msg.className="muted";msg.textContent="Proposed — awaiting review.";loadQueue()}
+      catch(e){msg.className="err";msg.textContent=e.message}};
+    box.appendChild(send);box.appendChild(msg);list.appendChild(box);
+  });
+  if(!shown)list.appendChild(el("div","muted","Nothing matches this filter."));
+}
+let QUEUE_GEN=0;
+async function loadQueue(){
+  // Same generation + captured-language discipline as loadKeys (round-3
+  // find N8): a slow stale-language response must never render as the
+  // currently selected queue, and every row is labelled with its language.
+  const gen=++QUEUE_GEN,lang=LANG;
+  const d=await api("/proposals?lang="+lang+"&status=pending");
+  if(gen!==QUEUE_GEN)return;
+  const qd=document.getElementById("queue");qd.textContent="";
+  if(!d.proposals.length)return;
+  qd.appendChild(el("h1",null,"Review queue — "+d.language.toUpperCase()+" ("+d.proposals.length+")"));
+  d.proposals.forEach(p=>{
+    const box=el("div","key");
+    const head=el("div","muted","["+d.language.toUpperCase()+"] #"+p.id+" by "+p.proposer+(p.sensitive?" ":""));
+    if(p.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive — admin only"));
+    if(p.source_changed_since)head.appendChild(el("span","badge b-stale","source changed since"));
+    box.appendChild(head);
+    box.appendChild(el("div","src",p.source));
+    box.appendChild(el("div","tgt",p.target));
+    const msg=el("div","err","");
+    const act=(a)=>async()=>{msg.textContent="";
+      try{await api("/review",{method:"POST",body:JSON.stringify(
+        {proposal_id:p.id,action:a})});loadQueue();loadKeys()}
+      catch(e){msg.textContent=e.message}};
+    const ap=el("button",null,"Approve");ap.onclick=act("approve");
+    const rj=el("button",null,"Reject");rj.onclick=act("reject");
+    box.appendChild(ap);box.appendChild(rj);box.appendChild(msg);qd.appendChild(box);
+  });
+}
+boot();
+</script></body></html>"""
+
+
+@app.get("/translate", include_in_schema=False)
+async def i18n_portal_page():
+    """The translator portal SPA (§2.5). Static, cookie-free; all data flows
+    through the bearer-header API above. CSP as belt-and-braces: no external
+    loads, no inline eval."""
+    return HTMLResponse(_I18N_PORTAL_HTML, headers={
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; "
+                                   "script-src 'unsafe-inline'; connect-src 'self'",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+    })
+
+
+@app.post("/api/v1/admin/i18n/grants", tags=["Admin"])
+async def admin_i18n_grant(payload: dict, db: AsyncSession = Depends(get_db)):
+    """Grant/revoke a language scope. Admin-HMAC-signed (grants are the root
+    of the whole moderation trust chain — never session-only)."""
+    admin_id = str(payload.get("admin_steam_id", ""))[:20]
+    target = str(payload.get("target_steam_id", ""))[:20]
+    lang = str(payload.get("language_code", "")).lower()[:8]
+    scope = str(payload.get("scope", "translate"))
+    action = str(payload.get("action", "grant"))
+    await _require_admin(db, admin_id, "i18n_grant", f"{target}:{lang}:{scope}:{action}",
+                         payload.get("signature"))
+    if scope not in ("translate", "chat_moderate") or action not in ("grant", "revoke"):
+        raise HTTPException(400, "bad scope/action")
+    # Wave-2 find 25: a transposed language code would mint a grant for a
+    # language no pack can ever serve — the translator's work would be
+    # permanently unreachable.
+    if lang not in I18N_LANGS:
+        raise HTTPException(400, f"unsupported language (allowed: {', '.join(I18N_LANGS)})")
+    # Rounds 12+13 find 1: this transaction writes TWO raw identities (the
+    # target on the grant row, the ADMIN on granted_by + the audit actor) and
+    # the i18n tables have no player FK — so BOTH must be locked, in
+    # canonical sorted order (learning #197), and BOTH re-read live under
+    # the locks. _require_admin ran before the locks; its verdict is re-
+    # proven here so a deletion that won the race can't be written around.
+    for _lid in sorted({admin_id, target}):
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": _lid})
+    for _who, _lid in (("admin", admin_id), ("target", target)):
+        _live = (await db.execute(text(
+            "SELECT 1 FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
+        ), {"sid": _lid})).scalar()
+        if not _live:
+            raise HTTPException(404 if _who == "target" else 403,
+                                f"{_who} player not found (or deleted)")
+    if not await _is_admin(db, admin_id):
+        raise HTTPException(403, "Not an admin")
+    if action == "grant":
+        exists = (await db.execute(text(
+            "SELECT 1 FROM language_grants WHERE steam_id=:sid AND language_code=:lang"
+            " AND scope=:scope AND revoked_at IS NULL"
+        ), {"sid": target, "lang": lang, "scope": scope})).scalar()
+        if not exists:
+            await db.execute(text(
+                "INSERT INTO language_grants (steam_id, language_code, scope, granted_by_steam_id)"
+                " VALUES (:sid, :lang, :scope, :by)"
+            ), {"sid": target, "lang": lang, "scope": scope, "by": admin_id})
+    else:
+        await db.execute(text(
+            "UPDATE language_grants SET revoked_at = NOW()"
+            " WHERE steam_id=:sid AND language_code=:lang AND scope=:scope AND revoked_at IS NULL"
+        ), {"sid": target, "lang": lang, "scope": scope})
+    await db.execute(text(
+        "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code,"
+        " key_id, action, detail) VALUES (:sid, 'admin', :lang, NULL, :act, :d)"
+    ), {"sid": admin_id, "lang": lang, "act": action, "d": f"{scope} for {target}"})
+    await db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/v1/admin/i18n/sync-keys", tags=["Admin"])
+async def admin_i18n_sync_keys(payload: dict, db: AsyncSession = Depends(get_db)):
+    """Release-time key sync from tools/i18n_extract.py output. Upserts every
+    key, retires keys absent from the list (retire ≠ delete: history and
+    proposals survive; a retired key just leaves the pack and portal)."""
+    admin_id = str(payload.get("admin_steam_id", ""))[:20]
+    keys = payload.get("keys") or []
+    if not isinstance(keys, list) or len(keys) > 20000:
+        raise HTTPException(400, "keys must be a list (<= 20000)")
+    await _require_admin(db, admin_id, "i18n_sync", f"n={len(keys)}",
+                         payload.get("signature"))
+    # Round-13 find 1: sync-keys writes the raw ADMIN identity into its
+    # audit row — same lock + live re-read as the grant endpoint.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": admin_id})
+    _a_live = (await db.execute(text(
+        "SELECT 1 FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
+    ), {"sid": admin_id})).scalar()
+    if not _a_live or not await _is_admin(db, admin_id):
+        raise HTTPException(403, "admin identity not live")
+    seen = []
+    for k in keys:
+        kid = str(k.get("key_id", ""))[:16]
+        ctx = str(k.get("msgctxt", ""))
+        if not kid or not ctx:
+            continue
+        seen.append(kid)
+        await db.execute(text(
+            "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, max_px, updated_at)"
+            " VALUES (:k, :ns, :ctx, :sh, :sens, :px, NOW())"
+            " ON CONFLICT (key_id) DO UPDATE SET namespace = EXCLUDED.namespace,"
+            "   msgctxt = EXCLUDED.msgctxt, source_hash = EXCLUDED.source_hash,"
+            "   sensitive = EXCLUDED.sensitive, max_px = EXCLUDED.max_px,"
+            "   retired_at = NULL, updated_at = NOW()"
+        ), {"k": kid, "ns": str(k.get("namespace", "client"))[:32], "ctx": ctx,
+            "sh": str(k.get("source_hash", ""))[:40],
+            "sens": bool(k.get("sensitive", False)),
+            "px": k.get("max_px")})
+    retired = 0
+    if seen:
+        retired = len((await db.execute(text(
+            "UPDATE i18n_keys SET retired_at = NOW()"
+            " WHERE retired_at IS NULL AND NOT (key_id = ANY(:seen)) RETURNING key_id"
+        ), {"seen": seen})).scalars().all())
+    await db.execute(text(
+        "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code,"
+        " key_id, action, detail) VALUES (:sid, 'admin', 'all', NULL, 'sync_keys', :d)"
+    ), {"sid": admin_id, "d": f"{len(seen)} keys, {retired} retired"})
+    await db.commit()
+    return {"synced": len(seen), "retired": retired}
 
 
 # ── Betting helpers ──────────────────────────────────────────
@@ -8659,6 +9844,7 @@ async def _settle_series_bets(db: AsyncSession, series: RankedSeries):
         if bet.bet_on_player_id == series.winner_id:
             payout = int(round(bet.amount * bet.odds_multiplier))
             bet.payout = payout
+            bet.settlement_kind = "won"
             # Credit to bettor — payout INCLUDES stake return.
             bettor = (await db.execute(select(Player).where(Player.id == bet.player_id))).scalar_one_or_none()
             if bettor is not None:
@@ -8669,6 +9855,7 @@ async def _settle_series_bets(db: AsyncSession, series: RankedSeries):
                 ))
         else:
             bet.payout = 0  # lost
+            bet.settlement_kind = "lost"
         bet.settled_at = now
     print(f"[BETS] Settled {len(rows)} bets on series {series.id}")
 
@@ -9369,6 +10556,7 @@ async def _refund_series_bets(db: AsyncSession, sid, reason: str = "refund_aband
         ))
         b.settled_at = datetime.now(timezone.utc)
         b.payout = b.amount  # full stake returned
+        b.settlement_kind = "refunded"
     return len(bets)
 
 
@@ -9692,6 +10880,21 @@ async def series_preflight(
     if not MATCH_HMAC_SECRET:
         print("[PREFLIGHT-DIAG] reject: HMAC not configured")
         raise HTTPException(status_code=503, detail="HMAC not configured")
+    # Round-19 find 2: point reads don't order against ban issuance — take
+    # the shared per-identity advisory locks (canonical sorted order, #197)
+    # so a ban either commits first (and the checks below see it) or waits
+    # behind this transaction (and the series pre-dates it — legal).
+    for _pf_sid in sorted([p1_steam_id, p2_steam_id]):
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                         {"sid": _pf_sid})
+    # Round-18 find 3: an active ban on either participant means NO new
+    # ranked series — answer not_ranked, the same casual-downgrade contract
+    # the client already implements for consent (#106/#121). This closes the
+    # forged-preflight post-ban pairing without touching innocents' flows.
+    for _pf_sid in (p1_steam_id, p2_steam_id):
+        if (await _is_banned(db, _pf_sid)) is not None:
+            print(f"[PREFLIGHT-DIAG] not_ranked: participant {_pf_sid} is banned")
+            return {"status": "not_ranked"}
     if p1_steam_id == p2_steam_id:
         print(f"[PREFLIGHT-DIAG] reject: same steam id {p1_steam_id}")
         raise HTTPException(status_code=400, detail="Players must be distinct")
@@ -10194,17 +11397,58 @@ async def get_player_bets(
     `vs_name` carries the mode context ("5-player FFA", "2v2") and
     `series_score` the game/series position.
     """
+    def _my_bet_state(r) -> str:
+        """open|won|lost|refunded, mode-aware (#244; Codex round-4 finds 5+6,
+        round-5 finds 1+2). The AMBIGUOUS case is payout == amount, where
+        arithmetic alone cannot distinguish a small win from a refund — the
+        SETTLEMENT CAUSE decides. The AUTHORITATIVE cause is the persisted
+        `settlement_kind` stamped by the settling code path itself (migration
+        180; Codex client find 16 — a refunded bet on a series that LATER
+        completes must never be relabelled by a rederivation). Everything
+        below the kind check is the legacy fallback for pre-180 rows settled
+        with an ambiguous payout: `outcome_recorded` is (series completed)
+        for ranked/team and (this game's _rN match row exists) for FFA. Only
+        when the outcome IS recorded does the arithmetic tiebreak run, and it
+        uses the mode's own rule on the mode's own stored precision: FFA
+        floors its 2-decimal NUMERIC; ranked/team round the RAW double
+        (rounding it to 2dp first re-broke the 1g case — round-5 find 1)."""
+        if r["settled_at"] is None or r["payout"] is None:
+            return "open"
+        if r["settlement_kind"] in ("won", "lost", "refunded"):
+            return r["settlement_kind"]
+        p, a = int(r["payout"]), int(r["amount"])
+        if p == 0:
+            return "lost"
+        if p != a:
+            return "won" if p > a else "lost"
+        # payout == amount: refund unless a recorded outcome says this exact
+        # stake IS the winning payout.
+        if not bool(r["outcome_recorded"]):
+            return "refunded"
+        try:
+            _raw = r["odds_multiplier"] or 0
+            if r["bet_mode"] == "ffa":
+                win_payout = int(_decimal.Decimal(a) * _decimal.Decimal(str(round(float(_raw), 2))))
+            else:
+                win_payout = int(round(a * float(_raw)))
+        except Exception:
+            win_payout = -1
+        return "won" if p == win_payout else "refunded"
+
     rows = (await db.execute(text("""
         SELECT * FROM (
             SELECT
-                b.id::text AS id, b.amount, b.odds_multiplier::float8 AS odds_multiplier,
+                b.id::text AS id, 'ranked' AS bet_mode,
+                b.amount, b.odds_multiplier::float8 AS odds_multiplier,
                 b.created_at, b.settled_at, b.payout,
                 b.series_id::text AS series_id,
                 bo.steam_id      AS bet_on_steam_id,
                 bo.display_name  AS bet_on_name,
                 vs.display_name  AS vs_name,
                 rs.status        AS series_status,
-                (rs.p1_series_wins || '-' || rs.p2_series_wins) AS series_score
+                (rs.p1_series_wins || '-' || rs.p2_series_wins) AS series_score,
+                (rs.status = 'completed') AS outcome_recorded,
+                b.settlement_kind
             FROM bets b
             JOIN players p        ON p.id = b.player_id
             JOIN players bo       ON bo.id = b.bet_on_player_id
@@ -10216,13 +11460,24 @@ async def get_player_bets(
             UNION ALL
 
             SELECT
-                fb.id::text, fb.amount, fb.odds_multiplier::float8,
+                fb.id::text, 'ffa',
+                fb.amount, fb.odds_multiplier::float8,
                 fb.created_at, fb.settled_at, fb.payout,
                 fb.lobby_id::text,
                 bo.steam_id, bo.display_name,
                 (l.player_count || '-player FFA') AS vs_name,
                 l.status,
-                ('game ' || fb.game_number) AS series_score
+                ('game ' || fb.game_number) AS series_score,
+                -- Settlement-cause discriminator (Codex round-5 find 2):
+                -- payout+odds cannot tell a floored 1g win from a refund; a
+                -- RECORDED game for this bet's exact _rN room suffix can.
+                -- The underscore is LIKE's any-char wildcard, hence ESCAPE.
+                EXISTS (SELECT 1 FROM ffa_matches fm2
+                         WHERE fm2.lobby_id = fb.lobby_id
+                           AND fm2.invalidated_at IS NULL
+                           AND fm2.photon_room_id LIKE ('%!_r' || fb.game_number) ESCAPE '!'
+                       ) AS outcome_recorded,
+                fb.settlement_kind
             FROM ffa_bets fb
             JOIN players p      ON p.id = fb.player_id
             JOIN players bo     ON bo.id = fb.bet_on_player_id
@@ -10232,13 +11487,16 @@ async def get_player_bets(
             UNION ALL
 
             SELECT
-                tb.id::text, tb.amount, tb.odds_multiplier,
+                tb.id::text, 'team',
+                tb.amount, tb.odds_multiplier,
                 tb.created_at, tb.settled_at, tb.payout,
                 tb.team_series_id::text,
                 NULL, ('Team ' || tb.bet_on_team),
                 '2v2' AS vs_name,
                 ts.status,
-                (COALESCE(ts.t1_series_wins,0) || '-' || COALESCE(ts.t2_series_wins,0)) AS series_score
+                (COALESCE(ts.t1_series_wins,0) || '-' || COALESCE(ts.t2_series_wins,0)) AS series_score,
+                (ts.status = 'completed') AS outcome_recorded,
+                tb.settlement_kind
             FROM team_bets tb
             JOIN players p       ON p.id = tb.player_id
             JOIN team_series ts  ON ts.id = tb.team_series_id
@@ -10270,6 +11528,11 @@ async def get_player_bets(
                 "vs_name": _ledger_safe_name(r["vs_name"]),
                 "series_status": r["series_status"],
                 "series_score": r["series_score"],
+                # EXPLICIT outcome (#244 / Codex round-4 find 5): the client
+                # used to infer "refunded" from payout==amount, which
+                # mislabels a floored FFA win as an abandoned-series refund.
+                # Mode-aware: FFA settles by floor, ranked/team by round.
+                "state": _my_bet_state(r),
             }
             for r in rows
         ]
@@ -11803,7 +13066,11 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
-    if os.getenv("STEAM_WEB_API_KEY") and not await _is_banned(db, steam_id):
+    # `is None`, not truthiness (round-16 find 5): a legacy reason="" ban is
+    # an ACTIVE ban whose sessions are already purged — the truthiness form
+    # demanded a session that player structurally cannot mint, stranding
+    # their documented HMAC-only deletion path.
+    if os.getenv("STEAM_WEB_API_KEY") and (await _is_banned(db, steam_id)) is None:
         token = None
         try:
             if request is not None:
@@ -11835,6 +13102,12 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                 detail="session_required_update_mod",
             )
 
+    # Identity lock FIRST (round-14 find 1): before the authoritative player
+    # read and before ANY queue/lobby/lease discovery or sweep. An enrollment
+    # writer holding this lock commits its row before our sweeps run; one
+    # that hasn't acquired it yet blocks, then fails its post-lock tombstone/
+    # live re-reads. Global order: identity -> lobby/series -> queue -> lease.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
         return {"status": "not_found", "steam_id": steam_id}
@@ -11909,15 +13182,45 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         await db.execute(text(
             "SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
         ), {"lid": _lid})
+    # Round-15 find 2: the SAME series-first order for team and OVT — the
+    # completion paths lock series (FOR UPDATE) then members
+    # (_lock_queue_rows_ordered), so deleting queue rows first and updating
+    # the series after was a textbook ABBA. FOR NO KEY UPDATE per #202: the
+    # weakest mode that conflicts with our own series UPDATEs below and with
+    # completion's FOR UPDATE, without enrolling FK KEY SHARE inserts.
+    for _sid in sorted(_grp, key=str):
+        await db.execute(text(
+            "SELECT 1 FROM team_series WHERE id = :sid FOR NO KEY UPDATE"
+        ), {"sid": _sid})
+    for _sid in sorted(_ovt_grp, key=str):
+        await db.execute(text(
+            "SELECT 1 FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"
+        ), {"sid": _sid})
+    _discovered = {"team_queue": {str(s) for s in _grp},
+                   "ovt_queue": {str(s) for s in _ovt_grp},
+                   "ffa_queue": {str(s) for s in _ffa_grp}}
     for _qt in ("team_queue", "ovt_queue", "ffa_queue"):
-        await db.execute(text(f"""
+        _gone = (await db.execute(text(f"""
             DELETE FROM {_qt}
             WHERE player_id IN (
                 SELECT player_id FROM {_qt}
                 WHERE player_id = :pid
                 FOR UPDATE SKIP LOCKED
             )
-        """), {"pid": pid})
+            RETURNING series_id
+        """), {"pid": pid})).scalars().all()
+        # Round-16 find 4: a matcher that does NOT take our identity lock can
+        # form a group with this player between our parent DISCOVERY above
+        # and this DELETE — the delete then removes a freshly-grouped row
+        # whose parent our in-memory lists never saw, leaving an active
+        # series/lobby anchored to the deleted member. The DELETE's own
+        # RETURNING is the authoritative membership read (#208): any parent
+        # it reveals that discovery missed means the snapshot went stale —
+        # roll everything back and let the caller retry against the new
+        # truth. (Locking the new parent HERE would invert queue->parent.)
+        if any(s is not None and str(s) not in _discovered[_qt] for s in _gone):
+            await db.rollback()
+            raise HTTPException(status_code=503, detail="account_cleanup_contended")
         _qleft = (await db.execute(text(
             f"SELECT 1 FROM {_qt} WHERE player_id = :pid LIMIT 1"
         ), {"pid": pid})).first()
@@ -12019,12 +13322,53 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # than deleting it, so queue_leases' ON DELETE CASCADE never fires.
     await db.execute(text("DELETE FROM queue_leases WHERE player_id = :pid"),
                      {"pid": pid})
+    # Identity lock BEFORE the session purge (round-13 find 2): a steam_auth
+    # finalization holding the lock could otherwise insert a fresh raw-id
+    # session between our purge and our commit. Locking first forces its
+    # post-await tombstone re-read to wait behind this whole transaction.
+    # (Round-11 find 1: the same lock serializes in-flight portal mutations —
+    # they commit before this sweep and are swept, or block and then fail
+    # their post-lock rechecks.)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": steam_id})
     await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text("DELETE FROM player_blocks WHERE blocker_id = :pid OR blocked_id = :pid"), {"pid": pid})
 
+    # i18n surfaces (Codex wave-2 round-10 find 2): the portal token and
+    # translate grants are LIVE AUTHORITY and must die with the account, and
+    # every identity-bearing i18n column falls under the same anonymization
+    # contract as the player row. Tombstone computed first so the rewrites
+    # share it.
+    short = uuid.uuid4().hex[:8]
+    _tomb = f"deleted_{short}"
+    await db.execute(text("DELETE FROM i18n_portal_sessions WHERE steam_id = :sid"), {"sid": steam_id})
+    await db.execute(text(
+        "UPDATE language_grants SET revoked_at = COALESCE(revoked_at, NOW()),"
+        "       steam_id = :tomb WHERE steam_id = :sid"), {"sid": steam_id, "tomb": _tomb})
+    await db.execute(text(
+        "UPDATE language_grants SET granted_by_steam_id = :tomb WHERE granted_by_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    await db.execute(text(
+        "UPDATE i18n_proposals SET proposer_steam_id = :tomb WHERE proposer_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    await db.execute(text(
+        "UPDATE i18n_proposals SET reviewed_by_steam_id = :tomb WHERE reviewed_by_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    await db.execute(text(
+        "UPDATE i18n_entries SET approved_by_steam_id = :tomb WHERE approved_by_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    # Round-11 find 5: the actor rewrite and the detail scrub are SEPARATE
+    # populations — a single combined UPDATE stamped the tombstone onto an
+    # UNRELATED admin's actor_steam_id whenever the deleted id merely
+    # appeared in that row's detail text.
+    await db.execute(text(
+        "UPDATE i18n_review_events SET actor_steam_id = :tomb"
+        " WHERE actor_steam_id = :sid"), {"sid": steam_id, "tomb": _tomb})
+    await db.execute(text(
+        "UPDATE i18n_review_events SET detail = REPLACE(detail, :sid, :tomb)"
+        " WHERE detail LIKE '%' || :sid || '%'"), {"sid": steam_id, "tomb": _tomb})
+
     # Anonymize the player row. Keep rating_history / glicko / matches untouched
     # so Glicko recalcs and opponent histories stay consistent.
-    short = uuid.uuid4().hex[:8]
     player.steam_id = f"deleted_{short}"
     player.display_name = "[Deleted User]"
     player.discord_id = None
@@ -12577,7 +13921,9 @@ import pathlib as _pathlib
 BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-rounds/bug-reports")
 BUG_REPORT_PER_STEAM_PER_DAY = 10
 BUG_REPORT_VALID_SEVERITIES = ("low", "medium", "high", "crash")
-BUG_REPORT_VALID_CATEGORIES = ("ui", "gameplay", "network", "other")
+# chat_report: the /report command's evidence rows (§2.6 v1 moderation
+# groundwork, wave-2 find 14) — must survive so admins can filter them.
+BUG_REPORT_VALID_CATEGORIES = ("ui", "gameplay", "network", "other", "chat_report")
 
 
 def _bug_report_log_path(report_id: str) -> _pathlib.Path:
@@ -13211,9 +14557,12 @@ async def _is_banned(db: AsyncSession, steam_id: str):
 
 
 async def _check_ban_or_raise(db: AsyncSession, steam_id: str) -> None:
+    # `is not None`, NEVER truthiness (round-15 find 3): an active ban row
+    # with reason="" is still a ban — the truthiness form let it pass every
+    # enrollment/auth gate while the endpoint reported success.
     reason = await _is_banned(db, steam_id)
-    if reason:
-        raise HTTPException(status_code=409, detail=f"Banned: {reason}")
+    if reason is not None:
+        raise HTTPException(status_code=409, detail=f"Banned: {reason or 'violation'}")
 
 
 async def _is_banned_via_session(steam_id: str) -> bool:
@@ -13291,6 +14640,13 @@ class _AdminBanReq(BaseModel):
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
+    # Identity lock FIRST, before any purge (round-13 find 6: with the lock
+    # taken after the session purge, a steam_auth finalization holding the
+    # lock could insert a fresh session AFTER our purge but BEFORE our ban
+    # row committed — its post-await ban re-read must be forced to wait
+    # behind, and therefore see, this whole transaction).
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                     {"sid": req.target_steam_id})
     # Revoke live Steam sessions (audit lower-pri item): without this a banned
     # player's existing verified session kept authenticating session-gated
     # endpoints until its 24h expiry. Ban checks at usage sites still apply;
@@ -13299,19 +14655,64 @@ async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
     # for any session that survived (migration 152 cleans pre-batch bans).
     await db.execute(text("DELETE FROM steam_sessions WHERE steam_id = :sid"),
                      {"sid": req.target_steam_id})
+    # Portal tokens are live authority too (round-10 find 2): a banned
+    # translator's open portal tab must die with the ban.
+    await db.execute(text("DELETE FROM i18n_portal_sessions WHERE steam_id = :sid"),
+                     {"sid": req.target_steam_id})
+    # Ban-time queue revocation (round-14 find 2): NON-LIVE matchmaking
+    # authority — searching rows and open-lobby seats — dies with the ban,
+    # or a row committed just before it stays matchable until its prune.
+    # Locked/ready_join rows are deliberately LEFT: they belong to a live or
+    # forming game, the banned client can no longer report or rejoin (no
+    # session), and evicting them here would fire the dissolution machinery
+    # against the innocent members; the lifecycle sweeps close those groups.
+    # Runs under the identity lock, so it cannot interleave with a gated
+    # enrollment for the same identity.
+    _bpid = (await db.execute(text(
+        "SELECT id FROM players WHERE steam_id = :sid"
+    ), {"sid": req.target_steam_id})).scalar()
+    if _bpid is not None:
+        # ALL-status row delete (round-18 find 1). Round 15's pair-DISSOLUTION
+        # branch was racy because it did partner WRITES from a status-filtered
+        # snapshot; a bare unconditional DELETE of the banned player's own
+        # rows has neither hazard, and it supplies the missing serialization:
+        # every room-issuance branch HOLDS its pair/group queue row locks
+        # from entry through commit, so this DELETE either waits behind a
+        # formation that commits first (room pre-dates the ban — legal) or
+        # commits first, leaving the formation's member read empty (no room —
+        # the invariant). Lock order stays acyclic: ban = identity -> queue
+        # rows; formation = queue rows only, never identity. Innocent
+        # partners self-heal via their polls' missing-opponent handling; live
+        # groups keep reporting against their FROZEN rosters (member_ids /
+        # series slots), which never referenced queue rows.
+        for _qt in ("ranked_queue", "team_queue", "ovt_queue", "ffa_queue"):
+            await db.execute(text(
+                f"DELETE FROM {_qt} WHERE player_id = :pid"
+            ), {"pid": _bpid})
+        # The candidate scans additionally exclude active bans (round-16) and
+        # the issuance branches re-check all members (round-17) — those stay
+        # as defense-in-depth around this serialization.
     existing = await _is_banned(db, req.target_steam_id)
-    if existing:
+    if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
         await db.commit()
         return {"status": "already_banned", "reason": existing}
-    db.add(PlayerBan(steam_id=req.target_steam_id, reason=req.reason[:256], banned_by_steam_id=req.admin_steam_id))
+    # Normalize a blank reason at the boundary (find 3): the row's existence
+    # is the ban; the reason is display-only and must never be empty.
+    # Normalize AND truncate ONCE (round-17 find 4): every sink — ban row,
+    # audit details, response — carries this exact value.
+    _ban_reason = ((req.reason or "").strip() or "violation")[:256]
+    db.add(PlayerBan(steam_id=req.target_steam_id, reason=_ban_reason, banned_by_steam_id=req.admin_steam_id))
     db.add(AdminAction(
         admin_steam_id=req.admin_steam_id, action="ban", target_steam_id=req.target_steam_id,
-        details={"reason": req.reason},
+        # The NORMALIZED reason (round-16 find 6): audit and ban row must
+        # agree — raw whitespace here showed a different "reason" to audit
+        # consumers than the ban itself carried.
+        details={"reason": _ban_reason},
     ))
     await db.commit()
     # The bot's poll_new_bans loop picks this up from /internal/recent-bans and
     # posts it to #scr-admin (item 4).
-    return {"status": "banned", "steam_id": req.target_steam_id, "reason": req.reason}
+    return {"status": "banned", "steam_id": req.target_steam_id, "reason": _ban_reason}
 
 
 @app.get("/api/v1/internal/recent-bans", tags=["Internal"])
@@ -13776,7 +15177,8 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
     balancer at lock-time uses queue-join values (not drifted live ratings)."""
     await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
-    await _check_ban_or_raise(db, req.steam_id)
+    # Identity gate (round-14 find 1): lock + ban/tombstone re-read under it.
+    await _enrollment_identity_gate(db, req.steam_id)
     name = req.display_name or req.steam_id
     player = await get_or_create_player(db, req.steam_id, name)
     await _mark_mod_seen(db, player)
@@ -14180,6 +15582,39 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
             # Generate room if not yet set (any one of the 4 can establish it).
             room_generated_2v2 = not me["room_name"]
             if not me["room_name"]:
+                # ALL-member ban recheck at room issuance (round-17 find 2):
+                # a ban landing after a member readied must not be frozen
+                # into the roster. Same dissolution as the ready-timeout
+                # branch above, under the group locks already held — plus
+                # the banned rows are DELETED (unmatchable thereafter).
+                _banned_ids = []
+                for _p in all_4:
+                    if (await _is_banned(db, _p["steam_id"])) is not None:
+                        _banned_ids.append(_p["player_id"])
+                if _banned_ids:
+                    _innocent = [p["player_id"] for p in all_4
+                                 if p["player_id"] not in _banned_ids]
+                    if _innocent:
+                        await db.execute(
+                            text("""UPDATE team_queue
+                                   SET status='searching', series_id=NULL, team_assigned=NULL,
+                                       room_name=NULL, room_region=NULL, ready=false,
+                                       matched_at=NULL, joined_at=NOW()
+                                   WHERE player_id = ANY(:ids)"""),
+                            {"ids": _innocent},
+                        )
+                    await db.execute(
+                        text("DELETE FROM team_queue WHERE player_id = ANY(:ids)"),
+                        {"ids": _banned_ids},
+                    )
+                    await db.execute(
+                        text("UPDATE team_series SET status='cancelled', invalidated_at=NOW(),"
+                             " invalidation_reason='member_banned' WHERE id = :sid"),
+                        {"sid": me["series_id"]},
+                    )
+                    await _reconcile_team_series_bets(db, me["series_id"], "member_banned")
+                    await db.commit()
+                    return TeamQueuePollResponse(status="searching")
                 room_name = f"team_{uuid_mod.uuid4().hex[:12]}"
                 # Pick region by mode of the 4 region values; fallback to 'us'.
                 regions = [p["region"] for p in all_4 if p["region"]]
@@ -14257,6 +15692,16 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
     if (me.get("queue_type") or "auto").lower() == "manual":
         elo_range = 1_000_000
 
+    # CALLER-side ban gate (round-17 find 1): the candidate predicate covers
+    # only the OTHER three — a banned caller (row reset to searching, client
+    # still polling) must not form a series either. Delete + not_in_queue;
+    # the enrollment gate refuses a rejoin. Covers the dc-resume path below
+    # too, since both live behind this point.
+    if (await _is_banned(db, steam_id)) is not None:
+        await db.execute(text("DELETE FROM team_queue WHERE player_id = :pid"),
+                         {"pid": my_pid})
+        await db.commit()
+        return TeamQueuePollResponse(status="not_in_queue")
     # Find 3 other compatible players. Bilateral Elo overlap, no mutual blocks.
     # Use the SAME elo_range as the caller's tier — wider tier callers find each
     # other faster but a 60s-old caller can't lock with a brand-new 100-Elo-band caller.
@@ -14282,6 +15727,9 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                   UNION SELECT blocked_id FROM queue_blocks WHERE blocker_id = :pid AND expires_at > now()
                   UNION SELECT blocker_id FROM queue_blocks WHERE blocked_id = :pid AND expires_at > now()
               )
+              AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                               WHERE pb.steam_id = tq.steam_id
+                                 AND pb.unbanned_at IS NULL)
             ORDER BY ABS(tq.rating - :my_r), tq.joined_at
             LIMIT 3
             FOR UPDATE SKIP LOCKED
@@ -14322,6 +15770,9 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
                    -- Freshness (review find): don't resume a series onto a
                    -- crashed teammate's ghost row.
                    AND last_polled > NOW() - INTERVAL '10 seconds'
+                   AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                                    WHERE pb.steam_id = team_queue.steam_id
+                                      AND pb.unbanned_at IS NULL)
                 FOR UPDATE SKIP LOCKED
             """),
             {"pids": original_pids, "me": my_pid},
@@ -15069,9 +16520,9 @@ async def _complete_team_series_with_ratings(
                 # between it and here, and an unconditional UPDATE would
                 # overwrite that terminal state and pay a second time.
                 claimed = (await db.execute(text(
-                    "UPDATE team_bets SET settled_at=NOW(), payout=:p"
+                    "UPDATE team_bets SET settled_at=NOW(), payout=:p, settlement_kind=:k"
                     " WHERE id=:id AND settled_at IS NULL RETURNING id"),
-                    {"p": payout, "id": b["id"]})).scalar()
+                    {"p": payout, "k": "won" if won else "lost", "id": b["id"]})).scalar()
                 if claimed is None:
                     continue
                 if payout > 0:
@@ -15155,14 +16606,16 @@ async def _reconcile_team_series_bets(db: AsyncSession, series_uuid, reason: str
             settled = refunded = 0
             for b in unsettled:
                 if settle_against is not None:
-                    pay = (int(round(b["amount"] * float(b["odds_multiplier"])))
-                           if b["bet_on_team"] == settle_against else 0)
+                    won = b["bet_on_team"] == settle_against
+                    pay = int(round(b["amount"] * float(b["odds_multiplier"]))) if won else 0
+                    kind = "won" if won else "lost"
                 else:
                     pay = b["amount"]   # payout == stake marks a refund (#107/#244)
+                    kind = "refunded"
                 claimed = (await db.execute(text(
-                    "UPDATE team_bets SET payout = :p, settled_at = NOW()"
+                    "UPDATE team_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k"
                     " WHERE id = :bid AND settled_at IS NULL RETURNING id"
-                ), {"p": pay, "bid": b["id"]})).scalar()
+                ), {"p": pay, "k": kind, "bid": b["id"]})).scalar()
                 if claimed is None:
                     continue
                 if settle_against is not None:
@@ -15819,6 +17272,16 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     steams = [req.t1a_steam, req.t1b_steam, req.t2a_steam, req.t2b_steam]
     if len(set(steams)) != 4:
         raise HTTPException(400, "Need four distinct players")
+    # Round-19 find 2: identity locks (sorted) so the ban gate below is
+    # ordered against ban issuance, not a point read.
+    for _cc_sid in sorted(steams):
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                         {"sid": _cc_sid})
+    # Round-18 find 3: no continuation with a banned member — the sitting
+    # ends for everyone rather than minting a new post-ban active pairing.
+    for _cc_sid in steams:
+        if (await _is_banned(db, _cc_sid)) is not None:
+            raise HTTPException(409, "Continuation refused: a participant is banned")
     if req.reporter_steam_id not in steams:
         raise HTTPException(403, "Reporter not part of the match")
     numeric = [s for s in steams if s.isdigit()]
@@ -15836,19 +17299,29 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     # A live series for this exact four already exists → return it (idempotent: covers
     # series 1 still in progress, and a double-fire from client retries).
     live = (await db.execute(text("""
-        SELECT id FROM team_series
+        SELECT id, photon_room_id FROM team_series
          WHERE status IN ('active', 'dc_paused', 'dc_incomplete')
            AND t1a_id = ANY(:ids) AND t1b_id = ANY(:ids)
            AND t2a_id = ANY(:ids) AND t2b_id = ANY(:ids)
          ORDER BY created_at DESC LIMIT 1
-    """), {"ids": ids})).scalar_one_or_none()
+    """), {"ids": ids})).mappings().first()
     if live is not None:
-        return {"series_id": str(live), "status": "existing"}
+        # Round-20 find 4: the idempotent return must honor the same room-
+        # continuity bar as the prior-series branch below — a caller naming
+        # an unrelated room must not be handed a live sitting's series id.
+        # Every legit continuation runs in the sitting's issued room (DC
+        # resume re-issues AND rewrites the stored room, so they still
+        # match); NULL stored room = pre-issuance/legacy, falls through.
+        _live_room = (live["photon_room_id"] or "").strip()
+        if _live_room and (req.room_id or "").strip() != _live_room:
+            raise HTTPException(409, "Continuation refused: room does not match the sitting")
+        return {"series_id": str(live["id"]), "status": "existing"}
 
     # Otherwise require a recent COMPLETED series for the same four (proves this is a
     # real rematch of an ongoing sitting, not a fabricated pairing).
     prior = (await db.execute(text("""
-        SELECT completed_at FROM team_series
+        SELECT completed_at, t1a_id, t1b_id, t2a_id, t2b_id, photon_room_id
+          FROM team_series
          WHERE status = 'completed'
            AND t1a_id = ANY(:ids) AND t1b_id = ANY(:ids)
            AND t2a_id = ANY(:ids) AND t2b_id = ANY(:ids)
@@ -15860,6 +17333,25 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
         age_min = (datetime.now(timezone.utc) - prior["completed_at"]).total_seconds() / 60.0
         if age_min > _CONTINUATION_WINDOW_MINUTES:
             raise HTTPException(409, "Prior series too old to continue")
+    # PARTITION preservation (round-18 find 3): `= ANY(:ids)` alone is
+    # set-blind — the same four players in a DIFFERENT team split (A+C vs
+    # B+D after A+B vs C+D) is a genuinely NEW pairing, not a continuation.
+    # The requested split must equal the prior's, sides swapped or not.
+    _prior_t1 = {prior["t1a_id"], prior["t1b_id"]}
+    _new_t1 = {id_by_steam[s] for s in sorted([req.t1a_steam, req.t1b_steam])}
+    _new_t2 = {id_by_steam[s] for s in sorted([req.t2a_steam, req.t2b_steam])}
+    if _prior_t1 != _new_t1 and _prior_t1 != _new_t2:
+        raise HTTPException(409, "Continuation refused: team split differs from the prior series")
+    # ROOM CONTINUITY (round-19 find 5): a 2v2 sitting lives in ONE Photon
+    # room — the server issued it at lock time, rematches replay inside it —
+    # so a genuine continuation must name the room the prior series carries.
+    # This is the structural "existing sitting" proof: the caller can only
+    # know a server-issued room by being in the sitting. Legacy priors with
+    # no stored room (pre-binding rows) fall through unproven — a shrinking,
+    # documented residue.
+    _prior_room = (prior["photon_room_id"] or "").strip()
+    if _prior_room and (req.room_id or "").strip() != _prior_room:
+        raise HTTPException(409, "Continuation refused: room does not match the sitting")
 
     # Preserve the sitting's team assignment; canonicalize within team by Steam ID so
     # t1a/t1b/t2a/t2b match what the match-report path computes.
@@ -16052,6 +17544,9 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
     """Join the 1v2 manual lobby (consent queue — no Elo band). Idempotent per
     player; re-joining refreshes preferences and the poll timestamp."""
     await _check_steam_session(request, req.steam_id, db)
+    # Identity gate (round-14 find 1, subsumes the round-13 usage-site ban
+    # check): lock + ban/tombstone re-read under it.
+    await _enrollment_identity_gate(db, req.steam_id)
     _presence_touch(req.steam_id)
     player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
@@ -16120,7 +17615,9 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
 
 
 @app.post("/api/v1/ovt/queue/leave", tags=["1v2 Queue"])
-async def ovt_queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
+                          cause: str = Query("", max_length=16),
+                          db: AsyncSession = Depends(get_db)):
     """Leave the 1v2 queue. If the leaver was LOCKED into a series that never
     produced a game, the lock is dissolved: the series is canceled and the
     other two lobby rows reset to searching. Without this, a no-show/failed
@@ -16149,8 +17646,29 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...), db: Asyn
         # in_match heartbeat veto separates "failed assembly" (dissolve, as
         # before) from "game 1 is live" (leave the series to the match
         # pipeline; only the leaver's own row is deleted below).
+        # Round-8 gate, same rule as the FFA leave: a PRE-BOOT zero-game lock
+        # during the post-restart evidence window is INDETERMINATE — take the
+        # departure path (series stays; the guarded janitor cleans a real
+        # dead assembly once evidence matures). Post-boot locks keep the
+        # one-shot dissolution (#270a).
+        # Round-9 gate: same cause-fencing as the FFA leave — an exit from
+        # inside the ovt_ ROOM is never assembly failure.
+        _ovt_in_room_exit = cause == "in_room_exit"
+        _ovt_startup_indeterminate = False
+        if (not _ovt_in_room_exit
+                and srow is not None and srow["status"] == "active"
+                and int(srow["games"] or 0) == 0
+                and not _in_match_evidence_trustworthy()
+                and not _group_game_positively_live(str(me["series_id"]))):
+            _ovt_locked_at = (await db.execute(text(
+                "SELECT MAX(matched_at) FROM ovt_queue WHERE series_id = :sid"
+            ), {"sid": me["series_id"]})).scalar()
+            _ovt_startup_indeterminate = (_ovt_locked_at is None
+                                          or _ovt_locked_at <= _PROCESS_STARTED_WALL)
         if (srow is not None and srow["status"] == "active"
                 and int(srow["games"] or 0) == 0
+                and not _ovt_in_room_exit
+                and not _ovt_startup_indeterminate
                 and not _group_game_positively_live(str(me["series_id"]))):
             await db.execute(text(
                 "UPDATE ovt_series SET status='canceled', invalidation_reason='assembly_timeout',"
@@ -16344,7 +17862,13 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         zero_game_stale = (srow is not None and srow["status"] == "active"
                            and int(srow["games"] or 0) == 0 and lock_age > 600)
         members_online = False
-        if zero_game_stale:
+        if zero_game_stale and not _in_match_evidence_trustworthy():
+            # Round-6 gate find, same hole as the FFA branch: a fresh
+            # process has an EMPTY presence map — absence proves nothing for
+            # ~210s after boot, and this recurring poll can safely defer
+            # (#270 recurring-actor veto rule).
+            members_online = True
+        elif zero_game_stale:
             mem_sids = (await db.execute(text(
                 "SELECT steam_id FROM ovt_queue WHERE series_id = :sid"
             ), {"sid": me["series_id"]})).scalars().all()
@@ -16383,7 +17907,15 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                         and (datetime.now(timezone.utc) - last_game).total_seconds() > 900
                         and not _group_game_in_progress(me["series_id"])):
                     sitting_over = True
-            elif all_polling and int(srow["games"] or 0) == 0 and lock_age > 300:
+            elif (all_polling and int(srow["games"] or 0) == 0 and lock_age > 300
+                  # Round-7 gate: "all polling" must mean the COMPLETE frozen
+                  # roster (3 for 1v2), not every SURVIVING row — a husk-swept
+                  # roster leaves one fresh survivor reading as "everyone".
+                  and int(mem_polls["total"] or 0) >= 3
+                  # And a live battle (positive evidence, any process age) or
+                  # a startup-unknown window vetoes the cancel outright.
+                  and _in_match_evidence_trustworthy()
+                  and not _group_game_positively_live(me["series_id"])):
                 assembly_failed = True
         if sitting_over:
             await db.execute(text(
@@ -16432,6 +17964,9 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
           FROM ovt_queue
          WHERE status = 'searching'
            AND last_polled > NOW() - INTERVAL '10 seconds'
+           AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                            WHERE pb.steam_id = ovt_queue.steam_id
+                              AND pb.unbanned_at IS NULL)
          ORDER BY joined_at
          LIMIT 3
          FOR UPDATE SKIP LOCKED
@@ -16544,6 +18079,17 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     numeric = [s for s in steams if s.isdigit()]
     if numeric and req.reporter_steam_id != min(numeric, key=int):
         raise HTTPException(403, "Reporter must be the lowest Steam ID")
+    # Round-19 find 2: identity locks (sorted) before the gate, as in the
+    # team continuation.
+    for _cc_sid in sorted(steams):
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                         {"sid": _cc_sid})
+    # Round-18 find 3: no continuation with a banned member (same rule as
+    # the team continuation — the sitting ends rather than minting a new
+    # post-ban active pairing).
+    for _cc_sid in steams:
+        if (await _is_banned(db, _cc_sid)) is not None:
+            raise HTTPException(409, "Continuation refused: a participant is banned")
     rows = (await db.execute(
         select(Player.id, Player.steam_id).where(Player.steam_id.in_(steams))
     )).all()
@@ -16557,7 +18103,7 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     # ancient series with stale tallies. Recent creation OR a recent match
     # counts as live (learning #101 pattern).
     live = (await db.execute(text("""
-        SELECT id FROM ovt_series s
+        SELECT id, photon_room_id FROM ovt_series s
          WHERE s.status IN ('active', 'dc_paused', 'dc_incomplete')
            AND s.solo_id = ANY(:ids) AND s.duo_a_id = ANY(:ids) AND s.duo_b_id = ANY(:ids)
            AND (s.created_at > NOW() - INTERVAL '6 hours'
@@ -16565,15 +18111,22 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
                            WHERE m.series_id = s.id
                              AND m.ended_at > NOW() - INTERVAL '6 hours'))
          ORDER BY s.created_at DESC LIMIT 1
-    """), {"ids": ids})).scalar_one_or_none()
+    """), {"ids": ids})).mappings().first()
     if live is not None:
-        return {"series_id": str(live), "status": "existing"}
+        # Round-20 find 4: same room-continuity bar as the team live branch
+        # (ovt series rooms are immutable after insert, so a mismatch can
+        # never be a re-issued room — it is a wrong-room caller).
+        _live_room = (live["photon_room_id"] or "").strip()
+        if _live_room and (req.room_id or "").strip() != _live_room:
+            raise HTTPException(409, "Continuation refused: room does not match the sitting")
+        return {"series_id": str(live["id"]), "status": "existing"}
     # A canceled series counts as a prior too: the trio DID lock together
     # (that's the consent proof this lookup exists for), and a lock canceled
     # as assembly_timeout must not 409 the sitting's remaining games — the
     # match pipeline would silently stop recording (review finding).
     prior = (await db.execute(text("""
-        SELECT completed_at, created_at, solo_id, duo_a_id, duo_b_id, solo_extra_pick
+        SELECT completed_at, created_at, solo_id, duo_a_id, duo_b_id, solo_extra_pick,
+               photon_room_id
           FROM ovt_series
          WHERE status IN ('completed', 'canceled', 'cancelled')
            AND solo_id = ANY(:ids) AND duo_a_id = ANY(:ids) AND duo_b_id = ANY(:ids)
@@ -16581,6 +18134,14 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     """), {"ids": ids})).mappings().first()
     if prior is None:
         raise HTTPException(409, "No prior series for these players")
+    # ROOM CONTINUITY (round-19 find 5, same bar as the team continuation):
+    # the sitting's Photon room was server-issued at lock; a genuine
+    # continuation names it. This is what makes the deliberate canceled-
+    # prior acceptance (assembly_timeout must not strand a sitting's games)
+    # safe against fabrication: the caller must know the issued room.
+    _prior_room = (prior["photon_room_id"] or "").strip()
+    if _prior_room and (req.room_id or "").strip() != _prior_room:
+        raise HTTPException(409, "Continuation refused: room does not match the sitting")
     anchor = prior["completed_at"] or prior["created_at"]
     if anchor is not None:
         age_min = (datetime.now(timezone.utc) - anchor).total_seconds() / 60.0
@@ -16652,6 +18213,18 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     ), {"sid": series_uuid})).mappings().first()
     if series is None:
         raise HTTPException(404, "Series not found")
+    # Round-20 find 4: bind the report to the sitting's issued room. Report
+    # rooms are per-game suffixed ("<room>_<token>_r<total>", the shared
+    # BuildReportRoomId helper) while the series stores the raw room, so the
+    # relation is PREFIX. Ovt series rooms are immutable after insert; NULL
+    # (legacy) falls through.
+    _series_room = (series["photon_room_id"] or "").strip()
+    # Full suffix grammar, not a bare prefix (round-21 find 2) — see the
+    # matching comment in the team sink.
+    if _series_room and not _re.fullmatch(
+            _re.escape(_series_room) + r"_\d{6}_r\d+",
+            (report.photon_room_id or "")):
+        raise HTTPException(400, "Report room does not match the series room")
 
     # ── Difficulty inputs (bug #129) ──────────────────────────────────────
     # Opponents' 1v1 Glicko drives the tier multiplier; guarded exactly like
@@ -17235,6 +18808,12 @@ _ffa_gather_pool_seen_mono: float = 0.0
 #       SERIES_GOLD_BASE / TEAM_SERIES_WIN_GOLD / OVT_SERIES_WIN_GOLD),
 #   (3) the lobby-size multiplier was gated behind `place == 1`, so lobby size
 #       paid nothing to 9 of 10 players — 4th-of-10 earned exactly 4th-of-4.
+# v1.35 LEGACY constants — SUPERSEDED by the battles × players meter below.
+# Kept because migration 164's pg_temp mirror reproduces the legacy flat
+# formula from these for the pre-meter back-pay; they are dead in the live
+# award path. (The old model paid per-GAME constants, so a 23-minute
+# 10-player game earned LESS per hour than a 8-minute 3-player one — the
+# meter inverts that by paying per signed half-point.)
 FFA_MATCH_XP_BASE = 600     # was 300 — parity with TEAM_MATCH_XP_BASE
 FFA_XP_PER_BEATEN = 90      # + per opponent placed STRICTLY below you (was 60)
 FFA_PLACE_GOLD_TOP = 50     # 1st  — parity with TEAM_SERIES_WIN_GOLD
@@ -17272,21 +18851,83 @@ def _ffa_place_mult(place: int, beaten: int, n_live: int) -> float:
 
 
 def _ffa_place_gold(place: int, beaten: int, n_live: int) -> int:
-    """Flat per-game placement gold — the FFA analogue of the 2v2/1v2 series
-    bonus (gap 2). Scaled by lobby size on the same curve as the XP multiplier
-    and normalised to the 5-player case (x0.6 at 3, x1.0 at 5, x2.0 at 10),
-    because both track GAME LENGTH, which is what the parity target is
-    denominated in.
-
-    Deliberately NOT tier-scaled, unlike 2v2's series bonus: the tier
-    multiplier already rides the (much larger) XP half, and keeping this
-    component a pure function of (placement, beaten, lobby size) is what lets
-    migration 164 reproduce it EXACTLY from stored columns for the back-pay.
-    """
+    """SUPERSEDED by the battles-x-players meter (v1.36.0) — kept because it
+    is the exact formula migration 164's pg_temp mirror reproduces for the
+    LEGACY back-pay, and legacy games must forever be re-derivable from it.
+    Not called by the live award path any more."""
     size = _ffa_win_mult(n_live) / _ffa_win_mult(5)
     frac = _ffa_place_frac(place, beaten, n_live)
     base = FFA_PLACE_GOLD_LAST + (FFA_PLACE_GOLD_TOP - FFA_PLACE_GOLD_LAST) * frac
     return int(round(base * size))
+
+
+# ── FFA economy v2: the battles × players meter (v1.36.0) ──────────────────
+# Sid's rule: meter on WORK, not wall-clock — camping produces no battles and
+# therefore no gold. A "battle" is one decisive round = one half-point;
+# battles = Σ points_total across the roster, and points_total is INSIDE the
+# frozen ffa: HMAC canonical, so the meter's input is signed. Because
+# duration ≡ battles × s(P) for honest play, gold per player-minute collapses
+# to 60·rate(P)·shape/s(P) — independent of score target and battle count, so
+# the score-target knob prices itself with no config table.
+#
+# KNOWN RESIDUAL (accepted, do NOT document as "structurally closed"): in the
+# clamped regime, banked half-points cash in against idle wall-clock —
+# fabricate-then-idle is bounded at ≈FFA_PACE_HEADROOM × the honest rate
+# (vs 39.6× pre-meter), not zero.
+# Drawn rounds (simultaneous death) consume real seconds and award zero
+# points_total — baked into the fitted s(P), but a second source of pace
+# variance; a reason not to tighten the headroom below 2.0 on current data.
+FFA_G_PER_PLAYER_MIN = 3.5    # g per player-minute at the tier-x1.5 calibration
+                              # field (2v2 mean 4.32, 1v1 mean 2.50).
+FFA_SIZE_SLOPE = 0.05         # DECIDED (Sid, 2026-08-01): 10-player FFA should
+                              # be the best gold rate in the game — 0.05/player
+                              # above 4 puts the P=10 mean at 4.55 g/plr-min
+                              # (~8.3 for 1st once level_reward is counted,
+                              # ≈1.44x the best rate in any other mode). The
+                              # slope encodes the intent; the base is scale.
+FFA_SEC_A, FFA_SEC_B = 3.08, 6.54   # s(P) = A + B·P, weighted LS over 38 prod games
+FFA_SEC_CLAMP_P = 6           # s(P) above 6 players is pure extrapolation (two
+                              # observed P=6 games, zero above) — clamp the
+                              # meter at the P=6 fit until ~200 games exist,
+                              # then re-fit from the new audit columns.
+FFA_PACE_HEADROOM = 2.0       # rate ceiling = H × the average pace; residual
+                              # abuse equals H exactly. The fast tail of s(P)
+                              # has never been measured — do not tighten below
+                              # 2.0 without measuring it.
+FFA_XP_SHARE = 0.45           # 45% of the pool rides as XP (×100 → the
+                              # 100xp=1g drip returns it as 'ffa_xp' gold);
+                              # 55% pays flat under reason='ffa_placement'.
+FFA_MIN_XP = 50               # LOAD-BEARING: migration 164's live/ghost
+                              # discriminator is xp_gained > 0 — a metered XP
+                              # that rounded to zero would make a live player
+                              # read as a ghost to every future back-pay.
+FFA_SHAPE_TOP = 1.666         # 1st place pays this × the lobby mean (7.58 vs
+                              # 4.55 g/plr-min at P=10 in the r2 model); last
+                              # pays 2−this. Linear in the beaten-fraction, so
+                              # the shape's mean is 1.0 ABSENT TIES — bottom
+                              # ties lower the mean frac below 0.5 and underpay
+                              # the lobby (≤~9% at a 4-way bottom tie in a
+                              # 10-player game). Documented, not corrected:
+                              # flat-in-expectation is the guarantee.
+
+
+def _ffa_sec_per_battle(n_live: int) -> float:
+    return FFA_SEC_A + FFA_SEC_B * min(max(int(n_live or 3), 3), FFA_SEC_CLAMP_P)
+
+
+def _ffa_battle_rate(n_live: int) -> float:
+    """Gold-equivalent per battle per player, at the tier-x1.5 calibration
+    field. rate(P) ∝ s(P): battles take longer in bigger lobbies, so a flat
+    per-battle rate would pay small lobbies ~2.3x more per MINUTE."""
+    gpm = FFA_G_PER_PLAYER_MIN * (1.0 + FFA_SIZE_SLOPE * max(0, int(n_live or 0) - 4))
+    return gpm * _ffa_sec_per_battle(n_live) / 60.0
+
+
+def _ffa_pool_shape(place: int, beaten: int, n_live: int) -> float:
+    """Placement shape on the per-player pool: FFA_SHAPE_TOP at 1st, its
+    mirror at last, linear in the beaten-fraction, mean 1.0 absent ties."""
+    frac = _ffa_place_frac(place, beaten, n_live)
+    return (2.0 - FFA_SHAPE_TOP) + (2.0 * FFA_SHAPE_TOP - 2.0) * frac
 # Rating movement per game is bounded: each player is compared against at
 # most this many placement-adjacent opponents (see submit_ffa_match).
 FFA_MAX_RATED_OPPONENTS = 4
@@ -17309,12 +18950,42 @@ FFA_BET_LIVE_ASSEMBLY_MINUTES = 15     # ...since lock, for a lobby with 0 games
 # seconds after game N-1 ended (or after the lock, for game 1). Delete this
 # once the live-score lock is live and adoption is confirmed.
 FFA_BET_OPEN_SECONDS = 90
-# Engine constants — MUST match plugin/FfaMode.cs (RoundsToWin/PointsToWinRound).
-# Reports are validated against them so a crafted body can't invent a score.
+# Engine DEFAULTS — MUST match plugin/FfaMode.cs (RoundsToWin/PointsToWinRound).
 # 3 -> 5 after the first playtest (Sid: games ended too fast for the rolling
 # card bar to ever engage).
+# Since the configurable-lobby columns landed (migration 176), report
+# validation reads the LOBBY ROW's frozen config, falling back to these when
+# a column is somehow absent. A report is validated against the row, never
+# against the report's own claims.
 FFA_ROUNDS_TO_WIN = 5
 FFA_POINTS_TO_WIN_ROUND = 2
+# Feature floor for non-default lobby config: every roster member's
+# players.mod_version must be at least this or the lobby's config collapses
+# to the defaults AS A SET at Start (never partially — a mixed lobby plays
+# exactly today's rules). is_ranked is exempt: it is mixed-version safe
+# because the server ANDs it against the row and an old client only
+# mis-renders its own HUD badge.
+FFA_CONFIG_MIN_VERSION = "1.36.0"
+FFA_CONFIG_DEFAULTS = {
+    "score_target": 5, "card_candidates": 5, "initial_picks": 1,
+    "card_cap": 5, "same_card_rule": False,
+}
+
+
+def _ffa_lobby_config(lobby) -> dict:
+    """Effective config off a lobby row, default-safe (a row predating
+    migration 176 or a None column yields today's shipped values)."""
+    cfg = {}
+    for k, dflt in FFA_CONFIG_DEFAULTS.items():
+        try:
+            v = lobby[k] if lobby is not None and k in lobby else None
+        except (KeyError, TypeError):
+            v = None
+        if isinstance(dflt, bool):
+            cfg[k] = bool(dflt if v is None else v)
+        else:
+            cfg[k] = int(v) if v is not None else dflt
+    return cfg
 # Max points_total one player can honestly bank in one game. points_total is
 # CUMULATIVE while the engine's points.Clear() wipes everyone's live half
 # whenever ANY player converts a round — so besides their own
@@ -17323,9 +18994,10 @@ FFA_POINTS_TO_WIN_ROUND = 2
 # the other n-1 players (Codex review 2026-07-28 find 1: the old flat cap of
 # 11 rejected honest long games outright — e.g. 18 halves in a 3-player
 # first-to-5). Bound each opponent's conversions by ROUNDS_TO_WIN.
-def _ffa_max_points(n_players: int) -> int:
-    own = FFA_ROUNDS_TO_WIN * FFA_POINTS_TO_WIN_ROUND + (FFA_POINTS_TO_WIN_ROUND - 1)
-    cleared = (FFA_POINTS_TO_WIN_ROUND - 1) * FFA_ROUNDS_TO_WIN * max(0, n_players - 1)
+def _ffa_max_points(n_players: int, score_target: int | None = None) -> int:
+    tgt = int(score_target or FFA_ROUNDS_TO_WIN)
+    own = tgt * FFA_POINTS_TO_WIN_ROUND + (FFA_POINTS_TO_WIN_ROUND - 1)
+    cleared = (FFA_POINTS_TO_WIN_ROUND - 1) * tgt * max(0, n_players - 1)
     return own + cleared
 # A lobby is one sitting; this bounds a compromised client's fabrication rate.
 FFA_MAX_GAMES_PER_LOBBY = 40
@@ -17352,6 +19024,30 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
     """
     try:
         await db.rollback()
+        # Flood bound, take 2 (Codex round-3 finds 2+3): the round-2 one-row
+        # semantic dedupe DESTROYED distinct legitimate games — an outbox
+        # retrying two real games of a since-closed lobby shares the
+        # (mode, group, reporter, reason) tuple, so game 2's payload was
+        # dropped forever. Distinct games have distinct per-game room ids and
+        # MUST each be kept: the (mode, photon_room_id) ON CONFLICT below is
+        # the retry-idempotency. Hostile flooding (fresh fabricated room ids)
+        # is bounded instead by a PER-GROUP pending QUOTA — generous above
+        # FFA_MAX_GAMES_PER_LOBBY so every honest multi-game sitting fits —
+        # counted under a transaction-scoped ADVISORY lock, because a plain
+        # count-then-insert races two concurrent captures past the bound
+        # (#207: serialize on a value that exists before the rows do).
+        if group_id is not None:
+            await db.execute(text(
+                "SELECT pg_advisory_xact_lock(hashtext('mrq:' || CAST(:g AS text)))"
+            ), {"g": str(group_id)})
+            _pending = (await db.execute(text("""
+                SELECT COUNT(*) FROM match_report_quarantine
+                 WHERE mode = :m AND group_id = :g AND status = 'pending'
+            """), {"m": mode, "g": group_id})).scalar() or 0
+            if int(_pending) >= 50:
+                await db.rollback()
+                print(f"[QUARANTINE] pending quota reached for {mode} group={group_id} — not capturing more")
+                return
         await db.execute(text("""
             INSERT INTO match_report_quarantine
                 (mode, reason, http_status, group_id, photon_room_id,
@@ -17418,6 +19114,9 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     player; re-joining refreshes the display fields and poll timestamp but
     never resets a locked row (same contract as the 1v2 join)."""
     await _check_steam_session(request, req.steam_id, db)
+    # Identity gate (round-14 find 1, subsumes the round-13 usage-site ban
+    # check): lock + ban/tombstone re-read under it.
+    await _enrollment_identity_gate(db, req.steam_id)
     _presence_touch(req.steam_id)
     player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
@@ -17659,7 +19358,8 @@ async def ffa_lobby_create(req: _FfaLobbyCreateReq, request: Request, db: AsyncS
     """Open a host lobby. The caller becomes host and its only member."""
     await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
-    await _check_ban_or_raise(db, req.steam_id)
+    # Identity gate (round-14 find 1): lock + ban/tombstone re-read under it.
+    await _enrollment_identity_gate(db, req.steam_id)
     player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(404, "Player not registered")
@@ -17687,7 +19387,8 @@ async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSessi
     """Join an open host lobby from the browser."""
     await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
-    await _check_ban_or_raise(db, req.steam_id)
+    # Identity gate (round-14 find 1): lock + ban/tombstone re-read under it.
+    await _enrollment_identity_gate(db, req.steam_id)
     player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(404, "Player not registered")
@@ -17721,14 +19422,146 @@ async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSessi
         # the FIRST enrollment's best-effort eviction failed, the recovery
         # rejoin is the only later actor that can repair the cross-queue ghost.
         await _evict_other_queue_searching(db, [player.id], "ffa_queue", "an open FFA lobby")
-        return {"status": "ok", "lobby_id": str(lobby_id)}
+        return {"status": "ok", "lobby_id": str(lobby_id),
+                **(await _ffa_lobby_config_echo(db, lobby_id))}
     if len(live) >= FFA_MAX_PLAYERS:
         raise HTTPException(409, "That lobby is full")
     await _ffa_lobby_enroll_caller(db, player, req, lobby_id)
     await db.commit()
     print(f"[FFA-LOBBY] {req.steam_id} joined lobby {lobby_id} ({len(live)+1} members)")
     await _evict_other_queue_searching(db, [player.id], "ffa_queue", "an open FFA lobby")
-    return {"status": "ok", "lobby_id": str(lobby_id)}
+    # Config echo (Codex client round-2 find 13): without it the client's
+    # mirrors show defaults (or the PREVIOUS lobby's values) until the first
+    # membership poll lands.
+    return {"status": "ok", "lobby_id": str(lobby_id),
+            **(await _ffa_lobby_config_echo(db, lobby_id))}
+
+
+async def _ffa_lobby_config_echo(db: AsyncSession, lobby_id) -> dict:
+    """The five config fields the client mirrors, straight off the row.
+    Best-effort: an error returns {} (client falls back to defaults + poll)."""
+    try:
+        row = (await db.execute(text(
+            "SELECT score_target, card_candidates, initial_picks, card_cap,"
+            "       same_card_rule, is_ranked FROM ffa_lobbies WHERE id = :lid"
+        ), {"lid": lobby_id})).mappings().first()
+        cfg = _ffa_lobby_config(row)
+        return {
+            "score_target": cfg["score_target"],
+            "initial_picks": cfg["initial_picks"],
+            "card_cap": cfg["card_cap"],
+            "same_card_rule": bool(cfg["same_card_rule"]),
+            # is_ranked is not in FFA_CONFIG_DEFAULTS (it predates the config
+            # system) — read it off the row directly, default TRUE.
+            "lobby_ranked": bool(row["is_ranked"]) if row is not None and row["is_ranked"] is not None else True,
+        }
+    except Exception as ex:
+        print(f"[FFA-LOBBY] config echo failed for {lobby_id}: {ex}")
+        return {}
+
+
+def _ffa_initial_picks_floor(card_cap: int, score_target: int) -> int:
+    """§7d: every NON-WINNER banks at least `score_target` picks, so total
+    opening draws T >= clamp(C+1-N, 1, C) guarantees they fill a complete
+    hand even in the worst case. (The sweeper is out of scope by decision —
+    a clean sweep finishes with exactly T cards, accepted.)"""
+    return max(1, min(int(card_cap), int(card_cap) + 1 - int(score_target)))
+
+
+class _FfaLobbySettingsReq(BaseModel):
+    steam_id: str
+    score_target: int | None = None
+    card_candidates: int | None = None
+    initial_picks: int | None = None
+    card_cap: int | None = None
+    same_card_rule: bool | None = None
+    is_ranked: bool | None = None
+
+
+@app.post("/api/v1/ffa/lobby/settings", tags=["FFA Queue"])
+async def ffa_lobby_settings(req: _FfaLobbySettingsReq, request: Request,
+                             db: AsyncSession = Depends(get_db)):
+    """Host edits the lobby config while it is still OPEN. Values are
+    validated + clamped server-side and the CLAMPED values are returned so
+    the host's UI reflects reality immediately (§7d). Omitted fields keep
+    their current value. settings_changed_at re-arms the 60s start gate only
+    when a value ACTUALLY changes (a host mashing the same value must not be
+    locked out; A→B→A does re-arm, correctly — someone who joined during B
+    saw B)."""
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    me = await _lock_queue_group_for_player(db, "ffa_queue", req.steam_id)
+    if me is None or me["status"] != "lobby" or me["series_id"] is None:
+        raise HTTPException(409, "You're not in an open lobby")
+    lobby_id = me["series_id"]
+    lrow = (await db.execute(text(
+        "SELECT * FROM ffa_lobbies WHERE id = :lid"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        raise HTTPException(409, "That lobby is no longer open")
+    live = await _ffa_live_lobby_members(db, lobby_id)
+    host_id = _ffa_effective_host(lrow["host_player_id"], live)
+    if host_id != me["player_id"]:
+        raise HTTPException(403, "Only the lobby host can change settings")
+
+    cur = _ffa_lobby_config(lrow)
+    cur["is_ranked"] = bool(lrow["is_ranked"]) if ("is_ranked" in lrow and lrow["is_ranked"] is not None) else True
+    new = dict(cur)
+    if req.score_target is not None:
+        if not (3 <= req.score_target <= 10):
+            raise HTTPException(400, "score_target must be 3-10")
+        new["score_target"] = int(req.score_target)
+    if req.card_candidates is not None:
+        # Range check kept 1-5 but the KNOB IS LOCKED for v1.36.0 (Sid,
+        # 2026-08-01: same-card rule ships this release; the candidates knob
+        # ships a later one — §9c forbids both in one release). Reject any
+        # non-default so no lobby row can carry a value no client honors yet.
+        if req.card_candidates != 5:
+            raise HTTPException(400, "Card draw size is locked at 5 for now")
+        new["card_candidates"] = 5
+    if req.card_cap is not None:
+        if not (3 <= req.card_cap <= 6):
+            raise HTTPException(400, "card_cap must be 3-6")
+        new["card_cap"] = int(req.card_cap)
+    if req.initial_picks is not None:
+        if not (1 <= req.initial_picks <= 4):
+            raise HTTPException(400, "initial_picks must be 1-4 (base draw + up to 3 extra)")
+        new["initial_picks"] = int(req.initial_picks)
+    if req.same_card_rule is not None:
+        new["same_card_rule"] = bool(req.same_card_rule)
+    if req.is_ranked is not None:
+        new["is_ranked"] = bool(req.is_ranked)
+    # §7d floor: clamp UP (never reject) so leaving both new controls alone
+    # can never silently violate the fill-a-hand guarantee, and clamp to the
+    # cap (T > C would drag rolling removal into game start — decided T <= C).
+    floor_t = _ffa_initial_picks_floor(new["card_cap"], new["score_target"])
+    new["initial_picks"] = max(floor_t, min(new["initial_picks"], new["card_cap"], 4))
+
+    changed = [k for k in new if new[k] != cur[k]]
+    if changed:
+        # clock_timestamp(), not NOW(): NOW() freezes before a lock wait, so a
+        # settings write that waited would stamp the past and the 60s gate
+        # would expire early (#277).
+        await db.execute(text("""
+            UPDATE ffa_lobbies
+               SET score_target=:st, card_candidates=:cc, initial_picks=:ip,
+                   card_cap=:cap, same_card_rule=:scr, is_ranked=:rk,
+                   settings_changed_at=clock_timestamp()
+             WHERE id=:lid AND status='open'
+        """), {"st": new["score_target"], "cc": new["card_candidates"],
+               "ip": new["initial_picks"], "cap": new["card_cap"],
+               "scr": new["same_card_rule"], "rk": new["is_ranked"],
+               "lid": lobby_id})
+        print(f"[FFA-LOBBY] {req.steam_id} changed lobby {lobby_id} settings: "
+              + ", ".join(f"{k}={new[k]}" for k in changed))
+    await db.commit()
+    return {"status": "ok", "changed": changed,
+            "score_target": new["score_target"],
+            "card_candidates": new["card_candidates"],
+            "initial_picks": new["initial_picks"],
+            "card_cap": new["card_cap"],
+            "same_card_rule": new["same_card_rule"],
+            "lobby_ranked": new["is_ranked"]}
 
 
 class _FfaLobbyStartReq(BaseModel):
@@ -17753,7 +19586,7 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     lobby_id = me["series_id"]
     # The group helper already holds the lobby row FOR UPDATE + member rows.
     lrow = (await db.execute(text(
-        "SELECT id, status, host_player_id FROM ffa_lobbies WHERE id = :lid"
+        "SELECT * FROM ffa_lobbies WHERE id = :lid"
     ), {"lid": lobby_id})).mappings().first()
     if lrow is None or lrow["status"] != "open":
         raise HTTPException(409, "That lobby is no longer open")
@@ -17763,20 +19596,94 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
            AND NOT ({FFA_LOBBY_MEMBER_FRESH_SQL})
     """), {"lid": lobby_id})
     live = await _ffa_live_lobby_members(db, lobby_id)
+    # Hosted Start is a FORMATION surface (round-17 find 3): a banned seat —
+    # e.g. one left by the pre-deploy old API, which purged sessions but not
+    # queue rows — must not be frozen into member_ids. Remove banned seats
+    # here, before the roster freeze; the survivor count then decides.
+    _start_banned = []
+    for _m in live:
+        _msid = (await db.execute(text(
+            "SELECT steam_id FROM players WHERE id = :pid"
+        ), {"pid": _m["player_id"]})).scalar()
+        if _msid is not None and (await _is_banned(db, _msid)) is not None:
+            _start_banned.append(_m["player_id"])
+    if _start_banned:
+        await db.execute(text(
+            "DELETE FROM ffa_queue WHERE player_id = ANY(:ids)"), {"ids": _start_banned})
+        live = [m for m in live if m["player_id"] not in _start_banned]
+        print(f"[FFA-LOBBY] start: removed {len(_start_banned)} banned seat(s) from lobby {lobby_id}")
     host_id = _ffa_effective_host(lrow["host_player_id"], live)
     if host_id != me["player_id"]:
         raise HTTPException(403, "Only the lobby host can start the game")
     if host_id is not None and host_id != lrow["host_player_id"]:
         await db.execute(text("UPDATE ffa_lobbies SET host_player_id=:h WHERE id=:lid"),
                          {"h": host_id, "lid": lobby_id})
+    # §7b settings lock, BOTH anchors (decided): a configured lobby cannot
+    # start within 60s of a real settings change, NOR within 15s of the
+    # newest member joining (a host who configured alone and pressed Start
+    # one second after someone walked in baited nobody — but nobody read
+    # anything either). Applies ONLY when the lobby was actually configured
+    # (settings_changed_at non-NULL); a default lobby keeps today's
+    # zero-friction start. clock_timestamp() on the read side too, so a lock
+    # wait can't hand out a stale remaining-seconds figure. The server check
+    # is the gate; the client countdown is decoration.
+    _sc_at = lrow["settings_changed_at"] if "settings_changed_at" in lrow else None
+    if _sc_at is not None:
+        _gate = (await db.execute(text("""
+            SELECT GREATEST(
+                     60.0 - EXTRACT(EPOCH FROM (clock_timestamp() - l.settings_changed_at)),
+                     15.0 - EXTRACT(EPOCH FROM (clock_timestamp() - COALESCE((
+                           SELECT MAX(q.joined_at) FROM ffa_queue q
+                            WHERE q.series_id = l.id AND q.status = 'lobby'),
+                           l.settings_changed_at)))
+                   ) AS wait_s
+              FROM ffa_lobbies l WHERE l.id = :lid
+        """), {"lid": lobby_id})).scalar()
+        if _gate is not None and float(_gate) > 0:
+            raise HTTPException(409,
+                f"Settings changed recently - wait {int(float(_gate)) + 1}s so everyone can read them")
     if len(live) < FFA_MIN_PLAYERS:
         raise HTTPException(409, f"Need at least {FFA_MIN_PLAYERS} players to start")
+    # §7d re-validation at Start: the floor depends on BOTH card_cap and
+    # score_target, so a later change to either can invalidate an earlier
+    # initial_picks (#208's re-read rule applied to config). Clamp up
+    # silently — the guarantee, not the host's number, is the contract.
+    _start_cfg = _ffa_lobby_config(lrow)
+    _floor_t = _ffa_initial_picks_floor(_start_cfg["card_cap"], _start_cfg["score_target"])
+    _fixed_t = max(_floor_t, min(_start_cfg["initial_picks"], _start_cfg["card_cap"], 4))
+    if _fixed_t != _start_cfg["initial_picks"]:
+        await db.execute(text(
+            "UPDATE ffa_lobbies SET initial_picks = :t WHERE id = :lid"
+        ), {"t": _fixed_t, "lid": lobby_id})
     # EXACTLY the legacy gather-decider lock body from here. created_at is
     # reset to NOW() because every active-lobby consumer (25-min dispersed
     # close, bettable assembly window, zero-game dead sweep) reads it as the
     # ACTIVATION time (design review find 2 — a lobby that sat open 26
     # minutes would otherwise be janitor-closed on the next sweep).
     ordered = sorted(live, key=lambda r: _ffa_sort_key(r["steam_id"]))
+    # Config feature floor (§3a): the server is the real authority, and it
+    # decides HERE — before any Photon room exists, so there is no propagation
+    # race to lose. If ANY roster member's build is below the floor, the
+    # lobby's config collapses to the defaults AS A SET (never partially): a
+    # mixed lobby plays exactly today's rules. is_ranked is deliberately not
+    # part of the collapse (mixed-version safe — the server ANDs it at
+    # submit; an old client only mis-renders its own HUD badge).
+    _pids = [r["player_id"] for r in ordered]
+    _vrows = (await db.execute(
+        select(Player.id, Player.mod_version).where(Player.id.in_(_pids))
+    )).all()
+    _floor = _parse_version(FFA_CONFIG_MIN_VERSION)
+    _all_capable = len(_vrows) == len(_pids) and all(
+        _parse_version(v.mod_version or "0") >= _floor for v in _vrows)
+    if not _all_capable:
+        await db.execute(text("""
+            UPDATE ffa_lobbies
+               SET score_target=5, card_candidates=5, initial_picks=1,
+                   card_cap=5, same_card_rule=FALSE
+             WHERE id=:lid
+        """), {"lid": lobby_id})
+        print(f"[FFA-LOBBY] lobby {lobby_id}: roster below config floor "
+              f"{FFA_CONFIG_MIN_VERSION} — config collapsed to defaults")
     regions = [r["region"] for r in ordered if r["region"]]
     region = max(set(regions), key=regions.count) if regions else "us"
     room = f"ffa_{uuid.uuid4().hex[:12]}"
@@ -17847,6 +19754,7 @@ async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
 @app.post("/api/v1/ffa/queue/leave", tags=["FFA Queue"])
 async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                           expected_lobby_id: str | None = Query(None),
+                          cause: str = Query("", max_length=16),
                           db: AsyncSession = Depends(get_db)):
     """Leave the FFA queue. Zero-game locked lobby → DISSOLVED (canceled,
     everyone else reset to searching — the #150 lifecycle rule). Lobby WITH
@@ -17945,8 +19853,55 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
         # reporter's result then 409'd (the July 30 incident's second half).
         # A zero-game lobby WITH live-game evidence takes the played-lobby
         # departure path below instead.
+        # Round-8 gate: during the post-boot evidence window, a PRE-BOOT lock
+        # with no observed heartbeat is INDETERMINATE, not a failed assembly —
+        # the API restarting mid-game-1 empties _in_match_seen, and a member
+        # quitting in the ~60s before the next ping used to dissolve the live
+        # lobby (the survivors' report then 409'd). A pre-boot zero-game lock
+        # in that window takes the DEPARTURE path below (lobby stays; if it
+        # really was a dead assembly, the guarded janitor cleans it once
+        # evidence matures). A lock created AFTER boot keeps the one-shot
+        # dissolution — this process would have heard its heartbeats (#270a:
+        # veto-on-ignorance must not turn post-boot failed assemblies into
+        # husks).
+        # Round-9 gate, the STRUCTURAL fix Codex named: the CLIENT knows this
+        # leave's cause — an exit from inside the ffa_ ROOM can never be
+        # "failed assembly" (the leaver was demonstrably at/past assembly),
+        # and no server-side evidence scheme can reconstruct that knowledge
+        # through the async heartbeat edge (a battle's first in_match ping
+        # trails its start by up to ~5s + HTTP). in_room_exit therefore takes
+        # the departure path UNCONDITIONALLY; only pre-room leaves (menu
+        # clicks, declines, watchdog bails — cause absent or other) may
+        # dissolve. Old clients send no cause and keep the evidence-based
+        # behaviour below.
+        _in_room_exit = cause == "in_room_exit"
+        # Round-13 REVERSAL of the round-12 fresh_cancel override: Codex
+        # proved it was a hostile-void primitive — ONE member's unverified
+        # claim cancelled a LIVE game (warm heartbeat and all), refunded its
+        # wagers, and 409'd the real report; a rematch could even mislabel
+        # game 2's cancel onto unreported game 1 (#280's criterion fails:
+        # a false in_room_exit preserves, a false fresh_cancel destroys,
+        # irreversibly). The cause is now LOG-ONLY: a genuine below-quorum
+        # fresh cancel rides the evidence-guarded path like any other leave,
+        # and its worst case is a few minutes of janitor-cleaned husk with
+        # delayed bet reconciliation — bounded and reversible.
+        if cause == "fresh_cancel":
+            print(f"[FFA-LOCK] leave cause=fresh_cancel from {steam_id} (log-only)")
+        _startup_indeterminate = False
+        if (not _in_room_exit
+                and lrow is not None and lrow["status"] == "active"
+                and int(lrow["games_played"] or 0) == 0
+                and not _in_match_evidence_trustworthy()
+                and not _group_game_positively_live(str(lobby_id))):
+            _locked_at = (await db.execute(text(
+                "SELECT MAX(matched_at) FROM ffa_queue WHERE series_id = :lid"
+            ), {"lid": lobby_id})).scalar()
+            _startup_indeterminate = (_locked_at is None
+                                      or _locked_at <= _PROCESS_STARTED_WALL)
         if (lrow is not None and lrow["status"] == "active"
                 and int(lrow["games_played"] or 0) == 0
+                and not _in_room_exit
+                and not _startup_indeterminate
                 and not _group_game_positively_live(str(lobby_id))):
             await db.execute(text(
                 "UPDATE ffa_lobbies SET status='canceled', invalidation_reason='assembly_timeout',"
@@ -17983,7 +19938,15 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
             # refunds bets that should settle against it. With live-game
             # evidence the leave only MARKS; the report's own completion path,
             # or the dispersed sweep, closes the lobby afterwards.
-            game_live_now = _group_game_positively_live(str(lobby_id))
+            # Round-9 gate find 1: uncertainty must SURVIVE into this
+            # decision. Positive evidence, a client-attested in-room exit,
+            # or the startup-unknown window all take the mark-only branch —
+            # completing on collapsed-to-false uncertainty quarantined the
+            # last survivor's in-flight report. A lobby wrongly left active
+            # here is closed later by the dispersed/sitting-over sweeps.
+            game_live_now = (_group_game_positively_live(str(lobby_id))
+                             or _in_room_exit
+                             or not _in_match_evidence_trustworthy())
             all_but_one = False
             # CAST(:pid AS uuid) is LOAD-BEARING, not decoration. departed_ids
             # is uuid[], and with a bare bind parameter on the right Postgres
@@ -18207,7 +20170,10 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # lobby row + member rows, so the state we report cannot be mid-mutation.
     if me["status"] == "lobby" and me["series_id"] is not None:
         lrow = (await db.execute(text(
-            "SELECT l.status, l.host_player_id FROM ffa_lobbies l WHERE l.id = :lid"
+            "SELECT l.*,"
+            "       GREATEST(0.0, 60.0 - EXTRACT(EPOCH FROM (clock_timestamp() - l.settings_changed_at)))"
+            "           AS settings_lock_remaining"
+            "  FROM ffa_lobbies l WHERE l.id = :lid"
         ), {"lid": me["series_id"]})).mappings().first()
         if lrow is None or lrow["status"] != "open":
             # Start flips member rows to ready_join ATOMICALLY under the
@@ -18271,15 +20237,38 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         host_id = _ffa_effective_host(lrow["host_player_id"], live)
         now_utc = datetime.now(timezone.utc)
         await db.commit()
+        _cfg = _ffa_lobby_config(lrow)
+        # §7b: REMAINING seconds, never an absolute timestamp (#180 — client
+        # clocks are not attribution-safe). The larger of the two anchors so
+        # the countdown the host sees matches the gate Start will apply.
+        _lock_s = 0
+        if lrow["settings_changed_at"] is not None:
+            _newest_join = max((m["joined_at"] for m in live if m["joined_at"]), default=None)
+            _join_s = 0.0
+            if _newest_join is not None:
+                _join_s = max(0.0, 15.0 - (now_utc - _newest_join).total_seconds())
+            # CEILING, not int-truncation (Codex find 11): at 59.2s the
+            # truncated 0 made can_start=true while Start's own float check
+            # still 409'd — the display predicate and the gate must agree.
+            _lock_s = math.ceil(max(float(lrow["settings_lock_remaining"] or 0.0), _join_s))
         return {
             "status": "lobby",
             "lobby_id": str(me["series_id"]),
             "is_host": host_id == me["player_id"],
-            "can_start": host_id == me["player_id"] and len(live) >= FFA_MIN_PLAYERS,
+            "can_start": (host_id == me["player_id"] and len(live) >= FFA_MIN_PLAYERS
+                          and _lock_s <= 0),
             "player_count": len(live),
             "max_players": FFA_MAX_PLAYERS,
             "min_players": FFA_MIN_PLAYERS,
             "queue_count": len(live),
+            # Frozen-at-render config scalars for the settings panel (#73).
+            "score_target": _cfg["score_target"],
+            "card_candidates": _cfg["card_candidates"],
+            "initial_picks": _cfg["initial_picks"],
+            "card_cap": _cfg["card_cap"],
+            "same_card_rule": _cfg["same_card_rule"],
+            "lobby_ranked": bool(lrow["is_ranked"]) if lrow["is_ranked"] is not None else True,
+            "settings_lock_seconds": _lock_s,
             "members": [
                 {"steam_id": m["steam_id"], "display_name": m["display_name"],
                  "rating": int(round(m["rating"])) if (m["games_played"] or 0) > 0 else 0,
@@ -18293,7 +20282,8 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # Already locked → self-heal dead locks, else report the lobby.
     if me["status"] == "ready_join" and me["series_id"] is not None:
         lrow = (await db.execute(text(
-            "SELECT l.status, l.games_played FROM ffa_lobbies l WHERE l.id = :lid"
+            "SELECT l.status, l.games_played, l.player_count"
+            "  FROM ffa_lobbies l WHERE l.id = :lid"
         ), {"lid": me["series_id"]})).mappings().first()
         lock_age = ((datetime.now(timezone.utc) - me["matched_at"]).total_seconds()
                     if me["matched_at"] is not None else 0)
@@ -18308,10 +20298,32 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         zero_game_stale = (lrow is not None and lrow["status"] == "active"
                            and int(lrow["games_played"] or 0) == 0 and lock_age > 600)
         members_online = False
-        if zero_game_stale:
+        if zero_game_stale and not _in_match_evidence_trustworthy():
+            # Round-6 gate find (the last F1 hole): a FRESH process has an
+            # EMPTY presence map, so "no member pinged recently" proves
+            # nothing for ~210s after boot — this branch was cancelling a
+            # LIVE 10-minute game 1 the moment a relaunched seat polled
+            # first. Absence-based destruction defers until the evidence
+            # matures; this poll re-fires every 2-3s, so the deferral costs
+            # minutes at most (the #270 recurring-actor veto rule), and the
+            # tri-state payload below answers startup-unknown meanwhile.
+            members_online = True
+        elif zero_game_stale and _group_game_positively_live(me["series_id"]):
+            # Round-8 gate: a POSITIVE in-match heartbeat (any process age)
+            # vetoes the lobby-wide cancel outright — the pings authenticate
+            # against the FROZEN roster, so they keep arriving even when the
+            # queue rows were partially pruned by the pre-round-8 sweep.
+            members_online = True
+        elif zero_game_stale:
+            # Round-8 gate: derive peers from the FROZEN ROSTER
+            # (ffa_lobbies.member_ids), never from surviving ffa_queue rows —
+            # a pre-round-8 husk sweep could leave ONE survivor, making the
+            # surviving-row peer list empty and "everyone offline" true while
+            # pruned members were still mid-game.
             mem_sids = (await db.execute(text(
-                "SELECT steam_id FROM ffa_queue WHERE series_id = :lid"
-                "   AND steam_id <> :me"
+                "SELECT p.steam_id FROM ffa_lobbies l"
+                "  JOIN players p ON p.id = ANY(l.member_ids)"
+                " WHERE l.id = :lid AND p.steam_id <> :me"
             ), {"lid": me["series_id"], "me": steam_id})).scalars().all()
             # `steam_id <> :me` is LOAD-BEARING. This poll called
             # _presence_touch(steam_id) at its top, so including the caller
@@ -18396,7 +20408,17 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                         and (datetime.now(timezone.utc) - last_game).total_seconds() > 900
                         and not _group_game_in_progress(me["series_id"])):
                     sitting_over = True
-            elif all_polling and int(lrow["games_played"] or 0) == 0 and lock_age > 300:
+            elif (all_polling and int(lrow["games_played"] or 0) == 0 and lock_age > 300
+                  # Round-7 gate: "all polling" must mean the COMPLETE frozen
+                  # roster, not every SURVIVING row — a husk-swept roster
+                  # leaves one fresh survivor reading as "everyone". The
+                  # lobby's locked player_count is the roster cardinality.
+                  and int(mem_polls["total"] or 0) >= int(lrow["player_count"] or 0)
+                  and int(lrow["player_count"] or 0) > 0
+                  # And a live battle (positive evidence, any process age) or
+                  # a startup-unknown window vetoes the cancel outright.
+                  and _in_match_evidence_trustworthy()
+                  and not _group_game_positively_live(me["series_id"])):
                 assembly_failed = True
         if sitting_over:
             await db.execute(text(
@@ -18444,6 +20466,9 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
           FROM ffa_queue
          WHERE status = 'searching'
            AND last_polled > NOW() - INTERVAL '10 seconds'
+           AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                            WHERE pb.steam_id = ffa_queue.steam_id
+                              AND pb.unbanned_at IS NULL)
          ORDER BY joined_at
          LIMIT :maxp
          FOR UPDATE SKIP LOCKED
@@ -18546,6 +20571,29 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     return await _ffa_poll_locked_payload(db, lobby_id, steam_id)
 
 
+async def _ffa_game_in_progress_tristate(db: AsyncSession, lobby_id, lobby) -> bool | None:
+    """True / False / None(unknown) — see the payload comment below. The
+    destructive consumer (the client's rejoin refusal + leave) acts only on
+    True; None makes it wait, which is always safe."""
+    try:
+        if _group_game_positively_live(lobby_id):
+            return True
+        if _in_match_evidence_trustworthy():
+            return False
+        # Startup window. A ZERO-GAME lobby locked AFTER this process booted
+        # cannot carry a live game this process never heard about.
+        if int((lobby["games_played"] if lobby is not None else 0) or 0) == 0:
+            locked_at = (await db.execute(text(
+                "SELECT MAX(matched_at) FROM ffa_queue WHERE series_id = :lid"
+            ), {"lid": lobby_id})).scalar()
+            if locked_at is not None and locked_at > _PROCESS_STARTED_WALL:
+                return False
+        return None
+    except Exception as ex:
+        print(f"[FFA] game_in_progress tristate failed for {lobby_id}: {ex}")
+        return None   # unknown — the client waits, never destroys
+
+
 async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) -> dict:
     lobby = (await db.execute(text(
         "SELECT * FROM ffa_lobbies WHERE id = :lid"
@@ -18559,6 +20607,7 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
     """), {"lid": lobby_id})).mappings().all()
     my_slot = next((int(m["slot"]) for m in members
                     if m["steam_id"] == steam_id and m["slot"] is not None), -1)
+    _cfg = _ffa_lobby_config(lobby)
     return {
         "status": "ready_join",
         "lobby_id": str(lobby_id),
@@ -18566,6 +20615,27 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
         "room_region": lobby["region"],
         "player_count": int(lobby["player_count"] or len(members)),
         "slot": my_slot,
+        # Frozen lobby config as FLAT scalars (learning #73 — these parse for
+        # free client-side). The row is the authority; the master republishes
+        # them as room props so every client pins one identical rule set.
+        "score_target": _cfg["score_target"],
+        "card_candidates": _cfg["card_candidates"],
+        "initial_picks": _cfg["initial_picks"],
+        "card_cap": _cfg["card_cap"],
+        "same_card_rule": _cfg["same_card_rule"],
+        "lobby_ranked": bool(lobby["is_ranked"]) if "is_ranked" in lobby and lobby["is_ranked"] is not None else True,
+        # Round-4 find F1 / round-5 gate correction: a relaunched client's
+        # recovery must NOT rejoin a room whose game is LIVE. TRI-STATE
+        # (round-5: the conservative _group_game_in_progress returns True
+        # for EVERY group in the 210s post-boot window — its own docstring
+        # says veto-only, and serializing it as positive evidence made a
+        # fresh API restart dissolve every new FFA):
+        #   true  = POSITIVE heartbeat evidence -> client refuses the rejoin;
+        #   false = trustworthy absence (mature process, or a zero-game lobby
+        #           locked after this boot — no pre-restart game can exist);
+        #   null  = startup-unknown -> client neither joins nor leaves, just
+        #           polls again.
+        "game_in_progress": await _ffa_game_in_progress_tristate(db, lobby_id, lobby),
         "players": [
             {"steam_id": m["steam_id"], "display_name": m["display_name"],
              "slot": int(m["slot"]) if m["slot"] is not None else -1}
@@ -18596,11 +20666,14 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         raise HTTPException(400, "Reporter is not a participant")
     if not (report.photon_room_id or "").strip():
         raise HTTPException(400, "photon_room_id is required")
-    # FFA lobbies are ranked, period — a crafted is_ranked=false must not open
-    # an unrated-economy side channel (Codex design find 12). Clients always
-    # send true; reject rather than silently flip (the flag is HMAC-signed).
-    if not report.is_ranked:
-        raise HTTPException(400, "FFA matches are ranked")
+    # §6 casual path: the ranked AUTHORITY is the LOBBY ROW, decided below the
+    # FOR UPDATE as `rated = lobby.is_ranked AND report.is_ranked` — this
+    # early site fires before the row is loaded, so it can no longer
+    # hard-reject. A crafted is_ranked=false still cannot open an economy
+    # side channel: the server ANDs it against the row it froze at Start, and
+    # a FALSE claim against a ranked lobby only DOWNGRADES the crafter's own
+    # game to casual — quarantine-class skew, handled below. An old client
+    # always sends true, which the AND makes correct for both lobby kinds.
 
     # Winner must hold the unique round maximum.
     max_rounds = max(p.rounds_won for p in report.players)
@@ -18631,6 +20704,22 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     members = list(lobby["member_ids"] or [])
     member_set = set(members)
     reported_ids = set(id_by_steam.values())
+    # Frozen per-lobby config (migration 176) — the row's values are the
+    # authority; the report's claims and the module defaults are not.
+    _cfg = _ffa_lobby_config(lobby)
+    _score_target = _cfg["score_target"]
+    _lobby_ranked = bool(lobby["is_ranked"]) if ("is_ranked" in lobby and lobby["is_ranked"] is not None) else True
+    # The LOBBY ROW is the sole ranked authority (Codex v1.36 server review
+    # find 2): the first draft ANDed in the report's claim, which let the
+    # elected reporter — precisely the client with the most to lose — strip
+    # the Glicko block for the ENTIRE roster by flipping one signed flag.
+    # A mismatched claim is logged as skew evidence and otherwise ignored;
+    # an old client always sends true, which is simply never consulted.
+    rated = _lobby_ranked
+    if bool(report.is_ranked) != _lobby_ranked:
+        print(f"[FFA] report is_ranked={bool(report.is_ranked)} disagrees with "
+              f"lobby {lobby_uuid} (is_ranked={_lobby_ranked}) — row wins "
+              f"(reporter {report.reported_by_steam_id})")
     if lobby["status"] != "active":
         # Quarantine ONLY a report that binds to this lobby's frozen roster
         # (exact member set, reporter among them) and respects the engine's
@@ -18638,7 +20727,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         _bound = (member_set
                   and reported_ids == member_set
                   and report.reported_by_steam_id in id_by_steam
-                  and max_rounds == FFA_ROUNDS_TO_WIN)
+                  and max_rounds == _score_target)
         if _bound:
             await _quarantine_report(
                 db, mode="ffa", reason=f"lobby_{lobby['status']}", status_code=409, payload=report.model_dump(),
@@ -18663,16 +20752,32 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         if slot_by_pid.get(pid) != p.slot:
             raise HTTPException(403, f"Slot mismatch for {p.steam_id}")
     # Engine invariants (review find 2): the FFA engine ends a game at exactly
-    # FFA_ROUNDS_TO_WIN rounds, and nobody else can have reached it. A crafted
-    # "I won 20-0" body is rejected outright rather than rated.
-    if max_rounds != FFA_ROUNDS_TO_WIN:
-        raise HTTPException(400, f"winner must hold exactly {FFA_ROUNDS_TO_WIN} rounds")
-    max_pts = _ffa_max_points(len(report.players))
-    for p in report.players:
-        if p.rounds_won > FFA_ROUNDS_TO_WIN:
-            raise HTTPException(400, "round tally above the game limit")
-        if p.points_total > max_pts:
-            raise HTTPException(400, "point tally above the game limit")
+    # the lobby's frozen score target, and nobody else can have reached it.
+    # Score-SHAPE mismatches vs the row are QUARANTINED, not destroyed: the
+    # honest cause is config skew (a client that missed the score-target room
+    # prop plays to its default and reports a real game whose shape disagrees
+    # with the row — the July-30 destroyed-reports class). This runs AFTER the
+    # exact-roster + slot + HMAC binding, so it is not a capture-before-binding
+    # write primitive; a crafted score from a real roster member lands in the
+    # admin queue instead of silently vanishing either way.
+    max_pts = _ffa_max_points(len(report.players), _score_target)
+    _shape_error = None
+    if max_rounds != _score_target:
+        _shape_error = f"winner must hold exactly {_score_target} rounds"
+    elif any(p.rounds_won > _score_target for p in report.players):
+        _shape_error = "round tally above the game limit"
+    elif any(p.points_total > max_pts for p in report.players):
+        _shape_error = "point tally above the game limit"
+    if _shape_error:
+        print(f"[FFA] score-shape mismatch vs lobby {lobby_uuid} config "
+              f"(target={_score_target}): {_shape_error} — quarantining")
+        await _quarantine_report(
+            db, mode="ffa", reason="score_shape_mismatch", status_code=409,
+            payload=report.model_dump(), group_id=lobby_uuid,
+            photon_room_id=report.photon_room_id,
+            reporter_id=id_by_steam.get(report.reported_by_steam_id),
+            player_ids=list(id_by_steam.values()))
+        raise HTTPException(409, _shape_error)
     # Rate ceiling: a lobby's games are real matches taking minutes each. This
     # bounds a compromised client's fabrication rate even inside a live lobby
     # (a full server-issued per-game nonce is the next hardening step).
@@ -18691,20 +20796,23 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
         ), {"pid": pid})
 
-    # Server-side placements: (rounds desc, points desc, kills desc); ties
-    # share the same placement, COMPETITION style (1,2,2,4 — not dense; Codex
-    # design find 15). kills is the Sid-item-3 tie-break: total kill credits
-    # across the game, reported by the client outside the frozen HMAC
-    # canonical (learning #213), 0 from pre-kills clients.
+    # Server-side placements: (rounds desc, points desc); ties share the same
+    # placement, COMPETITION style (1,2,2,4 — not dense; Codex design find 15).
+    # `kills` is deliberately NOT a tie-break: it lives OUTSIDE the frozen HMAC
+    # canonical (only steam:rounds_won:points_total per player is signed), so a
+    # modified reporter could reorder placements — and therefore ratings and
+    # gold — by inventing kill counts. rounds+points decide ~99% of orderings;
+    # a genuine full tie shares the place, and the trailing _ffa_sort_key only
+    # stabilises entry ORDER, never separates a shared place. `kills` keeps its
+    # display/telemetry role untouched.
     entries = sorted(report.players,
                      key=lambda p: (-p.rounds_won, -p.points_total,
-                                    -int(getattr(p, "kills", 0) or 0),
                                     _ffa_sort_key(p.steam_id)))
     placements: dict[str, int] = {}
     prev_key = None
     prev_place = 0
     for i, p in enumerate(entries):
-        k = (p.rounds_won, p.points_total, int(getattr(p, "kills", 0) or 0))
+        k = (p.rounds_won, p.points_total)
         place = prev_place if k == prev_key else i + 1
         placements[p.steam_id] = place
         prev_key, prev_place = k, place
@@ -18718,10 +20826,22 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # Keyed on the explicit `absent` flag (a mid-game leaver at zero score is
     # absent=False and still rated — leaving early must not dodge the loss).
     # FFA exists only on the current build, so no legacy-client heuristic.
-    ghosts = {
-        p.steam_id for p in report.players
-        if p.left_early and bool(getattr(p, "absent", False))
-    }
+    # REFUTATION GUARD: `absent` is client-supplied and OUTSIDE the HMAC
+    # canonical, but rounds_won/points_total are signed — a player whose
+    # signed tally is non-zero was demonstrably present this game, so an
+    # `absent` claim against them is ignored (a modified reporter could
+    # otherwise void the real winner's entire result for ~1% cost). Logged so
+    # a refuted claim is visible evidence, not a silent correction.
+    ghosts = set()
+    for p in report.players:
+        if not (p.left_early and bool(getattr(p, "absent", False))):
+            continue
+        if p.rounds_won > 0 or p.points_total > 0:
+            print(f"[FFA] absent claim REFUTED for {p.steam_id}: signed tally "
+                  f"{p.rounds_won}r/{p.points_total}p is non-zero "
+                  f"(reporter {report.reported_by_steam_id}, room {report.photon_room_id})")
+            continue
+        ghosts.add(p.steam_id)
     # Strictly-beaten counts drive XP (a tied pair didn't beat each other).
     beaten_count = {
         p.steam_id: sum(1 for q in report.players
@@ -18730,22 +20850,54 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         for p in report.players
     }
 
+    # ── Economy meter inputs (v1.36.0, §5 of the config-lobby spec). ──
+    # battles = Σ points_total (signed — inside the HMAC canonical).
+    # elapsed is measured from SERVER receipt times only: the previous game's
+    # ended_at (or lobby activation for game 1), never the client-supplied
+    # started_at/duration. GREATEST + floor guards the admin-replay case where
+    # a re-inserted historical row leaves MAX(ended_at) in the future
+    # (monotonic guard — elapsed can never go negative or absurdly small).
+    _n_live_meter = len(report.players) - len(ghosts)
+    battles_total = sum(max(0, int(p.points_total)) for p in report.players)
+    _max_prior_end = (await db.execute(text(
+        "SELECT MAX(ended_at) FROM ffa_matches WHERE lobby_id = :lid"
+    ), {"lid": lobby_uuid})).scalar()
+    _anchor_candidates = [t for t in (lobby["created_at"], _max_prior_end) if t is not None]
+    # ONE post-lock DB clock for BOTH the elapsed computation and the stored
+    # ended_at (Codex find 4): the first draft measured elapsed with a
+    # post-wait wall clock but stored NOW() — PostgreSQL's TRANSACTION-START
+    # time, frozen before this request waited on the lobby lock. Queued
+    # reports would each re-count their predecessors' lock/processing time as
+    # payable elapsed, defeating the pace ceiling. clock_timestamp() here runs
+    # after the FOR UPDATE above, and the identical value is bound into the
+    # INSERT, so the next report's anchor is exactly this report's meter end.
+    _now_dt = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
+    _anchor = max(_anchor_candidates) if _anchor_candidates else _now_dt
+    elapsed_seconds = max(30.0, (_now_dt - _anchor).total_seconds())
+    _sec_per_battle = _ffa_sec_per_battle(max(2, _n_live_meter))
+    paid_battles = min(float(battles_total),
+                       elapsed_seconds * FFA_PACE_HEADROOM / _sec_per_battle)
+
     match_id = uuid.uuid4()
     n = len(report.players)
     try:
         await db.execute(text("""
             INSERT INTO ffa_matches (id, lobby_id, photon_room_id, player_count, winner_id,
                 duration_seconds, game_version, region, hmac_signature, reported_by,
-                is_ranked, started_at, ended_at, timeline)
-            VALUES (:id, :lid, :room, :n, :win, :dur, :gv, :reg, :hmac, :rep, :ranked, :started, NOW(), :tl)
+                is_ranked, started_at, ended_at, timeline,
+                battles_total, paid_battles, elapsed_seconds)
+            VALUES (:id, :lid, :room, :n, :win, :dur, :gv, :reg, :hmac, :rep, :ranked, :started, :endts, :tl,
+                :bt, :pb, :es)
         """), {"id": match_id, "lid": lobby_uuid, "room": (report.photon_room_id or "")[:64],
                "n": n, "win": id_by_steam[report.winner_steam_id],
                "dur": report.match_duration, "gv": (report.game_version or "")[:32] or None,
                "reg": (report.region or "")[:8] or None,
                "hmac": (report.hmac_signature or "")[:160] or None,
                "rep": id_by_steam.get(report.reported_by_steam_id),
-               "ranked": bool(report.is_ranked), "started": report.started_at,
-               "tl": (report.timeline or "")[:2000] or None})
+               "ranked": rated, "started": report.started_at,
+               "tl": (report.timeline or "")[:2000] or None,
+               "bt": battles_total, "pb": round(paid_battles, 2),
+               "es": int(elapsed_seconds), "endts": _now_dt})
     except IntegrityError as ie:
         await db.rollback()
         # Only the room-id unique means "replay" — any OTHER integrity error
@@ -18781,7 +20933,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # ── Pairwise Glicko (pre-match snapshots for everyone). ──
     rating_changes: dict[str, float] = {}
     pre: dict[str, tuple[float, float, float]] = {}
-    if report.is_ranked:
+    if rated:
         # Glicko rows sorted FOR UPDATE (after the players pass).
         for pid in sorted(reported_ids, key=str):
             await db.execute(text(
@@ -18818,7 +20970,15 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                          else 0.0 if my_place > placements[q.steam_id] else 0.5)
                 opponents.append((pre[q.steam_id][0], pre[q.steam_id][1], score))
             old_r, old_rd, old_vol = pre[p.steam_id]
-            new_r, new_rd, new_vol = calculate_new_rating(old_r, old_rd, old_vol, opponents)
+            # w(N) = min(1, (N-1)/4): a game to a shorter score target carries
+            # less information, so it counts as a fraction of a game (§5e —
+            # scales variance AND update). N=5 (today's default) gives w=1.0,
+            # byte-identical to the unweighted path; clamped at 1.0 above N=5
+            # so grinding long lobbies is never the rating-efficient path.
+            _wN = min(1.0, (_score_target - 1) / 4.0)
+            new_r, new_rd, new_vol = calculate_new_rating(
+                old_r, old_rd, old_vol, opponents,
+                weights=([_wN] * len(opponents)) if _wN < 1.0 else None)
             rating_changes[p.steam_id] = round(new_r - old_r, 1)
             pid = id_by_steam[p.steam_id]
             await db.execute(text("""
@@ -18837,8 +20997,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                    "w": 1 if my_place == 1 else 0, "t3": 1 if my_place <= 3 else 0,
                    "pl": my_place})
 
-    # ── XP + gold: base + per-opponent-beaten, x1.5 for the win; atomic
-    # UPDATE..RETURNING (#148), canonical str(pid) award order (#197). ──
+    # ── XP + gold: battles × players meter (v1.36.0). The per-player pool is
+    # rate(P) × paid_battles × placement-shape × tier-factor, split 45% XP /
+    # 55% flat gold; atomic UPDATE..RETURNING (#148), canonical str(pid)
+    # award order (#197). ──
     award_info: dict[str, tuple[int, int]] = {}
     by_steam = {p.steam_id: p for p in report.players}
     for pid in sorted(reported_ids, key=str):
@@ -18847,21 +21009,24 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             continue   # no XP/gold for games they never played
         place = placements[sid_]
         beaten = beaten_count.get(sid_, 0)
-        # Round-2 review find 10: scale by players actually IN this game —
-        # roster ghosts must not inflate a 3-live-player win to x5.
+        # Round-2 review find 10 + §5c correction 5: scale by players actually
+        # IN this game — roster ghosts must not inflate the rate OR reach the
+        # pace ceiling by roster padding.
         n_live = len(report.players) - len(ghosts)
-        # Opponent-tier multiplier (bug #117 audit item: every other mode has
-        # one, FFA had none — beating a 2300-rated field paid the same as
-        # beating four 1200s). Mean pre-match rating of the LIVE opponents.
-        # `pre` is only populated for ranked games, so an unranked FFA takes
-        # x1.0 rather than _tier_mult_for(None)'s x1.5 — no tier bonus where
-        # there are no ratings to earn it against.
+        # Opponent-tier factor, NORMALISED to the x1.5 calibration field:
+        # FFA_G_PER_PLAYER_MIN is calibrated "at tier x1.5" (the default-1500
+        # field — learning #258), so the typical ranked lobby takes factor 1.0
+        # and a Grand-Master field roughly doubles the rate. `pre` is only
+        # populated for ranked games, so an unranked FFA takes tier 1.0 →
+        # factor ≈0.67, preserving "casual pays less than ranked".
         opp_ratings = [pre[s][0] for s in pre
                        if s != sid_ and s not in ghosts]
         tier_mult = (_tier_mult_for(sum(opp_ratings) / len(opp_ratings))[0]
                      if opp_ratings else 1.0)
-        xp = int((FFA_MATCH_XP_BASE + FFA_XP_PER_BEATEN * beaten)
-                 * _ffa_place_mult(place, beaten, n_live) * tier_mult)
+        pool = (_ffa_battle_rate(n_live) * paid_battles
+                * _ffa_pool_shape(place, beaten, n_live)
+                * (tier_mult / 1.5))
+        xp = max(FFA_MIN_XP, int(round(pool * FFA_XP_SHARE * 100)))
         row = (await db.execute(text(
             "UPDATE players SET total_xp = COALESCE(total_xp,0) + :xp,"
             "       ffa_xp_earned = COALESCE(ffa_xp_earned,0) + :xp"
@@ -18871,7 +21036,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         new_xp = row["new_xp"] if row else xp
         old_xp = row["old_xp"] if row else 0
         gold_delta = max(0, (new_xp // 100) - (old_xp // 100))
-        place_gold = _ffa_place_gold(place, beaten, n_live)
+        # Flat 55% half, FLOORED AT 1g (§5c correction 3): the ffa_placement
+        # ledger row is the back-pay idempotency marker, so a live player must
+        # ALWAYS produce one — a zero-rounded payout would suppress the row
+        # and a later 164 rerun would back-pay this game at the legacy rate.
+        place_gold = max(1, int(round(pool * (1.0 - FFA_XP_SHARE))))
         # Level-reward gold (bug #117 audit item: `_maybe_grant_level_rewards`
         # is called from submit_match and inlined in the 2v2 path, but FFA had
         # NO level rewards at all — an FFA-only player banked nothing for
@@ -18926,10 +21095,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                # no damage) into "not reported" and quietly drop real zeros out of
                # the average. The schema default is already None for old clients.
                "dmg": getattr(p, "damage_dealt", None),
-               # Roster ghost: held the slot but did not play THIS game. The
-               # report always sent it; the row never stored it, so those
-               # all-zero rows were dragging down the new per-game averages.
-               "absent": bool(getattr(p, "absent", False)),
+               # Roster ghost: held the slot but did not play THIS game.
+               # Persist the EFFECTIVE decision (the refutation-filtered
+               # ghosts set), not the raw client claim — a refuted absent
+               # flag stored as true would exclude a real winner's played
+               # row from every profile aggregate while their glicko
+               # games_played still counted the game (Codex v1.36 find 7).
+               "absent": p.steam_id in ghosts,
                "dmgtl": (getattr(p, "damage_dealt_timeline", None) or None),
                "killtl": (getattr(p, "kill_timeline", None) or None),
                "pl": placements[p.steam_id], "le": bool(p.left_early),
@@ -18948,7 +21120,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # (a real game never exceeds a few dozen picks) and strip control
         # characters, which otherwise reach TMP as literal line breaks and
         # wreck row-height estimates and tooltips.
-        for i, c in enumerate((p.cards or [])[:64]):
+        # 128, not 64 (Codex find 9): a 10-player first-to-10 legitimately
+        # produces up to ~90 picks for a busy non-winner — 64 truncated valid
+        # target-10 games. Sized above the structural max with slack.
+        for i, c in enumerate((p.cards or [])[:128]):
             nm = getattr(c, "card_name", None)
             if not nm:
                 continue
@@ -18967,6 +21142,23 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 "rl": bool(getattr(c, "rolled", False)),
                 "o": getattr(c, "pick_order", i) or i,
                 "rn": getattr(c, "round_number", None)})
+        # Offered candidates (§10 baseline; migration 178). Same trust posture
+        # as the picks list: outside the canonical, so row-capped and
+        # control-stripped. 512 covers the structural max (~90 draws × 5
+        # candidates = 450 in a 10-player first-to-10 — Codex find 9).
+        for off in (getattr(p, "card_offers", None) or [])[:512]:
+            onm = getattr(off, "card_name", None)
+            if not onm:
+                continue
+            onm_clean = "".join(
+                " " if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F
+                        or ord(ch) in (0x2028, 0x2029)) else ch
+                for ch in str(onm))
+            await db.execute(text(
+                "INSERT INTO ffa_card_offers (match_id, player_id, round_number,"
+                " card_name, was_picked) VALUES (:m, :p, :rn, :c, :w)"
+            ), {"m": match_id, "p": pid, "rn": int(getattr(off, "round_number", 1) or 1),
+                "c": onm_clean[:64], "w": bool(getattr(off, "was_picked", False))})
 
     # Settle FFA bets. Codex round-2 review finds 3+4: keyed by the game's
     # REAL identity (the _rN suffix inside the HMAC-covered room id), never
@@ -19077,15 +21269,18 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
     surface (placements, rounds, rating deltas, cards, telemetry) — the
     'Recent Ranked FFAs' panel feed. Browsable by anyone, like
     /team/all-series-paged."""
+    # §6: casual (unranked-lobby) games stay out of the RANKED recent panel —
+    # the docstring has always promised "Recent ranked FFA matches"; until the
+    # casual path existed the filter was vacuously true.
     total = (await db.execute(text(
-        "SELECT COUNT(*) FROM ffa_matches WHERE invalidated_at IS NULL"
+        "SELECT COUNT(*) FROM ffa_matches WHERE invalidated_at IS NULL AND is_ranked"
     ))).scalar() or 0
     matches = (await db.execute(text("""
         SELECT m.id, m.photon_room_id, m.player_count, m.duration_seconds,
                m.ended_at, m.is_ranked, m.timeline, pw.steam_id AS winner_steam
           FROM ffa_matches m
           LEFT JOIN players pw ON pw.id = m.winner_id
-         WHERE m.invalidated_at IS NULL
+         WHERE m.invalidated_at IS NULL AND m.is_ranked
          ORDER BY m.ended_at DESC
          LIMIT :lim OFFSET :off
     """), {"lim": page_size, "off": page * page_size})).mappings().all()
@@ -19176,21 +21371,98 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
 # RD<=150 down to 1.0 at RD>=350 — the 1.10x floor then rejects the bet
 # outright, same anti-smurf posture as 1v1.
 
-def _ffa_field_odds(field: list[tuple[str, float, float]]) -> dict[str, float]:
+def _ffa_race_probs(shares: list[float], target: int) -> list[float]:
+    """P(player i banks `target` points first) when each point's winner is
+    iid categorical with the given shares. EXACT via the Poisson-race
+    embedding: superpose points as a unit-rate Poisson process thinned by the
+    shares — the thinned processes are INDEPENDENT and the discrete winner
+    sequence is identical in law, so
+        P_i = ∫ Gamma(target, q_i).pdf(t) · Π_{j≠i} P(N_j(t) < target) dt.
+    This is the §8b fix: single-encounter expectancy compresses toward 1/n,
+    but the true probability of winning a first-to-N RACE does not — a
+    1.5x-per-point favourite in a 6-player lobby wins first-to-5 at ~0.66
+    while the flat share prices it at 0.23 (a repeatable +33-40% EV leak for
+    anyone backing favourites, growing with N)."""
+    n = len(shares)
+    tot = sum(shares) or 1e-9
+    q = [max(1e-9, s / tot) for s in shares]
+    tgt = max(1, int(target))
+    # Grid over the merged process time. The race ALWAYS ends within
+    # n·(tgt−1)+1 point arrivals (pigeonhole), and merged arrivals run at unit
+    # rate, so t beyond ~2·n·tgt is unreachable — bound t_max structurally,
+    # NEVER from min(q): a near-zero share would stretch the grid by orders of
+    # magnitude and the real contenders' mass would fall between grid points.
+    t_max = 2.0 * n * tgt + 20.0
+    steps = 600
+    dt = t_max / steps
+    lam = [[qi * (k + 0.5) * dt for k in range(steps)] for qi in q]   # q_i * t
+    # Poisson survival S_j(t) = P(N_j(t) <= target-1), per player per grid pt.
+    surv = []
+    for j in range(n):
+        col = []
+        for k in range(steps):
+            x = lam[j][k]
+            term = math.exp(-x)
+            acc = term
+            for m in range(1, tgt):
+                term *= x / m
+                acc += term
+            col.append(acc)
+        surv.append(col)
+    fact = math.factorial(tgt - 1)
+    probs = []
+    for i in range(n):
+        acc = 0.0
+        for k in range(steps):
+            x = lam[i][k]
+            # Gamma(target, rate q_i) pdf at t = q_i * x^(tgt-1) e^-x / (tgt-1)!
+            pdf = q[i] * (x ** (tgt - 1)) * math.exp(-x) / fact
+            prod = 1.0
+            for j in range(n):
+                if j != i:
+                    prod *= surv[j][k]
+            acc += pdf * prod * dt
+        probs.append(acc)
+    s = sum(probs) or 1e-9
+    return [p / s for p in probs]
+
+
+# Odds cache (Codex v1.36 review find 10): the race integral costs ~9ms for a
+# worst-case 10-player/target-10 field and /ffa/bettable is unauthenticated on
+# the 150/10s bucket — twenty uncached fields could eat the single worker.
+# Keyed on the exact inputs; single-process state is safe here (#125's
+# single-worker invariant is enforced by the compose command override).
+_FFA_ODDS_CACHE: dict = {}
+_FFA_ODDS_CACHE_AT: dict = {}
+_FFA_ODDS_CACHE_TTL = 5.0
+
+
+def _ffa_field_odds(field: list[tuple[str, float, float]],
+                    score_target: int = 5) -> dict[str, float]:
     """field = [(steam_id, rating, rd)] for the full roster. Returns
-    steam_id -> payout multiplier (uncapped by lobby size here; caller caps)."""
+    steam_id -> payout multiplier (uncapped by lobby size here; caller caps).
+    score_target is the lobby's first-to-N — the race length changes true win
+    probabilities materially (§8b), so it is part of the price."""
     n = len(field)
     if n < 2:
         return {s: 1.01 for s, _, _ in field}
-    strengths: dict[str, float] = {}
-    for i, (sid_i, r_i, rd_i) in enumerate(field):
-        acc = 0.0
-        for j, (sid_j, r_j, rd_j) in enumerate(field):
-            if i == j:
-                continue
-            acc += _glicko_expectancy(r_i, rd_i, r_j, rd_j)
-        strengths[sid_i] = max(1e-6, acc / (n - 1))
-    total = sum(strengths.values()) or 1e-6
+    _ck = (int(score_target or 5),
+           tuple(sorted((s, round(r, 1), round(rd, 1)) for s, r, rd in field)))
+    _now_mono = time.monotonic()
+    if _ck in _FFA_ODDS_CACHE and _now_mono - _FFA_ODDS_CACHE_AT.get(_ck, 0.0) < _FFA_ODDS_CACHE_TTL:
+        return dict(_FFA_ODDS_CACHE[_ck])
+    # Per-point win shares are BRADLEY-TERRY strengths derived from rating
+    # directly: s_i = 10^(r_i/400), so pairwise p_ij = s_i/(s_i+s_j) — the
+    # Luce/categorical model the Poisson race actually assumes. The first
+    # draft fed it MEAN PAIRWISE EXPECTANCIES, which are Borda-like scores,
+    # not shares — that compressed a true 66% favourite to p≈0.41 and left a
+    # reproducible +33% EV on backing favourites (Codex find 3, with the
+    # exact-DP verification). RD does not enter the strength — uncertainty is
+    # priced by the cap ramp below, exactly as before.
+    r_ref = min(r for _, r, _ in field)
+    strengths_l: list[float] = [pow(10.0, (r - r_ref) / 400.0) for _, r, _ in field]
+    race = _ffa_race_probs(strengths_l, max(1, int(score_target or 5)))
+    race_by_sid = {sid: race[i] for i, (sid, _, _) in enumerate(field)}
     mults: dict[str, float] = {}
     full_cap = min(FFA_ODDS_MAX, n / 2.0)
     # Sid's ask: "minimum odds 2x for 5+ people games". A floor RAISES what the
@@ -19201,8 +21473,17 @@ def _ffa_field_odds(field: list[tuple[str, float, float]]) -> dict[str, float]:
     # house-edge check below the function.
     floor = FFA_ODDS_MIN_LARGE if n >= 5 else FFA_ODDS_MIN_SMALL
     for sid_i, r_i, rd_i in field:
-        p = strengths[sid_i] / total
+        p = race_by_sid[sid_i]
         raw = 1.0 / max(1e-6, 2.0 * p)
+        # EV-SAFE floor (Codex find 3, second half): a hard 2.0 floor on a
+        # player whose TRUE race probability exceeds 0.5 pays out more than
+        # fair — a structural money printer no share model can fix. The floor
+        # therefore yields to 0.95/p (a guaranteed >=5% house margin) for
+        # probable winners; longshots — the floor's actual purpose — keep the
+        # full 2.0 because 0.95/p is enormous there. Sid's "minimum 2x at 5+"
+        # was set when favourites were mispriced at ~0.24; a 2x payout on a
+        # 66% favourite is +33% EV per bet, forever, to anyone who notices.
+        eff_floor = min(floor, 0.95 / max(1e-6, p))
         other_rds = [rd for s, _, rd in field if s != sid_i]
         field_rd = (sum(other_rds) / len(other_rds)) if other_rds else rd_i
         # OWN RD dominates the cap (was: max(own, field mean), which let a
@@ -19221,9 +21502,16 @@ def _ffa_field_odds(field: list[tuple[str, float, float]]) -> dict[str, float]:
         else:
             cap = 1.0 + (full_cap - 1.0) * (350.0 - rd_eff) / 200.0
         # The floor must never be squeezed out by a low cap in an uncertain
-        # field, or "minimum 2x at 5+" would silently not hold.
-        cap = max(cap, floor)
-        mults[sid_i] = max(floor, min(raw, cap))
+        # field, or "minimum 2x at 5+" would silently not hold (for the
+        # longshots it exists for — the EV-safe eff_floor governs favourites).
+        cap = max(cap, eff_floor)
+        mults[sid_i] = max(eff_floor, min(raw, cap))
+    _FFA_ODDS_CACHE[_ck] = dict(mults)
+    _FFA_ODDS_CACHE_AT[_ck] = _now_mono
+    # Bound the cache (rotating lobbies would grow it forever).
+    if len(_FFA_ODDS_CACHE) > 200:
+        _FFA_ODDS_CACHE.clear()
+        _FFA_ODDS_CACHE_AT.clear()
     return mults
 
 
@@ -19332,12 +21620,21 @@ async def _settle_ffa_bets_for_game(db: AsyncSession, lobby_id, game_no: int, wi
     ), {"lid": lobby_id, "g": game_no})).mappings().all()
     n = 0
     for b in open_bets:
-        pay = (int(round(b["amount"] * float(b["odds_multiplier"])))
-               if b["bet_on_player_id"] == winner_pid else 0)
+        # FLOOR, never round (Codex round-3 find 11): the odds already carry
+        # the continuous 0.95/p EV cap, but round(1 × 1.58) = 2 re-opens a
+        # +20% EV edge on 1g favourite bets. Floor keeps the discrete payout
+        # under the continuous bound at every stake; the sub-1g remainder is
+        # the house's.
+        # Arithmetic stays DECIMAL end-to-end (round-4 find 4): the NUMERIC
+        # column arrives as decimal.Decimal, and converting to binary float
+        # first turns 25 × 1.16 into 28.999999999999996 — a 1g underpay.
+        # int() on a positive Decimal truncates, which IS the floor here.
+        won = b["bet_on_player_id"] == winner_pid
+        pay = int(b["amount"] * b["odds_multiplier"]) if won else 0
         claimed = (await db.execute(text(
-            "UPDATE ffa_bets SET payout = :p, settled_at = NOW()"
+            "UPDATE ffa_bets SET payout = :p, settled_at = NOW(), settlement_kind = :k"
             " WHERE id = :bid AND settled_at IS NULL RETURNING id"
-        ), {"p": pay, "bid": b["id"]})).scalar()
+        ), {"p": pay, "k": "won" if won else "lost", "bid": b["id"]})).scalar()
         if claimed is None:
             continue   # another pass got here first — it also moved the gold
         n += 1
@@ -19373,7 +21670,8 @@ async def _refund_ffa_lobby_bets(db: AsyncSession, lobby_id, reason: str, game_n
             n = 0
             for b in rows:
                 claimed = (await db.execute(text(
-                    "UPDATE ffa_bets SET payout = amount, settled_at = NOW()"
+                    "UPDATE ffa_bets SET payout = amount, settled_at = NOW(),"
+                    " settlement_kind = 'refunded'"
                     " WHERE id = :bid AND settled_at IS NULL RETURNING id"
                 ), {"bid": b["id"]})).scalar()
                 if claimed is None:
@@ -19441,10 +21739,14 @@ async def ffa_bettable(steam_id: str = Query(""), db: AsyncSession = Depends(get
     requester is a member of are flagged (client hides the buttons)."""
     lobbies = (await db.execute(text("""
         SELECT l.id, l.member_ids, l.departed_ids, l.player_count, l.games_played,
-               l.created_at,
+               l.created_at, l.score_target,
                (SELECT MAX(m.ended_at) FROM ffa_matches m
                  WHERE m.lobby_id = l.id AND m.invalidated_at IS NULL) AS last_game_at
-          FROM ffa_lobbies l WHERE l.status = 'active'
+          FROM ffa_lobbies l
+         WHERE l.status = 'active'
+           AND l.is_ranked          -- §6: no betting on casual lobbies (odds
+                                    -- are rating-derived; a casual sitting has
+                                    -- no rating stakes to price)
          ORDER BY l.created_at DESC LIMIT 20
     """))).mappings().all()
     me = None
@@ -19469,7 +21771,7 @@ async def ffa_bettable(steam_id: str = Query(""), db: AsyncSession = Depends(get
             continue
         field_rows = await _ffa_lobby_field(db, live_ids)
         field = [(f["steam_id"], f["rating"], f["rd"]) for f in field_rows]
-        mults = _ffa_field_odds(field)
+        mults = _ffa_field_odds(field, _ffa_lobby_config(l)["score_target"])
         next_game = int(l["games_played"] or 0) + 1
         already = False
         if me is not None:
@@ -19539,6 +21841,7 @@ async def place_ffa_bet(
     # key column.
     lobby = (await db.execute(text(
         "SELECT id, status, member_ids, departed_ids, games_played, created_at,"
+        "       score_target, is_ranked,"
         "       (SELECT MAX(m.ended_at) FROM ffa_matches m"
         "         WHERE m.lobby_id = ffa_lobbies.id AND m.invalidated_at IS NULL) AS last_game_at"
         "  FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
@@ -19547,6 +21850,10 @@ async def place_ffa_bet(
         raise HTTPException(status_code=404, detail="Lobby not found")
     if lobby["status"] != "active":
         raise HTTPException(status_code=409, detail="Lobby is not active")
+    if not bool(lobby["is_ranked"] if lobby["is_ranked"] is not None else True):
+        # §6: the listing filters casual lobbies, and the POST must agree with
+        # the listing rather than trust it (same-predicate rule, wave-5 find 6).
+        raise HTTPException(status_code=409, detail="Casual lobbies are not bettable")
     if not _ffa_lobby_is_live(lobby):
         raise HTTPException(status_code=409, detail="Betting closed - this sitting has ended")
     if not _ffa_bet_window_open(lobby):
@@ -19579,7 +21886,7 @@ async def place_ffa_bet(
         raise HTTPException(status_code=409, detail="Already bet on this game")
 
     field = [(f["steam_id"], f["rating"], f["rd"]) for f in field_rows]
-    mult = _ffa_field_odds(field).get(bet_on_steam_id, 1.01)
+    mult = _ffa_field_odds(field, _ffa_lobby_config(lobby)["score_target"]).get(bet_on_steam_id, 1.01)
     if mult < 1.10:
         raise HTTPException(status_code=409,
             detail="Bets restricted — odds offer no meaningful profit (ratings still uncertain)")
@@ -19604,9 +21911,13 @@ async def place_ffa_bet(
     """), {"lid": lid, "g": game_number, "pid": bettor.id,
            "target": target["player_id"], "amt": amount, "mult": round(mult, 2)})
     await db.commit()
+    # The quote must be EXACTLY what settlement will pay (round-4 find 3):
+    # settlement floors the STORED 2-decimal odds in decimal arithmetic, so
+    # the quote does the same — never round(), never the raw float mult.
+    _stored_mult = _decimal.Decimal(str(round(mult, 2)))
     return {"status": "placed", "game_number": game_number, "amount": amount,
             "odds_multiplier": round(mult, 2),
-            "potential_payout": int(round(amount * mult))}
+            "potential_payout": int(_decimal.Decimal(amount) * _stored_mult)}
 
 
 # ── Per-player mode histories (Sid round-2 item 8) ──────────────────────────
@@ -19769,6 +22080,11 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         raise HTTPException(400, "winner_team disagrees with rounds")
     if report.photon_room_id and "offline" in report.photon_room_id.lower():
         raise HTTPException(400, "Offline matches are not recorded")
+    # Round-20 find 4 companion (mirrors the ovt sink): an empty/NULL room
+    # bypasses uq_team_match's dedup (Postgres NULLS DISTINCT, #147). The
+    # client always sends a per-game-suffixed room; enforce it.
+    if not (report.photon_room_id or "").strip():
+        raise HTTPException(400, "photon_room_id is required")
 
     # Series must exist and be active. Lock to prevent advance races.
     # Lock order (learning #197 / Codex batch finding 5): this FOR UPDATE must
@@ -19890,6 +22206,23 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                           series["t2a_id"], series["t2b_id"]}
     if {p_t1a.id, p_t1b.id, p_t2a.id, p_t2b.id} != _series_member_set:
         raise HTTPException(403, "Report players must be exactly the series roster")
+    # Round-20 find 4: bind the report to the sitting's issued room. The
+    # client's report room is "<room>_<token>_r<total>" (BuildReportRoomId)
+    # while the series stores the raw issued room, so the relation is
+    # PREFIX, not equality. The series room is read from the CURRENT row —
+    # a legacy dc_paused resume re-issues the room AND rewrites the stored
+    # value, so live sittings always match. NULL stored room (pre-issuance
+    # legacy rows) falls through.
+    _series_room = (series["photon_room_id"] or "").strip()
+    # Full suffix grammar, not a bare prefix (round-21 find 2): startswith
+    # would alias raw room "R_x" against stored room "R". BuildReportRoomId
+    # emits exactly "<raw-room>_<6-digit token>_r<total>" (token = shared
+    # game token, or HHmmss fallback — both always 6 digits; verified
+    # against 100% of organic prod rows in both team_ and ovt_ tables).
+    if _series_room and not _re.fullmatch(
+            _re.escape(_series_room) + r"_\d{6}_r\d+",
+            (report.photon_room_id or "")):
+        raise HTTPException(400, "Report room does not match the series room")
     # 2v2 reporter clearly has the mod installed.
     await _mark_mod_seen(db, reporter)
 
@@ -19906,6 +22239,15 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         client_t1_set = frozenset([p_t1a.id, p_t1b.id])
         server_t1_set = frozenset([series["t1a_id"], series["t1b_id"]])
         if client_t1_set != server_t1_set:
+            # PARTITION-preserving only (round-19 find 4): ROUNDS' in-game
+            # teamID legitimately swaps SIDES and within-team a/b order, so
+            # the client's t1 pair may equal the server's t2 pair — but a
+            # report whose pairs match NEITHER stored pair is a different
+            # PARTITION (A+C vs B+D), and realigning to it would rewrite the
+            # continuation gate's own ground truth. Reject it instead.
+            server_t2_set = frozenset([series["t2a_id"], series["t2b_id"]])
+            if client_t1_set != server_t2_set:
+                raise HTTPException(400, "Report team split does not match the series partition")
             await db.execute(
                 text("""UPDATE team_series
                        SET t1a_id=:t1a, t1b_id=:t1b, t2a_id=:t2a, t2b_id=:t2b
@@ -19920,6 +22262,22 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
             )
             series = s_q2.mappings().first()
             print(f"[TEAM-MATCH] series {series_uuid} slots realigned to client grouping")
+    else:
+        # Round-20 find 3: the partition gate must hold for EVERY match, not
+        # just the 0-0 realign — a mid-series report could otherwise carry
+        # an A+C-vs-B+D split past the set-only roster check and drive the
+        # positional wins/economy paths with a partition the series never
+        # had. Compare against the CURRENT stored slots, NOT match 1's
+        # grouping: the between-matches auto-balance (weakest-winner swap)
+        # legitimately rewrites the slots mid-series, so "frozen since match
+        # 1" would 400 every post-rebalance report. Side order may swap
+        # (in-game teamID), so client t1 matching EITHER stored pair is a
+        # valid same-partition report.
+        client_t1_set = frozenset([p_t1a.id, p_t1b.id])
+        server_t1_set = frozenset([series["t1a_id"], series["t1b_id"]])
+        server_t2_set = frozenset([series["t2a_id"], series["t2b_id"]])
+        if client_t1_set != server_t1_set and client_t1_set != server_t2_set:
+            raise HTTPException(400, "Report team split does not match the series partition")
 
     # Insert team_matches row. is_ranked is server-authoritative for 2v2 since
     # the team_series row was created by /queue/poll's lock — by definition
@@ -20150,10 +22508,11 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     # double-pay.
                     claimed = (await db.execute(text("""
                         UPDATE team_bets
-                           SET settled_at = NOW(), payout = :p
+                           SET settled_at = NOW(), payout = :p, settlement_kind = :k
                          WHERE id = :id AND settled_at IS NULL
                         RETURNING id
-                    """), {"p": payout, "id": b["id"]})).scalar()
+                    """), {"p": payout, "k": "won" if won else "lost",
+                           "id": b["id"]})).scalar()
                     if claimed is None:
                         continue
                     if payout > 0:
