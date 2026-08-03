@@ -260,20 +260,44 @@ namespace CompetitiveRounds
         public static int PointsTotalFor(int teamId) { return pointsTotal.TryGetValue(teamId, out var v) ? v : 0; }
         public static int KillsFor(int teamId) { return kills.TryGetValue(teamId, out var v) ? v : 0; }
 
+        /// <summary>Kills as used for ORDERING, saturated at the report bound.
+        /// Full-wipe battles advance no point, so raw kills are structurally
+        /// unbounded — any transport cap below the ceiling would let the
+        /// client order 2001-vs-2000 while the signed report carries a tie
+        /// (Codex Aug-3 r2 find 3). Making saturation part of the RULE keeps
+        /// client and server placement identical by definition: above the
+        /// bound, kills compare equal everywhere. Display keeps raw counts.</summary>
+        public const int KillsCompareCap = 2000;
+        public static int KillsRankFor(int teamId)
+        {
+            int k = KillsFor(teamId);
+            return k > KillsCompareCap ? KillsCompareCap : k;
+        }
+
         /// <summary>Placement order: points (rounds) desc, then ALL half
-        /// points earned incl. spent ones (pointsTotal) desc. 0 = tied
+        /// points earned incl. spent ones (pointsTotal) desc, then KILLS desc
+        /// (the second tie-break — Sid approved 2026-08-03). 0 = tied
         /// placement (shares a place, competition ranking). Used by the
-        /// game-over placement, the report payload ordering and the score HUD.
-        /// Kills are deliberately NOT a tie-break any more — they ride
-        /// outside the signed HMAC canonical, so the server stopped honoring
-        /// them for placement (a forged kill count could reorder ratings);
-        /// this mirror keeps the client's displayed placement identical to
-        /// what the server rates. Kills remain display/telemetry only.</summary>
+        /// game-over placement and the pairwise session records. Kills may
+        /// rank here because this build SIGNS them in the v2 ffa: canonical —
+        /// "signed" means the value is attributable to the reporting build
+        /// (same trust class as rounds/points, which the reporter equally
+        /// attests), NOT proof of gameplay truth. Server honors the kills
+        /// tie-break only when the WHOLE roster advertised a v2-signing build
+        /// at lobby lock, so in a mixed-version lobby this local mirror can
+        /// split a tie the server shares. That divergence PERSISTS locally
+        /// (the "placed #N" toast, session placements CSV and pairwise W/L
+        /// are written before the report and only the elected reporter ever
+        /// sees the server response — Codex Aug-3 r2 find 5): session-scoped
+        /// display and local tallies only, never ratings/gold, and the window
+        /// closes at the MIN_MOD_VERSION raise.</summary>
         public static int ComparePlacement(int teamA, int teamB)
         {
             int c = RoundsFor(teamB).CompareTo(RoundsFor(teamA));
             if (c != 0) return c;
-            return PointsTotalFor(teamB).CompareTo(PointsTotalFor(teamA));
+            c = PointsTotalFor(teamB).CompareTo(PointsTotalFor(teamA));
+            if (c != 0) return c;
+            return KillsRankFor(teamB).CompareTo(KillsRankFor(teamA));
         }
 
         // ── Damage dealt + per-player timelines (bug #127 / #130) ────────
@@ -400,25 +424,33 @@ namespace CompetitiveRounds
             return pickHistory.TryGetValue(teamId, out var v) ? v : new List<MatchTracker.CardPickData>();
         }
 
-        /// <summary>Current overall leader (rounds, then points) or null on a
-        /// tie/no score. Used by the crown patch.</summary>
+        /// <summary>Current overall leader (rounds, then LIVE points, then
+        /// kills) or null on a full tie/no score. Used by the crown patch.
+        /// DELIBERATE divergence from ComparePlacement (Codex Aug-3 find 5):
+        /// the crown tracks the CURRENT round standing via PointsFor (live,
+        /// spendable), not the placement-authoritative PointsTotalFor — the
+        /// mid-game crown answers "who is winning right now", not "who would
+        /// place first if the game ended". The zero-score guard also means a
+        /// kills-only leader (0 rounds, 0 live points) shows no crown; both
+        /// are display-only and never feed the report.</summary>
         public static Player CurrentLeader()
         {
             try
             {
                 if (PlayerManager.instance == null) return null;
                 Player best = null;
-                int bestR = -1, bestP = -1;
+                int bestR = -1, bestP = -1, bestK = -1;
                 bool tie = false;
                 foreach (var p in PlayerManager.instance.players)
                 {
                     if (p == null || p.gameObject == null || p.data == null) continue;
-                    int r = RoundsFor(p.TeamID), pt = PointsFor(p.TeamID);
-                    if (r > bestR || (r == bestR && pt > bestP))
+                    int r = RoundsFor(p.TeamID), pt = PointsFor(p.TeamID), k = KillsRankFor(p.TeamID);
+                    if (r > bestR || (r == bestR && pt > bestP)
+                        || (r == bestR && pt == bestP && k > bestK))
                     {
-                        best = p; bestR = r; bestP = pt; tie = false;
+                        best = p; bestR = r; bestP = pt; bestK = k; tie = false;
                     }
-                    else if (r == bestR && pt == bestP) tie = true;
+                    else if (r == bestR && pt == bestP && k == bestK) tie = true;
                 }
                 if (tie || (bestR == 0 && bestP == 0)) return null;
                 return best;
@@ -427,22 +459,27 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Compact score line for the IMGUI strip: one entry per live
-        /// player, sorted by (rounds, points) desc. ASCII only (#47).</summary>
+        /// player, sorted by (rounds, LIVE points, kills) desc — the crown's
+        /// current-standing order, deliberately NOT ComparePlacement's
+        /// (which uses cumulative pointsTotal). Log/diagnostic display only.
+        /// ASCII only (#47).</summary>
         public static string ScoreLine()
         {
             try
             {
                 if (PlayerManager.instance == null) return "";
-                var entries = new List<(string name, int r, int p, bool dead)>();
+                var entries = new List<(string name, int r, int p, int k, bool dead)>();
                 foreach (var pl in PlayerManager.instance.players)
                 {
                     if (pl == null || pl.gameObject == null || pl.data == null) continue;
                     string nm = "P" + pl.PlayerID;
                     try { nm = pl.data.view?.Owner?.NickName ?? nm; } catch { }
                     if (nm.Length > 12) nm = nm.Substring(0, 12);
-                    entries.Add((nm, RoundsFor(pl.TeamID), PointsFor(pl.TeamID), pl.data.dead));
+                    entries.Add((nm, RoundsFor(pl.TeamID), PointsFor(pl.TeamID),
+                                 KillsRankFor(pl.TeamID), pl.data.dead));
                 }
-                entries.Sort((a, b) => b.r != a.r ? b.r.CompareTo(a.r) : b.p.CompareTo(a.p));
+                entries.Sort((a, b) => b.r != a.r ? b.r.CompareTo(a.r)
+                    : b.p != a.p ? b.p.CompareTo(a.p) : b.k.CompareTo(a.k));
                 var sb = new System.Text.StringBuilder();
                 foreach (var e in entries)
                 {
@@ -581,9 +618,11 @@ namespace CompetitiveRounds
             // with the rules in force.
             try
             {
-                string cfgLine = $"FIRST TO {RoundsToWin}   -   {InitialPicks} OPENING DRAW{(InitialPicks == 1 ? "" : "S")}   -   {CardCap}-CARD HAND"
-                    + (SameCardRule ? "   -   SAME CARDS FOR EVERYONE" : "")
-                    + (LobbyRanked ? "" : "   -   CASUAL (UNRATED)");
+                string cfgLine = (InitialPicks == 1
+                        ? I18n.TrF("FIRST TO {0}   -   {1} OPENING DRAW   -   {2}-CARD HAND", RoundsToWin, InitialPicks, CardCap)
+                        : I18n.TrF("FIRST TO {0}   -   {1} OPENING DRAWS   -   {2}-CARD HAND", RoundsToWin, InitialPicks, CardCap))
+                    + (SameCardRule ? I18n.Tr("   -   SAME CARDS FOR EVERYONE") : "")
+                    + (LobbyRanked ? "" : I18n.Tr("   -   CASUAL (UNRATED)"));
                 CompetitiveUI.ShowFfaSettingsBanner(cfgLine, 9f);
             }
             catch { }
@@ -722,7 +761,7 @@ namespace CompetitiveRounds
                     freshGameCancelFired = true;
                     LeaveBelowMinimum(
                         $"[FFA] fresh game cancelled - {remaining} player(s), {scored} half-point(s) scored",
-                        "FFA cancelled - not enough players for a fresh game.");
+                        I18n.Tr("FFA cancelled - not enough players for a fresh game."));
                 }
                 yield break;
             }
@@ -937,6 +976,46 @@ namespace CompetitiveRounds
             try { TimeHandler.instance.DoSpeedUp(); } catch { }
             isTransitioning = false;
             GameManager.instance.battleOngoing = true;
+            // Sid, Aug 3: with up to 10 identical-looking bodies on screen,
+            // finding yourself at spawn is genuinely hard. Flash the local
+            // player bright and dim everyone else for the grace second.
+            try { Plugin.Instance.StartCoroutine(SpawnSpotlight()); } catch { }
+        }
+
+        /// <summary>"Which one am I?" — starts the spawn spotlight overlay.
+        ///
+        /// REWRITTEN after review: the first version recoloured every player's
+        /// SpriteRenderers. That was wrong twice over — the ROUNDS body is
+        /// largely PARTICLE-rendered (so the most visible layer never dimmed),
+        /// and the cosmetics system rewrites those colours at 30 Hz for
+        /// prismatic/chrome skins, so the effect was overwritten within a
+        /// frame AND risked leaving a player permanently mis-coloured if the
+        /// restore was ever interrupted.
+        ///
+        /// The overlay approach touches NO game state at all: CompetitiveUI
+        /// draws a darkened frame around the local player's screen position
+        /// for the grace second, so the background dims and you are the only
+        /// thing in the clear. Nothing to restore, nothing to fight, and a
+        /// crash mid-effect leaves the game exactly as it was.</summary>
+        private static IEnumerator SpawnSpotlight()
+        {
+            // One frame of settle so MovePlayers has placed everyone before
+            // the overlay reads a screen position.
+            yield return null;
+            Player mine = null;
+            try
+            {
+                foreach (var pl in PlayerManager.instance.players)
+                {
+                    if (pl == null) continue;
+                    bool isMine = false;
+                    try { isMine = pl.data != null && pl.data.view != null && pl.data.view.IsMine; } catch { }
+                    if (isMine) { mine = pl; break; }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] spotlight: {ex.Message}"); }
+            if (mine == null) yield break;
+            CompetitiveUI.BeginSpawnSpotlight(mine.transform);
         }
 
         /// <summary>Vanilla WaitForSyncUp waits for any one peer's reply with
@@ -1148,7 +1227,7 @@ namespace CompetitiveRounds
             GameManager.instance.battleOngoing = true;
             try { PlayerManager.instance.SetPlayersVisible(true); }
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] SetPlayersVisible(start): {ex.Message}"); }
-            CompetitiveUI.ShowNotification($"FFA - {Diag2v2.PlayersNeeded()} players - first to {RoundsToWin} points!",
+            CompetitiveUI.ShowNotification(I18n.TrF("FFA - {0} players - first to {1} points!", Diag2v2.PlayersNeeded(), RoundsToWin),
                 new Color(0.7f, 1f, 0.7f), 5f);
             // Bug #102: vanilla sends each player's face via an UNBUFFERED
             // RpcTarget.All at AssignPlayerID time — clients still joining
@@ -1503,7 +1582,7 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning($"[FFA] cycle {cycle}: local pick missed the window — no card this cycle (auto-confirm lost the close race?)");
                 try
                 {
-                    CompetitiveUI.ShowNotification("Pick window closed - no card this round.",
+                    CompetitiveUI.ShowNotification("Your pick missed the cutoff - no card this round.",
                         new Color(1f, 0.75f, 0.4f), 5f);
                 }
                 catch { }
@@ -1900,7 +1979,7 @@ namespace CompetitiveRounds
                 {
                     string display = shown[chosen].cardName;
                     if (string.IsNullOrEmpty(display)) display = cardName;
-                    CompetitiveUI.ShowNotification($"Time's up - {display} picked automatically.",
+                    CompetitiveUI.ShowNotification(I18n.TrF("Time's up - {0} picked automatically.", display),
                         new Color(1f, 0.85f, 0.5f), 5f);
                 }
                 catch { }

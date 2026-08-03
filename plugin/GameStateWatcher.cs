@@ -1005,11 +1005,11 @@ namespace CompetitiveRounds
             Plugin.Log.LogWarning($"[QUICKPLAY-GUARD] dead matchmaking state ({why}) — {(rqQuickmatch ? "auto-requeue" : "returning to menu")}");
             if (rqQuickmatch)
             {
-                try { CompetitiveUI.ShowNotification("Matchmaking bug detected - putting you back in the quickplay queue...", new Color(1f, 0.8f, 0.3f), 6f); } catch { }
+                try { CompetitiveUI.ShowNotification("Matchmaking hiccup — putting you back in the Quick Match queue...", new Color(1f, 0.8f, 0.3f), 6f); } catch { }
             }
             else
             {
-                try { CompetitiveUI.ShowNotification("Connection was lost - returning to menu.", new Color(1f, 0.8f, 0.3f), 6f); } catch { }
+                try { CompetitiveUI.ShowNotification("Connection was lost — returning to menu.", new Color(1f, 0.8f, 0.3f), 6f); } catch { }
             }
             rqForcedGoToMenu = false;
             rqPhase = RqPhase.KillSweep;
@@ -1098,7 +1098,7 @@ namespace CompetitiveRounds
                         try { MainMenuHandler.instance?.Close(); } catch { }
                         NetworkConnectionHandler.instance.QuickMatch();   // the real menu-button path
                         Plugin.Log.LogInfo("[QUICKPLAY-GUARD] re-entered quickplay queue after dead-state recovery");
-                        try { CompetitiveUI.ShowNotification("Back in the quickplay queue - searching for an opponent.", new Color(0.5f, 1f, 0.6f), 5f); } catch { }
+                        try { CompetitiveUI.ShowNotification("Back in the Quick Match queue — searching for an opponent.", new Color(0.5f, 1f, 0.6f), 5f); } catch { }
                     }
                     catch (Exception ex)
                     {
@@ -2019,7 +2019,7 @@ namespace CompetitiveRounds
                     {
                         // We initiated the leave for a ranked match — cancel, don't count
                         Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Left for ranked queue at {localRounds}-{oppRounds} (not counted)");
-                        CompetitiveUI.ShowNotification("Left match for ranked queue", new Color(0.4f, 0.8f, 1f));
+                        CompetitiveUI.ShowNotification("Left your game to join the queued match - no leave will be recorded.", new Color(0.4f, 0.8f, 1f));
                         LeavingForRanked = false;
                     }
                     else if (opponentDCReported
@@ -2057,7 +2057,7 @@ namespace CompetitiveRounds
                             Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Opp DC'd while ahead at {localRounds}-{oppRounds} (no win awarded)");
                         else
                             Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Disconnect at {localRounds}-{oppRounds} (not counted)");
-                        CompetitiveUI.ShowNotification("Match canceled (DC)", new Color(1f, 0.7f, 0.3f));
+                        CompetitiveUI.ShowNotification("Match canceled (disconnect)", new Color(1f, 0.7f, 0.3f));
                     }
                 }
 
@@ -2161,7 +2161,7 @@ namespace CompetitiveRounds
                         rankedRoomStallHandled = true;
                         Plugin.Log.LogWarning($"[QUEUE-STALL] Room {photonRoomId} never filled ({pc}/{fullAt}) after {(int)waited}s — returning to menu (no match started, no penalty)");
                         CompetitiveUI.ShowNotification(isTournamentRoom
-                            ? "Opponent never showed — their no-show forfeit should be recorded. Returning to menu."
+                            ? "Your opponent never joined. Returning to menu - you stay ready, and the server forfeits the match to you if they don't show."
                             : isOvtRoom
                             ? "1v2 lobby never filled — returning to menu. Requeue when ready."
                             : isFfaRoom

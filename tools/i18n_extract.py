@@ -76,7 +76,10 @@ def looks_translatable(s: str, allow_braces: bool = False) -> bool:
     # label ("Settings", "Refresh", "Loading...", "Failed") — round-3 find
     # N3 + round-4 find F4 (the alpha-only rule dropped "Loading...").
     if " " not in s:
-        if not re.fullmatch(r"[A-Za-z]{3,}[.!?…]{0,3}", s):
+        # Codex review: a display LABEL may end in ':' ("Timezone:") — the old
+        # pattern allowed only .!?… so such labels silently fell out of the key
+        # set entirely and could never be translated, not even by a server pack.
+        if not re.fullmatch(r"[A-Za-z]{3,}[.!?…:]{0,3}", s):
             return False
     # An interpolation HOLE normally means a $-string BODY (compiler-composed;
     # a whole-string key can never match) — EXCEPT at I18n.Tr/TrF sites, where
@@ -170,7 +173,13 @@ def arg_literals(arg: str) -> list:
     lits = [x.group(1) for x in STR_LIT.finditer(arg)]
     if not lits:
         return []
-    residue = re.sub(r"[\s+]+", "", STR_LIT.sub("", arg))
+    # '@' is the C# verbatim-string marker (ModeInfoText's whole-doc Tr/TrF
+    # bodies) — strippable residue like whitespace/'+'. CONSTRAINT: a verbatim
+    # literal harvests correctly only while it contains no backslashes (C#
+    # treats them literally; unescape() here would transform them) and no ""
+    # escaped quotes (STR_LIT would terminate early). The ModeInfoText bodies
+    # satisfy both; keep it that way.
+    residue = re.sub(r"[\s+@]+", "", STR_LIT.sub("", arg))
     if residue == "":
         return [unescape("".join(lits))]   # pure (possibly folded) literal
     if "?" in residue and ":" in residue:
@@ -211,6 +220,23 @@ def extract():
                     s = unescape(x.group(1))
                     if looks_translatable(s):
                         found.setdefault(s, []).append(fn)
+        # Achievement definition table (ApiClient.cs): display name + desc
+        # live in a dict INITIALIZER, never at a harvested call site (the
+        # render sites pass def[0]/def[1] variables). Harvest ONLY the
+        # literals inside each row's value array (new[]{ name, desc }) — the
+        # dictionary KEYS are wire ids ("regicide", "on_fire"); pure-alpha
+        # ids would pass looks_translatable and pollute the key set if the
+        # whole block were harvested QuickChat-style.
+        if fn == "ApiClient.cs":
+            block = re.search(
+                r"AchievementDefs\s*=\s*new\s+Dictionary<string,\s*string\[\]>\s*\{(.*?)\n\s*\};",
+                src, re.S)
+            if block:
+                for arr in re.finditer(r"new\[\]\s*\{([^}]*)\}", block.group(1)):
+                    for x in STR_LIT.finditer(arr.group(1)):
+                        s = unescape(x.group(1))
+                        if looks_translatable(s):
+                            found.setdefault(s, []).append(fn)
     return found
 
 

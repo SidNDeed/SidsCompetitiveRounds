@@ -491,7 +491,7 @@ namespace CompetitiveRounds
                 if (!IsSilentOutboxUrl(url))
                 {
                     Plugin.Log.LogWarning($"[OUTBOX] report queued for retry ({_pendingReports.Count} pending)");
-                    CompetitiveUI.ShowNotification("Report failed — will retry in background", new Color(1f, 0.75f, 0.3f), 4f);
+                    CompetitiveUI.ShowNotification("Couldn't record the match — retrying in the background", new Color(1f, 0.75f, 0.3f), 4f);
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] enqueue failed: {ex.Message}"); }
@@ -584,7 +584,7 @@ namespace CompetitiveRounds
                     {
                         Plugin.Log.LogInfo($"[OUTBOX] queued report delivered on retry {p.attempts}");
                         if (!IsSilentOutboxUrl(p.url))
-                            CompetitiveUI.ShowNotification("Match report delivered", new Color(0.4f, 1f, 0.5f), 4f);
+                            CompetitiveUI.ShowNotification("Match recorded", new Color(0.4f, 1f, 0.5f), 4f);
                         _pendingReports.RemoveAt(i);
                         changed = true;
                     }
@@ -897,7 +897,7 @@ namespace CompetitiveRounds
             if (apiReq.result != UnityWebRequest.Result.Success)
             {
                 Plugin.Log.LogWarning($"[UPDATE] GitHub API failed: {apiReq.error}");
-                CompetitiveUI.ShowNotification("Update failed — could not reach GitHub", new Color(1f, 0.4f, 0.4f), 5f);
+                CompetitiveUI.ShowNotification("Update failed — couldn't reach GitHub. Check your connection and try again.", new Color(1f, 0.4f, 0.4f), 5f);
                 IsUpdating = false;
                 yield break;
             }
@@ -926,13 +926,13 @@ namespace CompetitiveRounds
                 {
                     // Can't easily unzip in Unity — fall back to opening browser
                     Plugin.Log.LogWarning("[UPDATE] No DLL asset found, only zip. Opening browser.");
-                    CompetitiveUI.ShowNotification("No DLL found — opening releases page", Color.yellow, 5f);
+                    CompetitiveUI.ShowNotification("This release only ships a zip — opening the releases page to update manually", Color.yellow, 5f);
                     Application.OpenURL("https://github.com/SidNDeed/SidsCompetitiveRounds/releases/latest");
                     IsUpdating = false;
                     yield break;
                 }
                 Plugin.Log.LogWarning("[UPDATE] No downloadable assets found in release");
-                CompetitiveUI.ShowNotification("Update failed — no assets in release", new Color(1f, 0.4f, 0.4f), 5f);
+                CompetitiveUI.ShowNotification("Update failed — that release has no download attached. Update manually from GitHub.", new Color(1f, 0.4f, 0.4f), 5f);
                 IsUpdating = false;
                 yield break;
             }
@@ -950,7 +950,7 @@ namespace CompetitiveRounds
             if (dlReq.result != UnityWebRequest.Result.Success)
             {
                 Plugin.Log.LogWarning($"[UPDATE] Download failed: {dlReq.error}");
-                CompetitiveUI.ShowNotification("Update failed — download error", new Color(1f, 0.4f, 0.4f), 5f);
+                CompetitiveUI.ShowNotification("Update failed — the download didn't finish. Try again.", new Color(1f, 0.4f, 0.4f), 5f);
                 IsUpdating = false;
                 yield break;
             }
@@ -1008,7 +1008,7 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(currentDll) || !File.Exists(currentDll))
             {
                 Plugin.Log.LogWarning("[UPDATE] Could not locate current DLL");
-                CompetitiveUI.ShowNotification("Update failed — can't find current DLL", new Color(1f, 0.4f, 0.4f), 5f);
+                CompetitiveUI.ShowNotification("Update failed — couldn't find your installed mod file. Update manually from GitHub.", new Color(1f, 0.4f, 0.4f), 5f);
                 IsUpdating = false;
                 yield break;
             }
@@ -1043,7 +1043,7 @@ namespace CompetitiveRounds
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[UPDATE] Failed to write batch script: {ex.Message}");
-                CompetitiveUI.ShowNotification("Update failed — could not write updater", new Color(1f, 0.4f, 0.4f), 5f);
+                CompetitiveUI.ShowNotification("Update failed — couldn't save the updater. Update manually from GitHub.", new Color(1f, 0.4f, 0.4f), 5f);
                 IsUpdating = false;
                 yield break;
             }
@@ -1064,7 +1064,7 @@ namespace CompetitiveRounds
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[UPDATE] Failed to launch updater: {ex.Message}");
-                CompetitiveUI.ShowNotification("Update failed — could not launch updater", new Color(1f, 0.4f, 0.4f), 5f);
+                CompetitiveUI.ShowNotification("Update failed — couldn't start the updater. Update manually from GitHub.", new Color(1f, 0.4f, 0.4f), 5f);
                 IsUpdating = false;
                 yield break;
             }
@@ -1907,7 +1907,7 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
             if (!baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                CompetitiveUI.ShowNotification("Portal needs the HTTPS endpoint - this install is on a plaintext fallback.", Color.yellow, 6f);
+                CompetitiveUI.ShowNotification("Can't open the portal - this install is on an insecure backup connection. Restart ROUNDS to retry the secure one.", Color.yellow, 6f);
                 return;
             }
             Plugin.Instance.StartCoroutine(PostRequest(
@@ -3090,30 +3090,19 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(json)) return list;
             int kIdx = json.IndexOf("\"reports\":[");
             if (kIdx < 0) return list;
-            int start = kIdx + "\"reports\":[".Length;
-            int depth = 1, i = start;
-            while (i < json.Length && depth > 0)
+            // Bug #152 (learning #156, third occurrence): bug-report text is the
+            // MOST adversarial user input in the product, and a plain depth
+            // counter treats a '[' inside a description as structure. One
+            // unmatched bracket ate the array terminator, depth never reached
+            // 0, and this returned an EMPTY list with no log line — the admin
+            // tab just rendered blank. Proof: report #148's own text ends
+            // "looks like [X", and it is what broke the viewer.
+            int open = kIdx + "\"reports\":".Length;
+            int close = FindMatchingBracketStringAware(json, open);
+            if (close < 0) { Plugin.Log.LogWarning("[BUG-REPORTS] parse: unterminated reports array"); return list; }
+            string slice = json.Substring(open + 1, close - open - 1);
+            foreach (string obj in SliceTopLevelObjects(slice))
             {
-                if (json[i] == '[') depth++;
-                else if (json[i] == ']') depth--;
-                i++;
-            }
-            if (depth != 0) return list;
-            string slice = json.Substring(start, i - start - 1);
-            int oIdx = 0;
-            while (oIdx < slice.Length)
-            {
-                int objStart = slice.IndexOf('{', oIdx);
-                if (objStart < 0) break;
-                int oDepth = 1, j = objStart + 1;
-                while (j < slice.Length && oDepth > 0)
-                {
-                    if (slice[j] == '{') oDepth++;
-                    else if (slice[j] == '}') oDepth--;
-                    j++;
-                }
-                if (oDepth != 0) break;
-                string obj = slice.Substring(objStart, j - objStart);
                 list.Add(new BugReportSummary
                 {
                     id           = ExtractJsonString(obj, "id"),
@@ -3129,7 +3118,6 @@ namespace CompetitiveRounds
                     has_log      = ExtractJsonBool(obj, "has_log"),
                     log_bytes    = ExtractJsonInt(obj, "log_bytes"),
                 });
-                oIdx = j;
             }
             return list;
         }
@@ -3161,31 +3149,15 @@ namespace CompetitiveRounds
                 int kIdx = json.IndexOf("\"events\":[");
                 if (kIdx >= 0)
                 {
-                    int start = kIdx + "\"events\":[".Length;
-                    int depth = 1, i = start;
-                    while (i < json.Length && depth > 0)
+                    // Twin of the #152 defect: admin COMMENTS are user text too,
+                    // so the same bracket trap applies to this array.
+                    int evOpen = kIdx + "\"events\":".Length;
+                    int evClose = FindMatchingBracketStringAware(json, evOpen);
+                    if (evClose >= 0)
                     {
-                        if (json[i] == '[') depth++;
-                        else if (json[i] == ']') depth--;
-                        i++;
-                    }
-                    if (depth == 0)
-                    {
-                        string slice = json.Substring(start, i - start - 1);
-                        int oIdx = 0;
-                        while (oIdx < slice.Length)
+                        string slice = json.Substring(evOpen + 1, evClose - evOpen - 1);
+                        foreach (string obj in SliceTopLevelObjects(slice))
                         {
-                            int objStart = slice.IndexOf('{', oIdx);
-                            if (objStart < 0) break;
-                            int oDepth = 1, j = objStart + 1;
-                            while (j < slice.Length && oDepth > 0)
-                            {
-                                if (slice[j] == '{') oDepth++;
-                                else if (slice[j] == '}') oDepth--;
-                                j++;
-                            }
-                            if (oDepth != 0) break;
-                            string obj = slice.Substring(objStart, j - objStart);
                             detail.events.Add(new BugReportEventEntry
                             {
                                 id              = ExtractJsonString(obj, "id"),
@@ -3197,7 +3169,6 @@ namespace CompetitiveRounds
                                 comment         = ExtractJsonString(obj, "comment"),
                                 created_at      = ExtractJsonString(obj, "created_at"),
                             });
-                            oIdx = j;
                         }
                     }
                 }
@@ -3334,7 +3305,7 @@ namespace CompetitiveRounds
                             {
                                 Plugin.Log.LogWarning($"[BAN] Opponent {steamId} is mod-banned ({data.ban_reason}) — leaving match");
                                 CompetitiveUI.ShowNotification(
-                                    "Opponent is banned from the mod for cheating - leaving match.",
+                                    "Your opponent is banned from the mod - leaving match.",
                                     new Color(1f, 0.3f, 0.3f), 8f);
                                 try { if (Photon.Pun.PhotonNetwork.InRoom) Photon.Pun.PhotonNetwork.LeaveRoom(); }
                                 catch (Exception ex) { Plugin.Log.LogWarning($"[BAN] LeaveRoom failed: {ex.Message}"); }
@@ -3603,7 +3574,7 @@ namespace CompetitiveRounds
                         // xp_bonuses array generically (same pattern as gold_bonuses below)
                         // instead of hardcoded Contains() checks — new server labels like
                         // "Master opp x2.5" display without a client release.
-                        string xpLine = $"+{xpGained} XP";
+                        string xpLine = I18n.TrF("+{0} XP", xpGained);
                         var bonusParts = new List<string>();
                         int xpArrIdx = response.IndexOf("\"xp_bonuses\":");
                         if (xpArrIdx >= 0)
@@ -3649,7 +3620,7 @@ namespace CompetitiveRounds
                                     }
                                 }
                             }
-                            string goldLine = $"+{goldGained} gold";
+                            string goldLine = I18n.TrF("+{0} gold", goldGained);
                             if (parts.Count > 0) goldLine += "  [" + string.Join(", ", parts.ToArray()) + "]";
                             CompetitiveUI.QueueNotification(goldLine, new Color(1f, 0.85f, 0.3f), 4f);
                         }
@@ -3657,7 +3628,7 @@ namespace CompetitiveRounds
                         // Show level-up if we gained a level
                         if (newLevel > prevLevel && prevLevel >= 0)
                         {
-                            CompetitiveUI.QueueNotification($"LEVEL UP!  Level {newLevel}", new Color(1f, 0.85f, 0.3f), 4f);
+                            CompetitiveUI.QueueNotification(I18n.TrF("LEVEL UP!  Level {0}", newLevel), new Color(1f, 0.85f, 0.3f), 4f);
                         }
                         CompetitiveUI.LastKnownLevel = newLevel;
 
@@ -3677,11 +3648,11 @@ namespace CompetitiveRounds
 
                             if (seriesStatus == "active")
                             {
-                                CompetitiveUI.QueueNotification($"Series: {seriesScore}", new Color(1f, 0.85f, 0.3f), 3f);
+                                CompetitiveUI.QueueNotification(I18n.TrF("Series: {0}", seriesScore), new Color(1f, 0.85f, 0.3f), 3f);
                             }
                             else if (seriesStatus == "completed")
                             {
-                                CompetitiveUI.QueueNotification($"SERIES COMPLETE {seriesScore}!", new Color(0.3f, 1f, 0.3f), 4f);
+                                CompetitiveUI.QueueNotification(I18n.TrF("SERIES COMPLETE {0}!", seriesScore), new Color(0.3f, 1f, 0.3f), 4f);
                                 // Increment the session series tally. The series winner is
                                 // whoever won this final reported game (a BO_n first-to-N
                                 // ends on the deciding game), so map reporter-perspective
@@ -3702,7 +3673,7 @@ namespace CompetitiveRounds
                     else
                     {
                         Plugin.Log.LogError($"Failed to report match: {response}");
-                        CompetitiveUI.ShowNotification("Failed to report match", Color.red);
+                        CompetitiveUI.ShowNotification("Couldn't record the match", Color.red);
                         // Bug #65: transient network/DNS outages outlive the 3 immediate
                         // attempts — queue for background retry instead of losing the game.
                         EnqueueFailedReport($"{baseUrl}/api/v1/matches", json);
@@ -5140,7 +5111,7 @@ namespace CompetitiveRounds
                                     int oppWins = meIsP1 ? p2w : p1w;
                                     GameStateWatcher.AdoptSeriesScore(myWins, oppWins);
                                     CompetitiveUI.QueueNotification(
-                                        $"Resuming series at {myWins}-{oppWins}",
+                                        I18n.TrF("Resuming series at {0}-{1}", myWins, oppWins),
                                         new Color(1f, 0.85f, 0.3f), 4f);
                                 }
                             }
@@ -5212,7 +5183,7 @@ namespace CompetitiveRounds
                     {
                         Plugin.Log.LogInfo($"Ranked mode set to {enabled}");
                         CompetitiveUI.ShowNotification(
-                            enabled ? "Ranked mode ON" : "Ranked mode OFF",
+                            enabled ? "Ranked: ON" : "Ranked: OFF",
                             enabled ? Color.green : Color.yellow
                         );
                     }
@@ -5512,7 +5483,7 @@ namespace CompetitiveRounds
                     EscapePending = false;
                     TearDownAllQueueBeliefs();
                     Plugin.Log.LogInfo($"[ESCAPE] released from all queues: {resp}");
-                    CompetitiveUI.ShowNotification("Left all queues.", Color.green, 4f);
+                    CompetitiveUI.ShowNotification("Left all queues", Color.green, 4f);
                 }
                 else
                 {
@@ -5584,7 +5555,7 @@ namespace CompetitiveRounds
                     else
                     {
                         Plugin.Log.LogWarning($"[QUEUE] Failed to join queue: {response}");
-                        CompetitiveUI.ShowNotification("Failed to join queue", new Color(1f, 0.4f, 0.4f));
+                        CompetitiveUI.ShowNotification("Couldn't join the queue", new Color(1f, 0.4f, 0.4f));
                     }
                 }
             ));
@@ -5795,8 +5766,13 @@ namespace CompetitiveRounds
                                 // New match found!
                                 CurrentQueueState = QueueState.Matched;
                                 Plugin.Log.LogInfo($"[QUEUE] MATCHED! vs {ExtractJsonString(response, "opponent_name")} ({ExtractJsonFloat(response, "opponent_rating"):F0})");
+                                // Same template as NativeUI's match-found strip — ONE
+                                // key for both sites. TagsMatch counts spec'd holes
+                                // ({1:F0}) since the CountPlaceholder fix, so a
+                                // translation dropping the rating fails validation.
                                 CompetitiveUI.ShowNotification(
-                                    $"MATCH FOUND!  vs {ExtractJsonString(response, "opponent_name")} ({ExtractJsonFloat(response, "opponent_rating"):F0})",
+                                    I18n.TrF("MATCH FOUND!  vs {0} ({1:F0})", ExtractJsonString(response, "opponent_name"),
+                                        ExtractJsonFloat(response, "opponent_rating")),
                                     Color.green, 8f
                                 );
                                 CompetitiveUI.PlayMatchFoundSound();
@@ -5821,7 +5797,7 @@ namespace CompetitiveRounds
                             {
                                 // Was matched but now searching — declined or timeout
                                 Plugin.Log.LogInfo("[QUEUE] Match canceled — back to searching");
-                                CompetitiveUI.ShowNotification("Match canceled — searching...", Color.yellow, 5f);
+                                CompetitiveUI.ShowNotification("Match canceled — searching again...", Color.yellow, 5f);
                             }
 
                             CurrentQueueState = QueueState.Searching;
@@ -5841,7 +5817,7 @@ namespace CompetitiveRounds
                             LastPollData = null;
                             CompetitiveUI.ShowNotification(status == "expired"
                                 ? "Removed from queue after 30 minutes of searching - rejoin if you're still here!"
-                                : "Queue search ended", Color.yellow, 7f);
+                                : "Stopped searching", Color.yellow, 7f);
                             NativeUI.MarkDirty();
                         }
                     }
@@ -6099,10 +6075,25 @@ namespace CompetitiveRounds
         /// channel (players see notes as they're POSTED), falling back to the
         /// GitHub releases list when the mirror is empty/unreachable (fresh
         /// deploy, bot down). Cached for the session.</summary>
+        // Locale the cached notes were localized FOR. Codex review: without
+        // this, switching language kept the previous language's notes for the
+        // whole session, because the cache-populated early-return fires first.
+        private static string _releaseNotesLocale = null;
+
         public static void FetchReleaseNotes(bool force = false)
         {
             if (_releasesFetchInFlight) return;
-            if (!force && CachedReleaseNotes != null && CachedReleaseNotes.Count > 0) return;
+            string want = I18n.Locale;
+            if (want == I18n.LOCALE_UNSET) want = "en";
+            if (!force && CachedReleaseNotes != null && CachedReleaseNotes.Count > 0
+                && _releaseNotesLocale == want) return;
+            if (CachedReleaseNotes != null && _releaseNotesLocale != want)
+            {
+                // Language changed: the cached bodies are in the old language
+                // and the English originals are gone, so refetch rather than
+                // trying to un-translate them.
+                CachedReleaseNotes = null;
+            }
             _releasesFetchInFlight = true;
             Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/releases/recent?limit=3", (ok, resp) =>
             {
@@ -6113,6 +6104,10 @@ namespace CompetitiveRounds
                     CachedReleaseNotes = list;
                     Plugin.Log.LogInfo($"[HOME] release posts loaded: {list.Count} (channel mirror)");
                     NativeUI.MarkDirty();
+                    // Codex review: the overlay used to run ONLY on the GitHub
+                    // fallback, so on a healthy server (mirror populated — the
+                    // normal case) translated notes were never requested.
+                    MaybeLocalizeReleaseNotes();
                 }
                 else
                 {
@@ -6186,8 +6181,86 @@ namespace CompetitiveRounds
                 CachedReleaseNotes = list;
                 Plugin.Log.LogInfo($"[HOME] release notes loaded: {list.Count}");
                 NativeUI.MarkDirty();
+                // Sid, Aug 3: show the notes in the player's language. GitHub
+                // only has English, so the server holds an OVERLAY keyed by
+                // release tag; anything without a translation keeps its
+                // English text (never blank).
+                MaybeLocalizeReleaseNotes();
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[HOME] release notes parse failed: {ex.Message}"); }
+        }
+
+        /// <summary>Start the locale overlay if one is needed. Called from BOTH
+        /// cache paths (Discord mirror and GitHub fallback).</summary>
+        private static void MaybeLocalizeReleaseNotes()
+        {
+            string loc = I18n.Locale;
+            if (string.IsNullOrEmpty(loc) || loc == I18n.LOCALE_UNSET) loc = "en";
+            _releaseNotesLocale = loc;
+            if (loc == "en") return;
+            Plugin.Instance.StartCoroutine(DoFetchReleaseNotesOverlay(loc));
+        }
+
+        /// <summary>Overlay the cached (English) release notes with server-held
+        /// translations for the active locale. Per-TAG: an untranslated release
+        /// keeps its English body rather than disappearing, and a failed fetch
+        /// changes nothing at all.</summary>
+        private static IEnumerator DoFetchReleaseNotesOverlay(string locale)
+        {
+            var req = UnityEngine.Networking.UnityWebRequest.Get(
+                $"{baseUrl}/api/v1/release-notes/{Escape(locale)}");
+            req.SetRequestHeader("X-Mod-Version", Plugin.ModVersion);
+            req.timeout = 12;
+            yield return req.SendWebRequest();
+            if (req.result != UnityEngine.Networking.UnityWebRequest.Result.Success) yield break;
+            // The player may have switched language while this was in flight;
+            // applying it now would overwrite the new locale's notes with the
+            // old one's (Codex review).
+            if (_releaseNotesLocale != locale) yield break;
+            try
+            {
+                string resp = req.downloadHandler.text;
+                int open = resp.IndexOf("\"notes\":");
+                if (open < 0) yield break;
+                int close = FindMatchingBracketStringAware(resp, open + "\"notes\":".Length);
+                if (close < 0) yield break;
+                int s = open + "\"notes\":".Length;
+                int applied = 0;
+                foreach (string obj in SliceTopLevelObjects(resp.Substring(s + 1, close - s - 1)))
+                {
+                    string tag = ExtractJsonString(obj, "tag");
+                    string body = ExtractJsonString(obj, "body");
+                    if (string.IsNullOrEmpty(tag) || string.IsNullOrEmpty(body)) continue;
+                    string title = ExtractJsonString(obj, "title");
+                    bool machine = ExtractJsonBool(obj, "machine");
+                    foreach (var e in CachedReleaseNotes)
+                    {
+                        // Codex review: the Discord-mirror path stores the POST
+                        // AUTHOR in `tag`, so an exact tag compare matched
+                        // nothing on the normal path. Accept an exact match
+                        // (GitHub path) OR the release tag appearing in the
+                        // entry's title/body (mirror path).
+                        bool hit = e.tag == tag
+                                   || (!string.IsNullOrEmpty(e.title) && e.title.Contains(tag))
+                                   || (!string.IsNullOrEmpty(e.body) && e.body.Contains(tag));
+                        if (!hit) continue;
+                        // Sanitize BEFORE it reaches TMP (Codex review): a
+                        // translated body is Markdown that can carry '<'/'>'
+                        // and would otherwise open or close a rich-text tag in
+                        // the Home panel.
+                        string clean = CleanReleaseBodyUnicode(body);
+                        e.body = machine
+                            ? clean + "\n\n<color=#888><i>"
+                                    + I18n.Tr("Machine translation - the English notes are on GitHub.")
+                                    + "</i></color>"
+                            : clean;
+                        if (!string.IsNullOrEmpty(title)) e.title = title;
+                        applied++;
+                    }
+                }
+                if (applied > 0) { Plugin.Log.LogInfo($"[HOME] release notes localized: {applied}"); NativeUI.MarkDirty(); }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[HOME] release-note overlay failed: {ex.Message}"); }
         }
 
         /// <summary>Split a top-level JSON array into its object slices. Unlike
@@ -6251,6 +6324,39 @@ namespace CompetitiveRounds
         /// <summary>Markdown release body -> TMP-safe plain text: strip heading/bold
         /// markers, drop angle brackets (would parse as rich-text tags), map common
         /// unicode to ASCII (Gravity font, learning #47), truncate.</summary>
+        /// <summary>Same Markdown/TMP cleanup as CleanReleaseBody, WITHOUT the
+        /// ASCII-only pass — that pass would erase Spanish accents and delete
+        /// Cyrillic outright. Still neutralises '&lt;'/'&gt;' so a translated body
+        /// can never open or close a TMP tag in the Home panel (Codex review:
+        /// the localized body previously reached TMP raw).</summary>
+        private static string CleanReleaseBodyUnicode(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return "";
+            string nl = "\n";
+            string t = body.Replace("\r\n", nl).Replace("\r", nl);
+            t = t.Replace("**", "").Replace("__", "").Replace("`", "");
+            t = t.Replace("<", "[").Replace(">", "]");
+            var sb = new System.Text.StringBuilder(t.Length);
+            foreach (string rawLine in t.Split('\n'))
+            {
+                string line = rawLine.TrimEnd();
+                string trimmed = line.TrimStart();
+                if (trimmed.StartsWith("#")) line = trimmed.TrimStart('#', ' ');
+                sb.Append(line).Append('\n');
+            }
+            t = sb.ToString();
+            // Control characters only — every printable non-ASCII glyph is kept
+            // and the runtime font fallback renders it (UnicodeFallback).
+            var keep = new System.Text.StringBuilder(t.Length);
+            foreach (char ch in t)
+                if (ch == '\n' || ch >= 32) keep.Append(ch);
+            t = keep.ToString();
+            while (t.Contains("\n\n\n")) t = t.Replace("\n\n\n", "\n\n");
+            t = t.Trim();
+            if (t.Length > 2500) t = t.Substring(0, 2500).TrimEnd() + " ...";
+            return t;
+        }
+
         private static string CleanReleaseBody(string body)
         {
             if (string.IsNullOrEmpty(body)) return "";
@@ -6516,7 +6622,7 @@ namespace CompetitiveRounds
                     else
                     {
                         Plugin.Log.LogWarning($"[TEAM-QUEUE] Join failed: {response}");
-                        CompetitiveUI.ShowNotification("Failed to join 2v2 queue", new Color(1f, 0.4f, 0.4f));
+                        CompetitiveUI.ShowNotification("Couldn't join the 2v2 queue", new Color(1f, 0.4f, 0.4f));
                     }
                 }
             ));
@@ -6807,7 +6913,7 @@ namespace CompetitiveRounds
                     CurrentTeamQueueState = TeamQueueState.Searching;
                     ActiveTeamSeriesId = null;
                     Plugin.ClearPending2v2Slot();
-                    CompetitiveUI.ShowNotification("Match canceled — re-searching", new Color(1f, 0.6f, 0.2f), 5f);
+                    CompetitiveUI.ShowNotification("Match canceled — searching again...", new Color(1f, 0.6f, 0.2f), 5f);
                 }
                 NativeUI.MarkDirty();
             }
@@ -7140,7 +7246,7 @@ namespace CompetitiveRounds
                         string sScore = ExtractJsonString(response, "series_score");
                         if (sStatus == "completed")
                         {
-                            CompetitiveUI.ShowNotification($"Series complete: {sScore}", Color.green, 6f);
+                            CompetitiveUI.ShowNotification(I18n.TrF("Series complete: {0}", sScore), Color.green, 6f);
                             // Tally the series result into the Session Info panel
                             // (2v2 row). series_score is from the reporter's team
                             // perspective, e.g. "2-1" if the reporter's team won.
@@ -7166,7 +7272,7 @@ namespace CompetitiveRounds
                         }
                         else if (!string.IsNullOrEmpty(sScore))
                         {
-                            CompetitiveUI.ShowNotification($"Series: {sScore}", new Color(0.6f, 0.8f, 1f), 4f);
+                            CompetitiveUI.ShowNotification(I18n.TrF("Series: {0}", sScore), new Color(0.6f, 0.8f, 1f), 4f);
                         }
                         // Mid-series rebalance — server sends rebalance_assignments
                         // when the previous match was lopsided enough to swap a
@@ -7936,7 +8042,7 @@ namespace CompetitiveRounds
                         if (_ovtReadyFireCount > 3)
                         {
                             Plugin.Log.LogWarning($"[1v2] ready_join re-fired {_ovtReadyFireCount}x for '{room}' — giving up and leaving the 1v2 queue");
-                            CompetitiveUI.ShowNotification("Couldn't join the 1v2 room - left the queue. Please requeue.", Color.yellow, 8f);
+                            CompetitiveUI.ShowNotification("Couldn't join the 1v2 match — left the queue. Please requeue.", Color.yellow, 8f);
                             OvtLeaveQueue();
                             NativeUI.MarkDirty();
                             return;
@@ -8207,8 +8313,8 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[1v2] match reported: {resp}");
                     string sStatus = ExtractJsonString(resp, "series_status");
                     string sScore = ExtractJsonString(resp, "series_score");
-                    if (sStatus == "completed") { CompetitiveUI.ShowNotification($"1v2 series complete: {sScore}", Color.green, 6f); ActiveOvt1v2SeriesId = null; Plugin.ClearPendingOvtSlot(); }
-                    else if (!string.IsNullOrEmpty(sScore)) CompetitiveUI.ShowNotification($"1v2 series: {sScore}", new Color(0.6f, 0.8f, 1f), 4f);
+                    if (sStatus == "completed") { CompetitiveUI.ShowNotification(I18n.TrF("1v2 series complete: {0}", sScore), Color.green, 6f); ActiveOvt1v2SeriesId = null; Plugin.ClearPendingOvtSlot(); }
+                    else if (!string.IsNullOrEmpty(sScore)) CompetitiveUI.ShowNotification(I18n.TrF("1v2 series: {0}", sScore), new Color(0.6f, 0.8f, 1f), 4f);
                     // Bug #129: 1v2 always PAID xp+gold, but nothing anywhere ever
                     // showed it — which is exactly why it read as "1v2 doesn't give
                     // XP/gold". Queue (not Show) so it follows the score toast
@@ -8218,7 +8324,7 @@ namespace CompetitiveRounds
                     int gGold = ExtractJsonInt(resp, "gold_gained");
                     if (gXp > 0 || gGold > 0)
                     {
-                        string gLine = $"+{gXp} XP" + (gGold > 0 ? $"  <color=#FFD94D>+{gGold}g</color>" : "");
+                        string gLine = I18n.TrF("+{0} XP", gXp) + (gGold > 0 ? "  <color=#FFD94D>" + I18n.TrF("+{0}g", gGold) + "</color>" : "");
                         string bon = string.Join(", ", ExtractJsonStringArray(resp, "xp_bonuses").ToArray());
                         if (!string.IsNullOrEmpty(bon)) gLine += $"  ({bon})";
                         CompetitiveUI.QueueNotification(gLine, new Color(0.75f, 0.9f, 0.6f), 5f);
@@ -8483,6 +8589,13 @@ namespace CompetitiveRounds
             public string match_id, photon_room_id, ended_at, winner_steam_id, timeline;
             public int player_count, duration_seconds;
             public bool is_ranked;
+            // Lobby settings this game was played under. has_settings is FALSE
+            // for pre-config matches, whose stored values are migration
+            // defaults the game never actually used — those render as blank
+            // rather than as a plausible-looking lie.
+            public bool has_settings;
+            public int score_target, card_cap, initial_picks, card_candidates;
+            public bool same_card_rule;
             public List<FfaRecentPlayer> players = new List<FfaRecentPlayer>();
         }
         public static List<FfaRecentMatch> CachedFfaRecent = null;
@@ -9150,7 +9263,7 @@ namespace CompetitiveRounds
                     FfaLockedRoster = null;
                     Plugin.ClearPendingFfaSlot();
                     if (hadBelief)
-                        CompetitiveUI.ShowNotification("Your FFA lobby was dissolved.", new Color(1f, 0.75f, 0.4f), 6f);
+                        CompetitiveUI.ShowNotification("Your FFA lobby closed.", new Color(1f, 0.75f, 0.4f), 6f);
                     Plugin.Log.LogInfo($"[FFA-LOBBY] legacy searching row detected (belief={hadBelief}) — leaving it");
                     FfaLeaveQueue();
                     NativeUI.MarkDirty();
@@ -9404,7 +9517,7 @@ namespace CompetitiveRounds
                         if (_ffaReadyFireCount > 3)
                         {
                             Plugin.Log.LogWarning($"[FFA] ready_join re-fired {_ffaReadyFireCount}x for '{room}' — giving up and leaving the FFA queue");
-                            CompetitiveUI.ShowNotification("Couldn't join the FFA room - left the queue. Please requeue.", Color.yellow, 8f);
+                            CompetitiveUI.ShowNotification("Couldn't join the FFA match — left the queue. Please requeue.", Color.yellow, 8f);
                             FfaLeaveQueue();
                             NativeUI.MarkDirty();
                             return;
@@ -9447,7 +9560,7 @@ namespace CompetitiveRounds
                         _ffaJoinCountdownArmedAt = Time.realtimeSinceStartup;
                         CompetitiveUI.ShowFfaStartCountdown(5f);
                         Plugin.Log.LogInfo($"[FFA] Lobby locked! Room: {room} (region: {region ?? "auto"}) lobby={ActiveFfaLobbyId} slot={FfaMySlot} players={FfaLobbyPlayerCount} — joining in 5s");
-                        CompetitiveUI.ShowNotification($"{FfaLobbyPlayerCount}-player FFA starting in 5 seconds!", Color.green, 5f);
+                        CompetitiveUI.ShowNotification(I18n.TrF("{0}-player FFA starting in 5 seconds!", FfaLobbyPlayerCount), Color.green, 5f);
                         try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
                         Plugin.Instance.StartCoroutine(DelayedFfaRoomJoin(room, region, gen, ActiveFfaLobbyId, cdToken, 5f));
                     }
@@ -9714,6 +9827,28 @@ namespace CompetitiveRounds
                                 is_ranked = ExtractJsonBool(mObj, "is_ranked"),
                                 timeline = ExtractJsonString(mObj, "timeline"),
                             };
+                            // "settings" is a nested OBJECT and is null for
+                            // pre-config matches, so slice it explicitly
+                            // rather than reading fields off the whole match
+                            // blob (which would also match a player's keys).
+                            int sIdx = mObj.IndexOf("\"settings\"");
+                            int sOpen = sIdx >= 0 ? mObj.IndexOf('{', sIdx) : -1;
+                            // A null settings value has no '{' before the next
+                            // key, so bound the search to this match object.
+                            if (sOpen >= 0)
+                            {
+                                int sClose = FindMatchingBraceStringAware(mObj, sOpen);
+                                if (sClose > sOpen)
+                                {
+                                    string so = mObj.Substring(sOpen, sClose - sOpen + 1);
+                                    m.score_target = ExtractJsonInt(so, "score_target");
+                                    m.card_cap = ExtractJsonInt(so, "card_cap");
+                                    m.initial_picks = ExtractJsonInt(so, "initial_picks");
+                                    m.card_candidates = ExtractJsonInt(so, "card_candidates");
+                                    m.same_card_rule = ExtractJsonBool(so, "same_card_rule");
+                                    m.has_settings = m.score_target > 0;
+                                }
+                            }
                             int pStart = mObj.IndexOf("\"players\"");
                             int pArr = pStart >= 0 ? mObj.IndexOf('[', pStart) : -1;
                             int pEnd = pArr >= 0 ? FindMatchingBracketStringAware(mObj, pArr) : -1;
@@ -10084,8 +10219,9 @@ namespace CompetitiveRounds
             public List<MatchTracker.CardPickData> cards;
             public TeamTelemetry telemetry;
             // Bugs #127/#130. Cumulative CSV ints on the 3s telemetry cadence,
-            // plus the per-match total. Ride OUTSIDE the frozen ffa: HMAC
-            // canonical (#213) like kills/timeline do; old servers ignore them.
+            // plus the per-match total. Ride OUTSIDE the ffa: HMAC canonical
+            // like the timelines do (kills, by contrast, IS signed since the
+            // v2 canonical); old servers ignore them.
             public int damageDealt;
             public string killTimeline, damageTimeline;
         }
@@ -10113,10 +10249,22 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning("[FFA-REPORT] not enough players to report");
                 return;
             }
+            // Clamp kills to the shared SATURATION bound (0..2000) BEFORE
+            // building either the JSON body or the HMAC canonical — kills is
+            // signed now, so body and canonical must carry the identical
+            // value, and an out-of-bounds value would 422 the entire report.
+            // Saturation is part of the ordering RULE (FfaMode.KillsRankFor
+            // uses the same bound): full-wipe battles make raw kills
+            // structurally unbounded, so above 2000 kills deliberately
+            // compare EQUAL on every surface — client ordering, signed
+            // report, and server placement all agree by definition.
+            foreach (var p in players)
+                p.kills = Math.Max(0, Math.Min(FfaMode.KillsCompareCap, p.kills));
             // §6 casual path: the lobby's ranked flag (from the frozen server
             // row via the poll payload) replaces the old hardcoded literal.
-            // The server ANDs this signed claim against its own row either
-            // way — a wrong value here can only downgrade, never upgrade.
+            // The server's ranked AUTHORITY is its own lobby row exclusively;
+            // this signed claim is only compared against it as skew evidence
+            // (a mismatch is logged server-side, never honored).
             bool isRanked = FfaMode.LobbyRanked;
             var sb = new StringBuilder();
             sb.Append("{");
@@ -10128,10 +10276,12 @@ namespace CompetitiveRounds
                 if (i > 0) sb.Append(",");
                 sb.Append("{");
                 sb.Append($"\"steam_id\":\"{Escape(p.steamId)}\",\"display_name\":\"{Escape(p.displayName ?? "Player")}\",");
-                // kills is display/telemetry only (no longer a placement
-                // tie-break — it rides OUTSIDE the frozen ffa: HMAC canonical
-                // (learning #213 — never extend it), so the server refuses to
-                // let an unsigned field reorder placements).
+                // kills is the SECOND placement tie-break (rounds, points,
+                // kills — Sid approved 2026-08-03) and is now SIGNED: the v2
+                // ffa: canonical carries it per player. The ffa: canonical is
+                // the domain-tagged VARIABLE-length form (#213) — it may
+                // evolve, but only in client/server lockstep; the server
+                // accepts v1 (3-field) and v2 (4-field) for one release.
                 sb.Append($"\"slot\":{p.slot},\"rounds_won\":{p.rounds}," +
                           $"\"points_total\":{p.points},\"kills\":{Math.Max(0, p.kills)}," +
                           $"\"left_early\":{(p.leftEarly ? "true" : "false")}," +
@@ -10195,14 +10345,16 @@ namespace CompetitiveRounds
             // Score-progression timeline (outside the frozen canonical).
             if (!string.IsNullOrEmpty(timeline))
                 sb.Append($"\"timeline\":\"{Escape(timeline.Length > 1900 ? timeline.Substring(0, 1900) : timeline)}\",");
-            // Canonical: ffa:{lobby}:{room}:{reporter}:{is_ranked}:{winner}:{n}
-            // then per player sorted by (len, ordinal): :{steam}:{rounds}:{points}
+            // Canonical (v2): ffa:{lobby}:{room}:{reporter}:{is_ranked}:{winner}:{n}
+            // then per player sorted by (len, ordinal): :{steam}:{rounds}:{points}:{kills}
+            // kills MUST be the same clamped value the JSON body carries, or
+            // the server's recomputation from the received fields won't match.
             var sorted = new List<FfaReportPlayer>(players);
             sorted.Sort((a, b) => FfaCompareSteamIds(a.steamId, b.steamId));
             var canon = new StringBuilder();
             canon.Append($"ffa:{lobbyId}:{room ?? ""}:{reporterSteam}:{(isRanked ? "true" : "false")}:{winnerSteam}:{players.Count}");
             foreach (var p in sorted)
-                canon.Append($":{p.steamId}:{p.rounds}:{p.points}");
+                canon.Append($":{p.steamId}:{p.rounds}:{p.points}:{Math.Max(0, p.kills)}");
             sb.Append($"\"hmac_signature\":\"{ComputeHmacHex(canon.ToString())}\"");
             sb.Append("}");
             string json = sb.ToString();
@@ -10216,7 +10368,7 @@ namespace CompetitiveRounds
                     int xp = ExtractJsonInt(resp, "xp_gained");
                     if (myPlace > 0)
                         CompetitiveUI.ShowNotification(
-                            myPlace == 1 ? $"FFA VICTORY! +{xp}xp" : $"FFA: placed #{myPlace} (+{xp}xp)",
+                            myPlace == 1 ? I18n.TrF("FFA VICTORY! +{0}xp", xp) : I18n.TrF("FFA: placed #{0} (+{1}xp)", myPlace, xp),
                             myPlace == 1 ? Color.green : new Color(0.6f, 0.8f, 1f), 6f);
                 }
                 else
@@ -10640,14 +10792,14 @@ namespace CompetitiveRounds
                         if (!string.IsNullOrEmpty(code))
                         {
                             Plugin.Log.LogInfo($"[LINK] Generated link code: {code}");
-                            CompetitiveUI.ShowNotification($"Link code: {code}", Color.cyan, 15f);
+                            CompetitiveUI.ShowNotification(I18n.TrF("Link code: {0}", code), Color.cyan, 15f);
                             NativeUI.SetLinkCode(code);
                         }
                     }
                     else
                     {
                         Plugin.Log.LogWarning($"[LINK] Failed to generate code: {response}");
-                        CompetitiveUI.ShowNotification("Failed to get link code", new Color(1f, 0.4f, 0.4f));
+                        CompetitiveUI.ShowNotification("Couldn't get a link code", new Color(1f, 0.4f, 0.4f));
                     }
                 }
             ));
@@ -10682,7 +10834,7 @@ namespace CompetitiveRounds
                         case "cooldown":
                             int left = ExtractJsonInt(response, "seconds_left");
                             NativeUI.LfpArmCooldown(left);
-                            CompetitiveUI.ShowNotification($"RLFP ping available in {left / 60}m {left % 60}s (1 per hour).", new Color(1f, 0.8f, 0.3f), 6f);
+                            CompetitiveUI.ShowNotification(I18n.TrF("RLFP ping available in {0}m {1}s (1 per hour).", left / 60, left % 60), new Color(1f, 0.8f, 0.3f), 6f);
                             break;
                         case "not_linked":
                             CompetitiveUI.ShowNotification("Link your Discord account first (Home tab) to use RLFP pings.", new Color(1f, 0.8f, 0.3f), 7f);
@@ -10691,7 +10843,7 @@ namespace CompetitiveRounds
                             CompetitiveUI.ShowNotification("Enable Ranked first - the RLFP ping is for ranked matches.", new Color(1f, 0.8f, 0.3f), 6f);
                             break;
                         default:
-                            CompetitiveUI.ShowNotification($"RLFP ping failed: {status}", new Color(1f, 0.5f, 0.4f), 6f);
+                            CompetitiveUI.ShowNotification(I18n.TrF("RLFP ping failed: {0}", status), new Color(1f, 0.5f, 0.4f), 6f);
                             break;
                     }
                 }
@@ -10843,8 +10995,14 @@ namespace CompetitiveRounds
                         string name = ExtractJsonString(response, "name");
                         if (status == "unlocked" && !string.IsNullOrEmpty(name))
                         {
-                            string req = AchievementDefs.TryGetValue(achievementKey, out var def) ? def[1] : null;
-                            string toast = $"Achievement Unlocked: {name}!" + (string.IsNullOrEmpty(req) ? "" : $"\n{req}");
+                            // Headline prefers the client def's display name so it can
+                            // translate; the server-sent name is the fallback for
+                            // achievements shipped server-first that this build's
+                            // AchievementDefs doesn't know yet.
+                            bool hasDef = AchievementDefs.TryGetValue(achievementKey, out var def);
+                            string dispName = hasDef ? I18n.Tr(def[0]) : name;
+                            string req = hasDef ? I18n.Tr(def[1]) : null;
+                            string toast = I18n.TrF("Achievement Unlocked: {0}!", dispName) + (string.IsNullOrEmpty(req) ? "" : $"\n{req}");
                             CompetitiveUI.ShowNotification(toast, new Color(1f, 0.85f, 0.3f), 8f);
                             Plugin.Log.LogInfo($"[ACH] Unlocked: {achievementKey} ({name})");
                         }

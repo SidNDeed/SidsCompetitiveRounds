@@ -719,7 +719,7 @@ namespace CompetitiveRounds
                     {
                         try { GameStateWatcher.LeavingForRanked = false; } catch { }
                     }
-                    CompetitiveUI.ShowNotification("Slow connection — retrying ranked room join...", new Color(1f, 0.8f, 0.3f), 6f);
+                    CompetitiveUI.ShowNotification("Slow connection — still trying to join the match...", new Color(1f, 0.8f, 0.3f), 6f);
                     return;
                 }
                 Plugin.Log.LogWarning($"[QUEUE-JOINER] Timed out waiting for room join after {joinAttempts} attempts (state={state}, target='{targetRoom}'), resetting all queue state");
@@ -753,18 +753,18 @@ namespace CompetitiveRounds
                 if (wasOvt)
                 {
                     try { ApiClient.OvtLeaveQueue(); } catch { }
-                    CompetitiveUI.ShowNotification("Failed to join the 1v2 room — lobby dissolved, please requeue", new Color(1f, 0.4f, 0.4f), 8f);
+                    CompetitiveUI.ShowNotification("Couldn't join the 1v2 match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
                 }
                 else if (wasFfa)
                 {
                     // Same #150 lifecycle as 1v2: a failed join must dissolve the
                     // FFA lobby server-side or the husk re-feeds this dead room.
                     try { ApiClient.FfaLeaveQueue(); } catch { }
-                    CompetitiveUI.ShowNotification("Failed to join the FFA room — lobby dissolved, please requeue", new Color(1f, 0.4f, 0.4f), 8f);
+                    CompetitiveUI.ShowNotification("Couldn't join the FFA match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
                 }
                 else
                 {
-                    CompetitiveUI.ShowNotification("Failed to join ranked room — please requeue", new Color(1f, 0.4f, 0.4f), 8f);
+                    CompetitiveUI.ShowNotification("Couldn't join the ranked match — please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
                 }
                 return;
             }
@@ -1012,7 +1012,7 @@ namespace CompetitiveRounds
             }
             catch { }
 
-            CompetitiveUI.ShowNotification("In ranked match room!", Color.green, 5f);
+            CompetitiveUI.ShowNotification("Joined the match!", Color.green, 5f);
             CompetitiveRoundsBehaviour.HideMainMenu();
 
             string steamId = GameStateWatcher.LocalSteamId;

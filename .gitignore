@@ -75,3 +75,6 @@ __pycache__/
 # Thunderstore release zip artifacts — attach to GH release, don't track in git
 thunderstore/*.zip
 _cm.txt
+
+# Local analysis scratch (review-agent caches) — never publish
+*.pkl

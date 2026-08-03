@@ -1456,10 +1456,13 @@ _VERSION_GATE_BYPASS = frozenset({
     # before its real auth even ran. Each route carries its own auth.
     "/api/v1/i18n/grants/mine",
     "/api/v1/i18n/keys",
+    "/api/v1/i18n/history",
+    "/api/v1/admin/release-notes",
     "/api/v1/i18n/proposals",
     "/api/v1/i18n/review",
     "/api/v1/i18n/revert",
     "/api/v1/admin/i18n/grants",
+    "/api/v1/admin/i18n/grants/list",
     "/api/v1/admin/i18n/sync-keys",
 })
 
@@ -8968,6 +8971,32 @@ def _i18n_markup_residue(s: str) -> str:
     return "".join(out)
 
 
+def _i18n_hole_tokens(s: str) -> tuple[list, bool]:
+    """(exact hole tokens like "{0}" / "{1:F0}", well_formed). MUST mirror the
+    client's I18n.ExtractHoleTokens exactly (Codex Aug-3 find 8's rule): if
+    the portal and the client disagree, an approved proposal is silently
+    rejected by every client and never renders. well_formed goes False on any
+    brace that does not form a {N}/{N:spec} hole — "{{1:F0}}" (renders
+    literally via .NET brace-escaping), a truncated "{1:F0", a stray brace,
+    or "{10}" (out-of-range index throws at format time)."""
+    toks, i, ok = [], 0, True
+    while i < len(s):
+        c = s[i]
+        if c == "{":
+            m = _re.match(r"\{([0-9])(?::([^{}]*))?\}", s[i:])
+            if m is None:
+                ok = False
+                break
+            toks.append(m.group(0))
+            i += m.end()
+        elif c == "}":
+            ok = False
+            break
+        else:
+            i += 1
+    return toks, ok
+
+
 def _i18n_validate(source: str, target: str, language: str) -> list:
     """Server-side validator (§2.5) — runs identically at submit AND approve.
     Returns a list of human-readable errors; empty = valid."""
@@ -8977,11 +9006,20 @@ def _i18n_validate(source: str, target: str, language: str) -> list:
         return errors
     if len(target) > max(len(source) * 3, len(source) + 40):
         errors.append("target too long vs source (ratio cap)")
-    # 1. Placeholder arity/identity.
-    for d in range(10):
-        ph = "{" + str(d) + "}"
-        if source.count(ph) != target.count(ph):
-            errors.append(f"placeholder {ph} count differs from source")
+    # 1. Placeholder IDENTITY (Codex Aug-3 r2 find 4 + r3 find 2): the exact
+    #    hole tokens must match the source as a MULTISET. Counting alone
+    #    accepted "{{1:F0}}" (renders literally), "{10}" (throws), stray
+    #    braces, AND spec rewrites like "{1:F0}"→"{1:Q}" or "{1}" — a typed
+    #    spec against the real argument throws at format time, so TrF shows
+    #    raw English with visible holes. Zero existing entries alter a token,
+    #    so exact equality costs nothing and closes the whole class.
+    _src_toks, _ = _i18n_hole_tokens(source)
+    _tgt_toks, _tgt_ok = _i18n_hole_tokens(target)
+    if not _tgt_ok:
+        errors.append("stray or malformed brace — braces may only form {N} / {N:spec} holes")
+    elif sorted(_src_toks) != sorted(_tgt_toks):
+        errors.append("format holes must be carried over EXACTLY as the source writes them "
+                      f"(source has {sorted(set(_src_toks)) or 'none'})")
     # 2. TMP tag multiset — ordered sequence incl. exact hex values. THE
     #    injection vector: mismatches don't throw, they silently bleed.
     _src_tags, _tgt_tags = _i18n_extract_tags(source), _i18n_extract_tags(target)
@@ -9011,13 +9049,24 @@ def _i18n_validate(source: str, target: str, language: str) -> list:
         errors.append("the translation has no text - only the formatting tags "
                       "were submitted. Type the translated words between them.")
     # 4. Charset allowlist + universal forbids (zero-width, bidi overrides).
+    # A character the SOURCE itself carries is always legal in the target
+    # (universal forbids still apply): sources ship symbol glyphs (•, ✓)
+    # and even other-script literals ("Language / Idioma / Язык"), and a
+    # translation PRESERVING them cannot be an injection — without this
+    # exemption those keys were structurally unapprovable through the portal
+    # (found while regression-testing the Aug-3 brace-grammar addition).
+    # TRUST BOUNDARY: sources are not attacker-controlled — they come from
+    # the compiled extractor set, reach i18n_keys only through the admin-HMAC
+    # sync, and the client independently refuses pack entries for any source
+    # outside its compiled allowlist. A translator cannot choose source text.
+    _src_chars = set(source)
     ok = _I18N_LANG_OK.get(language, _I18N_BASE_OK)
     for ch in target:
         o = ord(ch)
         if o in _I18N_FORBIDDEN or (o < 0x20 and o != 0x0A):
             errors.append(f"forbidden control/invisible char U+{o:04X}")
             break
-        if not ok(o):
+        if not ok(o) and ch not in _src_chars:
             errors.append(f"char U+{o:04X} outside the {language} script allowlist")
             break
     # 5. No URLs, no @-mentions. ANY-length scheme (round-3 find N10:
@@ -9165,6 +9214,50 @@ async def i18n_portal_session(payload: dict, request: Request,
     return {"token": token, "ttl_minutes": I18N_PORTAL_TTL_MIN}
 
 
+@app.get("/api/v1/release-notes/{locale}", tags=["I18n"])
+async def release_notes_localized(locale: str, db: AsyncSession = Depends(get_db)):
+    """Localized release-note OVERLAY for the Home tab. The client already has
+    the English text from GitHub; this returns only the tags we have a
+    translation for, and the client keeps English for everything else. A
+    missing translation must never blank a release note."""
+    locale = locale.lower()[:8]
+    if locale not in I18N_LANGS:
+        return {"locale": locale, "notes": []}
+    rows = (await db.execute(text(
+        "SELECT tag, title, body, source FROM release_notes_i18n"
+        " WHERE language_code = :l ORDER BY updated_at DESC LIMIT 20"
+    ), {"l": locale})).mappings().all()
+    return {"locale": locale, "notes": [
+        {"tag": r["tag"], "title": r["title"], "body": r["body"],
+         "machine": r["source"] == "machine"} for r in rows]}
+
+
+@app.post("/api/v1/admin/release-notes", tags=["Admin"])
+async def admin_set_release_notes(payload: dict, db: AsyncSession = Depends(get_db)):
+    """Ship-time upload of a translated release note (admin-HMAC signed).
+    Idempotent per (tag, language): re-running a ship step overwrites rather
+    than duplicating."""
+    admin_id = str(payload.get("admin_steam_id", ""))[:20]
+    tag = str(payload.get("tag", ""))[:32]
+    lang = str(payload.get("language_code", "")).lower()[:8]
+    title = str(payload.get("title", ""))[:400]
+    body = str(payload.get("body", ""))[:8000]
+    source = "human" if str(payload.get("source", "")) == "human" else "machine"
+    await _require_admin(db, admin_id, "release_notes", f"{tag}:{lang}",
+                         payload.get("signature"))
+    if not tag or lang not in I18N_LANGS or not body.strip():
+        raise HTTPException(400, f"tag, body and a supported language ({', '.join(I18N_LANGS)}) are required")
+    await db.execute(text(
+        "INSERT INTO release_notes_i18n (tag, language_code, title, body, source, translated_by)"
+        " VALUES (:t, :l, :ti, :b, :s, :by)"
+        " ON CONFLICT (tag, language_code) DO UPDATE SET title = EXCLUDED.title,"
+        "   body = EXCLUDED.body, source = EXCLUDED.source,"
+        "   translated_by = EXCLUDED.translated_by, updated_at = NOW()"
+    ), {"t": tag, "l": lang, "ti": title, "b": body, "s": source, "by": admin_id})
+    await db.commit()
+    return {"status": "ok", "tag": tag, "language": lang, "source": source}
+
+
 @app.get("/api/v1/i18n/pack/{locale}", tags=["I18n"])
 async def i18n_pack(locale: str, db: AsyncSession = Depends(get_db)):
     """Launch-time catalogue overlay (public read). The client checks the
@@ -9230,13 +9323,88 @@ async def i18n_keys(request: Request, lang: str = Query(...),
     } for r in rows]}
 
 
+@app.get("/api/v1/i18n/history", tags=["I18n"])
+async def i18n_key_history(request: Request, key_id: str = Query(...),
+                           lang: str = Query(...),
+                           db: AsyncSession = Depends(get_db)):
+    """Sid, Aug 3: the portal must show WHO changed what, what the English
+    originally was, the proposal itself, and its status — so a reviewer can
+    audit a string without reading the database.
+
+    Returns the key's current English, the live approved entry, and every
+    proposal for this key+language newest-first with proposer, reviewer,
+    status and timestamps. Names are resolved for display; steam ids are
+    included because a display name is not an identity."""
+    steam_id = await _portal_auth(request, db)
+    lang = lang.lower()[:8]
+    if await _i18n_role(db, steam_id, lang, "translate") is None:
+        raise HTTPException(403, "no translate grant for this language")
+    key_id = str(key_id)[:16]
+    k = (await db.execute(text(
+        "SELECT key_id, msgctxt, source_hash, sensitive FROM i18n_keys"
+        " WHERE key_id = :k"), {"k": key_id})).mappings().first()
+    if k is None:
+        raise HTTPException(404, "unknown key")
+    ent = (await db.execute(text(
+        "SELECT e.target, e.state, e.approved_source_hash, e.self_approved,"
+        "       e.updated_at, e.approved_by_steam_id,"
+        "       COALESCE(p.display_name,'') AS approver_name"
+        "  FROM i18n_entries e"
+        "  LEFT JOIN players p ON p.steam_id = e.approved_by_steam_id"
+        " WHERE e.key_id = :k AND e.language_code = :lang"
+    ), {"k": key_id, "lang": lang})).mappings().first()
+    props = (await db.execute(text(
+        "SELECT pr.id, pr.proposed_target, pr.status, pr.created_at,"
+        "       pr.reviewed_at, pr.reviewed_by_steam_id, pr.review_note,"
+        "       pr.source_hash, pr.proposer_steam_id,"
+        "       COALESCE(pp.display_name,'') AS proposer_name,"
+        "       COALESCE(dp.display_name,'') AS decider_name"
+        "  FROM i18n_proposals pr"
+        "  LEFT JOIN players pp ON pp.steam_id = pr.proposer_steam_id"
+        "  LEFT JOIN players dp ON dp.steam_id = pr.reviewed_by_steam_id"
+        " WHERE pr.key_id = :k AND pr.language_code = :lang"
+        " ORDER BY pr.created_at DESC LIMIT 100"
+    ), {"k": key_id, "lang": lang})).mappings().all()
+    return {
+        "key_id": k["key_id"],
+        "source": k["msgctxt"],
+        "sensitive": k["sensitive"],
+        "current": None if ent is None else {
+            "target": ent["target"], "state": ent["state"],
+            "self_approved": ent["self_approved"],
+            "approved_by": ent["approved_by_steam_id"],
+            "approved_by_name": ent["approver_name"],
+            "updated_at": ent["updated_at"].isoformat() if ent["updated_at"] else None,
+            # A translation approved against OLDER English is the single most
+            # useful audit signal: it is live but no longer describes the UI.
+            "stale": bool(ent["target"] and ent["state"] == "approved"
+                          and ent["approved_source_hash"] != k["source_hash"]),
+        },
+        "proposals": [{
+            "id": r["id"], "target": r["proposed_target"], "status": r["status"],
+            "proposer": r["proposer_steam_id"], "proposer_name": r["proposer_name"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "decided_by": r["reviewed_by_steam_id"], "decided_by_name": r["decider_name"],
+            "decided_at": r["reviewed_at"].isoformat() if r["reviewed_at"] else None,
+            "note": r["review_note"],
+            # True when the English CHANGED after this proposal was written —
+            # the reviewer is otherwise judging a translation of text that no
+            # longer exists.
+            "source_changed_since": r["source_hash"] != k["source_hash"],
+        } for r in props],
+    }
+
+
 @app.post("/api/v1/i18n/proposals", tags=["I18n"])
 async def i18n_propose(payload: dict, request: Request,
                        db: AsyncSession = Depends(get_db)):
     steam_id = await _portal_auth(request, db)
     key_id = str(payload.get("key_id", ""))[:16]
     lang = str(payload.get("language_code", "")).lower()[:8]
-    target = str(payload.get("target", ""))[:4000]
+    # 8000 matches the client's PackMaxStringLen — the FFA How-It-Works doc
+    # (~4.3k source, longer translated) must survive the proposal path intact
+    # or moderators silently submit truncated rewrites (Codex Aug-3 find 6).
+    target = str(payload.get("target", ""))[:8000]
     # D15 (wave-2 find 5): no assent, no proposal — the recorded grant is
     # what makes an approved translation distributable. STRICT boolean
     # (round-3 find N2): the JSON string "false" is truthy in Python, and
@@ -9301,8 +9469,8 @@ async def i18n_review(payload: dict, request: Request,
     """Approve → live immediately (§2.5). The validator re-runs against the
     CURRENT source at approve time — never trust the submit verdict; the
     source may have changed since. Sensitive keys are admin-approve-only.
-    Self-approval is allowed, flagged, and audited (a single-moderator
-    language must be shippable)."""
+    Self-approval is REFUSED (Sid, Aug 2) — the reviewer must be someone
+    other than the proposer."""
     steam_id = await _portal_auth(request, db)
     pid = int(payload.get("proposal_id", 0) or 0)
     action = str(payload.get("action", ""))
@@ -9334,7 +9502,19 @@ async def i18n_review(payload: dict, request: Request,
         errors = _i18n_validate(key["msgctxt"], prop["proposed_target"], lang)
         if errors:
             raise HTTPException(422, "re-validation failed: " + "; ".join(errors[:4]))
+        # Sid, Aug 2: a moderator may propose AND approve, but never their
+        # OWN proposal — a second pair of eyes is the whole point of the
+        # review step. Applies to admins too: no special case, so a language
+        # with a single moderator ships via Sid reviewing THEIR work (the
+        # intended flow) rather than anyone self-certifying. The
+        # self_approved column stays for rows that predate this rule.
         self_app = prop["proposer_steam_id"] == steam_id
+        if self_app and role != "admin":
+            raise HTTPException(403, "you cannot approve your own proposal - "
+                                     "another reviewer has to look at it")
+        # Admins keep the self-approve path (Sid, Aug 3: the other two admins
+        # are multilingual and trusted to review their own work). Still
+        # recorded on the row and in the audit trail, so it stays visible.
         await db.execute(text(
             "INSERT INTO i18n_entries (key_id, language_code, target, state,"
             " approved_source_hash, approved_by_steam_id, self_approved, updated_at)"
@@ -9411,6 +9591,14 @@ user-select:none;cursor:not-allowed}
 .tl-row{display:flex;flex-wrap:wrap;align-items:center;gap:3px;margin:6px 0}
 .tl-run{flex:1 1 120px;min-width:90px;background:#1c2029;color:#dde;border:1px solid #445;padding:5px}
 .tl-note{font-size:11px;color:#889;margin:2px 0}
+.hist{margin:6px 0 2px;border-top:1px solid #2a3040;padding-top:6px;font-size:12px}
+.hist h4{margin:0 0 4px;font-size:12px;color:#9ad0ff;font-weight:600}
+.hrow{padding:4px 6px;margin:3px 0;border-left:3px solid #445;background:#161a22}
+.hrow .who{color:#bbb}.hrow .tgt{color:#b0ffb0;white-space:pre-wrap}
+.h-approved{border-left-color:#2e7d40}.h-rejected{border-left-color:#8a3030}
+.h-pending{border-left-color:#3a6ea5}.h-superseded{border-left-color:#555}
+.h-flag{font-size:10px;color:#ffc46b;margin-left:6px}
+.h-src{color:#9ad0ff;white-space:pre-wrap;background:#12151c;padding:3px 6px;border-radius:3px}
 .tl-warn{font-size:11px;color:#ffc46b;margin:2px 0;min-height:14px}
 .badge{font-size:11px;border-radius:3px;padding:1px 6px;margin-left:6px}
 .b-machine{background:#5a4a18}.b-approved{background:#1e4a24}.b-stale{background:#5a1e1e}
@@ -9614,7 +9802,49 @@ function renderKeys(){
         {key_id:k.key_id,language_code:rowLang,target:ed.value(),license_assent:true})});
         msg.className="muted";msg.textContent="Proposed — awaiting review.";loadQueue()}
       catch(e){msg.className="err";msg.textContent=e.message}};
-    box.appendChild(send);box.appendChild(msg);list.appendChild(box);
+    box.appendChild(send);
+    // Audit trail (Sid, Aug 3): who proposed, the ORIGINAL English, the
+    // proposal itself, and its status — on demand, so the list stays fast.
+    const hbtn=el("button",null,"History");
+    const hbox=el("div","hist");hbox.style.display="none";
+    hbtn.onclick=async()=>{
+      if(hbox.style.display!=="none"){hbox.style.display="none";return;}
+      hbox.style.display="";hbox.textContent="Loading history...";
+      try{
+        const h=await api("/history?key_id="+encodeURIComponent(k.key_id)+"&lang="+encodeURIComponent(rowLang));
+        hbox.textContent="";
+        const head=el("h4",null,"English source");hbox.appendChild(head);
+        hbox.appendChild(el("div","h-src",h.source));
+        if(h.current){
+          const c=el("div","hrow h-approved");
+          c.appendChild(el("div","tgt",h.current.target||"(none)"));
+          let who="LIVE - approved by "+(h.current.approved_by_name||h.current.approved_by||"?");
+          if(h.current.updated_at)who+=" on "+h.current.updated_at.slice(0,16).replace("T"," ");
+          if(h.current.self_approved)who+=" (self-approved)";
+          c.appendChild(el("div","who",who));
+          if(h.current.stale)c.appendChild(el("span","h-flag",
+            "STALE - the English changed after this was approved"));
+          hbox.appendChild(el("h4",null,"Currently live"));hbox.appendChild(c);
+        }
+        hbox.appendChild(el("h4",null,"Proposals ("+h.proposals.length+")"));
+        if(!h.proposals.length)hbox.appendChild(el("div","muted","No proposals yet."));
+        h.proposals.forEach(pr=>{
+          const r=el("div","hrow h-"+(pr.status||"pending"));
+          r.appendChild(el("div","tgt",pr.target));
+          let line=pr.status.toUpperCase()+" - by "+(pr.proposer_name||pr.proposer);
+          if(pr.created_at)line+=" on "+pr.created_at.slice(0,16).replace("T"," ");
+          if(pr.decided_by)line+="  |  reviewed by "+(pr.decided_by_name||pr.decided_by);
+          if(pr.decided_at)line+=" on "+pr.decided_at.slice(0,16).replace("T"," ");
+          r.appendChild(el("div","who",line));
+          if(pr.note)r.appendChild(el("div","muted","Note: "+pr.note));
+          if(pr.source_changed_since)r.appendChild(el("span","h-flag",
+            "the English changed after this proposal was written"));
+          hbox.appendChild(r);
+        });
+      }catch(e){hbox.textContent="";hbox.appendChild(el("div","err",e.message));}
+    };
+    box.appendChild(hbtn);
+    box.appendChild(msg);box.appendChild(hbox);list.appendChild(box);
   });
   if(!shown)list.appendChild(el("div","muted","Nothing matches this filter."));
 }
@@ -9662,6 +9892,23 @@ async def i18n_portal_page():
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",
     })
+
+
+@app.get("/api/v1/admin/i18n/grants/list", tags=["Admin"])
+async def admin_i18n_grants_list(admin_steam_id: str, sig: str,
+                                 db: AsyncSession = Depends(get_db)):
+    """Every LIVE translation grant, for the in-game Admin tab's roster.
+    Same admin-HMAC gate as the write endpoint — the roster names who can
+    change the mod's text, so it is not public."""
+    await _require_admin(db, admin_steam_id, "i18n_grants_list", "", sig)
+    rows = (await db.execute(text(
+        "SELECT g.steam_id, g.language_code, COALESCE(p.display_name, '') AS display_name"
+        "  FROM language_grants g LEFT JOIN players p ON p.steam_id = g.steam_id"
+        " WHERE g.scope = 'translate' AND g.revoked_at IS NULL"
+        " ORDER BY g.language_code, COALESCE(p.display_name, g.steam_id)"
+    ))).mappings().all()
+    return {"grants": [{"steam_id": r["steam_id"], "language_code": r["language_code"],
+                        "display_name": r["display_name"]} for r in rows]}
 
 
 @app.post("/api/v1/admin/i18n/grants", tags=["Admin"])
@@ -18966,6 +19213,12 @@ FFA_POINTS_TO_WIN_ROUND = 2
 # because the server ANDs it against the row and an old client only
 # mis-renders its own HUD badge.
 FFA_CONFIG_MIN_VERSION = "1.36.0"
+# Kills tie-break floor (Sid approved 2026-08-03): a lobby gets kills-split
+# placements only when EVERY member's session-authenticated join advertised
+# at least this version (frozen as ffa_lobbies.kills_tiebreak at lock —
+# migration 187). ⚠ SHIP COUPLING: must equal the version that ships the v2
+# ffa: canonical, or the tie-break never engages / engages one release early.
+FFA_KILLS_TIEBREAK_MIN_VERSION = "1.36.0"
 FFA_CONFIG_DEFAULTS = {
     "score_target": 5, "card_candidates": 5, "initial_picks": 1,
     "card_cap": 5, "same_card_rule": False,
@@ -19077,7 +19330,15 @@ def _ffa_sort_key(steam_id: str) -> tuple:
     return (len(steam_id or ""), steam_id or "")
 
 
-def _ffa_hmac_canonical(report: FfaMatchReport) -> str:
+def _ffa_hmac_canonical(report: FfaMatchReport, include_kills: bool) -> str:
+    """FFA is the domain-tagged VARIABLE-length canonical (#213) — it may
+    evolve, but only in client/server lockstep. Two live forms:
+      v2 (kills-signed, v1.36.0+ clients): per-player steam:rounds:points:kills
+      v1 (legacy, <= v1.35.x clients):      per-player steam:rounds:points
+    No cross-form collision is possible: both carry str(len(players)) at the
+    same position, and 7+4n == 7+3m forces n != m, contradicting the shared
+    count field — so one signature can never validate under the other form
+    for a different roster shape."""
     parts = [
         "ffa", report.lobby_id, report.photon_room_id or "",
         report.reported_by_steam_id, str(report.is_ranked).lower(),
@@ -19085,21 +19346,40 @@ def _ffa_hmac_canonical(report: FfaMatchReport) -> str:
     ]
     for p in sorted(report.players, key=lambda e: _ffa_sort_key(e.steam_id)):
         parts.extend([p.steam_id, str(p.rounds_won), str(p.points_total)])
+        if include_kills:
+            parts.append(str(p.kills))
     return ":".join(parts)
 
 
-def _verify_ffa_hmac(report: FfaMatchReport) -> bool:
+def _verify_ffa_hmac(report: FfaMatchReport) -> str | None:
+    """Returns the canonical form that verified ("v2" = kills signed,
+    "v1" = legacy 3-field players), or None on failure. The DUAL acceptance
+    is the deliberate version gate (TODO item 1, Sid-approved 2026-08-03):
+    old clients keep reporting under v1 with no MIN_MOD_VERSION bump. Drop v1
+    after adoption. TRUST MODEL, stated precisely (Codex Aug-3 finds 2/3):
+    the HMAC authenticates the REPORTING BUILD, not gameplay truth — kills,
+    like rounds/points/winner, are reporter-attested values a modified client
+    can fabricate wholesale; "signed" only means unsigned fields can't
+    reorder what the signature covers. A v1 signature is honored only for
+    lobbies that are NOT kills-capable (some member below the floor at lock);
+    from a kills-capable lobby submit_ffa_match quarantines any v1 report of
+    an UNRECORDED room as a downgrade attempt (an already-recorded room gets
+    the idempotent replay echo regardless of form) — so deliberately signing
+    v1 buys at most the same semantics as joining with an old version
+    advertised, which turns the lobby flag off for everyone. Retired when
+    the staged MIN_MOD_VERSION raise reaches 1.36.0."""
     if not MATCH_HMAC_SECRET:
-        return True
+        return "v2"
     if not report.hmac_signature:
         print("[FFA-HMAC] no signature provided")
-        return False
-    msg = _ffa_hmac_canonical(report)
-    expected = hmac.new(MATCH_HMAC_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
-    ok = hmac.compare_digest(report.hmac_signature, expected)
-    if not ok:
-        print(f"[FFA-HMAC] mismatch. canonical='{msg}'")
-    return ok
+        return None
+    for form, include_kills in (("v2", True), ("v1", False)):
+        msg = _ffa_hmac_canonical(report, include_kills)
+        expected = hmac.new(MATCH_HMAC_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(report.hmac_signature, expected):
+            return form
+    print(f"[FFA-HMAC] mismatch. canonical_v2='{_ffa_hmac_canonical(report, True)}'")
+    return None
 
 
 class _FfaQueueJoinReq(BaseModel):
@@ -19154,10 +19434,15 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     fallback = float(g1["rating"]) if g1 and g1["rating"] is not None else 1500.0
     _res = await db.execute(text("""
         INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating_deviation,
-                               games_played, fallback_rating, region, status, joined_at, last_polled)
-        VALUES (:pid, :sid, :dn, :r, :rd, :gp, :fr, :reg, 'searching', NOW(), NOW())
+                               games_played, fallback_rating, region, status, joined_at, last_polled,
+                               mod_version)
+        VALUES (:pid, :sid, :dn, :r, :rd, :gp, :fr, :reg, 'searching', NOW(), NOW(), :mv)
         ON CONFLICT (player_id) DO UPDATE SET
             display_name = EXCLUDED.display_name, region = EXCLUDED.region,
+            -- Capability provenance (Codex Aug-3 r2 find 1): this is the
+            -- caller's OWN session-authenticated header — the only version
+            -- signal the kills-tiebreak lock computation may trust.
+            mod_version = EXCLUDED.mod_version,
             -- Bug #109: a rejoin after quitting the game found the old ghost
             -- row and kept its joined_at ("in queue 18 minutes already").
             -- A SEARCHING row is a fresh search — reset the clock and the
@@ -19177,7 +19462,8 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
                              THEN NOW() ELSE ffa_queue.joined_at END
         RETURNING status
     """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64], "r": rating,
-           "rd": rd, "gp": games, "fr": fallback, "reg": (req.region or "")[:8] or None})
+           "rd": rd, "gp": games, "fr": fallback, "reg": (req.region or "")[:8] or None,
+           "mv": (_current_mod_version.get() or "")[:16] or None})
     _row_status = _res.scalar_one_or_none()
     if _row_status == "searching":
         # Authoritative arrival stamp for the gather window (Codex find 5):
@@ -19296,9 +19582,13 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
     if mine is not None and mine["status"] == "lobby":
         if mine["series_id"] == lobby_id:
             # Idempotent same-lobby rejoin — the client recovery path (find 6).
+            # mod_version refreshes too: this is the member's own session-
+            # authenticated call, and the lobby is still OPEN (pre-lock).
             await db.execute(text(
-                "UPDATE ffa_queue SET last_polled = NOW(), display_name = :dn WHERE player_id = :pid"
-            ), {"pid": player.id, "dn": req.display_name[:64]})
+                "UPDATE ffa_queue SET last_polled = NOW(), display_name = :dn,"
+                "       mod_version = :mv WHERE player_id = :pid"
+            ), {"pid": player.id, "dn": req.display_name[:64],
+                "mv": (_current_mod_version.get() or "")[:16] or None})
             return
         raise HTTPException(409, "Leave your current lobby first")
     if mine is not None and mine["status"] not in ("searching",):
@@ -19313,12 +19603,13 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
         inserted = (await db.execute(text("""
             INSERT INTO ffa_queue (player_id, steam_id, display_name, rating, rating_deviation,
                                    games_played, fallback_rating, region, status, series_id,
-                                   joined_at, last_polled)
-            VALUES (:pid, :sid, :dn, :r, :rd, :gp, :fr, :reg, 'lobby', :lid, NOW(), NOW())
+                                   joined_at, last_polled, mod_version)
+            VALUES (:pid, :sid, :dn, :r, :rd, :gp, :fr, :reg, 'lobby', :lid, NOW(), NOW(), :mv)
             ON CONFLICT (player_id) DO NOTHING
             RETURNING player_id
         """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64],
-               "reg": (req.region or "")[:8] or None, "lid": lobby_id, **snap})).scalar()
+               "reg": (req.region or "")[:8] or None, "lid": lobby_id,
+               "mv": (_current_mod_version.get() or "")[:16] or None, **snap})).scalar()
         if inserted is None:
             raise HTTPException(409, "Your queue state just changed — try again")
         _enrolled = True
@@ -19331,11 +19622,12 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
                    room_name=NULL, room_region=NULL, matched_at=NULL,
                    display_name=:dn, region=:reg, rating=:r, rating_deviation=:rd,
                    games_played=:gp, fallback_rating=:fr,
-                   joined_at=NOW(), last_polled=NOW()
+                   joined_at=NOW(), last_polled=NOW(), mod_version=:mv
              WHERE player_id=:pid AND status='searching'
             RETURNING player_id
         """), {"pid": player.id, "dn": req.display_name[:64],
-               "reg": (req.region or "")[:8] or None, "lid": lobby_id, **snap})).scalar()
+               "reg": (req.region or "")[:8] or None, "lid": lobby_id,
+               "mv": (_current_mod_version.get() or "")[:16] or None, **snap})).scalar()
         if flipped is None:
             raise HTTPException(409, "Your queue state just changed — try again")
         _enrolled = True
@@ -19468,6 +19760,31 @@ def _ffa_initial_picks_floor(card_cap: int, score_target: int) -> int:
     return max(1, min(int(card_cap), int(card_cap) + 1 - int(score_target)))
 
 
+def _ffa_apply_ranked_bounds(cfg: dict) -> list:
+    """Sid, Aug 3: RANKED FFA runs on a tighter config than casual.
+
+      * card_cap 3-5 (casual may go to 6). A 6-card hand changes the mode
+        enough that rated results stop being comparable across lobbies.
+      * initial_picks <= card_cap ALWAYS. Dealing more opening cards than a
+        player can hold just burns picks and real time at the card screen —
+        the surplus is discarded the moment the hand fills.
+
+    CLAMPS rather than rejects, and returns the names of what it changed, so
+    a host who flips ranked ON with a casual-legal config lands on a valid
+    ranked config with the change reported instead of an error they have to
+    decode. Called from EVERY config writer (create/settings/start) — the
+    bound must not depend on which endpoint happened to write last."""
+    touched = []
+    if cfg.get("is_ranked", True):
+        if int(cfg.get("card_cap", 5)) > 5:
+            cfg["card_cap"] = 5
+            touched.append("card_cap")
+    if int(cfg.get("initial_picks", 1)) > int(cfg.get("card_cap", 5)):
+        cfg["initial_picks"] = int(cfg["card_cap"])
+        touched.append("initial_picks")
+    return touched
+
+
 class _FfaLobbySettingsReq(BaseModel):
     steam_id: str
     score_target: int | None = None
@@ -19536,6 +19853,10 @@ async def ffa_lobby_settings(req: _FfaLobbySettingsReq, request: Request,
     # cap (T > C would drag rolling removal into game start — decided T <= C).
     floor_t = _ffa_initial_picks_floor(new["card_cap"], new["score_target"])
     new["initial_picks"] = max(floor_t, min(new["initial_picks"], new["card_cap"], 4))
+    _bounded = _ffa_apply_ranked_bounds(new)
+    if _bounded:
+        print(f"[FFA] lobby {lobby_id}: ranked bounds clamped {_bounded} -> "
+              f"cap={new['card_cap']} picks={new['initial_picks']}")
 
     changed = [k for k in new if new[k] != cur[k]]
     if changed:
@@ -19649,12 +19970,20 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     # initial_picks (#208's re-read rule applied to config). Clamp up
     # silently — the guarantee, not the host's number, is the contract.
     _start_cfg = _ffa_lobby_config(lrow)
+    _start_cfg["is_ranked"] = bool(lrow["is_ranked"]) if ("is_ranked" in lrow and lrow["is_ranked"] is not None) else True
     _floor_t = _ffa_initial_picks_floor(_start_cfg["card_cap"], _start_cfg["score_target"])
-    _fixed_t = max(_floor_t, min(_start_cfg["initial_picks"], _start_cfg["card_cap"], 4))
-    if _fixed_t != _start_cfg["initial_picks"]:
+    _start_cfg["initial_picks"] = max(_floor_t, min(_start_cfg["initial_picks"], _start_cfg["card_cap"], 4))
+    # Ranked bounds re-checked HERE too (Sid, Aug 3): a lobby row can predate
+    # the rule, or have been flipped to ranked after its cap was set, so Start
+    # is the last gate before a rated game inherits an out-of-bounds config.
+    _ffa_apply_ranked_bounds(_start_cfg)
+    _fixed_t = _start_cfg["initial_picks"]
+    if _fixed_t != int(lrow["initial_picks"] or 1) or _start_cfg["card_cap"] != int(lrow["card_cap"] or 5):
         await db.execute(text(
-            "UPDATE ffa_lobbies SET initial_picks = :t WHERE id = :lid"
-        ), {"t": _fixed_t, "lid": lobby_id})
+            "UPDATE ffa_lobbies SET initial_picks = :t, card_cap = :c WHERE id = :lid"
+        ), {"t": _fixed_t, "c": _start_cfg["card_cap"], "lid": lobby_id})
+        print(f"[FFA] lobby {lobby_id}: start-time config clamp -> "
+              f"cap={_start_cfg['card_cap']} picks={_fixed_t}")
     # EXACTLY the legacy gather-decider lock body from here. created_at is
     # reset to NOW() because every active-lobby consumer (25-min dispersed
     # close, bettable assembly window, zero-game dead sweep) reads it as the
@@ -19684,16 +20013,32 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
         """), {"lid": lobby_id})
         print(f"[FFA-LOBBY] lobby {lobby_id}: roster below config floor "
               f"{FFA_CONFIG_MIN_VERSION} — config collapsed to defaults")
+    # Kills tie-break capability, frozen HERE (migration 187): TRUE only when
+    # EVERY member's ffa_queue.mod_version — stamped by that member's OWN
+    # session-authenticated join/create call — clears the floor.
+    # players.mod_version is deliberately NOT consulted for this flag: any
+    # preflight caller can stamp that column onto another player's row (Codex
+    # Aug-3 r2 find 1), while a queue row's version is only ever written by
+    # its own player's request. NULL/missing ⇒ not capable ⇒ legacy shared-tie
+    # semantics (the safe direction, #288).
+    _kt_vals = (await db.execute(text(
+        "SELECT mod_version FROM ffa_queue WHERE player_id = ANY(:ids)"
+    ), {"ids": [r["player_id"] for r in ordered]})).scalars().all()
+    _kt_floor = _parse_version(FFA_KILLS_TIEBREAK_MIN_VERSION)
+    _kills_tiebreak = len(_kt_vals) == len(ordered) and all(
+        _parse_version((v or "0").lstrip("vV")) >= _kt_floor for v in _kt_vals)
     regions = [r["region"] for r in ordered if r["region"]]
     region = max(set(regions), key=regions.count) if regions else "us"
     room = f"ffa_{uuid.uuid4().hex[:12]}"
     await db.execute(text("""
         UPDATE ffa_lobbies
            SET status='active', photon_room_id=:room, region=:reg,
-               player_count=:n, member_ids=:members, created_at=NOW()
+               player_count=:n, member_ids=:members, created_at=NOW(),
+               kills_tiebreak=:kt
          WHERE id=:lid AND status='open'
     """), {"room": room, "reg": (region or "us")[:8], "n": len(ordered),
-           "members": [r["player_id"] for r in ordered], "lid": lobby_id})
+           "members": [r["player_id"] for r in ordered], "lid": lobby_id,
+           "kt": _kills_tiebreak})
     for slot, r in enumerate(ordered):
         await db.execute(text("""
             UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
@@ -20538,15 +20883,29 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
 
     # Lock: slots by the deterministic steam ordering (client mirrors it).
     ordered = sorted(lobby_rows, key=lambda r: _ffa_sort_key(r["steam_id"]))
+    # Kills tie-break capability, frozen at lock (migration 187) — same rule
+    # and same provenance constraint as the host-lobby Start site: only each
+    # member's own session-authenticated queue-row version counts. Legacy
+    # gather serves pre-1.36 clients, so this is FALSE in practice until the
+    # gather flow itself retires; computed anyway so the two lock sites stay
+    # byte-equivalent in the state they produce (the design keystone).
+    _kt_vals = (await db.execute(text(
+        "SELECT mod_version FROM ffa_queue WHERE player_id = ANY(:ids)"
+    ), {"ids": [r["player_id"] for r in ordered]})).scalars().all()
+    _kt_floor = _parse_version(FFA_KILLS_TIEBREAK_MIN_VERSION)
+    _kills_tiebreak = len(_kt_vals) == len(ordered) and all(
+        _parse_version((v or "0").lstrip("vV")) >= _kt_floor for v in _kt_vals)
     regions = [r["region"] for r in lobby_rows if r["region"]]
     region = max(set(regions), key=regions.count) if regions else "us"
     room = f"ffa_{uuid.uuid4().hex[:12]}"
     lobby_id = uuid.uuid4()
     await db.execute(text("""
-        INSERT INTO ffa_lobbies (id, status, photon_room_id, region, player_count, member_ids, created_at)
-        VALUES (:lid, 'active', :room, :reg, :n, :members, NOW())
+        INSERT INTO ffa_lobbies (id, status, photon_room_id, region, player_count, member_ids,
+                                 created_at, kills_tiebreak)
+        VALUES (:lid, 'active', :room, :reg, :n, :members, NOW(), :kt)
     """), {"lid": lobby_id, "room": room, "reg": (region or "us")[:8],
-           "n": len(ordered), "members": [r["player_id"] for r in ordered]})
+           "n": len(ordered), "members": [r["player_id"] for r in ordered],
+           "kt": _kills_tiebreak})
     for slot, r in enumerate(ordered):
         await db.execute(text("""
             UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
@@ -20644,6 +21003,50 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
     }
 
 
+async def _ffa_replay_echo(db: AsyncSession, report, lobby_uuid, id_by_steam, n):
+    """Idempotent echo for an already-recorded room, or None when the room is
+    unrecorded. Runs BEFORE every quarantine branch in submit_ffa_match
+    (Codex Aug-3 r4 find 1): the durable client outbox legitimately retries a
+    committed report whose response was lost — after the lobby completes,
+    the inactive-status branch used to QUARANTINE that duplicate (and the
+    admin endpoint could show it can_accept=true because the real match
+    predates the quarantine row). Also the sole duplicate handler for the
+    INSERT's unique-violation path."""
+    prior = (await db.execute(text(
+        "SELECT id, player_count, lobby_id FROM ffa_matches WHERE photon_room_id = :room"
+    ), {"room": (report.photon_room_id or "")[:64]})).mappings().first()
+    if prior is None:
+        return None
+    if str(prior["lobby_id"]) != str(lobby_uuid):
+        raise HTTPException(409, "Room already recorded for a different lobby")
+    # The detailed echo requires the submitted roster to BE the recorded one
+    # (Codex Aug-3 r5 find 1: running before the endpoint's exact-roster
+    # validation, a bare existence check would hand match details to any
+    # HMAC-holding session that knows the lobby+room ids but wasn't in the
+    # game). An honest outbox retry always carries the original roster.
+    rec_ids = set((await db.execute(text(
+        "SELECT player_id FROM ffa_match_players WHERE match_id = :m"
+    ), {"m": prior["id"]})).scalars().all())
+    if set(id_by_steam.values()) != rec_ids:
+        raise HTTPException(409, "Duplicate room id")
+    mine = (await db.execute(text(
+        "SELECT placement, rating_change, xp_gained, gold_gained FROM ffa_match_players"
+        " WHERE match_id = :m AND player_id = :p"
+    ), {"m": prior["id"], "p": id_by_steam[report.reported_by_steam_id]})).mappings().first()
+    changes = (await db.execute(text(
+        "SELECT p.steam_id, fmp.rating_change FROM ffa_match_players fmp"
+        " JOIN players p ON p.id = fmp.player_id WHERE fmp.match_id = :m"
+    ), {"m": prior["id"]})).mappings().all()
+    return FfaMatchResponse(
+        match_id=prior["id"], lobby_id=lobby_uuid,
+        placement=int(mine["placement"]) if mine else 0,
+        player_count=int(prior["player_count"] or n),
+        rating_changes={r["steam_id"]: float(r["rating_change"] or 0.0) for r in changes},
+        xp_gained=int(mine["xp_gained"] or 0) if mine else 0,
+        gold_gained=int(mine["gold_gained"] or 0) if mine else 0,
+        message="Already recorded")
+
+
 @app.post("/api/v1/ffa/matches", response_model=FfaMatchResponse, tags=["FFA Matches"])
 async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """Record one FFA game and apply pairwise Glicko + XP/gold inline (an FFA
@@ -20651,8 +21054,22 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     the per-player round/point tallies — the client's ordering is not trusted.
     Idempotent via the room-id unique (rooms are per-game suffixed)."""
     await _check_steam_session(request, report.reported_by_steam_id, db)
-    if not _verify_ffa_hmac(report):
+    canonical_form = _verify_ffa_hmac(report)
+    if not canonical_form:
         raise HTTPException(403, "Invalid FFA match signature")
+    # Two INDEPENDENT facts derived from the verified form:
+    #   kills_in_canonical — the kills values are covered by the signature
+    #     (v2 form). Feeds the absent-refutation guard only.
+    #   kills_break_ties — kills participate in PLACEMENT. Requires v2 AND
+    #     the lobby's FROZEN kills_tiebreak capability flag (Codex Aug-3
+    #     find 1): semantics must be a property of the GAME, not of which
+    #     member reports.
+    # A v1 report keeps the legacy shared-tie semantics ONLY in a lobby that
+    # is not kills-capable (some member below the floor at lock); from a
+    # kills-capable lobby a v1 report of an UNRECORDED room is quarantined +
+    # 403'd below as a downgrade attempt (a recorded room returns the replay
+    # echo first) — an honest old client can never be a member of one.
+    kills_in_canonical = canonical_form == "v2"
     try:
         lobby_uuid = UUID(report.lobby_id)
     except (ValueError, TypeError):
@@ -20699,6 +21116,13 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # payloads). The recoverable incident class — a live lobby closed
         # mid-game — always leaves the row behind.
         raise HTTPException(404, "Lobby not found")
+    # Duplicate-room replay FIRST — before the status/shape/limit branches
+    # below, every one of which quarantines (Codex Aug-3 r4 find 1: an honest
+    # outbox retry of a committed report, arriving after the lobby closed,
+    # must get its idempotent echo, never a quarantine capture).
+    _replay = await _ffa_replay_echo(db, report, lobby_uuid, id_by_steam, len(report.players))
+    if _replay is not None:
+        return _replay
     # Review find 2: a canceled/completed lobby must not keep minting rated
     # games. Only a live lobby accepts reports.
     members = list(lobby["member_ids"] or [])
@@ -20709,6 +21133,21 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     _cfg = _ffa_lobby_config(lobby)
     _score_target = _cfg["score_target"]
     _lobby_ranked = bool(lobby["is_ranked"]) if ("is_ranked" in lobby and lobby["is_ranked"] is not None) else True
+    # ── Kills tie-break capability: read the flag FROZEN at lock time
+    # (migration 187), computed there from each member's OWN session-
+    # authenticated join call (ffa_queue.mod_version) — never from
+    # players.mod_version, which any preflight caller can stamp onto another
+    # player's row (Codex Aug-3 round-2 find 1: provenance, not parsing).
+    # Freezing at lock makes the semantics a property of the GAME: no
+    # mid-sitting version change, poll race, or reporter identity can flip
+    # them between games of one sitting. Missing column/NULL (pre-187 lobby
+    # mid-flight during the deploy) => False => legacy shared-tie semantics,
+    # the safe direction (#288: prefer under-application).
+    _lobby_kills_capable = bool(lobby["kills_tiebreak"]) if "kills_tiebreak" in lobby else False
+    kills_break_ties = kills_in_canonical and _lobby_kills_capable
+    # (The v1-downgrade rejection for kills-capable lobbies lives BELOW the
+    # roster/shape/limit binding checks — Codex Aug-3 r3 find 1: quarantining
+    # up here would run before binding and become a quota-spam primitive.)
     # The LOBBY ROW is the sole ranked authority (Codex v1.36 server review
     # find 2): the first draft ANDed in the report's claim, which let the
     # elected reporter — precisely the client with the most to lose — strip
@@ -20789,6 +21228,28 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             player_ids=list(id_by_steam.values()))
         raise HTTPException(409, "Lobby game limit reached")
 
+    # A v1 signature from a lobby whose ENTIRE roster advertised a v2-signing
+    # build at lock is definitionally a downgrade attempt (Codex Aug-3 r2
+    # find 2: binding this to the SUBMIT request's claimed version would
+    # allow claim-switching between join and submit; the frozen flag closes
+    # that). Runs AFTER the active/roster/slot/shape/limit binding above (r3
+    # find 1: capture-before-binding was a quarantine-quota spam primitive);
+    # the endpoint-top replay echo already returned for any recorded room, so
+    # only unrecorded games reach this capture. RESIDUAL (accepted): a
+    # concurrent report committing the same room between that check and this
+    # capture leaves a stale quarantine row for an admin to reject — the
+    # capture itself runs in its own transaction after a rollback, so no lock
+    # is held across it. Quarantined, not dropped, so the vanishing-rare
+    # honest case (mid-sitting DLL downgrade) stays admin-recoverable.
+    if canonical_form == "v1" and _lobby_kills_capable:
+        await _quarantine_report(
+            db, mode="ffa", reason="v1_canonical_downgrade", status_code=403,
+            payload=report.model_dump(), group_id=lobby_uuid,
+            photon_room_id=report.photon_room_id,
+            reporter_id=id_by_steam.get(report.reported_by_steam_id),
+            player_ids=list(id_by_steam.values()))
+        raise HTTPException(403, "This lobby requires the current report signature")
+
     # Players pass: sorted FOR NO KEY UPDATE (#202/#203 — never FOR UPDATE,
     # and this pass is the real gate; glicko rows may not exist yet).
     for pid in sorted(reported_ids, key=str):
@@ -20796,23 +21257,27 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             "SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"
         ), {"pid": pid})
 
-    # Server-side placements: (rounds desc, points desc); ties share the same
-    # placement, COMPETITION style (1,2,2,4 — not dense; Codex design find 15).
-    # `kills` is deliberately NOT a tie-break: it lives OUTSIDE the frozen HMAC
-    # canonical (only steam:rounds_won:points_total per player is signed), so a
-    # modified reporter could reorder placements — and therefore ratings and
-    # gold — by inventing kill counts. rounds+points decide ~99% of orderings;
-    # a genuine full tie shares the place, and the trailing _ffa_sort_key only
-    # stabilises entry ORDER, never separates a shared place. `kills` keeps its
-    # display/telemetry role untouched.
+    # Server-side placements: (rounds desc, points desc, kills desc); ties
+    # share the same placement, COMPETITION style (1,2,2,4 — not dense; Codex
+    # design find 15). `kills` breaks ties ONLY when kills_break_ties: the
+    # report verified under the v2 canonical (kills signed — Sid approved
+    # 2026-08-03) AND the whole roster is on a kills-signing build (the
+    # capability gate above). On a v1 legacy report kills is unsigned, so it
+    # keeps the pre-v1.36 exclusion: a modified reporter could otherwise
+    # reorder placements — and therefore ratings and gold — by inventing kill
+    # counts an old server would never have covered. The trailing
+    # _ffa_sort_key only stabilises entry ORDER, never separates a shared
+    # place.
+    def _place_key(p) -> tuple:
+        return (p.rounds_won, p.points_total, p.kills if kills_break_ties else 0)
     entries = sorted(report.players,
-                     key=lambda p: (-p.rounds_won, -p.points_total,
-                                    _ffa_sort_key(p.steam_id)))
+                     key=lambda p: tuple(-v for v in _place_key(p))
+                     + (_ffa_sort_key(p.steam_id),))
     placements: dict[str, int] = {}
     prev_key = None
     prev_place = 0
     for i, p in enumerate(entries):
-        k = (p.rounds_won, p.points_total)
+        k = _place_key(p)
         place = prev_place if k == prev_key else i + 1
         placements[p.steam_id] = place
         prev_key, prev_place = k, place
@@ -20831,14 +21296,16 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # signed tally is non-zero was demonstrably present this game, so an
     # `absent` claim against them is ignored (a modified reporter could
     # otherwise void the real winner's entire result for ~1% cost). Logged so
-    # a refuted claim is visible evidence, not a silent correction.
+    # a refuted claim is visible evidence, not a silent correction. Kills
+    # count as presence proof only when signed (v2) — an unsigned kills field
+    # must never override an honest absent flag.
     ghosts = set()
     for p in report.players:
         if not (p.left_early and bool(getattr(p, "absent", False))):
             continue
-        if p.rounds_won > 0 or p.points_total > 0:
+        if p.rounds_won > 0 or p.points_total > 0 or (kills_in_canonical and p.kills > 0):
             print(f"[FFA] absent claim REFUTED for {p.steam_id}: signed tally "
-                  f"{p.rounds_won}r/{p.points_total}p is non-zero "
+                  f"{p.rounds_won}r/{p.points_total}p/{p.kills}k is non-zero "
                   f"(reporter {report.reported_by_steam_id}, room {report.photon_room_id})")
             continue
         ghosts.add(p.steam_id)
@@ -20905,30 +21372,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # find 11: a catch-all here would misreport broken inserts as success).
         if "uq_ffa_match_room" not in str(getattr(ie, "orig", ie)):
             raise HTTPException(500, "FFA match insert failed")
-        # Replay: return the already-recorded outcome idempotently.
-        prior = (await db.execute(text(
-            "SELECT id, player_count, lobby_id FROM ffa_matches WHERE photon_room_id = :room"
-        ), {"room": (report.photon_room_id or "")[:64]})).mappings().first()
-        if prior is None:
+        # Replay that raced past the early check: same idempotent echo.
+        _echo = await _ffa_replay_echo(db, report, lobby_uuid, id_by_steam, n)
+        if _echo is None:
             raise HTTPException(409, "Duplicate room id")
-        if str(prior["lobby_id"]) != str(lobby_uuid):
-            raise HTTPException(409, "Room already recorded for a different lobby")
-        mine = (await db.execute(text(
-            "SELECT placement, rating_change, xp_gained, gold_gained FROM ffa_match_players"
-            " WHERE match_id = :m AND player_id = :p"
-        ), {"m": prior["id"], "p": id_by_steam[report.reported_by_steam_id]})).mappings().first()
-        changes = (await db.execute(text(
-            "SELECT p.steam_id, fmp.rating_change FROM ffa_match_players fmp"
-            " JOIN players p ON p.id = fmp.player_id WHERE fmp.match_id = :m"
-        ), {"m": prior["id"]})).mappings().all()
-        return FfaMatchResponse(
-            match_id=prior["id"], lobby_id=lobby_uuid,
-            placement=int(mine["placement"]) if mine else 0,
-            player_count=int(prior["player_count"] or n),
-            rating_changes={r["steam_id"]: float(r["rating_change"] or 0.0) for r in changes},
-            xp_gained=int(mine["xp_gained"] or 0) if mine else 0,
-            gold_gained=int(mine["gold_gained"] or 0) if mine else 0,
-            message="Already recorded")
+        return _echo
 
     # ── Pairwise Glicko (pre-match snapshots for everyone). ──
     rating_changes: dict[str, float] = {}
@@ -21277,9 +21725,17 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
     ))).scalar() or 0
     matches = (await db.execute(text("""
         SELECT m.id, m.photon_room_id, m.player_count, m.duration_seconds,
-               m.ended_at, m.is_ranked, m.timeline, pw.steam_id AS winner_steam
+               m.ended_at, m.is_ranked, m.timeline, pw.steam_id AS winner_steam,
+               -- Sid, Aug 3: show the lobby's settings beside each game. The
+               -- config is immutable once a lobby leaves 'open' (settings are
+               -- host-only AND status-gated), so this row still describes
+               -- exactly what these games were played under. LEFT JOIN so a
+               -- pre-config-era match simply reports nulls.
+               l.score_target, l.card_cap, l.initial_picks,
+               l.card_candidates, l.same_card_rule, l.settings_known
           FROM ffa_matches m
           LEFT JOIN players pw ON pw.id = m.winner_id
+          LEFT JOIN ffa_lobbies l ON l.id = m.lobby_id
          WHERE m.invalidated_at IS NULL AND m.is_ranked
          ORDER BY m.ended_at DESC
          LIMIT :lim OFFSET :off
@@ -21351,6 +21807,21 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
              "is_ranked": bool(m["is_ranked"]),
              "winner_steam_id": m["winner_steam"],
              "timeline": m["timeline"] or "",
+             # Lobby settings this game was played under (null for
+             # pre-config-era matches, which the client renders as blank
+             # rather than as defaults it cannot vouch for).
+             # settings_known is FALSE for lobbies that predate the
+             # configurable-lobby feature: migration 176 gave them DEFAULT
+             # values they were never played under (early games were
+             # first-to-3), so report unknown rather than a plausible lie.
+             "settings": (None if (m["score_target"] is None
+                                   or not m["settings_known"]) else {
+                 "score_target": int(m["score_target"]),
+                 "card_cap": int(m["card_cap"]),
+                 "initial_picks": int(m["initial_picks"]),
+                 "card_candidates": int(m["card_candidates"]),
+                 "same_card_rule": bool(m["same_card_rule"]),
+             }),
              "players": players_by_match.get(m["id"], [])}
             for m in matches
         ],

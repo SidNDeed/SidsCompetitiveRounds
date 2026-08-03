@@ -172,7 +172,10 @@
     <EmbeddedResource Include="assets\logo.png" />
   </ItemGroup>
 
-  <Target Name="CopyToPlugins" AfterTargets="Build">
+  <!-- SkipCopyToPlugins=true builds WITHOUT installing to the local BepInEx —
+       a compile-verify of in-progress work must not live-deploy to this
+       machine (every Release build otherwise IS an install; learning #269). -->
+  <Target Name="CopyToPlugins" AfterTargets="Build" Condition="'$(SkipCopyToPlugins)' != 'true'">
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds" />
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cards" />
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cosmetics" />

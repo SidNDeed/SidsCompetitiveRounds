@@ -2,8 +2,14 @@ namespace CompetitiveRounds
 {
     internal static class ModeInfoText
     {
-        public const string TeamTitle = "2v2 - How It Works";
-        public const string Team = @"Two teams of two play a best-of-3 series.
+        // i18n: every member here is a PROPERTY whose literal sits directly
+        // inside I18n.Tr/TrF — the extractor only harvests literals at Tr/TrF
+        // call sites, and a const can't call Tr. Property access happens at
+        // Info-click time, long after I18nCatalogues.Install(), so the lookup
+        // always sees the catalogues. Consumers (ShowInfoPopup call sites)
+        // compile unchanged.
+        public static string TeamTitle => I18n.Tr("2v2 - How It Works");
+        public static string Team => I18n.Tr(@"Two teams of two play a best-of-3 series.
 
 <color=#FFD94D><b>HOW TO PLAY</b></color>
 
@@ -49,10 +55,10 @@ namespace CompetitiveRounds
 
 <color=#FFD94D><b>GOTCHAS</b></color>
 
-- Leaving mid-game is recorded.";
+- Leaving mid-game is recorded.");
 
-        public const string OvtTitle = "1v2 - How It Works";
-        public const string Ovt = @"One solo player faces a duo in a best-of-3 series.
+        public static string OvtTitle => I18n.Tr("1v2 - How It Works");
+        public static string Ovt => I18n.Tr(@"One solo player faces a duo in a best-of-3 series.
 
 <color=#FFD94D><b>HOW TO PLAY</b></color>
 
@@ -88,9 +94,9 @@ namespace CompetitiveRounds
 
 <color=#FFD94D><b>GOTCHAS</b></color>
 
-- Leaving mid-game is recorded.";
+- Leaving mid-game is recorded.");
 
-        public const string FfaTitle = "FFA - How It Works";
+        public static string FfaTitle => I18n.Tr("FFA - How It Works");
         // Config source for the prose (Codex v1.36 client find 13): while
         // sitting in an OPEN lobby, FfaMode's engine statics are not yet
         // latched (that happens at ready_join / the room prop) — the live
@@ -106,9 +112,11 @@ namespace CompetitiveRounds
         // score target and card cap are per-lobby now, and a const would bake
         // "5" into prose forever. Evaluated at Info-click time, so it renders
         // the CURRENT lobby's numbers when the player is in one and the
-        // defaults otherwise.
-        public static string Ffa => @"Free-for-all for 3-10 players. Every player is their own team.
-Standard ROUNDS scoring - first to " + FfaTargetNow + @" points takes the game.
+        // defaults otherwise. The whole body is ONE TrF template with {0} =
+        // score target and {1} = card cap, so translators see the entire doc
+        // as a single unit with the live numbers as holes.
+        public static string Ffa => I18n.TrF(@"Free-for-all for 3-10 players. Every player is their own team.
+Standard ROUNDS scoring - first to {0} points takes the game.
 
 <color=#FFD94D><b>HOW TO PLAY</b></color>
 
@@ -130,7 +138,7 @@ Standard ROUNDS scoring - first to " + FfaTargetNow + @" points takes the game.
   picked for you automatically. You always get a
   card - skipping a pick is not possible.
 
-- You hold up to " + FfaCapNow + @" cards.
+- You hold up to {1} cards.
   Picking one more replaces your oldest card.
 
 <color=#FFD94D><b>HOST SETTINGS</b></color>
@@ -155,8 +163,9 @@ Standard ROUNDS scoring - first to " + FfaTargetNow + @" points takes the game.
 - FFA is ranked with its own Glicko rating.
 
 - Placement uses points, then all round wins earned
-  (spent ones included).
-  Ties share a place using competition order: 1, 2, 2, 4.
+  (spent ones included), then kills.
+  Remaining ties share a place using competition
+  order: 1, 2, 2, 4.
 
 - Your rating is scored against the players placed
   nearest to you (up to 4 of them), so one game can't
@@ -218,6 +227,6 @@ Standard ROUNDS scoring - first to " + FfaTargetNow + @" points takes the game.
 <color=#FFD94D><b>GOTCHAS</b></color>
 
 - Leaving mid-game is recorded.
-  A leaver keeps their tallies for placement.";
+  A leaver keeps their tallies for placement.", FfaTargetNow, FfaCapNow);
     }
 }

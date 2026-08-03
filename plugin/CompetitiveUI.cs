@@ -127,6 +127,7 @@ namespace CompetitiveRounds
             DrawFPS();
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
+            DrawSpawnSpotlight();
             DrawNotification();
             DrawFfaScoreStrip();
             DrawMatchStatus();
@@ -542,7 +543,7 @@ namespace CompetitiveRounds
                     {
                         ffaPickBannerLocal = true;
                         ffaPickBannerSeconds = cdSec;
-                        ffaPickBannerText = $"FFA STARTING IN {cdSec}...";
+                        ffaPickBannerText = I18n.TrF("FFA STARTING IN {0}...", cdSec);
                     }
                     return;
                 }
@@ -555,7 +556,7 @@ namespace CompetitiveRounds
                 {
                     ffaPickBannerLocal = false;
                     ffaPickBannerSeconds = -1;
-                    ffaPickBannerText = "GET READY - fire and block unlock in a moment";
+                    ffaPickBannerText = I18n.Tr("GET READY - fire and block unlock in a moment");
                     return;
                 }
                 ffaPickBannerText = "";
@@ -576,8 +577,8 @@ namespace CompetitiveRounds
                 ffaPickBannerSeconds = Mathf.CeilToInt(
                     localOpen ? FfaMode.PickSecondsLeft : FfaMode.PickWindowSecondsLeft);
                 ffaPickBannerText = localOpen
-                    ? $"PICK YOUR CARD - {ffaPickBannerSeconds}s"
-                    : $"Card picks close in {ffaPickBannerSeconds}s";
+                    ? I18n.TrF("PICK YOUR CARD - {0}s", ffaPickBannerSeconds)
+                    : I18n.TrF("Card picks close in {0}s", ffaPickBannerSeconds);
             }
         }
 
@@ -756,12 +757,19 @@ namespace CompetitiveRounds
                     int bsecs = -1;
                     if (scheduled.scheduled_seconds_left >= 0)
                         bsecs = Mathf.Max(0, scheduled.scheduled_seconds_left - (int)(Time.realtimeSinceStartup - scheduled.fetched_at_realtime));
-                    string bclock = bsecs >= 0 ? $" in {bsecs / 60}:{bsecs % 60:00}" : " soon";
-                    string bopp = scheduled.opponent_display_name ?? "opponent";
+                    // i18n: this banner is GUI.Label-drawn (no Tr chokepoint), so
+                    // every fragment translates at composition. The clock stays
+                    // pre-formatted (a {N:00} spec would be translator bait) and
+                    // the in/soon wording lives INSIDE the main templates — a
+                    // bare " in {0}" fragment has under 3 letters, which
+                    // looks_translatable rejects, so it could never be keyed.
+                    string bopp = scheduled.opponent_display_name ?? I18n.Tr("opponent");
                     string early = scheduled.my_early_ok
-                        ? " (Play Now sent - waiting on them)"
-                        : " (both press Play Now in F5 to start early)";
-                    text = $"Next tournament match vs {bopp}{bclock}{early}";
+                        ? I18n.Tr(" (Play Now sent - waiting on them)")
+                        : I18n.Tr(" (both press Play Now in F5 to start early)");
+                    text = bsecs >= 0
+                        ? I18n.TrF("Next tournament match vs {0} in {1}{2}", bopp, $"{bsecs / 60}:{bsecs % 60:00}", early)
+                        : I18n.TrF("Next tournament match vs {0} soon{1}", bopp, early);
                     bg = new Color(0.12f, 0.25f, 0.45f, 0.85f);
                     barH = 26f;
                 }
@@ -788,15 +796,15 @@ namespace CompetitiveRounds
                     if (ready.ready_seconds_left >= 0)
                         secs = Mathf.Max(0, ready.ready_seconds_left - (int)(Time.realtimeSinceStartup - ready.fetched_at_realtime));
                     string clock = secs >= 0 ? $"   {secs / 60}:{secs % 60:00}" : "";
-                    string opp = ready.opponent_display_name ?? "opponent";
+                    string opp = ready.opponent_display_name ?? I18n.Tr("opponent");
                     if (inRoom)
                     {
-                        text = $"TOURNAMENT MATCH vs {opp} IS WAITING - LEAVE THIS GAME NOW!{clock}";
+                        text = I18n.TrF("TOURNAMENT MATCH vs {0} IS WAITING - LEAVE THIS GAME NOW!{1}", opp, clock);
                         bg = new Color(0.72f, 0.10f, 0.10f, 0.93f);
                     }
                     else
                     {
-                        text = $"TOURNAMENT MATCH vs {opp} - connecting automatically, hold tight...{clock}";
+                        text = I18n.TrF("TOURNAMENT MATCH vs {0} - connecting automatically, hold tight...{1}", opp, clock);
                         bg = new Color(0.08f, 0.48f, 0.20f, 0.93f);
                     }
                 }
@@ -814,12 +822,13 @@ namespace CompetitiveRounds
                             if (mins > 0 && mins <= 15)
                             {
                                 int s = (int)((start.ToUniversalTime() - DateTime.UtcNow).TotalSeconds);
-                                text = $"TOURNAMENT STARTS IN {s / 60}:{s % 60:00} - stay in ROUNDS at the main menu!";
+                                text = I18n.TrF("TOURNAMENT STARTS IN {0} - stay in ROUNDS at the main menu!",
+                                    $"{s / 60}:{s % 60:00}");
                                 bg = new Color(0.75f, 0.60f, 0.05f, 0.93f);
                             }
                             else if (mins <= 0 && mins > -10)
                             {
-                                text = "TOURNAMENT STARTING - matches are being created, hold tight...";
+                                text = I18n.Tr("TOURNAMENT STARTING - matches are being created, hold tight...");
                                 bg = new Color(0.75f, 0.60f, 0.05f, 0.93f);
                             }
                         }
@@ -836,7 +845,7 @@ namespace CompetitiveRounds
                                 if (s != null && s.signup_id == t.my_signup_id)
                                 { alive = !s.forfeited && s.placed_rank <= 0; break; }
                         if (!alive) return;
-                        text = "Tournament in progress - your next match will connect automatically. Keep ROUNDS open.";
+                        text = I18n.Tr("Tournament in progress - your next match will connect automatically. Keep ROUNDS open.");
                         bg = new Color(0.12f, 0.25f, 0.45f, 0.85f);
                         barH = 26f;
                     }
@@ -883,7 +892,8 @@ namespace CompetitiveRounds
                 GUI.color = new Color(0f, 0f, 0f, 0.55f * a);
                 GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
                 GUI.color = new Color(1f, 1f, 1f, a);
-                GUI.Label(new Rect(x, y, w, h), $"<color=#FFD94D>Map skin:</color> <color=#FFFFFF>{t}</color>", mapToastStyle);
+                GUI.Label(new Rect(x, y, w, h),
+                    I18n.TrF("<color=#FFD94D>Map skin:</color> <color=#FFFFFF>{0}</color>", t), mapToastStyle);
                 GUI.color = prev;
             }
             catch { }
@@ -2756,20 +2766,32 @@ namespace CompetitiveRounds
         private static string[] artistPickerNames = null;
         private static string[] artistPickerIds = null;
         private static int artistPickerIdx = 0;
+        private static string artistPickerNoun = "artist";
         private static Action<string> artistPickerOnPick = null;
         private static string artistPickerAction = "Assign";
         private static bool artistPickerShowClear = true;
         private static Vector2 artistPickerScroll = Vector2.zero;
         private static GUIStyle pickerRowStyle;
 
+        /// <param name="itemNoun">What the rows ARE. The picker is reused for
+        /// artists, translators and languages, so the count line must not say
+        /// "artists" for a language list (Codex review). Pass "" to omit it.</param>
+        /// <param name="selectedId">Pre-selects the current value, so pressing
+        /// the action button without clicking a row keeps what you already had
+        /// instead of silently choosing the first row.</param>
         public static void OpenArtistPicker(string title, string[] names, string[] ids, Action<string> onPick,
-                                            string actionLabel = "Assign", bool showClear = true)
+                                            string actionLabel = "Assign", bool showClear = true,
+                                            string itemNoun = "artist", string selectedId = null)
         {
             if (names == null || ids == null || names.Length == 0 || names.Length != ids.Length) return;
             artistPickerTitle = title ?? "Pick an artist";
             artistPickerNames = names;
             artistPickerIds = ids;
+            artistPickerNoun = itemNoun ?? "";
             artistPickerIdx = 0;
+            if (!string.IsNullOrEmpty(selectedId))
+                for (int i = 0; i < ids.Length; i++)
+                    if (ids[i] == selectedId) { artistPickerIdx = i; break; }
             artistPickerOnPick = onPick;
             artistPickerAction = string.IsNullOrEmpty(actionLabel) ? "Assign" : actionLabel;
             artistPickerShowClear = showClear;
@@ -2797,7 +2819,9 @@ namespace CompetitiveRounds
             float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
             GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
                 Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.93f), 0, 0);
-            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26), $"{artistPickerTitle}  <color=#999>({n} artist{(n == 1 ? "" : "s")})</color>",
+            string countNote = string.IsNullOrEmpty(artistPickerNoun) ? ""
+                : $"  <color=#999>({n} {artistPickerNoun}{(n == 1 ? "" : "s")})</color>";
+            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26), $"{artistPickerTitle}{countNote}",
                 new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold, richText = true });
 
             artistPickerScroll = GUI.BeginScrollView(new Rect(x + 12, y + 44, w - 24, listH),
@@ -3602,7 +3626,7 @@ namespace CompetitiveRounds
                         || resp.Contains("\"restoration_required\": true"));
                 ShowNotification(
                     restorationRequired
-                        ? "False positive recorded. The auto-invalidation still needs a manual reward/series repair."
+                        ? "Marked false positive. You still need to repair the rewards and series by hand."
                         : action == "confirmed_cheat"
                             ? "Flag marked as confirmed."
                             : "Flag marked false positive.",
@@ -4690,7 +4714,7 @@ namespace CompetitiveRounds
                 Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.82f), 0, 0);
             GUI.Label(new Rect(x, y - 22, w, 20),
                 ChatClient.LocaleChannel != null
-                    ? I18n.TrF("Chat [{0}]  -  Enter to send, Esc to cancel, Tab switches channel",
+                    ? I18n.TrF("Chat [{0}]  —  Enter to send, Esc to cancel, Tab switches channel",
                                ChatClient.SendChannel.ToUpperInvariant())
                     : I18n.Tr("Chat  —  Enter to send, Esc to cancel"));
 
@@ -4801,7 +4825,7 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.85f), 0, 0);
             GUI.Label(new Rect(x + 8, y + 6, w - 16, 20),
-                I18n.Tr("Quick chat - click a phrase (or keys 1-0). Y/Esc closes."));
+                I18n.Tr("Quick chat — click a phrase (or keys 1-0). Y/Esc closes."));
             for (int i = 0; i < n; i++)
             {
                 int c = i % cols, r = i / cols;
@@ -4891,9 +4915,17 @@ namespace CompetitiveRounds
             if (consentBodyStyle == null)
                 consentBodyStyle = new GUIStyle(GUI.skin.label) { fontSize = 14, wordWrap = true, alignment = TextAnchor.UpperLeft };
 
-            GUI.Label(new Rect(x, y + 14, w, 30), "Competitive ROUNDS — Data Consent", consentTitleStyle);
+            // i18n: IMGUI has no Tr chokepoint (GUI.Label/GUI.Button draw the raw
+            // string), so every consent string is translated here explicitly.
+            // The +-folded body is ONE compile-time literal and therefore ONE
+            // whole-string catalogue key (the extractor joins folded literals).
+            // (Tr is throw-free by construction — dictionary TryGetValue chains
+            // with an English passthrough — so no try/catch is needed on an
+            // IMGUI path; a literal argument is REQUIRED for the extractor.)
+            GUI.Label(new Rect(x, y + 14, w, 30),
+                I18n.Tr("Competitive ROUNDS — Data Consent"), consentTitleStyle);
 
-            string body =
+            string body = I18n.Tr(
                 "This mod sends data to a private server run by the mod author to power the leaderboard " +
                 "and ranked matchmaking.\n\n" +
                 "What gets recorded if you allow:\n" +
@@ -4906,16 +4938,18 @@ namespace CompetitiveRounds
                 "  • Delete your data (F5 → Settings → Delete my data). Steam ID, display name, and Discord link " +
                 "are scrubbed. Matches stay so other players' ratings and histories aren't disturbed. " +
                 "Deletion is IRREVERSIBLE — you cannot re-register this Steam ID later.\n\n" +
-                "Choose Allow to use the leaderboard. Choose Decline to run the mod fully offline.";
+                "Choose Allow to use the leaderboard. Choose Decline to run the mod fully offline.");
             GUI.Label(new Rect(x + 24, y + 50, w - 48, h - 120), body, consentBodyStyle);
 
-            if (GUI.Button(new Rect(x + 50, y + h - 56, 260, 38), "Allow data reporting"))
+            string allowLabel = I18n.Tr("Allow data reporting");
+            string declineLabel = I18n.Tr("Decline (offline mode)");
+            if (GUI.Button(new Rect(x + 50, y + h - 56, 260, 38), allowLabel))
             {
                 Plugin.DataConsent.Value = "granted";
                 Plugin.Log.LogInfo("[CONSENT] User granted data reporting");
                 ApiClient.OnConsentChanged();
             }
-            if (GUI.Button(new Rect(x + w - 310, y + h - 56, 260, 38), "Decline (offline mode)"))
+            if (GUI.Button(new Rect(x + w - 310, y + h - 56, 260, 38), declineLabel))
             {
                 Plugin.DataConsent.Value = "denied";
                 Plugin.Log.LogInfo("[CONSENT] User declined data reporting");
@@ -4988,6 +5022,70 @@ namespace CompetitiveRounds
 
             if (!string.IsNullOrEmpty(fpsLabel))
                 GUI.Label(new Rect(6, 4, fpsLabelWidth, 18), fpsLabel, fpsStyle);
+        }
+
+        // ── FFA spawn spotlight (Sid, Aug 3) ────────────────────────────────
+        // "In game for FFAs, it's a bit confusing when you spawn in where you
+        // are." With up to 10 near-identical bodies, finding yourself costs
+        // the first second of the round.
+        //
+        // Drawn as an OVERLAY on purpose. The obvious implementation —
+        // recolouring bodies — was reviewed and rejected: the ROUNDS body is
+        // largely particle-rendered (so the brightest layer would not dim),
+        // the cosmetics system rewrites those colours at 30 Hz for animated
+        // skins, and any interrupted restore would leave a player permanently
+        // mis-coloured. This touches no game state at all: it darkens the
+        // screen AROUND the local player and fades out.
+        private static Transform spotlightTarget;
+        private static float spotlightUntil;
+        private const float SPOT_HOLD = 0.75f, SPOT_FADE = 0.45f;
+        private static Texture2D spotlightTex;
+
+        public static void BeginSpawnSpotlight(Transform target)
+        {
+            spotlightTarget = target;
+            spotlightUntil = Time.unscaledTime + SPOT_HOLD + SPOT_FADE;
+        }
+
+        private static void DrawSpawnSpotlight()
+        {
+            if (spotlightTarget == null || Time.unscaledTime >= spotlightUntil) return;
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            Camera cam = null;
+            try { cam = MainCam.instance != null ? MainCam.instance.cam : Camera.main; } catch { }
+            if (cam == null) return;
+
+            float left = spotlightUntil - Time.unscaledTime;
+            // Full strength through the hold, then ease out over the fade.
+            float k = left > SPOT_FADE ? 1f : Mathf.Clamp01(left / SPOT_FADE);
+            float alpha = 0.55f * k;
+            if (alpha <= 0.01f) return;
+
+            Vector3 sp;
+            try { sp = cam.WorldToScreenPoint(spotlightTarget.position); } catch { return; }
+            if (sp.z < 0f) return;
+            float cx = sp.x, cy = Screen.height - sp.y;   // IMGUI y is top-down
+            float r = Mathf.Max(70f, Screen.height * 0.13f);
+
+            if (spotlightTex == null)
+            {
+                spotlightTex = new Texture2D(1, 1);
+                spotlightTex.SetPixel(0, 0, Color.white);
+                spotlightTex.Apply();
+                spotlightTex.hideFlags = HideFlags.HideAndDontSave;
+            }
+            var prev = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, alpha);
+            // Four bands around a clear square centred on the player: IMGUI has
+            // no cutout, and four rects are cheaper and sharper than a radial
+            // texture we would have to generate.
+            float x0 = Mathf.Max(0f, cx - r), x1 = Mathf.Min(Screen.width, cx + r);
+            float y0 = Mathf.Max(0f, cy - r), y1 = Mathf.Min(Screen.height, cy + r);
+            GUI.DrawTexture(new Rect(0, 0, Screen.width, y0), spotlightTex);
+            GUI.DrawTexture(new Rect(0, y1, Screen.width, Screen.height - y1), spotlightTex);
+            GUI.DrawTexture(new Rect(0, y0, x0, y1 - y0), spotlightTex);
+            GUI.DrawTexture(new Rect(x1, y0, Screen.width - x1, y1 - y0), spotlightTex);
+            GUI.color = prev;
         }
 
         private static void DrawNotification()
@@ -5066,8 +5164,8 @@ namespace CompetitiveRounds
                 int solo = GameStateWatcher.OvtSoloWins, duo = GameStateWatcher.OvtDuoWins;
                 bool localIsSolo = GameStateWatcher.LocalTeamId == 0;
                 matchStatusSeries = localIsSolo
-                    ? $"1v2 Series: You {solo} - {duo} Duo"
-                    : $"1v2 Series: Duo {duo} - {solo} Solo";
+                    ? I18n.TrF("1v2 Series: You {0} - {1} Duo", solo, duo)
+                    : I18n.TrF("1v2 Series: Duo {0} - {1} Solo", duo, solo);
 
                 var mates = new List<string>();
                 var foes = new List<string>();
@@ -5093,8 +5191,8 @@ namespace CompetitiveRounds
                 }
                 catch { }
                 matchStatusH2HTint = new Color(0.82f, 0.82f, 0.82f);
-                matchStatusH2H = (mates.Count > 0 ? $"w/ {string.Join(" + ", mates.ToArray())}   " : "")
-                               + (foes.Count > 0 ? $"vs {string.Join(" + ", foes.ToArray())}" : "");
+                matchStatusH2H = (mates.Count > 0 ? I18n.TrF("w/ {0}   ", string.Join(" + ", mates.ToArray())) : "")
+                               + (foes.Count > 0 ? I18n.TrF("vs {0}", string.Join(" + ", foes.ToArray())) : "");
                 return;
             }
 
@@ -5108,8 +5206,8 @@ namespace CompetitiveRounds
                 // kept live locally by OnSeriesCompletedVsOpponent. Until the
                 // fetch lands (or when the opponent has no real Steam ID) the
                 // line shows just the series score — never a wrong number.
-                matchStatusSeries =
-                    $"Series Score: {GameStateWatcher.CurrentSeriesGamesWon} - {GameStateWatcher.CurrentSeriesGamesLost}";
+                matchStatusSeries = I18n.TrF("Series Score: {0} - {1}",
+                    GameStateWatcher.CurrentSeriesGamesWon, GameStateWatcher.CurrentSeriesGamesLost);
                 try
                 {
                     string sid = GameStateWatcher.OpponentSteamId;
@@ -5119,7 +5217,7 @@ namespace CompetitiveRounds
                         int[] h2h;
                         if (ApiClient.CachedOppLifetime.TryGetValue(sid, out h2h)
                             && h2h != null && h2h.Length >= 4)
-                            matchStatusSeries += $"   (Total Series {h2h[2]} - {h2h[3]})";
+                            matchStatusSeries += I18n.TrF("   (Total Series {0} - {1})", h2h[2], h2h[3]);
                     }
                 }
                 catch { }
@@ -5150,12 +5248,12 @@ namespace CompetitiveRounds
                     matchStatusH2HTint = w > l ? new Color(0.6f, 1f, 0.6f)
                                            : w < l ? new Color(1f, 0.6f, 0.6f)
                                                    : new Color(0.85f, 0.85f, 0.85f);
-                    matchStatusH2H = $"vs {shortName}: {w}-{l} this session";
+                    matchStatusH2H = I18n.TrF("vs {0}: {1}-{2} this session", shortName, w, l);
                 }
                 else
                 {
                     matchStatusH2HTint = new Color(0.7f, 0.7f, 0.7f);
-                    matchStatusH2H = $"vs {shortName}: first game this session";
+                    matchStatusH2H = I18n.TrF("vs {0}: first game this session", shortName);
                 }
             }
             catch { }
@@ -5199,7 +5297,7 @@ namespace CompetitiveRounds
             {
                 GUI.contentColor = ovt ? new Color(0.55f, 0.8f, 1f) : Color.green;
                 GUI.Label(new Rect((Screen.width - 220) / 2f, 8, 220, 18),
-                    ovt ? "1v2 BETA - Unranked" : "RANKED - Recording", statusStyle);
+                    ovt ? I18n.Tr("1v2 - UNRATED") : I18n.Tr("RANKED - Recording"), statusStyle);
                 scoreY = 28;
             }
             else

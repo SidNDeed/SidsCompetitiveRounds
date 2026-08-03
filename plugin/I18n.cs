@@ -130,10 +130,14 @@ namespace CompetitiveRounds
         private static string _serverOverlayLocale;
 
         // Hard bounds on anything a (possibly compromised) server hands us
-        // (wave-2 find 18).
+        // (wave-2 find 18). PackMaxStringLen must exceed the LONGEST source
+        // key — the FFA How-It-Works doc is ~4.3k chars and its RU
+        // translation runs longer, so 4000 made that key permanently
+        // undeliverable via pack (Codex Aug-3 find 6). The proposal endpoint
+        // (main.py i18n_propose) carries the matching 8000 cap.
         private const int PackMaxBytes = 2 * 1024 * 1024;
         private const int PackMaxEntries = 5000;
-        private const int PackMaxStringLen = 4000;
+        private const int PackMaxStringLen = 8000;
 
         public static void LoadCachedPack()
         {
@@ -524,13 +528,54 @@ namespace CompetitiveRounds
             if (a.Count != b.Count) return false;
             for (int i = 0; i < a.Count; i++)
                 if (!string.Equals(a[i], b[i], StringComparison.Ordinal)) return false;
-            // Placeholder arity: {0}..{9} must survive verbatim.
-            for (int d = 0; d <= 9; d++)
-            {
-                string ph = "{" + d + "}";
-                if (CountOf(source, ph) != CountOf(target, ph)) return false;
-            }
+            // Placeholder IDENTITY (Codex Aug-3 r2 find 4 + r3 find 2,
+            // mirrors the server's _i18n_validate rule exactly): the target's
+            // hole TOKENS must equal the source's as a multiset. This rejects
+            // dropped holes, "{{1:F0}}" (renders literally via .NET brace
+            // escaping), stray/truncated braces, "{10}" (throws at format
+            // time), AND spec rewrites like "{1:F0}"->"{1:Q}" or "{1}" — a
+            // typed spec against the real argument throws, so TrF would show
+            // raw English with visible holes.
+            bool tgtOk;
+            var sh = ExtractHoleTokens(source, out _);
+            var th = ExtractHoleTokens(target, out tgtOk);
+            if (!tgtOk || sh.Count != th.Count) return false;
+            sh.Sort(StringComparer.Ordinal);
+            th.Sort(StringComparer.Ordinal);
+            for (int i = 0; i < sh.Count; i++)
+                if (!string.Equals(sh[i], th[i], StringComparison.Ordinal)) return false;
             return true;
+        }
+
+        /// <summary>Exact hole tokens ("{0}", "{1:F0}") in order; wellFormed
+        /// goes false on any brace that does not form a {N}/{N:spec} hole
+        /// (spec brace-free). Sources never carry literal braces, so a
+        /// conforming target can never make string.Format throw or
+        /// brace-escape.</summary>
+        private static List<string> ExtractHoleTokens(string s, out bool wellFormed)
+        {
+            var toks = new List<string>();
+            wellFormed = true;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '}') { wellFormed = false; break; }
+                if (c != '{') continue;
+                if (i + 2 >= s.Length) { wellFormed = false; break; }
+                char d = s[i + 1];
+                if (d < '0' || d > '9') { wellFormed = false; break; }
+                int j = i + 2;
+                if (s[j] == ':')
+                {
+                    j++;
+                    while (j < s.Length && s[j] != '}' && s[j] != '{') j++;
+                    if (j >= s.Length || s[j] != '}') { wellFormed = false; break; }
+                }
+                else if (s[j] != '}') { wellFormed = false; break; }
+                toks.Add(s.Substring(i, j - i + 1));
+                i = j;
+            }
+            return toks;
         }
 
         private static List<string> ExtractTags(string s)
@@ -566,6 +611,12 @@ namespace CompetitiveRounds
             ['n'] = 'ñ', ['c'] = 'ç', ['y'] = 'ý', ['L'] = 'Ļ', ['r'] = 'ŕ',
         };
 
+        // KNOWN QUIRK (dev-only, accepted — Codex Aug-3 find 9): sites that
+        // Tr/TrF explicitly and then pass the result through a chokepoint
+        // (CreateText/SetText/ShowNotification) double-apply the PSEUDO
+        // transform under the qps locale — nested brackets + doubled padding.
+        // Real locales are unaffected: a translated string simply misses the
+        // catalogue on the second lookup and passes through unchanged.
         private static string Pseudo(string s)
         {
             var sb = new StringBuilder(s.Length * 2 + 8);

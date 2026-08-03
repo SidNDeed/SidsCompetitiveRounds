@@ -995,9 +995,16 @@ class FfaPlayerEntry(BaseModel):
     slot: int = Field(0, ge=0, le=15)
     rounds_won: int = Field(0, ge=0, le=20)
     points_total: int = Field(0, ge=0, le=200)
-    # Placement tie-break only (rounds, then points, then kills). Rides
-    # OUTSIDE the frozen ffa: HMAC canonical; 0 from pre-kills clients.
-    kills: int = Field(0, ge=0, le=500)
+    # Placement tie-break (rounds, then points, then kills) — but ONLY when
+    # the report verified under the v2 canonical, which SIGNS kills, AND the
+    # lobby's frozen kills_tiebreak capability flag is set (see main.py
+    # _verify_ffa_hmac + submit_ffa_match). 0 from pre-kills clients.
+    # 2000 is deliberate SATURATION, part of the ordering RULE, not a bound
+    # believed to exceed the ceiling (full-wipe battles advance no point, so
+    # raw kills are structurally unbounded — Codex Aug-3 r2 find 3): the
+    # client compares AND signs min(kills, 2000), so above the bound kills
+    # compare equal on every surface by definition.
+    kills: int = Field(0, ge=0, le=2000)
     # Damage dealt + cumulative kill/damage timelines (bugs #127 / #130).
     # Also OUTSIDE the frozen ffa: HMAC canonical (#213) — advisory telemetry,
     # bounded so a crafted value can't overflow a column and 500 the submit.
@@ -1035,10 +1042,14 @@ class FfaPlayerEntry(BaseModel):
 class FfaMatchReport(BaseModel):
     """
     Submitted by the lowest-Steam-ID participant after an FFA game ends.
-    HMAC canonical — NEW variable-length format, domain-separated by the "ffa"
+    HMAC canonical — variable-length format, domain-separated by the "ffa"
     literal so it can never collide with the frozen 7/10/11-field formats:
       ffa:{lobby_id}:{room}:{reporter}:{is_ranked}:{winner_steam}:{n}
-        then, per player sorted by numeric steam id: :{steam}:{rounds}:{points}
+        then, per player sorted by numeric steam id:
+          v2 (v1.36.0+): :{steam}:{rounds}:{points}:{kills}
+          v1 (legacy):   :{steam}:{rounds}:{points}
+    The server accepts BOTH for one release (main.py _verify_ffa_hmac); the
+    kills tie-break applies only to v2-verified reports.
     """
     lobby_id: str
     players: list[FfaPlayerEntry] = Field(..., min_length=2, max_length=10)

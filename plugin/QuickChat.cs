@@ -34,12 +34,12 @@ namespace CompetitiveRounds
             "Good game!",               // 1
             "Well played!",             // 2
             "Nice shot!",               // 3
-            "Close one!",               // 4
+            "So close!",                // 4
             "Thanks!",                  // 5
             "Sorry!",                   // 6
             "Be right back",            // 7
             "I'm ready",                // 8
-            "Wait, please",             // 9
+            "Hold on!",                 // 9
             "Rematch?",                 // 10
             "Last game for me",         // 11
             "Hello!",                   // 12

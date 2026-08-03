@@ -1,5 +1,75 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.36.0 — UNRELEASED (backend live 2026-08-02/03) — localization, FFA lobby config, FAQ overhaul
+
+Backend deployed to production 2026-08-02/03. Schema: migrations **179–188** (187 adds the
+FFA kills-tiebreak capability columns; 188 repairs one seeded translation proposal; 184
+re-seeded with 466 new proposals). The client half is built but not yet released, so
+players see none of the client changes until v1.36.0 ships. Every server change is
+backward-compatible with v1.35.5 clients.
+
+### Added
+
+- **The mod speaks Spanish and Russian.** All 404 user-visible strings are translated, and
+  the language is chosen from Settings → Language / Idioma / Язык. Machine-translated
+  drafts to start; community moderators review and rewrite them from a web portal.
+- **Translation portal** at `/translate`: sign in from the game, propose translations, and
+  review others'. Formatting tags are locked so a translation can't break the layout, and
+  every string has a History view showing the original English, what's live now, who
+  proposed and approved it, and whether the English has changed since.
+- **Translated release notes.** Update notes now appear in your language on the Home tab,
+  labelled as machine translations, falling back to English when a release hasn't been
+  translated.
+- **Ranked FFA settings are bounded**: max cards held is 3–5 for ranked lobbies, and the
+  opening draw can never exceed the card cap (dealing more cards than you can hold just
+  wasted picks and time).
+- **FFA match history shows the settings each game used** — but only where those settings
+  were genuinely chosen; older games show nothing rather than a default they never used.
+- **Spawn spotlight in FFA**: the screen dims around you for a moment at the start of a
+  round so you can find yourself among up to ten identical bodies.
+- **Chat channels** for Spanish and Russian alongside global, both in game and in Discord.
+- **Admins can appoint and remove translators from the Admin tab** (there was previously
+  no in-game way to do it at all).
+- **Kills now break FFA placement ties.** Placements are rounds, then points, then kills;
+  only a full three-way tie still shares a place. Kill counts are now part of the signed
+  match report, which is what makes them safe to rank on — reports from older clients keep
+  the old two-field ordering.
+
+### Fixed
+
+- **Bracket resets in double-elimination tournaments could never be recorded.** The column
+  storing the bracket side was four characters wide and the value needed eight, so the
+  insert failed every time.
+- **In-match queue leases had been failing since 2026-08-01**, which could free a player's
+  queue slot early. A database parameter-typing bug; no data was lost.
+- Blank Shop, 2v2, Tournaments and Admin tabs after changing language.
+- Completed achievements showed `[X` with the closing bracket cut off.
+- The Name Styling previews showed nothing after "Preview:".
+- The admin bug-report list rendered blank whenever any report's text contained an
+  unmatched `[`.
+- Several messages stated things the code did not do: the bet box documented a number
+  format it rejected; the tournament notice implied Ranked was only enabled temporarily
+  when it stays on; the Artist Studio promised a 30% royalty on gifts, which are not paid;
+  and every banned opponent was described as banned "for cheating" regardless of reason.
+- 1v2 no longer advertises a ranked launch, and FFA no longer describes itself as new.
+
+### Changed
+
+- Language selection is a picker instead of a click-to-cycle, and it returns you to the
+  same tab instead of the Home tab — you can no longer get stranded in a language you
+  can't read.
+- Translation moderators can no longer approve their own proposals; admins still can.
+- Translation checks are stricter and fairer: broken placeholder braces are rejected
+  everywhere (they used to be accepted by the portal and then silently ignored by the
+  game), long texts like the FFA guide now fit through the review pipeline, and symbols
+  the English original itself uses (bullets, check marks) are always allowed in a
+  translation.
+- **Far more of the interface is translatable now.** The first-launch data-consent screen,
+  achievement names and descriptions, the "How It Works" guides for 2v2/1v2/FFA, tournament
+  banners, the in-match score lines, queue status lines, and dozens of composed messages
+  (bet results, level-ups, lobby status) previously rendered in English regardless of
+  language; all of them now translate.
+
 ## v1.35.5 — 2026-07-31 — queue strand root cause, Leave All Queues, shield charge, display toggles
 
 Backend deployed to production on 2026-07-31. Schema: migrations **173** (free
