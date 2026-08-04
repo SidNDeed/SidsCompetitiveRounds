@@ -26,6 +26,22 @@ The DO-NOT-TRANSLATE class (status enums, SKUs, room prefixes, HMAC fields,
 card names) never reaches these argument positions, but keep new call sites
 honest: if you route an identity string through CreateText, it becomes
 translatable and WILL corrupt comparisons.
+
+LINE-ENDING CONTRACT — EMITTED KEYS ARE ALWAYS LF.
+The plugin sources are checked out CRLF on Windows (no .gitattributes,
+core.autocrlf=true), and a C# VERBATIM literal (@"...") embeds the file's
+actual line endings — so ModeInfoText's mode docs and NativeUI's tournament
+instruction blocks contain "\r\n" at runtime while this extractor emitted
+"\n" keys (Python universal newlines silently translated them on read).
+I18n.Tr is an ORDINAL dictionary lookup, so every one of those multi-line
+sources was a guaranteed permanent miss: the popup TITLES translated and the
+BODIES stayed English on every machine, even after a restart.
+Both ends are now explicit rather than incidental: this file reads with
+newline="" and normalizes to LF itself (so the behaviour does not depend on
+Python's universal-newline default), and I18n.NormalizeLf converts at lookup
+and install time. Do NOT "fix" it by rewriting those literals into \n-joined
+regular strings — that changes the English source, which re-keys them and
+orphans every existing es/ru translation (learning #289).
 """
 import io
 import json
@@ -63,8 +79,91 @@ SITES = [
 
 STR_LIT = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
+# A positional format hole, including a format spec ("{0}", "{1:F0}").
+_HOLE = re.compile(r"\{\d+[^{}]*\}")
+
+
+# Explicit, hand-listed exemptions to the 3-letter floor, for COMPLETE lines
+# whose English is genuinely this short and whose display we do not want to
+# change to satisfy a heuristic.
+#
+# Both entries below are the whole in-match status line for a mode with only
+# one side to name (a 1v2 solo has no teammates; a read with no opponents
+# resolved has no foes). Their sibling "w/ {0}   vs {1}" clears the normal
+# floor on its own, so without these two the same surface would be translated
+# in the common case and English in the edge cases — worse than either.
+#
+# This list is ADDITIVE ONLY: an entry here can add a key, never remove or
+# rewrite one, so a mistake costs an unused catalogue row rather than data
+# (contrast learning #183, where a hand-maintained list gated a DESTRUCTIVE
+# backfill). Do not use it to smuggle in connector glue — a fragment spliced
+# into another sentence still belongs inside its parent template (#298c).
+SHORT_WHOLE_LINES = frozenset({
+    "w/ {0}",
+    "vs {0}",
+})
+
+
+def is_whole_template(s: str) -> bool:
+    """True for a COMPLETE template whose only prose is one short label.
+
+    The 3-letter floor in looks_translatable exists to keep connector GLUE out
+    of the key set (learning #295c): a fragment like " in {0}" must never
+    become a key, because a translator seeing it in isolation cannot know the
+    words it splices between, and compose-after-Tr is this codebase's recurring
+    i18n bug shape (#298c). But "Lv {0}" is not glue — it is the whole string
+    the player reads, and under the blanket floor it could never be translated
+    at all, not even by a server pack.
+
+    So the exemption is shaped to admit only strings that stand on their own,
+    and is checked against the RAW literal (never the markup-stripped/trimmed
+    form — trimming would erase the very whitespace that identifies glue):
+      - it must carry a positional hole, and must not be padded with the
+        whitespace a connector needs to splice between its neighbours, so
+        " in {0}" and " - {0}" stay rejected;
+      - it must OPEN with a CAPITALIZED label, so hole-first scaffolding
+        ("{0} of {1}"), anything that is only punctuation plus a hole, and
+        lowercase words that continue someone else's sentence all stay
+        rejected. Capitalization is the only signal that separates a label
+        from a connector at this length: "Lv" and "vs" are lexically
+        indistinguishable, but a string a player reads as a unit starts a
+        sentence and a spliced fragment does not. Verified against the live
+        source: without this clause the exemption also admitted "vs {0}"
+        (CompetitiveUI's match-status bar builds its line as
+        TrF("w/ {0}   ") + TrF("vs {0}"), i.e. compose-after-Tr — the fix
+        for that surface is one whole template at the call site, not two
+        fragment keys here);
+      - removing the holes must leave exactly ONE alphabetic label token, so
+        multi-hole sentence scaffolding can never qualify.
+
+    Do NOT widen this further. Anything that reads as a phrase fragment rather
+    than a standalone label belongs inside its parent template, not in the
+    catalogue as a separate key.
+
+    Only reachable at I18n.Tr/TrF sites: the braces gate in looks_translatable
+    already rejects every brace-bearing string harvested anywhere else.
+    """
+    if not _HOLE.search(s):
+        return False
+    if s != s.strip():
+        return False
+    # isupper() is False for '{', '(', '+', a space and a digit too, so this
+    # single test enforces both "opens with a label" and "that label is
+    # capitalized".
+    if not s[:1].isupper():
+        return False
+    label = _HOLE.sub(" ", s).strip()
+    return bool(re.fullmatch(r"[A-Za-z]{2,}[.!?…:%]{0,3}", label))
+
 
 def looks_translatable(s: str, allow_braces: bool = False) -> bool:
+    # The explicit allowlist short-circuits EVERY heuristic below, not just the
+    # 3-letter floor: "w/ {0}" carries a single letter and was being rejected by
+    # the 2-letter guard on the next line long before the floor's exemption ran.
+    # An entry here is a human asserting "this exact string is a complete line",
+    # which is strictly more information than any of these rules can recover.
+    if s in SHORT_WHOLE_LINES:
+        return True
     if not s or len(s) < 2:
         return False
     letters = sum(1 for c in s if c.isalpha())
@@ -104,14 +203,33 @@ def looks_translatable(s: str, allow_braces: bool = False) -> bool:
     # markup-only scraps, URLs, debug tags, JSON payloads
     stripped = re.sub(r"<[^>]{0,40}>", "", s).strip()
     if len(stripped) < 3 or sum(1 for c in stripped if c.isalpha()) < 3:
-        return False
+        # ...unless the whole string IS a template ("Lv {0}"); see
+        # is_whole_template for why the floor cannot simply be lowered, and
+        # SHORT_WHOLE_LINES for the two hand-listed complete lines that are
+        # shorter than any predicate can safely admit in general.
+        if s not in SHORT_WHOLE_LINES and not is_whole_template(s):
+            return False
     if s.startswith(("http", "file:", "[", "\"")) or "://" in s:
         return False
     return True
 
 
+def lf(s: str) -> str:
+    """LF-canonical form of a harvested key (see the module docstring).
+
+    Applied to EVERY string that enters the key set, whatever its route:
+    verbatim literals carry the source file's real CRLFs, escaped literals can
+    spell "\\r\\n" explicitly, and shop_strings.json can carry either. The
+    client mirrors this exactly in I18n.NormalizeLf.
+    """
+    if s is None or "\r" not in s:
+        return s
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def unescape(s: str) -> str:
-    return s.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
+    return (s.replace('\\"', '"').replace("\\n", "\n")
+             .replace("\\r", "\r").replace("\\\\", "\\"))
 
 
 def find_call_body(src: str, open_paren: int) -> str:
@@ -238,6 +356,7 @@ def extract():
                 or not all(isinstance(x, str) and x.strip() for x in _lst)):
             raise ValueError("'strings' must be a non-empty list of non-blank strings")
         for s in _lst:
+            s = lf(s)
             if looks_translatable(s):
                 found.setdefault(s, []).append("shop_strings.json")
     except SystemExit:
@@ -249,7 +368,12 @@ def extract():
         path = os.path.join(PLUGIN, fn)
         if not os.path.exists(path):
             continue
-        src = io.open(path, encoding="utf-8").read()
+        # newline="" = read the file's REAL bytes (no universal-newline
+        # translation), then normalize explicitly. The old plain open() relied
+        # on Python silently turning CRLF into LF, which is precisely the
+        # implicit behaviour that let the client and the catalogue disagree
+        # about verbatim literals — see the module docstring.
+        src = lf(io.open(path, encoding="utf-8", newline="").read())
         for site in SITES:
             site_re, arg_positions = site[0], site[1]
             allow_braces = site[2] if len(site) > 2 else False
@@ -262,6 +386,7 @@ def extract():
                     if pos >= len(args):
                         continue
                     for s in arg_literals(args[pos].strip()):
+                        s = lf(s)
                         if looks_translatable(s, allow_braces=allow_braces):
                             found.setdefault(s, []).append(f"{fn}")
         # QuickChat phrase table: the wire keys ARE the English sources.
@@ -269,7 +394,7 @@ def extract():
             block = re.search(r"Phrases\s*=\s*\{(.*?)\};", src, re.S)
             if block:
                 for x in STR_LIT.finditer(block.group(1)):
-                    s = unescape(x.group(1))
+                    s = lf(unescape(x.group(1)))
                     if looks_translatable(s):
                         found.setdefault(s, []).append(fn)
         # Achievement definition table (ApiClient.cs): display name + desc
@@ -286,7 +411,7 @@ def extract():
             if block:
                 for arr in re.finditer(r"new\[\]\s*\{([^}]*)\}", block.group(1)):
                     for x in STR_LIT.finditer(arr.group(1)):
-                        s = unescape(x.group(1))
+                        s = lf(unescape(x.group(1)))
                         if looks_translatable(s):
                             found.setdefault(s, []).append(fn)
     return found

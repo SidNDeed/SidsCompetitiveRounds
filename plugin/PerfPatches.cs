@@ -215,6 +215,9 @@ namespace CompetitiveRounds
     internal class ProjectileHitOutOfBoundsCleanup
     {
         private static readonly Dictionary<int, float> _lastChecked = new Dictionary<int, float>(64);
+        // Consecutive out-of-bounds observations per projectile — see the streak
+        // comment in Prefix. Pruned alongside _lastChecked.
+        private static readonly Dictionary<int, int> _oobStreak = new Dictionary<int, int>(64);
         private const float CHECK_INTERVAL = 0.5f;
         // Match the original mod's bounds — slight cushion outside the camera
         // viewport so a bullet at the very edge isn't yanked prematurely.
@@ -237,11 +240,46 @@ namespace CompetitiveRounds
             {
                 var stale = new List<int>();
                 foreach (var kv in _lastChecked) if (now - kv.Value > 30f) stale.Add(kv.Key);
-                foreach (var k in stale) _lastChecked.Remove(k);
+                foreach (var k in stale) { _lastChecked.Remove(k); _oobStreak.Remove(k); }
             }
             try
             {
-                if (!IsOutOfBounds(__instance.transform)) return;
+                if (!IsOutOfBounds(__instance.transform)) { _oobStreak.Remove(key); return; }
+                /* Require TWO consecutive out-of-bounds observations, a
+                 * CHECK_INTERVAL apart, before destroying (bug #156; Codex
+                 * Aug-4 r2 find 2).
+                 *
+                 * Learning #94: killing a bullet before FriendlyFoe's
+                 * BulletPoolInstancer.Start has run makes its OnDestroy NRE
+                 * inside PrefabPool.Release, leaving the pooled sub-effect
+                 * unreleased and corrupting the pool for the session — Sid's
+                 * log carries 12 of exactly that NRE.
+                 *
+                 * A first-sighting guard keyed on the instance ID does NOT
+                 * close it: these projectiles are POOLED, so the same managed
+                 * object comes back with the same instance ID and a stale
+                 * dictionary entry, and its first Update after reuse sails past
+                 * the guard. A streak counter is immune to that — a freshly
+                 * reused bullet has to be observed off-screen twice, half a
+                 * second apart, by which time its pool init has certainly run.
+                 * A bullet that genuinely flew out of frame satisfies it on the
+                 * very next check, so nothing real is kept alive longer. */
+                /* Round-3 blocker 1: a pooled projectile comes back with the
+                 * SAME instance ID, so a streak recorded in a previous lifetime
+                 * would carry over and let the very first check of the new one
+                 * reach the threshold. An airborne bullet is re-checked every
+                 * CHECK_INTERVAL; a gap materially longer than that means this
+                 * object was not being tracked in between — i.e. it was in the
+                 * pool — so the streak belongs to a dead lifetime. Three
+                 * intervals of slack keeps a frame-rate dip from resetting a
+                 * real streak; the cost of a false reset is only one more 0.5s
+                 * of life for a bullet that already left the screen. */
+                int streak; _oobStreak.TryGetValue(key, out streak);
+                if (now - prev > CHECK_INTERVAL * 3f) streak = 0;
+                streak++;
+                _oobStreak[key] = streak;
+                if (streak < 2) return;
+                _oobStreak.Remove(key);
                 if (__instance.ownPlayer == null || __instance.ownPlayer.data == null
                     || __instance.ownPlayer.data.view == null
                     || !__instance.ownPlayer.data.view.IsMine) return;

@@ -1,16 +1,25 @@
 # Sid's Competitive Rounds — Changelog
 
-## v1.36.0 — UNRELEASED (backend live 2026-08-02/03) — localization, FFA lobby config, FAQ overhaul
+## v1.36.0 — Spanish + Russian, translation portal, native cards
 
-Backend deployed to production 2026-08-02/03. Schema: migrations **179–188** (187 adds the
-FFA kills-tiebreak capability columns; 188 repairs one seeded translation proposal; 184
-re-seeded with 466 new proposals). The client half is built but not yet released, so
-players see none of the client changes until v1.36.0 ships. Every server change is
-backward-compatible with v1.35.5 clients.
+Schema: migrations **179–189**. 187 adds the FFA kills-tiebreak capability columns, 188
+repairs one seeded translation proposal, and **189** carries this batch's 188 new
+machine-translation proposals — a NEW file rather than more rows in the already-applied
+184, because a deploy that tracks applied migrations would never have run them.
+
+Release order matters and is specified in exactly one place — `.claude/commands/ship.md`,
+Deploy section. Do not restate it here or anywhere else; three copies of this rule drifted
+apart during the review of this very release, and the copy that performed the release was
+the wrong one. In short: the GitHub release is published BEFORE the backend deploy,
+because the server tells clients an update exists and the updater does not verify what it
+downloads. The key sync must run before migration 189, or 189 silently seeds nothing.
+
+**Minimum version stays at 1.35.4 at release** and is raised to 1.36.0 about two hours
+later, so players have a window to update through Thunderstore or the auto-updater first.
 
 ### Added
 
-- **The mod speaks Spanish and Russian.** All 404 user-visible strings are translated, and
+- **The mod speaks Spanish and Russian.** Every one of the mod's ~1,470 user-visible strings is translated, and
   the language is chosen from Settings → Language / Idioma / Язык. Machine-translated
   drafts to start; community moderators review and rewrite them from a web portal.
 - **Translation portal** at `/translate`: sign in from the game, propose translations, and
@@ -48,6 +57,85 @@ backward-compatible with v1.35.5 clients.
   Year/Month/Day, applied to every date in the mod from a new Settings picker.
 - **Release notes on the Home tab now appear in Spanish and Russian**, starting with
   v1.35.5's notes.
+
+### Fixed (August 3 feedback round 2)
+
+- **The translation portal expired after about a minute and could not be recovered.** The
+  session was always 45 minutes; the page simply forgot its sign-in on any reload. It now
+  keeps the session across reloads, renews itself while the tab is open (up to 8 hours,
+  after which you re-open it from the game), and renews immediately on load so a session
+  restored near its expiry is saved rather than lost.
+- **The portal's search box and its All / Untranslated / Stale / Has-pending filters did
+  nothing**, and the queue reported "200" for both languages regardless of the real
+  backlog. Search now matches across the English source, the current translation and the
+  key, each filter shows its true count, and the queue is properly paged.
+- **An approved translation appeared to vanish.** Approving a proposal removed it from the
+  pending queue and nothing replaced it, so the work looked lost — it was live the whole
+  time. There is now an Approved view listing every live translation with its original
+  English, who proposed it and who approved it, plus an admin-only reset.
+- **Switching the Home chat's channel scrolled an empty view to the bottom** and stranded
+  whatever you had typed at the top of the pane.
+- **Card Stats showed the bundled screenshot instead of the live card about half the time,
+  and "Remote" never rendered live at all.** Not random: our stored card name corrects the
+  game's own spelling mistakes (Leach → Leech, Riccochet → Ricochet, "Poison bullets" →
+  Poison), so for exactly those cards the lookup matched nothing in the game and fell back
+  forever. Every lookup now also accepts the game's own raw spellings.
+- **The live card render was too dark to read** over the in-match overlay; it is now
+  composited onto a solid backing so it reads the same everywhere.
+- **Changing language needed a restart, and could leave three languages on screen at
+  once.** The switch is now staged: translations swap, the font re-arms for the new
+  script, the game's own language follows (previously only written to disk and applied at
+  next launch, which is why card names stayed in the old language), card text and card
+  images are re-rendered, and only then does the page rebuild.
+- **The Tournament / 1v2 / 2v2 / FFA info popups and the per-player hover graphs were
+  still English**, along with the Compare tab and several of its charts.
+- **Compare-tab charts had no labels at all** — including the region-time pie charts. The
+  label element was one pixel shorter than its own text needed, and the truncation rule
+  drops a line that does not fit rather than clipping it.
+- **Per-game gold disappeared from the Casual and Ranked history rows** (series winnings
+  still showed): the cell was 65px and the text no longer fit.
+- **The FFA spawn spotlight was a large square**; it is now a soft circle about three times
+  the player's size.
+- **The Home tab's update block wrapped at a third of its width in English** while Spanish
+  and Russian used the full width.
+- **Chat is now one merged, time-ordered view by default.** "Global" is renamed "English",
+  All shows every channel in send order, you type into your own language's channel by
+  default, Shift changes which channel you are typing into, and the two selectors are
+  separate so reading everything does not force you to pick where you speak.
+- **Card names were inconsistently capitalised throughout the menu** (`CAREFUL PLANNING`
+  next to `Fast Forward`, and `Target BOUNCE`). The game's own table is inconsistent, so
+  names are normalised at display time only — nothing stored or looked up changes.
+- **The Card Stats tier letters were hard to read.** They were already bold twice over;
+  the game's font ships no bold face, so the letters are now larger instead.
+- **A crafted chat message could pin itself to the bottom of everyone's chat.** The
+  message parser matched field names anywhere in the payload, so text typed inside a
+  message could pose as the message's own timestamp.
+- **Off-screen bullets could be despawned on their first frame**, before the engine had
+  finished setting up their pooled effects — which corrupts the pool for the rest of the
+  session. They now get a moment first. (Under investigation as a possible cause of a
+  report that every shot rendered the poison effect.)
+- **The English update log wrapped at a third of the panel** while Spanish and Russian
+  filled it. Not a layout bug: release notes are published with their own line breaks at
+  about 78 characters, so the English text carried its own wrapping wherever it was shown.
+  Those breaks are now removed before display — lists, headings and paragraph breaks are
+  kept — and the panel does the wrapping in every language.
+- **Admins can appoint and remove translation moderators from the Admin tab again.** The
+  in-game controls were missing entirely; the server side had been working the whole time.
+
+- **A double KO in FFA no longer passes without explanation.** When the last players alive
+  kill each other in the same instant there is no survivor to award the point to, so the
+  round ended with nobody scoring and the next map simply loaded — correct, but completely
+  silent, and indistinguishable from a scoring bug. It now says so on screen. The rule is
+  unchanged — no point, round advances — and the outcome itself never differs between
+  players: the host decides it once and broadcasts it. The explanatory message needs both
+  players on this version; in a mixed lobby the older client just sees the round end
+  quietly, exactly as before.
+
+### Added (August 3 feedback round 2)
+
+- **Thicker menu text**, on by default. This is the game's own font rendered at a heavier
+  weight — not a different typeface — and it applies only to the mod's own menus. The
+  Settings row turns it off for the original thickness.
 
 ### Fixed (August 3 feedback round)
 
@@ -102,6 +190,29 @@ backward-compatible with v1.35.5 clients.
   banners, the in-match score lines, queue status lines, and dozens of composed messages
   (bet results, level-ups, lobby status) previously rendered in English regardless of
   language; all of them now translate.
+
+### Cosmetics
+
+* **Spilled Icecream** — new community submission, now bundled and renderable. It is not
+  on sale yet; the artist opens stock from the Artist tab.
+* **Rounds Cat** — the artist's approved placement revision rescales it (1.0 → 1.7). The
+  art is unchanged; existing owners will see it render larger.
+
+### Known issue — chat ordering on a machine with a wrong system clock
+
+Chat is now ordered by the time a message was **sent** rather than the time it arrived,
+which fixes the long-standing problem of scrollback and multi-channel messages appearing
+out of order. There is one case it does not handle: if your computer's clock is
+significantly wrong (minutes or more) **and** the chat history has not loaded yet, or
+fails to load, your own messages can be placed in the wrong position in your own chat
+pane. With a fast clock your messages sit below newer ones for as long as your clock is
+ahead. With a slow clock your message is filed back into history, and it can scroll off
+and disappear from your pane entirely.
+
+Only your own view is affected — the message is still delivered normally to everyone
+else, and nothing about matches, ratings, gold, or the queue is involved. Restarting
+ROUNDS clears it. If you see this, check that Windows "Set time automatically" is on.
+
 
 ## v1.35.5 — 2026-07-31 — queue strand root cause, Leave All Queues, shield charge, display toggles
 

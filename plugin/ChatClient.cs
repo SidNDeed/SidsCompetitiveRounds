@@ -38,16 +38,61 @@ namespace CompetitiveRounds
 
         public static bool IsConnected => socket != null && socket.State == WebSocketState.Open;
 
-        /// <summary>Invoked for each received message (raw JSON text). Called from a background thread.</summary>
-        public static Action<string> OnMessage;
+        /// <summary>Invoked for each received message (raw JSON text). Called
+        /// from a background thread. The payload is the server's own JSON,
+        /// untouched — live WS frames and each scrollback entry sliced out by
+        /// ApiClient.FetchRecentChat go through here in the SAME shape, so any
+        /// server field (id, channel, timestamp, ...) is available to the
+        /// consumer. Local echoes from Send() are synthesized in that same
+        /// shape.
+        ///
+        /// A property rather than a plain field so the server-clock sampler
+        /// below can see SCROLLBACK: ApiClient.FetchRecentChat dispatches each
+        /// history row straight through this member, and the getter is the only
+        /// place inside this file that those rows pass. The getter hands back a
+        /// wrapper that feeds the row to the sampler and then calls the real
+        /// consumer — a consumer exception still propagates to the caller's own
+        /// try/catch exactly as it did when this was a field, and the wrapper
+        /// is a cached delegate so a get allocates nothing.</summary>
+        public static Action<string> OnMessage
+        {
+            // Null when nothing is subscribed, so the existing `OnMessage?.Invoke`
+            // call sites short-circuit exactly as they did against the field.
+            get { return messageSink == null ? null : dispatchAgeUnknown; }
+            set { messageSink = value; }
+        }
+
+        // The real consumer. volatile: assigned once on the main thread during
+        // plugin init, invoked from the WS receive task.
+        private static volatile Action<string> messageSink;
+
+        // Kept as a wrapper rather than exposing messageSink directly so the
+        // OnMessage property's null-when-unsubscribed getter still short-
+        // circuits `?.Invoke` at the call sites exactly as a plain field did.
+        // (This used to also feed a clock-skew sampler; that estimator was
+        // removed — see the local-echo timestamp note further down.)
+        private static readonly Action<string> dispatchAgeUnknown = json => Dispatch(json);
+
+        /// <summary>Hand a received row to the consumer.</summary>
+        private static void Dispatch(string json)
+        {
+            messageSink?.Invoke(json);
+        }
 
         // ── §2.6 chat split ──────────────────────────────────────
-        // Subscribe to a SET (global + the locale channel + one optional
-        // extra viewed channel), send to ONE. SendChannel is UI-owned (Tab
-        // cycles it in the chat box; the Home dropdown sets it directly) and
-        // may be ANY allowed channel regardless of locale — the server
-        // relays sends to any allowed channel. It follows the language by
-        // default (DefaultSendChannel) until the player picks explicitly.
+        // Subscribe to EVERY allowed channel, always (AllChannels), and send
+        // to ONE. The subscription is a CONSTANT — it is deliberately not
+        // derived from the locale or from any display filter, because the
+        // socket subscription is what decides which messages ever reach this
+        // client at all (the server's broadcast() skips non-subscribed
+        // channels). Hiding a channel is a pure render-side concern for the
+        // UI; the pipe always carries everything.
+        //
+        // SendChannel is the TYPING target and is fully decoupled from the
+        // display filter: it is an explicit persisted pick
+        // (Plugin.ChatSendChannel) when there is one, else it follows the mod
+        // language, else global. It can never be "all" — that is what makes
+        // "typing into the merged view" structurally impossible.
 
         /// <summary>The language channel this locale is entitled to, or null
         /// (en/pseudo have only global).</summary>
@@ -66,43 +111,33 @@ namespace CompetitiveRounds
         private static bool IsAllowedChannel(string c)
             => c == "global" || c == "es" || c == "ru";
 
-        /// <summary>Restart-coherent send default (R2-4a): an explicitly
-        /// persisted language pick (item 5) wins, so a player who chose a
-        /// display channel both VIEWS and TYPES into it after a restart;
-        /// else follow the language; else global. Safe with the picker's
-        /// "all" branch: it persists "all" BEFORE re-deriving, so reverting
-        /// to the merged view falls through to the locale default.</summary>
+        /// <summary>Every channel this client subscribes to — a CONSTANT, and
+        /// the whole server-allowed set (CHAT_CHANNELS_ALLOWED). Comma-joined
+        /// because both consumers (the subscribe frame and the scrollback
+        /// query string) want that form. Closed-set values, so it is safe
+        /// verbatim in JSON and in a URL.</summary>
+        private const string AllChannels = "global,es,ru";
+
+        /// <summary>The TYPING target's default: an explicit persisted pick
+        /// wins (Plugin.ChatSendChannel), else the mod language's channel,
+        /// else global. Never returns "all". Independent of the display
+        /// filter — a player viewing the merged log still types somewhere
+        /// concrete.</summary>
         public static string DefaultSendChannel()
             => PersistedSendDefault() ?? LocaleChannel ?? "global";
 
-        /// <summary>Send-default variant of the persisted pick: unlike
-        /// PersistedDisplayChannel it ALSO honors an explicit "global" pick,
-        /// so an es/ru-locale player who chose Global keeps typing into
-        /// Global after a restart (view and type stay coherent). "all" and
-        /// unset fall through to the locale default.</summary>
+        /// <summary>The explicit persisted typing-channel override, or null
+        /// when the player never picked one (default "" = follow the mod
+        /// language). Honors "global" as a real pick, so an es/ru player who
+        /// deliberately types in Global keeps doing so across restarts and
+        /// across language changes. Null-guarded: the config may not be bound
+        /// yet in some init orders.</summary>
         private static string PersistedSendDefault()
         {
             try
             {
-                string v = Plugin.ChatDisplayChannel != null ? Plugin.ChatDisplayChannel.Value : null;
+                string v = Plugin.ChatSendChannel != null ? Plugin.ChatSendChannel.Value : null;
                 return (v == "es" || v == "ru" || v == "global") ? v : null;
-            }
-            catch { return null; }
-        }
-
-        /// <summary>The persisted display-channel pick when it names a
-        /// language channel ("es"/"ru"), else null ("all"/"global"/unset
-        /// narrow nothing). Null-guarded: the config may not be bound yet
-        /// in some init orders. Unlike ExtraViewChannel this survives
-        /// restarts, so it is the term that carries an explicit item-5
-        /// pick across sessions — for BOTH the subscription set and the
-        /// send default.</summary>
-        private static string PersistedDisplayChannel()
-        {
-            try
-            {
-                string v = Plugin.ChatDisplayChannel != null ? Plugin.ChatDisplayChannel.Value : null;
-                return (v == "es" || v == "ru") ? v : null;
             }
             catch { return null; }
         }
@@ -123,92 +158,73 @@ namespace CompetitiveRounds
                     sendChannel = DefaultSendChannel();
                 return sendChannel;
             }
-            set { sendChannel = IsAllowedChannel(value) ? value : DefaultSendChannel(); }
-        }
-
-        // One EXTRA viewed channel beyond global + the locale channel, so a
-        // player who picks a channel outside their locale in the Home dropdown
-        // still receives it live. Null/absent by default. Normalized to the
-        // language channels only — "global" is always subscribed, so it
-        // collapses to null. Changing it re-declares the socket's channel set.
-        private static volatile string extraViewChannel;
-        public static string ExtraViewChannel
-        {
-            get { return extraViewChannel; }
+            // An assignment is an EXPLICIT pick and is persisted, so it
+            // survives a restart AND a later language change (that is what
+            // "explicit override" means). "all" / anything unknown can never
+            // land here — it collapses to the default, which is always a
+            // concrete channel. Use ResetSendChannelToLocale() for the
+            // "go back to following the language" action; assigning
+            // DefaultSendChannel() would freeze today's language as a pick.
             set
             {
-                string v = (value == "es" || value == "ru") ? value : null;
-                if (v == extraViewChannel) return;
-                extraViewChannel = v;
-                subscribeDirty = true;
-                try { sendSignal?.Release(); } catch { }
+                sendChannel = IsAllowedChannel(value) ? value : DefaultSendChannel();
+                try
+                {
+                    if (Plugin.ChatSendChannel != null && IsAllowedChannel(value))
+                        Plugin.ChatSendChannel.Value = value;
+                }
+                catch { }
             }
         }
 
-        /// <summary>The derived VIEW-channel set as a comma-joined string:
-        /// global + the locale channel + the extra viewed channel + the
-        /// persisted display channel, deduped, stable order. THE single
-        /// source of truth for both the socket subscription (SubscribeJson)
-        /// and the scrollback fetch (ApiClient.FetchRecentChat) — R2-4b:
-        /// those two derivations had already drifted once (the fetch was
-        /// missing the persisted term), so both consume this helper and can
-        /// never diverge again. The persisted term matters because the
-        /// config survives restarts while ExtraViewChannel does not —
-        /// without it a player whose saved display filter is a language
-        /// channel outside their locale restarts into a filtered-EMPTY pane
-        /// (subscription never carries the channel their filter shows).
-        /// Values come from a closed set ("global"/"es"/"ru"), so the string
-        /// is safe verbatim in both a JSON frame and a URL query.</summary>
-        public static string DerivedChannelSet()
+        /// <summary>Drop the explicit typing-channel override and go back to
+        /// following the mod language (config "" = auto). The counterpart of
+        /// the SendChannel setter — assigning DefaultSendChannel() there
+        /// would persist the CURRENT language as an explicit pick and stop
+        /// following later language changes.</summary>
+        public static void ResetSendChannelToLocale()
         {
-            string lc = LocaleChannel;
-            string extra = extraViewChannel;
-            string persisted = PersistedDisplayChannel();
-            var sb = new StringBuilder("global");
-            if (lc != null) sb.Append(',').Append(lc);
-            if (extra != null && extra != lc)   // dedup vs the locale channel
-                sb.Append(',').Append(extra);
-            if (persisted != null && persisted != lc && persisted != extra)
-                sb.Append(',').Append(persisted);
-            return sb.ToString();
+            try { if (Plugin.ChatSendChannel != null) Plugin.ChatSendChannel.Value = ""; } catch { }
+            sendChannel = LocaleChannel ?? "global";
         }
+
+        /// <summary>The VIEW-channel set as a comma-joined string. CONSTANT:
+        /// every allowed channel, always, regardless of locale or of any
+        /// display filter. THE single source of truth for both the socket
+        /// subscription (SubscribeJson) and the scrollback fetch
+        /// (ApiClient.FetchRecentChat), so the two can never diverge.
+        ///
+        /// It used to be derived (global + locale + an extra viewed channel +
+        /// the persisted display filter) — which meant an English client
+        /// derived literally "global", the server's broadcast() skipped every
+        /// non-subscribed channel, and the "All (merged)" view could never
+        /// show es/ru because those messages never reached the client at all.
+        /// Hiding a channel is now purely render-side; the pipe always
+        /// carries the full set. Do NOT re-narrow this from UI state.</summary>
+        public static string DerivedChannelSet() => AllChannels;
 
         private static string SubscribeJson()
         {
-            // Closed-set values (see DerivedChannelSet), so rewriting the
+            // Closed-set values (see AllChannels), so rewriting the
             // comma-joined form into quoted JSON array items is safe.
             return "{\"type\":\"subscribe\",\"channels\":[\""
                 + DerivedChannelSet().Replace(",", "\",\"") + "\"]}";
         }
 
-        // Subscribe state is a DIRTY FLAG, never queued content (round-3
-        // find N12): a queued frame captures the locale at enqueue time, and
-        // a failed send requeues at the TAIL — a stale RU frame could drain
-        // after a fresh EN one and win the socket's final state. The sender
-        // computes SubscribeJson() at SEND time, so a retry always carries
-        // the current channel set.
-        private static volatile bool subscribeDirty;
-
-        /// <summary>Locale changed mid-session: narrow/widen this socket's
-        /// channel set and refetch scrollback so the newly-subscribed
-        /// channel's history appears (the render-side dedup is a seen-id SET,
-        /// not a high-water mark, precisely so this refetch isn't swallowed).</summary>
+        /// <summary>Locale changed mid-session. The socket's channel set is a
+        /// constant so there is nothing to re-declare — only the TYPING
+        /// target can move. Scrollback is refetched because the render side
+        /// rebuilds its pane on a language change (the dedup is a seen-id
+        /// SET, not a high-water mark, precisely so a refetch isn't
+        /// swallowed).</summary>
         public static void ResubscribeAndRefresh()
         {
-            // Every locale change re-derives the send channel. Since R2-4a
-            // the derivation prefers a PERSISTED explicit language pick over
-            // the new locale — deliberate: the display filter carrying that
-            // pick also survives the locale change, so the player keeps
-            // typing into the channel they see. Only without such a pick
-            // does the send channel follow the language, and either way the
-            // player never silently types into a channel they can't view.
-            // ExtraViewChannel is deliberately left alone here: the persisted
-            // display channel is covered by SubscribeJson's config-derived
-            // term, so no transient state needs re-seeding on locale change.
+            // Follow the NEW language unless the player explicitly overrode
+            // the typing channel — DefaultSendChannel() prefers the persisted
+            // pick, so an override survives and everything else moves with
+            // the language.
             sendChannel = DefaultSendChannel();
             if (!running) return;
-            subscribeDirty = true;
-            try { sendSignal?.Release(); } catch { }
             try { ApiClient.FetchRecentChat(50); } catch { }
         }
 
@@ -271,6 +287,18 @@ namespace CompetitiveRounds
             int rating = s != null ? (int)Math.Round(s.rating) : 0;
             string title = s?.active_title ?? "";
             string titleColor = s?.active_title_color ?? "";
+            // "timestamp" mirrors the server's own field (ISO-8601 UTC with a
+            // +00:00 offset, from a TIMESTAMPTZ) so a merged, time-ordered
+            // view can sort echoes against real rows without a special case.
+            // InvariantCulture is load-bearing (#47) — a ru/es OS locale
+            // would otherwise emit non-ASCII / reordered date parts.
+            // The value comes from the SERVER's clock (NowUtc), not this
+            // machine's: the time-ordered pane sorts on this field, so a
+            // client clock minutes fast would file its own line minutes into
+            // the future and one running slow would bury it above messages
+            // that are genuinely older. Ordering hint only — the server still
+            // owns the stored timestamp, and its canonical row supersedes this
+            // one when it arrives.
             string echo =
                 "{\"source\":\"ingame\"," +
                 "\"steam_id\":\"" + JsonEscape(steamId ?? "") + "\"," +
@@ -279,8 +307,12 @@ namespace CompetitiveRounds
                 "\"title\":\"" + JsonEscape(title) + "\"," +
                 "\"title_color\":\"" + JsonEscape(titleColor) + "\"," +
                 "\"channel\":\"" + channel + "\"," +
-                "\"message\":\"" + JsonEscape(message) + "\"}";
-            try { OnMessage?.Invoke(echo); } catch { }
+                "\"message\":\"" + JsonEscape(message) + "\"," +
+                "\"timestamp\":\"" + ServerNowIso8601() + "\"}";
+            // DIRECT to the consumer, NEVER through the OnMessage property: that
+            // getter feeds the clock sampler, and an echo carries OUR stamp, so
+            // routing it there would let the offset confirm itself and drift.
+            try { messageSink?.Invoke(echo); } catch { }
         }
 
         /// <summary>Set by ApiClient when its TLS probe fails and it falls back to
@@ -398,7 +430,7 @@ namespace CompetitiveRounds
                         {
                             string text = msg.ToString();
                             msg.Clear();
-                            try { OnMessage?.Invoke(text); } catch { }
+                            try { Dispatch(text); } catch { }
                             Plugin.Log.LogInfo($"[CHAT] <- {text}");
                         }
                     }
@@ -450,25 +482,11 @@ namespace CompetitiveRounds
                 try { await sendSignal.WaitAsync(token); }
                 catch { return; }
 
-                // Subscribe-dirty first, computed FRESH at send time (N12) —
-                // ahead of any queued data so a channel change is never
-                // outrun by the backlog.
-                if (subscribeDirty)
-                {
-                    subscribeDirty = false;
-                    var subJson = SubscribeJson();
-                    var subBytes = Encoding.UTF8.GetBytes(subJson);
-                    try
-                    {
-                        await ws.SendAsync(new ArraySegment<byte>(subBytes), WebSocketMessageType.Text, true, token);
-                    }
-                    catch (Exception ex)
-                    {
-                        Plugin.Log.LogWarning($"[CHAT] subscribe send failed: {ex.Message}");
-                        subscribeDirty = true;   // retried (fresh) after reconnect
-                        return;
-                    }
-                }
+                // No mid-session re-subscribe: the channel set is a constant
+                // declared once per connection (see RunLoop). The old
+                // dirty-flag path existed only to RE-NARROW the socket when
+                // the locale or the display filter changed — the very thing
+                // that made the merged view unreachable.
 
                 while (sendQueue.TryDequeue(out var json))
                 {
@@ -501,6 +519,98 @@ namespace CompetitiveRounds
                 sendQueue.Enqueue("{\"type\":\"ping\"}");
                 try { sendSignal?.Release(); } catch { }
             }
+        }
+
+        /// <summary>Server-shaped send time for the local echo: ISO-8601 UTC
+        /// with an explicit +00:00 offset, matching Python's
+        /// datetime.isoformat() on a TIMESTAMPTZ. Invariant so an es/ru OS
+        /// locale can't reorder or localize the digits. Reads the SERVER's
+        /// clock (NowUtc), not this machine's — see the offset block below.</summary>
+        private static string ServerNowIso8601()
+            => NowUtc().ToString("yyyy-MM-ddTHH:mm:ss.ffffff",
+                   System.Globalization.CultureInfo.InvariantCulture) + "+00:00";
+
+        // ── local echo timestamp ─────────────────────────────────
+        // The chat pane is ordered by each row's server timestamp, but a local
+        // echo is drawn before its canonical row exists, so it has to be
+        // stamped here — off this machine's clock.
+        //
+        // A previous revision learned the server/client skew from the
+        // timestamps on received rows and corrected for it. That estimator is
+        // GONE, deliberately. Adversarial review confirmed five independent
+        // ways for it to go wrong — one absurd row could move it by up to the
+        // 400-day cap, frames buffered across a process stall sampled as
+        // "live" and dragged it negative, a sender had no guaranteed route to
+        // receive its own canonical row, and echo markers expired on the very
+        // clock being corrected — for a benefit that lasts only until the
+        // server's own row arrives.
+        //
+        // That arrival is the real fix and it still happens: NativeUI pairs the
+        // canonical row with its echo and RE-STAMPS the drawn line with the
+        // authoritative created_at, then re-sorts it. So a skewed clock costs
+        // one briefly mis-ordered line, not a permanently mis-ordered one —
+        // and no session-wide estimate can be corrupted, because there is none
+        // (learning #288: prefer under-correction to a recovery mechanism whose
+        // own failure modes are worse than the thing it recovers from).
+
+        /// <summary>UTC now. Named for the role it plays — "the time to stamp a
+        /// message with" — so the call sites read the same whether or not any
+        /// skew correction ever exists again. Session state only.</summary>
+        public static DateTime NowUtc() => DateTime.UtcNow;
+
+
+        /// <summary>Read a string value stored under <paramref name="key"/> at
+        /// the TOP level of a chat row, or null.
+        ///
+        /// String-aware rather than an IndexOf for the same reason as the
+        /// scrollback slicer and NativeUI's field reader (#156): chat messages
+        /// and display names are user-authored, and a raw scan finds the first
+        /// textual occurrence anywhere — including inside a value. A player
+        /// typing a literal timestamp field would otherwise be feeding this
+        /// machine's clock estimator, which is a whole-session corruption
+        /// rather than one misplaced line. Only depth-1 keys (direct members of
+        /// the row object) are accepted, and only in value position.</summary>
+        private static string ExtractTopLevelString(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return null;
+
+            int depth = 0;
+            bool inString = false, escaped = false, expectValue = false;
+            int start = -1;
+            string pendingKey = null;
+
+            for (int i = 0; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (inString)
+                {
+                    if (escaped) { escaped = false; continue; }
+                    if (c == '\\') { escaped = true; continue; }
+                    if (c != '"') continue;
+                    inString = false;
+                    string token = json.Substring(start, i - start);
+                    if (expectValue)
+                    {
+                        if (depth == 1 && pendingKey == key) return token;
+                        expectValue = false;
+                        pendingKey = null;
+                    }
+                    else pendingKey = token;   // key position (or an array item)
+                    continue;
+                }
+
+                switch (c)
+                {
+                    case '"': inString = true; start = i + 1; break;
+                    // A nested object/array is not depth 1, and it also ends any
+                    // pending key/value pairing at this level.
+                    case '{': case '[': depth++; expectValue = false; pendingKey = null; break;
+                    case '}': case ']': depth--; expectValue = false; pendingKey = null; break;
+                    case ':': expectValue = true; break;
+                    case ',': expectValue = false; pendingKey = null; break;
+                }
+            }
+            return null;
         }
 
         private static string JsonEscape(string s)

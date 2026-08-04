@@ -157,7 +157,7 @@ namespace CompetitiveRounds
             // rides above the head; the star's canvas position per frame is
             // the orbit animation, 6fps ~= 1s per lap) — so scale 1, no
             // offset. Players can still drag-adjust like any face item.
-            new CosmeticDef { Sku = "face_detail_rounds_cat",    DisplayName = "Rounds Cat",       Slot = CharacterItemType.Detail, PngFile = "detail_rounds_cat.png",    Scale = 1.0f, Offset = Vector2.zero },
+            new CosmeticDef { Sku = "face_detail_rounds_cat",    DisplayName = "Rounds Cat",       Slot = CharacterItemType.Detail, PngFile = "detail_rounds_cat.png",    Scale = 1.7f, Offset = Vector2.zero },  // placement revision 2 (v1.36.0): artist rescaled 1.0 -> 1.7; art unchanged
             new CosmeticDef { Sku = "face_detail_star_spin",     DisplayName = "Star Spin",        Slot = CharacterItemType.Detail, PngFile = "detail_star_spin.png",     Scale = 1.0f, Offset = Vector2.zero, Fps = 6f },
             // v1.34.3 — first community submission shipped through the artist
             // upload + admin placement review workflow. Scale/Offset are the
@@ -183,6 +183,11 @@ namespace CompetitiveRounds
             new CosmeticDef { Sku = "face_eyes_casicorn_s_eyes",     DisplayName = "Casicorn's Eyes",   Slot = CharacterItemType.Eyes,   PngFile = "eyes_casicorn_s_eyes.png",     Scale = 1.3f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_detail_little_pink_buddy", DisplayName = "Little Pink Buddy", Slot = CharacterItemType.Detail, PngFile = "detail_little_pink_buddy.png", Scale = 1.3f, Offset = Vector2.zero },
             new CosmeticDef { Sku = "face_detail_sniper_medal",      DisplayName = "Sniper Medal",      Slot = CharacterItemType.Detail, PngFile = "detail_sniper_medal.png",      Scale = 1.3f, Offset = Vector2.zero },
+            // v1.36.0 - approved placement revision 1, values copied verbatim
+            // from cosmetic_submissions.approved_* so the render matches what
+            // was reviewed in-game (learning #164/#165). 512x512, md5 verified
+            // against the DB before writing the PNG.
+            new CosmeticDef { Sku = "face_detail_spilled_icecream", DisplayName = "Spilled Icecream", Slot = CharacterItemType.Detail, PngFile = "detail_spilled_icecream.png", Scale = 1.3f, Offset = Vector2.zero },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

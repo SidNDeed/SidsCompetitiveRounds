@@ -20,6 +20,11 @@ namespace CompetitiveRounds
         private const int MaxAddedGlyphs = 1200;
         private const int GlyphRenderModeSdffaa = 4165;
         private const int GlyphLoadFlagsForSdffaa = 10; // NO_HINTING | NO_BITMAP
+        // A font whose face fails to load this many times is treated as
+        // permanently unusable and dropped from the fallback chain, so the
+        // "don't condemn codepoints a skipped font never saw" rule below can
+        // never turn into an unbounded retry loop.
+        private const int MaxFaceLoadFailures = 3;
 
         private static readonly List<FontState> _fonts = new List<FontState>();
         private static readonly HashSet<uint> _knownCodepoints = new HashSet<uint>();
@@ -46,11 +51,89 @@ namespace CompetitiveRounds
         private static bool _installed;
         private static bool _failureLogged;
         private static bool _capLogged;
+        private static bool _batchFailureLogged;
         private static int _totalAdded;   // diagnostics only; the cap is per-atlas
 
         public static bool Ready
         {
             get { return _installed && _fonts.Count > 0; }
+        }
+
+        /// <summary>Re-arm on a live mod-language switch (called from
+        /// I18n.SetLocale before LocaleChanged fires).
+        ///
+        /// WHY THIS EXISTS: Install() is one-shot behind _installed and its
+        /// only other caller — UIFactory.InitFont — sets fontReady=true on the
+        /// same line BEFORE calling it, so InitFont's `if (fontReady) return`
+        /// guard means a failed install is never retried and EnsureCharacters
+        /// no-ops for the whole session (every non-ASCII glyph then renders as
+        /// nothing, not even a box). Relaunching was the only recovery path,
+        /// which is exactly the reported "font doesn't apply until restart".
+        ///
+        /// Three jobs, in order: retry Install() when not Ready; clear the
+        /// permanently-missing poison set so codepoints condemned under the
+        /// old font set / after a transient FontEngine hiccup get one more
+        /// chance; preload the NEW locale's script range (the install-time
+        /// preload list is fixed and never re-run).</summary>
+        public static void OnLocaleChanged(string locale)
+        {
+            bool wasReady = Ready;
+            if (!Ready)
+            {
+                // _installed true with no fonts can only come from a partially
+                // rolled-back install; clear it so Install()'s guard lets the
+                // retry through.
+                _installed = false;
+                _failureLogged = false;   // one warning per retry, not per session
+                try { Install(); }
+                catch (Exception ex)
+                { Plugin.Log.LogWarning("[FONT] fallback install retry threw: " + UnwrapMessage(ex)); }
+                if (Ready)
+                    Plugin.Log.LogInfo("[FONT] fallback install RECOVERED on locale change ('"
+                        + (locale ?? "?") + "') — non-ASCII text renders from now on");
+            }
+            if (!Ready) return;
+
+            int rearmed = _missingCodepoints.Count;
+            _missingCodepoints.Clear();
+            _capLogged = false;
+            _batchFailureLogged = false;
+
+            int before = _totalAdded;
+            try { AddRanges(RangesForLocale(locale)); }
+            catch (Exception ex)
+            { Plugin.Log.LogWarning("[FONT] locale preload failed: " + UnwrapMessage(ex)); }
+
+            Plugin.Log.LogInfo("[FONT] re-armed for locale '" + (locale ?? "?") + "': "
+                + (_totalAdded - before) + " glyphs preloaded, " + rearmed
+                + " previously-missing codepoint(s) re-armed"
+                + (wasReady ? "" : " (after an install retry)"));
+        }
+
+        /// <summary>Install retry for any caller that notices !Ready. With no
+        /// locale hint only the always-safe Latin range is warmed; glyphs
+        /// outside it still resolve on demand through EnsureCharacters, so
+        /// this is a slower first paint, not a missing one. Prefer
+        /// OnLocaleChanged(locale) whenever a locale is known.</summary>
+        public static void Retry() { OnLocaleChanged(null); }
+
+        /// <summary>Script blocks worth warming for a locale. Latin-1
+        /// Supplement + Latin Extended-A is always included (accented Latin is
+        /// reachable from any locale via player names and chat).</summary>
+        private static CodepointRange[] RangesForLocale(string locale)
+        {
+            var latin = new CodepointRange(0x00A0u, 0x017Fu);
+            string l = locale == null ? "" : locale.ToLowerInvariant();
+            if (l.StartsWith("ru", StringComparison.Ordinal)
+                || l.StartsWith("uk", StringComparison.Ordinal)
+                || l.StartsWith("be", StringComparison.Ordinal)
+                || l.StartsWith("bg", StringComparison.Ordinal)
+                || l.StartsWith("sr", StringComparison.Ordinal)
+                || l.StartsWith("kk", StringComparison.Ordinal))
+                return new[] { latin, new CodepointRange(0x0400u, 0x04FFu) };
+            if (l.StartsWith("el", StringComparison.Ordinal))
+                return new[] { latin, new CodepointRange(0x0370u, 0x03FFu) };
+            return new[] { latin };
         }
 
         public static void Install()
@@ -252,13 +335,24 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                if (requested != null)
-                {
-                    for (int i = 0; i < requested.Count; i++)
-                        _missingCodepoints.Add(requested[i]);
-                }
-                Plugin.Log.LogWarning("[FONT] glyph batch failed: " + UnwrapMessage(ex));
+                // NO BLANKET POISONING. This catch used to mark the ENTIRE
+                // requested batch permanently missing, and the one thing that
+                // actually throws out here — EnsureFaceLoaded, called per font
+                // inside AddCodepoints — meant a single transient FontEngine
+                // hiccup condemned codepoints that were never even queried, for
+                // the rest of the session (they then render as nothing).
+                // Genuine absences are condemned inside AddCodepoints, AFTER
+                // every live fallback font has actually been asked.
+                LogBatchFailureOnce(ex);
             }
+        }
+
+        private static void LogBatchFailureOnce(Exception ex)
+        {
+            if (_batchFailureLogged) return;
+            _batchFailureLogged = true;
+            Plugin.Log.LogWarning("[FONT] glyph batch failed: " + UnwrapMessage(ex)
+                + " (repeats are silent until the next locale switch)");
         }
 
         private static void ResolveReflection()
@@ -320,6 +414,14 @@ namespace CompetitiveRounds
             try
             {
                 ((UnityEngine.Object)asset).name = assetName;
+                // Learning #16: runtime-created assets must survive ROUNDS'
+                // scene changes. HideAndDontSave carries DontUnloadUnusedAsset,
+                // which is the load-bearing bit here — a scene transition's
+                // Resources.UnloadUnusedAssets would otherwise be free to
+                // collect this font asset / atlas / material while TMP's
+                // fallback tables still reference them, and the glyphs would
+                // silently stop rendering mid-session.
+                ((UnityEngine.Object)asset).hideFlags = HideFlags.HideAndDontSave;
                 SetMember(asset, "m_Version", "1.1.0");
                 SetMember(asset, "faceInfo", _getFaceInfo.Invoke(null, null));
                 SetMember(asset, "atlasPopulationMode", Enum.ToObject(_atlasPopulationModeType, 0));
@@ -331,6 +433,7 @@ namespace CompetitiveRounds
 
                 state.Texture = new Texture2D(AtlasSize, AtlasSize, TextureFormat.Alpha8, false);
                 state.Texture.name = assetName + " Atlas";
+                state.Texture.hideFlags = HideFlags.HideAndDontSave;
                 SetMember(asset, "atlasTextures", new[] { state.Texture });
 
                 Shader shader = GetStaticMember(_shaderUtilitiesType, "ShaderRef_MobileSDF") as Shader;
@@ -338,6 +441,7 @@ namespace CompetitiveRounds
 
                 state.Material = new Material(shader);
                 state.Material.name = assetName + " Material";
+                state.Material.hideFlags = HideFlags.HideAndDontSave;
                 state.Material.SetTexture(GetShaderId("ID_MainTex"), state.Texture);
                 state.Material.SetFloat(GetShaderId("ID_TextureWidth"), AtlasSize);
                 state.Material.SetFloat(GetShaderId("ID_TextureHeight"), AtlasSize);
@@ -394,10 +498,34 @@ namespace CompetitiveRounds
                     remaining.Add(unicode);
             }
 
+            bool skippedFont = false;
             for (int fontIndex = 0; fontIndex < _fonts.Count && remaining.Count > 0; fontIndex++)
             {
                 FontState state = _fonts[fontIndex];
-                EnsureFaceLoaded(state.Path);
+                if (state.Disabled) continue;
+                // Guarded per font: a face-load failure is the one error that
+                // hits BEFORE any codepoint was queried, and it used to throw
+                // straight out of AddCodepoints into EnsureCharacters' blanket
+                // catch. Skip this font, keep the rest of the chain, and record
+                // that the pass was incomplete (see the tail).
+                try { EnsureFaceLoaded(state.Path); }
+                catch (Exception faceEx)
+                {
+                    state.FaceLoadFailures++;
+                    skippedFont = true;
+                    if (state.FaceLoadFailures >= MaxFaceLoadFailures)
+                    {
+                        state.Disabled = true;
+                        Plugin.Log.LogWarning("[FONT] fallback '" + state.Name + "' disabled after "
+                            + state.FaceLoadFailures + " face-load failures: " + UnwrapMessage(faceEx));
+                    }
+                    else if (state.FaceLoadFailures == 1)
+                    {
+                        Plugin.Log.LogWarning("[FONT] face load failed for '" + state.Name
+                            + "' — skipped this pass: " + UnwrapMessage(faceEx));
+                    }
+                    continue;
+                }
 
                 var notInThisFont = new List<uint>();
                 var addedThisBatch = new List<uint>();
@@ -475,8 +603,16 @@ namespace CompetitiveRounds
                 remaining = notInThisFont;
             }
 
-            for (int i = 0; i < remaining.Count; i++)
-                _missingCodepoints.Add(remaining[i]);
+            // Condemn a codepoint only once EVERY live fallback actually got a
+            // chance at it. When a font was skipped this pass (face load blew
+            // up) the leftovers stay un-poisoned and retry on the next string;
+            // that font disables itself after MaxFaceLoadFailures, so the retry
+            // window is bounded and normal poisoning resumes.
+            if (!skippedFont)
+            {
+                for (int i = 0; i < remaining.Count; i++)
+                    _missingCodepoints.Add(remaining[i]);
+            }
         }
 
         private static bool TryGetGlyph(uint unicode, out object glyph, out uint glyphIndex)
@@ -878,6 +1014,8 @@ namespace CompetitiveRounds
             public IList FreeGlyphRects;
             public IList UsedGlyphRects;
             public int AddedCount;   // per-atlas glyph budget (review find 5)
+            public int FaceLoadFailures;
+            public bool Disabled;    // face load failed MaxFaceLoadFailures times
             public readonly Dictionary<uint, object> GlyphsByIndex =
                 new Dictionary<uint, object>();
         }

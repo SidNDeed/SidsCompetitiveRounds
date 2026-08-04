@@ -1040,7 +1040,7 @@ namespace CompetitiveRounds
                 compareSearchFocused = GUI.GetNameOfFocusedControl() == CMP_SEARCH_CTRL;
                 if (string.IsNullOrEmpty(next))
                     GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
-                              "<color=#7788AA><i>search players...</i></color>", compareSearchHintStyle);
+                              I18n.Tr("<color=#7788AA><i>search players...</i></color>"), compareSearchHintStyle);
                 if (next != cur)
                 {
                     NativeUI.CompareSearch = next;
@@ -1075,7 +1075,7 @@ namespace CompetitiveRounds
                 lbSearchFocused = GUI.GetNameOfFocusedControl() == LB_SEARCH_CTRL;
                 if (string.IsNullOrEmpty(next))
                     GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
-                              "<color=#7788AA><i>search players...</i></color>", compareSearchHintStyle);
+                              I18n.Tr("<color=#7788AA><i>search players...</i></color>"), compareSearchHintStyle);
                 if (next != cur)
                 {
                     NativeUI.LeaderboardSearch = next;
@@ -1306,7 +1306,7 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
             GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24),
-                "<color=#CCCCCC>Scoring history</color>  <color=#66DD66>you</color> <color=#888>vs</color> <color=#DD7777>opponent</color>",
+                I18n.Tr("<color=#CCCCCC>Scoring history</color>  <color=#66DD66>you</color> <color=#888>vs</color> <color=#DD7777>opponent</color>"),
                 _scoreGraphLbl);
 
             Rect plot = new Rect(gx + pad, gy + 30f, w - pad - 10f, h - 30f - 26f);
@@ -1330,7 +1330,7 @@ namespace CompetitiveRounds
                 GuiLine(new Vector2(x0, myY0), new Vector2(x1, myY1), new Color(0.40f, 0.87f, 0.40f, 0.95f), 2f);
             }
             GUI.Label(new Rect(gx + 8, gy + h - 24f, w - 16, 22f),
-                "<color=#777>rounds on the left - each step is one point scored</color>", _scoreGraphLbl);
+                I18n.Tr("<color=#777>rounds on the left - each step is one point scored</color>"), _scoreGraphLbl);
         }
 
         // ── FPS / Ping hover graphs (July 21 item 2 · July 22 item 3) ────────
@@ -1537,16 +1537,22 @@ namespace CompetitiveRounds
             float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
-            string title = isPing ? "Latency (ms)" : "FPS";
             // F13: FFA regions carry a subject label — a single participant's
             // series, so the you-vs-opponent phrasing (and its legend) would
             // misattribute the line. Name the player instead and drop the
             // opponent legend. Tabs 0/8 never set the label → byte-identical.
+            // Aug 3: the UNLABELED branch (tabs 0/8) is now two whole templates
+            // too. It used to interpolate a `title` local into the sentence, so
+            // the finished string could never match a catalogue key — and the
+            // you/vs/opponent legend has to travel WITH the sentence to be
+            // translatable as one unit.
             string header = !string.IsNullOrEmpty(hit.Value.subjectLabel)
                 ? (isPing
                     ? I18n.TrF("<color=#CCCCCC>Latency (ms) over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel)
                     : I18n.TrF("<color=#CCCCCC>FPS over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel))
-                : $"<color=#CCCCCC>{title} over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>";
+                : (isPing
+                    ? I18n.Tr("<color=#CCCCCC>Latency (ms) over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>")
+                    : I18n.Tr("<color=#CCCCCC>FPS over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>"));
             GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24),
                 header,
                 _scoreGraphLbl);
@@ -1612,7 +1618,6 @@ namespace CompetitiveRounds
             bool oppSubject = reg.subjectIsOpp;
             Color bright = oppSubject ? new Color(0.95f, 0.55f, 0.45f, 0.95f) : new Color(0.55f, 0.75f, 0.98f, 0.95f);
             Color dim = oppSubject ? new Color(0.70f, 0.42f, 0.38f, 0.80f) : new Color(0.42f, 0.52f, 0.70f, 0.80f);
-            string who = oppSubject ? "<color=#E69988>opponent</color>" : "<color=#99B3E6>you</color>";
             string brightHex = oppSubject ? "#F28C73" : "#8CBFFA";
             string dimHex = oppSubject ? "#B36B61" : "#6B85B3";
 
@@ -1631,8 +1636,8 @@ namespace CompetitiveRounds
             // F13: FFA rows register per-participant series with a subject
             // label — the title names that player instead of the you/opponent
             // phrasing. The hex holes ({1}-{3}) keep palette correctness for
-            // either subject side; tabs 0/8 never set the label → the
-            // interpolated branch stays byte-identical.
+            // either subject side; tabs 0/8 never set the label → they take
+            // the unlabeled branches below.
             bool hasSubject = !string.IsNullOrEmpty(reg.subjectLabel);
             string subjHex = oppSubject ? "#E69988" : "#99B3E6";
             string title;
@@ -1640,10 +1645,20 @@ namespace CompetitiveRounds
                 title = isBlock
                     ? I18n.TrF("<color=#CCCCCC>Block — <color={1}>{0}</color></color>  <color={2}>dmg taken</color> <color=#888>·</color> <color={3}>blocks</color>", reg.subjectLabel, subjHex, dimHex, brightHex)
                     : I18n.TrF("<color=#CCCCCC>Hit — <color={1}>{0}</color></color>  <color={2}>shots fired</color> <color=#888>·</color> <color={3}>hits</color>", reg.subjectLabel, subjHex, dimHex, brightHex);
+            // Aug 3: the unlabeled (tabs 0/8) branch is four whole templates —
+            // one per subject side — instead of one interpolating a pre-built
+            // `who` fragment. The subject WORD has to sit inside the sentence
+            // to be translatable at all (a bare "you"/"opponent" key is
+            // unusable in languages that inflect it), and the two palette
+            // hexes stay holes so a palette tweak can't retire the key.
+            else if (oppSubject)
+                title = isBlock
+                    ? I18n.TrF("<color=#CCCCCC>Block — <color=#E69988>opponent</color></color>  <color={0}>dmg taken</color> <color=#888>·</color> <color={1}>blocks</color>", dimHex, brightHex)
+                    : I18n.TrF("<color=#CCCCCC>Hit — <color=#E69988>opponent</color></color>  <color={0}>shots fired</color> <color=#888>·</color> <color={1}>hits</color>", dimHex, brightHex);
             else
                 title = isBlock
-                    ? $"<color=#CCCCCC>Block — {who}</color>  <color={dimHex}>dmg taken</color> <color=#888>·</color> <color={brightHex}>blocks</color>"
-                    : $"<color=#CCCCCC>Hit — {who}</color>  <color={dimHex}>shots fired</color> <color=#888>·</color> <color={brightHex}>hits</color>";
+                    ? I18n.TrF("<color=#CCCCCC>Block — <color=#99B3E6>you</color></color>  <color={0}>dmg taken</color> <color=#888>·</color> <color={1}>blocks</color>", dimHex, brightHex)
+                    : I18n.TrF("<color=#CCCCCC>Hit — <color=#99B3E6>you</color></color>  <color={0}>shots fired</color> <color=#888>·</color> <color={1}>hits</color>", dimHex, brightHex);
             GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24), title, _scoreGraphLbl);
 
             int n = a.Length;
@@ -1699,20 +1714,20 @@ namespace CompetitiveRounds
             drawSeries(a, maxA, dim);
             drawSeries(b, maxBAxis, bright);
 
-            // Footer: final tallies + the resulting percentage. F13: the
-            // subject-labeled (FFA) variant goes through TrF so the template
-            // is translatable; tabs 0/8 keep the interpolated original.
+            // Footer: final tallies + the resulting percentage. Aug 3: the two
+            // branches produced BYTE-IDENTICAL English, so the subject-labeled
+            // (FFA) split is gone and both paths share the existing key — no
+            // new key, and the tabs-0/8 path picks up the FFA translation for
+            // free. Side effect worth naming: {2:F0} now formats under
+            // InvariantCulture (TrF), where the old interpolated branch used
+            // the current culture — a comma decimal separator on an es/ru OS.
             string footer;
             if (isBlock)
-                footer = hasSubject
-                    ? I18n.TrF("<color=#777>{0} dmg taken · {1} successful blocks · markers = points scored</color>", a[n - 1], b[n - 1])
-                    : $"<color=#777>{a[n - 1]} dmg taken · {b[n - 1]} successful blocks · markers = points scored</color>";
+                footer = I18n.TrF("<color=#777>{0} dmg taken · {1} successful blocks · markers = points scored</color>", a[n - 1], b[n - 1]);
             else
             {
                 float pct = a[n - 1] > 0 ? 100f * b[n - 1] / a[n - 1] : 0f;
-                footer = hasSubject
-                    ? I18n.TrF("<color=#777>{0} fired · {1} hit · {2:F0}% · markers = points scored</color>", a[n - 1], b[n - 1], pct)
-                    : $"<color=#777>{a[n - 1]} fired · {b[n - 1]} hit · {pct:F0}% · markers = points scored</color>";
+                footer = I18n.TrF("<color=#777>{0} fired · {1} hit · {2:F0}% · markers = points scored</color>", a[n - 1], b[n - 1], pct);
             }
             GUI.Label(new Rect(gx + 8, gy + h - 22f, w - 16, 22f), footer, _scoreGraphLbl);
         }
@@ -1746,7 +1761,8 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
             GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 22),
-                $"<color={nameHex}>{reg.subjectLabel}</color> <color=#888>— match telemetry</color>", _scoreGraphLbl);
+                I18n.TrF("<color={1}>{0}</color> <color=#888>— match telemetry</color>",
+                         reg.subjectLabel, nameHex), _scoreGraphLbl);
 
             // Panel grid: 2 x 2, each panel has its own auto Y scale.
             float pw = (w - 30f) / 2f, ph = (h - 40f) / 2f;
@@ -1783,9 +1799,12 @@ namespace CompetitiveRounds
             };
 
             string hitFoot = hA != null && hA.Length > 1
-                ? $"<color=#777>{hA[hA.Length - 1]} fired / {hB[hB.Length - 1]} hit ({(hA[hA.Length - 1] > 0 ? 100f * hB[hB.Length - 1] / hA[hA.Length - 1] : 0f):F0}%)</color>" : "";
+                ? I18n.TrF("<color=#777>{0} fired / {1} hit ({2:F0}%)</color>",
+                           hA[hA.Length - 1], hB[hB.Length - 1],
+                           hA[hA.Length - 1] > 0 ? 100f * hB[hB.Length - 1] / hA[hA.Length - 1] : 0f) : "";
             string blkFoot = bA != null && bA.Length > 1
-                ? $"<color=#777>{bA[bA.Length - 1]} dmg / {bB[bB.Length - 1]} blocks</color>" : "";
+                ? I18n.TrF("<color=#777>{0} dmg / {1} blocks</color>",
+                           bA[bA.Length - 1], bB[bB.Length - 1]) : "";
             // Blocks are ~100x smaller than damage — rescale the blocks line to
             // the damage axis so the mini panel shows both trends (real numbers
             // live in the footer; the full-size 1v1 popup uses true dual axes).
@@ -1798,10 +1817,10 @@ namespace CompetitiveRounds
                 bBScaled = new int[bB.Length];
                 for (int i = 0; i < bB.Length; i++) bBScaled[i] = (int)((long)bB[i] * maxDmg / maxBlk);
             }
-            panel(new Rect(gx + 10f, gy + 40f, pw, ph), "<color=#CCC>FPS</color>", fps, null, bright, bright, "");
-            panel(new Rect(gx + 20f + pw, gy + 40f, pw, ph), "<color=#CCC>Ping (ms)</color>", ping, null, bright, bright, "");
-            panel(new Rect(gx + 10f, gy + 44f + ph, pw, ph), "<color=#CCC>Shots fired vs hits</color>", hA, hB, dim, bright, hitFoot);
-            panel(new Rect(gx + 20f + pw, gy + 44f + ph, pw, ph), "<color=#CCC>Dmg taken vs blocks</color>", bA, bBScaled, dim, bright, blkFoot);
+            panel(new Rect(gx + 10f, gy + 40f, pw, ph), I18n.Tr("<color=#CCC>FPS</color>"), fps, null, bright, bright, "");
+            panel(new Rect(gx + 20f + pw, gy + 40f, pw, ph), I18n.Tr("<color=#CCC>Ping (ms)</color>"), ping, null, bright, bright, "");
+            panel(new Rect(gx + 10f, gy + 44f + ph, pw, ph), I18n.Tr("<color=#CCC>Shots fired vs hits</color>"), hA, hB, dim, bright, hitFoot);
+            panel(new Rect(gx + 20f + pw, gy + 44f + ph, pw, ph), I18n.Tr("<color=#CCC>Dmg taken vs blocks</color>"), bA, bBScaled, dim, bright, blkFoot);
         }
         public static void RegisterCardHoverRegion(Rect screenRect, string fullCardLine, bool isOpponent)
             => RegisterCardHoverRegion(screenRect, fullCardLine, isOpponent, null, null, null, null, -1f, null);
@@ -1825,11 +1844,21 @@ namespace CompetitiveRounds
 
         private static GUIStyle _cardTipTitleStyle, _cardTipBodyStyle;
         // Comma-split tooltip body memo: rebuilt only when the hovered row's
-        // raw card line (or the locale) changes, not per Repaint — the
-        // CardTextLocalizer.DisplayName lookups ride this cache so card
+        // raw card line (or the translation state) changes, not per Repaint —
+        // the CardTextLocalizer.DisplayName lookups ride this cache so card
         // localization adds zero steady-state per-frame work (#162).
+        //
+        // Aug-3 review F10 sweep: this is the file's other memo holding
+        // translated text behind a locale-only key. Unlike the chat header it
+        // is NOT reachable today — the body resolves through ROUNDS' own
+        // localization table (CardTextLocalizer), and the only I18n input is
+        // PrettyCase's IsEnglish check, which the locale key already covers. So
+        // the generation is carried defensively: it costs one int compare, and
+        // it means the memo cannot silently rot the day a card display name
+        // starts routing through the catalogue.
         private static string _cardTipCacheKey, _cardTipCacheBody, _cardTipCacheLocale;
         private static int _cardTipCacheLines;
+        private static int _cardTipCacheGen = -1;
         private static void DrawCardHoverTooltip()
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
@@ -1887,8 +1916,10 @@ namespace CompetitiveRounds
             else
             {
                 string raw = hit.Value.fullCardLine;
+                int tipGen = I18n.CatalogueGeneration;
                 if (!string.Equals(raw, _cardTipCacheKey, StringComparison.Ordinal)
-                    || _cardTipCacheLocale != I18n.Locale)
+                    || _cardTipCacheLocale != I18n.Locale
+                    || _cardTipCacheGen != tipGen)
                 {
                     string[] cards;
                     try { cards = raw.Split(','); }
@@ -1906,11 +1937,12 @@ namespace CompetitiveRounds
                         // card localization, falling back to the English
                         // name when the game has none.
                         string disp = null;
-                        try { disp = CardTextLocalizer.DisplayName(name); } catch { }
+                        try { disp = CardTextLocalizer.PrettyName(name, name); } catch { }
                         sb.Append("• ").Append(disp ?? name).Append('\n');
                     }
                     _cardTipCacheKey = raw;
                     _cardTipCacheLocale = I18n.Locale;
+                    _cardTipCacheGen = tipGen;
                     _cardTipCacheBody = sb.ToString().TrimEnd();
                     _cardTipCacheLines = lines;
                 }
@@ -4665,18 +4697,76 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning("[CHAT] chat box went unrendered for >0.5s — "
                                       + "force-closing and releasing the input lock");
                 quickChatOpen = false;   // the popup shares the lock (§2.6)
-                CloseChatInput();
+                // Forced close: an upstream throw starved the renderer. The
+                // player never ended their message, so keep it (F4).
+                CloseChatInput(discardDraft: false);
             }
             catch { }
         }
 
-        /// <summary>Closes the chat box and releases the gameplay-input lock.
-        /// Every path that stops rendering the box must come through here.</summary>
-        private static void CloseChatInput()
+        // Aug-3 review F4: a half-typed message survives an INCIDENTAL close.
+        // Every path that stops rendering the box funnels through
+        // CloseChatInput (see its summary) and CloseChatInput used to clear the
+        // text unconditionally — so opening the "Change view" / "Typing
+        // channel" pickers, which register as ArtistPromptOpen modals and trip
+        // the modal guard below, silently ate whatever the player had typed.
+        // The distinction is INTENT, not call site: Esc and a successful send
+        // end the message, so they discard; a close FORCED on us (a modal
+        // taking the keyboard, vanilla's Enter box, the liveness watchdog)
+        // stashes it and the next open resumes.
+        private static string chatDraftStash;
+        private static float chatDraftStashAt = -999f;
+        // Ceiling on a resumed draft. The stash only ever bridges an
+        // involuntary interruption — a picker round-trip, a yield to vanilla
+        // chat — which is a seconds-scale detour, so 3 minutes is generous for
+        // "went to look at the channel list and came back" while being far too
+        // short to resurrect a forgotten line in what is effectively a later
+        // sitting. Time.unscaledTime is the right clock here: monotonic from
+        // game start, unaffected by scene loads AND by the pick-phase slow-mo
+        // that makes Time.time crawl (#221).
+        private const float CHAT_DRAFT_STASH_TTL = 180f;
+
+        /// <summary>Returns a stashed draft to resume (one-shot — the stash is
+        /// consumed either way), or "" when there is none or it has expired.</summary>
+        private static string TakeStashedDraft()
         {
+            string d = chatDraftStash;
+            chatDraftStash = null;
+            if (string.IsNullOrEmpty(d)) return "";
+            if (Time.unscaledTime - chatDraftStashAt > CHAT_DRAFT_STASH_TTL) return "";
+            return d;
+        }
+
+        /// <summary>Closes the chat box and releases the gameplay-input lock.
+        /// Every path that stops rendering the box must come through here.
+        /// <paramref name="discardDraft"/> is deliberately REQUIRED, not
+        /// defaulted: a future close path that quietly inherits the wrong
+        /// intent is exactly how F4 happened, so every caller has to say which
+        /// it is.</summary>
+        private static void CloseChatInput(bool discardDraft)
+        {
+            if (discardDraft) chatDraftStash = null;
+            // Only overwrite the stash when there is something to stash. The
+            // modal and consent guards call this EVERY frame the modal is up,
+            // and by the second call chatInputText is already "" — an
+            // unconditional write there would erase the draft one frame after
+            // saving it, which is the original bug with extra steps.
+            else if (!string.IsNullOrEmpty(chatInputText) && chatInputText.Trim().Length > 0)
+            {
+                chatDraftStash = chatInputText;
+                chatDraftStashAt = Time.unscaledTime;
+            }
             chatInputOpen = false;
             chatJustOpened = false;
             chatInputText = "";
+            // Item 13: never carry a half-observed shift hold into the next
+            // time the box opens — a KeyUp we never saw would otherwise leave
+            // the tap armed and switch channels on the next release.
+            chatShiftHeld = false;
+            chatShiftTapClean = false;
+            // Disarm the resume-caret window with the box — it is re-armed by
+            // the next open that actually resumes something.
+            chatCaretToEndUntil = -999f;
             SetGameplayInputLock(false);
         }
 
@@ -4695,20 +4785,72 @@ namespace CompetitiveRounds
 
         // §2.6: display label for a send channel's WIRE value ("global"/"es"/
         // "ru" — the wire strings stay English everywhere; this maps them for
-        // the chat header's {0} hole only). "ES"/"RU" are under the
-        // extractor's 3-letter floor (#295c) so they can never become
-        // catalogue keys — Tr passes them through, acceptable for
-        // locale-neutral language codes.
+        // the chat header's {0} hole only).
+        //
+        // Item 13: this used to render "Global/ES/RU" while
+        // NativeUI.ChatChannelDisplayName rendered "Global/Español/Русский" for
+        // the SAME wire values, so the F5 Home picker and this header named the
+        // channels differently. Both now use the endonyms. They are deliberately
+        // NOT passed through Tr — a language names itself the same way in every
+        // locale — and "ES"/"RU" were never translatable anyway (under the
+        // extractor's 3-letter floor, #295c). "global" reads "English" rather
+        // than "Global" because this label names the channel you are TYPING
+        // into, and beside two endonyms the language is the useful word.
         private static string ChannelDisplayLabel(string channel)
         {
             switch (channel)
             {
-                case "global": return I18n.Tr("Global");
-                case "es":     return I18n.Tr("ES");
-                case "ru":     return I18n.Tr("RU");
+                case "global": return I18n.Tr("English");
+                case "es":     return "Español";
+                case "ru":     return "Русский";
                 default:       return (channel ?? "").ToUpperInvariant();
             }
         }
+
+        // Item 13: the send channel rotates through the FULL allowed set
+        // (ChatClient.IsAllowedChannel), not just this locale's channel — an
+        // English client can type into es/ru too, which is the whole point of
+        // the change. Hoisted so the rotation allocates nothing per keystroke.
+        private static readonly string[] ChatSendCycle = { "global", "es", "ru" };
+        private static void CycleChatSendChannel()
+        {
+            string cur = ChatClient.SendChannel;
+            int idx = -1;
+            for (int i = 0; i < ChatSendCycle.Length; i++)
+                if (ChatSendCycle[i] == cur) { idx = i; break; }
+            // idx == -1 (a stale/unknown value) lands on "global".
+            ChatClient.SendChannel = ChatSendCycle[(idx + 1) % ChatSendCycle.Length];
+            chatHeaderCache = null;
+        }
+
+        // Shift-tap state for the channel cycle (see the KeyUp handler in
+        // DrawChatInput for why a tap, not a press, is the trigger).
+        private static bool chatShiftHeld, chatShiftTapClean;
+        private static float chatShiftDownAt;
+        // F4 companion, armed only when a stashed draft is resumed. Runtime
+        // IMGUI's TextEditor.DetectFocusChange calls OnFocus() -> SelectAll()
+        // on a single-line field the frame after keyboard focus lands, which is
+        // invisible for the normal empty open but would leave a RESUMED draft
+        // fully selected — the player's first keystroke would then replace it,
+        // i.e. the draft would look preserved and vanish anyway. Deadline (not
+        // a bool) so it can never stick: if the editor never shows up we simply
+        // stop trying after a second. See the block below the TextField.
+        private static float chatCaretToEndUntil = -999f;
+        // Header memo: TrF + string.Format on every IMGUI event (OnGUI runs
+        // 2+ times a frame, #162) for a line that changes only when the send
+        // channel, the locale, or the translation DATA changes.
+        //
+        // Aug-3 review F10: (channel, locale) was not a complete key. A server
+        // pack arriving mid-session changes the effective translation without
+        // touching either, so the header kept the bundled English/stale line
+        // for as long as the box stayed open — the "cleared when the box opens"
+        // escape hatch only bounded it to one chat session, and NativeUI's
+        // repaint doesn't reach an IMGUI memo. I18n.CatalogueGeneration is
+        // bumped by every path that changes the effective data (SetLocale,
+        // ApplyPack, RegisterCatalogue, LoadCachedPack), so keying on it makes
+        // the memo correct by construction rather than by enumeration.
+        private static string chatHeaderCache, chatHeaderChan, chatHeaderLocale;
+        private static int chatHeaderGen = -1;
 
         private static void DrawChatInput()
         {
@@ -4722,7 +4864,10 @@ namespace CompetitiveRounds
             // reason combat used to be excluded (typing would drive the
             // player) is handled properly now by holding ROUNDS' own
             // GameManager.lockInput while the box has focus.
-            if (!Plugin.DataConsentGranted) { CloseChatInput(); return; }
+            // Discard: consent has been revoked, so chat is gone entirely —
+            // there is no "next open" to resume into, and holding the player's
+            // typed text after they opted out is the wrong default (F4).
+            if (!Plugin.DataConsentGranted) { CloseChatInput(discardDraft: true); return; }
             // Don't hijack T while a modal IMGUI input is taking keystrokes —
             // bug report form, log viewer, admin bug viewer, and the Compare-tab
             // search field all have their own text entry that need T to type
@@ -4730,6 +4875,10 @@ namespace CompetitiveRounds
             // CloseChatInput (not a bare return): a modal opening while the box
             // is up must not leave it "open" and holding the input lock with
             // nothing rendering it.
+            // F4: this is THE incidental close — the two Aug-3 chat pickers
+            // (Change view / Typing channel) are ArtistPromptOpen modals, so
+            // clicking either used to eat the draft. Stashing here fixes every
+            // modal in this list at once, not just those two.
             if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused
                 // July 22 item 8: leaderboard search takes typed text too.
                 || lbSearchFocused
@@ -4739,7 +4888,7 @@ namespace CompetitiveRounds
                 || NativeUI.LfpPromptOpen
                 // July 12 round 2 item 4: the artist input / roster picker / player
                 // search modals all take typed text — 't' there must not open chat.
-                || ArtistPromptOpen) { quickChatOpen = false; CloseChatInput(); return; }
+                || ArtistPromptOpen) { quickChatOpen = false; CloseChatInput(discardDraft: false); return; }
 
             var ev = Event.current;
             if (!chatInputOpen)
@@ -4772,7 +4921,21 @@ namespace CompetitiveRounds
                 {
                     chatInputOpen = true;
                     chatJustOpened = true;
-                    chatInputText = "";
+                    // F4: resume a draft an incidental close stashed (one-shot,
+                    // TTL-bounded). "" when there is nothing to resume, which
+                    // is the old behaviour.
+                    chatInputText = TakeStashedDraft();
+                    if (chatInputText.Length > 0)
+                        chatCaretToEndUntil = Time.unscaledTime + 1f;
+                    chatShiftHeld = false;
+                    chatShiftTapClean = false;
+                    // Belt-and-suspenders re-derive. Since F10 the memo's key
+                    // covers every input that can change the line (channel,
+                    // locale, catalogue generation), so this is no longer the
+                    // thing that picks up a mid-session translation pack — it
+                    // just costs one TrF per opening and keeps the box honest
+                    // if a future header input escapes the key.
+                    chatHeaderCache = null;
                     ev.Use();
                     // Take the lock on the same frame the box opens, so the 't'
                     // that opened it can't also be read as gameplay input.
@@ -4783,7 +4946,8 @@ namespace CompetitiveRounds
 
             // Vanilla chat opening on top of ours (Enter is our submit key, so this
             // is only reachable if something else toggles DevConsole) — yield to it.
-            if (IsVanillaChatTyping()) { CloseChatInput(); return; }
+            // Yielding to vanilla is not the player ending their message (F4).
+            if (IsVanillaChatTyping()) { CloseChatInput(discardDraft: false); return; }
             // Re-assert every frame: GameManager.lockInput is a shared global that
             // vanilla also writes, and GameManager.Start() zeroes it on every scene
             // load (which is also our free self-heal if we ever miss a release).
@@ -4810,6 +4974,32 @@ namespace CompetitiveRounds
             bool submit = false, cancel = false;
             if (ev != null && ev.type == EventType.KeyDown)
             {
+                if (ev.keyCode == KeyCode.LeftShift || ev.keyCode == KeyCode.RightShift)
+                {
+                    // Arm a tap on the FIRST shift-down of a hold (key repeat
+                    // must not re-arm a hold that already typed something).
+                    // Deliberately not ev.Use()'d: a bare shift KeyDown carries
+                    // no character, and TextField reads the modifier off the
+                    // arrow/Home keys that follow, not off this event.
+                    if (!chatShiftHeld)
+                    {
+                        chatShiftHeld = true;
+                        chatShiftTapClean = true;
+                        chatShiftDownAt = Time.unscaledTime;
+                    }
+                }
+                else if (ev.keyCode != KeyCode.None || ev.character != '\0')
+                {
+                    // ANY other real KeyDown during the hold means shift was a
+                    // MODIFIER (a capital letter, shift+arrow selection), not a
+                    // tap. Unity fires TWO KeyDown events per physical key (one
+                    // with keyCode, one with ev.character — see the
+                    // chatJustOpened note above) and either one disarms.
+                    // Padding events with neither are skipped, or the shift's
+                    // own key-down pair could disarm the tap it just armed.
+                    chatShiftTapClean = false;
+                }
+
                 if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter)
                 {
                     submit = true; ev.Use();
@@ -4818,19 +5008,35 @@ namespace CompetitiveRounds
                 {
                     cancel = true; ev.Use();
                 }
-                else if (ev.keyCode == KeyCode.Tab && ChatClient.LocaleChannel != null)
+                else if (ev.keyCode == KeyCode.Tab)
                 {
-                    // §2.6: rotate the SEND channel through this player's full
-                    // allowed set: global -> locale channel -> back to global.
-                    // The set only ever holds global + the player's OWN locale
-                    // channel, so the rotation is a two-step cycle; a stale
-                    // SendChannel outside the set lands on global. Only exists
-                    // when the locale has a channel; English clients keep
-                    // plain Tab-does-nothing behavior.
-                    ChatClient.SendChannel = ChatClient.SendChannel == "global"
-                        ? ChatClient.LocaleChannel : "global";
+                    // Tab no longer cycles (Shift does), but keep swallowing it:
+                    // unconsumed, IMGUI treats Tab as focus navigation and would
+                    // yank the caret out of the box mid-message.
                     ev.Use();
                 }
+            }
+            else if (ev != null && ev.type == EventType.KeyUp
+                     && (ev.keyCode == KeyCode.LeftShift || ev.keyCode == KeyCode.RightShift))
+            {
+                // Item 13: a TAP of shift rotates the SEND channel through the
+                // whole allowed set (global -> es -> ru -> global), ungated by
+                // locale — the old Tab cycle only existed when the player HAD a
+                // locale channel, so English clients had no cycle at all.
+                //
+                // The discriminator is the whole trick: a bare shift KeyDown
+                // also fires as the first half of every capital letter, so
+                // acting on the PRESS would switch channels on every "Hello".
+                // Acting on the RELEASE instead, and only when nothing was
+                // typed between the press and the release (chatShiftTapClean,
+                // cleared above by any other KeyDown) and the hold was shorter
+                // than 0.6s, means a shift used as a modifier can never trigger
+                // it — the letter's own KeyDown always lands inside the hold.
+                bool tap = chatShiftHeld && chatShiftTapClean
+                           && Time.unscaledTime - chatShiftDownAt < 0.6f;
+                chatShiftHeld = false;
+                chatShiftTapClean = false;
+                if (tap) { CycleChatSendChannel(); ev.Use(); }
             }
 
             // Position: above the F5 menu's bottom bar (Discord/GitHub/Refresh buttons
@@ -4840,15 +5046,52 @@ namespace CompetitiveRounds
 
             GUI.DrawTexture(new Rect(x - 6, y - 24, w + 12, h + 30),
                 Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.82f), 0, 0);
-            GUI.Label(new Rect(x, y - 22, w, 20),
-                ChatClient.LocaleChannel != null
-                    ? I18n.TrF("Chat [{0}]  —  Enter to send, Esc to cancel, Tab switches channel",
-                               ChannelDisplayLabel(ChatClient.SendChannel))
-                    : I18n.Tr("Chat  —  Enter to send, Esc to cancel"));
+            // Item 13: ONE header for every locale — the cycle is ungated now,
+            // so the old "English clients get a shorter line with no channel
+            // name" branch would hide the very feature it needs to announce.
+            string hdrChan = ChatClient.SendChannel;
+            string hdrLoc = I18n.Locale;
+            int hdrGen = I18n.CatalogueGeneration;   // F10 — see the memo's note
+            if (chatHeaderCache == null || hdrChan != chatHeaderChan
+                || hdrLoc != chatHeaderLocale || hdrGen != chatHeaderGen)
+            {
+                chatHeaderChan = hdrChan; chatHeaderLocale = hdrLoc; chatHeaderGen = hdrGen;
+                chatHeaderCache = I18n.TrF(
+                    "Chat [{0}]  —  Enter to send, Esc to cancel, Shift switches channel",
+                    ChannelDisplayLabel(hdrChan));
+            }
+            GUI.Label(new Rect(x, y - 22, w, 20), chatHeaderCache);
 
             GUI.SetNextControlName("CRChat");
             chatInputText = GUI.TextField(new Rect(x, y, w, h), chatInputText ?? "", 480, chatStyle);
             GUI.FocusControl("CRChat");
+
+            // F4: collapse the focus-gain SelectAll to an append caret for a
+            // RESUMED draft (see chatCaretToEndUntil). Focus lands a frame or
+            // two after the box opens, so poll until the editor holding OUR
+            // exact text turns up, then disarm. The text equality is the guard
+            // against touching some other control's editor if keyboardControl
+            // is stale — and this only ever runs inside the 1s window opened by
+            // a non-empty restore, never on a normal open.
+            if (Time.unscaledTime < chatCaretToEndUntil)
+            {
+                try
+                {
+                    // Fully qualified: an unqualified TextEditor could bind to a
+                    // type in Assembly-CSharp or a future using.
+                    int kc = GUIUtility.keyboardControl;
+                    var te = kc != 0
+                        ? GUIUtility.GetStateObject(typeof(UnityEngine.TextEditor), kc)
+                            as UnityEngine.TextEditor
+                        : null;
+                    if (te != null && te.text == chatInputText)
+                    {
+                        te.cursorIndex = te.selectIndex = (chatInputText ?? "").Length;
+                        chatCaretToEndUntil = -999f;
+                    }
+                }
+                catch { chatCaretToEndUntil = -999f; }
+            }
 
             if (submit)
             {
@@ -4879,11 +5122,14 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo($"[CHAT] -> sent: {text}");
                     }
                 }
-                CloseChatInput();
+                // Sent (or consumed as a slash command) — the message is over.
+                CloseChatInput(discardDraft: true);
             }
             else if (cancel)
             {
-                CloseChatInput();
+                // Esc IS the discard gesture — it must also drop any older
+                // stash, or a resumed-then-cancelled draft would come back.
+                CloseChatInput(discardDraft: true);
             }
         }
 
@@ -5168,6 +5414,43 @@ namespace CompetitiveRounds
         private static float spotlightUntil;
         private const float SPOT_HOLD = 0.75f, SPOT_FADE = 0.45f;
         private static Texture2D spotlightTex;
+        private static Texture2D spotlightHoleTex;
+        // Radial-tile geometry: alpha 0 inside SPOT_HOLE_INNER of the tile's
+        // half-width, full at SPOT_HOLE_OUTER and beyond, soft between so the
+        // circle doesn't alias. The draw scales the tile by 1/SPOT_HOLE_INNER
+        // so the fully-clear core lands exactly on the requested radius.
+        private const float SPOT_HOLE_INNER = 0.72f, SPOT_HOLE_OUTER = 0.98f;
+
+        // One cached radial-alpha tile (same recipe as BuildFfaDotTexture, but
+        // with the alpha INVERTED — clear in the middle, opaque at the edge) so
+        // the cutout can be a circle without generating anything per Repaint.
+        private static Texture2D BuildSpotlightHoleTexture()
+        {
+            const int size = 128;
+            var texture = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            texture.name = "CR_FFA_SpotlightHole";
+            texture.hideFlags = HideFlags.HideAndDontSave;
+            texture.filterMode = FilterMode.Bilinear;
+            texture.wrapMode = TextureWrapMode.Clamp;
+            var pixels = new Color32[size * size];
+            float center = size * 0.5f;
+            float rIn = SPOT_HOLE_INNER * center, rOut = SPOT_HOLE_OUTER * center;
+            for (int y = 0; y < size; y++)
+            {
+                float py = y + 0.5f - center;
+                for (int x = 0; x < size; x++)
+                {
+                    float px = x + 0.5f - center;
+                    float d = Mathf.Sqrt(px * px + py * py);
+                    float alpha = Mathf.Clamp01((d - rIn) / (rOut - rIn));
+                    pixels[y * size + x] = new Color32(255, 255, 255,
+                        (byte)Mathf.RoundToInt(alpha * 255f));
+                }
+            }
+            texture.SetPixels32(pixels);
+            texture.Apply(false, true);
+            return texture;
+        }
 
         public static void BeginSpawnSpotlight(Transform target)
         {
@@ -5193,7 +5476,32 @@ namespace CompetitiveRounds
             try { sp = cam.WorldToScreenPoint(spotlightTarget.position); } catch { return; }
             if (sp.z < 0f) return;
             float cx = sp.x, cy = Screen.height - sp.y;   // IMGUI y is top-down
-            float r = Mathf.Max(70f, Screen.height * 0.13f);
+
+            // Radius comes from the PLAYER, not from the screen (Sid, item 9).
+            // The old `Mathf.Max(70f, Screen.height * 0.13f)` was 140px at
+            // 1080p — about 7.4x the ~38px ROUNDS body — and, being a pure
+            // screen fraction, it did not shrink on scaled FFA maps either
+            // (CameraZoomHandler lerps orthographicSize toward Map.size, so the
+            // bodies get smaller while a fixed fraction does not). Project a
+            // point 0.53 world units "up" from the target — half the ~1.06-unit
+            // body (learning #160) — and measure the screen distance.
+            float playerR = 0f;
+            try
+            {
+                Vector3 up = cam.WorldToScreenPoint(spotlightTarget.position + cam.transform.up * 0.53f);
+                playerR = Vector2.Distance(new Vector2(sp.x, sp.y), new Vector2(up.x, up.y));
+            }
+            catch { }
+            float r;
+            if (playerR >= 6f)
+                r = 3f * playerR;                 // "3x player size" = 3x the body diameter
+            else if (cam.orthographic && cam.orthographicSize > 0.01f)
+                // Closed form for a degenerate measurement: 3 * 0.53 world
+                // units * (pixels per world unit).
+                r = 1.59f * (Screen.height / (2f * cam.orthographicSize));
+            else
+                r = 18f;                          // 3x the 6px floor
+            if (r < 18f) r = 18f;
 
             if (spotlightTex == null)
             {
@@ -5202,17 +5510,41 @@ namespace CompetitiveRounds
                 spotlightTex.Apply();
                 spotlightTex.hideFlags = HideFlags.HideAndDontSave;
             }
+            if (spotlightHoleTex == null) spotlightHoleTex = BuildSpotlightHoleTexture();
             var prev = GUI.color;
             GUI.color = new Color(0f, 0f, 0f, alpha);
-            // Four bands around a clear square centred on the player: IMGUI has
-            // no cutout, and four rects are cheaper and sharper than a radial
-            // texture we would have to generate.
-            float x0 = Mathf.Max(0f, cx - r), x1 = Mathf.Min(Screen.width, cx + r);
-            float y0 = Mathf.Max(0f, cy - r), y1 = Mathf.Min(Screen.height, cy + r);
-            GUI.DrawTexture(new Rect(0, 0, Screen.width, y0), spotlightTex);
-            GUI.DrawTexture(new Rect(0, y1, Screen.width, Screen.height - y1), spotlightTex);
-            GUI.DrawTexture(new Rect(0, y0, x0, y1 - y0), spotlightTex);
-            GUI.DrawTexture(new Rect(x1, y0, Screen.width - x1, y1 - y0), spotlightTex);
+            // IMGUI has no cutout, so the dim is the cached radial tile over the
+            // player (clear core, opaque rim) plus four full-alpha bands
+            // covering everything outside the tile — the far screen therefore
+            // stays perfectly flat with zero texture stretch. 5 DrawTexture
+            // calls, 5 stack Rects, no per-frame allocation.
+            /* Bug #162 ("2-3 horizontal lines at the start of a round"): every
+             * one of these rects must land on INTEGER pixel boundaries, and the
+             * bands must be derived from the SAME integers as the tile.
+             *
+             * The edges used to be raw floats (cx - R etc). GUI.DrawTexture
+             * rasterizes to whole pixels, so a fractional boundary rounds each
+             * rect independently and the band and the tile disagree by a pixel:
+             * where they fall short you get an UNDIMMED hairline (the bright
+             * lines reported), and the naive fix — overlapping them — is just as
+             * visible in the other direction, because two 0.55-alpha blacks
+             * composite to 0.80 and draw a DARK hairline instead.
+             *
+             * Snapping first and slicing from the snapped values makes the edges
+             * exactly coincident: no gap to shine through, no overlap to double.
+             * The tile may still hang off-screen; that is free. */
+            float R = r / SPOT_HOLE_INNER;
+            int tx0 = Mathf.FloorToInt(cx - R), ty0 = Mathf.FloorToInt(cy - R);
+            int tSz = Mathf.CeilToInt(2f * R);
+            int x0 = Mathf.Clamp(tx0, 0, Screen.width);
+            int x1 = Mathf.Clamp(tx0 + tSz, 0, Screen.width);
+            int y0 = Mathf.Clamp(ty0, 0, Screen.height);
+            int y1 = Mathf.Clamp(ty0 + tSz, 0, Screen.height);
+            if (y0 > 0) GUI.DrawTexture(new Rect(0, 0, Screen.width, y0), spotlightTex);
+            if (y1 < Screen.height) GUI.DrawTexture(new Rect(0, y1, Screen.width, Screen.height - y1), spotlightTex);
+            if (x0 > 0) GUI.DrawTexture(new Rect(0, y0, x0, y1 - y0), spotlightTex);
+            if (x1 < Screen.width) GUI.DrawTexture(new Rect(x1, y0, Screen.width - x1, y1 - y0), spotlightTex);
+            GUI.DrawTexture(new Rect(tx0, ty0, tSz, tSz), spotlightHoleTex);
             GUI.color = prev;
         }
 
@@ -5319,8 +5651,22 @@ namespace CompetitiveRounds
                 }
                 catch { }
                 matchStatusH2HTint = new Color(0.82f, 0.82f, 0.82f);
-                matchStatusH2H = (mates.Count > 0 ? I18n.TrF("w/ {0}   ", string.Join(" + ", mates.ToArray())) : "")
-                               + (foes.Count > 0 ? I18n.TrF("vs {0}", string.Join(" + ", foes.ToArray())) : "");
+                /* ONE whole template per shape, never composed from Tr'd pieces
+                 * (learning #298c). The old form was TrF("w/ {0}   ") + TrF("vs {0}"),
+                 * and neither half could ever become a key: "w/ {0}   " has one
+                 * letter plus trailing spaces, and "vs {0}" is a two-letter
+                 * connector the extractor deliberately refuses. So this line
+                 * rendered English in every locale. Three templates because the
+                 * teammate-only and enemy-only cases are real (a 1v2 solo has no
+                 * mates; a spectator-shaped read can have no foes), and a
+                 * translator needs the whole sentence to order it correctly. */
+                string _mates = string.Join(" + ", mates.ToArray());
+                string _foes  = string.Join(" + ", foes.ToArray());
+                matchStatusH2H = mates.Count > 0 && foes.Count > 0
+                        ? I18n.TrF("w/ {0}   vs {1}", _mates, _foes)
+                        : mates.Count > 0 ? I18n.TrF("w/ {0}", _mates)
+                        : foes.Count > 0  ? I18n.TrF("vs {0}", _foes)
+                        : "";
                 return;
             }
 

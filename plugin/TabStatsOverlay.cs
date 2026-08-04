@@ -124,10 +124,20 @@ namespace CompetitiveRounds
         private static string[] trLabels;
         private static string trTitle, trCardsLabel, trNoCards;
         private static bool localeHooked;
+        private static int trGen = -1;
 
         private static void EnsureLocaleStrings()
         {
-            if (trLabels != null) return;
+            /* Codex Aug-4 r2 find 8: keying the memo on the LOCALE alone was
+             * not enough — a server pack can correct these strings WITHOUT the
+             * locale changing, and this cached array would keep serving the
+             * bundled wording for the rest of the session. I18n.CatalogueGeneration
+             * moves on every effective data change (pack applied, cached pack
+             * loaded, catalogue registered, locale set), so it is the honest key.
+             * Kept as a cheap int compare because this runs on the hold-Tab
+             * path, which must not allocate per frame (#162). */
+            if (trLabels != null && trGen == I18n.CatalogueGeneration) return;
+            trGen = I18n.CatalogueGeneration;
             if (!localeHooked)
             {
                 localeHooked = true;
@@ -383,7 +393,7 @@ namespace CompetitiveRounds
                     // L10n interim: localized display name when the game has
                     // one (cache is primed at menu time — this path renders
                     // mid-match and must never trigger the first table scan).
-                    string shownName = CardTextLocalizer.DisplayNameIfCached(canonicalName) ?? rawName;
+                    string shownName = CardTextLocalizer.PrettyNameIfCached(canonicalName, rawName);
                     display.content.text = Trunc(shownName, 12).ToUpperInvariant()
                         .Replace("<", "(").Replace(">", ")");
                 }
@@ -575,7 +585,29 @@ namespace CompetitiveRounds
             if (y + h > Screen.height - edge) y = mousePosition.y - h - gap;
             x = Mathf.Clamp(x, edge, Mathf.Max(edge, Screen.width - w - edge));
             y = Mathf.Clamp(y, edge, Mathf.Max(edge, Screen.height - h - edge));
+            // This popup follows the cursor, so it usually composites onto the
+            // LIVE MAP rather than onto the stats panel — any transparency in
+            // the source then reads as "faint and hard to read" (NativeUI's
+            // card popup never shows that because its Image sits on a
+            // 0.97-alpha panel). Two guards, both cheap:
+            //  - an opaque-enough backdrop plate in the panel's own colour, so
+            //    a partly-transparent source (the bundled PNGs, and any
+            //    snapshot cached before the capture-side fix) still reads;
+            //  - an explicitly white GUI.color. DrawUI leaves it white today
+            //    (Unity resets it per OnGUI and DrawFPS never touches it), so
+            //    this only pins it against a future sibling overlay leaking a
+            //    tint into the card.
+            const float pad = 6f;
+            float bx = Mathf.Max(0f, x - pad);
+            float by = Mathf.Max(0f, y - pad);
+            float bw = Mathf.Min(Screen.width - bx, w + pad * 2f);
+            float bh = Mathf.Min(Screen.height - by, h + pad * 2f);
+            var prevColor = GUI.color;
+            GUI.color = Color.white;
+            GUI.DrawTexture(new Rect(bx, by, bw, bh), Texture2D.whiteTexture,
+                ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.88f), 0, 0);
             GUI.DrawTexture(new Rect(x, y, w, h), texture, ScaleMode.ScaleToFit, true);
+            GUI.color = prevColor;
         }
 
         private static string Trunc(string s, int n)

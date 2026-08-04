@@ -19,6 +19,15 @@
   <!-- Build with: dotnet build -c Thunderstore  (or select "Thunderstore" config in VS) -->
   <PropertyGroup Condition="'$(Configuration)' == 'Thunderstore'">
     <DefineConstants>$(DefineConstants);THUNDERSTORE</DefineConstants>
+    <!-- The SDK only turns optimization on for the configuration literally
+         named "Release"; a custom configuration defaults to Optimize=false.
+         Without this the Thunderstore DLL ships UNOPTIMIZED - caught while
+         packaging 1.36.0, when the Thunderstore build came out 133 KB LARGER
+         than Release despite compiling strictly less code (the auto-updater is
+         #if'd out of it). Every Thunderstore release before this one shipped
+         unoptimized IL. Does NOT touch DebugType/Deterministic, which stay
+         load-bearing for the no-local-paths guarantee. -->
+    <Optimize>true</Optimize>
   </PropertyGroup>
 
   <PropertyGroup>

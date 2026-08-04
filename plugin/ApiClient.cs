@@ -876,6 +876,28 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(DoAutoUpdate());
         }
 
+        /* BUILD-GATE MARKERS. Do not translate these, do not reuse them, do not
+         * delete them: they exist ONLY so a packaging script can prove which
+         * variant a compiled DLL is, by scanning for a literal that can appear
+         * for no other reason.
+         *
+         * This is the THIRD verification method for this gate. The first
+         * scanned for a class name (learning #123) — type names live in the
+         * UTF-8 #Strings heap, not the UTF-16 #US literal heap, so it matched
+         * nothing in either build and passed vacuously. The second scanned the
+         * auto-updater's user-facing notification text (learning #203) — which
+         * worked until localization added BOTH of those strings to
+         * I18nCatalogues and I18nSourceKeys as translation keys, so they are
+         * now compiled unconditionally into EVERY build and can no longer tell
+         * the variants apart. A marker that exists solely to be scanned cannot
+         * be captured by a future feature the way user-visible text was. */
+        internal const string BuildVariantMarker =
+#if THUNDERSTORE
+            "SCR_BUILD_VARIANT=THUNDERSTORE";
+#else
+            "SCR_BUILD_VARIANT=STANDALONE";
+#endif
+
         private static IEnumerator DoAutoUpdate()
         {
 #if THUNDERSTORE
@@ -1925,30 +1947,36 @@ namespace CompetitiveRounds
                 }));
         }
 
-        // R2-5: chat scrollback request generation. A channel pick clears
-        // the pane and refetches; a SLOW earlier in-flight response landing
-        // after a newer one would repopulate the just-cleared pane with the
-        // previous channel set's rows. Bumped at REQUEST time; each callback
-        // captures its value and drops itself when superseded (mirrors
-        // ffaRecentRankedGen). Interlocked/Volatile rather than a plain int
-        // because FetchRecentChat is also invoked from the ChatClient WS
-        // thread (reconnect scrollback), not only the main thread.
+        // R2-5: chat scrollback request generation. A refetch (reconnect,
+        // language change) can race a slower earlier one; without a guard the
+        // stale response repopulates the pane after the newer one. Bumped at
+        // REQUEST time; each callback captures its value and drops itself when
+        // superseded (mirrors ffaRecentRankedGen). Interlocked/Volatile rather
+        // than a plain int because FetchRecentChat is also invoked from the
+        // ChatClient WS thread (reconnect scrollback), not only the main
+        // thread.
         private static int chatRecentGen;
 
-        public static void FetchRecentChat(int limit = 50, string channelsOverride = null)
+        /// <summary>Chat scrollback for the FULL allowed channel set, always.
+        /// There is no per-call channel override any more: the socket
+        /// subscribes to every channel unconditionally
+        /// (ChatClient.DerivedChannelSet is a constant), so history must
+        /// match — a narrower fetch would just recreate the "All (merged)
+        /// shows only global" bug on the history half. Filtering to one
+        /// channel is a render-side decision, not a fetch-side one.
+        /// `limit` is the TOTAL row budget; since Aug-3 the endpoint shares it
+        /// FAIRLY across the requested channels (a ROW_NUMBER CTE ordered by
+        /// rank first, so the channels interleave round-robin before the cut)
+        /// instead of letting a busy global consume all of it. That fairness
+        /// takes no client parameter — the server binds its per-channel window
+        /// to `limit` itself, so a quiet es/ru never wastes its slice. The
+        /// response is globally ordered by created_at, so ONE fetch is already
+        /// chronologically merged across channels.</summary>
+        public static void FetchRecentChat(int limit = 50)
         {
-            // §2.6: scrollback only for the channels this client subscribes
-            // to. The set comes from ChatClient.DerivedChannelSet — the SAME
-            // helper SubscribeJson consumes (R2-4b), so subscription and
-            // history can never diverge again. Values come from a closed
-            // set, so no URL-encoding concern.
-            // channelsOverride (F7): when non-null, used VERBATIM as the
-            // channels= value instead of the derived set, so a channel pick
-            // can fetch that channel's own history (/chat/recent accepts any
-            // subset). Callers pass closed-set values only ("ru", "es", ...).
-            string chans = !string.IsNullOrEmpty(channelsOverride)
-                ? channelsOverride
-                : ChatClient.DerivedChannelSet();
+            // Values come from a closed set ("global"/"es"/"ru"), so no
+            // URL-encoding concern.
+            string chans = ChatClient.DerivedChannelSet();
             int gen = System.Threading.Interlocked.Increment(ref chatRecentGen);
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/chat/recent?limit={limit}&channels={chans}",
@@ -1957,7 +1985,7 @@ namespace CompetitiveRounds
                     if (gen != System.Threading.Volatile.Read(ref chatRecentGen))
                     {
                         // A newer fetch owns the pane now — this response
-                        // would repopulate it with a stale channel set.
+                        // would repopulate it with a stale snapshot.
                         Plugin.Log.LogInfo("[CHAT] Scrollback response superseded - dropped");
                         return;
                     }
@@ -2717,6 +2745,88 @@ namespace CompetitiveRounds
 
         private static string Trunc120(string s) =>
             string.IsNullOrEmpty(s) ? "" : (s.Length > 120 ? s.Substring(0, 120) + "..." : s);
+
+        // ── Admin ↔ translation moderators (bug #158) ─────────
+        // The server half of this has existed since the i18n infrastructure
+        // landed; the client half was missing from the repo entirely when the
+        // report came in, so this is a rebuild against the live contract:
+        //   list:  GET  /admin/i18n/grants/list  action "i18n_grants_list", target ""
+        //   set:   POST /admin/i18n/grants       action "i18n_grant",
+        //          target "{target}:{lang}:{scope}:{action}"
+        // Canonical is admin:{admin}:{action}:{target} on both ends.
+        public class I18nGrantEntry
+        {
+            public string steam_id, language_code, display_name;
+        }
+
+        /// <summary>Everyone who currently holds a translate grant, for the
+        /// Admin tab's revoke picker. Null until the first successful fetch —
+        /// callers must not treat null as "nobody has a grant".</summary>
+        public static List<I18nGrantEntry> CachedI18nGrants = null;
+
+        public static void FetchI18nGrants(string adminSteamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:i18n_grants_list:");
+            string url = $"{baseUrl}/api/v1/admin/i18n/grants/list?admin_steam_id={Escape(adminSteamId)}&sig={sig}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                if (!ok || string.IsNullOrEmpty(resp))
+                {
+                    Plugin.Log.LogWarning($"[ADMIN] i18n grants list failed: {Trunc120(resp)}");
+                    callback?.Invoke(false);
+                    return;
+                }
+                var list = new List<I18nGrantEntry>();
+                try
+                {
+                    // Display names are user-authored, so the slicing must be
+                    // string-aware (learning #156) — a name containing '[' or
+                    // '{' would otherwise truncate the whole roster.
+                    int open = resp.IndexOf('[');
+                    int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                    if (open >= 0 && close > open)
+                        foreach (string chunk in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
+                            list.Add(new I18nGrantEntry
+                            {
+                                steam_id = ExtractJsonString(chunk, "steam_id"),
+                                language_code = ExtractJsonString(chunk, "language_code"),
+                                display_name = ExtractJsonString(chunk, "display_name"),
+                            });
+                    CachedI18nGrants = list;
+                    Plugin.Log.LogInfo($"[ADMIN] i18n grants: {list.Count} live");
+                    callback?.Invoke(true);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning($"[ADMIN] i18n grants parse: {ex.Message}");
+                    callback?.Invoke(false);
+                }
+            }));
+        }
+
+        public static void AdminSetI18nGrant(string adminSteamId, string targetSteamId,
+            string languageCode, bool grant, Action<bool, string> callback = null)
+        {
+            string action = grant ? "grant" : "revoke";
+            const string scope = "translate";
+            string sig = ComputeAdminHmacHex(
+                $"admin:{adminSteamId}:i18n_grant:{targetSteamId}:{languageCode}:{scope}:{action}");
+            string body = "{"
+                + $"\"admin_steam_id\":\"{Escape(adminSteamId)}\","
+                + $"\"target_steam_id\":\"{Escape(targetSteamId)}\","
+                + $"\"language_code\":\"{Escape(languageCode)}\","
+                + $"\"scope\":\"{scope}\",\"action\":\"{action}\","
+                + $"\"signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/admin/i18n/grants", body, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ADMIN] i18n {action} {languageCode} -> {targetSteamId}: ok={ok} resp={Trunc120(resp)}");
+                // Keep the roster honest for the next picker open without
+                // making the caller remember to refetch.
+                if (ok) FetchI18nGrants(adminSteamId);
+                callback?.Invoke(ok, resp);
+            }));
+        }
 
         // ── Admin ↔ artist management (v1.30, item 1) ─────────
         public static void AdminSetArtist(string adminSteamId, string targetSteamId, bool grant, Action<bool, string> callback = null)
@@ -6373,6 +6483,9 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(body)) return "";
             string nl = "\n";
             string t = body.Replace("\r\n", nl).Replace("\r", nl);
+            // Same ordering rule as CleanReleaseBody above (r2 find 16):
+            // unwrap while the Markdown structure is still present.
+            t = NativeUI.UnwrapHardBreaks(t);
             t = t.Replace("**", "").Replace("__", "").Replace("`", "");
             t = t.Replace("<", "[").Replace(">", "]");
             var sb = new System.Text.StringBuilder(t.Length);
@@ -6400,6 +6513,13 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(body)) return "";
             string t = body.Replace("\r\n", "\n").Replace("\r", "\n");
+            /* Bug #160 / Codex Aug-4 r2 find 16: unwrap the author's hard
+             * line breaks HERE, while the Markdown is still intact. The
+             * cleanup below strips '#' heading markers and backticks, and
+             * once those are gone a heading reads as ordinary prose — the
+             * unwrapper would happily join it into the paragraph beneath
+             * it. Structure has to be read before it is erased. */
+            t = NativeUI.UnwrapHardBreaks(t);
             t = t.Replace("**", "").Replace("__", "").Replace("`", "");
             t = t.Replace("<", "[").Replace(">", "]");
             t = t.Replace("—", "-").Replace("–", "-").Replace("×", "x")

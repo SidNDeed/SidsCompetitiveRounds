@@ -1457,6 +1457,12 @@ _VERSION_GATE_BYPASS = frozenset({
     "/api/v1/i18n/grants/mine",
     "/api/v1/i18n/keys",
     "/api/v1/i18n/history",
+    "/api/v1/i18n/approved",            # Aug-3: live-translation list for the portal
+    # Aug-3: the SPA's keep-alive. It MUST be listed or the browser is 426'd
+    # before _portal_auth runs — and a session that cannot be extended is the
+    # bug this route exists to fix. (The MINT, /i18n/portal-session, is called
+    # by the MOD and therefore stays version-gated.)
+    "/api/v1/i18n/portal-session/refresh",
     "/api/v1/admin/release-notes",
     "/api/v1/i18n/proposals",
     "/api/v1/i18n/review",
@@ -1513,7 +1519,12 @@ _RL_SENSITIVE_PREFIXES = (
     # pack fetch in the 20-per-10s bucket and two players behind one NAT
     # would break each other's language.
     "/api/v1/i18n/proposals", "/api/v1/i18n/review",
-    "/api/v1/i18n/revert",   # committed delete of a live entry (wave-2 find 20)
+    # The RESET route: committed delete of a live entry (wave-2 find 20), and
+    # since Aug-3 admin-only. Deliberately NOT joined by the read-only
+    # /i18n/approved list or the /i18n/portal-session/refresh keep-alive —
+    # neither mutates translation state, and a 15-minute keep-alive sharing a
+    # 20-per-10s bucket with reads would throttle a normal review session.
+    "/api/v1/i18n/revert",
 )
 _RL_MAX_BODY = 16 * 1024 * 1024   # 16 MB hard cap (log clamp is 12 MB)
 _RL_LAST_PRUNE = [0.0]
@@ -1945,7 +1956,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.35.5"
+LATEST_MOD_VERSION = "1.36.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -8304,7 +8315,20 @@ class _ChatManager:
         self._subs.pop(ws, None)
 
     def subscribe(self, ws: WebSocket, channels) -> set[str]:
+        # "UNSPECIFIED means ALL" — deliberately identical to /chat/recent's
+        # semantic (Aug-3). The two sinks used to disagree: this method force-
+        # added 'global' to an EMPTY set and so collapsed a channel-less
+        # subscribe frame to {global}, while /chat/recent read the same empty
+        # input as "no filter, every channel". A client whose scrollback and
+        # whose live feed cover different channels is a latent trap, so both
+        # now read "no valid channel named" as the full allowed set (which is
+        # also what connect() seeds, so the frame can only ever narrow from a
+        # state it already had). A client that genuinely wants global-only
+        # asks for it by NAME; the mandatory-global floor still applies to
+        # every non-empty request.
         wanted = {str(c).lower() for c in (channels or []) if str(c).lower() in CHAT_CHANNELS_ALLOWED}
+        if not wanted:
+            wanted = set(CHAT_CHANNELS_ALLOWED)
         wanted.add("global")   # the floor is not opt-out-able server-side
         if ws in self._subs:
             self._subs[ws] = wanted
@@ -8840,29 +8864,63 @@ async def get_recent_chat(
     so the client can append directly to its display log.
 
     `channels` is a comma list filtered to the allowed set; empty/absent means
-    ALL channels (pre-channel clients and the bot keep today's behavior).
+    ALL channels (pre-channel clients and the bot keep today's behavior) — the
+    same "unspecified means all" rule _ChatManager.subscribe now follows.
+    `limit` is the TOTAL row budget and is shared FAIRLY across the requested
+    channels (see the query comment) rather than being consumed newest-first by
+    whichever channel is busiest.
     Soft-deleted rows are excluded — the deleted_at column ships ahead of any
     removal UI (D16 groundwork) precisely so this filter exists from day one."""
     _want = [c for c in (channels or "").lower().split(",") if c in CHAT_CHANNELS_ALLOWED]
     _chan_filter = "AND cm.channel = ANY(:chans) " if _want else ""
-    # Join to current rating + active title so scrollback shows them too.
+    # PER-CHANNEL FAIRNESS (Aug-3). The old query was one
+    # `ORDER BY created_at DESC LIMIT :limit` across every requested channel,
+    # so a busy `global` consumed the entire budget and a correctly-subscribed
+    # es/ru client got an EMPTY language scrollback — the channel looked dead
+    # even though its messages were in the table.
+    #
+    # `ranked` numbers each channel's rows newest-first; `fair` then orders by
+    # that rank FIRST, which interleaves the channels round-robin (every
+    # channel's newest, then every channel's 2nd-newest, ...) before the single
+    # `LIMIT :limit` cut. Two properties fall out of that ordering:
+    #   * no channel can be starved — each gets ~limit/n rows when all are busy;
+    #   * a quiet channel does NOT waste its slice — when es/ru have nothing,
+    #     global simply keeps taking the next rank and the caller still gets a
+    #     full `limit` rows (which is why :per_channel is bound to `limit` and
+    #     not to limit/n — a smaller ceiling would cap global at its share and
+    #     return a short page).
+    # CTE, not LATERAL (learning #32: LATERAL is incompatible with asyncpg).
+    # The window is fed by ix_chat_messages_channel_created (channel,
+    # created_at DESC), and the row->player/rating/title joins now run only on
+    # the <= limit rows that survive `fair` rather than on the raw scan.
     rows = (await db.execute(
         text(
+            "WITH ranked AS ("
+            "  SELECT cm.id, cm.source, cm.steam_id, cm.discord_id, cm.display_name,"
+            "         cm.message, cm.created_at, cm.channel,"
+            "         ROW_NUMBER() OVER (PARTITION BY cm.channel"
+            "                            ORDER BY cm.created_at DESC, cm.id DESC) AS rn"
+            "    FROM chat_messages cm"
+            "   WHERE cm.deleted_at IS NULL "
+            + _chan_filter +
+            "), fair AS ("
+            "  SELECT * FROM ranked WHERE rn <= :per_channel"
+            "   ORDER BY rn, created_at DESC, id DESC LIMIT :limit"
+            ") "
             "SELECT cm.id, cm.source, cm.steam_id, cm.discord_id, cm.display_name, cm.message, cm.created_at, "
             "       cm.channel, "
             "       ROUND(gr.rating)::int AS rating, p.id::text AS player_id, "
             "       si.name AS title, si.preview_color AS title_color, si.sku AS title_sku "
-            "FROM chat_messages cm "
+            "FROM fair cm "
             "LEFT JOIN players p ON "
             "   (cm.steam_id IS NOT NULL AND p.steam_id = cm.steam_id) OR "
             "   (cm.steam_id IS NULL AND cm.discord_id IS NOT NULL AND p.discord_id = cm.discord_id) "
             "LEFT JOIN glicko_ratings gr ON gr.player_id = p.id AND p.deleted_at IS NULL "
             "LEFT JOIN shop_items si ON si.id = p.active_title_id "
-            "WHERE cm.deleted_at IS NULL "
-            + _chan_filter +
-            "ORDER BY cm.created_at DESC LIMIT :limit"
+            "ORDER BY cm.created_at DESC"
         ),
-        ({"limit": limit, "chans": _want} if _want else {"limit": limit}),
+        ({"limit": limit, "per_channel": limit, "chans": _want} if _want
+         else {"limit": limit, "per_channel": limit}),
     )).mappings().all()
     # Key order is LOAD-BEARING for the mod's manual parser (learning #25 /
     # CLAUDE.md): the client splits entries on the literal '{"source"' (so
@@ -8913,6 +8971,13 @@ I18N_PACK_FORMAT = 1
 # must carry it verbatim (they are proper nouns/metric names on every board).
 I18N_GLOSSARY_LOCKED = ("Elo", "Glicko", "RD")
 I18N_PORTAL_TTL_MIN = 45
+# ABSOLUTE life of a portal session, anchored on created_at (Aug-3). The TTL
+# above is now a SLIDING window that /i18n/portal-session/refresh extends while
+# the tab is open; without a total-life bound a renewer the server cannot fully
+# verify becomes an unbounded credential (learning #276 — a per-extension check
+# bounds one extension, never the chain). Past this, the only way back is a
+# fresh in-game mint, which re-proves the Steam session.
+I18N_PORTAL_MAX_LIFE_MIN = 8 * 60
 # Contribution terms revision recorded on every proposal (D15). Bump when the
 # wording shown in the portal changes.
 I18N_LICENSE_TERMS_REV = "v1"
@@ -9211,7 +9276,57 @@ async def i18n_portal_session(payload: dict, request: Request,
         "DELETE FROM i18n_portal_sessions WHERE steam_id = :sid"
         "   AND expires_at < NOW() - INTERVAL '1 day'"), {"sid": steam_id})
     await db.commit()
-    return {"token": token, "ttl_minutes": I18N_PORTAL_TTL_MIN}
+    return {"token": token, "ttl_minutes": I18N_PORTAL_TTL_MIN,
+            "max_life_minutes": I18N_PORTAL_MAX_LIFE_MIN}
+
+
+@app.post("/api/v1/i18n/portal-session/refresh", tags=["I18n"])
+async def i18n_portal_session_refresh(request: Request,
+                                      db: AsyncSession = Depends(get_db)):
+    """Slide the portal session's expiry forward (Aug-3).
+
+    Reported as "the session expires in a minute". The TTL was never the
+    problem (45 min, confirmed against every live row) — the SPA dropped the
+    token on any reload. That half is fixed client-side; this half exists so a
+    tab left open through a long review sitting does not silently die at 45
+    minutes either.
+
+    NO NEW TRUST: `_portal_auth` is the whole gate, so this route re-runs the
+    identical validation the mint path uses — token lookup, IP binding, the
+    per-identity advisory lock, and the post-lock re-reads that fail closed on
+    a deleted or banned identity (#207/#208). It cannot resurrect an expired
+    token (expires_at is checked before and after the lock) and it cannot
+    outlive I18N_PORTAL_MAX_LIFE_MIN measured from created_at.
+
+    clock_timestamp(), not NOW(): NOW() is frozen at transaction start, so a
+    long wait on the advisory lock above would silently shorten the window it
+    grants (learning #277).
+    """
+    steam_id = await _portal_auth(request, db)
+    token = request.headers.get("X-Portal-Token") or ""
+    row = (await db.execute(text(
+        "UPDATE i18n_portal_sessions"
+        "   SET expires_at = LEAST(created_at + (:cap || ' minutes')::interval,"
+        "                          clock_timestamp() + (:ttl || ' minutes')::interval)"
+        " WHERE token = :t"
+        "   AND created_at + (:cap || ' minutes')::interval > clock_timestamp()"
+        " RETURNING expires_at, created_at"
+    ), {"t": token, "ttl": str(I18N_PORTAL_TTL_MIN),
+        "cap": str(I18N_PORTAL_MAX_LIFE_MIN)})).mappings().first()
+    if row is None:
+        # _portal_auth passed, so the token is live — the only way to be here
+        # is the absolute cap. Say that plainly instead of "expired": the
+        # difference decides whether re-opening from the game will help.
+        raise HTTPException(401, "portal session reached its maximum lifetime "
+                                 "- reopen it from the in-game Settings tab")
+    await db.commit()
+    # Near the cap the granted window is the REMAINING life, which is the bound
+    # doing its job; the SPA shows whatever it gets back.
+    _left = int((row["expires_at"] - datetime.now(timezone.utc)).total_seconds())
+    return {"ok": True, "steam_id": steam_id,
+            "expires_at": row["expires_at"].isoformat(),
+            "expires_in_seconds": max(0, _left),
+            "max_life_minutes": I18N_PORTAL_MAX_LIFE_MIN}
 
 
 @app.get("/api/v1/release-notes/{locale}", tags=["I18n"])
@@ -9340,6 +9455,19 @@ async def i18n_key_history(request: Request, key_id: str = Query(...),
     if await _i18n_role(db, steam_id, lang, "translate") is None:
         raise HTTPException(403, "no translate grant for this language")
     key_id = str(key_id)[:16]
+    # KNOWN ISSUE (round-2 finding 15, deliberately not fixed): the key, the live
+    # entry and the proposal list are three READ COMMITTED snapshots, so an
+    # approval committing mid-request can render `current: null` beside an
+    # approved proposal. Cosmetic and self-correcting on the next load.
+    #
+    # Do NOT "fix" it with SET TRANSACTION ISOLATION LEVEL here. That was tried
+    # and made the endpoint 500 on EVERY authorized request: _portal_auth and
+    # _i18n_role have already issued queries by this point, Postgres rejects the
+    # SET after the first statement of a transaction, and swallowing that error
+    # without a rollback leaves the transaction aborted so the next query dies
+    # with InFailedSQLTransaction. A real fix has to open its own connection or
+    # set the isolation level before any auth query runs — neither is worth it
+    # for a momentary display inconsistency.
     k = (await db.execute(text(
         "SELECT key_id, msgctxt, source_hash, sensitive FROM i18n_keys"
         " WHERE key_id = :k"), {"k": key_id})).mappings().first()
@@ -9395,6 +9523,125 @@ async def i18n_key_history(request: Request, key_id: str = Query(...),
     }
 
 
+@app.get("/api/v1/i18n/approved", tags=["I18n"])
+async def i18n_approved_list(request: Request, lang: str = Query(...),
+                             offset: int = Query(0, ge=0),
+                             limit: int = Query(50, ge=1, le=200),
+                             db: AsyncSession = Depends(get_db)):
+    """Every LIVE (approved) translation for one language, newest-first.
+
+    Sid, Aug 3: he approved a Russian proposal and it "disappeared without a
+    trace". It had not — the review succeeded and the entry went live — but the
+    portal had no surface that showed approved entries, so the proposal simply
+    left the pending queue and nothing replaced it. This is that surface.
+
+    Shape mirrors /i18n/history's `current` block (same columns, same names) so
+    the two agree; this is that query with the single-key filter removed and
+    paging added.
+
+    Two schema facts worth stating because they look like omissions:
+      * there is NO approved_at column — `updated_at` IS the approval time,
+        written by the review path on both the INSERT and the ON CONFLICT
+        branch;
+      * i18n_entries has no proposer column, so the proposer is LEFT JOINed
+        from the newest APPROVED proposal for the same key+language. It is
+        legitimately NULL for entries that predate the proposal flow or were
+        written by a path that had no proposal row — render that, don't hide it.
+    Both identity columns are rewritten to a tombstone by account deletion, so
+    every name is a LEFT JOIN with a COALESCE and the raw steam id ships beside
+    it (a display name is not an identity).
+
+    Entries whose state is not 'approved' (machine seeds) are deliberately not
+    listed: this view answers "what did a human sign off", and the reset button
+    it carries is destructive.
+    """
+    steam_id = await _portal_auth(request, db)
+    lang = lang.lower()[:8]
+    if await _i18n_role(db, steam_id, lang, "translate") is None:
+        raise HTTPException(403, "no translate grant for this language")
+    # CTE + ROW_NUMBER for "newest approved proposal per key", never LATERAL
+    # (learning #32: LATERAL is incompatible with asyncpg).
+    #
+    # `total` is a COUNT(*) OVER () column on THIS statement, not a separate
+    # COUNT query (Aug-3 review F11). Under READ COMMITTED every statement
+    # takes its own snapshot, so a standalone count could observe zero, an
+    # approval commit, and then this query observe the row — shipping
+    # `total: 0` beside a non-empty page, which the SPA renders as "nothing
+    # approved yet". That is precisely the "it disappeared without a trace"
+    # report this view was built to answer, reintroduced by the paging. The
+    # window runs after WHERE and before LIMIT/OFFSET, so it counts the whole
+    # filtered set from the same snapshot as the rows. It also matches the
+    # rows exactly by construction: ap.rn = 1 is unique per key_id and
+    # players.steam_id is UNIQUE, so neither LEFT JOIN can multiply a row.
+    rows = (await db.execute(text(
+        "WITH ap AS ("
+        "  SELECT pr.key_id, pr.proposer_steam_id, pr.created_at AS proposed_at,"
+        "         ROW_NUMBER() OVER (PARTITION BY pr.key_id"
+        "           ORDER BY pr.reviewed_at DESC NULLS LAST, pr.id DESC) AS rn"
+        "    FROM i18n_proposals pr"
+        "   WHERE pr.language_code = :lang AND pr.status = 'approved'"
+        ") "
+        "SELECT e.key_id, k.namespace, k.msgctxt, k.source_hash, k.sensitive,"
+        "       e.target, e.state, e.approved_source_hash, e.self_approved,"
+        "       e.updated_at, e.approved_by_steam_id,"
+        "       COALESCE(av.display_name,'') AS approver_name,"
+        "       ap.proposer_steam_id, ap.proposed_at,"
+        "       COALESCE(pv.display_name,'') AS proposer_name,"
+        "       COUNT(*) OVER () AS total_rows"
+        "  FROM i18n_entries e"
+        "  JOIN i18n_keys k ON k.key_id = e.key_id"
+        "  LEFT JOIN ap ON ap.key_id = e.key_id AND ap.rn = 1"
+        "  LEFT JOIN players av ON av.steam_id = e.approved_by_steam_id"
+        "  LEFT JOIN players pv ON pv.steam_id = ap.proposer_steam_id"
+        " WHERE e.language_code = :lang AND e.state = 'approved'"
+        "   AND k.retired_at IS NULL"
+        " ORDER BY e.updated_at DESC NULLS LAST, e.key_id"
+        " LIMIT :lim OFFSET :off"
+    ), {"lang": lang, "lim": limit, "off": offset})).mappings().all()
+    total = int(rows[0]["total_rows"]) if rows else 0
+    if not rows and offset > 0:
+        # Only a page PAST THE END has no row to carry the window column, and
+        # the SPA needs a real total there to walk itself back to the last page
+        # (resetting the final entry of the final page lands exactly here).
+        # A second snapshot is harmless in this branch: the page is empty
+        # whatever the count says, so the two reads cannot contradict.
+        total = (await db.execute(text(
+            "SELECT COUNT(*) FROM i18n_entries e JOIN i18n_keys k ON k.key_id = e.key_id"
+            " WHERE e.language_code = :lang AND e.state = 'approved' AND k.retired_at IS NULL"
+        ), {"lang": lang})).scalar() or 0
+        # Codex Aug-4 r2 find 14: clamp so the client's walk-back is STRICTLY
+        # smaller than its current offset. This count is a second snapshot, and
+        # a row inserted between the two reads can otherwise produce a "last
+        # page" equal to the offset the client is already on — its
+        # `back !== offset` guard then declines to reload and the pager sticks
+        # on a permanently empty page. Under-reporting here is safe: the client
+        # steps back, and the next request reads a fresh, authoritative total.
+        total = min(int(total), offset)
+        # Codex Aug-4 r2 find 14: clamp so the client's walk-back is STRICTLY
+        # smaller than its current offset. This count is a second snapshot, and
+        # a row inserted between the two reads can otherwise produce a "last
+        # page" equal to the offset the client is already on — its
+        # `back !== offset` guard then declines to reload and the pager sticks
+        # on a permanently empty page. Under-reporting here is safe: the client
+        # steps back, and the next request reads a fresh, authoritative total.
+        total = min(int(total), offset)
+    return {"language": lang, "total": int(total), "offset": offset,
+            "limit": limit, "entries": [{
+        "key_id": r["key_id"], "namespace": r["namespace"],
+        "source": r["msgctxt"], "sensitive": r["sensitive"],
+        "target": r["target"], "state": r["state"],
+        "approved_by": r["approved_by_steam_id"],
+        "approved_by_name": r["approver_name"],
+        "self_approved": r["self_approved"],
+        # updated_at IS the approval timestamp (see docstring).
+        "approved_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+        "proposer": r["proposer_steam_id"],
+        "proposer_name": r["proposer_name"],
+        "proposed_at": r["proposed_at"].isoformat() if r["proposed_at"] else None,
+        "stale": bool(r["target"] and r["approved_source_hash"] != r["source_hash"]),
+    } for r in rows]}
+
+
 @app.post("/api/v1/i18n/proposals", tags=["I18n"])
 async def i18n_propose(payload: dict, request: Request,
                        db: AsyncSession = Depends(get_db)):
@@ -9442,20 +9689,60 @@ async def i18n_propose(payload: dict, request: Request,
 @app.get("/api/v1/i18n/proposals", tags=["I18n"])
 async def i18n_proposal_queue(request: Request, lang: str = Query(...),
                               status: str = Query("pending"),
+                              offset: int = Query(0, ge=0),
+                              limit: int = Query(50, ge=1, le=200),
                               db: AsyncSession = Depends(get_db)):
+    """Paged review queue.
+
+    Reported as "the queue always says 200". It was a bare `LIMIT 200` with no
+    total, and the SPA printed the returned array's LENGTH — with 1,234 pending
+    es and 1,233 pending ru, both clamped to exactly 200 forever. `total` is now
+    a real COUNT over the same predicate and the page is addressable.
+
+    `status` is normalised against a closed set rather than declared with
+    Query(enum=...), which validates NOTHING (learning #188); it is bound as a
+    parameter either way, never interpolated.
+    idx_i18n_proposals_queue (language_code, status, created_at) covers both
+    the count and the page.
+    """
     steam_id = await _portal_auth(request, db)
     lang = lang.lower()[:8]
     if await _i18n_role(db, steam_id, lang, "translate") is None:
         raise HTTPException(403, "no translate grant for this language")
     status = status if status in ("pending", "approved", "rejected", "superseded") else "pending"
+    # COUNT(*) OVER () on the ROW statement, never a separate COUNT query
+    # (Aug-3 review F11). Two statements are two READ COMMITTED snapshots: the
+    # count could observe zero, a proposal commit, and the page query observe
+    # it — shipping `total: 0` with a non-empty page, which renderQueue()
+    # treats as "nothing pending" and suppresses. The window is evaluated
+    # after WHERE and before LIMIT/OFFSET, so it counts the full filtered set.
+    # Counting over the JOINed set also makes the total agree with the page by
+    # construction; the old standalone count read i18n_proposals alone and
+    # would have over-counted a proposal whose key row was gone.
     rows = (await db.execute(text(
         "SELECT p.id, p.key_id, p.proposed_target, p.proposer_steam_id, p.created_at,"
-        "       p.source_hash, k.msgctxt, k.source_hash AS current_hash, k.sensitive"
+        "       p.source_hash, k.msgctxt, k.source_hash AS current_hash, k.sensitive,"
+        "       COUNT(*) OVER () AS total_rows"
         "  FROM i18n_proposals p JOIN i18n_keys k ON k.key_id = p.key_id"
         " WHERE p.language_code = :lang AND p.status = :st"
-        " ORDER BY p.created_at LIMIT 200"
-    ), {"lang": lang, "st": status})).mappings().all()
-    return {"language": lang, "proposals": [{
+        " ORDER BY p.created_at, p.id LIMIT :lim OFFSET :off"
+    ), {"lang": lang, "st": status, "lim": limit, "off": offset})).mappings().all()
+    total = int(rows[0]["total_rows"]) if rows else 0
+    if not rows and offset > 0:
+        # Page past the end — no row carries the window column, and the SPA
+        # needs a real total to walk its offset back to the last page
+        # (approving the final proposal of the final page lands exactly here).
+        # The extra snapshot is harmless: the page is empty either way.
+        total = (await db.execute(text(
+            "SELECT COUNT(*) FROM i18n_proposals p JOIN i18n_keys k ON k.key_id = p.key_id"
+            " WHERE p.language_code = :lang AND p.status = :st"
+        ), {"lang": lang, "st": status})).scalar() or 0
+        # r3 find 12: clamp like the approved list, so the client's walk-back is
+        # STRICTLY smaller than its current offset and cannot stall on a page an
+        # insertion re-populated between the two reads.
+        total = min(int(total), offset)
+    return {"language": lang, "status": status, "total": int(total),
+            "offset": offset, "limit": limit, "proposals": [{
         "id": r["id"], "key_id": r["key_id"], "source": r["msgctxt"],
         "target": r["proposed_target"], "proposer": r["proposer_steam_id"],
         "created_at": r["created_at"].isoformat(), "sensitive": r["sensitive"],
@@ -9550,20 +9837,34 @@ async def i18n_review(payload: dict, request: Request,
 async def i18n_revert(payload: dict, request: Request,
                       db: AsyncSession = Depends(get_db)):
     """One-call revert (§2.5): drop the live entry so the client falls back
-    to the embedded catalogue (machine draft or English)."""
+    to the embedded catalogue (machine draft or English).
+
+    ADMIN-ONLY since Aug-3. This is the only destructive translation route —
+    it deletes text that is live for every player of that language — and it was
+    gated on `role is None`, i.e. ANY moderator holding a translate grant could
+    reset ANY live translation in their language. Approving requires a second
+    pair of eyes (see i18n_review); un-shipping a translation must not be
+    easier than shipping one. The portal's Reset button is hidden for
+    non-admins, but that is cosmetic — THIS check is the boundary."""
     steam_id = await _portal_auth(request, db)
     key_id = str(payload.get("key_id", ""))[:16]
     lang = str(payload.get("language_code", "")).lower()[:8]
     role = await _i18n_role(db, steam_id, lang, "translate")
     if role is None:
         raise HTTPException(403, "no translate grant for this language")
+    if role != "admin":
+        raise HTTPException(403, "resetting a live translation is admin-only")
     n = (await db.execute(text(
         "DELETE FROM i18n_entries WHERE key_id = :k AND language_code = :lang RETURNING key_id"
     ), {"k": key_id, "lang": lang})).scalar()
+    # Record whether anything was actually deleted: a bare 'revert' event for a
+    # key that had no live entry reads in the audit trail exactly like one that
+    # unshipped a real translation.
     await db.execute(text(
         "INSERT INTO i18n_review_events (actor_steam_id, actor_role, language_code,"
-        " key_id, action, detail) VALUES (:sid, :role, :lang, :k, 'revert', NULL)"
-    ), {"sid": steam_id, "role": role, "lang": lang, "k": key_id})
+        " key_id, action, detail) VALUES (:sid, :role, :lang, :k, 'revert', :d)"
+    ), {"sid": steam_id, "role": role, "lang": lang, "k": key_id,
+        "d": "deleted live entry" if n is not None else "no live entry (no-op)"})
     await db.commit()
     return {"reverted": n is not None}
 
@@ -9595,6 +9896,10 @@ user-select:none;cursor:not-allowed}
 .hist h4{margin:0 0 4px;font-size:12px;color:#9ad0ff;font-weight:600}
 .hrow{padding:4px 6px;margin:3px 0;border-left:3px solid #445;background:#161a22}
 .hrow .who{color:#bbb}.hrow .tgt{color:#b0ffb0;white-space:pre-wrap}
+/* Unscoped twin: the Approved view's attribution lines live in a .key box, not
+   a .hrow, and were rendering unstyled. Same colour, so history rows are
+   visually unchanged. */
+.who{color:#bbb}
 .h-approved{border-left-color:#2e7d40}.h-rejected{border-left-color:#8a3030}
 .h-pending{border-left-color:#3a6ea5}.h-superseded{border-left-color:#555}
 .h-flag{font-size:10px;color:#ffc46b;margin-left:6px}
@@ -9609,21 +9914,190 @@ input[type=text]{background:#1c2029;color:#dde;border:1px solid #445;padding:5px
 <h1>Sid's Competitive ROUNDS — Translation Portal</h1>
 <div id="auth" class="muted">Checking session…</div>
 <div id="langs"></div>
+<div id="status" class="muted"></div>
 <div id="assentRow" style="display:none;margin:8px 0"><label>
 <input type="checkbox" id="assent"> I license my submitted translations to the
 project for distribution with the mod (recorded per proposal).</label></div>
-<div id="filter"></div><div id="queue"></div><div id="list"></div>
+<div id="views"></div>
+<div id="filter"></div><div id="queue"></div><div id="approved"></div><div id="list"></div>
 <script>
 "use strict";
 // Token arrives in the URL FRAGMENT (never a query param, never a cookie) and
-// lives only in JS memory. Every rendered field goes through textContent —
-// Steam display names and proposals are hostile input.
-const TOKEN=(location.hash||"").replace(/^#token=/,"");history.replaceState(null,"",location.pathname);
-const api=(p,opt)=>fetch("/api/v1/i18n"+p,Object.assign({headers:{"X-Portal-Token":TOKEN,
-  "Content-Type":"application/json"}},opt||{})).then(async r=>{
-  if(!r.ok)throw new Error(await r.text());return r.json()});
+// is stripped from the URL immediately. Every rendered field goes through
+// textContent — Steam display names and proposals are hostile input.
+//
+// DELIBERATE DEVIATION from "the token lives only in JS memory" (Aug-3):
+// it is now mirrored into sessionStorage. It used to be a plain JS const while
+// replaceState() removed it from the URL, so ANY reload, F5, back/forward or
+// stray navigation destroyed a session the SERVER still considered valid for
+// another 44 minutes — that is what "the portal session expires in a minute"
+// actually was (the TTL was never short). sessionStorage is the MINIMAL fix
+// that survives a reload: it is per-TAB and dies with the tab, and unlike a
+// cookie it is never attached to a request automatically, so there is still no
+// ambient credential for a same-origin injected fetch to ride — the token only
+// ever moves because this script puts it in an explicit header. localStorage
+// would outlive the tab and was rejected for exactly that reason.
+const SS_KEY="scr_portal_token";
+// The token's expiry is persisted BESIDE the token (ms epoch). A reload that
+// restores the token from sessionStorage otherwise has no idea how much life
+// it has left, so it could only guess at a keep-alive schedule — and a token
+// restored one minute before expiry with the first keep-alive 15 minutes out
+// died before it was ever refreshed (Aug-3 review F2).
+const SS_EXP="scr_portal_expires_at";
+// Mint tokens are secrets.token_urlsafe(32) — [A-Za-z0-9_-] only. Strip
+// anything else so a hand-edited fragment can never shape a request header.
+function cleanToken(t){return (t||"").replace(/[^A-Za-z0-9_-]/g,"").slice(0,64);}
+function forgetSession(){TOKEN="";
+  try{sessionStorage.removeItem(SS_KEY);sessionStorage.removeItem(SS_EXP);}catch(e){}}
+// Stored from expires_in_seconds, NOT from the response's absolute expires_at:
+// a DURATION is immune to clock skew between the browser and the server, and
+// the whole point of this value is scheduling a local timer.
+function rememberExpiry(sec){
+  const n=Math.max(0,Math.floor(Number(sec)||0));
+  const at=Date.now()+n*1000;
+  try{sessionStorage.setItem(SS_EXP,String(at));}catch(e){}
+  return at;
+}
+// Seconds of life left according to the last server answer. 0 when unknown —
+// callers treat that as "refresh soon", never as "plenty of time".
+function storedLeftSeconds(){
+  let at=0;
+  try{at=parseInt(sessionStorage.getItem(SS_EXP)||"0",10);}catch(e){at=0;}
+  if(!isFinite(at)||at<=0)return 0;
+  return Math.max(0,Math.floor((at-Date.now())/1000));
+}
+let TOKEN=(function(){
+  const h=cleanToken((location.hash||"").replace(/^#token=/,""));
+  if(h){try{sessionStorage.setItem(SS_KEY,h);sessionStorage.removeItem(SS_EXP);}catch(e){}return h;}
+  try{return cleanToken(sessionStorage.getItem(SS_KEY)||"");}catch(e){return "";}
+})();
+history.replaceState(null,"",location.pathname);
+
+const REFRESH_PATH="/portal-session/refresh";
+// The status code is LOAD-BEARING (Aug-3): the old wrapper threw a bare
+// Error(text), so no caller could tell 401 from 429/500/timeout and boot()
+// reported every one of them as "session expired".
+async function rawApi(p,opt){
+  const r=await fetch("/api/v1/i18n"+p,Object.assign({headers:{"X-Portal-Token":TOKEN,
+    "Content-Type":"application/json"}},opt||{}));
+  if(!r.ok){const e=new Error(await r.text());e.status=r.status;throw e;}
+  return r.json();
+}
+// Retry ONCE on 401. Every handler calls _portal_auth as its first statement,
+// so a 401 proves the request did no work — re-issuing it after a successful
+// refresh is safe even for the POSTs. If the refresh itself 401s the session is
+// genuinely gone: drop it, so a reload stops replaying a dead token.
+async function api(p,opt){
+  try{return await rawApi(p,opt);}
+  catch(e){
+    if(e.status!==401||p===REFRESH_PATH||!TOKEN)throw e;
+    try{const r=await rawApi(REFRESH_PATH,{method:"POST"});
+      rememberExpiry(r.expires_in_seconds);scheduleKeepAlive(r.expires_in_seconds);}
+    // A 401 on the REFRESH carries the reason (expired vs the absolute cap)
+    // and the original 401 does not, so surface e2 when it is one.
+    catch(e2){forgetSession();throw (e2&&e2.status===401)?e2:e;}
+    return await rawApi(p,opt);
+  }
+}
+// Keep-alive against the sliding TTL, scheduled ADAPTIVELY from the expiry the
+// server just told us rather than on a fixed 15-minute interval (Aug-3 review
+// F2). The fixed interval was unsound in one specific, reachable case: a token
+// restored from sessionStorage can be seconds from expiry, and refresh itself
+// requires an UNEXPIRED token, so missing the window made the session
+// unrecoverable even with hours of absolute life left. Aim two minutes before
+// expiry, never sooner than 30s (so a short remaining window cannot spin) and
+// never later than 15 minutes (so a long TTL still gets regular contact).
+// setTimeout, not setInterval: each tick schedules the next from the fresh
+// answer, and a transient failure must not wait a whole fixed period.
+// The floor is 5s, NOT 30s (Codex Aug-4 r2 find 4): a restored token with 20s
+// left whose boot refresh hit one transient 503 would have waited a full 30s
+// and then refreshed an ALREADY-EXPIRED token, destroying a session still well
+// inside its 8-hour absolute life. The floor exists only to stop a spin, and 5s
+// does that. Deliberately no clamp on the low side beyond it — when the token
+// is nearly gone the right move is to try again almost immediately.
+// r3 find 10: with under ~5s left even the floor lands after expiry. Below the
+// floor there is nothing useful left to schedule — refresh on the spot instead.
+const KEEPALIVE_MAX_MS=15*60*1000, KEEPALIVE_MIN_MS=5*1000, KEEPALIVE_LEAD_S=120, KEEPALIVE_NOW_S=6;
+let keepAliveTimer=null, keepAliveRush=0;
+function scheduleKeepAlive(expiresInSeconds){
+  if(keepAliveTimer){clearTimeout(keepAliveTimer);keepAliveTimer=null;}
+  if(!TOKEN)return;
+  const left=Math.floor(Number(expiresInSeconds)||0);
+  /* Too little life left for any delay to be safe: go almost immediately — but
+   * NEVER at zero delay, and never more than a couple of times in a row
+   * (Codex r4 find 10). Near the 8-hour cap the server legitimately keeps
+   * answering with 1-6 seconds left, and a zero-delay reschedule then spins as
+   * fast as the network allows and trips the rate limiter. One second is still
+   * far inside the window and turns a spin into at most a handful of requests;
+   * after three consecutive immediates the session is genuinely finished, so
+   * stop and let the next API call surface the 401. */
+  if(left>0&&left<=KEEPALIVE_NOW_S){
+    if(++keepAliveRush>3){keepAliveRush=0;return;}
+    keepAliveTimer=setTimeout(runKeepAlive,1000);return;
+  }
+  keepAliveRush=0;
+  const lead=(left-KEEPALIVE_LEAD_S)*1000;
+  // Never schedule past the expiry itself: with less than the lead remaining,
+  // aim at half the remaining life instead of the lead-adjusted (negative) one.
+  const cap=left>0?Math.max(KEEPALIVE_MIN_MS,(left*1000)/2):KEEPALIVE_MIN_MS;
+  const wait=Math.min(KEEPALIVE_MAX_MS,Math.max(KEEPALIVE_MIN_MS,Math.min(lead>0?lead:cap,cap)));
+  keepAliveTimer=setTimeout(runKeepAlive,wait);
+}
+async function runKeepAlive(){
+  keepAliveTimer=null;
+  if(!TOKEN)return;
+  try{
+    const r=await rawApi(REFRESH_PATH,{method:"POST"});
+    rememberExpiry(r.expires_in_seconds);
+    scheduleKeepAlive(r.expires_in_seconds);
+  }catch(e){
+    if(e.status===401){forgetSession();setStatus(errText(e),true);return;}
+    // Transient (429/5xx/network). Retry against the life we last knew about,
+    // so the retries tighten as expiry approaches instead of sitting on a
+    // fixed period that can straddle it.
+    scheduleKeepAlive(storedLeftSeconds());
+  }
+}
 const el=(tag,cls,txt)=>{const e=document.createElement(tag);if(cls)e.className=cls;
   if(txt!==undefined)e.textContent=txt;return e};
+function setStatus(msg,isErr){const s=document.getElementById("status");
+  if(!s)return;s.className=isErr?"err":"muted";s.textContent=msg||"";}
+// FastAPI sends its message as {"detail": "..."} — print the sentence, not the
+// JSON envelope. Falls back to the raw body for anything else (a proxy error
+// page, a plain-text 502).
+function detailOf(e){
+  const m=(e&&e.message)||"";
+  try{const j=JSON.parse(m);
+    if(j&&typeof j.detail==="string")return j.detail;}catch(_){}
+  return m;
+}
+// Honest error text. Only a 401 means "expired"; sending the maintainer back
+// to the game because of a rate limit or a dropped connection wastes his time
+// and hides the real failure. The server distinguishes an expired session from
+// one that hit I18N_PORTAL_MAX_LIFE_MIN, and that difference decides whether
+// anything can be done about it — keep the two apart here too.
+function errText(e){
+  if(!e)return "unknown error";
+  const d=detailOf(e);
+  if(e.status===401){
+    if(d&&d.indexOf("maximum lifetime")>=0)
+      return "Session reached its maximum lifetime — reopen the portal from the in-game Settings tab.";
+    return "Session expired — reopen the portal from the in-game Settings tab.";
+  }
+  if(e.status===403)return "Not allowed: "+d;
+  if(e.status===429)return "Rate limited by the server — wait a few seconds and try again.";
+  if(e.status)return "Server error "+e.status+": "+d;
+  return "Network error (the request never reached the server): "+d;
+}
+function pager(offset,limit,total,go){
+  const row=el("div");
+  const prev=el("button",null,"< Prev");prev.disabled=offset<=0;
+  prev.onclick=function(){go(Math.max(0,offset-limit));};
+  const next=el("button",null,"Next >");next.disabled=(offset+limit)>=total;
+  next.onclick=function(){go(offset+limit);};
+  row.appendChild(prev);row.appendChild(next);
+  return row;
+}
 
 // ── Tag-locked editor ────────────────────────────────────────────────────
 // tokenize() MUST mirror _i18n_extract_tags()/_i18n_markup_residue() in
@@ -9727,30 +10201,213 @@ function bindRun(node,warnEl){
   node.addEventListener("drop",function(){setTimeout(scrub,0);});
 }
 
-let LANG=null,VIEW="all";
+let LANG=null,VIEW="all",IS_ADMIN=false,SECTION="keys";
+// Section switcher. The key list, the review queue and the approved list used
+// to render stacked, so the queue sat under up to 200 editor boxes and the
+// approved list would have been invisible below both.
+const SECTIONS=[["keys","Keys"],["queue","Review queue"],["approved","Approved"]];
+const VIEW_COUNTS={};
+// ── Language-switch generation (Aug-3 review F1) ─────────────────────────
+// Selecting a language fans out to three sequential fetches. Until all three
+// land the page still shows the PREVIOUS language's rows, and each of those
+// rows carries a Propose button — so text typed in Spanish could be submitted
+// through a still-visible Russian row as language_code "ru", which the Russian
+// validator accepts (Latin text is not rejected) and commits as wrong-language
+// data. The gate is this counter, not a boolean "loading" flag: two switches
+// in a row must not let the FIRST switch's callback re-enable the UI, and only
+// a comparison against the CURRENT generation can express that.
+//   LANG_GEN         bumped on every switch, monotonic.
+//   LANG_LOADED_GEN  the generation whose full three-fetch sequence completed.
+// Submit is armed only while the two are equal AND the row agrees with both.
+let LANG_GEN=0,LANG_LOADED_GEN=-1;
+const SUBMIT_GATES=[];
+function paintSubmitGates(){
+  const ready=(LANG_LOADED_GEN===LANG_GEN);
+  SUBMIT_GATES.forEach(function(g){
+    const on=ready&&g.gen===LANG_GEN&&g.lang===LANG;
+    g.btn.disabled=!on;
+    g.btn.title=on?"":"Still loading this language - the row cannot be submitted yet.";
+  });
+}
+// Drop every rendered row the moment the selection changes, so nothing stale
+// is actionable while the new language loads. The counts go with them: a queue
+// count left over from the previous language is a lie about the current one.
+function clearLangViews(){
+  // Disable BEFORE dropping the registry. Emptying #list detaches these
+  // buttons, so in today's flow they are unreachable anyway — but a button
+  // that is about to be orphaned should still READ disabled, so anything
+  // holding a reference to an old row (or any later change that leaves rows
+  // painted while the new language loads) finds it inert rather than armed.
+  SUBMIT_GATES.forEach(function(g){g.btn.disabled=true;});
+  KEYS=[];KEYS_LANG=null;SUBMIT_GATES.length=0;
+  ["list","queue","approved"].forEach(function(id){
+    const e=document.getElementById(id);if(e)e.textContent="";});
+  delete VIEW_COUNTS.queue;delete VIEW_COUNTS.approved;
+  paintViewButtons();updateFilterCounts();
+}
+function buildViews(){
+  const v=document.getElementById("views");v.textContent="";
+  SECTIONS.forEach(function(sv){
+    const b=el("button",null,sv[1]);b.id="vbtn_"+sv[0];
+    b.onclick=function(){showSection(sv[0]);};
+    v.appendChild(b);
+  });
+}
+function paintViewButtons(){
+  SECTIONS.forEach(function(sv){
+    const b=document.getElementById("vbtn_"+sv[0]);if(!b)return;
+    const n=VIEW_COUNTS[sv[0]];
+    b.textContent=sv[1]+(n===undefined?"":" ("+n+")");
+    b.style.background=(sv[0]===SECTION)?"#4a5a7a":"";
+  });
+}
+function setViewCount(sec,n){VIEW_COUNTS[sec]=n;paintViewButtons();}
+function showSection(sec){
+  SECTION=sec;
+  const on=function(id,vis){const e=document.getElementById(id);
+    if(e)e.style.display=vis?"":"none";};
+  on("filter",sec==="keys");on("list",sec==="keys");
+  on("queue",sec==="queue");on("approved",sec==="approved");
+  paintViewButtons();
+}
+function paintLangButtons(){
+  const langs=document.getElementById("langs");if(!langs)return;
+  Array.prototype.forEach.call(langs.querySelectorAll("button"),function(b){
+    b.style.background=(b.getAttribute("data-lang")===LANG)?"#4a5a7a":"";
+  });
+}
+async function selectLang(code){
+  const gen=++LANG_GEN;
+  LANG=code;QUEUE_OFFSET=0;APPROVED_OFFSET=0;paintLangButtons();
+  // Clear FIRST (F1): the previous language's rows must stop being actionable
+  // at the instant the selection changes, not when the last fetch returns.
+  clearLangViews();paintSubmitGates();
+  setStatus("Loading "+String(code).toUpperCase()+"…",false);
+  // SEQUENCED, not fired in parallel: one of these pulls the entire 1,384-key
+  // list, and the portal is normally opened from inside the LAN where hairpin
+  // NAT serializes concurrent flows anyway (learning #223). Counts first so the
+  // section buttons are useful while the big list is still loading.
+  // Each await is followed by a generation check so a switch made mid-sequence
+  // abandons this one instead of racing it.
+  await loadQueue();       if(gen!==LANG_GEN)return;
+  await loadApproved();    if(gen!==LANG_GEN)return;
+  await loadKeys();        if(gen!==LANG_GEN)return;
+  // Only the NEWEST switch can arm submit — an older sequence finishing late
+  // writes a stale gen here, which never equals LANG_GEN.
+  LANG_LOADED_GEN=gen;paintSubmitGates();
+}
 async function boot(){
   const a=document.getElementById("auth");
   if(!TOKEN){a.textContent="No session token. Open the portal from the in-game Settings tab.";return}
+  buildViews();showSection("keys");
+  // Refresh BEFORE the first data fetch (Aug-3 review F2). A token restored
+  // from sessionStorage may be a minute from expiry, and refresh REQUIRES an
+  // unexpired token — so the old order (fetch, discover the 401, then try to
+  // refresh) could not recover: both calls 401 even though the 8-hour absolute
+  // cap is nowhere near. This also hands us expires_in_seconds, which is what
+  // the adaptive keep-alive schedules from.
+  try{
+    const r=await rawApi(REFRESH_PATH,{method:"POST"});
+    rememberExpiry(r.expires_in_seconds);
+    scheduleKeepAlive(r.expires_in_seconds);
+  }catch(e){
+    if(e.status===401){forgetSession();a.textContent=errText(e);return;}
+    // Anything else (429/5xx/network) says nothing about the token: carry on
+    // and let the data fetch decide, with the keep-alive on its short retry.
+    scheduleKeepAlive(storedLeftSeconds());
+  }
   try{
     const g=await api("/grants/mine");
-    a.textContent="Signed in as "+g.steam_id+(g.admin?" (admin)":"");
+    // Stored, not just printed: it gates the Reset button in the Approved
+    // view. The SERVER enforces admin-only independently — this is UX.
+    IS_ADMIN=!!g.admin;
+    a.textContent="Signed in as "+g.steam_id+(IS_ADMIN?" (admin)":"");
     const langs=document.getElementById("langs");langs.textContent="";
     const seen=new Set();
     g.languages.forEach(l=>{if(l.scope!=="translate"||seen.has(l.language_code))return;
       seen.add(l.language_code);
       const b=el("button",null,l.language_code.toUpperCase());
-      b.onclick=()=>{LANG=l.language_code;loadKeys();loadQueue()};langs.appendChild(b)});
+      b.setAttribute("data-lang",l.language_code);
+      b.onclick=()=>{selectLang(l.language_code)};langs.appendChild(b)});
     if(seen.size)document.getElementById("assentRow").style.display="";
     if(!seen.size)a.textContent+=" — no translate grants. Ask an admin for one.";
-  }catch(e){a.textContent="Session invalid or expired — reopen from in-game. ("+e.message+")"}
+    // The keep-alive is already armed by the pre-fetch refresh above and
+    // re-arms itself from every server answer, so there is nothing to start
+    // here.
+  }catch(e){
+    // Only a real 401 sends him back to the game (see errText).
+    if(e.status===401){forgetSession();
+      a.textContent="Session invalid or expired — reopen the portal from the in-game Settings tab.";}
+    else{a.textContent="Signed-in check failed — the session may still be fine. Reload to retry.";
+      setStatus(errText(e),true);}
+  }
 }
+const FILTERS=[["all","All"],["missing","Untranslated"],["stale","Stale"],["pending","Has pending"]];
+const RENDER_CAP=200;
+let filterBuilt=false,searchTimer=null;
+function matchesView(k,v){
+  if(v==="missing")return !k.target;
+  if(v==="stale")return !!k.stale;
+  if(v==="pending")return !!k.pending;
+  return true;
+}
+// Search covers the English source, the CURRENT TARGET, the key id and the
+// namespace. Source-only meant a translator searching for the Spanish or
+// Russian words they had just written got zero results.
+function matchesQuery(k,q){
+  if(!q)return true;
+  return (k.source||"").toLowerCase().indexOf(q)>=0
+      ||(k.target||"").toLowerCase().indexOf(q)>=0
+      ||(k.key_id||"").toLowerCase().indexOf(q)>=0
+      ||(k.namespace||"").toLowerCase().indexOf(q)>=0;
+}
+function currentQuery(){const s=document.getElementById("q");
+  return s?s.value.trim().toLowerCase():"";}
+// Built ONCE. It used to be rebuilt from scratch at the top of loadKeys(),
+// which recreated the search input on every filter click and threw away
+// whatever had been typed — "the search doesn't work".
 function filterBar(){
-  const f=document.getElementById("filter");f.textContent="";
-  [["all","All"],["missing","Untranslated"],["stale","Stale"],["pending","Has pending"]].forEach(([v,label])=>{
-    const b=el("button",null,label);if(v===VIEW)b.style.background="#4a5a7a";
-    b.onclick=()=>{VIEW=v;loadKeys()};f.appendChild(b)});
-  const s=el("input");s.type="text";s.placeholder="search source text";s.id="q";
-  s.oninput=()=>renderKeys();f.appendChild(s);
+  const f=document.getElementById("filter");
+  if(filterBuilt){updateFilterCounts();return;}
+  f.textContent="";
+  FILTERS.forEach(function(fv){
+    const b=el("button",null,fv[1]);b.setAttribute("data-view",fv[0]);
+    // Client-side: a view change is a re-render over the ALREADY-LOADED set,
+    // never a refetch of all 1,384 keys.
+    b.onclick=function(){VIEW=fv[0];renderKeys();updateFilterCounts();};
+    f.appendChild(b);
+  });
+  const s=el("input");s.type="text";s.id="q";
+  s.placeholder="search English, translation or key id";s.style.minWidth="280px";
+  // Debounced: renderKeys() rebuilds up to 200 tag-locked editors, far too
+  // much work to redo on every keystroke (the input felt frozen).
+  s.oninput=function(){if(searchTimer)clearTimeout(searchTimer);
+    searchTimer=setTimeout(function(){searchTimer=null;renderKeys();updateFilterCounts();},150);};
+  f.appendChild(s);
+  filterBuilt=true;
+}
+// The counts are what make the four buttons distinguishable. With the render
+// cap at 200, All / Untranslated / Has-pending showed the same first 200 rows
+// and looked identical even when the underlying sets differed.
+// NOTE (data reality, not a bug): the bundled es/ru catalogue was seeded as
+// PENDING PROPOSALS, not as live entries, so nearly every key legitimately has
+// no target and "Untranslated" really is ~everything. The filters are
+// reporting the truth; the counts make that visible instead of confusing.
+// Counts are computed over the CURRENT SEARCH, so they narrow as you type.
+function updateFilterCounts(){
+  const f=document.getElementById("filter");if(!f)return;
+  const q=currentQuery(),counts={};
+  FILTERS.forEach(function(fv){counts[fv[0]]=0;});
+  KEYS.forEach(function(k){
+    if(!matchesQuery(k,q))return;
+    FILTERS.forEach(function(fv){if(matchesView(k,fv[0]))counts[fv[0]]++;});
+  });
+  Array.prototype.forEach.call(f.querySelectorAll("button"),function(b){
+    const v=b.getAttribute("data-view");if(!v)return;
+    const hit=FILTERS.filter(function(fv){return fv[0]===v;})[0];
+    b.textContent=(hit?hit[1]:v)+" ("+counts[v]+")";
+    b.style.background=(v===VIEW)?"#4a5a7a":"";
+  });
 }
 let KEYS=[],KEYS_LANG=null,LOAD_GEN=0;
 async function loadKeys(){
@@ -9758,27 +10415,48 @@ async function loadKeys(){
   // Generation + captured-language discipline (wave-2 find 12): a stale
   // slower response must never overwrite a newer language's rows, and every
   // proposal submits the language its ROW came from, not the mutable global.
-  const gen=++LOAD_GEN,lang=LANG;
-  const d=await api("/keys?lang="+lang);
-  if(gen!==LOAD_GEN)return;
-  KEYS=d.keys;KEYS_LANG=d.language;renderKeys();
+  const gen=++LOAD_GEN,lang=LANG,lgen=LANG_GEN;
+  setStatus("Loading keys…",false);
+  try{
+    const d=await api("/keys?lang="+encodeURIComponent(lang));
+    // Drop on EITHER staleness: a newer load of this same language (LOAD_GEN)
+    // or a newer language selection entirely (LANG_GEN, F1).
+    if(gen!==LOAD_GEN||lgen!==LANG_GEN)return;
+    KEYS=d.keys;KEYS_LANG=d.language;setStatus("",false);
+    renderKeys();updateFilterCounts();
+  }catch(e){
+    if(gen!==LOAD_GEN||lgen!==LANG_GEN)return;
+    // Fail LOUDLY, and DROP the old rows. With no catch at all the promise
+    // rejected silently and the previous language's content stayed on screen —
+    // indistinguishable from "the filters do nothing", and actively misleading
+    // after a language switch.
+    KEYS=[];KEYS_LANG=null;renderKeys();updateFilterCounts();
+    setStatus("Could not load keys. "+errText(e),true);
+  }
 }
 function renderKeys(){
   const list=document.getElementById("list");list.textContent="";
-  const q=(document.getElementById("q")||{value:""}).value.toLowerCase();
-  let shown=0;
+  // The whole list is rebuilt here, so every previously registered Propose
+  // button is now detached — the gate registry is rebuilt with it.
+  SUBMIT_GATES.length=0;
+  const q=currentQuery();
+  let matched=0,shown=0;
   KEYS.forEach(k=>{
-    if(VIEW==="missing"&&k.target)return;
-    if(VIEW==="stale"&&!k.stale)return;
-    if(VIEW==="pending"&&!k.pending)return;
-    if(q&&k.source.toLowerCase().indexOf(q)<0)return;
-    if(++shown>200)return;
+    if(!matchesView(k,VIEW))return;
+    if(!matchesQuery(k,q))return;
+    matched++;
+    if(shown>=RENDER_CAP)return;
+    shown++;
     const box=el("div","key");
     const head=el("div",null,k.namespace+" · "+k.key_id);head.className="muted";
     if(k.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive"));
     if(k.state)head.appendChild(el("span","badge b-"+k.state,k.state));
     if(k.stale)head.appendChild(el("span","badge b-stale","stale"));
-    if(k.pending)head.appendChild(el("span","badge b-pending",k.pending+" pending"));
+    // Kept as a reference so a submit can update it in place (F8) instead of
+    // reloading the whole key list and destroying every open editor.
+    let pendBadge=null;
+    if(k.pending){pendBadge=el("span","badge b-pending",k.pending+" pending");
+      head.appendChild(pendBadge);}
     box.appendChild(head);
     box.appendChild(el("div","src",k.source));
     // Only on the untagged path: beside the chips this would show a STALE
@@ -9793,15 +10471,40 @@ function renderKeys(){
     const send=el("button",null,"Propose");
     const msg=el("div","err","");
     const rowLang=KEYS_LANG;   // find 12: bind the row's language, not the global
+    const rowGen=LANG_GEN;     // F1: and the switch generation it was drawn for
+    SUBMIT_GATES.push({btn:send,gen:rowGen,lang:rowLang});
     send.onclick=async()=>{msg.textContent="";
+      // Belt and braces behind the disabled state (F1). The generation is the
+      // real gate; this refuses a row that outlived its language even if it
+      // somehow stayed clickable — submitting the typed text under the OLD
+      // language_code writes wrong-language data that the target language's
+      // validator has no way to reject (Latin text passes the ru rules).
+      if(rowGen!==LANG_GEN||rowLang!==LANG||LANG_LOADED_GEN!==LANG_GEN){
+        msg.className="err";
+        msg.textContent="The language selection changed while this row was on screen - nothing was submitted. Wait for the list to finish loading and try again.";
+        return}
       if(!document.getElementById("assent").checked){
         msg.className="err";msg.textContent="Tick the contribution-licence box above first.";return}
       const edErr=ed.error();
       if(edErr){msg.className="err";msg.textContent=edErr;return}
       try{await api("/proposals",{method:"POST",body:JSON.stringify(
         {key_id:k.key_id,language_code:rowLang,target:ed.value(),license_assent:true})});
-        msg.className="muted";msg.textContent="Proposed — awaiting review.";loadQueue()}
-      catch(e){msg.className="err";msg.textContent=e.message}};
+        msg.className="muted";msg.textContent="Proposed — awaiting review.";
+        // F8: the Has-pending filter AND its count both read KEYS[].pending,
+        // which /keys computed before this proposal existed — so the key kept
+        // reporting zero pending until a full reload. Reloading the key list
+        // here would throw away every open editor on the page, so bump this
+        // key in place instead: the filter, its count and the rendered badge
+        // are then all derived from the same mutated object and cannot
+        // disagree. (A row can only be on screen under a filter it still
+        // matches after the bump: "Has pending" only shows keys that already
+        // had one, and the other three filters ignore pending entirely.)
+        k.pending=(k.pending||0)+1;
+        if(!pendBadge){pendBadge=el("span","badge b-pending","");head.appendChild(pendBadge);}
+        pendBadge.textContent=k.pending+" pending";
+        updateFilterCounts();
+        loadQueue()}
+      catch(e){msg.className="err";msg.textContent=errText(e)}};
     box.appendChild(send);
     // Audit trail (Sid, Aug 3): who proposed, the ORIGINAL English, the
     // proposal itself, and its status — on demand, so the list stays fast.
@@ -9846,19 +10549,56 @@ function renderKeys(){
     box.appendChild(hbtn);
     box.appendChild(msg);box.appendChild(hbox);list.appendChild(box);
   });
-  if(!shown)list.appendChild(el("div","muted","Nothing matches this filter."));
+  // Arm (or leave disabled) every Propose button just registered. During a
+  // language switch LANG_LOADED_GEN is still behind, so rows render inert and
+  // only selectLang's final paint enables them.
+  paintSubmitGates();
+  if(!matched){list.appendChild(el("div","muted","Nothing matches this filter."));return;}
+  // SAY when the list is truncated. The silent 200-row cap is why three of the
+  // four filters looked identical: they all rendered the same first 200 rows.
+  if(matched>shown)list.insertBefore(el("div","muted",
+    "Showing the first "+shown+" of "+matched+" matches — narrow the search to see the rest."),
+    list.firstChild);
 }
-let QUEUE_GEN=0;
+let QUEUE_GEN=0,QUEUE_OFFSET=0;
+const QUEUE_PAGE=25;
 async function loadQueue(){
   // Same generation + captured-language discipline as loadKeys (round-3
   // find N8): a slow stale-language response must never render as the
   // currently selected queue, and every row is labelled with its language.
-  const gen=++QUEUE_GEN,lang=LANG;
-  const d=await api("/proposals?lang="+lang+"&status=pending");
-  if(gen!==QUEUE_GEN)return;
+  const gen=++QUEUE_GEN,lang=LANG,lgen=LANG_GEN;
+  try{
+    const d=await api("/proposals?lang="+encodeURIComponent(lang)+"&status=pending"+
+      "&offset="+QUEUE_OFFSET+"&limit="+QUEUE_PAGE);
+    // Stale on either axis: a newer queue load, or a newer language (F1).
+    if(gen!==QUEUE_GEN||lgen!==LANG_GEN)return;
+    renderQueue(d);
+  }catch(e){
+    if(gen!==QUEUE_GEN||lgen!==LANG_GEN)return;
+    const qd=document.getElementById("queue");qd.textContent="";
+    qd.appendChild(el("div","err","Could not load the review queue. "+errText(e)));
+  }
+}
+function renderQueue(d){
   const qd=document.getElementById("queue");qd.textContent="";
-  if(!d.proposals.length)return;
-  qd.appendChild(el("h1",null,"Review queue — "+d.language.toUpperCase()+" ("+d.proposals.length+")"));
+  const total=d.total||0;
+  setViewCount("queue",total);
+  // "N pending" is the SERVER'S COUNT. Printing d.proposals.length is why this
+  // read exactly 200 for both languages forever: the query ended in LIMIT 200
+  // and 1,234 rows were waiting behind it.
+  qd.appendChild(el("h1",null,"Review queue — "+d.language.toUpperCase()+" ("+total+" pending)"));
+  if(!total){qd.appendChild(el("div","muted","Nothing pending in this language."));return;}
+  // Approving the last row of the last page leaves the offset past the end.
+  // Recompute to the final page; the new offset is strictly smaller, so this
+  // cannot loop.
+  if(!d.proposals.length&&d.offset>0){
+    const back=Math.max(0,(Math.ceil(total/d.limit)-1)*d.limit);
+    if(back!==d.offset){QUEUE_OFFSET=back;loadQueue();return;}
+  }
+  if(d.proposals.length)qd.appendChild(el("div","muted",
+    "Showing "+(d.offset+1)+"–"+(d.offset+d.proposals.length)+" of "+total));
+  const go=function(o){QUEUE_OFFSET=o;loadQueue();};
+  qd.appendChild(pager(d.offset,d.limit,total,go));
   d.proposals.forEach(p=>{
     const box=el("div","key");
     const head=el("div","muted","["+d.language.toUpperCase()+"] #"+p.id+" by "+p.proposer+(p.sensitive?" ":""));
@@ -9870,12 +10610,100 @@ async function loadQueue(){
     const msg=el("div","err","");
     const act=(a)=>async()=>{msg.textContent="";
       try{await api("/review",{method:"POST",body:JSON.stringify(
-        {proposal_id:p.id,action:a})});loadQueue();loadKeys()}
-      catch(e){msg.textContent=e.message}};
+        {proposal_id:p.id,action:a})});
+        // Refresh the Approved list too: an approval leaving the queue with
+        // nothing visibly replacing it is exactly the "it disappeared without
+        // a trace" report.
+        await loadQueue();await loadApproved();await loadKeys();}
+      catch(e){msg.textContent=errText(e)}};
     const ap=el("button",null,"Approve");ap.onclick=act("approve");
     const rj=el("button",null,"Reject");rj.onclick=act("reject");
     box.appendChild(ap);box.appendChild(rj);box.appendChild(msg);qd.appendChild(box);
   });
+  qd.appendChild(pager(d.offset,d.limit,total,go));
+}
+// ── Approved (live) translations ─────────────────────────────────────────
+// Sid, Aug 3: approving a Russian proposal "disappeared without a trace". The
+// approval worked — there was simply no view that showed live entries. Same
+// generation guard, same textContent-only rendering (proposer and approver
+// display names are hostile input).
+let APPROVED_GEN=0,APPROVED_OFFSET=0;
+const APPROVED_PAGE=25;
+async function loadApproved(){
+  const gen=++APPROVED_GEN,lang=LANG,lgen=LANG_GEN;
+  try{
+    const d=await api("/approved?lang="+encodeURIComponent(lang)+
+      "&offset="+APPROVED_OFFSET+"&limit="+APPROVED_PAGE);
+    // Stale on either axis: a newer approved load, or a newer language (F1).
+    if(gen!==APPROVED_GEN||lgen!==LANG_GEN)return;
+    renderApproved(d);
+  }catch(e){
+    if(gen!==APPROVED_GEN||lgen!==LANG_GEN)return;
+    const ad=document.getElementById("approved");ad.textContent="";
+    ad.appendChild(el("div","err","Could not load approved translations. "+errText(e)));
+  }
+}
+function renderApproved(d){
+  const ad=document.getElementById("approved");ad.textContent="";
+  const total=d.total||0;
+  setViewCount("approved",total);
+  ad.appendChild(el("h1",null,"Approved translations — "+d.language.toUpperCase()+" ("+total+")"));
+  if(!total){ad.appendChild(el("div","muted",
+    "Nothing approved in this language yet. Approving a proposal in the review "+
+    "queue puts it here, live for every player of that language."));return;}
+  if(!d.entries.length&&d.offset>0){
+    const back=Math.max(0,(Math.ceil(total/d.limit)-1)*d.limit);
+    if(back!==d.offset){APPROVED_OFFSET=back;loadApproved();return;}
+  }
+  if(d.entries.length)ad.appendChild(el("div","muted",
+    "Showing "+(d.offset+1)+"–"+(d.offset+d.entries.length)+" of "+total));
+  const go=function(o){APPROVED_OFFSET=o;loadApproved();};
+  ad.appendChild(pager(d.offset,d.limit,total,go));
+  d.entries.forEach(function(e){
+    const box=el("div","key");
+    const head=el("div","muted",e.namespace+" - "+e.key_id);
+    if(e.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive"));
+    if(e.stale)head.appendChild(el("span","badge b-stale","stale"));
+    if(e.self_approved)head.appendChild(el("span","badge b-machine","self-approved"));
+    box.appendChild(head);
+    box.appendChild(el("div","h-src",e.source));
+    box.appendChild(el("div","tgt",e.target||"(empty)"));
+    // approved_at IS i18n_entries.updated_at — there is no approved_at column.
+    let who="Approved by "+(e.approved_by_name||e.approved_by||"unknown");
+    if(e.approved_at)who+=" on "+e.approved_at.slice(0,16).replace("T"," ");
+    box.appendChild(el("div","who",who));
+    // Legitimately absent for entries written before the proposal flow, and
+    // for either identity after an account deletion tombstones the column.
+    let prop=e.proposer?("Proposed by "+(e.proposer_name||e.proposer)):
+      "Proposed by: no approved proposal on record for this entry";
+    if(e.proposed_at)prop+=" on "+e.proposed_at.slice(0,16).replace("T"," ");
+    box.appendChild(el("div","who",prop));
+    if(e.stale)box.appendChild(el("div","h-flag",
+      "STALE — the English changed after this was approved"));
+    // Reset is ADMIN-ONLY and the server enforces that independently; hiding
+    // the button is only so moderators aren't offered a 403.
+    if(IS_ADMIN){
+      const msg=el("div","err","");
+      const rs=el("button",null,"Reset to bundled");
+      rs.onclick=async function(){
+        // NOTE: no backslash escapes anywhere in this blob — it is a plain
+        // (non-raw) Python triple-quoted string, so Python would consume them
+        // before the browser ever sees the JS.
+        if(!window.confirm("Delete the live "+d.language.toUpperCase()+" translation for "+
+          e.key_id+"? Players fall back to the bundled catalogue (machine draft "+
+          "or English) until something new is approved."))return;
+        msg.className="err";msg.textContent="";
+        try{await api("/revert",{method:"POST",body:JSON.stringify(
+          {key_id:e.key_id,language_code:d.language})});
+          msg.className="muted";msg.textContent="Reset — reloading.";
+          await loadApproved();await loadKeys();}
+        catch(err){msg.className="err";msg.textContent=errText(err);}
+      };
+      box.appendChild(rs);box.appendChild(msg);
+    }
+    ad.appendChild(box);
+  });
+  ad.appendChild(pager(d.offset,d.limit,total,go));
 }
 boot();
 </script></body></html>"""

@@ -829,6 +829,13 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogError($"[FFA] HandlePlayerDied: {ex.Message}"); }
         }
 
+        /// <summary>Winner id meaning "nobody survived, because the last
+        /// players alive killed each other". Distinct from -1, which is the
+        /// generic no-winner value every other path uses (a leaver ending the
+        /// round, an unresolved state). Both are < 0, so every award gate keeps
+        /// treating them identically — only the announcement differs.</summary>
+        private const int WINNER_DOUBLE_KO = -2;
+
         private static IEnumerator ResolvePointEndOfFrame(GM_ArmsRace gm)
         {
             yield return new WaitForEndOfFrame();
@@ -848,7 +855,21 @@ namespace CompetitiveRounds
                     pointLatched = false;
                     return;
                 }
-                int winnerTeam = alive.Count == 1 ? alive[0].TeamID : -1;
+                /* The winner id doubles as the REASON there is no winner
+                  * (r4 finds 8+9). This method is only reached from the death
+                  * path, so zero survivors here really is a mutual kill —
+                  * whereas CheckRoundAfterLeave also resolves from the alive
+                  * count and can legitimately reach zero because the last
+                  * living player quit.
+                  *
+                  * Putting that on the wire rather than in a local static fixes
+                  * both halves at once: a leaver-ended round can no longer
+                  * inherit the flag, and every client (not just the master)
+                  * learns the reason, because they all read the same RPC.
+                  * WINNER_DOUBLE_KO is safe in a mixed lobby — an older
+                  * client's `winnerTeam >= 0` award gate rejects it exactly as
+                  * it rejects -1, so it awards nothing either way. */
+                int winnerTeam = alive.Count == 1 ? alive[0].TeamID : WINNER_DOUBLE_KO;
                 // Map-scale count rides ahead of the round RPC: Photon orders
                 // a sender's operations, so every client holds the fresh count
                 // before its transition loads the next map (FfaMapScale).
@@ -894,6 +915,38 @@ namespace CompetitiveRounds
                 // reporter's copy ships.
                 if (timelineEvents.Count < 400)
                     timelineEvents.Add($"{winnerTeam}{(roundOver ? "R" : "")}{(gameOver ? "G" : "")}");
+            }
+            else
+            {
+                /* Nobody survived the round — the last players alive killed each
+                 * other inside one resolve window, so there is no winner to
+                 * award (ResolvePointNow yields -1 when AlivePlayers() is
+                 * empty). That is not a bug in the accounting, but it WAS
+                 * completely silent: the round simply ended, no score moved,
+                 * and the next map loaded. Sid hit it at 2 rounds + 1 point
+                 * against NotNic and could not tell what had happened, or
+                 * whether the other client had seen the same thing.
+                 *
+                 * It does see the same thing: the master decides the winner
+                 * once in ResolvePointNow and broadcasts it with
+                 * RpcTarget.All, so every client applies the identical value.
+                 * There is no desync here — only a missing explanation.
+                 *
+                 * Announce it. Whether a double knockout SHOULD award nothing,
+                 * award both, or replay the round is a game-design call that
+                 * is Sid's, not mine; this only makes the current rule
+                 * legible (learning #250: the axis is visible-and-announced
+                 * versus silent). */
+                if (winnerTeam == WINNER_DOUBLE_KO)
+                {
+                    try
+                    {
+                        CompetitiveUI.ShowNotification(
+                            I18n.Tr("Double KO - nobody scored this round."),
+                            new Color(1f, 0.85f, 0.5f), 4f);
+                    }
+                    catch { }
+                }
             }
             Plugin.Log.LogInfo($"[FFA] point over: winner team={winnerTeam} " +
                                $"roundOver={roundOver} gameOver={gameOver} scores=[{ScoreLine()}]");

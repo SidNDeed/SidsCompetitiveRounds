@@ -99,6 +99,12 @@ namespace CompetitiveRounds
         private const int RT_W = 380;
         private const int RT_H = 600;
 
+        // Opaque backing composited under every capture AFTER the #139 probe
+        // (CompositeOntoOpaqueBacking). Deliberately the same colour as
+        // NativeUI's card-preview panel so the popup shows no seam around the
+        // image, and it reads as a dark plate at the IMGUI draw sites.
+        private static readonly Color BACKING_COLOR = new Color(0.10f, 0.12f, 0.16f, 1f);
+
         // Park position for the clone + camera. DELIBERATELY distinct from
         // the tier export's (50000,50000): the tier camera renders with
         // cullingMask ~0, so a concurrent snapshot clone at the same spot
@@ -778,6 +784,13 @@ namespace CompetitiveRounds
                     yield break;
                 }
 
+                // Self-contained image: re-render the SAME settled clone over
+                // an opaque backing and force alpha to 255. Runs AFTER the
+                // #139 probe on purpose (see the method comment) and after the
+                // discard guards above so a snapshot we are about to throw
+                // away never pays for it.
+                bool opaque = CompositeOntoOpaqueBacking(cam, rt, tex);
+
                 tex.filterMode = FilterMode.Bilinear;
                 tex.hideFlags = HideFlags.HideAndDontSave;
                 var sprite = Sprite.Create(tex,
@@ -816,7 +829,7 @@ namespace CompetitiveRounds
                 _cacheOrder.Add(key);
                 keepTex = true;
                 _lastOutcome = Outcome.Success;
-                Plugin.Log?.LogInfo($"[CARDSNAP] captured '{cardName}' ({RT_W}x{RT_H}, lit {litFraction:P1}) in {(Time.realtimeSinceStartup - t0) * 1000f:F0}ms — {_cache.Count} cached");
+                Plugin.Log?.LogInfo($"[CARDSNAP] captured '{cardName}' ({RT_W}x{RT_H}, lit {litFraction:P1}, opaque={opaque}) in {(Time.realtimeSinceStartup - t0) * 1000f:F0}ms — {_cache.Count} cached");
             }
             finally
             {
@@ -853,12 +866,30 @@ namespace CompetitiveRounds
         {
             string reqKey = CardImageLoader.NormalizeKey(requested);
             string canonKey = KeyFor(requested);
+            // Bug #155: the canonical name is DB-facing and CORRECTS ROUNDS'
+            // typos, so for Leech/Ricochet/Poison it matches no live prefab at
+            // all — those cards logged "no CardInfo prefab matches" on every
+            // request and permanently served the PNG. Walk the alias map
+            // backwards and accept any raw in-game spelling too.
+            var rawKeys = new List<string> { reqKey, canonKey };
+            try
+            {
+                foreach (var raw in CardRarityLookup.RawNamesFor(
+                             CardRarityLookup.GetCanonicalName(requested) ?? requested))
+                {
+                    string k = CardImageLoader.NormalizeKey(raw);
+                    if (!string.IsNullOrEmpty(k) && !rawKeys.Contains(k)) rawKeys.Add(k);
+                }
+            }
+            catch { }
 
             bool Matches(string s)
             {
                 if (string.IsNullOrEmpty(s)) return false;
                 string k = CardImageLoader.NormalizeKey(s);
-                return k == reqKey || k == canonKey;
+                for (int i = 0; i < rawKeys.Count; i++)
+                    if (k == rawKeys[i]) return true;
+                return false;
             }
 
             try
@@ -1022,6 +1053,64 @@ namespace CompetitiveRounds
             catch
             {
                 return true;
+            }
+        }
+
+        /// <summary>Re-renders the SAME settled clone over an OPAQUE backing
+        /// and forces every captured pixel to alpha 255, so the cached texture
+        /// is self-contained at EVERY draw site. Returns false (and leaves the
+        /// transparent capture in place — exact previous behavior) on any
+        /// failure.
+        ///
+        /// Why: uGUI/TMP render with `Blend SrcAlpha OneMinusSrcAlpha`, and
+        /// that blend applies to the ALPHA channel too — over a
+        /// transparent-cleared RT a layer of coverage `a` lands as `a*a`, so
+        /// every semi-transparent part of the card (the theme-tinted front
+        /// Images CardVisuals.ChangeSelected assigns, the soft card art, TMP's
+        /// anti-aliased glyph edges) captures at far less coverage than it has
+        /// in game. NativeUI's card popup hides that completely — its Image
+        /// sits on a 0.97-alpha panel — but the hold-Tab overlay composites
+        /// the same texture straight onto the live map, which is the "really
+        /// faint and hard to read" report. Clearing to an opaque colour makes
+        /// the RGB channel the exact straight-alpha composite (RGB is already
+        /// correct premultiplied coverage; only the alpha channel is squared,
+        /// hence the forced 255).
+        ///
+        /// Ordering is load-bearing: this is a SECOND render, run only after
+        /// ProbeLitFraction has already judged the transparent-backed capture.
+        /// The #139 probe therefore keeps its exact current semantics (a blank
+        /// render still reads 0% lit and is rejected) instead of passing
+        /// because a fill colour was painted into every pixel.</summary>
+        private static bool CompositeOntoOpaqueBacking(Camera cam, RenderTexture rt, Texture2D tex)
+        {
+            try
+            {
+                if (cam == null || rt == null || tex == null) return false;
+                cam.backgroundColor = BACKING_COLOR;
+                cam.Render();
+                var prevActive = RenderTexture.active;
+                try
+                {
+                    RenderTexture.active = rt;
+                    tex.ReadPixels(new Rect(0, 0, RT_W, RT_H), 0, 0);
+                }
+                finally
+                {
+                    RenderTexture.active = prevActive;
+                }
+                var px = tex.GetPixels32();
+                if (px != null && px.Length > 0)
+                {
+                    for (int i = 0; i < px.Length; i++) px[i].a = 255;
+                    tex.SetPixels32(px);
+                }
+                tex.Apply();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogWarning("[CARDSNAP] opaque composite failed: " + ex.Message + " — caching the transparent capture (previous behavior)");
+                return false;
             }
         }
 

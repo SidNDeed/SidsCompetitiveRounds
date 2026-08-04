@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.35.5";   // July 31: FFA queue strand root-caused (queue leases), Leave All Queues, shield-charge/block rematch fix, chromatic aberration toggle fix, screen shake Full/Reduced/Off
+        public const string ModVersion = "1.36.0";   // Aug 4: Spanish + Russian throughout, translation portal, native card rendering, merged time-ordered chat, FFA kills tie-break, date-order setting, thicker menu font
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -98,7 +98,10 @@ namespace CompetitiveRounds
         // Gravity SDF font renders them cleanly regardless of OS locale.
         internal static ConfigEntry<string> TournamentDateFormat;
         internal static ConfigEntry<string> UiDateFormat;       // MDY | DMY | YMD (Sid Aug-3 item 9)
+        internal static ConfigEntry<bool> UiHeavyFont;          // bug #159: thicker SCR menu text
+        internal static ConfigEntry<float> UiFontWeight;        // how much thicker (SDF weight delta)
         internal static ConfigEntry<string> ChatDisplayChannel; // all | global | es | ru (item 5)
+        internal static ConfigEntry<string> ChatSendChannel;    // "" = follow language (item 13)
         // Pipe-delimited list of muted display names — local mute, doesn't leave the client.
         // Mutated via /mute and /unmute commands typed in the F5 chat input.
         internal static ConfigEntry<string> MutedChatNames;
@@ -463,11 +466,49 @@ namespace CompetitiveRounds
                 true,
                 "Null-guard StunPlayer.Go so a destroyed parent Player reference doesn't NRE every frame. Pure error suppression, no visual change."
             );
+            // DEFAULT OFF as of v1.36.0. Projectiles are POOLED: the pool hands
+            // back the same managed object with the same instance id and no
+            // observable marker for "this is a new lifetime", so no guard keyed
+            // on identity or elapsed time can reliably tell a re-fired bullet
+            // from a still-flying one. Destroying one before its pool wrapper
+            // has initialised makes BulletPoolInstancer.OnDestroy throw inside
+            // PrefabPool.Release and corrupts the pool for the whole session
+            // (learning #94) — a far worse outcome than the modest Photon
+            // bandwidth this saves. Left available for anyone who wants it.
             PerfDespawnOffscreenBullets = Config.Bind(
                 "Performance", "DespawnOffscreenBullets",
-                true,
-                "Host of each projectile despawns it once it flies outside the camera viewport (0.5s throttle). Without this, missed bullets keep ticking physics + RPC handlers indefinitely. Slight bandwidth savings, no gameplay difference."
+                false,
+                "Host of each projectile despawns it once it flies outside the camera viewport (0.5s throttle). Saves a little bandwidth on long rounds. OFF by default: these projectiles are pooled, and destroying one before the engine has finished setting it up can corrupt the bullet pool for the rest of the session."
             );
+            /* ONE-SHOT MIGRATION (learning #190). The default above only
+             * applies to installs that have never written this key; every
+             * upgrade from 1.35.5 or earlier still has `true` on disk, which is
+             * exactly the population the new default exists to protect. Rewrite
+             * the stored value ONCE, and only when it is still the old default
+             * — a player who deliberately turns it back on afterwards keeps it,
+             * because the flag below is already set by then. */
+            var _despawnMigrated = Config.Bind(
+                "Internal", "DespawnOffscreenBulletsMigratedV136", false,
+                "Set automatically once the unsafe-by-default off-screen bullet despawn has been turned off for an upgrading install. Do not edit.");
+            if (!_despawnMigrated.Value)
+            {
+                /* PAYLOAD FIRST, COMPLETION FLAG LAST (Codex r6 find 2).
+                 * BepInEx persists on every Value assignment, so setting the
+                 * flag first meant a crash or a failed save between the two
+                 * writes left "migrated" recorded with the unsafe value still
+                 * on disk — and every future launch would then skip the rewrite
+                 * forever. Ordered this way the worst case is doing the same
+                 * safe rewrite twice, which is a no-op. */
+                if (PerfDespawnOffscreenBullets.Value)
+                {
+                    PerfDespawnOffscreenBullets.Value = false;
+                    Log.LogInfo("[CONFIG] DespawnOffscreenBullets turned OFF for this upgrade "
+                              + "(pooled projectiles: destroying one before its pool wrapper is "
+                              + "ready can corrupt the bullet pool for the session). Re-enable it "
+                              + "in Settings if you want it back.");
+                }
+                _despawnMigrated.Value = true;
+            }
             PerfSwallowHitSoundNREs = Config.Bind(
                 "Performance", "SwallowHitSoundNREs",
                 true,
@@ -523,6 +564,19 @@ namespace CompetitiveRounds
                 "MDY",
                 "Order for dates shown in the mod: MDY (8/23/2026, US default), DMY (23/8/2026), or YMD (2026-08-23). Short dates follow the same order."
             );
+            // Bug #159: Sid asked for the game's own font at the Russian
+            // fallback face's weight. Defaults ON at his request ("it looks
+            // better and should be the default"); the toggle in Settings
+            // restores the original thickness. Affects only the mod's own
+            // labels — ROUNDS' UI is untouched.
+            UiHeavyFont = Config.Bind(
+                "UI", "HeavyMenuFont", true,
+                "Render the mod's menu text at a heavier weight (the game's own font, thickened). Turn off for the original thickness."
+            );
+            UiFontWeight = Config.Bind(
+                "UI", "MenuFontWeightBoost", 0.30f,
+                "How much heavier, as an SDF weight delta. 0 = unchanged, 0.5 = maximum. Only used when HeavyMenuFont is on."
+            );
 
             // Sid Aug-3 item 5: which chat channel the Home tab shows.
             // "all" = merged view of every subscribed channel (the historical
@@ -533,6 +587,21 @@ namespace CompetitiveRounds
                 "UI", "ChatDisplayChannel",
                 "all",
                 "Home-tab chat filter: all (merged), global, es, or ru."
+            );
+
+            // Sid Aug-3 item 13: the TYPING target is now its OWN setting,
+            // separate from the display filter above. Empty = follow the mod
+            // language (Spanish -> es, Russian -> ru, everything else ->
+            // global/English). A concrete value here is an explicit player
+            // pick made from the Home tab or by pressing Shift while typing.
+            // "all" is deliberately not a legal value — you cannot type into
+            // the merged view. NEW key (#190: changing ChatDisplayChannel's
+            // meaning would have migrated nobody, since its value is already
+            // written to every existing install's config).
+            ChatSendChannel = Config.Bind(
+                "UI", "ChatSendChannel",
+                "",
+                "Chat channel you type into: empty (follow the mod language), global, es, or ru."
             );
 
             MutedChatNames = Config.Bind(
@@ -633,7 +702,10 @@ namespace CompetitiveRounds
                 Log.LogInfo("Created persistent GameObject with DontDestroyOnLoad");
             }
 
-            Log.LogInfo($"{ModName} v{ModVersion} loaded!");
+            // Referencing the marker is what puts it in the compiled #US heap
+            // (an unreferenced const is folded away and would be unscannable),
+            // and it also tells a bug report which variant the player is on.
+            Log.LogInfo($"{ModName} v{ModVersion} loaded! [{ApiClient.BuildVariantMarker}]");
 
             // Create a separate tiny object for queue auto-join
             var queueObj = new GameObject("CR_QueueJoiner");
@@ -4521,6 +4593,47 @@ namespace CompetitiveRounds
             if (canonical.TryGetValue(name, out string canon))
                 return ToTitleCase(canon);
             return name;
+        }
+
+        /// <summary>Every RAW in-game spelling that canonicalizes to
+        /// <paramref name="canonicalName"/>, including the canonical itself.
+        ///
+        /// GetCanonicalName is DB-facing and deliberately CORRECTS ROUNDS'
+        /// own typos ("Leach" -> "Leech", "Riccochet" -> "Ricochet",
+        /// "Poison bullets" -> "Poison"), so for exactly those cards the
+        /// canonical name matches NOTHING in the game's CardInfo registry.
+        /// Anything resolving a live prefab from a stored name (the native
+        /// card snapshot, the card-stats cell) has to walk the alias map
+        /// BACKWARDS — that is bug #155's "no CardInfo prefab matches
+        /// 'Ricochet'" and the reason those cards always served the PNG.
+        ///
+        /// Built once, lazily; hardAliases is a readonly literal so the
+        /// reverse index can never go stale.</summary>
+        private static Dictionary<string, List<string>> _reverseAliases;
+        public static List<string> RawNamesFor(string canonicalName)
+        {
+            var outp = new List<string>();
+            if (string.IsNullOrEmpty(canonicalName)) return outp;
+            outp.Add(canonicalName);
+            try
+            {
+                if (_reverseAliases == null)
+                {
+                    var rev = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var kv in hardAliases)
+                    {
+                        if (!rev.TryGetValue(kv.Value, out var l))
+                            rev[kv.Value] = l = new List<string>();
+                        l.Add(kv.Key);
+                    }
+                    _reverseAliases = rev;
+                }
+                if (_reverseAliases.TryGetValue(canonicalName, out var raws))
+                    foreach (var r in raws)
+                        if (!outp.Contains(r)) outp.Add(r);
+            }
+            catch { }
+            return outp;
         }
 
         private static string ToTitleCase(string input)
