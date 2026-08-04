@@ -42,9 +42,12 @@ namespace CompetitiveRounds
         public static Action<string> OnMessage;
 
         // ── §2.6 chat split ──────────────────────────────────────
-        // Subscribe to a SET (global + the locale channel), send to ONE.
-        // SendChannel is UI-owned (Tab cycles it in the chat box); it self-
-        // collapses to global whenever the locale channel disappears.
+        // Subscribe to a SET (global + the locale channel + one optional
+        // extra viewed channel), send to ONE. SendChannel is UI-owned (Tab
+        // cycles it in the chat box; the Home dropdown sets it directly) and
+        // may be ANY allowed channel regardless of locale — the server
+        // relays sends to any allowed channel. It follows the language by
+        // default (DefaultSendChannel) until the player picks explicitly.
 
         /// <summary>The language channel this locale is entitled to, or null
         /// (en/pseudo have only global).</summary>
@@ -57,24 +60,125 @@ namespace CompetitiveRounds
             }
         }
 
-        private static string sendChannel = "global";
+        /// <summary>True for every channel the server accepts as a send target
+        /// (CHAT_CHANNELS_ALLOWED). The server relays a send to any of these
+        /// regardless of the sender's locale.</summary>
+        private static bool IsAllowedChannel(string c)
+            => c == "global" || c == "es" || c == "ru";
+
+        /// <summary>Restart-coherent send default (R2-4a): an explicitly
+        /// persisted language pick (item 5) wins, so a player who chose a
+        /// display channel both VIEWS and TYPES into it after a restart;
+        /// else follow the language; else global. Safe with the picker's
+        /// "all" branch: it persists "all" BEFORE re-deriving, so reverting
+        /// to the merged view falls through to the locale default.</summary>
+        public static string DefaultSendChannel()
+            => PersistedSendDefault() ?? LocaleChannel ?? "global";
+
+        /// <summary>Send-default variant of the persisted pick: unlike
+        /// PersistedDisplayChannel it ALSO honors an explicit "global" pick,
+        /// so an es/ru-locale player who chose Global keeps typing into
+        /// Global after a restart (view and type stay coherent). "all" and
+        /// unset fall through to the locale default.</summary>
+        private static string PersistedSendDefault()
+        {
+            try
+            {
+                string v = Plugin.ChatDisplayChannel != null ? Plugin.ChatDisplayChannel.Value : null;
+                return (v == "es" || v == "ru" || v == "global") ? v : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>The persisted display-channel pick when it names a
+        /// language channel ("es"/"ru"), else null ("all"/"global"/unset
+        /// narrow nothing). Null-guarded: the config may not be bound yet
+        /// in some init orders. Unlike ExtraViewChannel this survives
+        /// restarts, so it is the term that carries an explicit item-5
+        /// pick across sessions — for BOTH the subscription set and the
+        /// send default.</summary>
+        private static string PersistedDisplayChannel()
+        {
+            try
+            {
+                string v = Plugin.ChatDisplayChannel != null ? Plugin.ChatDisplayChannel.Value : null;
+                return (v == "es" || v == "ru") ? v : null;
+            }
+            catch { return null; }
+        }
+
+        // Null-backed: resolved lazily from DefaultSendChannel() on first get,
+        // so a Spanish-locale player types into "es" at session start with no
+        // init-order dependency on when the locale is bound.
+        private static string sendChannel;
         public static string SendChannel
         {
             get
             {
-                if (sendChannel != "global" && sendChannel != LocaleChannel)
-                    sendChannel = "global";
+                // Self-collapse ONLY when the stored value is a language
+                // channel that no longer exists in the allowed set (future
+                // channel retirement); any currently-allowed channel is a
+                // valid pick for any locale.
+                if (sendChannel == null || !IsAllowedChannel(sendChannel))
+                    sendChannel = DefaultSendChannel();
                 return sendChannel;
             }
-            set { sendChannel = (value == LocaleChannel && value != null) ? value : "global"; }
+            set { sendChannel = IsAllowedChannel(value) ? value : DefaultSendChannel(); }
+        }
+
+        // One EXTRA viewed channel beyond global + the locale channel, so a
+        // player who picks a channel outside their locale in the Home dropdown
+        // still receives it live. Null/absent by default. Normalized to the
+        // language channels only — "global" is always subscribed, so it
+        // collapses to null. Changing it re-declares the socket's channel set.
+        private static volatile string extraViewChannel;
+        public static string ExtraViewChannel
+        {
+            get { return extraViewChannel; }
+            set
+            {
+                string v = (value == "es" || value == "ru") ? value : null;
+                if (v == extraViewChannel) return;
+                extraViewChannel = v;
+                subscribeDirty = true;
+                try { sendSignal?.Release(); } catch { }
+            }
+        }
+
+        /// <summary>The derived VIEW-channel set as a comma-joined string:
+        /// global + the locale channel + the extra viewed channel + the
+        /// persisted display channel, deduped, stable order. THE single
+        /// source of truth for both the socket subscription (SubscribeJson)
+        /// and the scrollback fetch (ApiClient.FetchRecentChat) — R2-4b:
+        /// those two derivations had already drifted once (the fetch was
+        /// missing the persisted term), so both consume this helper and can
+        /// never diverge again. The persisted term matters because the
+        /// config survives restarts while ExtraViewChannel does not —
+        /// without it a player whose saved display filter is a language
+        /// channel outside their locale restarts into a filtered-EMPTY pane
+        /// (subscription never carries the channel their filter shows).
+        /// Values come from a closed set ("global"/"es"/"ru"), so the string
+        /// is safe verbatim in both a JSON frame and a URL query.</summary>
+        public static string DerivedChannelSet()
+        {
+            string lc = LocaleChannel;
+            string extra = extraViewChannel;
+            string persisted = PersistedDisplayChannel();
+            var sb = new StringBuilder("global");
+            if (lc != null) sb.Append(',').Append(lc);
+            if (extra != null && extra != lc)   // dedup vs the locale channel
+                sb.Append(',').Append(extra);
+            if (persisted != null && persisted != lc && persisted != extra)
+                sb.Append(',').Append(persisted);
+            return sb.ToString();
         }
 
         private static string SubscribeJson()
         {
-            string lc = LocaleChannel;
-            return lc == null
-                ? "{\"type\":\"subscribe\",\"channels\":[\"global\"]}"
-                : "{\"type\":\"subscribe\",\"channels\":[\"global\",\"" + lc + "\"]}";
+            // Closed-set values (see DerivedChannelSet), so rewriting the
+            // comma-joined form into quoted JSON array items is safe.
+            return "{\"type\":\"subscribe\",\"channels\":[\""
+                + DerivedChannelSet().Replace(",", "\",\"") + "\"]}";
         }
 
         // Subscribe state is a DIRTY FLAG, never queued content (round-3
@@ -91,7 +195,17 @@ namespace CompetitiveRounds
         /// not a high-water mark, precisely so this refetch isn't swallowed).</summary>
         public static void ResubscribeAndRefresh()
         {
-            SendChannel = sendChannel;   // collapse if now-invalid
+            // Every locale change re-derives the send channel. Since R2-4a
+            // the derivation prefers a PERSISTED explicit language pick over
+            // the new locale — deliberate: the display filter carrying that
+            // pick also survives the locale change, so the player keeps
+            // typing into the channel they see. Only without such a pick
+            // does the send channel follow the language, and either way the
+            // player never silently types into a channel they can't view.
+            // ExtraViewChannel is deliberately left alone here: the persisted
+            // display channel is covered by SubscribeJson's config-derived
+            // term, so no transient state needs re-seeding on locale change.
+            sendChannel = DefaultSendChannel();
             if (!running) return;
             subscribeDirty = true;
             try { sendSignal?.Release(); } catch { }
@@ -136,9 +250,9 @@ namespace CompetitiveRounds
             // server before the socket died, the server drops the repeat instead
             // of double-relaying it to Discord + other players (bug #30/#34).
             string nonce = Guid.NewGuid().ToString("N");
-            // §2.6: send to ONE channel. SendChannel self-validates against
-            // the current locale; the server additionally collapses unknown
-            // values to global (never drops).
+            // §2.6: send to ONE channel. SendChannel is any allowed channel
+            // (follows the language by default); the server additionally
+            // collapses unknown values to global (never drops).
             string channel = SendChannel;
             string outbound =
                 "{\"steam_id\":\"" + JsonEscape(steamId ?? "") + "\"," +

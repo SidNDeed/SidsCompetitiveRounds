@@ -97,6 +97,8 @@ namespace CompetitiveRounds
         // All formats emit ASCII-only using CultureInfo.InvariantCulture so the
         // Gravity SDF font renders them cleanly regardless of OS locale.
         internal static ConfigEntry<string> TournamentDateFormat;
+        internal static ConfigEntry<string> UiDateFormat;       // MDY | DMY | YMD (Sid Aug-3 item 9)
+        internal static ConfigEntry<string> ChatDisplayChannel; // all | global | es | ru (item 5)
         // Pipe-delimited list of muted display names — local mute, doesn't leave the client.
         // Mutated via /mute and /unmute commands typed in the F5 chat input.
         internal static ConfigEntry<string> MutedChatNames;
@@ -509,6 +511,28 @@ namespace CompetitiveRounds
                 "Tournaments", "DateFormat",
                 "ISO",
                 "Date/time display format: ISO (2026-04-24 14:30), US (Sat 04/24 2:30 PM), or EU (Sat 24/04 14:30). All formats emit ASCII-only so any locale renders cleanly."
+            );
+
+            // Sid Aug-3 item 9: GLOBAL date-order setting for every plain date
+            // display in the mod (DateFmt.cs routes all sites through it).
+            // Digits-only formats, so every locale renders cleanly (#47).
+            // Tournament slot TIMES keep their own richer ISO/US/EU setting
+            // above. New key => no #190 migration concern.
+            UiDateFormat = Config.Bind(
+                "UI", "DateOrder",
+                "MDY",
+                "Order for dates shown in the mod: MDY (8/23/2026, US default), DMY (23/8/2026), or YMD (2026-08-23). Short dates follow the same order."
+            );
+
+            // Sid Aug-3 item 5: which chat channel the Home tab shows.
+            // "all" = merged view of every subscribed channel (the historical
+            // behavior); "global"/"es"/"ru" show only that channel. The SEND
+            // channel defaults to the mod language's channel and is changed
+            // from the same Home dropdown or with Tab while typing.
+            ChatDisplayChannel = Config.Bind(
+                "UI", "ChatDisplayChannel",
+                "all",
+                "Home-tab chat filter: all (merged), global, es, or ru."
             );
 
             MutedChatNames = Config.Bind(

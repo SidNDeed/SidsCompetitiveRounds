@@ -34,6 +34,39 @@ backward-compatible with v1.35.5 clients.
   only a full three-way tie still shares a place. Kill counts are now part of the signed
   match report, which is what makes them safe to rank on — reports from older clients keep
   the old two-field ordering.
+- **Cards render natively.** Hovering a card now shows the game's own card — drawn live,
+  in your language — instead of a bundled English screenshot. The old images remain as an
+  automatic fallback, and a future release can drop the ~15 MB card image pack entirely.
+- **Shop items are translated** — every cosmetic name and description, with community
+  artists' own item names left as the artist wrote them.
+- **Chat channels are visible and pickable.** The Home-tab chat shows which channel you're
+  in, a selector switches between All/Global/Español/Русский, and you type into your
+  language's channel by default. Your choice sticks between sessions.
+- **Recent Casual FFAs** — casual FFA games get their own history section under the ranked
+  one.
+- **Date order is configurable**: Month/Day/Year (default), Day/Month/Year, or
+  Year/Month/Day, applied to every date in the mod from a new Settings picker.
+- **Release notes on the Home tab now appear in Spanish and Russian**, starting with
+  v1.35.5's notes.
+
+### Fixed (August 3 feedback round)
+
+- **Achievement names vanished in Russian.** Translated names come from a fallback font
+  with taller lines than the row cells; the truncation rule deleted the whole line. Only
+  names kept in English survived.
+- **Sorting the leaderboard flipped its headers back to English** — the sort rewrite
+  path skipped translation. Same class of miss fixed across every sortable header.
+- **The per-player FFA graphs (Hit/Block/FPS/ping) never opened on hover** — the drawing
+  code only ran on other tabs.
+- **"(65 tot" and "(click t"** — the FFA history header and the Discord link line were
+  too narrow for their text; both widened, and the Discord line now reads
+  "Linked to Discord (Click to show)".
+- Several Russian labels were clipped (tournament timezone/format buttons, the 1v2 join
+  button); widened.
+- Hundreds of remaining English surfaces now translate: the leaderboard detail panel,
+  Card Stats (including localized card names), My Stats history rows, tournament
+  signup/voting block, the bug-report form, settings rows including every performance
+  patch, FFA/1v2/2v2 history internals, and the hold-Tab match overlay.
 
 ### Fixed
 

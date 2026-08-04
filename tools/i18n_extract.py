@@ -75,11 +75,25 @@ def looks_translatable(s: str, allow_braces: bool = False) -> bool:
     # position that is alpha with optional TRAILING punctuation is a real
     # label ("Settings", "Refresh", "Loading...", "Failed") — round-3 find
     # N3 + round-4 find F4 (the alpha-only rule dropped "Loading...").
-    if " " not in s:
+    # Aug-3 recon: run the check on the MARKUP-STRIPPED text — a markup-
+    # wrapped single word ("<color=#8899AA>Search</color>") is spaceless as
+    # a raw literal and was silently dropped forever.
+    _bare = re.sub(r"<[^>]{0,40}>", "", s)
+    if " " not in _bare:
         # Codex review: a display LABEL may end in ':' ("Timezone:") — the old
         # pattern allowed only .!?… so such labels silently fell out of the key
         # set entirely and could never be translated, not even by a server pack.
-        if not re.fullmatch(r"[A-Za-z]{3,}[.!?…:]{0,3}", s):
+        # Trailing '%' joined the allowed suffix set (Aug-3 completeness pass:
+        # the "Pass%" column header could never be a key).
+        ok_simple = re.fullmatch(r"[A-Za-z]{3,}[.!?…:%]{0,3}", _bare)
+        # Aug-3 Codex find 10: display tokens with INTERIOR punctuation were
+        # unreachable forever ("He/him", "They/them", "same-card", "(you)",
+        # "+pick", "Day/Month/Year"). Identity strings stay excluded because
+        # they carry digits or underscores ("cr_ff", "sct-1", "ranked_").
+        ok_punct = (re.fullmatch(r"[+(]?[A-Za-z][A-Za-z/()'’.-]*[.!?…:%]{0,3}", _bare)
+                    and sum(1 for c in _bare if c.isalpha()) >= 3
+                    and not any(c.isdigit() or c == "_" for c in _bare))
+        if not (ok_simple or ok_punct):
             return False
     # An interpolation HOLE normally means a $-string BODY (compiler-composed;
     # a whole-string key can never match) — EXCEPT at I18n.Tr/TrF sites, where
@@ -168,8 +182,17 @@ def arg_literals(arg: str) -> list:
     condition-embedded literal costs a harmless extra key; a missing branch
     costs a translator-invisible surface. $-string args yield nothing (the
     compiler composes them; whole-string keys can never match)."""
-    if arg is None or '$"' in arg:
+    if arg is None:
         return []
+    # Aug-3 recon: bailing on '$"' ANYWHERE in the arg dropped every PLAIN
+    # literal branch of a ternary whose OTHER branch was interpolated
+    # (`cond ? "Queue stalled" : $"...{x}..."` lost "Queue stalled" — this
+    # alone killed several live notices). Strip $-strings FIRST; they become
+    # non-literal residue, so a pure $-string arg still yields nothing and a
+    # folded literal+$-string concatenation still yields nothing (correct:
+    # the rendered string is compiler-composed) — but ternary/?? branches
+    # that are themselves plain literals harvest.
+    arg = re.sub(r'\$"(?:[^"\\]|\\.)*"', "INTERP", arg)
     lits = [x.group(1) for x in STR_LIT.finditer(arg)]
     if not lits:
         return []
@@ -193,6 +216,35 @@ def arg_literals(arg: str) -> list:
 
 def extract():
     found = {}
+    # Server-data display strings (Sid Aug-3 item 3: shop/cosmetic names +
+    # descriptions are translated now). The client renders them via
+    # I18n.Tr(variable) — invisible to call-site harvesting — so the key set
+    # ingests them from a checked-in snapshot of the live catalog
+    # (tools/shop_strings.json, regenerated from prod when items ship).
+    # This keeps them portal-moderatable like every other key.
+    shop_path = os.path.join(REPO, "tools", "shop_strings.json")
+    # FAIL LOUD (Aug-3 Codex find 11): a missing or malformed file must not
+    # silently retire ~400 shop keys while the extractor exits 0 and writes
+    # apparently-valid registries.
+    if not os.path.exists(shop_path):
+        print("ERROR: tools/shop_strings.json missing — its keys would silently retire")
+        sys.exit(1)
+    try:
+        _shop = json.load(io.open(shop_path, encoding="utf-8"))
+        if not isinstance(_shop, dict) or _shop.get("format") != 1:
+            raise ValueError("expected an object with format == 1")
+        _lst = _shop.get("strings")
+        if (not isinstance(_lst, list) or not _lst
+                or not all(isinstance(x, str) and x.strip() for x in _lst)):
+            raise ValueError("'strings' must be a non-empty list of non-blank strings")
+        for s in _lst:
+            if looks_translatable(s):
+                found.setdefault(s, []).append("shop_strings.json")
+    except SystemExit:
+        raise
+    except Exception as ex:
+        print(f"ERROR: shop_strings.json invalid ({ex})")
+        sys.exit(1)
     for fn in FILES:
         path = os.path.join(PLUGIN, fn)
         if not os.path.exists(path):

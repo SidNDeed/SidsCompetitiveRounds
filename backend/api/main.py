@@ -10228,6 +10228,10 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
         SELECT si.sku, si.kind, si.name, si.rarity, si.price, si.preview_color,
                si.stock_limit,
                to_char(COALESCE(si.released_at, si.created_at), 'Mon FMDD') AS added,
+               -- Machine-readable twin of `added` (Codex Aug-3b find 14): the
+               -- preformatted "Mon D" bypassed the client's date-order setting.
+               -- New clients format date_iso via DateFmt; old clients ignore it.
+               to_char(COALESCE(si.released_at, si.created_at), 'YYYY-MM-DD') AS added_iso,
                COALESCE(ap.display_name, '') AS artist_name
         FROM shop_items si
         LEFT JOIN players ap ON ap.steam_id = si.artist_steam_id
@@ -10250,6 +10254,7 @@ async def newest_shop_items(limit: int = Query(6, ge=1, le=24),
              "rarity": r["rarity"], "price": r["price"],
              "preview_color": r["preview_color"] or "",
              "added": r["added"] or "",
+             "date_iso": r["added_iso"] or "",
              "on_sale": (r["stock_limit"] or 0) >= 0,
              "artist_name": r["artist_name"] or ""}
             for r in rows
@@ -21712,17 +21717,20 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
 
 @app.get("/api/v1/ffa/recent", tags=["FFA Matches"])
 async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1, le=10),
+                     ranked: bool = Query(True),
                      db: AsyncSession = Depends(get_db)):
-    """Recent ranked FFA matches, newest first, with the full per-player stat
+    """Recent FFA matches, newest first, with the full per-player stat
     surface (placements, rounds, rating deltas, cards, telemetry) — the
-    'Recent Ranked FFAs' panel feed. Browsable by anyone, like
+    'Recent Ranked FFAs' panel feed, and with ranked=false the new 'Recent
+    Casual FFAs' panel (Sid, Aug 3). Browsable by anyone, like
     /team/all-series-paged."""
-    # §6: casual (unranked-lobby) games stay out of the RANKED recent panel —
-    # the docstring has always promised "Recent ranked FFA matches"; until the
-    # casual path existed the filter was vacuously true.
+    # §6: ranked and casual games never mix in one panel. `bool` is genuinely
+    # type-validated by FastAPI (unlike Query enum= — learning #188) and bound
+    # as a parameter in BOTH queries (a filter drift between COUNT and page
+    # desyncs total_pages from the page contents).
     total = (await db.execute(text(
-        "SELECT COUNT(*) FROM ffa_matches WHERE invalidated_at IS NULL AND is_ranked"
-    ))).scalar() or 0
+        "SELECT COUNT(*) FROM ffa_matches WHERE invalidated_at IS NULL AND is_ranked = :rk"
+    ), {"rk": ranked})).scalar() or 0
     matches = (await db.execute(text("""
         SELECT m.id, m.photon_room_id, m.player_count, m.duration_seconds,
                m.ended_at, m.is_ranked, m.timeline, pw.steam_id AS winner_steam,
@@ -21736,10 +21744,10 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
           FROM ffa_matches m
           LEFT JOIN players pw ON pw.id = m.winner_id
           LEFT JOIN ffa_lobbies l ON l.id = m.lobby_id
-         WHERE m.invalidated_at IS NULL AND m.is_ranked
+         WHERE m.invalidated_at IS NULL AND m.is_ranked = :rk
          ORDER BY m.ended_at DESC
          LIMIT :lim OFFSET :off
-    """), {"lim": page_size, "off": page * page_size})).mappings().all()
+    """), {"lim": page_size, "off": page * page_size, "rk": ranked})).mappings().all()
     match_ids = [r["id"] for r in matches]
     players_by_match: dict = {mid: [] for mid in match_ids}
     cards_by_match_player: dict = {}

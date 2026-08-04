@@ -1925,17 +1925,42 @@ namespace CompetitiveRounds
                 }));
         }
 
-        public static void FetchRecentChat(int limit = 50)
+        // R2-5: chat scrollback request generation. A channel pick clears
+        // the pane and refetches; a SLOW earlier in-flight response landing
+        // after a newer one would repopulate the just-cleared pane with the
+        // previous channel set's rows. Bumped at REQUEST time; each callback
+        // captures its value and drops itself when superseded (mirrors
+        // ffaRecentRankedGen). Interlocked/Volatile rather than a plain int
+        // because FetchRecentChat is also invoked from the ChatClient WS
+        // thread (reconnect scrollback), not only the main thread.
+        private static int chatRecentGen;
+
+        public static void FetchRecentChat(int limit = 50, string channelsOverride = null)
         {
             // §2.6: scrollback only for the channels this client subscribes
-            // to (global + the locale channel). Values come from a closed
+            // to. The set comes from ChatClient.DerivedChannelSet — the SAME
+            // helper SubscribeJson consumes (R2-4b), so subscription and
+            // history can never diverge again. Values come from a closed
             // set, so no URL-encoding concern.
-            string chans = ChatClient.LocaleChannel == null
-                ? "global" : "global," + ChatClient.LocaleChannel;
+            // channelsOverride (F7): when non-null, used VERBATIM as the
+            // channels= value instead of the derived set, so a channel pick
+            // can fetch that channel's own history (/chat/recent accepts any
+            // subset). Callers pass closed-set values only ("ru", "es", ...).
+            string chans = !string.IsNullOrEmpty(channelsOverride)
+                ? channelsOverride
+                : ChatClient.DerivedChannelSet();
+            int gen = System.Threading.Interlocked.Increment(ref chatRecentGen);
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/chat/recent?limit={limit}&channels={chans}",
                 (success, response) =>
                 {
+                    if (gen != System.Threading.Volatile.Read(ref chatRecentGen))
+                    {
+                        // A newer fetch owns the pane now — this response
+                        // would repopulate it with a stale channel set.
+                        Plugin.Log.LogInfo("[CHAT] Scrollback response superseded - dropped");
+                        return;
+                    }
                     if (!success || string.IsNullOrEmpty(response)) return;
                     try
                     {
@@ -6010,6 +6035,11 @@ namespace CompetitiveRounds
             public string previewColor;
             public string artistName;
             public string added;   // "Jul 12" — the cosmetic-update day (batch)
+            // F14: ISO date ("date_iso": YYYY-MM-DD) parsed when the server
+            // sends it, so the render can honor the date-order setting via
+            // DateFmt.Short(dateIso). Null on old servers — 'added' is the
+            // preformatted fallback and stays untouched.
+            public DateTime? dateIso;
             public bool onSale;    // false = artist hasn't opened sales yet ("coming soon")
         }
 
@@ -6047,6 +6077,15 @@ namespace CompetitiveRounds
                             // to on-sale so pre-round-4 servers render unchanged.
                             onSale = !chunk.Contains("\"on_sale\":false"),
                         };
+                        // F14: date_iso is additive — absent (old server) or
+                        // unparseable leaves dateIso null and the preformatted
+                        // 'added' string renders as before.
+                        string iso = ExtractJsonString(chunk, "date_iso");
+                        if (!string.IsNullOrEmpty(iso) &&
+                            DateTime.TryParseExact(iso, "yyyy-MM-dd",
+                                System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.None, out DateTime isoDt))
+                            e.dateIso = isoDt;
                         if (!string.IsNullOrEmpty(e.sku)) list.Add(e);
                     }
                     CachedNewestCosmetics = list;
@@ -8601,6 +8640,12 @@ namespace CompetitiveRounds
         public static List<FfaRecentMatch> CachedFfaRecent = null;
         public static int CachedFfaRecentTotal = 0;
         public static int CachedFfaRecentPages = 0;
+        // Casual (unranked) mirror of the three caches above. Separate statics
+        // because the FFA tab renders both sections at once — the two fetches
+        // must never clobber each other's page.
+        public static List<FfaRecentMatch> CachedFfaRecentCasual = null;
+        public static int CachedFfaRecentCasualTotal = 0;
+        public static int CachedFfaRecentCasualPages = 0;
 
         // Per-player mode history for the Leaderboard detail panel. These
         // endpoints carry nested arrays of user-authored display names, so
@@ -9800,9 +9845,25 @@ namespace CompetitiveRounds
             }));
         }
 
-        public static void FetchFfaRecent(int page = 0, int pageSize = 5)
+        // F8: per-mode request generations. Paged fetches can complete out of
+        // order (a slow page-1 response landing after a fast page-2 one would
+        // clobber the newer page's caches). Bumped at REQUEST time; each
+        // callback captures its own value and only the newest may write.
+        // Coroutine callbacks run on the main thread, so plain ints suffice.
+        private static int ffaRecentRankedGen;
+        private static int ffaRecentCasualGen;
+
+        public static void FetchFfaRecent(int page = 0, int pageSize = 5, bool ranked = true)
         {
-            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/recent?page={page}&page_size={pageSize}", (ok, resp) =>
+            // ranked=true (the default, and every pre-existing caller) hits the
+            // endpoint exactly as before and writes the ranked caches; false
+            // asks the server's validated bool param for casual rows and writes
+            // the CachedFfaRecentCasual* mirror instead. Same parser both ways —
+            // it already handles null rating_change + is_ranked per row.
+            string url = $"{baseUrl}/api/v1/ffa/recent?page={page}&page_size={pageSize}";
+            if (!ranked) url += "&ranked=false";
+            int gen = ranked ? ++ffaRecentRankedGen : ++ffaRecentCasualGen;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 if (!ok) return;
                 try
@@ -9922,11 +9983,27 @@ namespace CompetitiveRounds
                             matches.Add(m);
                         }
                     }
-                    CachedFfaRecent = matches;
-                    CachedFfaRecentTotal = ExtractJsonInt(resp, "total");
-                    CachedFfaRecentPages = ExtractJsonInt(resp, "total_pages");
+                    // F8: superseded response — a newer request for this mode
+                    // was issued after ours; its data must win. Drop ours.
+                    if (gen != (ranked ? ffaRecentRankedGen : ffaRecentCasualGen))
+                    {
+                        Plugin.Log.LogInfo($"[FFA-RECENT] stale {(ranked ? "ranked" : "casual")} page {page} response dropped (superseded)");
+                        return;
+                    }
+                    if (ranked)
+                    {
+                        CachedFfaRecent = matches;
+                        CachedFfaRecentTotal = ExtractJsonInt(resp, "total");
+                        CachedFfaRecentPages = ExtractJsonInt(resp, "total_pages");
+                    }
+                    else
+                    {
+                        CachedFfaRecentCasual = matches;
+                        CachedFfaRecentCasualTotal = ExtractJsonInt(resp, "total");
+                        CachedFfaRecentCasualPages = ExtractJsonInt(resp, "total_pages");
+                    }
                     NativeUI.MarkDirty();
-                    Plugin.Log.LogInfo($"[FFA-RECENT] loaded {matches.Count} matches (page {page})");
+                    Plugin.Log.LogInfo($"[FFA-RECENT] loaded {matches.Count} {(ranked ? "ranked" : "casual")} matches (page {page})");
                 }
                 catch (Exception ex) { Plugin.Log.LogError($"[FFA-RECENT] parse: {ex.Message}"); }
             }));

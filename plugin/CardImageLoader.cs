@@ -50,6 +50,8 @@ namespace CompetitiveRounds
         private static readonly Dictionary<string, Sprite> _spriteCache =
             new Dictionary<string, Sprite>(StringComparer.OrdinalIgnoreCase);
         private static bool _scanAttempted;
+        // One-shot log guard for the native-snapshot seam (per-frame path).
+        private static bool _snapSeamLogged;
 #if !THUNDERSTORE
         private static int _downloadStarted; // 0 = not started, 1 = in flight or done
 #endif
@@ -216,6 +218,36 @@ namespace CompetitiveRounds
         public static Sprite GetSprite(string cardName)
         {
             if (string.IsNullOrEmpty(cardName)) return null;
+
+            // NATIVE CARD RENDERING seam — the ONE seam every image
+            // consumer (Card Stats popup, hold-Tab board, tier-list export)
+            // goes through, so all three upgrade at once. Snapshot first;
+            // on a miss, kick the async capture and serve the PNG exactly
+            // as before (async upgrade — the snapshot lands for the NEXT
+            // request). Sits BEFORE the PNG map null-check so native art
+            // can serve even when the cards/ folder is missing/corrupt.
+            // CardSnapshot.UseNativeSnapshots is the single master switch
+            // back to pure-PNG behavior; any exception here falls through
+            // to the PNG path (one log, then permanently quiet — this is a
+            // per-frame path on the Tab board).
+            if (CardSnapshot.UseNativeSnapshots)
+            {
+                try
+                {
+                    if (CardSnapshot.TryGetSprite(cardName, out var snap) && snap != null)
+                        return snap;
+                    CardSnapshot.RequestSnapshot(cardName);
+                }
+                catch (Exception ex)
+                {
+                    if (!_snapSeamLogged)
+                    {
+                        _snapSeamLogged = true;
+                        Plugin.Log?.LogWarning($"[CARD-ART] native snapshot seam failed ({ex.Message}) — serving PNGs");
+                    }
+                }
+            }
+
             if (!_scanAttempted) Initialize();
             var map = _filesByKey;
             if (map == null) return null;
@@ -264,8 +296,11 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Lowercase + strip spaces, hyphens, apostrophes, periods. Matches
-        /// our filename convention "abyssal countdown.png" → "abyssalcountdown".</summary>
-        private static string NormalizeKey(string s)
+        /// our filename convention "abyssal countdown.png" → "abyssalcountdown".
+        /// internal: CardSnapshot keys its cache with THIS normalizer so the
+        /// native-render cache and the PNG cache collapse name forms
+        /// identically (one seam, one key derivation).</summary>
+        internal static string NormalizeKey(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
             var sb = new System.Text.StringBuilder(s.Length);

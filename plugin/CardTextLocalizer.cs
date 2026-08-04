@@ -34,6 +34,12 @@ namespace CompetitiveRounds
         public static void InvalidateCache()
         {
             _names.Clear(); _descs.Clear(); _scanned = false;
+            // NATIVE CARD RENDERING: snapshots bake the game's localized
+            // card text into pixels, so a language switch must re-render
+            // them too. This is the one locale-change funnel the mod
+            // already has — call through so the two card-text caches can
+            // never disagree on locale.
+            try { CardSnapshot.InvalidateAll(); } catch { }
         }
 
         private static string Key(string anyForm)

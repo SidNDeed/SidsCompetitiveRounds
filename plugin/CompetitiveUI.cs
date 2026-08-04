@@ -931,7 +931,8 @@ namespace CompetitiveRounds
                 GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
                 GUI.color = Color.white;
                 GUI.Label(new Rect(x, y + 6f, w, 22f),
-                    $"<color=#FFD94D>Custom bet</color> on <color=#FFFFFF>{NativeUI.CustomBetTargetLabel}</color>", betPromptTitleStyle);
+                    I18n.TrF("<color=#FFD94D>Custom bet</color> on <color=#FFFFFF>{0}</color>",
+                             NativeUI.CustomBetTargetLabel), betPromptTitleStyle);
                 GUI.SetNextControlName(BET_AMOUNT_CTRL);
                 string next = GUI.TextField(new Rect(x + 40f, y + 34f, w - 80f, 30f), NativeUI.CustomBetAmountText ?? "", 5, betPromptStyle);
                 // Digits only (commas allowed, stripped at submit).
@@ -939,10 +940,10 @@ namespace CompetitiveRounds
                 foreach (char c in next) if (char.IsDigit(c) || c == ',') filtered.Append(c);
                 NativeUI.CustomBetAmountText = filtered.ToString();
                 GUI.FocusControl(BET_AMOUNT_CTRL);
-                GUI.Label(new Rect(x, y + 64f, w, 16f), "<color=#8899AA>1 - 2,000 gold</color>", betPromptTitleStyle);
-                if (GUI.Button(new Rect(x + 34f, y + 86f, 130f, 30f), "Place bet"))
+                GUI.Label(new Rect(x, y + 64f, w, 16f), I18n.Tr("<color=#8899AA>1 - 2,000 gold</color>"), betPromptTitleStyle);
+                if (GUI.Button(new Rect(x + 34f, y + 86f, 130f, 30f), I18n.Tr("Place bet")))
                     NativeUI.SubmitCustomBet();
-                if (GUI.Button(new Rect(x + w - 164f, y + 86f, 130f, 30f), "Cancel"))
+                if (GUI.Button(new Rect(x + w - 164f, y + 86f, 130f, 30f), I18n.Tr("Cancel")))
                     NativeUI.CancelCustomBet();
             }
             catch { }
@@ -979,15 +980,15 @@ namespace CompetitiveRounds
                 GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
                 GUI.color = Color.white;
                 GUI.Label(new Rect(x, y + 6f, w, 22f),
-                    "<color=#FFD94D>Ranked Looking For Player</color> - Discord ping", lfpTitleStyle);
+                    I18n.Tr("<color=#FFD94D>Ranked Looking For Player</color> - Discord ping"), lfpTitleStyle);
                 GUI.Label(new Rect(x, y + 28f, w, 18f),
-                    "<color=#8899AA>Pings the Ranked Looking For Player role (max 1 per hour). Optional message:</color>", lfpTitleStyle);
+                    I18n.Tr("<color=#8899AA>Pings the Ranked Looking For Player role (max 1 per hour). Optional message:</color>"), lfpTitleStyle);
                 GUI.SetNextControlName(LFP_MSG_CTRL);
                 string next = GUI.TextField(new Rect(x + 20f, y + 52f, w - 40f, 30f), NativeUI.LfpMessageText ?? "", 200, lfpFieldStyle);
                 NativeUI.LfpMessageText = next;
                 GUI.FocusControl(LFP_MSG_CTRL);
                 GUI.Label(new Rect(x, y + 90f, w, 18f),
-                    "<color=#8899AA>How long are you searching? (shown to players as an expiry)</color>", lfpTitleStyle);
+                    I18n.Tr("<color=#8899AA>How long are you searching? (shown to players as an expiry)</color>"), lfpTitleStyle);
                 float bw = 70f, bx = x + (w - (bw * 4 + 24f)) / 2f;
                 for (int i = 0; i < 4; i++)
                 {
@@ -998,9 +999,9 @@ namespace CompetitiveRounds
                     if (GUI.Button(new Rect(bx + i * (bw + 8f), y + 112f, bw, 26f), NativeUI.LfpExpiryLabels[i], lfpTitleStyle))
                         NativeUI.LfpExpiryIdx = i;
                 }
-                if (GUI.Button(new Rect(x + 60f, y + 156f, 180f, 32f), "Send ping"))
+                if (GUI.Button(new Rect(x + 60f, y + 156f, 180f, 32f), I18n.Tr("Send ping")))
                     NativeUI.SubmitLfpPing();
-                if (GUI.Button(new Rect(x + w - 240f, y + 156f, 180f, 32f), "Cancel"))
+                if (GUI.Button(new Rect(x + w - 240f, y + 156f, 180f, 32f), I18n.Tr("Cancel")))
                     NativeUI.CancelLfpPing();
             }
             catch { }
@@ -1152,7 +1153,8 @@ namespace CompetitiveRounds
             }
             catch { return fallback; }
         }
-        internal static Rect LiveRegionRect(RectTransform rt, Camera cam, float frac, RectTransform clip, Rect fallback)
+        internal static Rect LiveRegionRect(RectTransform rt, Camera cam, float frac, RectTransform clip, Rect fallback,
+                                            RectTransform outerClip = null)
         {
             try
             {
@@ -1165,6 +1167,18 @@ namespace CompetitiveRounds
                 if (clip != null)
                 {
                     Rect c = ScreenRectOf(clip, cam);
+                    float xMin = Mathf.Max(r.xMin, c.xMin), xMax = Mathf.Min(r.xMax, c.xMax);
+                    float yMin = Mathf.Max(r.yMin, c.yMin), yMax = Mathf.Min(r.yMax, c.yMax);
+                    if (xMax - xMin < 1f || yMax - yMin < 1f) return _offscreenRect;
+                    r = new Rect(xMin, yMin, xMax - xMin, yMax - yMin);
+                }
+                // F9: second mask — the FFA tab's whole-page outer viewport. A
+                // row can be visible inside its list scroll yet outer-scrolled
+                // beneath the page chrome; clip at hit-test time exactly like
+                // the FFA cards/header path (TryGetFfaViewportClippedRect).
+                if (outerClip != null)
+                {
+                    Rect c = ScreenRectOf(outerClip, cam);
                     float xMin = Mathf.Max(r.xMin, c.xMin), xMax = Mathf.Min(r.xMax, c.xMax);
                     float yMin = Mathf.Max(r.yMin, c.yMin), yMax = Mathf.Min(r.yMax, c.yMax);
                     if (xMax - xMin < 1f || yMax - yMin < 1f) return _offscreenRect;
@@ -1340,6 +1354,11 @@ namespace CompetitiveRounds
             public string subjectLabel; // kind 4: player name for the popup title
             public string pointTimes;   // "12,47,..." seconds since match start (marker X)
             public string pointTimeline;// "mine:theirs,..." viewer-relative (marker color = scorer)
+            // F9: FFA regions also carry the whole-tab OUTER viewport — the
+            // hit test clips against BOTH masks live (the inner list clip
+            // alone let a row outer-scrolled under the page chrome keep a
+            // live hover region). Null for tabs 0/8 = behavior unchanged.
+            public RectTransform outerClipRT;
             public RectTransform sourceRT;
             public Camera sourceCam;
             public float widthFrac;
@@ -1351,13 +1370,15 @@ namespace CompetitiveRounds
                                                   RectTransform sourceRT, Camera sourceCam, float widthFrac,
                                                   RectTransform clipRT, object sourceTxt = null,
                                                   string pointTimes = null, string pointTimeline = null,
-                                                  float myStep = 0f)
+                                                  float myStep = 0f,
+                                                  RectTransform outerClipRT = null, string subjectLabel = null)
         {
             if (string.IsNullOrEmpty(mySeries) && string.IsNullOrEmpty(oppSeries)) return;
             _fpsGraphRegions.Add(new FpsGraphRegion {
                 screenRect = screenRect, mySeries = mySeries ?? "", oppSeries = oppSeries ?? "",
                 kind = isPing ? 1 : 0, myStep = myStep > 0f ? myStep : (isPing ? 3f : 5f),
                 pointTimes = pointTimes, pointTimeline = pointTimeline,
+                outerClipRT = outerClipRT, subjectLabel = subjectLabel,
                 sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
                 sourceTxt = sourceTxt,
             });
@@ -1368,13 +1389,15 @@ namespace CompetitiveRounds
         public static void RegisterPairGraphRegion(Rect screenRect, string pairSeries, bool isBlock, bool subjectIsOpp,
                                                    RectTransform sourceRT, Camera sourceCam, float widthFrac,
                                                    RectTransform clipRT, object sourceTxt,
-                                                   string pointTimes, string pointTimeline)
+                                                   string pointTimes, string pointTimeline,
+                                                   RectTransform outerClipRT = null, string subjectLabel = null)
         {
             if (string.IsNullOrEmpty(pairSeries) || pairSeries.IndexOf(':') < 0) return;
             _fpsGraphRegions.Add(new FpsGraphRegion {
                 screenRect = screenRect, mySeries = pairSeries, oppSeries = "",
                 kind = isBlock ? 3 : 2, myStep = 3f, subjectIsOpp = subjectIsOpp,
                 pointTimes = pointTimes, pointTimeline = pointTimeline,
+                outerClipRT = outerClipRT, subjectLabel = subjectLabel,
                 sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
                 sourceTxt = sourceTxt,
             });
@@ -1472,7 +1495,12 @@ namespace CompetitiveRounds
         private static void DrawFpsHoverGraph()
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
-            if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8)) return;
+            // Gate = the set of tabs that REGISTER into _fpsGraphRegions: My
+            // Stats (0), 2v2 (8) and the FFA tab (12 — per-player Hit/Block/
+            // FPS/ping cells). Safe because SwitchTab clears every region list
+            // on tab change, so allowing a tab here can't resurrect stale
+            // regions from another tab's last render.
+            if (!NativeUI.IsOpen || (NativeUI.CurrentTab != 0 && NativeUI.CurrentTab != 8 && NativeUI.CurrentTab != 12)) return;
             if (_fpsGraphRegions.Count == 0) return;
             Vector2 mp = Input.mousePosition;
             FpsGraphRegion? hit = null;
@@ -1480,7 +1508,7 @@ namespace CompetitiveRounds
             {
                 var reg = _fpsGraphRegions[i];
                 float liveFrac = LiveWidthFrac(reg.sourceTxt, reg.sourceRT, reg.widthFrac);
-                Rect rr = LiveRegionRect(reg.sourceRT, reg.sourceCam, liveFrac, reg.clipRT, reg.screenRect);
+                Rect rr = LiveRegionRect(reg.sourceRT, reg.sourceCam, liveFrac, reg.clipRT, reg.screenRect, reg.outerClipRT);
                 if (rr.Contains(mp)) { hit = reg; break; }
             }
             if (hit == null) return;
@@ -1510,8 +1538,17 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
             string title = isPing ? "Latency (ms)" : "FPS";
+            // F13: FFA regions carry a subject label — a single participant's
+            // series, so the you-vs-opponent phrasing (and its legend) would
+            // misattribute the line. Name the player instead and drop the
+            // opponent legend. Tabs 0/8 never set the label → byte-identical.
+            string header = !string.IsNullOrEmpty(hit.Value.subjectLabel)
+                ? (isPing
+                    ? I18n.TrF("<color=#CCCCCC>Latency (ms) over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel)
+                    : I18n.TrF("<color=#CCCCCC>FPS over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel))
+                : $"<color=#CCCCCC>{title} over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>";
             GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24),
-                $"<color=#CCCCCC>{title} over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>",
+                header,
                 _scoreGraphLbl);
 
             float maxT = 1f;
@@ -1591,9 +1628,22 @@ namespace CompetitiveRounds
             float gy = Mathf.Clamp(Screen.height - mp.y - h / 2f, 8f, Screen.height - h - 8f);
             GUI.DrawTexture(new Rect(gx - 4, gy - 4, w + 8, h + 8), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.93f), 0, 0);
-            string title = isBlock
-                ? $"<color=#CCCCCC>Block — {who}</color>  <color={dimHex}>dmg taken</color> <color=#888>·</color> <color={brightHex}>blocks</color>"
-                : $"<color=#CCCCCC>Hit — {who}</color>  <color={dimHex}>shots fired</color> <color=#888>·</color> <color={brightHex}>hits</color>";
+            // F13: FFA rows register per-participant series with a subject
+            // label — the title names that player instead of the you/opponent
+            // phrasing. The hex holes ({1}-{3}) keep palette correctness for
+            // either subject side; tabs 0/8 never set the label → the
+            // interpolated branch stays byte-identical.
+            bool hasSubject = !string.IsNullOrEmpty(reg.subjectLabel);
+            string subjHex = oppSubject ? "#E69988" : "#99B3E6";
+            string title;
+            if (hasSubject)
+                title = isBlock
+                    ? I18n.TrF("<color=#CCCCCC>Block — <color={1}>{0}</color></color>  <color={2}>dmg taken</color> <color=#888>·</color> <color={3}>blocks</color>", reg.subjectLabel, subjHex, dimHex, brightHex)
+                    : I18n.TrF("<color=#CCCCCC>Hit — <color={1}>{0}</color></color>  <color={2}>shots fired</color> <color=#888>·</color> <color={3}>hits</color>", reg.subjectLabel, subjHex, dimHex, brightHex);
+            else
+                title = isBlock
+                    ? $"<color=#CCCCCC>Block — {who}</color>  <color={dimHex}>dmg taken</color> <color=#888>·</color> <color={brightHex}>blocks</color>"
+                    : $"<color=#CCCCCC>Hit — {who}</color>  <color={dimHex}>shots fired</color> <color=#888>·</color> <color={brightHex}>hits</color>";
             GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24), title, _scoreGraphLbl);
 
             int n = a.Length;
@@ -1649,14 +1699,20 @@ namespace CompetitiveRounds
             drawSeries(a, maxA, dim);
             drawSeries(b, maxBAxis, bright);
 
-            // Footer: final tallies + the resulting percentage.
+            // Footer: final tallies + the resulting percentage. F13: the
+            // subject-labeled (FFA) variant goes through TrF so the template
+            // is translatable; tabs 0/8 keep the interpolated original.
             string footer;
             if (isBlock)
-                footer = $"<color=#777>{a[n - 1]} dmg taken · {b[n - 1]} successful blocks · markers = points scored</color>";
+                footer = hasSubject
+                    ? I18n.TrF("<color=#777>{0} dmg taken · {1} successful blocks · markers = points scored</color>", a[n - 1], b[n - 1])
+                    : $"<color=#777>{a[n - 1]} dmg taken · {b[n - 1]} successful blocks · markers = points scored</color>";
             else
             {
                 float pct = a[n - 1] > 0 ? 100f * b[n - 1] / a[n - 1] : 0f;
-                footer = $"<color=#777>{a[n - 1]} fired · {b[n - 1]} hit · {pct:F0}% · markers = points scored</color>";
+                footer = hasSubject
+                    ? I18n.TrF("<color=#777>{0} fired · {1} hit · {2:F0}% · markers = points scored</color>", a[n - 1], b[n - 1], pct)
+                    : $"<color=#777>{a[n - 1]} fired · {b[n - 1]} hit · {pct:F0}% · markers = points scored</color>";
             }
             GUI.Label(new Rect(gx + 8, gy + h - 22f, w - 16, 22f), footer, _scoreGraphLbl);
         }
@@ -1768,6 +1824,12 @@ namespace CompetitiveRounds
         }
 
         private static GUIStyle _cardTipTitleStyle, _cardTipBodyStyle;
+        // Comma-split tooltip body memo: rebuilt only when the hovered row's
+        // raw card line (or the locale) changes, not per Repaint — the
+        // CardTextLocalizer.DisplayName lookups ride this cache so card
+        // localization adds zero steady-state per-frame work (#162).
+        private static string _cardTipCacheKey, _cardTipCacheBody, _cardTipCacheLocale;
+        private static int _cardTipCacheLines;
         private static void DrawCardHoverTooltip()
         {
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
@@ -1825,25 +1887,41 @@ namespace CompetitiveRounds
             else
             {
                 string raw = hit.Value.fullCardLine;
-                string[] cards;
-                try { cards = raw.Split(','); }
-                catch { cards = new[] { raw }; }
-                lineCount = 0;
-                var sb = new System.Text.StringBuilder();
-                foreach (var c in cards)
+                if (!string.Equals(raw, _cardTipCacheKey, StringComparison.Ordinal)
+                    || _cardTipCacheLocale != I18n.Locale)
                 {
-                    string name = c.Trim();
-                    if (string.IsNullOrEmpty(name)) continue;
-                    lineCount++;
-                    sb.Append("• ").Append(name).Append('\n');
+                    string[] cards;
+                    try { cards = raw.Split(','); }
+                    catch { cards = new[] { raw }; }
+                    int lines = 0;
+                    var sb = new System.Text.StringBuilder();
+                    foreach (var c in cards)
+                    {
+                        string name = c.Trim();
+                        if (string.IsNullOrEmpty(name)) continue;
+                        lines++;
+                        // The server comma-list carries the frozen English
+                        // card names (identity — never changed on any data
+                        // path); display resolves through the game's own
+                        // card localization, falling back to the English
+                        // name when the game has none.
+                        string disp = null;
+                        try { disp = CardTextLocalizer.DisplayName(name); } catch { }
+                        sb.Append("• ").Append(disp ?? name).Append('\n');
+                    }
+                    _cardTipCacheKey = raw;
+                    _cardTipCacheLocale = I18n.Locale;
+                    _cardTipCacheBody = sb.ToString().TrimEnd();
+                    _cardTipCacheLines = lines;
                 }
-                body = sb.ToString().TrimEnd();
+                body = _cardTipCacheBody;
+                lineCount = _cardTipCacheLines;
             }
 
             // Title: default "Your/Opponent's picks", or an override ("" = no header).
             string title = hit.Value.titleOverride != null
                          ? hit.Value.titleOverride
-                         : (hit.Value.isOpponent ? "Opponent's picks" : "Your picks");
+                         : (hit.Value.isOpponent ? I18n.Tr("Opponent's picks") : I18n.Tr("Your picks"));
             bool showTitle = !string.IsNullOrEmpty(title);
 
             float w = 260f;
@@ -1924,21 +2002,19 @@ namespace CompetitiveRounds
 
             int secs = GameStateWatcher.SecondsInUnstartedRoom;
             GUI.Label(new Rect(x + 14, y + 8, w - 28, 22),
-                      "<color=#FFD080>Match-found screen might be stuck</color>",
+                      I18n.Tr("<color=#FFD080>Match-found screen might be stuck</color>"),
                       stuckTitleStyle);
             GUI.Label(new Rect(x + 14, y + 32, w - 28, 50),
-                      $"<color=#CCCCCC>In this Photon room for <b>{secs}s</b> with no match started. " +
-                      "Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. " +
-                      "Click into the ROUNDS window first and try space again, or use the escape hatch below.</color>",
+                      I18n.TrF("<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try space again, or use the escape hatch below.</color>", secs),
                       stuckTextStyle);
 
-            if (GUI.Button(new Rect(x + 14, y + h - 38, 220, 28), "Force exit room", stuckButtonStyle))
+            if (GUI.Button(new Rect(x + 14, y + h - 38, 220, 28), I18n.Tr("Force exit room"), stuckButtonStyle))
             {
                 try { Photon.Pun.PhotonNetwork.LeaveRoom(); }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[STUCK] LeaveRoom failed: {ex.Message}"); }
                 GameStateWatcher.DismissMatchFoundStuckOverlay();
             }
-            if (GUI.Button(new Rect(x + w - 174, y + h - 38, 160, 28), "Dismiss (1 min)", stuckButtonStyle))
+            if (GUI.Button(new Rect(x + w - 174, y + h - 38, 160, 28), I18n.Tr("Dismiss (1 min)"), stuckButtonStyle))
             {
                 GameStateWatcher.DismissMatchFoundStuckOverlay();
             }
@@ -2327,7 +2403,10 @@ namespace CompetitiveRounds
             try
             {
                 var dt = DateTime.Parse(isoStr, null, System.Globalization.DateTimeStyles.RoundtripKind).ToLocalTime();
-                return dt.ToString("M/d HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+                // Date half via DateFmt (locale-aware day/month ORDER, numeric
+                // only — #47: no localized month names through the SDF font);
+                // time half stays invariant HH:mm.
+                return DateFmt.Short(dt) + " " + dt.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
             }
             catch { return isoStr; }
         }
@@ -2721,12 +2800,12 @@ namespace CompetitiveRounds
             float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
             GUI.DrawTexture(new Rect(x - 8, y - 8, w + 16, h + 16),
                 Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.94f), 0, 0);
-            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26), "Confirm",
+            GUI.Label(new Rect(x + 12, y + 10, w - 24, 26), I18n.Tr("Confirm"),
                 new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
             GUI.Label(new Rect(x + 12, y + 42, w - 24, 70), confirmMessage,
                 new GUIStyle(adminLabelStyle) { fontSize = 14, wordWrap = true });
-            if (GUI.Button(new Rect(x + 12, y + h - 40, 120, 30), "Cancel")) no = true;
-            if (GUI.Button(new Rect(x + w - 132, y + h - 40, 120, 30), "Confirm")) yes = true;
+            if (GUI.Button(new Rect(x + 12, y + h - 40, 120, 30), I18n.Tr("Cancel"))) no = true;
+            if (GUI.Button(new Rect(x + w - 132, y + h - 40, 120, 30), I18n.Tr("Confirm"))) yes = true;
 
             if (no) { confirmOpen = false; confirmOnYes = null; return; }
             if (yes)
@@ -3794,8 +3873,8 @@ namespace CompetitiveRounds
                 new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
             GUI.Label(new Rect(x + 12, y + 44, w - 24, 20), artistPromptLabel, adminLabelStyle);
             artistPromptValue = GUI.TextField(new Rect(x + 12, y + 68, w - 24, 28), artistPromptValue ?? "", adminFieldStyle);
-            if (GUI.Button(new Rect(x + 12, y + h - 40, 110, 30), "Cancel")) cancel = true;
-            if (GUI.Button(new Rect(x + w - 122, y + h - 40, 110, 30), "Submit")) submit = true;
+            if (GUI.Button(new Rect(x + 12, y + h - 40, 110, 30), I18n.Tr("Cancel"))) cancel = true;
+            if (GUI.Button(new Rect(x + w - 122, y + h - 40, 110, 30), I18n.Tr("Submit"))) submit = true;
 
             if (cancel) { artistPromptOpen = false; artistPromptOnSubmit = null; return; }
             if (submit)
@@ -3870,8 +3949,8 @@ namespace CompetitiveRounds
                 adminInputB = GUI.TextField(new Rect(x + 10, y + 118, w - 20, 26), adminInputB ?? "", adminFieldStyle);
             }
 
-            if (GUI.Button(new Rect(x + 10, y + h - 36, 100, 28), "Cancel")) cancel = true;
-            if (GUI.Button(new Rect(x + w - 110, y + h - 36, 100, 28), "Submit")) submit = true;
+            if (GUI.Button(new Rect(x + 10, y + h - 36, 100, 28), I18n.Tr("Cancel"))) cancel = true;
+            if (GUI.Button(new Rect(x + w - 110, y + h - 36, 100, 28), I18n.Tr("Submit"))) submit = true;
 
             if (cancel) { adminPromptOpen = false; return; }
 
@@ -3909,6 +3988,28 @@ namespace CompetitiveRounds
         // sending.
         private static readonly string[] BUG_SEVERITIES = new[] { "low", "medium", "high", "crash" };
         private static readonly string[] BUG_CATEGORIES = new[] { "ui", "gameplay", "network", "other" };
+
+        // DISPLAY labels for the severity/category buttons. The arrays above
+        // are the API wire contract and must stay English (SubmitBugReportNow
+        // sends them verbatim); only the button face is translated, keyed by
+        // wire value. "UI" is under the extractor's 3-letter floor (#295c) so
+        // it can never become a catalogue key — Tr passes it through, which is
+        // acceptable for a universal abbreviation.
+        private static string BugChoiceLabel(string wire)
+        {
+            switch (wire)
+            {
+                case "low":      return I18n.Tr("LOW");
+                case "medium":   return I18n.Tr("MEDIUM");
+                case "high":     return I18n.Tr("HIGH");
+                case "crash":    return I18n.Tr("CRASH");
+                case "ui":       return I18n.Tr("UI");
+                case "gameplay": return I18n.Tr("GAMEPLAY");
+                case "network":  return I18n.Tr("NETWORK");
+                case "other":    return I18n.Tr("OTHER");
+                default:         return (wire ?? "").ToUpper();
+            }
+        }
         private static bool bugModalOpen = false;
         private static string bugDescription = "";
         private static string bugRepro = "";
@@ -3968,35 +4069,35 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(x - 10, y - 10, w + 20, 1), Texture2D.whiteTexture,
                             ScaleMode.StretchToFill, true, 0, new Color(1f, 1f, 1f, 0.4f), 0, 0);
 
-            GUI.Label(new Rect(x, y, w, 28), "<color=#FFE580>Report a Bug</color>", bugTitleStyle);
+            GUI.Label(new Rect(x, y, w, 28), I18n.Tr("<color=#FFE580>Report a Bug</color>"), bugTitleStyle);
             GUI.Label(new Rect(x, y + 30, w, 18),
-                "<color=#AAAAAA>Reports go to the mod team. Be specific — what happened, when, what you were doing.</color>",
+                I18n.Tr("<color=#AAAAAA>Reports go to the mod team. Be specific — what happened, when, what you were doing.</color>"),
                 bugLabelStyle);
 
             // Severity row
-            GUI.Label(new Rect(x, y + 56, 120, 22), "<b>Severity:</b>", bugLabelStyle);
+            GUI.Label(new Rect(x, y + 56, 120, 22), "<b>" + I18n.Tr("Severity:") + "</b>", bugLabelStyle);
             for (int i = 0; i < BUG_SEVERITIES.Length; i++)
             {
                 bool picked = i == bugSeverityIdx;
                 if (GUI.Button(new Rect(x + 100 + i * 88, y + 54, 84, 26),
-                               BUG_SEVERITIES[i].ToUpper(),
+                               BugChoiceLabel(BUG_SEVERITIES[i]),
                                picked ? bugBtnPickedStyle : bugButtonStyle))
                     bugSeverityIdx = i;
             }
 
             // Category row
-            GUI.Label(new Rect(x, y + 92, 120, 22), "<b>Category:</b>", bugLabelStyle);
+            GUI.Label(new Rect(x, y + 92, 120, 22), "<b>" + I18n.Tr("Category:") + "</b>", bugLabelStyle);
             for (int i = 0; i < BUG_CATEGORIES.Length; i++)
             {
                 bool picked = i == bugCategoryIdx;
                 if (GUI.Button(new Rect(x + 100 + i * 88, y + 90, 84, 26),
-                               BUG_CATEGORIES[i].ToUpper(),
+                               BugChoiceLabel(BUG_CATEGORIES[i]),
                                picked ? bugBtnPickedStyle : bugButtonStyle))
                     bugCategoryIdx = i;
             }
 
             // Description (required)
-            GUI.Label(new Rect(x, y + 126, w, 18), "<b>What happened?</b> <color=#FF9966>(required)</color>", bugLabelStyle);
+            GUI.Label(new Rect(x, y + 126, w, 18), I18n.Tr("<b>What happened?</b> <color=#FF9966>(required)</color>"), bugLabelStyle);
             bugDescScroll = GUI.BeginScrollView(new Rect(x, y + 146, w, 140),
                                                 bugDescScroll,
                                                 new Rect(0, 0, w - 20, Mathf.Max(140, (bugDescription?.Length ?? 0) / 4)));
@@ -4005,7 +4106,7 @@ namespace CompetitiveRounds
             GUI.EndScrollView();
 
             // Repro
-            GUI.Label(new Rect(x, y + 296, w, 18), "<b>How to reproduce?</b> <color=#888>(optional)</color>", bugLabelStyle);
+            GUI.Label(new Rect(x, y + 296, w, 18), I18n.Tr("<b>How to reproduce?</b> <color=#888>(optional)</color>"), bugLabelStyle);
             bugReproScroll = GUI.BeginScrollView(new Rect(x, y + 316, w, 100),
                                                  bugReproScroll,
                                                  new Rect(0, 0, w - 20, Mathf.Max(100, (bugRepro?.Length ?? 0) / 4)));
@@ -4035,11 +4136,11 @@ namespace CompetitiveRounds
             }
             // Label sits inside the toggle hit area.
             GUI.Label(new Rect(togX + 28, y + 428, togW - 32, 26),
-                      "Attach game logs (recommended)",
+                      I18n.Tr("Attach game logs (recommended)"),
                       bugLabelStyle);
             // Preview button far to the right of the toggle hit area + a gap.
             float prevX = togX + togW + 16;
-            if (GUI.Button(new Rect(prevX, y + 428, 140, 24), "Preview logs", bugButtonStyle))
+            if (GUI.Button(new Rect(prevX, y + 428, 140, 24), I18n.Tr("Preview logs"), bugButtonStyle))
             {
                 OpenLogViewer();
             }
@@ -4051,13 +4152,13 @@ namespace CompetitiveRounds
             // Buttons
             bool disabled = bugSubmitting || string.IsNullOrEmpty(bugDescription) || bugDescription.Trim().Length < 4;
             GUI.enabled = !bugSubmitting;
-            if (GUI.Button(new Rect(x, y + h - 44, 120, 30), "Cancel", bugButtonStyle))
+            if (GUI.Button(new Rect(x, y + h - 44, 120, 30), I18n.Tr("Cancel"), bugButtonStyle))
             {
                 bugModalOpen = false; GUI.enabled = true; return;
             }
             GUI.enabled = !disabled;
             if (GUI.Button(new Rect(x + w - 160, y + h - 44, 160, 30),
-                           bugSubmitting ? "Submitting..." : "Submit Report",
+                           bugSubmitting ? I18n.Tr("Submitting...") : I18n.Tr("Submit Report"),
                            bugButtonStyle))
             {
                 SubmitBugReportNow();
@@ -4068,7 +4169,7 @@ namespace CompetitiveRounds
         private static void SubmitBugReportNow()
         {
             bugSubmitting = true;
-            bugSubmitStatus = "<color=#88CCFF>Submitting...</color>";
+            bugSubmitStatus = "<color=#88CCFF>" + I18n.Tr("Submitting...") + "</color>";
             string sid = MatchTracker.LocalSteamId;
             string name = MatchTracker.LocalDisplayName ?? "";
             string desc = (bugDescription ?? "").Trim();
@@ -4086,17 +4187,22 @@ namespace CompetitiveRounds
                         // Pull bug_number out of the response so the user sees a
                         // human-friendly ID they can quote in chat.
                         int bn = ApiClient.ExtractJsonIntPublic(resp ?? "", "bug_number");
-                        string idTag = bn > 0 ? $" Filed as <b>#{bn}</b>." : "";
-                        bugSubmitStatus = $"<color=#88FF88>Sent! Thank you.{idTag}</color>";
+                        bugSubmitStatus = bn > 0
+                            ? I18n.TrF("<color=#88FF88>Sent! Thank you. Filed as <b>#{0}</b>.</color>", bn)
+                            : I18n.Tr("<color=#88FF88>Sent! Thank you.</color>");
                         bugDescription = "";
                         bugRepro = "";
-                        string notif = bn > 0 ? $"Bug report sent. Thanks! (#{bn})" : "Bug report sent. Thanks!";
+                        string notif = bn > 0 ? I18n.TrF("Bug report sent. Thanks! (#{0})", bn)
+                                              : I18n.Tr("Bug report sent. Thanks!");
                         ShowNotification(notif, new Color(0.5f, 1f, 0.5f), 5f);
                         bugModalOpen = false;
                     }
                     else
                     {
-                        bugSubmitStatus = $"<color=#FF6666>Failed: {(resp ?? "").Replace("\n", " ")}</color>";
+                        // The failure detail is server-sent English (class D) —
+                        // it stays raw inside the translated template's hole.
+                        bugSubmitStatus = I18n.TrF("<color=#FF6666>Failed: {0}</color>",
+                                                   (resp ?? "").Replace("\n", " "));
                     }
                 });
         }
@@ -4262,27 +4368,27 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(x - 10, y - 10, w + 20, h + 20), Texture2D.whiteTexture,
                             ScaleMode.StretchToFill, true, 0, new Color(0.05f, 0.06f, 0.08f, 0.98f), 0, 0);
 
-            GUI.Label(new Rect(x, y, w, 24), "<b>Game logs (tail)</b> — included with your report when the box is checked.",
+            GUI.Label(new Rect(x, y, w, 24), I18n.Tr("<b>Game logs (tail)</b> — included with your report when the box is checked."),
                       bugLabelStyle ?? GUI.skin.label);
 
             // Tab labels kept short so they fit inside the buttons without clipping
             // — earlier "BepInEx (previous session)" cut off the trailing "n)".
-            if (GUI.Button(new Rect(x, y + 28, 160, 26), "BepInEx (current)",
+            if (GUI.Button(new Rect(x, y + 28, 160, 26), I18n.Tr("BepInEx (current)"),
                            logViewerTab == 0 ? logViewerTabActiveStyle : logViewerTabStyle))
                 logViewerTab = 0;
-            if (GUI.Button(new Rect(x + 168, y + 28, 180, 26), "BepInEx (prev session)",
+            if (GUI.Button(new Rect(x + 168, y + 28, 180, 26), I18n.Tr("BepInEx (prev session)"),
                            logViewerTab == 1 ? logViewerTabActiveStyle : logViewerTabStyle))
                 logViewerTab = 1;
-            if (GUI.Button(new Rect(x + 356, y + 28, 140, 26), "Unity / Game",
+            if (GUI.Button(new Rect(x + 356, y + 28, 140, 26), I18n.Tr("Unity / Game"),
                            logViewerTab == 2 ? logViewerTabActiveStyle : logViewerTabStyle))
                 logViewerTab = 2;
-            if (GUI.Button(new Rect(x + w - 200, y + 28, 90, 26), "Refresh", logViewerTabStyle))
+            if (GUI.Button(new Rect(x + w - 200, y + 28, 90, 26), I18n.Tr("Refresh"), logViewerTabStyle))
             {
                 logViewerBepCache     = ApiClient.ReadLogTail(BepInExLogPath(), maxChars: 400_000);
                 logViewerBepPrevCache = ApiClient.ReadLogTail(BepInExLogPreviousPath(), maxChars: 400_000);
                 logViewerUniCache     = ApiClient.ReadLogTail(UnityLogPath(), maxChars: 400_000);
             }
-            if (GUI.Button(new Rect(x + w - 100, y + 28, 100, 26), "Close", logViewerTabStyle))
+            if (GUI.Button(new Rect(x + w - 100, y + 28, 100, 26), I18n.Tr("Close"), logViewerTabStyle))
             { logViewerOpen = false; return; }
 
             string body, path;
@@ -4295,9 +4401,10 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(body))
             {
                 if (logViewerTab == 1)
-                    body = $"(no previous-session log yet — gets written by the mod when ROUNDS is closed cleanly, so on first ever launch this is empty)\n\nExpected path: {path ?? "unknown"}";
+                    body = I18n.TrF("(no previous-session log yet — gets written by the mod when ROUNDS is closed cleanly, so on first ever launch this is empty)\n\nExpected path: {0}",
+                                    path ?? I18n.Tr("unknown"));
                 else
-                    body = $"(no log content read from: {path ?? "unknown path"})";
+                    body = I18n.TrF("(no log content read from: {0})", path ?? I18n.Tr("unknown path"));
             }
 
             float bodyY = y + 64;
@@ -4586,6 +4693,23 @@ namespace CompetitiveRounds
         private static string chatInputText = "";
         private static GUIStyle chatStyle;
 
+        // §2.6: display label for a send channel's WIRE value ("global"/"es"/
+        // "ru" — the wire strings stay English everywhere; this maps them for
+        // the chat header's {0} hole only). "ES"/"RU" are under the
+        // extractor's 3-letter floor (#295c) so they can never become
+        // catalogue keys — Tr passes them through, acceptable for
+        // locale-neutral language codes.
+        private static string ChannelDisplayLabel(string channel)
+        {
+            switch (channel)
+            {
+                case "global": return I18n.Tr("Global");
+                case "es":     return I18n.Tr("ES");
+                case "ru":     return I18n.Tr("RU");
+                default:       return (channel ?? "").ToUpperInvariant();
+            }
+        }
+
         private static void DrawChatInput()
         {
             // Liveness stamp for TickChatLockWatchdog — first statement, so it is
@@ -4696,9 +4820,13 @@ namespace CompetitiveRounds
                 }
                 else if (ev.keyCode == KeyCode.Tab && ChatClient.LocaleChannel != null)
                 {
-                    // §2.6: cycle the SEND channel (global <-> the locale
-                    // channel). Only exists when the locale has a channel;
-                    // English clients keep plain Tab-does-nothing behavior.
+                    // §2.6: rotate the SEND channel through this player's full
+                    // allowed set: global -> locale channel -> back to global.
+                    // The set only ever holds global + the player's OWN locale
+                    // channel, so the rotation is a two-step cycle; a stale
+                    // SendChannel outside the set lands on global. Only exists
+                    // when the locale has a channel; English clients keep
+                    // plain Tab-does-nothing behavior.
                     ChatClient.SendChannel = ChatClient.SendChannel == "global"
                         ? ChatClient.LocaleChannel : "global";
                     ev.Use();
@@ -4715,7 +4843,7 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(x, y - 22, w, 20),
                 ChatClient.LocaleChannel != null
                     ? I18n.TrF("Chat [{0}]  —  Enter to send, Esc to cancel, Tab switches channel",
-                               ChatClient.SendChannel.ToUpperInvariant())
+                               ChannelDisplayLabel(ChatClient.SendChannel))
                     : I18n.Tr("Chat  —  Enter to send, Esc to cancel"));
 
             GUI.SetNextControlName("CRChat");

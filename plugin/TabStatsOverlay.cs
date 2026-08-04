@@ -32,6 +32,11 @@ namespace CompetitiveRounds
             new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, float> cardTexRetryAt =
             new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        // CardSnapshot generation this texture cache was filled under — a
+        // locale switch (CardSnapshot.InvalidateAll) DESTROYS the native
+        // sprites/textures these entries may point at, so a generation
+        // change drops the whole cache instead of painting dead textures.
+        private static int cardTexGeneration;
         private static int cachedPlayerCount;
         private static float nextSnapshotAt;
         private static bool cardLayoutDirty = true;
@@ -109,6 +114,50 @@ namespace CompetitiveRounds
         private static Gun Gun(Player p) => p.data.weaponHandler.gun;
         private static GunAmmo Ammo(Player p) => p.data.weaponHandler.gun.GetComponentInChildren<GunAmmo>(true);
 
+        // ── L10n (Aug 3 completeness pass): this overlay is per-frame IMGUI, so
+        // labels are translated ONCE into cached fields and re-resolved on
+        // I18n.LocaleChanged — never per-frame (#162). Every literal sits INSIDE
+        // its I18n.Tr call so the extractor harvests it as a key (Tr(variable)
+        // harvests NOTHING — learning #295a). The label list below must stay in
+        // LOCKSTEP with ROWS; on a length mismatch we fall back to the English
+        // ROWS labels rather than mislabeling rows.
+        private static string[] trLabels;
+        private static string trTitle, trCardsLabel, trNoCards;
+        private static bool localeHooked;
+
+        private static void EnsureLocaleStrings()
+        {
+            if (trLabels != null) return;
+            if (!localeHooked)
+            {
+                localeHooked = true;
+                try { I18n.LocaleChanged += () => { trLabels = null; }; } catch { }
+            }
+            trTitle = I18n.Tr("MATCH STATS  <color=#888><size=12>(hold Tab)</size></color>");
+            trCardsLabel = I18n.Tr("Cards");
+            trNoCards = I18n.Tr("<color=#666>no cards</color>");
+            var labels = new[]
+            {
+                // "HP" stays English: a 2-letter token sits below the
+                // extractor's key floor (looks_translatable) so it can never be
+                // a catalogue key — and it is cross-locale gaming shorthand.
+                "HP",
+                I18n.Tr("Lives"), I18n.Tr("Damage"), I18n.Tr("Attack spd"),
+                I18n.Tr("Reload"), I18n.Tr("Ammo"), I18n.Tr("Bullets"),
+                I18n.Tr("Bursts"), I18n.Tr("Bounces"), I18n.Tr("Bullet spd"),
+                I18n.Tr("Bullet slow"), I18n.Tr("Knockback"), I18n.Tr("Spread"),
+                I18n.Tr("Life steal"), I18n.Tr("Block CD"), I18n.Tr("Blocks"),
+                I18n.Tr("Regen"), I18n.Tr("Move spd"), I18n.Tr("Jump"),
+                I18n.Tr("Jumps"), I18n.Tr("Size"),
+            };
+            if (labels.Length != ROWS.Length)
+            {
+                labels = new string[ROWS.Length];
+                for (int i = 0; i < ROWS.Length; i++) labels[i] = ROWS[i].label;
+            }
+            trLabels = labels;
+        }
+
         // Fallback team palette when PlayerSkinBank can't be read (orange/blue
         // first — ROUNDS' default 1v1 pairing).
         private static readonly Color[] FALLBACK = {
@@ -158,6 +207,7 @@ namespace CompetitiveRounds
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null || pm.players.Count == 0) return;
 
+                EnsureLocaleStrings();   // before RefreshSnapshot — it reads trNoCards
                 if (Time.unscaledTime >= nextSnapshotAt) RefreshSnapshot(pm);
                 if (cachedPlayerCount == 0) return;
 
@@ -188,7 +238,7 @@ namespace CompetitiveRounds
                 GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
                     ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.88f), 0, 0);
                 GUI.Label(new Rect(x + 12, y + 6, w - 24, 24),
-                    "MATCH STATS  <color=#888><size=12>(hold Tab)</size></color>", stTitle);
+                    trTitle ?? "MATCH STATS  <color=#888><size=12>(hold Tab)</size></color>", stTitle);
 
                 // Player name headers, team-colored.
                 float cx = x + 12 + labelW;
@@ -208,7 +258,7 @@ namespace CompetitiveRounds
                     if ((r & 1) == 0)
                         GUI.DrawTexture(new Rect(x + 6, ry, w - 12, rowH), Texture2D.whiteTexture,
                             ScaleMode.StretchToFill, true, 0, new Color(1f, 1f, 1f, 0.03f), 0, 0);
-                    GUI.Label(new Rect(x + 12, ry, labelW, rowH), ROWS[r].label, stLabel);
+                    GUI.Label(new Rect(x + 12, ry, labelW, rowH), trLabels[r], stLabel);
                     cx = x + 12 + labelW;
                     for (int i = 0; i < cachedPlayerCount; i++)
                     {
@@ -220,7 +270,7 @@ namespace CompetitiveRounds
 
                 // Card lists (up to 4 wrapped lines, then a +N tail).
                 ry += 4f;
-                GUI.Label(new Rect(x + 12, ry, labelW, cardsH), "Cards", stLabel);
+                GUI.Label(new Rect(x + 12, ry, labelW, cardsH), trCardsLabel ?? "Cards", stLabel);
                 cx = x + 12 + labelW;
                 Vector2 mousePosition = Event.current.mousePosition;
                 Texture2D hoveredCardTexture = null;
@@ -269,7 +319,7 @@ namespace CompetitiveRounds
                 if (!string.IsNullOrEmpty(nick)) return NametagStyler.Clean(nick);
             }
             catch { }
-            return $"Player {p.PlayerID + 1}";
+            return I18n.TrF("Player {0}", p.PlayerID + 1);
         }
 
         private static Color TeamColor(Player p)
@@ -316,7 +366,7 @@ namespace CompetitiveRounds
                 row.hasTail = false;
                 if (cards == null || cards.Count - skip <= 0)
                 {
-                    row.message.text = "<color=#666>no cards</color>";
+                    row.message.text = trNoCards ?? "<color=#666>no cards</color>";
                     return;
                 }
                 row.message.text = "";
@@ -352,6 +402,39 @@ namespace CompetitiveRounds
         private static Texture2D GetCardTexture(string canonicalName)
         {
             if (string.IsNullOrEmpty(canonicalName)) return null;
+            // Locale switch: CardSnapshot.InvalidateAll destroyed every
+            // native sprite/texture — drop the whole cache once per
+            // generation change so we never serve a destroyed texture.
+            if (cardTexGeneration != CardSnapshot.Generation)
+            {
+                cardTexGeneration = CardSnapshot.Generation;
+                cardTextures.Clear();
+                cardTexRetryAt.Clear();
+            }
+            // F3: consult the native snapshot FIRST on every call (cheap
+            // dict hit) so a session-cached PNG texture upgrades the moment
+            // the async capture lands — the first non-null texture used to
+            // be cached forever. Miss => existing session-cache/PNG flow
+            // below, unchanged.
+            if (CardSnapshot.TryGetSprite(canonicalName, out var snap) && snap != null)
+            {
+                var native = snap.texture;
+                if (native != null)
+                {
+                    cardTextures[canonicalName] = native;
+                    return native;
+                }
+            }
+            else if (!CardSnapshot.IsFailed(canonicalName))
+            {
+                // R2-2: the session-cached PNG return below bypasses the
+                // CardImageLoader.GetSprite seam (and its RequestSnapshot),
+                // so without this a card whose capture was lost — e.g. the
+                // pump's coroutine host died — never recovered on the Tab
+                // board. Cheap and idempotent per frame (RequestSnapshot is
+                // O(1) on the repeat path), and it re-arms EnsurePump.
+                CardSnapshot.RequestSnapshot(canonicalName);
+            }
             if (cardTextures.TryGetValue(canonicalName, out var texture))
             {
                 // Misses are cached, but only for a few seconds — on the
