@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds — Changelog
 
-## v1.36.0 — Spanish + Russian, translation portal, native cards
+## v1.36.0 — 2026-08-04 — Spanish + Russian, translation portal, native cards
 
 Schema: migrations **179–189**. 187 adds the FFA kills-tiebreak capability columns, 188
 repairs one seeded translation proposal, and **189** carries this batch's 188 new
