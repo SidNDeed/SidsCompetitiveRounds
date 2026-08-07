@@ -57,6 +57,8 @@ FILES = [
     "NativeUI.cs", "CompetitiveUI.cs", "Plugin.cs", "ApiClient.cs",
     "FfaMode.cs", "ModeInfoText.cs", "TabStatsOverlay.cs", "GameStateWatcher.cs",
     "MatchTracker.cs", "VanillaFixes.cs", "QuickChat.cs",
+    # Spectator mode (Aug 6 item 13) — new files with user-visible Tr() text.
+    "SpectatorHud.cs", "SpectatorJoiner.cs", "SpectatorSync.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

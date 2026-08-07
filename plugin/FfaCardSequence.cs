@@ -283,7 +283,10 @@ namespace CompetitiveRounds
                 _seq.Clear();
                 _candCount = Mathf.Clamp(FfaMode.CardCandidates, 1, 5);
                 int players = 5;
-                try { players = Mathf.Max(2, PhotonNetwork.CurrentRoom.PlayerCount); } catch { }
+                // Fighter count (census): a spectator must not inflate the
+                // draw-sequence length K — every fighter computes K locally
+                // and they must all agree.
+                try { players = Mathf.Max(2, RoomActors.ActiveFighterCount()); } catch { }
                 // K = 4·(P−1)+6, floored at 16, capped at 64 (§7e); the fold
                 // can EXTEND from its stored state, never restart.
                 int k = Mathf.Clamp(4 * (players - 1) + 6, 16, 64);
@@ -308,7 +311,11 @@ namespace CompetitiveRounds
             try
             {
                 if (PhotonNetwork.OfflineMode) return 1;
-                var players = PhotonNetwork.PlayerList;
+                // Capability consensus is over FIGHTERS only (census): a
+                // spectator never publishes this prop, so including it would
+                // pin the whole room at PENDING forever and silently degrade
+                // every fighter to private card rolls.
+                var players = RoomActors.ActiveFighters();
                 if (players == null || players.Length == 0) return 0;
                 uint myHash = ComputePoolHash();
                 if (myHash == 0) return 0;

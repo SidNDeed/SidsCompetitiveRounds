@@ -361,6 +361,22 @@ namespace CompetitiveRounds
             cardBaseline.Clear();
         }
 
+        /// <summary>Cards to skip at the head of p.data.currentCards to get
+        /// THIS game's deck (see the #64/#138 note above). Used by the
+        /// spectator snapshot so the master serializes the active deck, not
+        /// the whole-room accumulation.</summary>
+        public static int CardBaselineFor(Player p)
+        {
+            try
+            {
+                if (p != null && p.data != null && p.data.currentCards != null
+                    && cardBaseline.TryGetValue(p, out int b) && b > 0 && b <= p.data.currentCards.Count)
+                    return b;
+            }
+            catch { }
+            return 0;
+        }
+
         private static void RefreshCardRow(CardRow row, Player p)
         {
             try
@@ -456,7 +472,7 @@ namespace CompetitiveRounds
                     Time.realtimeSinceStartup < at)
                     return null;
             }
-            Sprite sprite = CardImageLoader.GetSprite(canonicalName);
+            Sprite sprite = CardImageLoader.GetSprite(canonicalName, prioritize: true);
             texture = sprite != null ? sprite.texture : null;
             cardTextures[canonicalName] = texture;
             if (texture == null) cardTexRetryAt[canonicalName] = Time.realtimeSinceStartup + 5f;

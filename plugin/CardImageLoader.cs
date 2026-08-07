@@ -215,17 +215,30 @@ namespace CompetitiveRounds
         /// disk on first request. Returns null if the card has no
         /// art file in the cards/ folder.
         /// </summary>
-        public static Sprite GetSprite(string cardName)
+        public static Sprite GetSprite(string cardName, bool prioritize = false,
+            bool allowPngWhilePending = false)
         {
             if (string.IsNullOrEmpty(cardName)) return null;
 
             // NATIVE CARD RENDERING seam — the ONE seam every image
             // consumer (Card Stats popup, hold-Tab board, tier-list export)
             // goes through, so all three upgrade at once. Snapshot first;
-            // on a miss, kick the async capture and serve the PNG exactly
-            // as before (async upgrade — the snapshot lands for the NEXT
-            // request). Sits BEFORE the PNG map null-check so native art
-            // can serve even when the cards/ folder is missing/corrupt.
+            // on a miss, kick the async capture. Sits BEFORE the PNG map
+            // null-check so native art can serve even when the cards/
+            // folder is missing/corrupt.
+            //
+            // Aug 6 item 3 ("turn the card images off"): while the pipeline
+            // is HEALTHY, a pending capture returns NULL instead of the PNG
+            // — consumers show their text/placeholder fallback and upgrade
+            // when the native render lands (no more PNG-first flash). The
+            // PNG pack survives purely as the emergency fallback for rigs
+            // where native capture is broken (SnapshotsHealthy=false after
+            // 3 straight failures) — without it those players would have no
+            // card art at all. `prioritize` puts the card the player is
+            // looking at RIGHT NOW at the front of the capture queue;
+            // `allowPngWhilePending` keeps the old PNG-while-capturing
+            // behavior for bulk surfaces (tier-list export) where a null
+            // cell reads worse than old art.
             // CardSnapshot.UseNativeSnapshots is the single master switch
             // back to pure-PNG behavior; any exception here falls through
             // to the PNG path (one log, then permanently quiet — this is a
@@ -236,7 +249,26 @@ namespace CompetitiveRounds
                 {
                     if (CardSnapshot.TryGetSprite(cardName, out var snap) && snap != null)
                         return snap;
-                    CardSnapshot.RequestSnapshot(cardName);
+                    CardSnapshot.RequestSnapshot(cardName, prioritize);
+                    // Codex round 1 (MEDIUM): the null-instead-of-PNG rule is
+                    // for a capture that is still COMING. A card that has
+                    // exhausted its retries and landed in the failed set has
+                    // no capture coming EVER, and RequestSnapshot no-ops for
+                    // it — so returning null here rendered that one card as
+                    // permanently blank while global SnapshotsHealthy stayed
+                    // true (the health kill-switch only trips after 3
+                    // CONSECUTIVE failures, which interleaved successes reset).
+                    // A per-card dead end must fall through to the PNG, which
+                    // is exactly what the PNG pack still exists for.
+                    // Only withhold the PNG when a capture is genuinely
+                    // COMING. Round 2 (finding 10) added RequestsBlocked: the
+                    // request can be declined outright (30s env cooldown, or
+                    // the cache cap) in which case nothing is coming and a
+                    // null renders as a blank card forever.
+                    if (CardSnapshot.SnapshotsHealthy && !allowPngWhilePending
+                        && !CardSnapshot.IsFailed(cardName)
+                        && !CardSnapshot.RequestsBlocked)
+                        return null;
                 }
                 catch (Exception ex)
                 {

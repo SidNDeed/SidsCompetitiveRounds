@@ -51,7 +51,7 @@ namespace CompetitiveRounds
                 }
 
                 if (n == 0)
-                    n = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0;
+                    n = RoomActors.ActiveFighterCount();   // census: scale by fighters, not actors
                 n = Math.Max(2, n);
 
                 var h = new ExitGames.Client.Photon.Hashtable();
@@ -367,7 +367,10 @@ namespace CompetitiveRounds
             try
             {
                 if (PhotonNetwork.OfflineMode) return true;
-                var players = PhotonNetwork.PlayerList;
+                // Capability consensus over FIGHTERS only (census): a
+                // spectator publishes no scale capability and must not
+                // disable map scaling room-wide.
+                var players = RoomActors.ActiveFighters();
                 if (players == null || players.Length == 0) return false;
                 foreach (var p in players)
                 {

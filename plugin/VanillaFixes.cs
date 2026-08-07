@@ -893,6 +893,79 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>Aug 6 item 10 — FFA sudden death.
+    ///
+    /// <para>When the lobby option is on and someone is at match point, every player
+    /// EXCEPT the match-point player(s) has friendly fire disabled: damage between two
+    /// non-match-point players is suppressed until all match-point players are dead.
+    /// The whole rule lives in <see cref="FfaMode.SuddenDeathSuppresses"/>, whose doc
+    /// carries the cross-client determinism argument.</para>
+    ///
+    /// <para>Hooked on the 9-arg <c>HealthHandler.DoDamage</c> — the single funnel every
+    /// health change passes through, direct hits and DOT ticks alike
+    /// (HealthHandler.cs:267). Returning false skips vanilla entirely, so no health
+    /// moves, no <c>DealtDamage</c> credit is recorded, <c>lastSourceOfDamage</c> is not
+    /// rewritten (so kill credit cannot be stolen by a suppressed hit) and no death RPC
+    /// can fire. Knockback is untouched: force travels through
+    /// <c>CallTakeForce</c>/<c>TakeForce</c>, a different path — so bullets still shove,
+    /// they just do not wound.</para>
+    ///
+    /// <para>Prefix rather than Postfix on purpose (#256 is about the opposite trap):
+    /// a Postfix here could not prevent anything, and vanilla's own early-return block
+    /// at the top of DoDamage is irrelevant to us because we run BEFORE it.</para>
+    ///
+    /// <para>INERT unless every condition holds: FFA engine active, the lobby's frozen
+    /// config says sudden death, and someone is actually at match point. Outside FFA
+    /// the very first check in <c>SuddenDeathSuppresses</c> returns false.</para></summary>
+    [HarmonyPatch(
+        typeof(HealthHandler),
+        "DoDamage",
+        new Type[]
+        {
+            typeof(Vector2),
+            typeof(Vector2),
+            typeof(Color),
+            typeof(GameObject),
+            typeof(Player),
+            typeof(bool),
+            typeof(bool),
+            typeof(bool),
+            typeof(HealthHandler.DamageSource)
+        })]
+    internal static class FfaSuddenDeathPatch
+    {
+        [HarmonyPrefix]
+        private static bool BeforeDoDamage(HealthHandler __instance, Player damagingPlayer)
+        {
+            try
+            {
+                if (damagingPlayer == null) return true;      // out-of-bounds etc.
+                if (!FfaMode.SuddenDeath) return true;        // cheapest gate first
+                var victim = __instance != null ? __instance.GetComponent<Player>() : null;
+                if (victim == null) return true;
+                if (!FfaMode.SuddenDeathSuppresses(damagingPlayer, victim)) return true;
+
+                VanillaFixSupport.DiagLimited(
+                    "FfaSuddenDeath-suppressed",
+                    "FfaSuddenDeath suppressed damage between two non-match-point players",
+                    12);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("FfaSuddenDeath", ex);
+                return true;   // never let this patch eat a legitimate hit
+            }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("FfaSuddenDeath", exception);
+        }
+    }
+
     /// <summary>Bug #128 — the pick phase reads player input BEHIND GameManager.lockInput.
     ///
     /// <para><c>CardChoice.DoPlayerSelect</c> pulls the action set straight off the player

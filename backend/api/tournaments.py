@@ -2308,17 +2308,129 @@ async def signup(tournament_id: uuid.UUID, req: TournamentSignupRequest, db: Asy
     try:
         confirmed = await _confirmed_count(db, tournament_id)
         await _queue_channel_post(db, _signup_count_line(t, confirmed))
-        if prev_confirmed < t.min_players <= confirmed:
-            mentions = await _confirmed_mentions(db, tournament_id)
-            when = t.lock_at if t.kind == "async" else t.default_start_ts
-            await _queue_channel_post(
-                db,
-                f"{mentions} — enough players have joined! The "
-                f"{_kind_label(t.kind)} tournament will start {_dts(when)}.")
+        if t.kind == "async":
+            # Async genuinely IS ready at a signup count: it starts when signups
+            # close, so there is no time to agree on and lock_at is the truth.
+            if prev_confirmed < t.min_players <= confirmed:
+                mentions = await _confirmed_mentions(db, tournament_id)
+                await _queue_channel_post(
+                    db,
+                    f"{mentions} — enough players have joined! The "
+                    f"{_kind_label(t.kind)} tournament will start "
+                    f"{_dts(t.lock_at)}.")
+        else:
+            # Sync is NOT ready merely because enough people joined — the start
+            # time comes from the vote. Announce only once a slot has actually
+            # reached min_players, and name that slot.
+            await _maybe_announce_sync_agreement(db, t)
     except Exception as e:
         print(f"[TOURNAMENT] signup feed post failed: {e}")
     await db.commit()
     return await _build_current_response(db, t, player)
+
+
+async def _sync_agreement_reached(db: AsyncSession, t: Tournament) -> bool:
+    """Has SOME slot reached min_players votes? Nothing more than that.
+
+    It answers EXISTENCE, not identity, and the distinction is the whole point.
+    An earlier version returned "the agreed slot" and the announcement named it.
+    That was wrong twice over (Codex Aug-7b, two HIGHs, both CONFIRMED):
+
+      1. It returned the EARLIEST slot at or above the bar, while the lock path
+         picks the HIGHEST-VOTE slot and breaks top ties at RANDOM. With a
+         minimum of 8, an earlier slot on 8 votes and a later one on 10, the
+         feed promised the earlier and the lock scheduled the later — then
+         REMOVED everyone who had only voted for the promised one. The old
+         docstring claimed to "mirror the lock-time tally" while the sentence
+         below it admitted picking the earliest; the two contradicted each
+         other and the code followed the wrong one.
+
+      2. Votes are mutable. Even a correctly-chosen slot can stop winning when
+         one entrant edits their availability, and the lock can also push the
+         whole tournament back — but the announcement had already promised a
+         time and the once-only marker prevented any correction.
+
+    Both collapse if the message never names a time, which is what it now does.
+    So this function only has to be RIGHT ABOUT EXISTENCE, and existence is
+    stable in the useful direction: the feed says "a time has been agreed", the
+    lock decides which, and the lock's own DM tells everyone the answer.
+
+    The eligibility rules still match the lock's tally, because a claim of
+    agreement that the lock would not honour is still a lie:
+      * only slots far enough out to be lockable (MIN_SLOT_NOTICE_HOURS),
+      * only votes from CURRENT signups,
+      * banned entrants excluded, so a banned vote cannot push a slot over a
+        threshold the eligible roster cannot reach.
+    """
+    now = datetime.now(timezone.utc)
+    min_start = now + timedelta(hours=MIN_SLOT_NOTICE_HOURS - 1)
+    rows = (await db.execute(text("""
+        SELECT v.slot_ts, COUNT(*) AS votes
+        FROM tournament_time_votes v
+        JOIN tournament_signups ts ON ts.tournament_id = v.tournament_id
+                                  AND ts.player_id = v.player_id
+        WHERE v.tournament_id = :tid AND v.slot_ts >= :min_start
+          AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                           JOIN players p ON p.steam_id = pb.steam_id
+                          WHERE p.id = ts.player_id AND pb.unbanned_at IS NULL)
+        GROUP BY v.slot_ts
+        HAVING COUNT(*) >= :minp
+        ORDER BY v.slot_ts
+    """), {"tid": t.id, "min_start": min_start, "minp": int(t.min_players)})).all()
+    return bool(rows)
+
+
+async def _maybe_announce_sync_agreement(db: AsyncSession, t: Tournament) -> None:
+    """Post the sync 'ready' line ONCE, when a start time is actually agreed.
+
+    This replaced a signup-count trigger that announced `default_start_ts` — the
+    pre-vote placeholder — as soon as min_players had JOINED. Two separate
+    falsehoods: agreeing to play is not agreeing to a time, and the time printed
+    was not the time played (Sid, 2026-08-07).
+
+    Called from BOTH signup and time-vote. The vote path is the important one:
+    once signups are already past min_players, agreement is reached by someone
+    VOTING, and the old code had no hook there at all — so the announcement
+    could never fire for the case it exists to cover.
+
+    Best-effort and non-fatal: a feed post must never be able to fail a signup
+    or a vote (#187 — an optional notification does not belong in the failure
+    domain of the action it announces).
+    """
+    if t.kind != "sync" or t.status != "voting" or t.agreement_announced_at is not None:
+        return
+    try:
+        if not await _sync_agreement_reached(db, t):
+            return
+        # Claim the marker ATOMICALLY. The in-Python `is not None` check above
+        # is only a cheap early-out: two concurrent voters can both read a NULL
+        # marker and both queue the post (Codex Aug-7b, MEDIUM, CONFIRMED). A
+        # conditional UPDATE ... WHERE agreement_announced_at IS NULL RETURNING
+        # lets exactly one transaction win; the loser gets no row and returns
+        # silently. Both this and the post ride the caller's transaction, so a
+        # rollback un-claims the marker rather than losing the announcement.
+        claimed = (await db.execute(text(
+            "UPDATE tournaments SET agreement_announced_at = NOW()"
+            " WHERE id = :tid AND agreement_announced_at IS NULL"
+            " RETURNING id"), {"tid": t.id})).first()
+        if claimed is None:
+            return
+        t.agreement_announced_at = datetime.now(timezone.utc)
+        mentions = await _confirmed_mentions(db, t.id)
+        # DELIBERATELY NAMES NO TIME. The winning slot is not decided until the
+        # lock runs, votes can still change until then, and this message cannot
+        # be corrected once sent. Announcing the milestone without a promise is
+        # the only version that stays true — the lock's own DM delivers the
+        # actual start time to every entrant.
+        await _queue_channel_post(
+            db,
+            f"{mentions} — enough entrants have agreed on a start time! The "
+            f"exact slot is locked in {_dts(t.lock_at)}; the bot DMs everyone "
+            f"the final time then. Votes are still open until lock, and "
+            f"entrants who did not vote for the winning slot are removed, so "
+            f"make sure your availability covers every time you could play.")
+    except Exception as e:
+        print(f"[TOURNAMENT] agreement announce failed: {e}")
 
 
 @router.post("/{tournament_id}/unsignup", response_model=TournamentCurrentResponse)
@@ -2439,6 +2551,10 @@ async def time_vote(tournament_id: uuid.UUID, req: TournamentTimeVoteRequest, db
     # An empty replace-set is rejected — clearing every vote would get the
     # player silently kicked at lock.
     await _replace_time_votes(db, t, player.id, req.slot_ts)
+    await db.flush()
+    # A vote is what normally tips a sync tournament into agreement once signups
+    # are already past min_players, so this is the hook that actually matters.
+    await _maybe_announce_sync_agreement(db, t)
     await db.commit()
     return await _build_current_response(db, t, player)
 

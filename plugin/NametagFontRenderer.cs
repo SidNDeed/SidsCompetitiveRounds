@@ -185,7 +185,9 @@ namespace CompetitiveRounds
 
             // Build "clean nickname → typeface sku" index for current room players.
             var nickToFont = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var pp in PhotonNetwork.PlayerList)
+            // Census: fighters only — a spectator with a colliding nickname
+            // must not overwrite a fighter's entry and repaint the wrong tag.
+            foreach (var pp in RoomActors.ActiveFighters())
             {
                 if (pp == null) continue;
                 string cleanNick = NametagStyler.Clean(pp.NickName ?? "");

@@ -77,6 +77,22 @@ from schemas import (
     FfaMatchResponse,
     FfaLeaderboardEntry,
     FfaLeaderboardResponse,
+    RecordsBoardResponse,
+    CardTopPickersResponse,
+    CardPickersSummaryResponse,
+    RankedFriendsResponse,
+    GoldSourcesResponse,
+    NemesisResponse,
+    PlayerNemesisResponse,
+    PlayerNemesisPlayer,
+    PlayerNemesisEntry,
+    BuildTypeResponse,
+    SimilarPlayersResponse,
+    SpectateAttestBody,
+    SpectateGrantBody,
+    SpectateLeaseBody,
+    SpectateValidateBody,
+    AllowSpectatorsBody,
 )
 
 # ── Config from environment ────────────────────────────────────
@@ -797,6 +813,18 @@ async def team_queue_cleanup_loop():
                             LEFT JOIN team_series ts ON ts.id = tq.series_id
                             WHERE tq.last_polled < NOW() - INTERVAL '90 seconds'
                                OR (tq.last_polled < NOW() - INTERVAL '30 seconds'
+                                   -- Aug 6 item 9 (#252a): a 'lobby' row's
+                                   -- series_id points at team_LOBBIES, so this
+                                   -- LEFT JOIN never matches and ts.status is
+                                   -- NULL -> 'IS DISTINCT FROM active' is TRUE.
+                                   -- Without this guard every open-lobby member
+                                   -- would be evicted after 30s of poll silence,
+                                   -- which is TIGHTER than the 75s contract the
+                                   -- FFA lobby uses and would drop members on a
+                                   -- brief hiccup. Lobby rows fall through to
+                                   -- the 90s arm above, which is the correct
+                                   -- "this client is gone" bound.
+                                   AND tq.status <> 'lobby'
                                    AND (tq.series_id IS NULL
                                         OR ts.status IS DISTINCT FROM 'active'))
                             FOR UPDATE OF tq SKIP LOCKED
@@ -970,6 +998,13 @@ async def queue_cleanup_loop():
                             WHERE q.last_polled < NOW() - INTERVAL '60 minutes'
                               AND NOT (q.status = 'ready_join'
                                        AND s.status = 'active')
+                              -- Aug 6 item 9: 'lobby' rows point at
+                              -- ovt_LOBBIES, so s.* is NULL for them and they
+                              -- reach this sweep on age alone. That is the
+                              -- INTENDED outcome (60 minutes without a poll
+                              -- means the client is gone), but it is stated
+                              -- here so it is a decision rather than a
+                              -- side-effect of a non-matching join.
                             FOR UPDATE OF q SKIP LOCKED
                         )
                         RETURNING steam_id, status"""))
@@ -1242,6 +1277,70 @@ async def queue_cleanup_loop():
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] ffa sweep error: {e}")
+        # ── Open 2v2 / 1v2 host lobbies (Aug 6 item 9) ──────────────────
+        # Direct port of the FFA open-lobby maintenance above: prune members
+        # whose clients stopped polling for 75s+, promote a new host if the
+        # host was pruned, disband when nobody is left, and free queue rows
+        # stranded under a lobby that is no longer open.
+        #
+        # Its OWN try/except (learning #228): one broken statement must never
+        # starve the sweeps behind it — that is how a ghost row once sat in the
+        # 2v2 tab for 285 minutes.
+        for _mode, _qt, _lt, _tag in (("team", "team_queue", "team_lobbies", "2v2"),
+                                      ("ovt", "ovt_queue", "ovt_lobbies", "1v2")):
+            try:
+                async with async_session() as db:
+                    # Rows whose lobby left 'open' (started, disbanded,
+                    # canceled) but that were never re-pointed. FOR UPDATE OF q
+                    # — a bare FOR UPDATE over this LEFT-JOIN-shaped subquery
+                    # is an asyncpg FeatureNotSupportedError (learning #228).
+                    freed = await db.execute(text(f"""
+                        DELETE FROM {_qt}
+                        WHERE player_id IN (
+                            SELECT q.player_id FROM {_qt} q
+                              JOIN {_lt} l ON l.id = q.series_id
+                             WHERE q.status = 'lobby' AND l.status <> 'open'
+                             FOR UPDATE OF q SKIP LOCKED
+                        )
+                        RETURNING steam_id"""))
+                    for r in freed.fetchall():
+                        print(f"[{_tag}-LOBBY-CLEANUP] Freed stranded lobby row: {r[0]}")
+                    # ORDER BY random(), not created_at: a stable oldest-first
+                    # pick + LIMIT would let ten long-lived healthy lobbies
+                    # permanently starve lobby 11+ of pruning and promotion.
+                    open_lobbies = (await db.execute(text(f"""
+                        SELECT l.id, l.host_player_id FROM {_lt} l
+                         WHERE l.status = 'open'
+                         ORDER BY random()
+                         LIMIT 10
+                         FOR UPDATE SKIP LOCKED"""))).mappings().all()
+                    for ol in open_lobbies:
+                        await db.execute(text(f"""
+                            DELETE FROM {_qt}
+                             WHERE series_id = :lid AND status = 'lobby'
+                               AND last_polled < NOW() - INTERVAL '75 seconds'"""),
+                            {"lid": ol["id"]})
+                        live = (await db.execute(text(f"""
+                            SELECT player_id FROM {_qt}
+                             WHERE series_id = :lid AND status = 'lobby'
+                             ORDER BY joined_at, player_id::text"""),
+                            {"lid": ol["id"]})).scalars().all()
+                        if not live:
+                            await db.execute(text(f"""
+                                UPDATE {_lt} SET status='canceled', invalidated_at=NOW(),
+                                       invalidation_reason='lobby_abandoned'
+                                 WHERE id=:lid AND status='open'"""), {"lid": ol["id"]})
+                            print(f"[{_tag}-LOBBY] open lobby abandoned "
+                                  f"(no live members): {ol['id']}")
+                        elif ol["host_player_id"] not in set(live):
+                            await db.execute(text(
+                                f"UPDATE {_lt} SET host_player_id=:h WHERE id=:lid"
+                            ), {"h": live[0], "lid": ol["id"]})
+                            print(f"[{_tag}-LOBBY] host pruned — promoted earliest "
+                                  f"member (lobby {ol['id']})")
+                    await db.commit()
+            except Exception as e:
+                print(f"[QUEUE-CLEANUP] {_tag} lobby sweep error: {e}")
         # ── Queue-lease hygiene (migration 174) ─────────────────────────
         # Its OWN try/except: a raise here must not kill the sweeps after it
         # (learning #228 — one shared handler once silently killed every sweep
@@ -1514,6 +1613,7 @@ _RL_SENSITIVE_PREFIXES = (
     "/api/v1/auth/steam",  # token minting — throttle floods (July 21)
     "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
     "/api/v1/ffa/bets",
+    "/api/v1/spectate/grant",  # seat minting — ~5/min is plenty (design §6.5)
     # L10n mutating paths ONLY (localization-design §2.5): never the bare
     # "/api/v1/i18n/" prefix — startswith matching would put the launch-time
     # pack fetch in the 20-per-10s bucket and two players behind one NAT
@@ -1956,7 +2056,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected")
 
 
-LATEST_MOD_VERSION = "1.36.0"
+LATEST_MOD_VERSION = "1.37.0"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
@@ -3011,6 +3111,34 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     _p1t = _loc_tl if reporter_is_p1 else _opp_tl
     _p2t = _opp_tl if reporter_is_p1 else _loc_tl
 
+    # Aug 6 items 1+4 — expanded combat telemetry, same seat-orientation
+    # pattern as the tuples above. Deaths are the reporter's local
+    # observations of BOTH seats. All-None from pre-Aug-6 clients.
+    def _tl_clamp(s):
+        return ((s or "")[:1024] or None)
+
+    def _obs(v):
+        """Map the client's -1 'never observed' sentinel to NULL.
+
+        An older peer sends no expanded telemetry, so its Opp* fields sit at
+        their reset zeroes. Storing those as real zeroes would divide a true
+        match duration by damage nobody measured and drag that player's DPS
+        average down forever (#257). NULL means 'not recorded'; 0 means
+        'recorded, and it was zero'. They are different facts."""
+        return None if (v is None or v < 0) else v
+    _loc_cmb = (_obs(report.local_damage_dealt), _obs(report.local_max_single_hit),
+                _obs(report.local_max_health), _obs(report.local_best_bounce_kill),
+                _tl_clamp(report.local_damage_timeline),
+                report.local_deaths, report.local_deaths_boundary,
+                report.local_deaths_own_bullet)
+    _opp_cmb = (_obs(report.opp_damage_dealt), _obs(report.opp_max_single_hit),
+                _obs(report.opp_max_health), _obs(report.opp_best_bounce_kill),
+                _tl_clamp(report.opp_damage_timeline),
+                report.opp_deaths, report.opp_deaths_boundary,
+                report.opp_deaths_own_bullet)
+    _p1c = _loc_cmb if reporter_is_p1 else _opp_cmb
+    _p2c = _opp_cmb if reporter_is_p1 else _loc_cmb
+
     match = Match(
         player1_id=p1.id,
         player2_id=p2.id,
@@ -3066,6 +3194,15 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         p2_hit_timeline=_p2t[0], p2_block_timeline=_p2t[1],
         # No p1/p2 orientation — plain seconds-since-start marks.
         point_times=((report.point_times or "")[:512] or None),
+        # Aug 6 items 1+4 — expanded combat telemetry (migration 191).
+        p1_damage_dealt=_p1c[0], p1_max_single_hit=_p1c[1],
+        p1_max_health=_p1c[2], p1_best_bounce_kill=_p1c[3],
+        p1_damage_timeline=_p1c[4], p1_deaths=_p1c[5],
+        p1_deaths_boundary=_p1c[6], p1_deaths_own_bullet=_p1c[7],
+        p2_damage_dealt=_p2c[0], p2_max_single_hit=_p2c[1],
+        p2_max_health=_p2c[2], p2_best_bounce_kill=_p2c[3],
+        p2_damage_timeline=_p2c[4], p2_deaths=_p2c[5],
+        p2_deaths_boundary=_p2c[6], p2_deaths_own_bullet=_p2c[7],
     )
     db.add(match)
     await db.flush()  # Get match.id
@@ -3075,7 +3212,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         db.add(MatchCard(
             match_id=match.id,
             player_id=p1.id,
-            card_name=card.card_name,
+            card_name=_canon_card_name(card.card_name),
             card_rarity=card.card_rarity,
             pick_order=card.pick_order,
             round_number=card.round_number,
@@ -3086,7 +3223,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         db.add(MatchCard(
             match_id=match.id,
             player_id=p2.id,
-            card_name=card.card_name,
+            card_name=_canon_card_name(card.card_name),
             card_rarity=card.card_rarity,
             pick_order=card.pick_order,
             round_number=card.round_number,
@@ -3100,7 +3237,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 match_id=match.id,
                 player_id=player_obj.id,
                 round_number=offer.round_number,
-                card_name=offer.card_name,
+                card_name=_canon_card_name(offer.card_name),
                 was_picked=offer.was_picked,
             ))
 
@@ -3183,6 +3320,48 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             and report.local_active_seconds >= 5):
         reporter.keys_pressed_total = (reporter.keys_pressed_total or 0) + report.local_keys_pressed
         reporter.active_seconds_total = (reporter.active_seconds_total or 0) + report.local_active_seconds
+
+    # Aug 6 item 1 — career records for the mini-leaderboards, BOTH seats
+    # (the report carries both sides' values). Atomic GREATEST updates (#148)
+    # so two concurrent submits can't lose a record. Single-hit and health
+    # records only advance when the seat's build QUALIFIED this match:
+    # <= 5 cards and no growth-damage card, or the boards become a Grow
+    # stacking contest (Sid's exclusion rule; card list confirmed with him).
+    # Savepointed (#235): a failed UPDATE here (e.g. code deployed before
+    # migration 191 ran) must degrade to "records skipped", never abort the
+    # whole match submit — a bare try/except would leave the transaction
+    # poisoned and 500 the report anyway.
+    try:
+        async with db.begin_nested():
+            _GROWTH_CARDS = {"grow"}   # normalized: lower, no spaces
+            def _cmb_qualifies(cards) -> bool:
+                names = [(getattr(c, "card_name", "") or "").lower().replace(" ", "")
+                         for c in (cards or [])]
+                if len(names) > 5:
+                    return False
+                return not any(n in _GROWTH_CARDS for n in names)
+            _p1_qual = _cmb_qualifies(report.player1.cards)
+            _p2_qual = _cmb_qualifies(report.player2.cards)
+            for _pid, _cmb, _qual in ((p1.id, _p1c, _p1_qual), (p2.id, _p2c, _p2_qual)):
+                _hit, _hp, _bounce = _cmb[1], _cmb[2], _cmb[3]
+                if _qual and _hit and _hit > 0:
+                    await db.execute(text(
+                        "UPDATE players SET record_max_single_hit ="
+                        " GREATEST(COALESCE(record_max_single_hit, 0), :v) WHERE id = :pid"
+                    ), {"v": int(_hit), "pid": str(_pid)})
+                if _qual and _hp and _hp > 0:
+                    await db.execute(text(
+                        "UPDATE players SET record_max_health ="
+                        " GREATEST(COALESCE(record_max_health, 0), :v) WHERE id = :pid"
+                    ), {"v": int(_hp), "pid": str(_pid)})
+                # Bounce record has no build exclusion — bounces are the point.
+                if _bounce and _bounce > 0:
+                    await db.execute(text(
+                        "UPDATE players SET record_bounce_kill ="
+                        " GREATEST(COALESCE(record_bounce_kill, 0), :v) WHERE id = :pid"
+                    ), {"v": int(_bounce), "pid": str(_pid)})
+    except Exception as _rec_ex:
+        print(f"[MATCH] career-record update failed (non-fatal): {_rec_ex}")
 
     # Award XP to both players
     winner_rounds = max(report.p1_rounds_won, report.p2_rounds_won)
@@ -3957,6 +4136,38 @@ async def get_player_stats(
         for h in history_result.scalars().all()
     ]
 
+    # Aug 7 — the same series for FFA. There is no rating_history table for FFA
+    # ratings, but every rated FFA game already snapshots rating_after on the
+    # per-player row, so the game rows ARE the history. Same 500 cap and same
+    # ASC ordering as the 1v1 list above so both feed one client graph.
+    # Filters: ranked only (a casual game leaves rating_after NULL), roster
+    # ghosts excluded (they held a slot but did not play — #227), invalidated
+    # matches excluded (every other FFA aggregate in this file does), and
+    # rating_after NOT NULL so a null can never land in the plotted series.
+    #
+    # Each entry carries the timestamp under BOTH keys on purpose. The frozen
+    # contract names the field 'recorded_at'; the 1v1 client parser this one is
+    # copied from reads 'date'. Emitting both means neither end can be wrong,
+    # and the split-on-"rating" parser is unaffected by the extra key.
+    ffa_history_rows = (await db.execute(text("""
+        SELECT fmp.rating_after, fm.created_at
+          FROM ffa_match_players fmp
+          JOIN ffa_matches fm ON fm.id = fmp.match_id
+         WHERE fmp.player_id = :pid
+           AND fm.is_ranked IS TRUE
+           AND fm.invalidated_at IS NULL
+           AND NOT fmp.absent
+           AND fmp.rating_after IS NOT NULL
+         ORDER BY fm.created_at ASC
+         LIMIT 500
+    """), {"pid": player.id})).mappings().all()
+    ffa_history = [
+        {"rating": round(float(r["rating_after"]), 1),
+         "recorded_at": r["created_at"].isoformat(),
+         "date": r["created_at"].isoformat()}
+        for r in ffa_history_rows
+    ]
+
     # Top cards by pick count, with pass-rate from card_offers (additive — old
     # matches without offer rows just yield times_offered=0, pass_rate=0).
     cards_query = text("""
@@ -4518,6 +4729,131 @@ async def get_player_stats(
     except Exception as ex:
         print(f"[STATS] FFA kills/damage block failed: {ex}")
 
+    # ── Aug 6 item 1: Compare-tab scalar additions (migration 191) ────────
+    # ONE savepoint for the whole group (#235): these queries read brand-new
+    # columns, so in the deploy-order window where this code is live before
+    # migration 191 has applied, the block must degrade to zero-data defaults
+    # instead of poisoning the transaction for everything after it.
+    # (The ORM attribute reads — casual_dc_count, record_* — are already safe:
+    # the endpoint's opening select(Player) reads every mapped column, so a
+    # missing column would have failed the endpoint at the top, not here.)
+    casual_rage_quit_pct = 0.0
+    casual_dc = int(player.casual_dc_count or 0)
+    casual_matches_played = 0
+    ranked_dps = 0.0
+    ffa_dps = 0.0
+    self_death_pct = 0.0
+    deaths_total = deaths_boundary = deaths_own_bullet = 0
+    ranked_unique_opponents = ranked_total_series = 0
+    ranked_uniqueness_pct = 0.0
+    try:
+        async with db.begin_nested():
+            # One pass over the player's 1v1 matches: casual count (rage-quit
+            # denominator), ranked DPS, and the death breakdown. Damage/death
+            # columns are NULL on pre-telemetry rows — SUM skips them, and the
+            # DPS numerator/denominator share ONE filter so a row only counts
+            # in both or neither (#257).
+            mrow = (await db.execute(text("""
+                SELECT
+                  COUNT(*) FILTER (WHERE NOT COALESCE(m.is_ranked, false)) AS casual_matches,
+                  SUM(CASE WHEN m.player1_id = :pid THEN m.p1_damage_dealt
+                           ELSE m.p2_damage_dealt END)
+                      FILTER (WHERE COALESCE(m.is_ranked, false)
+                                AND (CASE WHEN m.player1_id = :pid THEN m.p1_damage_dealt
+                                          ELSE m.p2_damage_dealt END) IS NOT NULL
+                                AND COALESCE(m.duration_seconds, m.match_duration, 0) > 0) AS r_dmg,
+                  SUM(COALESCE(m.duration_seconds, m.match_duration))
+                      FILTER (WHERE COALESCE(m.is_ranked, false)
+                                AND (CASE WHEN m.player1_id = :pid THEN m.p1_damage_dealt
+                                          ELSE m.p2_damage_dealt END) IS NOT NULL
+                                AND COALESCE(m.duration_seconds, m.match_duration, 0) > 0) AS r_dur,
+                  SUM(CASE WHEN m.player1_id = :pid THEN m.p1_deaths ELSE m.p2_deaths END) AS d_total,
+                  SUM(CASE WHEN m.player1_id = :pid THEN m.p1_deaths_boundary
+                           ELSE m.p2_deaths_boundary END) AS d_boundary,
+                  SUM(CASE WHEN m.player1_id = :pid THEN m.p1_deaths_own_bullet
+                           ELSE m.p2_deaths_own_bullet END) AS d_own
+                  FROM matches m
+                 WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+                   AND m.invalidated_at IS NULL
+            """), {"pid": player.id})).mappings().first()
+            if mrow:
+                casual_matches_played = int(mrow["casual_matches"] or 0)
+                r_dur = float(mrow["r_dur"] or 0)
+                if r_dur > 0:
+                    ranked_dps = round(float(mrow["r_dmg"] or 0) / r_dur, 2)
+                deaths_total = int(mrow["d_total"] or 0)
+                deaths_boundary = int(mrow["d_boundary"] or 0)
+                deaths_own_bullet = int(mrow["d_own"] or 0)
+                if deaths_total > 0:
+                    self_death_pct = round(
+                        (deaths_boundary + deaths_own_bullet) / deaths_total, 4)
+            # Rage-quit rate, third attempt — and this time computed from the
+            # EVENTS rather than from two aggregate counters.
+            #
+            # History: the original denominator was matches + DCs, which
+            # double-counted a leave at 4-0 (that one game is BOTH a recorded
+            # casual match and a DC event). Round 1 changed it to
+            # max(matches, DCs), and round 2 correctly pointed out that max()
+            # is not the union either: one finished game plus one separate
+            # early quit that produced no match row gives max(1,1)=1 and
+            # displays 100% instead of 50%.
+            #
+            # The union is only computable from the event rows, and it is:
+            # casual games played = recorded casual matches + DC events whose
+            # room produced NO match row. casual_dc_events stores room_id
+            # exactly so this join is possible. Anything older than the
+            # Aug-6 deploy has no DC rows at all and simply reads 0%.
+            _dc_no_match = (await db.execute(text("""
+                SELECT COUNT(*) FROM casual_dc_events e
+                 WHERE e.leaver_id = :pid
+                   AND NOT EXISTS (
+                       SELECT 1 FROM matches m
+                        WHERE m.photon_room_id = e.room_id
+                          AND m.invalidated_at IS NULL
+                          AND (m.player1_id = :pid OR m.player2_id = :pid))
+            """), {"pid": player.id})).scalar() or 0
+            _rq_den = casual_matches_played + int(_dc_no_match)
+            if _rq_den > 0:
+                casual_rage_quit_pct = round(min(1.0, casual_dc / _rq_den), 4)
+
+            # FFA DPS — same one-filter-both-sides shape over the per-player
+            # FFA rows (roster ghosts excluded like the averages above; both
+            # ranked and casual games count — DPS carries its own denominator
+            # so the glicko_ratings_ffa consistency constraint doesn't apply).
+            fdrow = (await db.execute(text("""
+                SELECT SUM(fmp.damage_dealt)
+                         FILTER (WHERE fmp.damage_dealt IS NOT NULL
+                                   AND COALESCE(fm.duration_seconds, 0) > 0) AS f_dmg,
+                       SUM(fm.duration_seconds)
+                         FILTER (WHERE fmp.damage_dealt IS NOT NULL
+                                   AND COALESCE(fm.duration_seconds, 0) > 0) AS f_dur
+                  FROM ffa_match_players fmp
+                  JOIN ffa_matches fm ON fm.id = fmp.match_id
+                 WHERE fmp.player_id = :pid
+                   AND fm.invalidated_at IS NULL
+                   AND NOT fmp.absent
+            """), {"pid": player.id})).mappings().first()
+            if fdrow and float(fdrow["f_dur"] or 0) > 0:
+                ffa_dps = round(float(fdrow["f_dmg"] or 0) / float(fdrow["f_dur"]), 2)
+
+            # Opponent variety over completed, non-invalidated ranked series.
+            urow = (await db.execute(text("""
+                SELECT COUNT(*) AS total,
+                       COUNT(DISTINCT CASE WHEN rs.player1_id = :pid
+                                           THEN rs.player2_id ELSE rs.player1_id END) AS uniq
+                  FROM ranked_series rs
+                 WHERE (rs.player1_id = :pid OR rs.player2_id = :pid)
+                   AND rs.status = 'completed'
+                   AND rs.invalidated_at IS NULL
+            """), {"pid": player.id})).mappings().first()
+            if urow and int(urow["total"] or 0) > 0:
+                ranked_total_series = int(urow["total"])
+                ranked_unique_opponents = int(urow["uniq"] or 0)
+                ranked_uniqueness_pct = round(
+                    ranked_unique_opponents / ranked_total_series, 4)
+    except Exception as ex:
+        print(f"[STATS] Aug-6 compare block failed: {ex}")
+
     # LFP-ping cooldown surface (July 21): seconds until this player may fire
     # the next Discord LFP ping — same MAX(created_at) source the /lfp-ping
     # cooldown gate reads. Guarded (and LAST before the return so a failed
@@ -4555,6 +4891,7 @@ async def get_player_stats(
         discord_display_name=(player.discord_display_name
                               if bool(player.show_discord) else None),
         show_discord=bool(player.show_discord),
+        allow_spectators=bool(getattr(player, "allow_spectators", True)),
         gold_earned=player.gold_earned or 0,
         gold_spent=player.gold_spent or 0,
         bullets_fired=player.bullets_fired or 0,
@@ -4580,6 +4917,7 @@ async def get_player_stats(
         active_nametag_skus=active_nametag_skus,
         last_match=stats["last_match"],
         recent_rating_history=history,
+        ffa_rating_history=ffa_history,
         top_cards=top_cards,
         level=player_level,
         total_xp=player_total_xp,
@@ -4633,6 +4971,22 @@ async def get_player_stats(
         ffa_avg_damage=ffa_avg_dmg,
         ffa_damage_games=ffa_damage_games,
         lfp_seconds_left=lfp_seconds_left,
+        # Aug 6 item 1 — Compare-tab scalar additions (migration 191).
+        casual_rage_quit_pct=casual_rage_quit_pct,
+        casual_dc_count=casual_dc,
+        casual_matches=casual_matches_played,
+        ranked_dps=ranked_dps,
+        ffa_dps=ffa_dps,
+        self_death_pct=self_death_pct,
+        deaths_total=deaths_total,
+        deaths_boundary=deaths_boundary,
+        deaths_own_bullet=deaths_own_bullet,
+        record_max_single_hit=player.record_max_single_hit,
+        record_max_health=player.record_max_health,
+        record_bounce_kill=player.record_bounce_kill,
+        ranked_unique_opponents=ranked_unique_opponents,
+        ranked_total_series=ranked_total_series,
+        ranked_uniqueness_pct=ranked_uniqueness_pct,
     )
 
 
@@ -4867,6 +5221,18 @@ async def get_player_matches(
             CASE WHEN m.player1_id = :pid THEN m.p2_blocks_successful ELSE m.p1_blocks_successful END AS op_bs,
             CASE WHEN m.player1_id = :pid THEN m.p2_keys_pressed ELSE m.p1_keys_pressed END AS op_kp,
             CASE WHEN m.player1_id = :pid THEN m.p2_active_seconds ELSE m.p1_active_seconds END AS op_as,
+            -- Aug 6 item 1 (migration 191): viewer-relative damage + deaths.
+            -- NULL on pre-telemetry rows (#257) — passed through untouched.
+            CASE WHEN m.player1_id = :pid THEN m.p1_damage_dealt ELSE m.p2_damage_dealt END AS pl_dmg,
+            CASE WHEN m.player1_id = :pid THEN m.p2_damage_dealt ELSE m.p1_damage_dealt END AS op_dmg,
+            CASE WHEN m.player1_id = :pid THEN m.p1_damage_timeline ELSE m.p2_damage_timeline END AS pl_dmg_tl,
+            CASE WHEN m.player1_id = :pid THEN m.p2_damage_timeline ELSE m.p1_damage_timeline END AS op_dmg_tl,
+            CASE WHEN m.player1_id = :pid THEN m.p1_deaths ELSE m.p2_deaths END AS pl_deaths,
+            CASE WHEN m.player1_id = :pid THEN m.p1_deaths_boundary ELSE m.p2_deaths_boundary END AS pl_deaths_bnd,
+            CASE WHEN m.player1_id = :pid THEN m.p1_deaths_own_bullet ELSE m.p2_deaths_own_bullet END AS pl_deaths_own,
+            CASE WHEN m.player1_id = :pid THEN m.p2_deaths ELSE m.p1_deaths END AS op_deaths,
+            CASE WHEN m.player1_id = :pid THEN m.p2_deaths_boundary ELSE m.p1_deaths_boundary END AS op_deaths_bnd,
+            CASE WHEN m.player1_id = :pid THEN m.p2_deaths_own_bullet ELSE m.p1_deaths_own_bullet END AS op_deaths_own,
             (m.player1_id = :pid) AS viewer_is_p1,
             m.point_timeline,
             -- Bug batch item 4: game length. duration_seconds is canonical
@@ -4996,6 +5362,17 @@ async def get_player_matches(
             # Seconds-since-start marks — no orientation, no flip.
             point_times=row["point_times"],
             duration_seconds=row["duration_seconds"] or 0,
+            # Aug 6 item 1 — damage + deaths, NULL-preserving (#257).
+            player_damage_dealt=row["pl_dmg"],
+            opp_damage_dealt=row["op_dmg"],
+            player_damage_timeline=row["pl_dmg_tl"],
+            opp_damage_timeline=row["op_dmg_tl"],
+            player_deaths=row["pl_deaths"],
+            player_deaths_boundary=row["pl_deaths_bnd"],
+            player_deaths_own_bullet=row["pl_deaths_own"],
+            opp_deaths=row["op_deaths"],
+            opp_deaths_boundary=row["op_deaths_bnd"],
+            opp_deaths_own_bullet=row["op_deaths_own"],
         ))
 
     return entries
@@ -5054,6 +5431,15 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                m.p1_keys_pressed, m.p2_keys_pressed,
                m.p1_active_seconds, m.p2_active_seconds,
                m.p1_xp_gained, m.p2_xp_gained,
+               -- Aug 6 item 1 (migration 191) — expanded combat telemetry.
+               m.p1_damage_dealt, m.p2_damage_dealt,
+               m.p1_max_single_hit, m.p2_max_single_hit,
+               m.p1_max_health, m.p2_max_health,
+               m.p1_best_bounce_kill, m.p2_best_bounce_kill,
+               m.p1_damage_timeline, m.p2_damage_timeline,
+               m.p1_deaths, m.p2_deaths,
+               m.p1_deaths_boundary, m.p2_deaths_boundary,
+               m.p1_deaths_own_bullet, m.p2_deaths_own_bullet,
                m.player1_id, m.player2_id, m.winner_id,
                p1.steam_id AS p1_sid, p1.display_name AS p1_name,
                p2.steam_id AS p2_sid, p2.display_name AS p2_name,
@@ -5106,6 +5492,16 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                 "blocks_activated": row[f"{o}_blocks_activated"],
                 "blocks_successful": row[f"{o}_blocks_successful"],
                 "keys_pressed": row[f"{o}_keys_pressed"], "active_seconds": row[f"{o}_active_seconds"],
+                # Aug 6 item 1 — expanded combat telemetry. NULL on rows
+                # predating migration 191's clients (#257) — kept as null.
+                "damage_dealt": row[f"{o}_damage_dealt"],
+                "max_single_hit": row[f"{o}_max_single_hit"],
+                "max_health": row[f"{o}_max_health"],
+                "best_bounce_kill": row[f"{o}_best_bounce_kill"],
+                "damage_timeline": row[f"{o}_damage_timeline"],
+                "deaths": row[f"{o}_deaths"],
+                "deaths_boundary": row[f"{o}_deaths_boundary"],
+                "deaths_own_bullet": row[f"{o}_deaths_own_bullet"],
                 "xp_gained": row[f"{o}_xp_gained"] or 0,
                 "gold_gained": gold_by_pid.get(str(row[pid_col]), 0),
                 "rating_change": (float(s_rc_p1) if n == 1 else float(s_rc_p2))
@@ -5167,8 +5563,8 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
         tele = {}
         t_rows = (await db.execute(text("""
             SELECT player_id, fps_timeline, ping_timeline, ping_avg, hit_timeline,
-                   block_timeline, bullets_fired, bullets_hit, blocks_activated,
-                   blocks_successful
+                   block_timeline, damage_dealt_timeline, bullets_fired,
+                   bullets_hit, blocks_activated, blocks_successful
               FROM team_match_telemetry WHERE match_id = :mid"""),
             {"mid": row["id"]})).mappings().all()
         for t in t_rows:
@@ -5195,7 +5591,8 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                 "xp_earned": int(row[f"{s_slot}_xp_earned"] or 0) if s_slot else 0,
                 "cards": cards.get(row[f"{slot_col}_sid"], []),
                 **{k: t.get(k) for k in ("fps_timeline", "ping_timeline", "ping_avg",
-                                         "hit_timeline", "block_timeline", "bullets_fired",
+                                         "hit_timeline", "block_timeline",
+                                         "damage_dealt_timeline", "bullets_fired",
                                          "bullets_hit", "blocks_activated", "blocks_successful")},
             }
         return {
@@ -5220,6 +5617,7 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                m.solo_rounds_won, m.duo_rounds_won, m.solo_points_total, m.duo_points_total,
                m.winner_side, m.duration_seconds, m.series_id,
                m.solo_fps_avg, m.duo_a_fps_avg, m.duo_b_fps_avg,
+               m.solo_damage_timeline, m.duo_a_damage_timeline, m.duo_b_damage_timeline,
                m.solo_id, m.duo_a_id, m.duo_b_id,
                ps.steam_id AS solo_sid, ps.display_name AS solo_name,
                pa.steam_id AS duo_a_sid, pa.display_name AS duo_a_name,
@@ -5259,6 +5657,11 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                 "steam_id": row[f"{slot_col}_sid"], "name": row[f"{slot_col}_name"],
                 "side": "solo" if side == 1 else "duo", "won": row["winner_side"] == side,
                 "fps_avg": row[f"{slot_col}_fps_avg"],
+                # Aug-7b item 3. The COLUMN is <slot>_damage_timeline, but the
+                # per-player wire key is the 2v2/FFA one so a client reads the
+                # same key in every mode. NULL passes through — no timeline
+                # means no hover graph, not an empty one.
+                "damage_dealt_timeline": row[f"{slot_col}_damage_timeline"],
                 "gold_earned": int(row[f"{s_slot}_gold_earned"] or 0) if s_slot else 0,
                 "xp_earned": int(row[f"{s_slot}_xp_earned"] or 0) if s_slot else 0,
                 "cards": cards.get(row[f"{slot_col}_sid"], []),
@@ -5434,11 +5837,18 @@ async def set_player_card_tier(
     if pid is None:
         raise HTTPException(404, "Player not found")
 
+    # Store the canonical spelling. The HMAC above deliberately verifies the RAW
+    # name (that is what the client signed); normalisation applies only to the
+    # value written, so a tr-TR client's dotless-i spelling converges onto the
+    # same row migration 195 produced instead of forking a second tier entry.
+    # The clear path needs it too, or such a client could never clear the row it
+    # had just created.
+    card_name_db = _canon_card_name(card_name)
     if not t:
         # Empty tier = clear the assignment.
         await db.execute(
             text("DELETE FROM player_card_tiers WHERE player_id=:pid AND card_name=:c AND filter=:f"),
-            {"pid": pid, "c": card_name, "f": f},
+            {"pid": pid, "c": card_name_db, "f": f},
         )
     else:
         await db.execute(
@@ -5448,10 +5858,12 @@ async def set_player_card_tier(
                 ON CONFLICT (player_id, card_name, filter)
                 DO UPDATE SET tier = EXCLUDED.tier, assigned_at = NOW()
             """),
-            {"pid": pid, "c": card_name, "f": f, "t": t},
+            {"pid": pid, "c": card_name_db, "f": f, "t": t},
         )
     await db.commit()
-    return {"status": "ok", "card_name": card_name, "filter": f, "tier": t or None}
+    # Echo the name actually STORED, not the one sent — returning the raw
+    # spelling here would tell the client a row exists under a key that does not.
+    return {"status": "ok", "card_name": card_name_db, "filter": f, "tier": t or None}
 
 
 # Allowlist: request value -> fixed SQL fragment. The `enum=` kwarg on Query is
@@ -5460,6 +5872,76 @@ async def set_player_card_tier(
 # blind SQLi; proven with sort_by=zzz_not_a_column returning a Postgres error).
 # Same shape as team_leaderboard's sort_map. Unknown values fall back to the
 # default rather than 422 so no client can ever be broken by a new value.
+# ── Card-name normalisation at INGEST (Aug 7, Codex r2 MEDIUM) ─────────────
+# Migration 195 merges the Turkish dotless-i card names that culture-sensitive
+# client casing created ("WIND UP".ToLower() on tr-TR -> "wInd up" with U+0131,
+# which matches nothing in the CardInfo registry and is always stored rarity
+# 'Unknown').
+#
+# The client fix (ToLowerInvariant) only helps clients that UPDATE. Every
+# already-shipped v1.36.0 tr-TR client still sends the dotless spelling, the
+# version floor accepts it, and the API stored it verbatim — so a one-shot
+# migration would be re-polluted the same day it ran. That is the convergence
+# gap the review named: without this, 195 cleans up history and history
+# immediately re-dirties.
+#
+# Normalising at the write sites is the right layer — the server owns what goes
+# into the column and it needs no client release. NOTE (Codex Aug-7, MEDIUM):
+# the first version of this comment claimed it "closes it for good" while the
+# helper was wired into the 1v1 picks/offers ONLY, so FFA, 1v2, 2v2 and the
+# card-tier writes kept minting dotless rows and re-dirtying everything
+# migration 195 had just merged. A claim in a comment is a claim to verify
+# (#277). Every write site that feeds a surface 195 touches is now covered:
+#   match_cards, card_offers            (1v1)
+#   ffa_match_cards, ffa_card_offers    (FFA)
+#   ovt_match_cards                     (1v2)
+#   team_match_cards                    (2v2)
+#   player_card_tiers                   (tier assignments, both clear + assign)
+# If a new mode adds a card-write site, it belongs on that list.
+# Deliberately an EXPLICIT allowlist, identical to migration 195's — a blanket
+# U+0131 rewrite would silently rename a legitimate mod card (r1 HIGH).
+_DOTLESS = "\u0131"
+_CARD_NAME_FIXUPS = {
+    ("Po" + _DOTLESS + "son"):                              "Poison",
+    ("W" + _DOTLESS + "nd Up"):                             "Wind Up",
+    ("Comb" + _DOTLESS + "ne"):                             "Combine",
+    ("B" + _DOTLESS + "g Bullet"):                          "Big Bullet",
+    ("Qu" + _DOTLESS + "ck Reload"):                        "Quick Reload",
+    ("Paras" + _DOTLESS + "te"):                            "Parasite",
+    ("T" + _DOTLESS + "med Detonat" + _DOTLESS + "on"):     "Timed Detonation",
+    ("Qu" + _DOTLESS + "ck Shot"):                          "Quick Shot",
+    ("Careful Plann" + _DOTLESS + "ng"):                    "Careful Planning",
+    ("Explos" + _DOTLESS + "ve Bullet"):                    "Explosive Bullet",
+    ("Stat" + _DOTLESS + "c F" + _DOTLESS + "eld"):         "Static Field",
+    ("S" + _DOTLESS + "lence"):                             "Silence",
+    ("Dr" + _DOTLESS + "ll Ammo"):                          "Drill Ammo",
+    ("Tr" + _DOTLESS + "ckster"):                           "Trickster",
+    ("Phoen" + _DOTLESS + "x"):                             "Phoenix",
+    ("Tox" + _DOTLESS + "c Cloud"):                         "Toxic Cloud",
+    ("Rad" + _DOTLESS + "ance"):                            "Radiance",
+    ("L" + _DOTLESS + "festealer"):                         "Lifestealer",
+    ("Ch" + _DOTLESS + "ll" + _DOTLESS + "ng Presence"):    "Chilling Presence",
+    # Added post-deploy (migration 198). These three were absent from the
+    # original 19 because that list was derived from cards actually PICKED
+    # (match_cards) and these were only ever OFFERED to a tr-TR client — they
+    # existed solely in card_offers, where no match_cards query could see them.
+    # Verified against production: each canonical target has 336-1765 picks and
+    # 528-2194 offer rows; each dotless twin had 2-4.
+    ("Hom" + _DOTLESS + "ng"):                              "Homing",
+    ("Sh" + _DOTLESS + "eld Charge"):                       "Shield Charge",
+    ("Sh" + _DOTLESS + "elds Up"):                          "Shields Up",
+}
+
+
+def _canon_card_name(name):
+    """Map a known dotless-i card spelling to its canonical form. Anything not
+    on the allowlist is returned UNCHANGED — a mod card legitimately spelled
+    with U+0131 must survive intact."""
+    if not name:
+        return name
+    return _CARD_NAME_FIXUPS.get(name, name)
+
+
 _CARD_SORT_MAP = {
     "times_picked": "times_picked",
     "win_rate": "win_rate",
@@ -5512,10 +5994,36 @@ async def get_card_stats(
             FROM card_offers
             {offer_player_filter}
             GROUP BY card_name
+        ),
+        rarity_votes AS (
+            -- Aug 7 item 2. card_rarity is a PER-PICK SNAPSHOT written by
+            -- whichever client reported the match, so one card accumulates
+            -- several stored rarities over its life (prod: 20 names carry >=2,
+            -- e.g. Drill Ammo = Rare x610 + Common x3 + Unknown x3). Grouping
+            -- by it emitted ONE ROW PER (name, rarity) -- 88 real cards came
+            -- back as 110 rows, and a minority-rarity row could win the sort
+            -- and colour the card wrongly. Count the votes instead.
+            SELECT card_name, card_rarity, COUNT(*) AS votes
+            FROM match_cards
+            GROUP BY card_name, card_rarity
+        ),
+        rarity AS (
+            -- Elect the MODE. Computed over ALL match_cards rows, NOT the
+            -- filtered set: a card's rarity is a property of the CARD, so it
+            -- must not change when the caller filters to one player or to
+            -- ranked-only. Tie-break: a real rarity always beats 'Unknown'
+            -- (which only means the reporting client had not scanned the card
+            -- registry yet), then vote count, then name for determinism.
+            SELECT DISTINCT ON (card_name) card_name, card_rarity
+            FROM rarity_votes
+            ORDER BY card_name,
+                     (card_rarity IS NOT NULL AND card_rarity <> 'Unknown') DESC,
+                     votes DESC,
+                     card_rarity
         )
         SELECT
             mc.card_name,
-            mc.card_rarity,
+            COALESCE(r.card_rarity, 'Unknown') AS card_rarity,
             COUNT(*) AS times_picked,
             COUNT(DISTINCT mc.match_id) AS matches_appeared,
             COUNT(DISTINCT mc.player_id) AS unique_players,
@@ -5529,8 +6037,12 @@ async def get_card_stats(
         FROM match_cards mc
         JOIN matches m ON m.id = mc.match_id
         LEFT JOIN offers o ON o.card_name = mc.card_name
+        LEFT JOIN rarity r ON r.card_name = mc.card_name
         WHERE 1=1 {player_filter} {ranked_filter}
-        GROUP BY mc.card_name, mc.card_rarity, o.times_offered, o.pass_rate
+        -- r.card_rarity must stay in the GROUP BY: Postgres cannot infer the
+        -- functional dependency through a CTE. Since `rarity` is
+        -- DISTINCT ON (card_name) it adds no extra groups.
+        GROUP BY mc.card_name, r.card_rarity, o.times_offered, o.pass_rate
         HAVING COUNT(*) >= :min_picks
         ORDER BY {_CARD_SORT_MAP.get(sort_by, "times_picked")} {"DESC" if order == "desc" else "ASC"}
         LIMIT :limit
@@ -5552,6 +6064,746 @@ async def get_card_stats(
         )
         for r in rows
     ]
+
+
+# ── Routes: Compare-tab stat boards (Aug 6 item 1) ─────────────────────────
+
+# Allowlist: request value -> fixed column name. Interpolating anything else
+# into SQL is the #188 injection class — the ONLY thing that may reach the
+# f-string below is a VALUE from this dict, never the request string.
+_RECORDS_BOARD_MAP = {
+    "single_hit": "record_max_single_hit",
+    "max_health": "record_max_health",
+    "bounce_kill": "record_bounce_kill",
+}
+
+
+@app.get("/api/v1/records", response_model=RecordsBoardResponse, tags=["Players"])
+async def get_records_board(
+    board: str = Query("single_hit"),
+    limit: int = Query(10, ge=1, le=25),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 6 item 1 — career-record mini-leaderboards (biggest single hit,
+    highest max health, longest bounce kill) from the players.record_*
+    columns migration 191 added. NULL = the player never recorded that stat
+    (pre-telemetry clients, #257), so NULL rows are excluded outright.
+    Public read, same exposure as the main leaderboard."""
+    col = _RECORDS_BOARD_MAP.get(board)
+    if col is None:
+        raise HTTPException(400, "board must be single_hit|max_health|bounce_kill")
+    # `col` comes exclusively from the allowlist dict above (#188).
+    rows = (await db.execute(text(f"""
+        SELECT p.display_name, p.steam_id, p.{col} AS val
+          FROM players p
+         WHERE p.{col} IS NOT NULL AND p.deleted_at IS NULL
+         ORDER BY p.{col} DESC NULLS LAST
+         LIMIT :lim
+    """), {"lim": limit})).mappings().all()
+    return RecordsBoardResponse(
+        board=board,
+        display_names=[r["display_name"] or r["steam_id"] for r in rows],
+        steam_ids=[r["steam_id"] for r in rows],
+        values=[int(r["val"] or 0) for r in rows],
+    )
+
+
+@app.get("/api/v1/cards/top-pickers", response_model=CardTopPickersResponse, tags=["Cards"])
+async def get_card_top_pickers(
+    card_name: str = Query(..., max_length=64),
+    limit: int = Query(10, ge=1, le=25),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 6 item 1 — who picks this card the most, with their win rate
+    holding it. Picks counts every pick row (a card re-picked/levelled in one
+    match counts each time, matching /cards' times_picked semantics); the win
+    rate is per MATCH (distinct matches won / distinct matches with the card)
+    so multi-pick matches can't double-count a single win. Exact-name match,
+    parameterized (#188). Empty arrays for an unknown card — no 404, a card
+    nobody picked is legitimate zero-data."""
+    rows = (await db.execute(text("""
+        SELECT p.display_name, p.steam_id,
+               COUNT(*) AS picks,
+               COUNT(DISTINCT mc.match_id) AS games,
+               COUNT(DISTINCT mc.match_id) FILTER (WHERE m.winner_id = mc.player_id) AS wins
+          FROM match_cards mc
+          JOIN matches m ON m.id = mc.match_id
+          JOIN players p ON p.id = mc.player_id
+         WHERE mc.card_name = :card
+           AND m.invalidated_at IS NULL
+           AND p.deleted_at IS NULL
+         GROUP BY p.id, p.display_name, p.steam_id
+         ORDER BY COUNT(*) DESC, p.display_name ASC
+         LIMIT :lim
+    """), {"card": card_name, "lim": limit})).mappings().all()
+    return CardTopPickersResponse(
+        card_name=card_name,
+        display_names=[r["display_name"] or r["steam_id"] for r in rows],
+        steam_ids=[r["steam_id"] for r in rows],
+        picks=[int(r["picks"] or 0) for r in rows],
+        win_rates=[round(int(r["wins"] or 0) / int(r["games"]), 4)
+                   if int(r["games"] or 0) > 0 else 0.0 for r in rows],
+    )
+
+
+@app.get("/api/v1/cards/pickers-summary", response_model=CardPickersSummaryResponse, tags=["Cards"])
+async def get_card_pickers_summary(
+    limit_per_card: int = Query(3, ge=1, le=5),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 6 item 1 — top pickers for EVERY card in one call, flattened as
+    'card|name|picks|winrate' pipe-CSV strings (the client parses pipe
+    strings natively; nesting per-card arrays would hit JsonUtility's silent
+    nested-array failure, #25). Display names are ADVERSARIAL input (#156):
+    a literal '|' in a name would shift every later field, so pipes are
+    stripped from names before assembly. Win rate is per MATCH like
+    /cards/top-pickers. Full-table aggregate — same cost class as /cards,
+    which already aggregates all of match_cards per call."""
+    rows = (await db.execute(text("""
+        WITH per AS (
+            -- Tombstoned players are filtered HERE, before ROW_NUMBER, so a
+            -- deleted account can't consume one of a card's top-N slots.
+            SELECT mc.card_name, mc.player_id,
+                   COUNT(*) AS picks,
+                   COUNT(DISTINCT mc.match_id) AS games,
+                   COUNT(DISTINCT mc.match_id) FILTER (WHERE m.winner_id = mc.player_id) AS wins
+              FROM match_cards mc
+              JOIN matches m ON m.id = mc.match_id
+              JOIN players pp ON pp.id = mc.player_id AND pp.deleted_at IS NULL
+             WHERE m.invalidated_at IS NULL
+             GROUP BY mc.card_name, mc.player_id
+        ),
+        ranked_per AS (
+            SELECT per.*,
+                   ROW_NUMBER() OVER (PARTITION BY per.card_name
+                                      ORDER BY per.picks DESC, per.wins DESC) AS rn
+              FROM per
+        )
+        SELECT r.card_name, p.display_name, p.steam_id, r.picks, r.games, r.wins
+          FROM ranked_per r
+          JOIN players p ON p.id = r.player_id
+         WHERE r.rn <= :lim
+         ORDER BY r.card_name ASC, r.rn ASC
+    """), {"lim": limit_per_card})).mappings().all()
+    entries = []
+    for r in rows:
+        name = (r["display_name"] or r["steam_id"] or "").replace("|", "/")
+        games = int(r["games"] or 0)
+        wr = round(int(r["wins"] or 0) / games, 4) if games > 0 else 0.0
+        entries.append(f"{r['card_name']}|{name}|{int(r['picks'] or 0)}|{wr}")
+    return CardPickersSummaryResponse(entries=entries)
+
+
+@app.get("/api/v1/players/{steam_id}/ranked-friends", response_model=RankedFriendsResponse, tags=["Players"])
+async def get_ranked_friends(
+    steam_id: str,
+    limit: int = Query(8, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 6 item 1 — the player's most-played ranked opponents by COMPLETED
+    series count (pie chart source). Same series predicate as the stats
+    endpoint's uniqueness metric: status='completed' AND not invalidated."""
+    pid = (await db.execute(
+        select(Player.id).where(Player.steam_id == steam_id)
+    )).scalar_one_or_none()
+    if pid is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    rows = (await db.execute(text("""
+        SELECT p.display_name, p.steam_id, COUNT(*) AS series_count
+          FROM ranked_series rs
+          JOIN players p ON p.id = (CASE WHEN rs.player1_id = :pid
+                                         THEN rs.player2_id ELSE rs.player1_id END)
+         WHERE (rs.player1_id = :pid OR rs.player2_id = :pid)
+           AND rs.status = 'completed'
+           AND rs.invalidated_at IS NULL
+           AND p.deleted_at IS NULL
+         GROUP BY p.id, p.display_name, p.steam_id
+         ORDER BY COUNT(*) DESC, p.display_name ASC
+         LIMIT :lim
+    """), {"pid": pid, "lim": limit})).mappings().all()
+    return RankedFriendsResponse(
+        display_names=[r["display_name"] or r["steam_id"] for r in rows],
+        steam_ids=[r["steam_id"] for r in rows],
+        series_counts=[int(r["series_count"] or 0) for r in rows],
+    )
+
+
+@app.get("/api/v1/players/{steam_id}/gold-sources", response_model=GoldSourcesResponse, tags=["Players"])
+async def get_gold_sources(
+    steam_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 6 item 1 — where this player's gold came from (pie source): SUM of
+    POSITIVE gold_transactions by bucket. Buckets map the reason strings the
+    award paths actually write (grepped from every GoldTransaction insert
+    site — none invented): artist_royalty; bet_win/team_bet_payout/
+    ffa_bet_win (winnings only — stake-return refunds refund_abandoned/
+    team_bet_refund/ffa_bet_refund are EXCLUDED entirely: returned stakes are
+    not income); series_win/series_loss + ranked-match xp; casual-match xp;
+    level_reward (own bucket — the every-5-levels ding is the game's
+    3rd-largest gold source, #251/#259, and folding it into a mode bucket
+    would misattribute it); team_xp/team_series_win/team_series_loss;
+    ovt_xp/ovt_series_win/ovt_series_loss; ffa_xp/ffa_placement;
+    booster_monthly; achievement; everything else positive -> other.
+    The xp-row match join is by reference_id string against matches.id::text
+    (reference_id can hold skus/months/keys — never cast it to uuid); xp rows
+    whose reference doesn't resolve to a match land in 'other' by design."""
+    pid = (await db.execute(
+        select(Player.id).where(Player.steam_id == steam_id)
+    )).scalar_one_or_none()
+    if pid is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    rows = (await db.execute(text("""
+        SELECT CASE
+                 WHEN gt.reason = 'artist_royalty' THEN 'shop_sales'
+                 WHEN gt.reason IN ('bet_win', 'team_bet_payout', 'ffa_bet_win') THEN 'betting'
+                 WHEN gt.reason IN ('series_win', 'series_loss') THEN 'ranked_1v1'
+                 WHEN gt.reason = 'xp' AND m.is_ranked IS TRUE THEN 'ranked_1v1'
+                 WHEN gt.reason = 'xp' AND m.is_ranked IS FALSE THEN 'casual_1v1'
+                 WHEN gt.reason = 'level_reward' THEN 'level_ups'
+                 WHEN gt.reason IN ('team_xp', 'team_series_win', 'team_series_loss') THEN 'team_2v2'
+                 WHEN gt.reason IN ('ovt_xp', 'ovt_series_win', 'ovt_series_loss') THEN 'ovt_1v2'
+                 WHEN gt.reason IN ('ffa_xp', 'ffa_placement') THEN 'ffa'
+                 WHEN gt.reason = 'booster_monthly' THEN 'boosters'
+                 WHEN gt.reason = 'achievement' THEN 'achievements'
+                 ELSE 'other'
+               END AS bucket,
+               SUM(gt.amount) AS total
+          FROM gold_transactions gt
+          LEFT JOIN matches m ON gt.reason = 'xp' AND m.id::text = gt.reference_id
+         WHERE gt.player_id = :pid
+           AND gt.amount > 0
+           AND gt.reason NOT IN ('refund_abandoned', 'team_bet_refund', 'ffa_bet_refund')
+         GROUP BY 1
+         ORDER BY SUM(gt.amount) DESC
+    """), {"pid": pid})).mappings().all()
+    return GoldSourcesResponse(
+        buckets=[r["bucket"] for r in rows],
+        amounts=[int(r["total"] or 0) for r in rows],
+    )
+
+
+def _parse_compare_targets(targets: str) -> list[str]:
+    """Shared strict parse for the Compare tab's multi-player endpoints.
+    Deduplicates while preserving the requested order, rejects anything that is
+    not a plain numeric steam id, and enforces the 2..12 bound. Extracted so the
+    two nemesis endpoints cannot drift apart on what they accept — the parsed
+    list feeds a parameterized ANY(), never string-built SQL (#188)."""
+    raw = [t.strip() for t in (targets or "").split(",") if t.strip()]
+    sids: list[str] = []
+    for t in raw:
+        # [0-9] not \d — \d matches Unicode digits, which are not steam ids.
+        if not _re.fullmatch(r"[0-9]{1,20}", t):
+            raise HTTPException(400, "targets must be numeric steam ids")
+        if t not in sids:
+            sids.append(t)
+    if not (2 <= len(sids) <= 12):
+        raise HTTPException(400, "targets must contain 2-12 steam ids")
+    return sids
+
+
+@app.get("/api/v1/compare/nemesis", response_model=NemesisResponse, tags=["Players"])
+async def get_compare_nemesis(
+    targets: str = Query(..., max_length=300,
+                         description="Comma-separated steam ids (2-12)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 6 item 1, rescoped Aug 7 — who gives these players the hardest time.
+    Now counts completed, non-invalidated RANKED 1v1 SERIES (ranked_series),
+    not individual games: `matches` is every game including casual (#39), and
+    Sid wants the board to answer "who beats us in ranked". Per outside
+    opponent: series won vs the targets, series played vs the targets, win rate.
+
+    The response arrays keep their names for the client's sake, so read `wins`
+    and `games` as SERIES won and SERIES played — the units changed, the shape
+    did not. Targets stay excluded from the opponent list (a target-vs-target
+    series would otherwise crown one selected player the other's nemesis, which
+    is not the question a COMPARISON board asks — the per-player endpoint below
+    deliberately makes the opposite choice). Minimum 5 series, top 10 by win
+    rate. Series predicate matches /players/{sid}/ranked-friends exactly."""
+    sids = _parse_compare_targets(targets)
+    tids = (await db.execute(text(
+        "SELECT id FROM players WHERE steam_id = ANY(:sids) AND deleted_at IS NULL"
+    ), {"sids": sids})).scalars().all()
+    if len(tids) < 2:
+        # Fewer than 2 known targets — empty result, not an error (zero-data
+        # tolerance: a compare of fresh accounts must not 500 or 404).
+        return NemesisResponse()
+    tids = list(tids)
+    # faced_by comes from the same scan rather than a second query: each row of
+    # `g` already knows WHICH target the series was against, so aggregating the
+    # target's steam id alongside the counts is free. The tgt join is 1:1 on a
+    # row that already exists, so it cannot inflate COUNT(*).
+    rows = (await db.execute(text("""
+        WITH g AS (
+            SELECT rs.player2_id AS opp_id,
+                   rs.player1_id AS tgt_id,
+                   (rs.winner_id = rs.player2_id) AS opp_won
+              FROM ranked_series rs
+             WHERE rs.player1_id = ANY(:tids)
+               AND NOT (rs.player2_id = ANY(:tids))
+               AND rs.status = 'completed'
+               AND rs.invalidated_at IS NULL
+            UNION ALL
+            SELECT rs.player1_id, rs.player2_id,
+                   (rs.winner_id = rs.player1_id)
+              FROM ranked_series rs
+             WHERE rs.player2_id = ANY(:tids)
+               AND NOT (rs.player1_id = ANY(:tids))
+               AND rs.status = 'completed'
+               AND rs.invalidated_at IS NULL
+        )
+        SELECT p.display_name, p.steam_id,
+               COUNT(*) AS games,
+               COUNT(*) FILTER (WHERE g.opp_won) AS wins,
+               ARRAY_AGG(DISTINCT tgt.steam_id) AS faced_by
+          FROM g
+          JOIN players p ON p.id = g.opp_id
+          JOIN players tgt ON tgt.id = g.tgt_id
+         WHERE p.deleted_at IS NULL
+         GROUP BY p.id, p.display_name, p.steam_id
+        HAVING COUNT(*) >= 5
+         ORDER BY (COUNT(*) FILTER (WHERE g.opp_won))::numeric / COUNT(*) DESC,
+                  COUNT(*) DESC
+         LIMIT 10
+    """), {"tids": tids})).mappings().all()
+    return NemesisResponse(
+        display_names=[r["display_name"] or r["steam_id"] for r in rows],
+        steam_ids=[r["steam_id"] for r in rows],
+        wins=[int(r["wins"] or 0) for r in rows],
+        games=[int(r["games"] or 0) for r in rows],
+        win_rates=[round(int(r["wins"] or 0) / int(r["games"]), 4)
+                   if int(r["games"] or 0) > 0 else 0.0 for r in rows],
+        faced_by=[list(r["faced_by"] or []) for r in rows],
+    )
+
+
+@app.get("/api/v1/compare/player-nemesis", response_model=PlayerNemesisResponse,
+         tags=["Players"])
+async def get_compare_player_nemesis(
+    targets: str = Query(..., max_length=300,
+                         description="Comma-separated steam ids (2-12)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 7 — each selected player's OWN top-5 nemeses: the opponents who beat
+    them most often over completed, non-invalidated ranked 1v1 series.
+
+    Two deliberate differences from /compare/nemesis, both of which look like
+    bugs if you skim: (a) co-selected targets are NOT excluded — "who beats me
+    most" is a per-player question and dropping a rival because they happen to
+    be on screen too would answer a different one; (b) the bar is 3 series, not
+    5 — a per-player list gated at 5 is empty for most of the playerbase.
+
+    Every KNOWN requested player appears, in the order requested, even with an
+    empty list; unknown steam ids are silently absent. There is no "fewer than
+    2 known targets" bail like the comparison board's, because a single
+    player's nemesis list is a complete answer on its own."""
+    sids = _parse_compare_targets(targets)
+    trows = (await db.execute(text(
+        "SELECT id, steam_id, display_name FROM players "
+        " WHERE steam_id = ANY(:sids) AND deleted_at IS NULL"
+    ), {"sids": sids})).mappings().all()
+    if not trows:
+        return PlayerNemesisResponse()
+    tids = [r["id"] for r in trows]
+    # ROW_NUMBER, not LATERAL — LATERAL joins are incompatible with asyncpg
+    # (#32). The deleted-opponent filter sits in `agg`, BEFORE the ranking, so a
+    # deleted account can't consume one of the five slots and silently shorten
+    # a live player's list.
+    rows = (await db.execute(text("""
+        WITH s AS (
+            SELECT rs.player1_id AS me_id,
+                   rs.player2_id AS opp_id,
+                   (rs.winner_id = rs.player2_id) AS lost
+              FROM ranked_series rs
+             WHERE rs.player1_id = ANY(:tids)
+               AND rs.status = 'completed'
+               AND rs.invalidated_at IS NULL
+            UNION ALL
+            SELECT rs.player2_id, rs.player1_id,
+                   (rs.winner_id = rs.player1_id)
+              FROM ranked_series rs
+             WHERE rs.player2_id = ANY(:tids)
+               AND rs.status = 'completed'
+               AND rs.invalidated_at IS NULL
+        ),
+        agg AS (
+            SELECT s.me_id, s.opp_id,
+                   COUNT(*) AS played,
+                   COUNT(*) FILTER (WHERE s.lost) AS lost_n
+              FROM s
+              JOIN players op0 ON op0.id = s.opp_id AND op0.deleted_at IS NULL
+             GROUP BY s.me_id, s.opp_id
+            HAVING COUNT(*) >= 3
+        ),
+        ranked AS (
+            SELECT a.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY a.me_id
+                       ORDER BY a.lost_n::numeric / a.played DESC, a.played DESC,
+                                a.opp_id
+                   ) AS rn
+              FROM agg a
+        )
+        SELECT mp.steam_id AS me_sid,
+               op.steam_id AS opp_sid, op.display_name AS opp_name,
+               r.played, r.lost_n
+          FROM ranked r
+          JOIN players mp ON mp.id = r.me_id
+          JOIN players op ON op.id = r.opp_id
+         WHERE r.rn <= 5
+         ORDER BY r.me_id, r.rn
+    """), {"tids": tids})).mappings().all()
+
+    by_sid: dict[str, list] = {}
+    for r in rows:
+        played = int(r["played"] or 0)
+        lost = int(r["lost_n"] or 0)
+        by_sid.setdefault(r["me_sid"], []).append(PlayerNemesisEntry(
+            steam_id=r["opp_sid"],
+            display_name=r["opp_name"] or r["opp_sid"],
+            series_played=played,
+            series_lost=lost,
+            loss_rate=round(lost / played, 4) if played > 0 else 0.0,
+        ))
+    known = {r["steam_id"]: r for r in trows}
+    return PlayerNemesisResponse(players=[
+        PlayerNemesisPlayer(
+            steam_id=sid,
+            display_name=known[sid]["display_name"] or sid,
+            nemeses=by_sid.get(sid, []),
+        )
+        for sid in sids if sid in known
+    ])
+
+
+# ── Build-type classification (Aug 6 item 1) ───────────────────────────────
+# Derived from the client's card stat table (plugin/NativeUI.cs
+# CARD_STATS_FALLBACK + CARD_DESC_FALLBACK) — display-only taxonomy, NOT
+# game logic. A card touching a bucket (positive stat contribution or a
+# bucket-defining effect) carries weight 1 in that bucket; a card may touch
+# several. Rules: Health = positive HP stat or HP-centric effect; Damage =
+# positive DMG/SPLASH stat or a damage-amplifying/explosive/DoT effect;
+# Shield = block-triggered effect ("Blocking ..." cards) or a block-CD
+# improvement; Leech = LIFE STEAL stat/effect; Bounce = BULLET BOUNCE stat
+# or bounce-centric effect; Bullet Speed = positive BULLET/PROJ SPEED stat.
+# Cards touching none (reload/movement/utility) -> "Other", as is any card
+# name this table doesn't know (modded lobbies). Keys are lowercase
+# alpha-only, so both name forms a card has (#19: GameObject "BombsAway" vs
+# display "BOMBS AWAY", "Leach" vs "LEECH") normalize onto one entry.
+BUILD_TYPE_BUCKETS = ("Health", "Damage", "Shield", "Leech", "Bounce", "Bullet Speed", "Other")
+CARD_BUILD_TYPES: dict[str, tuple] = {
+    "abyssalcountdown": (),
+    "barrage": (),
+    "bigbullet": (),
+    "bigbullets": (),
+    "bombsaway": ("Health", "Shield"),
+    "bouncy": ("Bounce", "Damage"),
+    "brawler": ("Health",),
+    "buckshot": (),
+    "burst": (),
+    "carefulplanning": ("Damage",),
+    "chase": (),
+    "chillingpresence": ("Health",),
+    "coldbullets": (),
+    "combine": ("Damage",),
+    "dazzle": (),
+    "decay": ("Health",),
+    "defender": ("Shield", "Health"),
+    "demonicpact": ("Damage",),
+    "drillammo": (),
+    "echo": ("Shield", "Health"),
+    "emp": ("Shield", "Health"),
+    "empower": ("Shield", "Damage"),
+    "explosivebullet": ("Damage",),
+    "fastball": ("Bullet Speed",),
+    "fastforward": ("Bullet Speed",),
+    "frostslam": ("Shield", "Health"),
+    "glasscannon": ("Damage",),
+    "grow": ("Damage",),
+    "healingfield": ("Shield", "Health"),
+    "homing": (),
+    "huge": ("Health",),
+    "implode": ("Shield", "Health"),
+    "leach": ("Leech", "Health"),   # GameObject-name spelling (#19)
+    "leech": ("Leech", "Health"),
+    "lifestealer": ("Leech", "Health"),
+    "mayhem": ("Bounce",),
+    "overpower": ("Shield", "Health"),
+    "parasite": ("Leech", "Health", "Damage"),
+    "phoenix": (),
+    "poison": ("Damage",),
+    "pristineperseverance": ("Health",),
+    "pristineperseverence": ("Health",),  # in-game spelling variant
+    "quickreload": (),
+    "quickshot": ("Bullet Speed",),
+    "radarshot": ("Shield", "Health"),
+    "radiance": ("Health",),
+    "refresh": ("Shield",),
+    "remote": (),
+    "riccochet": ("Bounce",),  # in-game spelling variant
+    "ricochet": ("Bounce",),
+    "saw": ("Shield", "Health"),
+    "scavenger": (),
+    "shieldcharge": ("Shield",),
+    "shieldsup": ("Shield",),
+    "shockwave": ("Shield", "Health"),
+    "silence": ("Shield", "Health"),
+    "sneaky": (),
+    "spray": (),
+    "staticfield": ("Shield",),
+    "steadyshot": ("Health", "Bullet Speed"),
+    "supernova": ("Shield", "Health"),
+    "tacticalreload": ("Shield",),
+    "tank": ("Health",),
+    "targetbounce": ("Bounce",),
+    "tasteofblood": ("Leech",),
+    "teleport": ("Shield",),
+    "thruster": (),
+    "timeddetonation": ("Damage",),
+    "toxiccloud": ("Damage",),
+    "trickster": ("Bounce", "Damage"),
+    "windup": ("Bullet Speed", "Damage"),
+}
+
+
+def _card_build_key(name: str) -> str:
+    """Normalize a stored card name onto a CARD_BUILD_TYPES key: lowercase,
+    letters only. Collapses both name forms every card has (#19)."""
+    return _re.sub(r"[^a-z]", "", (name or "").lower())
+
+
+def _build_bucket_counts(picks_by_card: dict) -> dict:
+    """Weighted bucket counts from {card_name: pick_count}. Each pick adds 1
+    to every bucket its card touches; bucket-less/unknown cards -> Other."""
+    counts = {b: 0 for b in BUILD_TYPE_BUCKETS}
+    for cname, n in picks_by_card.items():
+        buckets = CARD_BUILD_TYPES.get(_card_build_key(cname))
+        if not buckets:
+            counts["Other"] += int(n)
+        else:
+            for b in buckets:
+                counts[b] += int(n)
+    return counts
+
+
+@app.get("/api/v1/players/{steam_id}/build-type", response_model=BuildTypeResponse, tags=["Players"])
+async def get_player_build_type(
+    steam_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 6 item 1 — the player's ranked build-type pie: every RANKED card
+    pick classified into Health / Damage / Shield / Leech / Bounce /
+    Bullet Speed (+ Other), weighted (a card touching N buckets adds 1 to
+    each). Taxonomy derived from the client stat table — see
+    CARD_BUILD_TYPES. Zero-data players return all-zero counts."""
+    pid = (await db.execute(
+        select(Player.id).where(Player.steam_id == steam_id)
+    )).scalar_one_or_none()
+    if pid is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    rows = (await db.execute(text("""
+        SELECT mc.card_name, COUNT(*) AS picks
+          FROM match_cards mc
+          JOIN matches m ON m.id = mc.match_id
+         WHERE mc.player_id = :pid
+           AND COALESCE(m.is_ranked, false)
+           AND m.invalidated_at IS NULL
+         GROUP BY mc.card_name
+    """), {"pid": pid})).mappings().all()
+    picks_by_card = {r["card_name"]: int(r["picks"] or 0) for r in rows}
+    counts = _build_bucket_counts(picks_by_card)
+    return BuildTypeResponse(
+        buckets=list(BUILD_TYPE_BUCKETS),
+        counts=[counts[b] for b in BUILD_TYPE_BUCKETS],
+        total_picks=sum(picks_by_card.values()),
+    )
+
+
+@app.get("/api/v1/players/{steam_id}/similar", response_model=SimilarPlayersResponse, tags=["Players"])
+async def get_similar_players(
+    steam_id: str,
+    limit: int = Query(5, ge=1, le=10),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 6 item 1 — most similar players by profile vector: lifetime hit%,
+    block success %, ranked DPS, avg keys/sec, and build-type bucket shares.
+
+    Candidate pool: the 200 most-active players by non-invalidated RANKED
+    match count, floor 10 ranked matches (the >=10-completed-series bar
+    excluded too many real profiles). The pool bound keeps this a three-query
+    endpoint: one pool select, one batched DPS aggregate, one batched card
+    aggregate — scoring happens in Python over <=201 vectors.
+
+    Macro suspects are EXCLUDED from the pool: any flagged_matches row with
+    flag_reason='suspected_macro' attributing the player
+    (flag_details->>'suspect_steam', with 'reporter_steam' as the legacy
+    attribution key) that an admin has not dismissed. Review-flow semantics
+    (read from the flag review endpoint, not guessed): reviewed_at IS NULL =
+    pending, review_action in ('confirmed_cheat','false_positive');
+    "dismissed" = 'false_positive', so the exclusion predicate is
+    review_action IS DISTINCT FROM 'false_positive' — pending and confirmed
+    flags both exclude. An input-rate profile built on macro'd inputs would
+    poison the neighbor list for everyone it matched."""
+    player = (await db.execute(
+        select(Player).where(Player.steam_id == steam_id)
+    )).scalar_one_or_none()
+    if not player:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    pool = (await db.execute(text("""
+        WITH rm AS (
+            SELECT m.player1_id AS pid FROM matches m
+             WHERE COALESCE(m.is_ranked, false) AND m.invalidated_at IS NULL
+            UNION ALL
+            SELECT m.player2_id FROM matches m
+             WHERE COALESCE(m.is_ranked, false) AND m.invalidated_at IS NULL
+        ),
+        counts AS (
+            SELECT rm.pid, COUNT(*) AS ranked_matches FROM rm GROUP BY rm.pid
+        )
+        SELECT p.id, p.steam_id, p.display_name,
+               p.bullets_fired, p.bullets_hit,
+               p.blocks_activated, p.blocks_successful,
+               p.keys_pressed_total, p.active_seconds_total,
+               c.ranked_matches
+          FROM counts c
+          JOIN players p ON p.id = c.pid
+         WHERE p.deleted_at IS NULL
+           AND p.id != :pid
+           AND c.ranked_matches >= 10
+           AND NOT EXISTS (
+               SELECT 1 FROM flagged_matches fm
+                WHERE fm.flag_reason = 'suspected_macro'
+                  AND COALESCE(fm.flag_details->>'suspect_steam',
+                               fm.flag_details->>'reporter_steam') = p.steam_id
+                  AND fm.review_action IS DISTINCT FROM 'false_positive')
+         ORDER BY c.ranked_matches DESC
+         LIMIT 200
+    """), {"pid": player.id})).mappings().all()
+    if not pool:
+        return SimilarPlayersResponse()
+
+    all_ids = [r["id"] for r in pool] + [player.id]
+    # Batched ranked DPS per player — numerator and denominator share ONE
+    # filter (#257: only rows carrying damage telemetry count, in both).
+    dps_rows = (await db.execute(text("""
+        SELECT s.pid, SUM(s.dmg) AS dmg, SUM(s.dur) AS dur
+          FROM (
+            SELECT m.player1_id AS pid, m.p1_damage_dealt AS dmg,
+                   COALESCE(m.duration_seconds, m.match_duration) AS dur
+              FROM matches m
+             WHERE m.player1_id = ANY(:pids)
+               AND COALESCE(m.is_ranked, false) AND m.invalidated_at IS NULL
+               AND m.p1_damage_dealt IS NOT NULL
+               AND COALESCE(m.duration_seconds, m.match_duration, 0) > 0
+            UNION ALL
+            SELECT m.player2_id, m.p2_damage_dealt,
+                   COALESCE(m.duration_seconds, m.match_duration)
+              FROM matches m
+             WHERE m.player2_id = ANY(:pids)
+               AND COALESCE(m.is_ranked, false) AND m.invalidated_at IS NULL
+               AND m.p2_damage_dealt IS NOT NULL
+               AND COALESCE(m.duration_seconds, m.match_duration, 0) > 0
+          ) s
+         GROUP BY s.pid
+    """), {"pids": all_ids})).mappings().all()
+    dps_by_pid = {}
+    for r in dps_rows:
+        dur = float(r["dur"] or 0)
+        if dur > 0:
+            dps_by_pid[r["pid"]] = float(r["dmg"] or 0) / dur
+
+    # Batched ranked card picks -> build-type shares per player. Bounded:
+    # <=201 players x <=~70 distinct cards.
+    card_rows = (await db.execute(text("""
+        SELECT mc.player_id, mc.card_name, COUNT(*) AS picks
+          FROM match_cards mc
+          JOIN matches m ON m.id = mc.match_id
+         WHERE mc.player_id = ANY(:pids)
+           AND COALESCE(m.is_ranked, false)
+           AND m.invalidated_at IS NULL
+         GROUP BY mc.player_id, mc.card_name
+    """), {"pids": all_ids})).mappings().all()
+    picks_by_pid: dict = {}
+    for r in card_rows:
+        picks_by_pid.setdefault(r["player_id"], {})[r["card_name"]] = int(r["picks"] or 0)
+
+    def _shares(pid) -> dict:
+        counts = _build_bucket_counts(picks_by_pid.get(pid, {}))
+        tot = sum(counts.values())
+        if tot <= 0:
+            return {b: 0.0 for b in BUILD_TYPE_BUCKETS}
+        return {b: counts[b] / tot for b in BUILD_TYPE_BUCKETS}
+
+    def _scalars(row_like) -> tuple:
+        fired = int(row_like["bullets_fired"] or 0)
+        hits = int(row_like["bullets_hit"] or 0)
+        ba = int(row_like["blocks_activated"] or 0)
+        bs = int(row_like["blocks_successful"] or 0)
+        kp = float(row_like["keys_pressed_total"] or 0)
+        asec = float(row_like["active_seconds_total"] or 0)
+        return (
+            hits / fired if fired > 0 else 0.0,
+            bs / ba if ba > 0 else 0.0,
+            # Same >=60s floor as the stats endpoint's avg_keys_per_sec.
+            kp / asec if asec >= 60 else 0.0,
+        )
+
+    target_row = {
+        "bullets_fired": player.bullets_fired, "bullets_hit": player.bullets_hit,
+        "blocks_activated": player.blocks_activated,
+        "blocks_successful": player.blocks_successful,
+        "keys_pressed_total": player.keys_pressed_total,
+        "active_seconds_total": player.active_seconds_total,
+    }
+    t_hit, t_block, t_kps = _scalars(target_row)
+    t_dps = dps_by_pid.get(player.id, 0.0)
+    t_shares = _shares(player.id)
+
+    # Min-max style normalization for the unbounded dims (DPS, keys/sec) so
+    # neither dominates the 0..1 hit/block/share dims. Pool max includes the
+    # target so its own normalized value is <= 1.
+    dps_scale = max([t_dps] + [dps_by_pid.get(r["id"], 0.0) for r in pool]) or 1.0
+    kps_scale = max([t_kps] + [_scalars(r)[2] for r in pool]) or 1.0
+
+    # Codex round 1 (MEDIUM): DPS is the one dimension that can be genuinely
+    # ABSENT rather than zero. Damage telemetry only started with this release,
+    # so a legacy player has no damage rows at all — and treating that as a
+    # real 0.0 coordinate made two unmeasured players look like a stylistic
+    # match for each other, and made both look maximally UNLIKE anyone with a
+    # measured DPS. Missing data is not a playing style (#257).
+    #
+    # Fix: compare a dimension only when BOTH sides carry it, and divide by the
+    # dimensions actually compared. Two players who share fewer dimensions are
+    # scored on what they do share instead of on a fabricated zero.
+    t_has_dps = player.id in dps_by_pid
+    scored = []
+    for r in pool:
+        c_hit, c_block, c_kps = _scalars(r)
+        c_shares = _shares(r["id"])
+        d2 = (t_hit - c_hit) ** 2 + (t_block - c_block) ** 2
+        dims = 2
+        if t_has_dps and r["id"] in dps_by_pid:
+            c_dps = dps_by_pid[r["id"]]
+            d2 += (t_dps / dps_scale - c_dps / dps_scale) ** 2
+            dims += 1
+        d2 += (t_kps / kps_scale - c_kps / kps_scale) ** 2
+        dims += 1
+        for b in BUILD_TYPE_BUCKETS:
+            d2 += (t_shares[b] - c_shares[b]) ** 2
+        dims += len(BUILD_TYPE_BUCKETS)
+        # Normalize distance by the max possible over the dims we COMPARED
+        # (every dim is in 0..1) and invert into a 0-100 display score.
+        score = max(0.0, round(100.0 * (1.0 - math.sqrt(d2) / math.sqrt(dims)), 1))
+        scored.append((score, r["display_name"] or r["steam_id"], r["steam_id"]))
+    scored.sort(key=lambda s: (-s[0], s[1]))
+    top = scored[:limit]
+    return SimilarPlayersResponse(
+        display_names=[s[1] for s in top],
+        steam_ids=[s[2] for s in top],
+        similarity_scores=[s[0] for s in top],
+    )
 
 
 # ── Routes: Glicko-2 Recalculation ────────────────────────────
@@ -6050,9 +7302,29 @@ _QUEUE_GROUP_SERIES_TABLES = {
     # helper's contract, the target table differs per mode.
     "ffa_queue": "ffa_lobbies",
 }
+# Aug 6 item 9. Statuses whose series_id points at a LOBBY row instead of the
+# mode's series row. FFA has always been this way (its "series table" IS
+# ffa_lobbies); 2v2 and 1v2 now have BOTH shapes on one queue table, so the
+# parent table has to be resolved from the ROW'S STATUS rather than from the
+# table alone — see _queue_group_parent_table.
+#
+# Getting this wrong is not a subtle bug: a 'lobby' row whose parent was
+# looked up in team_series would find NO row, take NO lock, and the whole
+# lobby-first locking protocol would silently become a no-op.
+_QUEUE_GROUP_LOBBY_TABLES = {
+    "team_queue": "team_lobbies",
+    "ovt_queue": "ovt_lobbies",
+    "ffa_queue": "ffa_lobbies",
+}
 _QUEUE_GROUP_STATUSES = {
-    "team_queue": {"matched", "ready"},
-    "ovt_queue": {"matched", "ready_join"},
+    # 'lobby' = member of an OPEN host lobby (Aug 6 item 9), mirroring the FFA
+    # entry below. Grouping it means every _lock_queue_group_for_player caller
+    # acquires lobby-row-first -> members in UUID order -> authoritative
+    # re-read, which is the SAME protocol create/join implement directly. If
+    # 'lobby' were left ungrouped, poll/leave would lock the member row first
+    # while create/join locked the lobby first — a textbook ABBA.
+    "team_queue": {"matched", "ready", "lobby"},
+    "ovt_queue": {"matched", "ready_join", "lobby"},
     # 'lobby' = member of an OPEN host-controlled lobby (July 29 redesign).
     # Grouping it means every _lock_queue_group_for_player caller (poll,
     # leave, start) acquires lobby-row-first -> members in UUID order -> an
@@ -6517,6 +7789,13 @@ async def _lock_queue_group_for_player(
     if series_table is None or grouped_statuses is None:
         raise ValueError(f"refusing grouped lock for unknown table {table!r}")
 
+    def _parent_table(status: str) -> str:
+        """Which table this row's series_id points at (Aug 6 item 9).
+        Closed set on both sides — never derived from a request."""
+        if status == "lobby":
+            return _QUEUE_GROUP_LOBBY_TABLES.get(table) or series_table
+        return series_table
+
     for attempt in range(1, max_attempts + 1):
         disc = (await db.execute(
             text(f"""
@@ -6534,12 +7813,16 @@ async def _lock_queue_group_for_player(
             disc["status"] in grouped_statuses and disc["series_id"] is not None
         )
         disc_series_id = disc["series_id"] if disc_grouped else None
+        # The parent table is decided by the DISCOVERED status and remembered,
+        # so the stability re-check below can detect a row that changed shape
+        # (lobby -> series) under us and retry against the right table.
+        disc_parent = _parent_table(disc["status"]) if disc_grouped else None
         locked_ids = [disc["player_id"]]
         if disc_series_id is not None:
             # Stabilize membership against leave/completion before taking queue
             # rows. A missing series cannot reappear with the same UUID.
             await db.execute(
-                text(f"SELECT 1 FROM {series_table} WHERE id = :sid FOR UPDATE"),
+                text(f"SELECT 1 FROM {disc_parent} WHERE id = :sid FOR UPDATE"),
                 {"sid": disc_series_id},
             )
             locked_ids = list((await db.execute(
@@ -6568,7 +7851,12 @@ async def _lock_queue_group_for_player(
             and current["series_id"] is not None
         )
         stable = not current_grouped
-        if current_grouped and current["series_id"] == disc_series_id:
+        # Aug 6 item 9: the PARENT TABLE must match too. A row that went from
+        # 'lobby' to a series status (or the reverse) while we were acquiring
+        # points at a different table, so the lock we took is not the lock the
+        # caller needs — retry rather than proceed on a mismatched parent.
+        if (current_grouped and current["series_id"] == disc_series_id
+                and _parent_table(current["status"]) == disc_parent):
             current_ids = set((await db.execute(
                 text(f"SELECT player_id FROM {table} WHERE series_id = :sid"),
                 {"sid": current["series_id"]},
@@ -7137,7 +8425,26 @@ async def booster_grant(
 
 
 @app.get("/api/v1/queue/recent-joins", tags=["Queue"])
-async def queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
+# `seconds` is BOUNDED (ge/le) because it is multiplied straight into an
+# interval below: `NOW() - INTERVAL '1 second' * :secs`. Unbounded, it returns
+# an unauthenticated 500 — reproduced live on all four recent-joins routes
+# during the Aug-7 post-deploy sweep. Pre-existing, not a regression.
+#
+# There are actually TWO failure modes, found by bisection: from roughly 3e11
+# seconds the RESULTING TIMESTAMP underflows PostgreSQL's 4713 BC floor
+# ("timestamp out of range"), while int64-scale values overflow the interval
+# itself ("interval out of range"). Both are unhandled. FastAPI accepts the
+# input as a valid int and the server then crashes on it, so it is a validation
+# defect rather than a bad request — note `seconds=abc` correctly 422s.
+#
+# Every real caller is the Discord bot sending seconds=20, so a 1..86400 window
+# costs nothing. Two sibling routes already used this pattern
+# (`Query(90, ge=10, le=600)`), which is what makes these four the outliers.
+#
+# NOTE the ge=1: a NEGATIVE value is the quieter half of the same bug — it makes
+# the comparison `joined_at > NOW() + interval`, which silently returns an empty
+# list rather than erroring.
+async def queue_recent_joins(seconds: int = Query(20, ge=1, le=86400), db: AsyncSession = Depends(get_db)):
     """Return players who joined the queue within the last N seconds. v1.34.1:
     also carries the searcher's Discord display name (opt-out honored) so the
     Search-Ranked beacon can name who to @ — plain text, never a real ping."""
@@ -7937,6 +9244,79 @@ async def report_disconnect(
         "disconnected_steam_id": disconnected_steam_id,
         "ranked_dc_count": disconnected.ranked_dc_count,
     }
+
+
+@app.post("/api/v1/matches/casual-dc", tags=["Players"])
+async def report_casual_dc(
+    request: Request,
+    reporter_steam_id: str = Query(...),
+    leaver_steam_id: str = Query(...),
+    room_id: str = Query(..., min_length=1, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 6 item 1 — casual rage-quit tracking. The surviving client reports
+    a mid-game leave in a CASUAL 1v1 (any midgame leave counts, including at
+    4-0 — Sid's rule). Feeds the Compare tab's casual rage-quit %, whose
+    denominator is the UNION of casual games played: recorded casual matches
+    plus DC events whose room produced no match row. (Deliberately NOT
+    matches + dc_count: a 4-0 leave is BOTH and would be counted twice —
+    which is why room_id is stored on every event, so the union is
+    computable.)
+
+    No series exists for casual games, so the ranked endpoint's shared-series
+    reality check can't apply. Containment instead: (1) the REPORTER must hold
+    a valid Steam session; (2) dedup on (room_id, leaver) — the all-NOT-NULL
+    unique in casual_dc_events (#147), room_id required non-blank; (3) a
+    reporter can land at most 4 casual-DC reports per hour, so an abusive
+    session inflates a rival slowly at best and leaves an audit trail.
+    The cap is enforced under a per-reporter advisory lock so concurrent
+    requests cannot all pass the count (round-1 finding).
+    Residual accepted: a determined authed attacker can add ~4/h — this feeds
+    a cosmetic stat, not ratings or gold."""
+    room_id = (room_id or "").strip()
+    if not room_id:
+        raise HTTPException(status_code=422, detail="room_id required")
+    reporter = (await db.execute(select(Player).where(Player.steam_id == reporter_steam_id))).scalar_one_or_none()
+    leaver = (await db.execute(select(Player).where(Player.steam_id == leaver_steam_id))).scalar_one_or_none()
+    if not reporter or not leaver:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if reporter.id == leaver.id:
+        raise HTTPException(status_code=400, detail="Cannot report yourself")
+    await _check_steam_session(request, reporter_steam_id, db)
+
+    # Codex round 1 (MEDIUM): the COUNT below is a check-then-act. Five
+    # concurrent requests with distinct room ids all read zero and all insert,
+    # blowing straight through the cap. Serialize this reporter against itself
+    # with a transaction-scoped advisory lock FIRST — it keys on a VALUE, so it
+    # works even though the rows being counted do not exist yet (#207). Every
+    # concurrent call for the same reporter now queues behind this and sees the
+    # committed count.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                     {"k": f"casualdc:{reporter_steam_id}"})
+
+    recent = (await db.execute(text(
+        "SELECT COUNT(*) FROM casual_dc_events"
+        " WHERE reporter_id = :rp AND created_at > NOW() - INTERVAL '1 hour'"
+    ), {"rp": reporter.id})).scalar() or 0
+    if recent >= 4:
+        raise HTTPException(status_code=429, detail="casual DC report rate limit")
+
+    inserted = (await db.execute(text(
+        "INSERT INTO casual_dc_events (room_id, leaver_id, reporter_id)"
+        " VALUES (:room, :lv, :rp) ON CONFLICT (room_id, leaver_id) DO NOTHING"
+        " RETURNING id"
+    ), {"room": room_id[:64], "lv": leaver.id, "rp": reporter.id})).first()
+    if inserted is None:
+        await db.commit()
+        return {"status": "already_recorded"}
+    # Atomic increment (#148) — the counter row is shared across reports.
+    await db.execute(text(
+        "UPDATE players SET casual_dc_count = COALESCE(casual_dc_count, 0) + 1"
+        " WHERE id = :lv"
+    ), {"lv": leaver.id})
+    await db.commit()
+    print(f"[DC] casual rage-quit: {leaver_steam_id} left room {room_id} (reported by {reporter_steam_id})")
+    return {"status": "recorded"}
 
 
 # ── Routes: Discord Linking ──────────────────────────────────────
@@ -8771,6 +10151,16 @@ async def ws_chat(ws: WebSocket):
             # encourage griefing on alts. The mod's queue-join 409 is the primary signal.
             if await _is_banned_via_session(steam_id):
                 continue
+            # Muted players can't chat in the muted channel (Aug 6 item 5).
+            # Silent drop, deliberately mirroring the ban behaviour directly
+            # above. NOTE the trust level: `steam_id` here is CLIENT-CLAIMED
+            # (this socket carries no session token), so this is a deterrent,
+            # not an authorization boundary — see the _chat_moderator_scope
+            # header. It is exactly as strong as the ban check it sits beside,
+            # which is the bar this had to clear.
+            if await _is_chat_muted(steam_id, channel):
+                print(f"[CHAT-MOD] dropped muted {display_name} ({steam_id}) in [{channel}]")
+                continue
             meta = await _lookup_chat_meta(steam_id=steam_id)
             out = {
                 "source": "ingame",
@@ -8816,6 +10206,11 @@ async def post_chat_from_discord(
     # Look up the linked Steam ID and refuse the relay if that player is banned.
     # Without this, a banned player can still chat from Discord (since the WS path
     # is the in-game-only block point). Silent drop matches the WS behavior.
+    # Linked Steam id of the Discord author, resolved once and reused by BOTH
+    # the ban gate below and the mute gate after the channel is known
+    # (Aug 6 item 5). None when unlinked — an unlinked Discord account has no
+    # steam identity to moderate on, so neither gate applies.
+    _linked_steam = None
     if discord_id:
         try:
             from database import async_session
@@ -8824,8 +10219,10 @@ async def post_chat_from_discord(
                     text("SELECT steam_id FROM players WHERE discord_id = :d AND deleted_at IS NULL"),
                     {"d": discord_id},
                 )).first()
-            if row and row[0] and await _is_banned_via_session(row[0]):
-                print(f"[CHAT] dropped banned discord chatter discord_id={discord_id} steam={row[0]}")
+            if row and row[0]:
+                _linked_steam = row[0]
+            if _linked_steam and await _is_banned_via_session(_linked_steam):
+                print(f"[CHAT] dropped banned discord chatter discord_id={discord_id} steam={_linked_steam}")
                 return {"status": "banned"}
         except Exception as e:
             print(f"[CHAT] ban-check failed for discord {discord_id}: {e}")
@@ -8835,6 +10232,14 @@ async def post_chat_from_discord(
     channel = str(payload.get("channel", "global")).lower()
     if channel not in CHAT_CHANNELS_ALLOWED:
         channel = "global"
+    # Mute gate for the relay path (Aug 6 item 5). Unlike the WS path, the
+    # identity here is SERVER-RESOLVED from the Discord account the bot
+    # authenticated, so this half is trustworthy: a muted player cannot dodge
+    # it by editing a client. Silent drop, mirroring the ban behaviour.
+    if _linked_steam and await _is_chat_muted(_linked_steam, channel):
+        print(f"[CHAT-MOD] dropped muted discord chatter discord_id={discord_id} "
+              f"steam={_linked_steam} in [{channel}]")
+        return {"status": "muted"}
     out = {
         "source": "discord",
         "discord_id": discord_id,
@@ -8956,6 +10361,525 @@ async def get_recent_chat(
     return {"messages": entries}
 
 
+# ── T-chat moderation (Aug 6 item 5) ──────────────────────────────────────
+#
+# Two roles, ONE authorization helper (_chat_moderator_scope) so the rules
+# cannot drift between the five endpoints below:
+#
+#   admin      — every channel, every action. Identified by admin_users.
+#   moderator  — a live language_grants row with scope='chat_moderate'. May
+#                act ONLY inside the channel(s) matching their granted
+#                language_code. A grant NEVER confers 'global': the grant's
+#                language IS the channel name (ru -> 'ru', es -> 'es'), and
+#                'global' is not a language code, so it can never be produced
+#                by that mapping. This is the first thing that consumes the
+#                'chat_moderate' scope — it has been grantable (and inert)
+#                since the i18n grants endpoint shipped.
+#
+# ⚠ TRUST LIMITATION — read before extending this.
+# The WS chat frame's steam_id is CLIENT-CLAIMED and unauthenticated (see
+# ws_chat: the socket carries no session token, the frame just asserts an id).
+# MUTE ENFORCEMENT on that path therefore inherits that weakness: a modified
+# client can send a different steam_id and dodge its own mute. That is
+# accepted here as a DETERRENT, not a security control — it is exactly the
+# same trust level the existing ban check on that path already has
+# (_is_banned_via_session, keyed on the same claimed id), so muting is no
+# weaker than banning. It is NOT a regression, and it must not be described
+# as authoritative. The strongest identity available on that socket is the
+# claimed steam_id; there is no session lookup on the WS handshake to prefer.
+# The AUTHORING side (who may issue a mute/delete) is fully authenticated —
+# admin HMAC or a session-proven moderator — so the privileged half is sound.
+# If the WS is ever session-authenticated, key enforcement on the proven id
+# and delete this paragraph.
+
+
+async def _chat_moderator_scope(db: AsyncSession, steam_id: str):
+    """Resolve a caller's chat-moderation authority.
+
+    Returns exactly one of:
+        ("admin",     None)          — unrestricted
+        ("moderator", {"ru", ...})   — restricted to those CHANNEL names
+        (None,        None)          — no authority
+
+    The moderator set is built from LIVE grants only (revoked_at IS NULL), so
+    a revoked grant loses authority on the very next call with no cache to
+    invalidate. Zero-data callers (unknown steam_id, no grants) get
+    (None, None) rather than raising — every caller turns that into a 403.
+    """
+    if not steam_id:
+        return (None, None)
+    if await _is_admin(db, steam_id):
+        return ("admin", None)
+    langs = (await db.execute(text(
+        "SELECT DISTINCT language_code FROM language_grants"
+        " WHERE steam_id = :sid AND scope = 'chat_moderate' AND revoked_at IS NULL"
+    ), {"sid": steam_id})).scalars().all()
+    # A grant's language_code IS its channel name. Filter to channels the
+    # server actually serves so a grant for a retired language cannot widen
+    # into something unexpected, and 'global' can never appear (it is not a
+    # language code, so it is not producible here — but the intersection with
+    # CHAT_CHANNELS_ALLOWED makes that structural rather than incidental).
+    chans = {str(l).lower() for l in langs
+             if str(l).lower() in CHAT_CHANNELS_ALLOWED and str(l).lower() != "global"}
+    if chans:
+        return ("moderator", chans)
+    return (None, None)
+
+
+def _chat_scope_allows(role, langs, channel: str | None) -> bool:
+    """May this role act on `channel`? `channel=None` means ALL CHANNELS,
+    which only an admin may ever target (a null-channel mute silences the
+    player in 'global' too, so it is strictly outside any language grant)."""
+    if role == "admin":
+        return True
+    if role != "moderator" or not langs:
+        return False
+    if channel is None:
+        return False
+    return str(channel).lower() in langs
+
+
+async def _require_chat_moderator(db: AsyncSession, steam_id: str, channel: str | None):
+    """Resolve + enforce in one call. Returns (role, langs) on success."""
+    role, langs = await _chat_moderator_scope(db, steam_id)
+    if role is None:
+        raise HTTPException(403, "Not a chat moderator")
+    if not _chat_scope_allows(role, langs, channel):
+        raise HTTPException(
+            403,
+            "Your moderation grant does not cover "
+            + ("all channels" if channel is None else f"the '{channel}' channel"))
+    return (role, langs)
+
+
+async def _log_admin_action(db: AsyncSession, *, admin_steam_id: str, action: str,
+                            target_steam_id: str | None = None, details: dict | None = None) -> None:
+    """Append one admin_actions row. Best-effort: an audit failure must never
+    take down the moderation action it describes (#187 — the notification/audit
+    half does not belong in the failure domain of the decision). Uses a
+    SAVEPOINT so a failed insert cannot poison the caller's transaction
+    (#235: under asyncpg a caught SQL error still aborts the whole
+    transaction unless it is rolled back to a savepoint)."""
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, details)"
+                " VALUES (:a, :act, :t, CAST(:d AS jsonb))"
+            ), {"a": admin_steam_id[:20], "act": action[:32],
+                "t": (target_steam_id or None), "d": _json.dumps(details or {})})
+    except Exception as ex:
+        print(f"[CHAT-MOD] audit row failed for {action}: {ex}")
+
+
+# ── The WS retraction frame ───────────────────────────────────────────────
+#
+# Shape:  {"type":"delete","id":<chat_messages.id>,"channel":"<channel>"}
+#
+# WHY OLD CLIENTS IGNORE IT SAFELY (verified against the shipped parser, not
+# assumed). Every WS frame reaches NativeUI.OnChatMessage, which extracts its
+# fields and then does:
+#
+#       string message = ExtractChatField(json, "message");
+#       ...
+#       if (string.IsNullOrEmpty(message)) return;          // NativeUI.cs
+#
+# The frame carries NO "message" key, so ExtractChatField returns "" and the
+# handler returns before doing anything at all. Three properties make that a
+# guarantee rather than a coincidence:
+#
+#   1. FindChatKey matches a key by EXACT length at the object's own depth
+#      (it tracks string/escape state and compares `i - strStart - 1 ==
+#      key.Length`), so no other key can be mistaken for "message" and no
+#      substring of a value can satisfy the lookup.
+#   2. The empty-message early return runs BEFORE the `id` is read, so the
+#      frame's `id` can NEVER reach `lastServerStampSeen`. This matters: that
+#      variable is the local-echo ordering anchor (learning #310), and
+#      poisoning it with a retraction's id would corrupt chat ordering for the
+#      rest of the session. The ordering is load-bearing — do not move the id
+#      read above the message check, and do not add a "message" key here.
+#   3. The scrollback path is unaffected: retractions are broadcast-only and
+#      never persisted into /chat/recent, which already filters
+#      deleted_at IS NULL.
+#
+# So a pre-item-5 client silently drops the frame (no render, no state
+# change) and simply keeps showing the deleted line until its next scrollback
+# fetch — a strictly cosmetic staleness, which is the correct degradation.
+# A NEW client keys on "type":"delete" and removes the line by id.
+
+
+async def _broadcast_chat_delete(message_id: int, channel: str) -> None:
+    """Push the retraction to every socket subscribed to that channel.
+    Best-effort — a delete is durable in the DB regardless of who was
+    listening, and /chat/recent already excludes it."""
+    try:
+        await chat_manager.broadcast(
+            {"type": "delete", "id": int(message_id), "channel": channel or "global"},
+            channel=channel or "global")
+    except Exception as ex:
+        print(f"[CHAT-MOD] retraction broadcast failed for msg {message_id}: {ex}")
+
+
+class _ChatModDeleteReq(BaseModel):
+    steam_id: str
+    message_id: int
+    hmac_signature: str | None = None
+
+
+@app.post("/api/v1/chat/moderate/delete", tags=["Chat"])
+async def chat_moderate_delete(req: _ChatModDeleteReq, request: Request,
+                               db: AsyncSession = Depends(get_db)):
+    """Soft-delete one chat message.
+
+    Authorization is resolved from the message's OWN channel (read first,
+    under a row lock) — never from anything the caller claims — so a
+    moderator cannot delete outside their language by mislabelling the
+    request. Admins additionally prove identity with the standard admin HMAC
+    over `admin:{admin}:chat_delete:{message_id}`; moderators prove identity
+    with their Steam session (they have no admin secret)."""
+    role, langs = await _chat_moderator_scope(db, req.steam_id)
+    if role is None:
+        raise HTTPException(403, "Not a chat moderator")
+    if role == "admin":
+        if not _verify_admin_hmac(req.steam_id, "chat_delete", str(req.message_id),
+                                  req.hmac_signature):
+            raise HTTPException(403, "Bad admin signature")
+    else:
+        # Moderators are session-authenticated. This is the same proof every
+        # other player-initiated write on this server uses.
+        await _check_steam_session(request, req.steam_id, db)
+    # Lock the row and read its ACTUAL channel + author before deciding.
+    row = (await db.execute(text(
+        "SELECT id, channel, steam_id, discord_id, display_name, deleted_at"
+        "  FROM chat_messages WHERE id = :mid FOR UPDATE"
+    ), {"mid": req.message_id})).mappings().first()
+    if row is None:
+        raise HTTPException(404, "No such message")
+    chan = (row["channel"] or "global").lower()
+    if not _chat_scope_allows(role, langs, chan):
+        raise HTTPException(403, f"Your moderation grant does not cover the '{chan}' channel")
+    if row["deleted_at"] is not None:
+        # Idempotent: a retry (or a second moderator) is a no-op, not a 409.
+        # Re-broadcast anyway so a client that missed the first retraction
+        # still drops the line.
+        await db.commit()
+        await _broadcast_chat_delete(req.message_id, chan)
+        return {"status": "ok", "already_deleted": True,
+                "message_id": req.message_id, "channel": chan}
+    await db.execute(text(
+        "UPDATE chat_messages SET deleted_at = NOW(), deleted_by_steam_id = :by"
+        " WHERE id = :mid AND deleted_at IS NULL"
+    ), {"mid": req.message_id, "by": req.steam_id[:32]})
+    await _log_admin_action(
+        db, admin_steam_id=req.steam_id, action="chat_delete",
+        target_steam_id=row["steam_id"],
+        details={"message_id": int(req.message_id), "channel": chan,
+                 "author_steam_id": row["steam_id"],
+                 "author_discord_id": row["discord_id"],
+                 "author_display_name": row["display_name"],
+                 "moderator_steam_id": req.steam_id,
+                 "moderator_role": role})
+    await db.commit()
+    print(f"[CHAT-MOD] {role} {req.steam_id} deleted message {req.message_id} in [{chan}]")
+    await _broadcast_chat_delete(req.message_id, chan)
+    return {"status": "ok", "message_id": req.message_id, "channel": chan}
+
+
+class _ChatModMuteReq(BaseModel):
+    steam_id: str                      # the MODERATOR / admin
+    target_steam_id: str               # who is being muted
+    channel: str | None = None         # None = all channels (admin only)
+    duration_minutes: int | None = None  # None/<=0 = permanent
+    reason: str = ""
+    hmac_signature: str | None = None
+
+
+async def _chat_mod_authn(db: AsyncSession, request: Request, req, action: str, target: str):
+    """Shared identity proof for the mute/unmute pair: admin HMAC for admins,
+    Steam session for scoped moderators."""
+    role, langs = await _chat_moderator_scope(db, req.steam_id)
+    if role is None:
+        raise HTTPException(403, "Not a chat moderator")
+    if role == "admin":
+        if not _verify_admin_hmac(req.steam_id, action, target, req.hmac_signature):
+            raise HTTPException(403, "Bad admin signature")
+    else:
+        await _check_steam_session(request, req.steam_id, db)
+    return (role, langs)
+
+
+@app.post("/api/v1/chat/moderate/mute", tags=["Chat"])
+async def chat_moderate_mute(req: _ChatModMuteReq, request: Request,
+                             db: AsyncSession = Depends(get_db)):
+    """Mute a steam_id, optionally scoped to one channel and/or time-boxed.
+
+    channel=None means EVERY channel and is admin-only (it silences 'global',
+    which no language grant covers). duration_minutes omitted or <= 0 means
+    permanent."""
+    chan = (req.channel or "").lower().strip() or None
+    if chan is not None and chan not in CHAT_CHANNELS_ALLOWED:
+        raise HTTPException(400, f"Unknown channel '{chan}'")
+    role, langs = await _chat_mod_authn(
+        db, request, req, "chat_mute", f"{req.target_steam_id}:{chan or 'all'}")
+    if not _chat_scope_allows(role, langs, chan):
+        raise HTTPException(
+            403,
+            "Your moderation grant does not cover "
+            + ("all channels — name a channel you moderate" if chan is None
+               else f"the '{chan}' channel"))
+    if not req.target_steam_id:
+        raise HTTPException(400, "target_steam_id required")
+    # A moderator must not be able to silence an admin or another moderator.
+    # Admins may mute anyone (including each other — that is a people problem,
+    # not a code one, and the audit log records it).
+    if role == "moderator":
+        t_role, _ = await _chat_moderator_scope(db, req.target_steam_id)
+        if t_role is not None:
+            raise HTTPException(403, "You cannot mute another moderator or an admin")
+    mins = int(req.duration_minutes) if req.duration_minutes else 0
+    if mins > 0 and mins > 60 * 24 * 365:
+        raise HTTPException(400, "duration_minutes too large")
+    # Supersede any live mute with the SAME scope so the newest terms win and
+    # `mutes` never shows two overlapping rows for one (player, channel).
+    await db.execute(text(
+        "UPDATE chat_mutes SET revoked_at = NOW()"
+        " WHERE steam_id = :sid AND revoked_at IS NULL"
+        "   AND channel IS NOT DISTINCT FROM :chan"
+    ), {"sid": req.target_steam_id[:32], "chan": chan})
+    await db.execute(text(
+        "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at)"
+        " VALUES (:sid, :chan, :by, :why,"
+        "         CASE WHEN :mins > 0 THEN NOW() + (:mins || ' minutes')::interval ELSE NULL END)"
+    ), {"sid": req.target_steam_id[:32], "chan": chan, "by": req.steam_id[:32],
+        "why": (req.reason or "")[:256] or None, "mins": mins})
+    await _log_admin_action(
+        db, admin_steam_id=req.steam_id, action="chat_mute",
+        target_steam_id=req.target_steam_id,
+        details={"channel": chan or "ALL", "duration_minutes": mins or None,
+                 "permanent": mins <= 0, "reason": (req.reason or "")[:256],
+                 "moderator_steam_id": req.steam_id, "moderator_role": role})
+    await db.commit()
+    print(f"[CHAT-MOD] {role} {req.steam_id} muted {req.target_steam_id} "
+          f"in [{chan or 'ALL'}] for {mins or 'ever'} min")
+    return {"status": "ok", "target_steam_id": req.target_steam_id,
+            "channel": chan, "duration_minutes": mins or None,
+            "permanent": mins <= 0}
+
+
+@app.post("/api/v1/chat/moderate/unmute", tags=["Chat"])
+async def chat_moderate_unmute(req: _ChatModMuteReq, request: Request,
+                               db: AsyncSession = Depends(get_db)):
+    """Revoke live mutes for a steam_id. With `channel` set, revokes only that
+    channel's mute; without it, revokes every mute the CALLER is entitled to
+    revoke (an admin clears all; a moderator clears only their languages —
+    never the all-channels row, which is admin-issued)."""
+    chan = (req.channel or "").lower().strip() or None
+    if chan is not None and chan not in CHAT_CHANNELS_ALLOWED:
+        raise HTTPException(400, f"Unknown channel '{chan}'")
+    role, langs = await _chat_mod_authn(
+        db, request, req, "chat_unmute", f"{req.target_steam_id}:{chan or 'all'}")
+    if not req.target_steam_id:
+        raise HTTPException(400, "target_steam_id required")
+    if chan is not None:
+        if not _chat_scope_allows(role, langs, chan):
+            raise HTTPException(403, f"Your moderation grant does not cover the '{chan}' channel")
+        cleared = (await db.execute(text(
+            "UPDATE chat_mutes SET revoked_at = NOW()"
+            " WHERE steam_id = :sid AND revoked_at IS NULL AND channel = :chan"
+            " RETURNING id"
+        ), {"sid": req.target_steam_id[:32], "chan": chan})).scalars().all()
+    elif role == "admin":
+        cleared = (await db.execute(text(
+            "UPDATE chat_mutes SET revoked_at = NOW()"
+            " WHERE steam_id = :sid AND revoked_at IS NULL RETURNING id"
+        ), {"sid": req.target_steam_id[:32]})).scalars().all()
+    else:
+        # Scoped moderator with no channel named: clear exactly the channels
+        # they moderate. The all-channels (NULL) row is deliberately excluded
+        # — `channel = ANY(:chans)` is false for NULL, so it cannot be cleared
+        # by anyone but an admin.
+        cleared = (await db.execute(text(
+            "UPDATE chat_mutes SET revoked_at = NOW()"
+            " WHERE steam_id = :sid AND revoked_at IS NULL AND channel = ANY(:chans)"
+            " RETURNING id"
+        ), {"sid": req.target_steam_id[:32], "chans": sorted(langs)})).scalars().all()
+    if cleared:
+        await _log_admin_action(
+            db, admin_steam_id=req.steam_id, action="chat_unmute",
+            target_steam_id=req.target_steam_id,
+            details={"channel": chan or ("ALL" if role == "admin" else sorted(langs)),
+                     "cleared": len(cleared),
+                     "moderator_steam_id": req.steam_id, "moderator_role": role})
+    await db.commit()
+    print(f"[CHAT-MOD] {role} {req.steam_id} unmuted {req.target_steam_id} "
+          f"in [{chan or 'their scope'}] ({len(cleared)} row(s))")
+    return {"status": "ok", "cleared": len(cleared),
+            "target_steam_id": req.target_steam_id, "channel": chan}
+
+
+@app.get("/api/v1/chat/moderate/mutes", tags=["Chat"])
+async def chat_moderate_list_mutes(
+    steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    request: Request = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Live mutes, for the admin panel. An admin sees every mute; a scoped
+    moderator sees only mutes in the channels they moderate (never the
+    all-channels rows, which are outside their authority to see or clear).
+    Expired rows are filtered out here rather than deleted — the row is the
+    audit trail."""
+    role, langs = await _chat_moderator_scope(db, steam_id)
+    if role is None:
+        raise HTTPException(403, "Not a chat moderator")
+    if role == "admin":
+        if not _verify_admin_hmac(steam_id, "chat_mutes_list", "", hmac_signature):
+            raise HTTPException(403, "Bad admin signature")
+        scope_sql = ""
+        params: dict = {}
+    else:
+        await _check_steam_session(request, steam_id, db)
+        scope_sql = " AND m.channel = ANY(:chans)"
+        params = {"chans": sorted(langs)}
+    rows = (await db.execute(text(
+        "SELECT m.id, m.steam_id, m.channel, m.muted_by_steam_id, m.reason,"
+        "       m.created_at, m.expires_at,"
+        "       COALESCE(p.display_name, '') AS display_name,"
+        "       COALESCE(b.display_name, '') AS muted_by_name"
+        "  FROM chat_mutes m"
+        "  LEFT JOIN players p ON p.steam_id = m.steam_id"
+        "  LEFT JOIN players b ON b.steam_id = m.muted_by_steam_id"
+        " WHERE m.revoked_at IS NULL"
+        "   AND (m.expires_at IS NULL OR m.expires_at > NOW())"
+        + scope_sql +
+        " ORDER BY m.created_at DESC LIMIT 500"
+    ), params)).mappings().all()
+    return {"mutes": [{
+        "id": int(r["id"]),
+        "steam_id": r["steam_id"],
+        "display_name": r["display_name"],
+        # None == every channel. The client renders that as "ALL".
+        "channel": r["channel"],
+        "muted_by_steam_id": r["muted_by_steam_id"],
+        "muted_by_name": r["muted_by_name"],
+        "reason": r["reason"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "expires_at": r["expires_at"].isoformat() if r["expires_at"] else None,
+        "permanent": r["expires_at"] is None,
+    } for r in rows], "count": len(rows), "role": role}
+
+
+async def _is_chat_muted(steam_id: str, channel: str) -> bool:
+    """Enforcement read for the two chat ingress paths. Own short-lived
+    session (mirrors _is_banned_via_session) because the WS handler has no
+    Depends-injected db. A row matches when it is live, unexpired, and either
+    channel-less (all channels) or this exact channel. Fails OPEN on error —
+    a database blip must not silence the whole chat."""
+    from database import async_session
+    if not steam_id:
+        return False
+    try:
+        async with async_session() as db:
+            hit = (await db.execute(text(
+                "SELECT 1 FROM chat_mutes"
+                " WHERE steam_id = :sid AND revoked_at IS NULL"
+                "   AND (expires_at IS NULL OR expires_at > NOW())"
+                "   AND (channel IS NULL OR channel = :chan)"
+                " LIMIT 1"
+            ), {"sid": steam_id, "chan": (channel or "global").lower()})).scalar()
+            return hit is not None
+    except Exception as e:
+        print(f"[CHAT-MOD] mute check error for {steam_id}: {e}")
+        return False
+
+
+# ── Routes: Admin panel reads (Aug 6 item 5) ─────────────────────────────
+
+
+@app.get("/api/v1/admin/admins", tags=["Admin"])
+async def admin_list_admins(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Current admin roster for the in-game Admin tab. Names come from a LEFT
+    JOIN so an admin with no players row still lists (steam_id only) rather
+    than vanishing."""
+    await _require_admin(db, admin_steam_id, "admins_list", "", hmac_signature)
+    rows = (await db.execute(text(
+        "SELECT a.steam_id, a.granted_by_steam_id, a.granted_at, a.notes,"
+        "       COALESCE(p.display_name, '') AS display_name,"
+        "       COALESCE(g.display_name, '') AS granted_by_name"
+        "  FROM admin_users a"
+        "  LEFT JOIN players p ON p.steam_id = a.steam_id"
+        "  LEFT JOIN players g ON g.steam_id = a.granted_by_steam_id"
+        " ORDER BY a.granted_at ASC NULLS FIRST, a.steam_id"
+    ))).mappings().all()
+    return {"admins": [{
+        "steam_id": r["steam_id"],
+        "display_name": r["display_name"],
+        "granted_by_steam_id": r["granted_by_steam_id"],
+        "granted_by_name": r["granted_by_name"],
+        "granted_at": r["granted_at"].isoformat() if r["granted_at"] else None,
+        "notes": r["notes"],
+    } for r in rows], "count": len(rows)}
+
+
+@app.get("/api/v1/admin/actions", tags=["Admin"])
+async def admin_list_actions(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    action: str = Query("", max_length=32),
+    target_steam_id: str = Query("", max_length=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """Paginated admin_actions audit log, newest first — the "log of admin
+    actions" surface. Includes the chat_delete / chat_mute / chat_unmute rows
+    written by the moderation endpoints above, so T-chat moderation is
+    auditable through the same panel as bans.
+
+    `action` and `target_steam_id` are BOUND PARAMETERS, never interpolated
+    (#188 — the ORDER BY there is a fixed literal for the same reason)."""
+    await _require_admin(db, admin_steam_id, "admin_actions_list", "", hmac_signature)
+    where = ["TRUE"]
+    params: dict = {"limit": limit, "offset": offset}
+    if action:
+        where.append("aa.action = :action")
+        params["action"] = action
+    if target_steam_id:
+        where.append("aa.target_steam_id = :target")
+        params["target"] = target_steam_id
+    where_sql = " AND ".join(where)
+    total = (await db.execute(text(
+        f"SELECT COUNT(*) FROM admin_actions aa WHERE {where_sql}"), params)).scalar() or 0
+    rows = (await db.execute(text(
+        "SELECT aa.id, aa.admin_steam_id, aa.action, aa.target_steam_id,"
+        "       aa.target_match_id, aa.target_series_id, aa.details, aa.created_at,"
+        "       COALESCE(ap.display_name, '') AS admin_name,"
+        "       COALESCE(tp.display_name, '') AS target_name"
+        "  FROM admin_actions aa"
+        "  LEFT JOIN players ap ON ap.steam_id = aa.admin_steam_id"
+        "  LEFT JOIN players tp ON tp.steam_id = aa.target_steam_id"
+        f" WHERE {where_sql}"
+        " ORDER BY aa.created_at DESC, aa.id DESC"
+        " LIMIT :limit OFFSET :offset"
+    ), params)).mappings().all()
+    return {"actions": [{
+        "id": str(r["id"]),
+        "admin_steam_id": r["admin_steam_id"],
+        "admin_name": r["admin_name"],
+        "action": r["action"],
+        "target_steam_id": r["target_steam_id"],
+        "target_name": r["target_name"],
+        "target_match_id": str(r["target_match_id"]) if r["target_match_id"] else None,
+        "target_series_id": str(r["target_series_id"]) if r["target_series_id"] else None,
+        # JSONB passes through as a dict; None stays None.
+        "details": r["details"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+    } for r in rows], "total": int(total), "limit": limit, "offset": offset}
+
+
 # ── Routes: Localization (v1.36, localization-design §2.3/§2.5) ──────
 # Live catalogue + proposal/review flow + grants + the translator portal.
 # Auth model: the in-game client mints a short-TTL portal session over HTTPS
@@ -8970,6 +10894,35 @@ I18N_PACK_FORMAT = 1
 # Terms locked by the glossary check: if the SOURCE contains one, the target
 # must carry it verbatim (they are proper nouns/metric names on every board).
 I18N_GLOSSARY_LOCKED = ("Elo", "Glicko", "RD")
+
+# Per-language accepted renderings of a locked term.
+#
+# A locked term exists to keep ONE rendering of a rating concept across the whole
+# mod — not to force Latin script into a language that does not use it. The
+# verbatim-only rule rejected a CORRECT Russian translation: a translator
+# submitted "Эло за игры" for "Elo over games" and got
+# `422 locked term 'Elo' missing from target` (reported with a screenshot,
+# 2026-08-07). Эло is simply how Russian writes Elo; demanding the Latin form
+# inside Cyrillic prose is asking for the wrong translation.
+#
+# So the rule becomes "use ONE OF the sanctioned renderings for your language"
+# rather than "use the English letters". The English form stays acceptable in
+# every language — the translator in that report said they could write "Elo" if
+# they had to, and some Russian UI genuinely does keep the Latin term — so this
+# only ADDS a legal option and cannot invalidate anything already approved.
+#
+# Spanish needs no entries: it uses the Latin alphabet and writes Elo/Glicko/RD
+# as-is. Add a language here only when its script or convention makes the
+# English form the wrong answer, not merely an unusual one.
+I18N_GLOSSARY_ALIASES = {
+    "ru": {
+        "Elo": ("Эло",),
+        "Glicko": ("Глико",),
+        # RD (rating deviation) has no settled Cyrillic short form; Russian
+        # rating write-ups keep "RD". Left verbatim-only on purpose rather than
+        # inventing an abbreviation nobody uses.
+    },
+}
 I18N_PORTAL_TTL_MIN = 45
 # ABSOLUTE life of a portal session, anchored on created_at (Aug-3). The TTL
 # above is now a SLIDING window that /i18n/portal-session/refresh extends while
@@ -9157,10 +11110,20 @@ def _i18n_validate(source: str, target: str, language: str) -> list:
         if has_cyr and has_lat:
             errors.append(f"mixed Cyrillic/Latin inside one word ('{w[:20]}')")
             break
-    # 6. Glossary-locked terms survive verbatim.
+    # 6. Glossary-locked terms survive — as the English form OR a sanctioned
+    #    per-language rendering (see I18N_GLOSSARY_ALIASES for why).
     for term in I18N_GLOSSARY_LOCKED:
-        if _re.search(r"\b" + _re.escape(term) + r"\b", source) and term not in target:
-            errors.append(f"locked term '{term}' missing from target")
+        if not _re.search(r"\b" + _re.escape(term) + r"\b", source):
+            continue
+        accepted = (term,) + tuple(
+            I18N_GLOSSARY_ALIASES.get((language or "").lower(), {}).get(term, ()))
+        if not any(a in target for a in accepted):
+            # Name every accepted form. The old message said only what was
+            # missing, so a Russian translator staring at "locked term 'Elo'
+            # missing" had no way to learn that Эло would be accepted.
+            errors.append(
+                f"locked term '{term}' missing from target "
+                f"(use one of: {', '.join(accepted)})")
     return errors
 
 
@@ -9755,9 +11718,16 @@ async def i18n_review(payload: dict, request: Request,
                       db: AsyncSession = Depends(get_db)):
     """Approve → live immediately (§2.5). The validator re-runs against the
     CURRENT source at approve time — never trust the submit verdict; the
-    source may have changed since. Sensitive keys are admin-approve-only.
-    Self-approval is REFUSED (Sid, Aug 2) — the reviewer must be someone
-    other than the proposer."""
+    source may have changed since. Sensitive keys are approvable by
+    moderators too since Aug 6 (item 14).
+
+    Containment, stated accurately (Codex round 1): a MODERATOR cannot
+    approve their own proposal — that refusal is what makes moderator
+    approval of sensitive strings safe. ADMINS are deliberately exempt
+    (Sid, Aug 3: the other admins are multilingual and trusted to review
+    their own work), so 'a second pair of eyes always saw it' is true for
+    moderators and NOT true for admins. The earlier wording claimed the
+    refusal was universal, which it never was."""
     steam_id = await _portal_auth(request, db)
     pid = int(payload.get("proposal_id", 0) or 0)
     action = str(payload.get("action", ""))
@@ -9784,8 +11754,11 @@ async def i18n_review(payload: dict, request: Request,
     if key is None:
         raise HTTPException(409, "key retired since proposal")
     if action == "approve":
-        if key["sensitive"] and role != "admin":
-            raise HTTPException(403, "sensitive keys are admin-approve-only")
+        # Aug 6 item 14 (Sid): translation moderators may now approve
+        # sensitive keys too — he can't review translations himself anyway,
+        # so the admin-only gate just bottlenecked on him. The self-approval
+        # refusal below still forces a second pair of eyes on every
+        # moderator-proposed string, sensitive included.
         errors = _i18n_validate(key["msgctxt"], prop["proposed_target"], lang)
         if errors:
             raise HTTPException(422, "re-validation failed: " + "; ".join(errors[:4]))
@@ -10602,7 +12575,7 @@ function renderQueue(d){
   d.proposals.forEach(p=>{
     const box=el("div","key");
     const head=el("div","muted","["+d.language.toUpperCase()+"] #"+p.id+" by "+p.proposer+(p.sensitive?" ":""));
-    if(p.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive — admin only"));
+    if(p.sensitive)head.appendChild(el("span","badge b-sensitive","sensitive"));
     if(p.source_changed_since)head.appendChild(el("span","badge b-stale","source changed since"));
     box.appendChild(head);
     box.appendChild(el("div","src",p.source));
@@ -12148,6 +14121,33 @@ async def place_discord_bet(
     )
 
 
+async def _reject_active_spectator_bet(db: AsyncSession, steam_id: str) -> None:
+    """Spectators see live match state other bettors cannot (Codex spectator
+    r1 find 7): an account holding an ACTIVE spectator lease may not bet on
+    anything until it leaves. Fails open on infra errors — betting predates
+    the spectate tables, and a missing table must not take betting down
+    (#235 class); pre-migration the query is guarded by the savepoint."""
+    try:
+        async with db.begin_nested():
+            live = (await db.execute(text("""
+                SELECT 1 FROM spectate_leases
+                 WHERE spectator_steam_id = :sid
+                   AND ((revoked_at IS NULL AND heartbeat_expires_at > NOW())
+                        -- COOLDOWN (Codex r3 HIGH): /spectate/leave revokes
+                        -- instantly, but a modified client can keep its
+                        -- Photon seat and stay informed until the master's
+                        -- validation TTL kicks it. Bets stay blocked for the
+                        -- full propagation window after ANY lease ends.
+                        OR GREATEST(COALESCE(revoked_at, heartbeat_expires_at),
+                                    heartbeat_expires_at) > NOW() - INTERVAL '5 minutes')
+                 LIMIT 1
+            """), {"sid": steam_id})).first()
+    except Exception:
+        return
+    if live is not None:
+        raise HTTPException(status_code=409, detail="spectators_cannot_bet")
+
+
 @app.post("/api/v1/bets", tags=["Betting"])
 async def place_bet(
     steam_id: str = Query(...),
@@ -12163,6 +14163,7 @@ async def place_bet(
 ):
     """Place a bet. HMAC signs 'bet:{steam_id}:{series_id}:{bet_on_steam_id}:{amount}'."""
     await _check_steam_session(request, steam_id, db)
+    await _reject_active_spectator_bet(db, steam_id)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
@@ -12283,6 +14284,7 @@ async def place_team_bet(
     same one-bet-per-series-per-player rule, same gold debit-now /
     credit-on-settle flow."""
     await _check_steam_session(request, steam_id, db)
+    await _reject_active_spectator_bet(db, steam_id)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
@@ -14253,6 +16255,22 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     _ffa_grp = (await db.execute(text(
         "SELECT series_id FROM ffa_queue WHERE player_id = :pid AND series_id IS NOT NULL"
     ), {"pid": pid})).scalars().all()
+    # Aug 6 item 9: a 'lobby' row's series_id points at team_lobbies /
+    # ovt_lobbies, NOT at the mode's series table. It is therefore already
+    # inside _grp/_ovt_grp above (which filter only on "series_id IS NOT
+    # NULL"), where the series locks and series UPDATEs simply no-op against a
+    # lobby id. Collect the LOBBY ids separately so the open-lobby
+    # remove/promote/disband step below can run for them, exactly as FFA's
+    # does. UUIDs cannot collide across the two tables, so a lobby id in _grp
+    # is harmless — it just matches nothing.
+    _team_lob = (await db.execute(text(
+        "SELECT series_id FROM team_queue WHERE player_id = :pid"
+        " AND status = 'lobby' AND series_id IS NOT NULL"
+    ), {"pid": pid})).scalars().all()
+    _ovt_lob = (await db.execute(text(
+        "SELECT series_id FROM ovt_queue WHERE player_id = :pid"
+        " AND status = 'lobby' AND series_id IS NOT NULL"
+    ), {"pid": pid})).scalars().all()
     # Review find 8: FFA's canonical writer order is LOBBY row first, then its
     # queue members (leave/poll/janitor all take it that way). Deleting the
     # queue row first and touching ffa_lobbies afterwards inverts that and
@@ -14276,6 +16294,18 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         await db.execute(text(
             "SELECT 1 FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"
         ), {"sid": _sid})
+    # Aug 6 item 9: same parent-before-members order for the new lobby tables
+    # (round-15 find 2 / #202 — FOR NO KEY UPDATE is the weakest mode that
+    # still conflicts with our own UPDATEs below without enrolling every FK
+    # KEY SHARE insert in our lock graph).
+    for _lid in sorted(_team_lob, key=str):
+        await db.execute(text(
+            "SELECT 1 FROM team_lobbies WHERE id = :lid FOR NO KEY UPDATE"
+        ), {"lid": _lid})
+    for _lid in sorted(_ovt_lob, key=str):
+        await db.execute(text(
+            "SELECT 1 FROM ovt_lobbies WHERE id = :lid FOR NO KEY UPDATE"
+        ), {"lid": _lid})
     _discovered = {"team_queue": {str(s) for s in _grp},
                    "ovt_queue": {str(s) for s in _ovt_grp},
                    "ffa_queue": {str(s) for s in _ffa_grp}}
@@ -14335,6 +16365,33 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
                   AND EXISTS (SELECT 1 FROM ovt_series s WHERE s.id=:sid
                               AND s.invalidation_reason='member_deleted')"""),
             {"sid": _sid})
+    # Aug 6 item 9: promote or disband the 2v2 / 1v2 open lobbies the deleted
+    # account was sitting in. Without this the lobby keeps pointing at the
+    # anonymized account as host and nothing else ever repairs it (the series
+    # UPDATEs above cannot — a lobby id matches no series row).
+    for _qt, _lt, _lids in (("team_queue", "team_lobbies", _team_lob),
+                            ("ovt_queue", "ovt_lobbies", _ovt_lob)):
+        for _lid in _lids:
+            _ol = (await db.execute(text(
+                f"SELECT id, host_player_id FROM {_lt} WHERE id=:lid AND status='open'"
+                " FOR UPDATE SKIP LOCKED"), {"lid": _lid})).mappings().first()
+            if _ol is None:
+                continue
+            _live = (await db.execute(text(f"""
+                SELECT player_id FROM {_qt}
+                 WHERE series_id = :lid AND status = 'lobby' AND player_id <> :pid
+                 ORDER BY joined_at, player_id::text"""),
+                {"lid": _lid, "pid": pid})).scalars().all()
+            if not _live:
+                await db.execute(text(
+                    f"""UPDATE {_lt} SET status='canceled', invalidated_at=NOW(),
+                              invalidation_reason='lobby_disbanded'
+                        WHERE id=:lid AND status='open'"""), {"lid": _lid})
+            elif _ol["host_player_id"] == pid:
+                await db.execute(text(
+                    f"UPDATE {_lt} SET host_player_id=:h WHERE id=:lid"
+                ), {"h": _live[0], "lid": _lid})
+
     for _lid in _ffa_grp:
         # OPEN host lobby (July 29 redesign): run the same remove/promote/
         # disband step an explicit Leave performs — without it the open lobby
@@ -14420,6 +16477,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # share it.
     short = uuid.uuid4().hex[:8]
     _tomb = f"deleted_{short}"
+    # Captured up front: the player row is anonymized further down and clears
+    # discord_id, but the Discord-authored chat/audit scrub below needs it.
+    _prior_discord_id = getattr(player, "discord_id", None)
     await db.execute(text("DELETE FROM i18n_portal_sessions WHERE steam_id = :sid"), {"sid": steam_id})
     await db.execute(text(
         "UPDATE language_grants SET revoked_at = COALESCE(revoked_at, NOW()),"
@@ -14446,6 +16506,82 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text(
         "UPDATE i18n_review_events SET detail = REPLACE(detail, :sid, :tomb)"
         " WHERE detail LIKE '%' || :sid || '%'"), {"sid": steam_id, "tomb": _tomb})
+
+    # Aug 6 item 5 tables (Codex round 1, MEDIUM): chat moderation is new and
+    # stores RAW steam ids in three places, all of which survived deletion —
+    # a permanently muted player who deleted their account kept appearing, by
+    # steam id, in the moderator mute list forever.
+    #
+    # The mute itself is REVOKED, not just tombstoned: the account is gone, so
+    # there is nothing left to mute, and leaving a live row keyed to a
+    # tombstone would silently gag whoever might later be issued that id.
+    await db.execute(text(
+        "UPDATE chat_mutes SET revoked_at = COALESCE(revoked_at, NOW()),"
+        "       steam_id = :tomb WHERE steam_id = :sid"), {"sid": steam_id, "tomb": _tomb})
+    await db.execute(text(
+        "UPDATE chat_mutes SET muted_by_steam_id = :tomb WHERE muted_by_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    await db.execute(text(
+        "UPDATE chat_messages SET deleted_by_steam_id = :tomb WHERE deleted_by_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    # Codex round 2 (HIGH): the AUTHORED chat rows carry the deleted account's
+    # identity too — steam_id, discord_id and the display name embedded in the
+    # row — and /chat/recent is an UNAUTHENTICATED read. Tombstoning only the
+    # moderator columns left a deleted player's Steam ID and Discord ID being
+    # served publicly forever. Anonymize the authored rows on the same contract
+    # as the player row itself; the message TEXT is left intact because it is
+    # conversation other people took part in, and the row no longer identifies
+    # who wrote it.
+    await db.execute(text(
+        "UPDATE chat_messages SET steam_id = :tomb, discord_id = NULL,"
+        "       display_name = '[Deleted User]'"
+        " WHERE steam_id = :sid"), {"sid": steam_id, "tomb": _tomb})
+    # Codex round 3 (HIGH): a message the player sent THROUGH DISCORD has
+    # steam_id NULL and only discord_id set — the relay resolves the linked
+    # Steam account to render rank/title but never persists it. Scrubbing by
+    # steam_id alone therefore left every Discord-authored line, with its
+    # Discord ID and display name, being served by the UNAUTHENTICATED
+    # /chat/recent forever. Captured BEFORE the player row is anonymized
+    # below, because that clears discord_id.
+    if _prior_discord_id:
+        await db.execute(text(
+            "UPDATE chat_messages SET discord_id = NULL, steam_id = :tomb,"
+            "       display_name = '[Deleted User]'"
+            " WHERE discord_id = :did"), {"did": _prior_discord_id, "tomb": _tomb})
+        # NOTE (round 4): a REPLACE over the serialized JSONB used to run here
+        # and has been REMOVED — see the admin_actions note below.
+    # admin_actions.details is JSONB and can carry copies of the same ids.
+    #
+    # REMOVED (Codex round 4, MEDIUM — this was MY regression, not a
+    # pre-existing gap): the scrub was a REPLACE over the serialized text,
+    # which matches ARBITRARY SUBSTRINGS. Deleting Discord id
+    # 407123456789012345 rewrote an unrelated mute reason containing
+    # 1407123456789012345 into "1deleted_<suffix>" — corrupting another
+    # player's audit row to anonymize this one. A substring rewrite over
+    # free-text JSON cannot be made safe by tightening the LIKE; it needs
+    # exact per-key path updates against a known details schema, and
+    # admin_actions.details has no fixed shape (every action writes its own
+    # keys).
+    #
+    # The identity-bearing COLUMNS (admin_steam_id, target_steam_id) are
+    # tombstoned above, which is the part this batch is responsible for. The
+    # embedded copies inside details — along with the pre-existing copies in
+    # bug_reports, artist_users, release_posts and booster_grants that round 4
+    # also enumerated — are a REAL but SEPARATE problem: they predate this
+    # work, and patching them table-by-table produced three new findings per
+    # round. They need one mechanical inventory of every identity-bearing
+    # column and a scrub built from it. Tracked as its own item; deliberately
+    # NOT attempted here, because a half-done scrub that corrupts unrelated
+    # rows is worse than a known, recorded gap (#242).
+    # admin_actions is the moderation audit trail and its FK to admin_users was
+    # deliberately dropped (migration 192) so scoped moderators can be logged.
+    # Tombstone the actor and target ids the same way the i18n audit is handled.
+    await db.execute(text(
+        "UPDATE admin_actions SET admin_steam_id = :tomb WHERE admin_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
+    await db.execute(text(
+        "UPDATE admin_actions SET target_steam_id = :tomb WHERE target_steam_id = :sid"),
+        {"sid": steam_id, "tomb": _tomb})
 
     # Anonymize the player row. Keep rating_history / glicko / matches untouched
     # so Glicko recalcs and opponent histories stay consistent.
@@ -14493,6 +16629,44 @@ ACHIEVEMENT_GOLD_OVERRIDES = {
     # 300g — hard
     "stacked_deck": 300, "flawless": 300, "silent_drill": 300,
     "deep_end": 300, "casual_century": 300, "unstoppable": 300,
+    # The six FFA achievements — PAID, per Sid 2026-08-07 (they shipped at 0g
+    # for one day; see the trade-off recorded below).
+    "ffa_shutout_3": 100,          # Clean House      — 5-0 with 3+ players
+    "ffa_shutout_4": 300,          # Party Crasher    — 5-0 with 4+ players
+    "ffa_shutout_5": 500,          # Hostile Takeover — 5-0 with 5+ players
+    "ffa_kills_50": 100,           # Rampage          — >50 kills in one game
+    "ffa_kills_100": 500,          # Bodycount        — >100 kills in one game
+    "ffa_half_point_heartbreak": 300,   # Heartbreak  — lose holding 10+ halves
+    #
+    # ── KNOWN TRADE-OFF, accepted deliberately ─────────────────────────────
+    # These six originally shipped at 0g BECAUSE every value they read is
+    # REPORTER-ATTESTED. _verify_ffa_hmac's own docstring says it plainly — the
+    # signature authenticates the reporting BUILD, not gameplay truth, and the
+    # signing key ships inside the client. A participant in a real rated lobby
+    # can submit a fabricated game under a fresh room id (dedup is per room,
+    # and FFA_MAX_GAMES_PER_LOBBY allows 40) claiming 5 rounds, 10 half points
+    # and 101 kills, and every one of the six unlocks. At 0g that bought a
+    # vanity badge; at these values it is a one-time 1,800g faucet per account
+    # (100+300+500+100+500+300 — arithmetic checked, not eyeballed).
+    #
+    # The underlying exposure is NOT new — the same report already moves
+    # ratings and gold, which is the accepted FFA trust model (only the elected
+    # reporter submits, #4) — and each key is once-per-account, so this is a
+    # bounded one-off rather than a repeatable mint. Closing the forgery itself
+    # needs server-authoritative FFA match evidence, which does not exist and
+    # is far beyond this batch. Sid's call, made with the above stated.
+    #
+    # If these are ever re-tiered again, the already-granted rows need the
+    # migration-138 DELTA pattern (#229) — an idempotent backfill CANNOT top up
+    # a player who already holds the achievement, because the grant row exists
+    # and the gold write is skipped. Migration 199 did exactly that for the 8
+    # rows migration 196 granted at 0g.
+    #
+    # (The six entries that used to sit HERE, repeating each key with a value
+    # of 0, have been removed. They were the real payout: a later duplicate key
+    # in a dict literal silently wins, so pricing the keys higher up while
+    # leaving these in place would have looked correct in review and paid
+    # nothing. Caught by evaluating the literal rather than reading the diff.)
 }
 
 # The only achievements the game client is allowed to unlock through
@@ -14574,6 +16748,41 @@ ACHIEVEMENT_DEFS = {
     # identical 5-card multisets (duplicates counted) at game end. No win
     # requirement — the mirror itself is the achievement.
     "twins":                {"name": "Twins!",              "desc": "Finish a game with the exact same 5 cards (and copies) as your opponent"},
+    # ── Aug 7 FFA achievements (Sid's list of six). All RANKED-only, all
+    # evaluated server-side in submit_ffa_match — deliberately NOT added to
+    # CLIENT_UNLOCK_KEYS, so POST /achievements/unlock keeps 403ing them.
+    #
+    # Wording note on the three shutouts: in FFA "5-0" means the winner
+    # converted all 5 POINTS and nobody else converted even one. Losers can
+    # still be sitting on leftover HALF points (the engine wipes every
+    # player's live halves whenever ANYONE converts), so this is not a total
+    # shutout and the text says so rather than letting players read a zero
+    # into it and file a bug when the scoreboard shows halves.
+    # ASCII only — ROUNDS' Gravity SDF font has no em-dash (#47).
+    "ffa_shutout_3":        {"name": "Clean House",        "desc": "Win a ranked FFA 5-0 with 3 or more players (nobody else takes a point)"},
+    "ffa_shutout_4":        {"name": "Party Crasher",      "desc": "Win a ranked FFA 5-0 with 4 or more players (nobody else takes a point)"},
+    "ffa_shutout_5":        {"name": "Hostile Takeover",   "desc": "Win a ranked FFA 5-0 with 5 or more players (nobody else takes a point)"},
+    "ffa_kills_50":         {"name": "Rampage",            "desc": "Get over 50 kills in a single ranked FFA"},
+    "ffa_kills_100":        {"name": "Bodycount",          "desc": "Get over 100 kills in a single ranked FFA"},
+    "ffa_half_point_heartbreak": {"name": "Heartbreak",    "desc": "Lose a ranked FFA holding 10 or more half points that never became a point"},
+    # Payout: 100 / 300 / 500 / 100 / 500 / 300, in the order listed above
+    # (Sid priced them 2026-08-07; they shipped at 0g for one day). The table in
+    # ACHIEVEMENT_GOLD_OVERRIDES is the contract — read it, not this comment —
+    # and it also records the reporter-attestation trade-off these values were
+    # accepted with.
+    #
+    # (This block has now stated the payout wrongly TWICE: once claiming a flat
+    # 100g after the 0g override landed, once claiming ZERO after the pricing
+    # did. A payout restated away from its own table goes stale every time the
+    # table moves, which is the #277 class — hence the pointer above rather than
+    # a third copy of the numbers to drift.)
+    #
+    # The three shutouts ARE strictly nested — a 5-player 5-0 unlocks all three
+    # at once, so that single game pays 100+300+500. Re-tiering any of them is a
+    # one-line ACHIEVEMENT_GOLD_OVERRIDES edit plus a delta-based backfill in the
+    # migration-138 pattern (#229: back-pay must read the LIVE tier, never copy
+    # an older migration's rate) — migration 199 did exactly that for the rows
+    # migration 196 had already granted at 0g.
 }
 
 # Master rank threshold — applies to both 1v1 and 2v2 Glicko rating.
@@ -14735,7 +16944,8 @@ async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
 
 
 async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key: str) -> bool:
-    """Idempotent inline grant — insert PlayerAchievement row + gold, no commit.
+    """Idempotent inline grant — insert PlayerAchievement row (+ gold when the
+    key pays anything), no commit.
     Caller is responsible for the surrounding transaction's commit/rollback.
     Returns True if newly granted, False if already unlocked or unknown key."""
     if achievement_key not in ACHIEVEMENT_DEFS:
@@ -14750,14 +16960,24 @@ async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key
         return False
     db.add(PlayerAchievement(player_id=player_id, achievement_key=achievement_key))
     gold_amt = _achievement_gold(achievement_key)
-    await db.execute(
-        text("UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id = :pid"),
-        {"g": gold_amt, "pid": player_id},
-    )
-    db.add(GoldTransaction(
-        player_id=player_id, amount=gold_amt,
-        reason="achievement", reference_id=achievement_key,
-    ))
+    # A 0g achievement writes NEITHER a no-op balance update NOR a 0-amount
+    # ledger row. The ledger is read as "what did this player actually earn" —
+    # the gold-sources breakdown filters to amount > 0 — so a zero row is pure
+    # noise in the audit trail for something that moved no money.
+    #
+    # No key prices at 0 today: the six FFA keys were the only ones and were
+    # priced 2026-08-07, so this branch is currently unreachable. It stays
+    # because re-introducing a 0g key is a one-line ACHIEVEMENT_GOLD_OVERRIDES
+    # edit.
+    if gold_amt:
+        await db.execute(
+            text("UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id = :pid"),
+            {"g": gold_amt, "pid": player_id},
+        )
+        db.add(GoldTransaction(
+            player_id=player_id, amount=gold_amt,
+            reason="achievement", reference_id=achievement_key,
+        ))
     # Achievement-gated titles (Sid Slayer / Stan Slayer) become equippable
     # the moment the achievement lands, whatever the grant path.
     title_sku = ACHIEVEMENT_TITLE_SKUS.get(achievement_key)
@@ -14808,7 +17028,10 @@ async def get_player_achievements(steam_id: str, db: AsyncSession = Depends(get_
             # "Sid Slayer") label correctly in the Compare grid (#44).
             name=ACHIEVEMENT_DEFS[key].get("name"),
             global_pct=pct.get(key, 0.0),
-            # Per-key gold (v1.32) — slayers pay 1000, the rest 100.
+            # Per-key gold (v1.32). NOT a uniform 100: _achievement_gold
+            # consults ACHIEVEMENT_GOLD_OVERRIDES, which today spans the
+            # 100 default through the 300/500 tiers up to 1000 for the
+            # slayers. Read that table, never this comment.
             gold=_achievement_gold(key),
         ))
     return AchievementListResponse(steam_id=steam_id, achievements=entries)
@@ -15661,7 +17884,32 @@ async def _is_banned_via_session(steam_id: str) -> bool:
 
 @app.get("/api/v1/admin/check-status", tags=["Admin"])
 async def admin_check_status(steam_id: str = Query(...), db: AsyncSession = Depends(get_db)):
-    return {"is_admin": await _is_admin(db, steam_id)}
+    """Startup identity probe — every player calls this once per launch.
+
+    `chat_moderator` is true for a live chat_moderate grant OR an admin (an
+    admin passes every _chat_scope_allows check, so that is the same authority
+    rather than a second one). It exists so the client stops inferring the
+    answer by PROBING /chat/moderate/mutes and reading its 403 as "no": that
+    cost every ordinary player who opens the F5 menu one refused request plus
+    two alarming log lines, once per session.
+
+    ⚠ DISPLAY HINT ONLY — this endpoint identifies its caller by an
+    UNAUTHENTICATED `steam_id` query param (exactly as `is_admin` always has),
+    so the flag answers "does that id hold moderation authority", not "does
+    the caller". Nothing is gated on it: every mute / unmute / delete
+    re-resolves the caller's scope from the DB and separately proves identity
+    (admin HMAC, or the Steam session for a scoped moderator), and the channel
+    check is made against the message's own channel. A client that forges the
+    flag therefore gains a set of buttons that 403 (#159 — a client-side scope
+    check is a rendering suggestion, not a gate)."""
+    role, _ = await _chat_moderator_scope(db, steam_id)
+    # `is_admin` deliberately keeps its own source of truth rather than reading
+    # `role == "admin"` — the admin gate must not become a downstream effect of
+    # a chat-moderation helper's return shape.
+    return {
+        "is_admin": await _is_admin(db, steam_id),
+        "chat_moderator": role is not None,
+    }
 
 
 @app.get("/api/v1/admin/flagged-matches", tags=["Admin"])
@@ -15687,17 +17935,58 @@ async def admin_list_flagged(
 async def admin_list_bans(
     admin_steam_id: str = Query(...),
     hmac_signature: str = Query(None),
+    search: str = Query("", max_length=64),
+    limit: int | None = Query(None, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
+    """Active bans, newest first.
+
+    Aug 6 item 5: gained `search` / `limit` / `offset` + a `total` count for
+    the admin panel. BACKWARD COMPATIBILITY IS EXACT — the shipped client
+    (ApiClient.FetchBannedUsers) sends only admin_steam_id + hmac_signature,
+    and with all three new params absent this runs the identical query it
+    always did: every active ban, ORDER BY banned_at DESC, NO LIMIT. `limit`
+    defaults to None rather than a number precisely so the unpaged default
+    cannot silently truncate an admin with more bans than some chosen page
+    size. The HMAC action stays `list_bans` with an empty target, so existing
+    signatures keep verifying.
+
+    The new `total` key is a NUMBER, which matters: the client's
+    ParseBannedUsers splits the body on the literal `"id":"` and would treat
+    any new quoted-string key named `id` as another ban row. Numeric siblings
+    are invisible to it."""
     await _require_admin(db, admin_steam_id, "list_bans", "", hmac_signature)
+    where = "pb.unbanned_at IS NULL"
+    params: dict = {}
+    if search:
+        # Case-insensitive on display_name OR steam_id. Bound parameter, never
+        # interpolated (#188); ILIKE wildcards in user input are escaped so a
+        # '%' typed in the box searches for a literal '%'.
+        where += (" AND (p.display_name ILIKE :q ESCAPE '\\'"
+                  "      OR pb.steam_id   ILIKE :q ESCAPE '\\')")
+        _esc = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params["q"] = f"%{_esc}%"
+    total = (await db.execute(text(
+        "SELECT COUNT(*) FROM player_bans pb "
+        "LEFT JOIN players p ON p.steam_id = pb.steam_id "
+        f"WHERE {where}"
+    ), params)).scalar() or 0
+    page_sql = ""
+    if limit is not None:
+        page_sql = " LIMIT :limit OFFSET :offset"
+        params = {**params, "limit": limit, "offset": offset}
     rows = (await db.execute(text(
         "SELECT pb.id, pb.steam_id, pb.reason, pb.banned_by_steam_id, pb.banned_at, "
         "       pb.unbanned_at, p.display_name "
         "FROM player_bans pb "
         "LEFT JOIN players p ON p.steam_id = pb.steam_id "
-        "WHERE pb.unbanned_at IS NULL "
-        "ORDER BY pb.banned_at DESC"
-    ))).mappings().all()
+        f"WHERE {where} "
+        # id as a stable tiebreak so paging can't repeat or skip a row when
+        # several bans share a banned_at instant.
+        "ORDER BY pb.banned_at DESC, pb.id DESC"
+        + page_sql
+    ), params)).mappings().all()
     return {"bans": [
         {
             "id": str(r["id"]),
@@ -15707,7 +17996,7 @@ async def admin_list_bans(
             "banned_by_steam_id": r["banned_by_steam_id"],
             "banned_at": r["banned_at"].isoformat() if r["banned_at"] else None,
         } for r in rows
-    ]}
+    ], "total": int(total), "limit": limit, "offset": offset}
 
 
 class _AdminBanReq(BaseModel):
@@ -16271,6 +18560,22 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
     if _other:
         raise HTTPException(status_code=409,
                             detail="You're in a live match in another mode - finish it first")
+    # SAME-mode open-lobby guard (Aug 6 item 9). _locked_in_other_queue cannot
+    # cover this: the lease mode IS 'team', so it returns None for a 2v2
+    # caller. Without the guard this upsert sets status='searching' on a
+    # 'lobby' row and silently yanks the player out of the lobby they are
+    # sitting in — the lobby's member query stops seeing them while the lobby
+    # row and their lease still reference it.
+    _inlob = (await db.execute(text(
+        "SELECT series_id FROM team_queue WHERE player_id = :pid AND status = 'lobby'"
+    ), {"pid": player.id})).scalar()
+    if _inlob is not None:
+        _lob_open = (await db.execute(text(
+            "SELECT 1 FROM team_lobbies WHERE id = :lid AND status = 'open'"
+        ), {"lid": _inlob})).scalar()
+        if _lob_open:
+            raise HTTPException(status_code=409,
+                                detail="Leave your 2v2 lobby first")
 
     # Snapshot 2v2 rating (default if no row yet)
     g2_r = await db.execute(select(GlickoRating2v2).where(GlickoRating2v2.player_id == player.id))
@@ -16479,7 +18784,7 @@ async def team_queue_list(db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/api/v1/team/queue/recent-joins", tags=["Team Queue"])
-async def team_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
+async def team_queue_recent_joins(seconds: int = Query(20, ge=1, le=86400), db: AsyncSession = Depends(get_db)):
     """Players who joined the 2v2 queue in the last N seconds. Drives the Discord
     beacon `🎯 NAME searching for 2v2!` post — auto queue only. Custom-lobby
     (manual) queuers are intentionally excluded so #ranked-looking-for-people
@@ -16513,12 +18818,28 @@ async def team_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = D
 
 
 @app.get("/api/v1/team/queue/poll/{steam_id}", response_model=TeamQueuePollResponse, tags=["Team Queue"])
-async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
+async def team_queue_poll(steam_id: str, request: Request,
+                          db: AsyncSession = Depends(get_db)):
     """Polled by all 4 participants. Drives the searching → matched → ready_join state machine.
     At lock time, runs the balancer to assign teams. Identical safety pattern to 1v1:
-    SELECT FOR UPDATE SKIP LOCKED on the candidate set, atomic update of all 4 rows."""
+    SELECT FOR UPDATE SKIP LOCKED on the candidate set, atomic update of all 4 rows.
+
+    Session-bound, same reasoning as the 1v2 and FFA polls (#233 find 1). This
+    poll refreshes last_polled for the CLAIMED steam_id, and queue liveness
+    inferences treat that freshness as evidence a client is alive — a
+    destructive input, since the sweeps act on its absence. Unauthenticated,
+    anyone could forge freshness for a whole locked group of four.
+
+    This was the LAST of the three multi-player polls left ungated: ovt and ffa
+    were session-bound when that lesson was written and team was missed, so the
+    fix existed beside the hole for a full release. Found by the Aug-7
+    post-deploy sweep, which flagged it precisely because the sibling routes
+    disagreed. `request` is now REQUIRED (it was `Request = None`, which would
+    have made the check silently unenforceable). Enforcement inherits the
+    steam-auth arming rollout; unarmed accounts remain soft."""
     import uuid as uuid_mod
 
+    await _check_steam_session(request, steam_id, db)
     _presence_touch(steam_id)
 
     # Discover and lock either just the searching caller or the entire existing
@@ -16562,6 +18883,78 @@ async def team_queue_poll(steam_id: str, db: AsyncSession = Depends(get_db)):
         await db.execute(text("DELETE FROM team_queue WHERE player_id = :pid"), {"pid": my_pid})
         await db.commit()
         return TeamQueuePollResponse(status="expired")
+
+    # ── OPEN HOST LOBBY (Aug 6 item 9) ───────────────────────
+    # MUST return before the matchmaking code below. That code gates the
+    # CANDIDATES on status='searching' but never gates the CALLER, so without
+    # this branch a lobby member's own poll would run the balancer and lock a
+    # series with three unrelated searching players — yanking them out of the
+    # lobby they are sitting in. The lease renewal here is what keeps the open
+    # seat alive (LEASE_TTL_POLLING, renewed by the member's own poll), exactly
+    # as the FFA lobby does.
+    #
+    # The rich lobby payload lives on GET /team/lobby/state — this response
+    # model is shared with the auto-queue and silently strips unknown fields,
+    # so returning lobby detail here would be dropped on the floor.
+    if me["status"] == "lobby" and me["series_id"] is not None:
+        # Codex round 1 (MEDIUM): this endpoint is deliberately UNAUTHENTICATED
+        # for the public auto-queue, where a poll is a read. The lobby branch
+        # is not a read — it RENEWS a seat and its cross-mode lease, so an
+        # unauthenticated caller armed only with a victim's public Steam ID
+        # could keep their ghost lobby seat (and its exclusion from every other
+        # mode) alive for the full 2h ceiling after they closed the game.
+        # Session-bind the branch that mutates; the auto-queue path above is
+        # untouched, so no existing caller changes behaviour (#233a: an input
+        # that drives destruction must be session-bound).
+        await _check_steam_session(request, steam_id, db)
+        _lstatus = (await db.execute(text(
+            "SELECT status FROM team_lobbies WHERE id = :lid"
+        ), {"lid": me["series_id"]})).scalar()
+        if _lstatus != "open":
+            # The lobby started, was disbanded, or vanished. Authoritative
+            # re-read under the group lock (#208) — never serve a husk.
+            await db.execute(text(
+                "UPDATE team_queue SET status='searching', series_id=NULL,"
+                "       team_assigned=NULL, room_name=NULL, room_region=NULL,"
+                "       ready=false, matched_at=NULL, joined_at=NOW()"
+                " WHERE player_id = :pid AND status = 'lobby'"), {"pid": my_pid})
+            await db.commit()
+            return TeamQueuePollResponse(status="searching")
+        # Seat lease + its 2h TOTAL ceiling (#276b): poll-renewal proves "a
+        # client is running", not "a game is happening", so a wedged retry
+        # loop must not be able to hold its own cross-mode exclusion forever.
+        _seat_ok = False
+        try:
+            async with db.begin_nested():
+                _seat_ok = await _lease_renew(
+                    db, my_pid, "team", me["series_id"],
+                    LEASE_TTL_POLLING, max_total_seconds=LEASE_MAX_LOBBY_SEAT)
+        except Exception as _lex:
+            print(f"[LEASE] team lobby renew failed for {steam_id}: {_lex}")
+        if not _seat_ok:
+            # A capped seat has to actually END, row and lease together — a
+            # fresh row with a dead lease makes the player cross-mode free
+            # while the host's Start would still yank them back (FFA's
+            # round-N lesson, mirrored). The lease delete is FENCED to this
+            # mode+lobby: _lease_renew also returns false for "your lease now
+            # belongs to another mode", and an unfenced delete would destroy
+            # that live lease.
+            await db.execute(text("DELETE FROM team_queue WHERE player_id = :pid"),
+                             {"pid": my_pid})
+            await db.execute(text(
+                "DELETE FROM queue_leases WHERE player_id = :pid"
+                "   AND mode = 'team' AND group_id = :lid"),
+                {"pid": my_pid, "lid": me["series_id"]})
+            await db.commit()
+            print(f"[LEASE] open 2v2 lobby seat expired for {steam_id} (lobby {me['series_id']})")
+            return TeamQueuePollResponse(status="lobby_closed")
+        _n = (await db.execute(text(
+            f"SELECT COUNT(*) FROM team_queue WHERE series_id = :lid"
+            f"   AND status = 'lobby' AND {LOBBY_MEMBER_FRESH_SQL}"
+        ), {"lid": me["series_id"]})).scalar() or 0
+        await db.commit()
+        return TeamQueuePollResponse(status="lobby", queue_count=int(_n),
+                                     series_id=str(me["series_id"]))
 
     # ── MATCHED / READY state ────────────────────────────────
     if me["status"] in ("matched", "ready") and me["series_id"]:
@@ -18650,6 +21043,20 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
             " RETURNING status"), {"pid": player.id})).scalar()
         if _cleared:
             print(f"[LEASE] 1v2 join cleared an unleased '{_cleared}' husk for {req.steam_id}")
+    # SAME-mode open-lobby guard (Aug 6 item 9) — see the 2v2 twin. Runs AFTER
+    # the husk clear above on purpose: an UNLEASED lobby row is a husk and has
+    # just been reset to 'searching', so it must not block a legitimate rejoin;
+    # only a genuinely live lobby membership does.
+    _inlob = (await db.execute(text(
+        "SELECT series_id FROM ovt_queue WHERE player_id = :pid AND status = 'lobby'"
+    ), {"pid": player.id})).scalar()
+    if _inlob is not None:
+        _lob_open = (await db.execute(text(
+            "SELECT 1 FROM ovt_lobbies WHERE id = :lid AND status = 'open'"
+        ), {"lid": _inlob})).scalar()
+        if _lob_open:
+            raise HTTPException(status_code=409,
+                                detail="Leave your 1v2 lobby first")
     # Snapshot ratings (1v2 rating if it exists, else 1v1 as fallback ordering hint).
     g = (await db.execute(text(
         "SELECT rating, rating_deviation, completed_series FROM glicko_ratings_1v2 WHERE player_id = :pid"
@@ -18772,7 +21179,7 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
 
 
 @app.get("/api/v1/ovt/queue/recent-joins", tags=["1v2 Queue"])
-async def ovt_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
+async def ovt_queue_recent_joins(seconds: int = Query(20, ge=1, le=86400), db: AsyncSession = Depends(get_db)):
     """Players who joined the 1v2 lobby in the last N seconds. Drives the
     Discord #ranked-looking-for-people beacon, same as the 1v1 and 2v2
     queues. `rating` is the 1v1 elo snapshot (fallback_rating) — the 1v2
@@ -18822,7 +21229,12 @@ async def ovt_queue_list(db: AsyncSession = Depends(get_db)):
           LEFT JOIN glicko_ratings gr ON gr.player_id = q.player_id
           LEFT JOIN glicko_ratings_2v2 g2 ON g2.player_id = q.player_id
          WHERE (q.status = 'searching' AND q.last_polled > NOW() - INTERVAL '75 seconds')
-            OR (q.status != 'searching'
+            -- Aug 6 item 9 (#252a): POSITIVE enumeration, not "!= searching".
+            -- A private-lobby member is status='lobby'; the old negative
+            -- predicate leaked them into this PUBLIC panel as though they were
+            -- a locked auto-queue player. (The 2v2 sibling already enumerates
+            -- its statuses positively, which is why it needed no fix.)
+            OR (q.status IN ('matched', 'ready_join')
                 AND COALESCE(q.matched_at, q.joined_at) > NOW() - INTERVAL '3 hours')
          ORDER BY q.joined_at ASC
     """))).mappings().all()
@@ -18915,6 +21327,48 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                              {"pid": me["player_id"]})
             await db.commit()
             return {"status": "expired", "queue_count": 0}
+
+    # ── OPEN HOST LOBBY (Aug 6 item 9) ───────────────────────
+    # Same reason as the 2v2 branch: the decider path below elects from
+    # 'searching' rows but the CALLER reaches it whatever its status, so a
+    # lobby member's poll must return before it. Renews the open-seat lease.
+    if me["status"] == "lobby" and me["series_id"] is not None:
+        _lstatus = (await db.execute(text(
+            "SELECT status FROM ovt_lobbies WHERE id = :lid"
+        ), {"lid": me["series_id"]})).scalar()
+        if _lstatus != "open":
+            await db.execute(text(
+                "UPDATE ovt_queue SET status='searching', series_id=NULL,"
+                "       side_assigned=NULL, room_name=NULL, room_region=NULL,"
+                "       matched_at=NULL, joined_at=NOW()"
+                " WHERE player_id = :pid AND status = 'lobby'"), {"pid": me["player_id"]})
+            await db.commit()
+            return {"status": "searching", "queue_count": 0}
+        _seat_ok = False
+        try:
+            async with db.begin_nested():
+                _seat_ok = await _lease_renew(
+                    db, me["player_id"], "ovt", me["series_id"],
+                    LEASE_TTL_POLLING, max_total_seconds=LEASE_MAX_LOBBY_SEAT)
+        except Exception as _lex:
+            print(f"[LEASE] ovt lobby renew failed for {steam_id}: {_lex}")
+        if not _seat_ok:
+            await db.execute(text("DELETE FROM ovt_queue WHERE player_id = :pid"),
+                             {"pid": me["player_id"]})
+            await db.execute(text(
+                "DELETE FROM queue_leases WHERE player_id = :pid"
+                "   AND mode = 'ovt' AND group_id = :lid"),
+                {"pid": me["player_id"], "lid": me["series_id"]})
+            await db.commit()
+            print(f"[LEASE] open 1v2 lobby seat expired for {steam_id} (lobby {me['series_id']})")
+            return {"status": "lobby_closed", "queue_count": 0}
+        _n = (await db.execute(text(
+            f"SELECT COUNT(*) FROM ovt_queue WHERE series_id = :lid"
+            f"   AND status = 'lobby' AND {LOBBY_MEMBER_FRESH_SQL}"
+        ), {"lid": me["series_id"]})).scalar() or 0
+        await db.commit()
+        return {"status": "lobby", "queue_count": int(_n),
+                "lobby_id": str(me["series_id"])}
 
     # Already locked → report my slot + lobby.
     if me["status"] in ("ready_join", "matched") and me["series_id"] is not None:
@@ -19369,11 +21823,24 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                 winner_side, solo_fps_avg, duo_a_fps_avg, duo_b_fps_avg, duration_seconds,
                 photon_room_id, game_version, region, hmac_signature, reported_by,
                 is_ranked, started_at, ended_at,
-                solo_rating_at, duo_a_rating_at, duo_b_rating_at)
+                solo_rating_at, duo_a_rating_at, duo_b_rating_at,
+                solo_damage_timeline, duo_a_damage_timeline, duo_b_damage_timeline)
             VALUES (:id, :sid, :solo, :da, :db, :sr, :dr, :sp, :dp, :ws,
                     :sf, :daf, :dbf, :dur, :room, :gv, :reg, :hmac, :rep, false, :started, NOW(),
-                    :sra, :dar, :dbr)
+                    :sra, :dar, :dbr, :sdt, :dadt, :dbdt)
         """), {"id": match_id, "sid": series_uuid, "solo": solo_id, "da": duo_a_id, "db": duo_b_id,
+               # Aug-7b item 3 (migration 201): per-seat cumulative damage-dealt
+               # CSVs. 1v2 has no telemetry table, so these hang off the match
+               # row beside the fps averages. 1v2 stores only an fps AVERAGE,
+               # so there is no sibling timeline to read the sample interval
+               # from — the client must state the grid it used, and the batch's
+               # stated one is localFps3sTimeline's (3s, cap 128), NOT the 1v1
+               # LocalDamageTimelineCsv's 5s/90. Empty -> NULL: "not recorded"
+               # and "dealt nothing" are different facts (#257), and an old
+               # client sends neither.
+               "sdt": (report.solo_damage_timeline or None),
+               "dadt": (report.duo_a_damage_timeline or None),
+               "dbdt": (report.duo_b_damage_timeline or None),
                # Snapshot the ratings the multiplier was computed from — these
                # three columns were dead (NULL on all 11 legacy rows) and without
                # them no audit or back-pay can reproduce what was actually paid
@@ -19412,7 +21879,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
             await db.execute(text(
                 "INSERT INTO ovt_match_cards (match_id, player_id, card_name, pick_order) "
                 "VALUES (:m, :p, :c, :o)"
-            ), {"m": match_id, "p": pid, "c": str(nm)[:64], "o": i})
+            ), {"m": match_id, "p": pid, "c": _canon_card_name(str(nm))[:64], "o": i})
 
     # Advance the series win tally only if still active (re-check under the lock).
     if series["status"] != "active":
@@ -19683,6 +22150,21 @@ async def ovt_leaderboard(
             level=lvl, title=t_name, title_color=t_color,
             last_played=r["last_played"].isoformat() if r["last_played"] else None,
         ))
+    # KNOWN NIT, deliberately NOT fixed here: total_players is len(entries),
+    # so it reports the PAGE SIZE rather than the population (limit=1 says "1
+    # player total"). The 1v1 and 2v2 boards run a real COUNT; the FFA board was
+    # corrected in this pass because its page query is a plain filter over
+    # glicko_ratings_ffa and the matching COUNT is exact.
+    #
+    # This board is different: its population comes from a role-dependent CTE
+    # over ovt_matches (`sc.scoped_games >= 1`, where scoped_games is solo_games
+    # / duo_games / games depending on :role), so a correct count means
+    # duplicating that whole CTE — a solo-only player is genuinely absent from
+    # the duo board. A first attempt here counted a `glicko_ratings_ovt` table
+    # that does not even exist (it is glicko_ratings_1v2, and this board never
+    # reads it), which would have 500'd the endpoint. Left as-is rather than
+    # shipping an unverified count mid-deploy; the field is display-only and the
+    # in-game client fetches the full board, where page size == population.
     return Ovt1v2LeaderboardResponse(
         entries=entries, total_players=len(entries),
         last_updated=datetime.now(timezone.utc), is_ranked=False)
@@ -19740,6 +22222,8 @@ async def ovt_recent(
                    m.solo_points_total, m.duo_points_total,
                    m.duration_seconds,
                    m.solo_fps_avg, m.duo_a_fps_avg, m.duo_b_fps_avg,
+                   m.solo_damage_timeline, m.duo_a_damage_timeline,
+                   m.duo_b_damage_timeline,
                    solo.steam_id AS solo_sid,
                    duo_a.steam_id AS duo_a_sid,
                    duo_b.steam_id AS duo_b_sid
@@ -19767,13 +22251,20 @@ async def ovt_recent(
 
         for m in match_rows:
             fps_by_steam = {}
-            for sid_key, fps_key in (
-                ("solo_sid", "solo_fps_avg"),
-                ("duo_a_sid", "duo_a_fps_avg"),
-                ("duo_b_sid", "duo_b_fps_avg"),
+            # Aug-7b item 3 — damage timelines keyed the same way as fps, but
+            # built in the same loop over the three seats. A seat with no
+            # timeline is OMITTED rather than mapped to "" so the client can
+            # tell "not recorded" from a recorded empty series (#257).
+            damage_timeline_by_steam = {}
+            for sid_key, fps_key, dmg_key in (
+                ("solo_sid", "solo_fps_avg", "solo_damage_timeline"),
+                ("duo_a_sid", "duo_a_fps_avg", "duo_a_damage_timeline"),
+                ("duo_b_sid", "duo_b_fps_avg", "duo_b_damage_timeline"),
             ):
                 if m[fps_key]:
                     fps_by_steam[m[sid_key]] = int(m[fps_key])
+                if m[dmg_key]:
+                    damage_timeline_by_steam[m[sid_key]] = m[dmg_key]
             matches_by_series.setdefault(str(m["series_id"]), []).append({
                 "match_id": str(m["match_id"]),
                 "ended_at": m["ended_at"].isoformat() if m["ended_at"] else None,
@@ -19784,6 +22275,7 @@ async def ovt_recent(
                 "duo_points": int(m["duo_points_total"] or 0),
                 "duration_seconds": int(m["duration_seconds"] or 0),
                 "fps_by_steam": fps_by_steam,
+                "damage_timeline_by_steam": damage_timeline_by_steam,
                 "cards_by_steam": cards_by_match.get(str(m["match_id"]), {}),
             })
 
@@ -20052,9 +22544,28 @@ FFA_CONFIG_MIN_VERSION = "1.36.0"
 # migration 187). ⚠ SHIP COUPLING: must equal the version that ships the v2
 # ffa: canonical, or the tie-break never engages / engages one release early.
 FFA_KILLS_TIEBREAK_MIN_VERSION = "1.36.0"
+# Sudden death (Aug 6 item 10) needs its OWN floor and it must be the version
+# that SHIPS the rule, not the floor the rest of the FFA config set uses.
+#
+# Codex round 1 CRITICAL 1: it was riding FFA_CONFIG_MIN_VERSION = "1.36.0" —
+# a version that is ALREADY LIVE. Every stock 1.36.0 client would therefore
+# have passed the gate while implementing none of the rule, so a host could
+# enable sudden death in a ranked FFA and the new client would suppress a hit
+# the old one applied: split health and death state mid-match. A capability
+# floor equal to an already-shipped version is not a gate at all.
+#
+# ⚠ SHIP COUPLING — this MUST equal the version that ships the client half
+# (FfaMode's 7th cr_ffa_cfg segment + the DoDamage suppression). Bump it in
+# the SAME commit as the version bump, or the feature either never engages or
+# engages one release early against clients that cannot honour it.
+FFA_SUDDEN_DEATH_MIN_VERSION = "1.37.0"
 FFA_CONFIG_DEFAULTS = {
     "score_target": 5, "card_candidates": 5, "initial_picks": 1,
     "card_cap": 5, "same_card_rule": False,
+    # Aug 6 item 10: friendly-fire off / last-player-standing rule. A
+    # GAMEPLAY rule with its OWN stricter floor — see
+    # FFA_SUDDEN_DEATH_MIN_VERSION above (round-1 CRITICAL 1).
+    "sudden_death": False,
 }
 
 
@@ -20308,6 +22819,858 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     return {"status": "ok", "queue_count": int(n)}
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# Private host lobbies for 2v2 and 1v2 (Aug 6 item 9)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Direct mirror of the FFA host-lobby system below, generalized over the two
+# modes. A host opens a lobby, players browse and join (optionally behind a
+# password), the host presses Start at exactly the mode's player count.
+#
+# THE ONE DESIGN RULE that makes this safe: Start produces EXACTLY the state
+# the mode's existing auto-lock produces — a real team_series / ovt_series row
+# plus queue rows in that mode's post-lock status. Everything downstream of
+# Start (ready-up, room issuance, spawn confirm, reports, continuations,
+# betting, DC handling, the janitors) is the existing shipped machinery,
+# untouched. The lobby row is only a gathering surface plus provenance.
+#
+# MEMBERSHIP lives in the mode's own queue table as status='lobby' with
+# series_id = the LOBBY id (the ffa_queue convention). Consequences that are
+# handled and must stay handled:
+#   * _QUEUE_GROUP_LOBBY_TABLES resolves the parent table per STATUS, so
+#     _lock_queue_group_for_player still locks lobby-row-first.
+#   * Both polls have an explicit 'lobby' branch that returns BEFORE their
+#     matchmaking code (which gates candidates on 'searching' but never the
+#     caller).
+#   * The team stale sweep excludes 'lobby' from its 30s arm (#252a).
+#   * Account deletion promotes/disbands open lobbies for both modes.
+#
+# CROSS-MODE EXCLUSION is entirely lease-based (_locked_in_other_queue reads
+# queue_leases, never a queue row), so joining a lobby takes a lease and the
+# other modes refuse the player automatically — the same guarantee FFA gets,
+# for free, with no new predicate to keep in sync.
+
+# 75 seconds, identical to the FFA lobby contract: members poll every ~2s, so
+# 75s of silence means the client is gone, and the window survives a backend
+# rebuild (~30s of connection-refused during /deploy-backend) without evicting
+# live members.
+LOBBY_MEMBER_FRESH_SQL = "last_polled > NOW() - INTERVAL '75 seconds'"
+
+# Closed set — every table name below is interpolated into SQL, so it must
+# never be derived from a request (learning #188).
+_LOBBY_MODE_CFG = {
+    "team": {
+        "queue": "team_queue", "lobbies": "team_lobbies", "lease": "team",
+        "players": 4, "label": "2v2",
+        # Post-lock status for this mode's queue rows (what the auto-lock sets).
+        "locked_status": "matched",
+    },
+    "ovt": {
+        "queue": "ovt_queue", "lobbies": "ovt_lobbies", "lease": "ovt",
+        "players": 3, "label": "1v2",
+        "locked_status": "ready_join",
+    },
+}
+
+
+def _lobby_cfg(mode: str) -> dict:
+    cfg = _LOBBY_MODE_CFG.get(mode)
+    if cfg is None:
+        raise ValueError(f"unknown lobby mode {mode!r}")
+    return cfg
+
+
+async def _lobby_live_members(db: AsyncSession, mode: str, lobby_id):
+    """Fresh 'lobby' members, promotion order (joined_at, then player_id::text
+    — deterministic across every client and every call)."""
+    cfg = _lobby_cfg(mode)
+    return (await db.execute(text(f"""
+        SELECT player_id, steam_id, display_name, rating, rating_deviation,
+               completed_series, fallback_rating, region, joined_at,
+               {'preferred_team' if mode == 'team' else 'preferred_side, solo_extra_pick'}
+          FROM {cfg['queue']}
+         WHERE series_id = :lid AND status = 'lobby'
+           AND {LOBBY_MEMBER_FRESH_SQL}
+         ORDER BY joined_at, player_id::text
+    """), {"lid": lobby_id})).mappings().all()
+
+
+def _lobby_effective_host(lobby_host_id, live_members):
+    """Who may press Start: the stored host if still a live member, else the
+    earliest-joined live member. DERIVED on reads; only leave/start/deletion
+    persist it (a read must never write)."""
+    if not live_members:
+        return None
+    live_ids = {m["player_id"] for m in live_members}
+    if lobby_host_id in live_ids:
+        return lobby_host_id
+    return live_members[0]["player_id"]
+
+
+async def _lobby_snapshot_fields(db: AsyncSession, mode: str, player_id) -> dict:
+    """Rating snapshot for a new lobby membership — the same values the mode's
+    own /queue/join stores, so Start's balancer sees join-time ratings rather
+    than ratings that drifted while the lobby sat open."""
+    g2 = (await db.execute(text(
+        "SELECT rating, rating_deviation, completed_series"
+        "  FROM glicko_ratings_2v2 WHERE player_id = :pid"
+    ), {"pid": player_id})).mappings().first()
+    g1 = (await db.execute(text(
+        "SELECT rating FROM glicko_ratings WHERE player_id = :pid"
+    ), {"pid": player_id})).mappings().first()
+    _fb = float(g1["rating"]) if g1 and g1["rating"] is not None else GLICKO2_DEFAULT_RATING
+    if mode == "team":
+        return {
+            "r": float(g2["rating"]) if g2 else GLICKO2_DEFAULT_RATING,
+            "rd": float(g2["rating_deviation"]) if g2 else GLICKO2_DEFAULT_RD,
+            "cs": int(g2["completed_series"]) if g2 else 0,
+            "fr": _fb,
+        }
+    # 1v2 is unrated at launch, so its display rating is the 1v1 one — the
+    # same thing the 1v2 auto-queue shows.
+    return {"r": _fb, "rd": GLICKO2_DEFAULT_RD, "cs": 0, "fr": _fb}
+
+
+async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_id) -> None:
+    """Move the caller's queue row into `lobby_id` under the already-held lobby
+    lock. Direct port of _ffa_lobby_enroll_caller, including its CAS ladder:
+    only a MISSING row or a 'searching' row may become a lobby membership. A
+    row the auto-matcher just locked, or a different lobby's membership, 409s
+    — there is no implicit lobby switching. Raises HTTPException on conflict,
+    so the caller's whole transaction (including a just-created lobby row)
+    rolls back with it."""
+    cfg = _lobby_cfg(mode)
+    q = cfg["queue"]
+    mine = (await db.execute(text(
+        f"SELECT status, series_id FROM {q} WHERE player_id = :pid FOR UPDATE"
+    ), {"pid": player.id})).mappings().first()
+    # A locked row whose LEASE has lapsed is a husk, not a commitment
+    # (migration 174). Without this the row would 409 every Create/Join
+    # forever and the player would watch everyone else queue while their own
+    # button rejected them — the exact "perma stuck in the queue" class
+    # (#275/#276) that the lease exists to make impossible.
+    if mine is not None and mine["status"] != "searching":
+        if await _lease_live_mode(db, player.id) is None:
+            await db.execute(text(
+                f"UPDATE {q} SET status='searching', series_id=NULL,"
+                f"       room_name=NULL, room_region=NULL, matched_at=NULL,"
+                f"       {'team_assigned=NULL,' if mode == 'team' else 'side_assigned=NULL,'}"
+                f"       joined_at=NOW(), last_polled=NOW()"
+                f" WHERE player_id = :pid"), {"pid": player.id})
+            print(f"[LEASE] {cfg['label']} lobby enroll cleared an unleased "
+                  f"{mine['status']} husk for {req.steam_id} (group {mine['series_id']})")
+            mine = {"status": "searching", "series_id": None}
+    if mine is not None and mine["status"] == "lobby":
+        if mine["series_id"] == lobby_id:
+            # Idempotent same-lobby rejoin — the client's recovery path.
+            await db.execute(text(
+                f"UPDATE {q} SET last_polled = NOW(), display_name = :dn"
+                f" WHERE player_id = :pid"
+            ), {"pid": player.id, "dn": (req.display_name or "Player")[:64]})
+            return
+        raise HTTPException(409, "Leave your current lobby first")
+    if mine is not None and mine["status"] != "searching":
+        raise HTTPException(
+            409, f"You're locked into another {cfg['label']} game — finish or leave it first")
+    snap = await _lobby_snapshot_fields(db, mode, player.id)
+    _pref_col = "preferred_team" if mode == "team" else "preferred_side"
+    _pref_val = getattr(req, "preferred_team" if mode == "team" else "preferred_side", None)
+    # CLAMP to the values each column actually means. Both are SMALLINT, so an
+    # out-of-range int from a modified client is an overflow error on INSERT
+    # rather than a validation message; and a stray 5 in preferred_team would
+    # silently fall through to "no preference" anyway. 1/2 are the only
+    # meaningful values (2v2: team 1 or 2; 1v2: 1 = wants solo, 2 = wants duo).
+    if _pref_val is not None and int(_pref_val) not in (1, 2):
+        _pref_val = None
+    _pref_val = int(_pref_val) if _pref_val is not None else None
+    if mode == "ovt" and _pref_val is None:
+        _pref_val = 0            # NOT NULL DEFAULT 0 on ovt_queue
+    _sep_val = bool(getattr(req, "solo_extra_pick", False)) if mode == "ovt" else False
+    if mine is None:
+        # ON CONFLICT DO NOTHING + re-check: two concurrent enrolls for one
+        # account (a double-click, or two PCs) must produce a 409, not a
+        # unique-violation 500 that aborts the caller's transaction.
+        inserted = (await db.execute(text(f"""
+            INSERT INTO {q} (player_id, steam_id, display_name, rating, rating_deviation,
+                             completed_series, fallback_rating, region, status, series_id,
+                             queue_type, {_pref_col},
+                             {'solo_extra_pick, ' if mode == 'ovt' else ''}joined_at, last_polled)
+            VALUES (:pid, :sid, :dn, :r, :rd, :cs, :fr, :reg, 'lobby', :lid,
+                    'manual', :pref, {':sep, ' if mode == 'ovt' else ''}NOW(), NOW())
+            ON CONFLICT (player_id) DO NOTHING
+            RETURNING player_id
+        """), {"pid": player.id, "sid": req.steam_id, "dn": (req.display_name or "Player")[:64],
+               "reg": (req.region or "")[:8] or None, "lid": lobby_id,
+               "pref": _pref_val, "sep": _sep_val, **snap})).scalar()
+        if inserted is None:
+            raise HTTPException(409, "Your queue state just changed — try again")
+    else:
+        # CAS: the WHERE re-checks 'searching' on the row we hold locked.
+        flipped = (await db.execute(text(f"""
+            UPDATE {q} SET status='lobby', series_id=:lid,
+                   room_name=NULL, room_region=NULL, matched_at=NULL,
+                   {'team_assigned=NULL,' if mode == 'team' else 'side_assigned=NULL,'}
+                   display_name=:dn, region=:reg, rating=:r, rating_deviation=:rd,
+                   completed_series=:cs, fallback_rating=:fr, queue_type='manual',
+                   {_pref_col}=:pref,
+                   {'solo_extra_pick=:sep,' if mode == 'ovt' else ''}
+                   joined_at=NOW(), last_polled=NOW()
+             WHERE player_id=:pid AND status='searching'
+            RETURNING player_id
+        """), {"pid": player.id, "dn": (req.display_name or "Player")[:64],
+               "reg": (req.region or "")[:8] or None, "lid": lobby_id,
+               "pref": _pref_val, "sep": _sep_val, **snap})).scalar()
+        if flipped is None:
+            raise HTTPException(409, "Your queue state just changed — try again")
+    # Open-lobby seat: short lease renewed by this member's own poll. Taken on
+    # BOTH branches (the FFA version once had this inside the else, so anyone
+    # joining a lobby fresh — the common case — got a membership with NO lease
+    # at all and stayed cross-mode available until Start yanked them).
+    await _lease_acquire(db, player.id, cfg["lease"], lobby_id, LEASE_TTL_POLLING)
+
+
+class _LobbyCreateReq(BaseModel):
+    steam_id: str
+    display_name: str = "Player"
+    region: str | None = None
+    password: str | None = None
+    # 2v2: 1 or 2 (the manual queue's existing team-claim mechanism).
+    preferred_team: int | None = None
+    # 1v2: 1 = wants solo, 2 = wants duo, 0/None = no preference.
+    preferred_side: int | None = None
+    # 1v2 only (Codex round 1, LOW): the solo's bonus opening pick. Start ORs
+    # this across the locked group — "any member may enable it" — but the
+    # model silently DISCARDED it, so a fresh private-lobby member could never
+    # turn it on and Start's OR was always false. The auto-queue join has
+    # carried the field since 1v2 shipped; the lobby path just never mirrored
+    # it. Ignored for 2v2 (no such rule).
+    solo_extra_pick: bool = False
+
+
+class _LobbyJoinReq(_LobbyCreateReq):
+    lobby_id: str
+
+
+async def _lobby_create_impl(mode: str, req: _LobbyCreateReq, request: Request,
+                             db: AsyncSession) -> dict:
+    cfg = _lobby_cfg(mode)
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    # Identity gate: advisory lock + ban/tombstone re-read under it.
+    await _enrollment_identity_gate(db, req.steam_id)
+    player = (await db.execute(
+        select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(404, "Player not registered")
+    _other = await _locked_in_other_queue(db, player.id, cfg["queue"])
+    if _other:
+        raise HTTPException(409, "You're in a live match in another mode - finish it first")
+    _pw = _lobby_password_hash(req.password)
+    lobby_id = uuid.uuid4()
+    # A brand-new row is invisible to every other transaction until commit, so
+    # inserting it first IS the lobby-first lock order for the enroll below.
+    await db.execute(text(f"""
+        INSERT INTO {cfg['lobbies']} (id, status, player_count, member_ids,
+                                      host_player_id, created_at, password_hash)
+        VALUES (:lid, 'open', 0, '{{}}', :host, NOW(), :pw)
+    """), {"lid": lobby_id, "host": player.id, "pw": _pw})
+    await _lobby_enroll_caller(db, mode, player, req, lobby_id)
+    await db.commit()
+    print(f"[{cfg['label']}-LOBBY] {req.steam_id} opened lobby {lobby_id}"
+          f"{' (private)' if _pw else ''}")
+    # A lobby member is committed to this mode — clear their searches
+    # elsewhere. Post-commit, own transaction, SKIP LOCKED.
+    await _evict_other_queue_searching(db, [player.id], cfg["queue"],
+                                       f"an open {cfg['label']} lobby")
+    return {"status": "ok", "lobby_id": str(lobby_id), "has_password": bool(_pw),
+            "max_players": cfg["players"]}
+
+
+async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
+                           db: AsyncSession) -> dict:
+    cfg = _lobby_cfg(mode)
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    await _enrollment_identity_gate(db, req.steam_id)
+    player = (await db.execute(
+        select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(404, "Player not registered")
+    try:
+        lobby_id = UUID(req.lobby_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid lobby_id")
+    _other = await _locked_in_other_queue(db, player.id, cfg["queue"])
+    if _other:
+        raise HTTPException(409, "You're in a live match in another mode - finish it first")
+    # Lobby-first lock, then prune/count/enroll under it: without the lock two
+    # joins at capacity-1 would both pass the count check.
+    lrow = (await db.execute(text(
+        f"SELECT id, status, password_hash FROM {cfg['lobbies']} WHERE id = :lid FOR UPDATE"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        raise HTTPException(404, "That lobby is no longer open")
+    # Password AFTER the open-check (so a wrong password and a dead lobby stay
+    # distinguishable) and BEFORE any membership mutation (so a failed guess
+    # can never leave a partial enrollment behind).
+    _lobby_password_check(lrow["password_hash"], req.password)
+    await db.execute(text(f"""
+        DELETE FROM {cfg['queue']}
+         WHERE series_id = :lid AND status = 'lobby'
+           AND NOT ({LOBBY_MEMBER_FRESH_SQL})
+    """), {"lid": lobby_id})
+    live = await _lobby_live_members(db, mode, lobby_id)
+    if any(m["player_id"] == player.id for m in live):
+        # Idempotent rejoin — short-circuit so the capacity check can't 409
+        # our own existing seat.
+        await _lobby_enroll_caller(db, mode, player, req, lobby_id)
+        await db.commit()
+        # Eviction runs on this path too: if the FIRST enrollment's
+        # best-effort eviction failed, the recovery rejoin is the only later
+        # actor that can repair the cross-queue ghost.
+        await _evict_other_queue_searching(db, [player.id], cfg["queue"],
+                                           f"an open {cfg['label']} lobby")
+        return {"status": "ok", "lobby_id": str(lobby_id),
+                "player_count": len(live), "max_players": cfg["players"]}
+    if len(live) >= cfg["players"]:
+        raise HTTPException(409, "That lobby is full")
+    await _lobby_enroll_caller(db, mode, player, req, lobby_id)
+    await db.commit()
+    print(f"[{cfg['label']}-LOBBY] {req.steam_id} joined lobby {lobby_id} "
+          f"({len(live) + 1}/{cfg['players']})")
+    await _evict_other_queue_searching(db, [player.id], cfg["queue"],
+                                       f"an open {cfg['label']} lobby")
+    return {"status": "ok", "lobby_id": str(lobby_id),
+            "player_count": len(live) + 1, "max_players": cfg["players"]}
+
+
+async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
+                            db: AsyncSession) -> dict:
+    """Rich state for the caller's open lobby. Separate from the mode's
+    /queue/poll because that response model is shared with the auto-queue and
+    silently strips unknown fields. Read-only apart from the heartbeat: the
+    effective host is DERIVED here, never persisted (only leave/start/deletion
+    persist it)."""
+    cfg = _lobby_cfg(mode)
+    await _check_steam_session(request, steam_id, db)
+    _presence_touch(steam_id)
+    me = await _lock_queue_group_for_player(db, cfg["queue"], steam_id)
+    if me is None or me["status"] != "lobby" or me["series_id"] is None:
+        await db.commit()
+        return {"status": "not_in_lobby"}
+    lobby_id = me["series_id"]
+    lrow = (await db.execute(text(
+        f"SELECT id, status, host_player_id, created_at, password_hash"
+        f"  FROM {cfg['lobbies']} WHERE id = :lid"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        await db.commit()
+        return {"status": "not_in_lobby"}
+    # Codex round 1 (HIGH): this endpoint is a REAL heartbeat — a client
+    # sitting on the lobby screen can poll only here for many minutes. It used
+    # to refresh last_polled and NOTHING else, so the ROW stayed fresh (and
+    # Start-eligible) while the queue LEASE quietly expired underneath it.
+    # Row-fresh + lease-dead is precisely the split the lease system exists to
+    # prevent (#276): the player becomes cross-mode free, joins another queue,
+    # and the original host can still Start and yank them out of it.
+    #
+    # So renew here exactly as the mode's own poll branch does, including the
+    # 2h TOTAL ceiling — poll-renewal proves "a client is running", not "a
+    # game is happening", so a wedged client must not hold its own exclusion
+    # forever (#276b) — and on expiry tear down the ROW AND THE LEASE
+    # together, with the delete FENCED to this mode+lobby so a lease since
+    # claimed by another mode is never destroyed.
+    _seat_ok = False
+    try:
+        async with db.begin_nested():
+            _seat_ok = await _lease_renew(
+                db, me["player_id"], mode, lobby_id,
+                LEASE_TTL_POLLING, max_total_seconds=LEASE_MAX_LOBBY_SEAT)
+    except Exception as _lex:
+        print(f"[LEASE] {mode} lobby-state renew failed for {steam_id}: {_lex}")
+    if not _seat_ok:
+        await db.execute(text(
+            f"DELETE FROM {cfg['queue']} WHERE player_id = :pid"),
+            {"pid": me["player_id"]})
+        await db.execute(text(
+            "DELETE FROM queue_leases WHERE player_id = :pid"
+            "   AND mode = :mode AND group_id = :lid"),
+            {"pid": me["player_id"], "mode": mode, "lid": lobby_id})
+        await db.commit()
+        print(f"[LEASE] open {mode} lobby seat expired for {steam_id} (lobby {lobby_id})")
+        return {"status": "not_in_lobby"}
+    await db.execute(text(
+        f"UPDATE {cfg['queue']} SET last_polled = NOW() WHERE player_id = :pid"
+    ), {"pid": me["player_id"]})
+    live = await _lobby_live_members(db, mode, lobby_id)
+    host_id = _lobby_effective_host(lrow["host_player_id"], live)
+    now_utc = datetime.now(timezone.utc)
+    await db.commit()
+    return {
+        "status": "lobby",
+        "lobby_id": str(lobby_id),
+        "player_count": len(live),
+        "max_players": cfg["players"],
+        "min_players": cfg["players"],
+        "is_host": host_id == me["player_id"],
+        "has_password": bool(lrow["password_hash"]),
+        "can_start": (host_id == me["player_id"] and len(live) == cfg["players"]),
+        "members": [{
+            "steam_id": m["steam_id"],
+            "display_name": m["display_name"],
+            "rating": int(round(m["rating"] or GLICKO2_DEFAULT_RATING)),
+            "rating_1v1": int(round(m["fallback_rating"] or GLICKO2_DEFAULT_RATING)),
+            "is_host": m["player_id"] == host_id,
+            **({"preferred_team": m["preferred_team"]} if mode == "team"
+               else {"preferred_side": m["preferred_side"],
+                     "solo_extra_pick": bool(m["solo_extra_pick"])}),
+            "wait_seconds": int((now_utc - m["joined_at"]).total_seconds()) if m["joined_at"] else 0,
+        } for m in live],
+    }
+
+
+async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | None,
+                            request: Request, db: AsyncSession) -> dict:
+    """Leave an OPEN lobby: remove the seat, promote a new host, disband when
+    the last member goes.
+
+    SCOPE, deliberately narrow: this endpoint handles status='lobby' ONLY. Once
+    Start has run, the caller is in a normal locked group and the mode's
+    existing /queue/leave owns that teardown (series dissolution, bet
+    reconciliation, partner reset). Half-implementing it here would create
+    exactly the husk class the lease system exists to prevent, so a non-lobby
+    caller gets an explicit 409 naming the right endpoint rather than a
+    partial teardown."""
+    cfg = _lobby_cfg(mode)
+    await _check_steam_session(request, steam_id, db)
+    # UNLOCKED pre-check BEFORE touching the lease. This ordering is
+    # load-bearing and the first draft had it wrong: _lease_release_by_steam
+    # with a NULL fence deletes EVERY lease the player holds, so releasing
+    # unconditionally at the top meant a player already in a live match who
+    # hit this endpoint (a stale client, a retry after Start) lost the lease
+    # for that match and became cross-mode available mid-game — manufacturing
+    # exactly the desync this endpoint exists to prevent (#249).
+    #
+    # Racing this check can only move the row lobby -> locked, and the release
+    # below is fenced to the LOBBY id, while a started group's lease is keyed
+    # on the SERIES id — so the fence cannot match a live match's lease even
+    # if the row flips between the two statements.
+    _pre = (await db.execute(text(
+        f"SELECT status, series_id, joined_at FROM {cfg['queue']} WHERE steam_id = :sid"
+    ), {"sid": steam_id})).mappings().first()
+    await db.commit()
+    if _pre is None:
+        return {"status": "ok"}
+    if _pre["status"] != "lobby" or _pre["series_id"] is None:
+        raise HTTPException(409, f"Not in an open lobby — use /{mode}/queue/leave")
+    # Codex round 1 (LOW): normalize the caller's lobby id ONCE, here. The
+    # fence below compared it as raw TEXT while the lease release canonicalized
+    # the same value as a PostgreSQL UUID — so an uppercase-but-correct id
+    # released the lease and THEN failed the text compare, returning "stale"
+    # and leaving a live membership row behind with no lease: the exact
+    # row-fresh/lease-dead split this endpoint exists to avoid. Parsing here
+    # also turns a malformed id into a clean 422 instead of a silent no-op.
+    if expected_lobby_id:
+        try:
+            expected_lobby_id = str(uuid.UUID(str(expected_lobby_id)))
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(422, "expected_lobby_id is not a valid id")
+    # Codex round 3 (MEDIUM, blocker): the lease release and the membership
+    # delete MUST be fenced to the SAME lobby. When the caller omits
+    # expected_lobby_id we fell back to the pre-read lobby for the LEASE but
+    # then let the membership fence go unchecked, so this sequence stranded a
+    # player: T1 pre-reads lobby A; the player leaves and rejoins as lobby B;
+    # T1 resumes, releases A's (now irrelevant) lease, and deletes B's
+    # membership — leaving B's LIVE lease with no row behind it, which blocks
+    # every queue until it expires. Pinning one id for both fences makes the
+    # whole operation a no-op against a membership that has since moved.
+    _fence_lobby = expected_lobby_id or str(_pre["series_id"])
+    # Release the lease in its own committed transaction, before the caller
+    # takes any other lock (#276: freedom must never ride the fate of the
+    # bookkeeping below). Always fenced — never a bare NULL.
+    await _lease_release_by_steam(db, steam_id, _fence_lobby)
+    me = await _lock_queue_group_for_player(db, cfg["queue"], steam_id)
+    if me is None:
+        await db.commit()
+        return {"status": "ok"}
+    if me["status"] != "lobby" or me["series_id"] is None:
+        # Changed under us between the pre-check and the lock — the lease we
+        # released was fenced to the old lobby, so nothing live was touched.
+        await db.commit()
+        return {"status": "ok", "stale": True}
+    lobby_id = me["series_id"]
+    # Delayed-retry fence: a leave aimed at lobby A must never tear down a
+    # LATER membership in lobby B. Fences on _fence_lobby (never the raw
+    # optional param) so the membership check covers exactly the lobby whose
+    # lease was just released — see the round-3 note above.
+    if str(lobby_id) != _fence_lobby:
+        await db.commit()
+        return {"status": "ok", "stale": True}
+    # Codex round 4 (MEDIUM): the lobby-id fence alone has a same-lobby ABA
+    # hole. T1 pre-reads lobby A and stalls; the player's seat is removed and
+    # they REJOIN LOBBY A with a fresh row and a fresh lease; T1 resumes, sees
+    # the same lobby id, and deletes the NEW row — leaving the new lease alive
+    # with nothing behind it, which blocks every queue until it expires.
+    #
+    # joined_at is the incarnation marker: every enroll stamps NOW(), so a
+    # rejoin always produces a different value even into the same lobby. If it
+    # moved, this leave is aimed at a seat that no longer exists and must do
+    # nothing.
+    _cur_joined = (await db.execute(text(
+        f"SELECT joined_at FROM {cfg['queue']} WHERE player_id = :pid"
+    ), {"pid": me["player_id"]})).scalar()
+    if _pre["joined_at"] is not None and _cur_joined != _pre["joined_at"]:
+        await db.commit()
+        print(f"[{cfg['label']}-LOBBY] stale leave ignored for {steam_id} "
+              f"(seat was re-taken in the same lobby)")
+        return {"status": "ok", "stale": True}
+    await db.execute(text(f"DELETE FROM {cfg['queue']} WHERE player_id = :pid"),
+                     {"pid": me["player_id"]})
+    # Row and lease die TOGETHER, in this transaction. The early release above
+    # is best-effort and fenced, but it commits before the lock and so cannot
+    # cover a lease acquired in the window between the two. Taking the lease
+    # tuple HERE is deadlock-safe precisely because we already hold the group
+    # lock: the documented order is series/lobby -> queue rows -> lease, and
+    # this now follows it exactly like the lock paths do. Fenced to this
+    # lobby, so a lease since claimed by another mode is never touched.
+    await db.execute(text(
+        "DELETE FROM queue_leases WHERE player_id = :pid AND group_id = CAST(:lid AS uuid)"
+    ), {"pid": me["player_id"], "lid": str(lobby_id)})
+    remaining = (await db.execute(text(f"""
+        SELECT player_id FROM {cfg['queue']}
+         WHERE series_id = :lid AND status = 'lobby' AND {LOBBY_MEMBER_FRESH_SQL}
+         ORDER BY joined_at, player_id::text
+    """), {"lid": lobby_id})).scalars().all()
+    disbanded = False
+    if not remaining:
+        await db.execute(text(f"""
+            UPDATE {cfg['lobbies']} SET status='canceled', invalidated_at=NOW(),
+                   invalidation_reason='lobby_disbanded'
+             WHERE id=:lid AND status='open'"""), {"lid": lobby_id})
+        disbanded = True
+    else:
+        # Promote only when the LEAVER was the stored host (a read never
+        # persists the derived host — see _lobby_effective_host).
+        _host = (await db.execute(text(
+            f"SELECT host_player_id FROM {cfg['lobbies']} WHERE id=:lid"
+        ), {"lid": lobby_id})).scalar()
+        if _host == me["player_id"]:
+            await db.execute(text(
+                f"UPDATE {cfg['lobbies']} SET host_player_id=:h WHERE id=:lid"
+            ), {"h": remaining[0], "lid": lobby_id})
+    await db.commit()
+    print(f"[{cfg['label']}-LOBBY] {steam_id} left lobby {lobby_id}"
+          f"{' (disbanded)' if disbanded else f' ({len(remaining)} left)'}")
+    return {"status": "ok", "disbanded": disbanded, "remaining": len(remaining)}
+
+
+async def _lobby_browser_impl(mode: str, db: AsyncSession) -> dict:
+    """Open lobbies for the browser panel. A PRIVATE lobby is still listed —
+    it shows a lock and refuses joins without the password (Sid's spec).
+    Hiding it would turn "where did my friend's lobby go?" into a support
+    question."""
+    cfg = _lobby_cfg(mode)
+    # HAVING inside the query, not a post-LIMIT filter: zero-member husks
+    # awaiting the janitor must not consume the LIMIT and crowd out real
+    # lobbies.
+    lobbies = (await db.execute(text(f"""
+        SELECT l.id, l.host_player_id, l.created_at,
+               (l.password_hash IS NOT NULL) AS has_password,
+               COUNT(q.player_id) FILTER (WHERE {LOBBY_MEMBER_FRESH_SQL}) AS live_n
+          FROM {cfg['lobbies']} l
+          LEFT JOIN {cfg['queue']} q ON q.series_id = l.id AND q.status = 'lobby'
+         WHERE l.status = 'open'
+         GROUP BY l.id, l.host_player_id, l.created_at, l.password_hash
+        HAVING COUNT(q.player_id) FILTER (WHERE {LOBBY_MEMBER_FRESH_SQL}) > 0
+         ORDER BY l.created_at DESC
+         LIMIT 20
+    """))).mappings().all()
+    now = datetime.now(timezone.utc)
+    out = []
+    for l in lobbies:
+        live = await _lobby_live_members(db, mode, l["id"])
+        if not live:
+            continue   # started/emptied between the two reads
+        host_id = _lobby_effective_host(l["host_player_id"], live)
+        host = next((m for m in live if m["player_id"] == host_id), None)
+        out.append({
+            "lobby_id": str(l["id"]),
+            "host_name": (host["display_name"] if host else "?") or "?",
+            "player_count": len(live),
+            "max_players": cfg["players"],
+            "has_password": bool(l["has_password"]),
+            "age_seconds": int((now - l["created_at"]).total_seconds()) if l["created_at"] else 0,
+        })
+    return {"lobbies": out, "count": len(out)}
+
+
+async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str):
+    """Shared Start preamble: refresh own liveness, take the group lock,
+    re-read the lobby, prune stale + BANNED seats, verify host and count.
+    Returns (me, lobby_row, live_members) or raises."""
+    cfg = _lobby_cfg(mode)
+    # Refresh our own liveness FIRST: an authenticated Start is proof the
+    # host's client is alive even if its polls lagged a redeploy.
+    await db.execute(text(
+        f"UPDATE {cfg['queue']} SET last_polled = NOW()"
+        f" WHERE steam_id = :sid AND status = 'lobby'"), {"sid": steam_id})
+    await db.commit()
+    me = await _lock_queue_group_for_player(db, cfg["queue"], steam_id)
+    if me is None or me["status"] != "lobby" or me["series_id"] is None:
+        raise HTTPException(409, "You're not in an open lobby")
+    lobby_id = me["series_id"]
+    lrow = (await db.execute(text(
+        f"SELECT id, status, host_player_id FROM {cfg['lobbies']} WHERE id = :lid"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        raise HTTPException(409, "That lobby is no longer open")
+    await db.execute(text(f"""
+        DELETE FROM {cfg['queue']}
+         WHERE series_id = :lid AND status = 'lobby'
+           AND NOT ({LOBBY_MEMBER_FRESH_SQL})
+    """), {"lid": lobby_id})
+    live = await _lobby_live_members(db, mode, lobby_id)
+    # Start is a FORMATION surface: a banned seat must never be frozen into a
+    # roster. Remove them here, before the count decides.
+    _banned = []
+    for _m in live:
+        if (await _is_banned(db, _m["steam_id"])) is not None:
+            _banned.append(_m["player_id"])
+    if _banned:
+        await db.execute(text(
+            f"DELETE FROM {cfg['queue']} WHERE player_id = ANY(:ids)"), {"ids": _banned})
+        live = [m for m in live if m["player_id"] not in _banned]
+        print(f"[{cfg['label']}-LOBBY] start: removed {len(_banned)} banned seat(s) "
+              f"from lobby {lobby_id}")
+    # Codex round 2 (finding 14): a banned-seat eviction must survive the
+    # failure paths below. Both raises roll the transaction back, and the 409
+    # in particular fires EXACTLY when the eviction made the roster
+    # undersized — so the banned player's seat came straight back and the
+    # lobby sat permanently full of someone who can never legally start it,
+    # with no room for a replacement. Committing the eviction inline is NOT
+    # the fix: that would drop the group lock this function still needs for
+    # the checks below and for the caller's Start. Instead, commit only on the
+    # way out through a raise, where the lock is being released anyway.
+    async def _fail(exc: HTTPException):
+        if _banned:
+            try:
+                await db.commit()
+            except Exception as _cex:
+                print(f"[{cfg['label']}-LOBBY] ban-eviction commit failed: {_cex}")
+        raise exc
+
+    host_id = _lobby_effective_host(lrow["host_player_id"], live)
+    if host_id != me["player_id"]:
+        await _fail(HTTPException(403, "Only the lobby host can start the game"))
+    if host_id is not None and host_id != lrow["host_player_id"]:
+        await db.execute(text(
+            f"UPDATE {cfg['lobbies']} SET host_player_id=:h WHERE id=:lid"),
+            {"h": host_id, "lid": lobby_id})
+    if len(live) != cfg["players"]:
+        await _fail(HTTPException(
+            409, f"Need exactly {cfg['players']} players to start "
+                 f"({len(live)} in the lobby)"))
+    return me, lrow, live
+
+
+async def _lobby_activate(db: AsyncSession, mode: str, lobby_id, series_id,
+                          member_ids, region: str | None, room: str | None) -> None:
+    """Flip the lobby row to 'active' and bind it to the series it produced.
+    created_at is RESET to NOW() because every downstream age-based consumer
+    reads it as the ACTIVATION time (#252b) — a lobby that sat open for an
+    hour must not be born already past a staleness window."""
+    cfg = _lobby_cfg(mode)
+    await db.execute(text(f"""
+        UPDATE {cfg['lobbies']}
+           SET status='active', series_id=:sid, photon_room_id=:room, region=:reg,
+               player_count=:n, member_ids=:members, created_at=NOW()
+         WHERE id=:lid AND status='open'
+    """), {"sid": series_id, "room": room, "reg": (region or "us")[:8] if region else None,
+           "n": len(member_ids), "members": member_ids, "lid": lobby_id})
+
+
+@app.post("/api/v1/team/lobby/create", tags=["Team Queue"])
+async def team_lobby_create(req: _LobbyCreateReq, request: Request,
+                            db: AsyncSession = Depends(get_db)):
+    """Open a private 2v2 lobby (Aug 6 item 9)."""
+    return await _lobby_create_impl("team", req, request, db)
+
+
+@app.post("/api/v1/team/lobby/join", tags=["Team Queue"])
+async def team_lobby_join(req: _LobbyJoinReq, request: Request,
+                          db: AsyncSession = Depends(get_db)):
+    return await _lobby_join_impl("team", req, request, db)
+
+
+@app.get("/api/v1/team/lobby/state", tags=["Team Queue"])
+async def team_lobby_state(steam_id: str = Query(...), request: Request = None,
+                           db: AsyncSession = Depends(get_db)):
+    return await _lobby_state_impl("team", steam_id, request, db)
+
+
+@app.post("/api/v1/team/lobby/leave", tags=["Team Queue"])
+async def team_lobby_leave(request: Request, steam_id: str = Query(...),
+                           expected_lobby_id: str | None = Query(None),
+                           db: AsyncSession = Depends(get_db)):
+    return await _lobby_leave_impl("team", steam_id, expected_lobby_id, request, db)
+
+
+@app.get("/api/v1/team/lobbies", tags=["Team Queue"])
+async def team_lobby_browser(db: AsyncSession = Depends(get_db)):
+    return await _lobby_browser_impl("team", db)
+
+
+class _LobbyStartReq(BaseModel):
+    steam_id: str
+
+
+@app.post("/api/v1/team/lobby/start", tags=["Team Queue"])
+async def team_lobby_start(req: _LobbyStartReq, request: Request,
+                           db: AsyncSession = Depends(get_db)):
+    """Host presses Start on a 2v2 lobby: freeze the roster, create the
+    team_series row, and put all four queue rows into 'matched' — EXACTLY the
+    state the auto-queue's lock produces, so the whole ready-up / room-issuance
+    / report pipeline downstream is the existing shipped machinery."""
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    me, lrow, live = await _lobby_start_common(db, "team", req.steam_id)
+    lobby_id = me["series_id"]
+    # Team assignment: honor preferred_team exactly as the MANUAL auto-queue
+    # does (joining a host lobby IS the consent, so this is the manual path,
+    # never the Elo balancer). Members with no preference fill the gaps.
+    team1_ids, team2_ids, unassigned = [], [], []
+    for m in live:
+        pt = m["preferred_team"]
+        if pt == 1 and len(team1_ids) < 2:
+            team1_ids.append(m["player_id"])
+        elif pt == 2 and len(team2_ids) < 2:
+            team2_ids.append(m["player_id"])
+        else:
+            unassigned.append(m["player_id"])
+    for pid in unassigned:
+        if len(team1_ids) < 2:
+            team1_ids.append(pid)
+        elif len(team2_ids) < 2:
+            team2_ids.append(pid)
+    # Canonical t-a / t-b slot order by steam_id WITHIN each team. Load-bearing:
+    # the client rebuilds the same order with no extra metadata, so its
+    # 11-field HMAC byte-matches what /team/matches recomputes. Without this
+    # the arbitrary partition order breaks signature verification.
+    pid_to_steam = {m["player_id"]: m["steam_id"] for m in live}
+    team1_ids = sorted(team1_ids, key=lambda pid: pid_to_steam[pid])
+    team2_ids = sorted(team2_ids, key=lambda pid: pid_to_steam[pid])
+    # NOTE: module-level `uuid`, never `uuid_mod` — that alias exists only as a
+    # function-local import inside the queue endpoints, and referencing it from
+    # a different function is a NameError at runtime (learning #135, bug #70).
+    series_id = uuid.uuid4()
+    await db.execute(text("""
+        INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
+                                 status, was_auto_balanced, created_at)
+        VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', false, NOW())
+    """), {"sid": series_id,
+           "t1a": team1_ids[0], "t1b": team1_ids[1],
+           "t2a": team2_ids[0], "t2b": team2_ids[1]})
+    all4 = team1_ids + team2_ids
+    await db.execute(text("""
+        UPDATE team_queue
+           SET status='matched', series_id=:sid,
+               team_assigned = CASE WHEN player_id = ANY(:t1) THEN 1 ELSE 2 END,
+               matched_at = NOW(), ready = false,
+               room_name = NULL, room_region = NULL
+         WHERE player_id = ANY(:all4)
+    """), {"sid": series_id, "t1": team1_ids, "all4": all4})
+    regions = [m["region"] for m in live if m["region"]]
+    region = max(set(regions), key=regions.count) if regions else None
+    await _lobby_activate(db, "team", lobby_id, series_id, all4, region, None)
+    # Assembly-length lease, then renewed by the authenticated in_match ping
+    # for as long as battles actually run.
+    await _lease_acquire_many(db, all4, "team", series_id, LEASE_TTL_ASSEMBLY)
+    await db.commit()
+    print(f"[2v2-LOBBY] host {req.steam_id} started lobby {lobby_id} "
+          f"series {series_id} t1={team1_ids} t2={team2_ids}")
+    await _evict_other_queue_searching(db, all4, "team_queue", "a 2v2 lobby")
+    return {"status": "ok", "series_id": str(series_id), "lobby_id": str(lobby_id)}
+
+
+@app.post("/api/v1/ovt/lobby/create", tags=["1v2 Queue"])
+async def ovt_lobby_create(req: _LobbyCreateReq, request: Request,
+                           db: AsyncSession = Depends(get_db)):
+    """Open a private 1v2 lobby (Aug 6 item 9)."""
+    return await _lobby_create_impl("ovt", req, request, db)
+
+
+@app.post("/api/v1/ovt/lobby/join", tags=["1v2 Queue"])
+async def ovt_lobby_join(req: _LobbyJoinReq, request: Request,
+                         db: AsyncSession = Depends(get_db)):
+    return await _lobby_join_impl("ovt", req, request, db)
+
+
+@app.get("/api/v1/ovt/lobby/state", tags=["1v2 Queue"])
+async def ovt_lobby_state(steam_id: str = Query(...), request: Request = None,
+                          db: AsyncSession = Depends(get_db)):
+    return await _lobby_state_impl("ovt", steam_id, request, db)
+
+
+@app.post("/api/v1/ovt/lobby/leave", tags=["1v2 Queue"])
+async def ovt_lobby_leave(request: Request, steam_id: str = Query(...),
+                          expected_lobby_id: str | None = Query(None),
+                          db: AsyncSession = Depends(get_db)):
+    return await _lobby_leave_impl("ovt", steam_id, expected_lobby_id, request, db)
+
+
+@app.get("/api/v1/ovt/lobbies", tags=["1v2 Queue"])
+async def ovt_lobby_browser(db: AsyncSession = Depends(get_db)):
+    return await _lobby_browser_impl("ovt", db)
+
+
+@app.post("/api/v1/ovt/lobby/start", tags=["1v2 Queue"])
+async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
+                          db: AsyncSession = Depends(get_db)):
+    """Host presses Start on a 1v2 lobby: assign solo/duo, create the
+    ovt_series row + Photon room, and flip all three queue rows to
+    'ready_join' — exactly the state the 1v2 auto-lock produces."""
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    me, lrow, live = await _lobby_start_common(db, "ovt", req.steam_id)
+    lobby_id = me["series_id"]
+    # Sides: first member who wants solo takes it, else the earliest joiner —
+    # identical rule to the 1v2 auto-lock.
+    solo = next((m for m in live if m["preferred_side"] == 1), None) or live[0]
+    duo = [m for m in live if m["player_id"] != solo["player_id"]]
+    if len(duo) != 2:
+        raise HTTPException(409, "Could not assign sides — try again")
+    # Any member may enable the solo's extra initial pick; the lock takes the
+    # OR across the lobby and stamps it on the series (same as the auto-lock).
+    extra_pick = any(bool(m["solo_extra_pick"]) for m in live)
+    region = next((m["region"] for m in live if m["region"]), "us")
+    room = f"ovt_{uuid.uuid4().hex[:12]}"
+    series_id = uuid.uuid4()
+    await db.execute(text("""
+        INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
+                                solo_extra_pick, photon_room_id, region, created_at)
+        VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :reg, NOW())
+    """), {"sid": series_id, "solo": solo["player_id"], "da": duo[0]["player_id"],
+           "db": duo[1]["player_id"], "sep": extra_pick, "room": room,
+           "reg": (region or "us")[:8]})
+    for m in live:
+        this_side = 1 if m["player_id"] == solo["player_id"] else 2
+        await db.execute(text("""
+            UPDATE ovt_queue SET status='ready_join', series_id=:sid, side_assigned=:side,
+                   room_name=:room, room_region=:reg, matched_at=NOW()
+             WHERE player_id=:pid
+        """), {"sid": series_id, "side": this_side, "room": room,
+               "reg": (region or "us")[:8], "pid": m["player_id"]})
+    ids = [m["player_id"] for m in live]
+    await _lobby_activate(db, "ovt", lobby_id, series_id, ids, region, room)
+    await _lease_acquire_many(db, ids, "ovt", series_id, LEASE_TTL_ASSEMBLY)
+    await db.commit()
+    print(f"[1v2-LOBBY] host {req.steam_id} started lobby {lobby_id} "
+          f"series {series_id} room {room} solo={solo['steam_id']}")
+    await _evict_other_queue_searching(db, ids, "ovt_queue", "a 1v2 lobby")
+    return {"status": "ok", "series_id": str(series_id), "lobby_id": str(lobby_id),
+            "room_name": room, "room_region": (region or "us")[:8]}
+
+
 # ── FFA host lobbies (July 29 redesign — Sid's spec) ───────────────────────
 # A host opens a lobby, players browse and join, the host presses Start at
 # 3+ members. Start produces EXACTLY the state the legacy gather-decider lock
@@ -20372,10 +23735,77 @@ async def _ffa_lobby_snapshot_fields(db: AsyncSession, player_id):
     }
 
 
+# ── Lobby passwords (Aug 6 item 9, shared by FFA / 2v2 / 1v2) ─────────────
+#
+# THREAT MODEL, stated plainly so nobody mistakes this for a credential store:
+# the only thing a lobby password protects is "can a stranger walk into the
+# game I am hosting". It is typed in the open, shared over Discord, and lives
+# for the few minutes a lobby is open. It is hashed rather than stored in
+# plaintext so a database dump or an admin browsing rows does not casually
+# reveal it — that is the entire goal. It is deliberately NOT a slow KDF
+# (bcrypt/argon2): the value is low, the row is ephemeral, and a per-join
+# KDF would put a CPU cost on a hot path.
+#
+# The pepper is a server-side secret so a hash cannot be precomputed offline
+# without server access. If no secret is configured we fall back to a constant
+# — degraded (a rainbow table over common passwords becomes possible) but
+# NEVER fail-closed, because failing closed here would break lobby creation
+# entirely for a purely cosmetic protection. This is the opposite of the
+# ADMIN_HMAC_SECRET rule (which must fail closed) precisely because the stakes
+# are different, and that asymmetry is intentional.
+LOBBY_PASSWORD_MAX_LEN = 64
+_LOBBY_PEPPER = (os.getenv("API_SECRET_KEY", "") or "scr-lobby-pepper-fallback")
+
+
+def _lobby_password_hash(raw: str | None) -> str | None:
+    """Hex sha256 of pepper + password, or None when there is no password.
+    Whitespace-only is treated as no password (a host who types a space has
+    not set one). Raises 400 on an over-long value rather than silently
+    truncating — a truncated password that still 'works' would be a trap for
+    the host, who would share the full string with their friends."""
+    if raw is None:
+        return None
+    s = str(raw)
+    if len(s) > LOBBY_PASSWORD_MAX_LEN:
+        raise HTTPException(400, f"Password must be {LOBBY_PASSWORD_MAX_LEN} characters or fewer")
+    s = s.strip()
+    if not s:
+        return None
+    return hashlib.sha256(f"{_LOBBY_PEPPER}:lobby:{s}".encode("utf-8")).hexdigest()
+
+
+# Distinct detail strings so the client can tell "prompt for a password" apart
+# from "the password was wrong" and from every other 403 on these endpoints.
+LOBBY_PW_REQUIRED_DETAIL = "password_required"
+LOBBY_PW_WRONG_DETAIL = "password_incorrect"
+
+
+def _lobby_password_check(stored_hash: str | None, supplied: str | None) -> None:
+    """Gate a join against a lobby's stored password. No password on the
+    lobby -> always allowed (a supplied password is simply ignored, so a
+    stale client prompt cannot lock anyone out of an open lobby)."""
+    if not stored_hash:
+        return
+    if supplied is None or not str(supplied).strip():
+        raise HTTPException(403, LOBBY_PW_REQUIRED_DETAIL)
+    try:
+        got = _lobby_password_hash(supplied)
+    except HTTPException:
+        # An over-long guess is just a wrong guess on the JOIN path.
+        raise HTTPException(403, LOBBY_PW_WRONG_DETAIL)
+    # compare_digest on the HEX DIGESTS: both are fixed-length, so this leaks
+    # nothing about the password's length or content through timing.
+    if not got or not hmac.compare_digest(got, stored_hash):
+        raise HTTPException(403, LOBBY_PW_WRONG_DETAIL)
+
+
 class _FfaLobbyCreateReq(BaseModel):
     steam_id: str
     display_name: str = "Player"
     region: str | None = None
+    # Aug 6 item 9. Optional everywhere: omitted / blank = a public lobby,
+    # which is exactly today's behaviour for every existing client.
+    password: str | None = None
 
 
 class _FfaLobbyJoinReq(BaseModel):
@@ -20383,6 +23813,7 @@ class _FfaLobbyJoinReq(BaseModel):
     display_name: str = "Player"
     region: str | None = None
     lobby_id: str
+    password: str | None = None
 
 
 async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> None:
@@ -20494,10 +23925,14 @@ async def ffa_lobby_create(req: _FfaLobbyCreateReq, request: Request, db: AsyncS
     lobby_id = uuid.uuid4()
     # Brand-new row: invisible to every other transaction until commit, so
     # inserting it first IS the lobby-first order for the enroll below.
+    # Aug 6 item 9: password_hash is NULL for a public lobby, so an old
+    # client (which sends no `password`) creates exactly what it always did.
+    _pw = _lobby_password_hash(req.password)
     await db.execute(text("""
-        INSERT INTO ffa_lobbies (id, status, player_count, member_ids, host_player_id, created_at)
-        VALUES (:lid, 'open', 0, '{}', :host, NOW())
-    """), {"lid": lobby_id, "host": player.id})
+        INSERT INTO ffa_lobbies (id, status, player_count, member_ids, host_player_id,
+                                 created_at, password_hash)
+        VALUES (:lid, 'open', 0, '{}', :host, NOW(), :pw)
+    """), {"lid": lobby_id, "host": player.id, "pw": _pw})
     await _ffa_lobby_enroll_caller(db, player, req, lobby_id)
     await db.commit()
     print(f"[FFA-LOBBY] {req.steam_id} opened lobby {lobby_id}")
@@ -20528,10 +23963,15 @@ async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSessi
     # revalidate open + capacity under the lobby lock, or two joins at 9/10
     # both pass and produce 11).
     lrow = (await db.execute(text(
-        "SELECT id, status FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
+        "SELECT id, status, password_hash FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
     ), {"lid": lobby_id})).mappings().first()
     if lrow is None or lrow["status"] != "open":
         raise HTTPException(404, "That lobby is no longer open")
+    # Aug 6 item 9. Checked under the lobby lock and BEFORE any membership
+    # mutation, so a wrong password cannot leave a partial enrollment behind.
+    # Deliberately AFTER the open-check so a wrong password and a dead lobby
+    # stay distinguishable to the client.
+    _lobby_password_check(lrow["password_hash"], req.password)
     await db.execute(text(f"""
         DELETE FROM ffa_queue
          WHERE series_id = :lid AND status = 'lobby'
@@ -20568,7 +24008,7 @@ async def _ffa_lobby_config_echo(db: AsyncSession, lobby_id) -> dict:
     try:
         row = (await db.execute(text(
             "SELECT score_target, card_candidates, initial_picks, card_cap,"
-            "       same_card_rule, is_ranked FROM ffa_lobbies WHERE id = :lid"
+            "       same_card_rule, sudden_death, is_ranked FROM ffa_lobbies WHERE id = :lid"
         ), {"lid": lobby_id})).mappings().first()
         cfg = _ffa_lobby_config(row)
         return {
@@ -20576,6 +24016,7 @@ async def _ffa_lobby_config_echo(db: AsyncSession, lobby_id) -> dict:
             "initial_picks": cfg["initial_picks"],
             "card_cap": cfg["card_cap"],
             "same_card_rule": bool(cfg["same_card_rule"]),
+            "sudden_death": bool(cfg["sudden_death"]),
             # is_ranked is not in FFA_CONFIG_DEFAULTS (it predates the config
             # system) — read it off the row directly, default TRUE.
             "lobby_ranked": bool(row["is_ranked"]) if row is not None and row["is_ranked"] is not None else True,
@@ -20625,6 +24066,7 @@ class _FfaLobbySettingsReq(BaseModel):
     initial_picks: int | None = None
     card_cap: int | None = None
     same_card_rule: bool | None = None
+    sudden_death: bool | None = None
     is_ranked: bool | None = None
 
 
@@ -20679,6 +24121,22 @@ async def ffa_lobby_settings(req: _FfaLobbySettingsReq, request: Request,
         new["initial_picks"] = int(req.initial_picks)
     if req.same_card_rule is not None:
         new["same_card_rule"] = bool(req.same_card_rule)
+    if req.sudden_death is not None:
+        # Aug 6 item 10 — SUDDEN DEATH IS CUT FROM THIS RELEASE and the
+        # server refuses to enable it. Codex round 4 (HIGH): the client-side
+        # suppression reads each replica's own asynchronously-observed
+        # `data.dead`, so two clients can disagree about whether a hit
+        # between two non-match-point players happened — permanently
+        # diverging health in a RANKED FFA. A correct version needs a
+        # master-authoritative decision broadcast to all replicas (the
+        # poison-protocol shape), which is its own piece of work.
+        #
+        # The column, the config plumbing, the payload surfaces and the
+        # strict per-member capability gate all stay in place so re-enabling
+        # is a UI change plus that redesign — but the flag can only ever be
+        # written FALSE from here. Accepting the field silently (rather than
+        # 4xx-ing) keeps a client that still sends it working normally.
+        new["sudden_death"] = False
     if req.is_ranked is not None:
         new["is_ranked"] = bool(req.is_ranked)
     # §7d floor: clamp UP (never reject) so leaving both new controls alone
@@ -20699,12 +24157,13 @@ async def ffa_lobby_settings(req: _FfaLobbySettingsReq, request: Request,
         await db.execute(text("""
             UPDATE ffa_lobbies
                SET score_target=:st, card_candidates=:cc, initial_picks=:ip,
-                   card_cap=:cap, same_card_rule=:scr, is_ranked=:rk,
+                   card_cap=:cap, same_card_rule=:scr, sudden_death=:sd, is_ranked=:rk,
                    settings_changed_at=clock_timestamp()
              WHERE id=:lid AND status='open'
         """), {"st": new["score_target"], "cc": new["card_candidates"],
                "ip": new["initial_picks"], "cap": new["card_cap"],
-               "scr": new["same_card_rule"], "rk": new["is_ranked"],
+               "scr": new["same_card_rule"], "sd": new["sudden_death"],
+               "rk": new["is_ranked"],
                "lid": lobby_id})
         print(f"[FFA-LOBBY] {req.steam_id} changed lobby {lobby_id} settings: "
               + ", ".join(f"{k}={new[k]}" for k in changed))
@@ -20715,6 +24174,7 @@ async def ffa_lobby_settings(req: _FfaLobbySettingsReq, request: Request,
             "initial_picks": new["initial_picks"],
             "card_cap": new["card_cap"],
             "same_card_rule": new["same_card_rule"],
+            "sudden_death": new["sudden_death"],
             "lobby_ranked": new["is_ranked"]}
 
 
@@ -20838,6 +24298,25 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     _all_capable = len(_vrows) == len(_pids) and all(
         _parse_version(v.mod_version or "0") >= _floor for v in _vrows)
     if not _all_capable:
+        # Codex round 2 (MEDIUM): sudden_death is deliberately NOT in this
+        # collapse. This check reads players.mod_version — the stale,
+        # cross-player-writable column (see the kills tie-break note below) —
+        # and it runs BEFORE the strict per-member gate, which can only turn
+        # the flag OFF. So a roster that is genuinely capable by every
+        # member's own authenticated queue version would still have had the
+        # host's rule silently disabled by one stale players row, with no way
+        # to restore it.
+        #
+        # R3 (LOW) — stating this precisely, because the earlier wording was
+        # false. The two gates read DIFFERENT columns, so neither strictly
+        # subsumes the other: every member's authenticated queue version can
+        # be 1.37 while one STALE players.mod_version says 1.35, in which case
+        # this general gate fires and the strict gate still (correctly) leaves
+        # sudden death ON. That is the INTENDED outcome — the queue column is
+        # the authoritative per-member evidence (#294b) and the players column
+        # is the one that can be written by another player's request. The
+        # other knobs keep riding the weaker gate because a stale version
+        # there only mis-sizes a draw, never desyncs damage.
         await db.execute(text("""
             UPDATE ffa_lobbies
                SET score_target=5, card_candidates=5, initial_picks=1,
@@ -20860,6 +24339,36 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     _kt_floor = _parse_version(FFA_KILLS_TIEBREAK_MIN_VERSION)
     _kills_tiebreak = len(_kt_vals) == len(ordered) and all(
         _parse_version((v or "0").lstrip("vV")) >= _kt_floor for v in _kt_vals)
+
+    # Aug 6 item 10 — sudden death gets a STRICTER capability gate than the
+    # rest of the config set, and deliberately does not rely on the
+    # `_all_capable` collapse above.
+    #
+    # Why: that collapse reads `players.mod_version`, which the comment
+    # immediately above states is cross-player poisonable — any preflight
+    # caller can stamp that column onto ANOTHER player's row (#294b). For the
+    # other knobs (draw size, score target, card cap) a poisoned version only
+    # mis-sizes a draw. Sudden death decides whether DAMAGE LANDS, so a
+    # client that does not implement it while its peers do produces a real
+    # cross-client divergence: one replica suppresses a hit, another applies
+    # it, and the two disagree about who is alive.
+    #
+    # So it rides the same evidence the kills tie-break uses — each member's
+    # OWN session-authenticated `ffa_queue.mod_version`, written only by that
+    # member's own join/create request — and it is frozen HERE at lock, never
+    # live-read per report. NULL/missing => not capable => OFF, which is the
+    # safe direction (the client's own 7th-segment parse defaults false too,
+    # so both ends fail the same way).
+    _sd_floor = _parse_version(FFA_SUDDEN_DEATH_MIN_VERSION)
+    _sd_capable = len(_kt_vals) == len(ordered) and all(
+        _parse_version((v or "0").lstrip("vV")) >= _sd_floor for v in _kt_vals)
+    if not _sd_capable:
+        await db.execute(text(
+            "UPDATE ffa_lobbies SET sudden_death=FALSE WHERE id=:lid"
+        ), {"lid": lobby_id})
+        print(f"[FFA-LOBBY] lobby {lobby_id}: sudden_death disabled — "
+              f"not every member's own queue-stamped version clears {FFA_SUDDEN_DEATH_MIN_VERSION}")
+
     regions = [r["region"] for r in ordered if r["region"]]
     region = max(set(regions), key=regions.count) if regions else "us"
     room = f"ffa_{uuid.uuid4().hex[:12]}"
@@ -20902,11 +24411,12 @@ async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
     # crowd real lobbies out of the browser.
     lobbies = (await db.execute(text(f"""
         SELECT l.id, l.host_player_id, l.created_at,
+               (l.password_hash IS NOT NULL) AS has_password,
                COUNT(q.player_id) FILTER (WHERE {FFA_LOBBY_MEMBER_FRESH_SQL}) AS live_n
           FROM ffa_lobbies l
           LEFT JOIN ffa_queue q ON q.series_id = l.id AND q.status = 'lobby'
          WHERE l.status = 'open'
-         GROUP BY l.id, l.host_player_id, l.created_at
+         GROUP BY l.id, l.host_player_id, l.created_at, l.password_hash
         HAVING COUNT(q.player_id) FILTER (WHERE {FFA_LOBBY_MEMBER_FRESH_SQL}) > 0
          ORDER BY l.created_at DESC
          LIMIT 20
@@ -20924,6 +24434,10 @@ async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
             "host_name": (host["display_name"] if host else "?") or "?",
             "player_count": len(live),
             "max_players": FFA_MAX_PLAYERS,
+            # A private lobby is still LISTED (Sid's spec) — it just shows a
+            # lock and refuses joins without the password. Hiding it would
+            # make "where did my friend's lobby go?" a support question.
+            "has_password": bool(l["has_password"]),
             "age_seconds": int((now - l["created_at"]).total_seconds()) if l["created_at"] else 0,
         })
     return {"lobbies": out, "count": len(out)}
@@ -21204,7 +24718,7 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
 
 
 @app.get("/api/v1/ffa/queue/recent-joins", tags=["FFA Queue"])
-async def ffa_queue_recent_joins(seconds: int = Query(20), db: AsyncSession = Depends(get_db)):
+async def ffa_queue_recent_joins(seconds: int = Query(20, ge=1, le=86400), db: AsyncSession = Depends(get_db)):
     """Players who joined the FFA queue in the last N seconds (Discord beacon
     parity with the other queues). Rating shown is the FFA elo once the player
     has FFA games, else their 1v1 elo as the only meaningful hint.
@@ -21445,6 +24959,7 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
             "initial_picks": _cfg["initial_picks"],
             "card_cap": _cfg["card_cap"],
             "same_card_rule": _cfg["same_card_rule"],
+            "sudden_death": _cfg["sudden_death"],
             "lobby_ranked": bool(lrow["is_ranked"]) if lrow["is_ranked"] is not None else True,
             "settings_lock_seconds": _lock_s,
             "members": [
@@ -21815,6 +25330,7 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
         "initial_picks": _cfg["initial_picks"],
         "card_cap": _cfg["card_cap"],
         "same_card_rule": _cfg["same_card_rule"],
+        "sudden_death": _cfg["sudden_death"],
         "lobby_ranked": bool(lobby["is_ranked"]) if "is_ranked" in lobby and lobby["is_ranked"] is not None else True,
         # Round-4 find F1 / round-5 gate correction: a relaunched client's
         # recovery must NOT rejoin a room whose game is LIVE. TRI-STATE
@@ -22418,7 +25934,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             await db.execute(text(
                 "INSERT INTO ffa_match_cards (match_id, player_id, card_name, card_rarity,"
                 " pick_order, round_number, rolled) VALUES (:m, :p, :c, :r, :o, :rn, :rl)"
-            ), {"m": match_id, "p": pid, "c": nm_clean[:64],
+            ), {"m": match_id, "p": pid, "c": _canon_card_name(nm_clean)[:64],
                 "r": (getattr(c, "card_rarity", None) or "")[:16] or None,
                 "rl": bool(getattr(c, "rolled", False)),
                 "o": getattr(c, "pick_order", i) or i,
@@ -22439,7 +25955,124 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 "INSERT INTO ffa_card_offers (match_id, player_id, round_number,"
                 " card_name, was_picked) VALUES (:m, :p, :rn, :c, :w)"
             ), {"m": match_id, "p": pid, "rn": int(getattr(off, "round_number", 1) or 1),
-                "c": onm_clean[:64], "w": bool(getattr(off, "was_picked", False))})
+                "c": _canon_card_name(onm_clean)[:64],
+                "w": bool(getattr(off, "was_picked", False))})
+
+    # ── Aug 7 FFA achievements (Sid's six). ONE evaluation site, deliberately
+    # placed HERE: after every validation/quarantine gate above (a rejected,
+    # roster-mismatched, shape-mismatched, downgraded or replayed report has
+    # already returned or raised, so none of them can mint an achievement) and
+    # before the single `await db.commit()` below, so a grant lands in exactly
+    # the same transaction as the match it was earned in.
+    #
+    # SAVEPOINT (#235): an achievement problem must degrade to "no achievement
+    # this game", never poison the transaction and 500 a real match report. A
+    # bare try/except would NOT do that under asyncpg — the failed statement
+    # aborts the transaction and the games_played UPDATE below dies anyway.
+    #
+    # The flush before the savepoint is load-bearing, not tidiness: rolling a
+    # SAVEPOINT back expunges session-pending ORM objects, and SQLAlchemy's
+    # restore covers the ones still pending when the savepoint opened — i.e.
+    # the award loop's GoldTransaction rows would be discarded along with ours.
+    # Flushing first means a rollback here can only ever discard OUR writes. It
+    # cannot make anything worse than today either: the very next db.execute
+    # would autoflush the identical pending set.
+    #
+    # No new lock order (#197/#202): _grant_achievement_inline CAN UPDATE
+    # players.gold_earned, and every reported player's row is already held
+    # FOR NO KEY UPDATE from the sorted pass above, so those are re-locks of
+    # rows this transaction owns. The grant loop is sorted by str(pid) anyway
+    # to keep the file's convention intact if that pass ever moves.
+    #
+    # That re-lock reasoning is load-bearing rather than theoretical: since the
+    # 2026-08-07 pricing all six of these keys pay, so the helper DOES take the
+    # players UPDATE and write a ledger row. (This comment previously said the
+    # question was moot because they were 0g — true for one day, and exactly the
+    # kind of "no money moves here" claim that must not be left standing once it
+    # stops being true.)
+    try:
+        if rated:
+            await db.flush()
+            async with db.begin_nested():
+                # Players who ACTUALLY PLAYED this game. `ghosts` is the
+                # refutation-filtered absent set (a signed non-zero tally has
+                # already refuted a false `absent` claim), which is the same
+                # basis the economy meter uses for `_n_live_meter` / `n_live`.
+                # Recomputed rather than reusing those locals so the rule reads
+                # standalone; a roster ghost must not inflate a shutout's
+                # player-count tier any more than it inflates a payout.
+                _ach_players = sorted(
+                    (p for p in report.players if p.steam_id not in ghosts),
+                    key=lambda q: str(id_by_steam[q.steam_id]))
+                # Codex Aug-7 (HIGH): the shutout TIER must not be decided by
+                # `absent`/`left_early`, which are UNSIGNED client flags. A
+                # modified reporter could flip two carried ghosts to
+                # absent=false and turn a genuine 3-player 5-0 into the 4- and
+                # 5-player badges. `members` is the lobby's LOCK-TIME roster
+                # read from ffa_lobbies.member_ids under FOR UPDATE — server
+                # state the client cannot author — so the tier is decided by
+                # how many people the server SEATED, not by how many the
+                # reporter says stayed.
+                #
+                # This is deliberately the stricter reading of "an FFA of N
+                # people": a 5-seat lobby whose players quit is still a
+                # 5-person FFA that the winner won. The reverse (tiering on
+                # survivors) is both forgeable and rewards attrition.
+                _n_played = len(members)
+
+                # 1-3: shutout tiers, WINNER only, nested (a 5-player 5-0
+                # unlocks all three). "5-0" = the winner converted 5 full
+                # POINTS and no other player converted even one; losers may
+                # still hold leftover HALF points, which the descriptions say
+                # out loud. winner.rounds_won == 5 is equivalent to
+                # _score_target == 5 here (validation above pins max_rounds to
+                # the lobby's frozen target and the winner holds the unique
+                # max) — checked directly so the rule needs no inference.
+                _win_entry = next((p for p in report.players
+                                   if p.steam_id == report.winner_steam_id), None)
+                if (_win_entry is not None
+                        and report.winner_steam_id not in ghosts
+                        and _win_entry.rounds_won == 5
+                        and all(p.rounds_won == 0 for p in report.players
+                                if p.steam_id != report.winner_steam_id)):
+                    _win_pid = id_by_steam[report.winner_steam_id]
+                    for _need, _key in ((3, "ffa_shutout_3"),
+                                        (4, "ffa_shutout_4"),
+                                        (5, "ffa_shutout_5")):
+                        if _n_played >= _need:
+                            await _grant_achievement_inline(db, _win_pid, _key)
+
+                for _p in _ach_players:
+                    _ach_pid = id_by_steam[_p.steam_id]
+                    # 4-5: kill counts. "over 50" / "over 100" => strictly
+                    # greater. Gated on kills_in_canonical because `kills` is
+                    # covered by the HMAC only under the v2 form — the same
+                    # reason kills stay out of PLACEMENT on a v1 report (#293).
+                    # An unsigned field must never mint gold plus a permanent
+                    # badge for the whole roster; a v1 report simply awards no
+                    # kill achievement.
+                    if kills_in_canonical:
+                        _kills = int(getattr(_p, "kills", 0) or 0)
+                        if _kills > 50:
+                            await _grant_achievement_inline(db, _ach_pid, "ffa_kills_50")
+                        if _kills > 100:
+                            await _grant_achievement_inline(db, _ach_pid, "ffa_kills_100")
+                    # 6: half-point heartbreak. The wire names invert the
+                    # internal ones — `rounds_won` is FULL points and
+                    # `points_total` is CUMULATIVE half points ever awarded
+                    # (never reset, while every conversion wipes everyone's
+                    # LIVE halves) — so leftover halves is exact arithmetic,
+                    # not an estimate. Both fields are inside the HMAC
+                    # canonical in v1 and v2, so no signature gate is needed.
+                    # Losers only: a shared 1st place is not a loss.
+                    if placements.get(_p.steam_id, 0) > 1:
+                        _leftover = (int(_p.points_total)
+                                     - FFA_POINTS_TO_WIN_ROUND * int(_p.rounds_won))
+                        if _leftover >= 10:
+                            await _grant_achievement_inline(
+                                db, _ach_pid, "ffa_half_point_heartbreak")
+    except Exception as _ach_ex:
+        print(f"[FFA-ACH] achievement evaluation failed (report unaffected): {_ach_ex}")
 
     # Settle FFA bets. Codex round-2 review finds 3+4: keyed by the game's
     # REAL identity (the _rN suffix inside the HMAC-covered room id), never
@@ -22538,8 +26171,18 @@ async def ffa_leaderboard(limit: int = 200, min_games: int = 1, sort_by: str = "
             ffa_gold_earned=(-1 if r["hide_gold"] else int(r["ffa_gold_earned"] or 0)),
             ffa_xp_earned=int(r["ffa_xp_earned"] or 0),
         ))
+    # total_players is the POPULATION, not the page size. It used to be
+    # len(entries), so it tracked `limit` — limit=1 reported "1 player total".
+    # The 1v1 and 2v2 boards both run a real COUNT (main.py `total` / `cnt`);
+    # these two were the odd ones out. Counted over the SAME filter the page
+    # query uses so the number and the rows agree.
+    _ffa_total = (await db.execute(text(
+        "SELECT COUNT(*) FROM glicko_ratings_ffa g"
+        " JOIN players p ON p.id = g.player_id"
+        " WHERE g.games_played >= :ming AND p.deleted_at IS NULL"),
+        {"ming": max(1, min_games)})).scalar() or 0
     return FfaLeaderboardResponse(
-        entries=entries, total_players=len(entries),
+        entries=entries, total_players=int(_ffa_total),
         last_updated=datetime.now(timezone.utc), is_ranked=True)
 
 
@@ -22568,7 +26211,7 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                -- exactly what these games were played under. LEFT JOIN so a
                -- pre-config-era match simply reports nulls.
                l.score_target, l.card_cap, l.initial_picks,
-               l.card_candidates, l.same_card_rule, l.settings_known
+               l.card_candidates, l.same_card_rule, l.sudden_death, l.settings_known
           FROM ffa_matches m
           LEFT JOIN players pw ON pw.id = m.winner_id
           LEFT JOIN ffa_lobbies l ON l.id = m.lobby_id
@@ -22632,6 +26275,13 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                 "keys_pressed": r["keys_pressed"], "active_seconds": r["active_seconds"],
                 "fps_timeline": r["fps_timeline"], "ping_timeline": r["ping_timeline"],
                 "hit_timeline": r["hit_timeline"], "block_timeline": r["block_timeline"],
+                # Aug 6 item 1 — damage telemetry, NULL-preserving (#257):
+                # None for every game recorded before v1.35.3 clients, so
+                # consumers can tell "no data" from a real 0.
+                "damage_dealt": (int(r["damage_dealt"])
+                                 if r["damage_dealt"] is not None else None),
+                "damage_dealt_timeline": r["damage_dealt_timeline"],
+                "kill_timeline": r["kill_timeline"],
                 "cards": cards_by_match_player.get((r["match_id"], r["steam_id"]), []),
             })
     return {
@@ -22657,6 +26307,7 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                  "initial_picks": int(m["initial_picks"]),
                  "card_candidates": int(m["card_candidates"]),
                  "same_card_rule": bool(m["same_card_rule"]),
+                 "sudden_death": bool(m["sudden_death"]),
              }),
              "players": players_by_match.get(m["id"], [])}
             for m in matches
@@ -23122,6 +26773,7 @@ async def place_ffa_bet(
     bet). The window is enforced HERE, not just hidden in the UI — a client-side
     hide is a rendering suggestion, not a gate (#159)."""
     await _check_steam_session(request, steam_id, db)
+    await _reject_active_spectator_bet(db, steam_id)
     if not MATCH_HMAC_SECRET:
         raise HTTPException(status_code=503, detail="HMAC not configured")
     expected = hmac.new(
@@ -23335,7 +26987,15 @@ async def player_ovt_history(steam_id: str, limit: int = Query(10, ge=1, le=30),
                (SELECT COALESCE(SUM(gt.amount), 0) FROM gold_transactions gt
                  WHERE gt.player_id = me.id
                    AND gt.reason IN ('ovt_series_win', 'ovt_series_loss')
-                   AND gt.reference_id = m.series_id::text) AS series_gold_gained
+                   AND gt.reference_id = m.series_id::text) AS series_gold_gained,
+               -- Aug-7b item 3 — the REQUESTER's own seat, oriented the same
+               -- way the 1v1 history orients p1/p2. Without this the 1v2
+               -- damage timeline would be stored and returned nowhere My Stats
+               -- reads, i.e. collected and unreachable. The WHERE clause below
+               -- already guarantees me.id is one of the three seats.
+               CASE WHEN me.id = m.solo_id  THEN m.solo_damage_timeline
+                    WHEN me.id = m.duo_a_id THEN m.duo_a_damage_timeline
+                    ELSE m.duo_b_damage_timeline END AS my_damage_timeline
           FROM ovt_matches m
           JOIN players me ON me.steam_id = :sid
           LEFT JOIN players ps ON ps.id = m.solo_id
@@ -23358,6 +27018,9 @@ async def player_ovt_history(steam_id: str, limit: int = Query(10, ge=1, le=30),
             "ended_at": r["ended_at"].isoformat() if r["ended_at"] else None,
             "gold_gained": int(r["gold_gained"] or 0),
             "series_gold_gained": int(r["series_gold_gained"] or 0),
+            # NULL, not "", when unrecorded — a row with no timeline must
+            # register no hover graph rather than an empty one.
+            "damage_dealt_timeline": r["my_damage_timeline"],
         })
     return {"games": games}
 
@@ -23626,7 +27289,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
             db.add(TeamMatchCard(
                 match_id=new_match.id,
                 player_id=player_obj.id,
-                card_name=card.card_name,
+                card_name=_canon_card_name(card.card_name),
                 card_rarity=card.card_rarity,
                 pick_order=card.pick_order,
                 round_number=card.round_number,
@@ -23648,6 +27311,17 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
             ping_avg=tele.ping_avg,
             hit_timeline=(tele.hit_timeline or None),
             block_timeline=(tele.block_timeline or None),
+            # Aug-7b item 3 (migration 201): cumulative damage-dealt CSV.
+            # The server is grid-agnostic — it stores whatever CSV arrives —
+            # but the DPS derivative only shares this row's fps x-axis if the
+            # client samples it on the SAME grid fps_timeline above uses, which
+            # for 2v2/FFA is GameStateWatcher's localFps3sTimeline (3s, cap
+            # 128). Note the 1v1 pair is a DIFFERENT grid (localDamageTimeline,
+            # 5s, cap 90): reusing LocalDamageTimelineCsv here would silently
+            # put the two series on different x-axes. Empty collapses to NULL
+            # like its siblings — "not recorded" and "dealt nothing" must stay
+            # distinguishable (#257), and an old client sends nothing at all.
+            damage_dealt_timeline=(tele.damage_dealt_timeline or None),
             bullets_fired=tele.bullets_fired,
             bullets_hit=tele.bullets_hit,
             blocks_activated=tele.blocks_activated,
@@ -24528,7 +28202,8 @@ async def team_all_series_paged(
             # stats line + hover graphs on the 2v2 tab.
             t_rows = (await db.execute(text("""
                 SELECT match_id, player_id, fps_timeline, ping_timeline, ping_avg,
-                       hit_timeline, block_timeline, bullets_fired, bullets_hit,
+                       hit_timeline, block_timeline, damage_dealt_timeline,
+                       bullets_fired, bullets_hit,
                        blocks_activated, blocks_successful
                   FROM team_match_telemetry
                  WHERE match_id = ANY(:mids)
@@ -24542,6 +28217,10 @@ async def team_all_series_paged(
                     "ping_avg": t["ping_avg"] or 0,
                     "hit_timeline": t["hit_timeline"],
                     "block_timeline": t["block_timeline"],
+                    # Aug-7b item 3 — NULL passes straight through (no `or ""`):
+                    # a row with no timeline must register no hover graph at all
+                    # rather than an empty one.
+                    "damage_dealt_timeline": t["damage_dealt_timeline"],
                     "bullets_fired": t["bullets_fired"] or 0,
                     "bullets_hit": t["bullets_hit"] or 0,
                     "blocks_activated": t["blocks_activated"] or 0,
@@ -24888,3 +28567,594 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     await db.commit()
     print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}")
     return {"status": "accepted"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SPECTATOR MODE (Aug 6 item 13, design §6 — migration 194)
+#
+# Security model in one paragraph: the ROOM NAME is the join credential, so
+# it appears ONLY in a grant response to a session-verified spectator and in
+# strict-session POST bodies from fighters — never in list responses, logs,
+# or query strings. Attestation is per-fighter and session-bound, so a game
+# is listable only when every fighter independently agreed on the same room
+# tuple (a colluding pair can at most list a room name they already know,
+# which the Photon layer cannot cryptographically reject anyway — §6.6).
+# Everything here fails toward "not spectatable"; nothing a spectator or a
+# lying fighter sends can move a match result or a rating.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_SPECTATE_MODES = {"1v1", "2v2", "1v2", "ffa"}
+_SPECTATE_ROOM_PREFIX = {"1v1": "ranked_", "2v2": "team_", "1v2": "ovt_", "ffa": "ffa_"}
+SPECTATE_ATTEST_FRESH_SECONDS = 150      # attest cadence is 60s; 150 covers one miss
+SPECTATE_SEAT_CAP = 4                    # Sid's Aug 6 decision (client SEAT_CAP mirrors)
+SPECTATE_PROTOCOL = 1
+SPECTATE_JOIN_WINDOW_SECONDS = 60
+SPECTATE_HEARTBEAT_TTL_SECONDS = 60
+
+
+def _spectate_roster_list(roster: str) -> list:
+    return [s for s in (roster or "").split(",") if s]
+
+
+async def _spectate_game_ready(db: AsyncSession, game) -> tuple[bool, str]:
+    """Completeness check (design §6.3): every roster member holds a FRESH
+    attestation byte-matching the game row's tuple, and every member still
+    allows spectating. Returns (ready, disabled_reason)."""
+    roster = _spectate_roster_list(game["roster"])
+    if len(roster) != game["fighter_target"]:
+        return False, "room_not_ready"
+    if game["room_capacity"] < game["fighter_target"] + 1:
+        # No reserved seat exists (old-client room creator) — never grant.
+        return False, "room_not_ready"
+    # A room that has not reported LIVE COMBAT recently is listable but never
+    # grantable (Codex r1 find 15): pre-assembly, stuck-assembly and post-
+    # game-over rooms all fail here.
+    lba = game.get("last_battle_at") if hasattr(game, "get") else game["last_battle_at"]
+    if lba is None or lba < datetime.now(timezone.utc) - timedelta(seconds=SPECTATE_ATTEST_FRESH_SECONDS):
+        return False, "room_not_ready"
+    rows = (await db.execute(text("""
+        SELECT steam_id, roster, region, fighter_target, room_capacity, protocol
+          FROM spectate_attestations
+         WHERE game_id = :gid
+           AND attested_at > NOW() - make_interval(secs => :fresh)
+    """), {"gid": str(game["id"]), "fresh": SPECTATE_ATTEST_FRESH_SECONDS})).mappings().all()
+    by_sid = {r["steam_id"]: r for r in rows}
+    for sid in roster:
+        r = by_sid.get(sid)
+        if r is None:
+            return False, "room_not_ready"
+        if (r["roster"] != game["roster"]
+                or r["region"] != game["room_region"]
+                or r["fighter_target"] != game["fighter_target"]
+                or r["room_capacity"] != game["room_capacity"]
+                or r["protocol"] < game["protocol_min"]):
+            return False, "room_not_ready"
+    opt = (await db.execute(text("""
+        SELECT COUNT(*) AS n FROM players
+         WHERE steam_id = ANY(:sids) AND allow_spectators IS NOT TRUE
+    """), {"sids": roster})).scalar() or 0
+    if opt > 0:
+        # Generic reason — never reveal WHICH participant opted out (§6.4).
+        return False, "spectating_disabled"
+    return True, ""
+
+
+async def _spectate_active_seats(db: AsyncSession, game_id) -> int:
+    return (await db.execute(text("""
+        SELECT COUNT(*) FROM spectate_leases
+         WHERE game_id = :gid AND revoked_at IS NULL
+           AND heartbeat_expires_at > NOW()
+    """), {"gid": str(game_id)})).scalar() or 0
+
+
+async def _spectate_authoritative_roster(db: AsyncSession, mode: str, room: str):
+    """Resolve the room's TRUE roster + source id from the server's own
+    queue-lock records (Codex r1 find 5: a caller-authored roster lets two
+    colluding sessions list someone else's real room and bypass a third
+    player's opt-out). Returns (steam_id_set_or_None, source_ref).
+    None = no server mapping exists for this mode/room (1v1 fallback);
+    an EMPTY set = a mapping SHOULD exist and does not -> fail closed."""
+    if mode == "2v2":
+        row = (await db.execute(text("""
+            SELECT ts.id,
+                   (SELECT array_agg(p.steam_id) FROM players p
+                     WHERE p.id IN (ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id)) AS sids
+              FROM team_series ts
+             WHERE ts.photon_room_id = :room AND ts.completed_at IS NULL
+               AND ts.invalidated_at IS NULL
+             ORDER BY ts.created_at DESC LIMIT 1
+        """), {"room": room})).mappings().first()
+        if row is None or not row["sids"]:
+            return set(), ""
+        return set(row["sids"]), str(row["id"])
+    if mode == "1v2":
+        row = (await db.execute(text("""
+            SELECT s.id,
+                   (SELECT array_agg(p.steam_id) FROM players p
+                     WHERE p.id IN (s.solo_id, s.duo_a_id, s.duo_b_id)) AS sids
+              FROM ovt_series s
+             WHERE s.photon_room_id = :room
+               AND s.status IN ('active', 'dc_paused', 'dc_incomplete')
+             ORDER BY s.created_at DESC LIMIT 1
+        """), {"room": room})).mappings().first()
+        if row is None or not row["sids"]:
+            return set(), ""
+        return set(row["sids"]), str(row["id"])
+    if mode == "ffa":
+        # LIVE membership = locked members minus departed (Codex r2 find 5:
+        # a bare subset test let two colluding members attest a 2-man roster
+        # for a 6-player lobby and dodge the other four's opt-outs). The
+        # attest handler requires the claimed roster to EQUAL this set.
+        row = (await db.execute(text("""
+            SELECT l.id,
+                   (SELECT array_agg(p.steam_id) FROM players p
+                     WHERE p.id = ANY(l.member_ids)
+                       AND NOT (p.id = ANY(COALESCE(l.departed_ids, '{}')))) AS sids
+              FROM ffa_lobbies l
+             WHERE l.photon_room_id = :room AND l.status = 'active'
+             ORDER BY l.created_at DESC LIMIT 1
+        """), {"room": room})).mappings().first()
+        if row is None or not row["sids"]:
+            return set(), ""
+        return set(row["sids"]), str(row["id"])
+    # 1v1: ranked queue rows may already be pruned by report time; when they
+    # exist, enforce them, else accept cardinality+session only (documented
+    # residual: two colluding SESSIONS can list a ranked_ room name they
+    # already know — the room name is the credential either way, §6.6).
+    rows = (await db.execute(text("""
+        SELECT p.steam_id FROM ranked_queue q JOIN players p ON p.id = q.player_id
+         WHERE q.room_name = :room
+    """), {"room": room})).mappings().all()
+    # Enforce only a COMPLETE pair — queue rows are pruned asymmetrically
+    # after lock, and a lone survivor row must not brick attestation with an
+    # exact-equality check it can never satisfy.
+    if len(rows) == 2:
+        return {r["steam_id"] for r in rows}, ""
+    return None, ""
+
+
+# Per-mode exact fighter cardinality (Codex r1 find 5: without this, two
+# attesters could declare a team_ room a 2-fighter game).
+_SPECTATE_MODE_TARGET = {"1v1": 2, "2v2": 4, "1v2": 3}
+
+
+@app.post("/api/v1/spectate/participant-attest", tags=["Spectate"])
+async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
+                                      db: AsyncSession = Depends(get_db)):
+    if req.mode not in _SPECTATE_MODES:
+        raise HTTPException(status_code=422, detail="bad_mode")
+    if req.mode == "1v1":
+        # 1v1 accepts CODE rooms too (Sid, Aug 7: private ranked lobbies are
+        # most real ranked play, #286) — but a 1v1 claim must never wear a
+        # TEAM-mode or tournament prefix (cross-mode masquerade would dodge
+        # the stricter modes' roster verification). Collusion residual is the
+        # documented 1v1 fallback one (§6.6): two sessions can list a room
+        # name they already possess; the room name is the credential either
+        # way, capacity gating fails the lure onto full vanilla rooms, and
+        # modded victims classify-and-suppress the entrant.
+        if any(req.room_name.startswith(p) for p in ("team_", "ovt_", "ffa_", "sct-")):
+            raise HTTPException(status_code=422, detail="room_mode_mismatch")
+    elif not req.room_name.startswith(_SPECTATE_ROOM_PREFIX[req.mode]):
+        raise HTTPException(status_code=422, detail="room_mode_mismatch")
+    roster = _spectate_roster_list(req.roster)
+    if len(roster) != req.fighter_target or req.steam_id not in roster:
+        raise HTTPException(status_code=422, detail="bad_roster")
+    if sorted(roster) != roster or len(set(roster)) != len(roster):
+        raise HTTPException(status_code=422, detail="roster_not_canonical")
+    if req.mode in _SPECTATE_MODE_TARGET:
+        if req.fighter_target != _SPECTATE_MODE_TARGET[req.mode]:
+            raise HTTPException(status_code=422, detail="bad_cardinality")
+    elif not (2 <= req.fighter_target <= 10):   # ffa (2 tolerates leavers mid-sitting)
+        raise HTTPException(status_code=422, detail="bad_cardinality")
+    if not await _strict_steam_session_ok(request, req.steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+
+    # Server-authoritative roster check (fail CLOSED when a mapping should
+    # exist): the claimed roster must be members of the room's real locked
+    # group, and the claimed room must actually belong to this mode's flow.
+    true_roster, derived_ref = await _spectate_authoritative_roster(db, req.mode, req.room_name)
+    if true_roster is not None:
+        if not true_roster:
+            raise HTTPException(status_code=409, detail="room_unknown")
+        # EXACT set equality (Codex r2 find 5): a proper subset would let a
+        # partial clique attest around the excluded members' opt-outs.
+        if set(roster) != true_roster or req.steam_id not in true_roster:
+            raise HTTPException(status_code=409, detail="roster_mismatch")
+
+    # Serialize per-room (attests from all fighters land within the same
+    # second) — advisory lock on the room name, then upsert game + attest.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                     {"k": f"spectate:{req.room_name}"})
+    game = (await db.execute(text("""
+        SELECT id, roster FROM spectate_games
+         WHERE room_name = :room AND ended_at IS NULL
+    """), {"room": req.room_name})).mappings().first()
+    is_battle = req.phase == "battle"
+    if game is None:
+        gid = str(uuid.uuid4())
+        await db.execute(text("""
+            INSERT INTO spectate_games
+                (id, mode, source_ref, room_name, room_region, roster,
+                 fighter_target, room_capacity, spectator_cap, protocol_min, phase,
+                 last_battle_at)
+            VALUES (CAST(:id AS UUID), :mode, :ref, :room, :region, :roster,
+                    :target, :cap, :seats, :proto, :phase,
+                    CASE WHEN :battle THEN NOW() ELSE NOW() - INTERVAL '1 hour' END)
+            ON CONFLICT (room_name) WHERE ended_at IS NULL DO NOTHING
+        """), {"id": gid, "mode": req.mode, "ref": derived_ref[:64],
+               "room": req.room_name, "region": req.region, "roster": req.roster,
+               "target": req.fighter_target, "cap": req.room_capacity,
+               "seats": SPECTATE_SEAT_CAP, "proto": SPECTATE_PROTOCOL,
+               "phase": req.phase[:16], "battle": is_battle})
+        game = (await db.execute(text("""
+            SELECT id, roster FROM spectate_games
+             WHERE room_name = :room AND ended_at IS NULL
+        """), {"room": req.room_name})).mappings().first()
+        if game is None:
+            raise HTTPException(status_code=500, detail="attest_race")
+    else:
+        # Last-writer-wins on the live tuple: completeness (checked at list/
+        # grant time) is what enforces agreement, so a roster change (FFA
+        # leaver) converges as the remaining fighters re-attest.
+        # source_ref is server-derived, never the caller's (r1 find 4).
+        await db.execute(text("""
+            UPDATE spectate_games
+               SET roster = :roster, room_region = :region, phase = :phase,
+                   fighter_target = :target, room_capacity = :cap,
+                   source_ref = :ref,
+                   last_attest_at = NOW(),
+                   last_battle_at = CASE WHEN :battle THEN NOW() ELSE last_battle_at END
+             WHERE id = :gid
+        """), {"roster": req.roster, "region": req.region, "phase": req.phase[:16],
+               "target": req.fighter_target, "cap": req.room_capacity,
+               "ref": derived_ref[:64], "battle": is_battle,
+               "gid": str(game["id"])})
+
+    await db.execute(text("""
+        INSERT INTO spectate_attestations
+            (game_id, steam_id, actor_number, region, fighter_target,
+             room_capacity, protocol, roster, phase, attested_at)
+        VALUES (:gid, :sid, :actor, :region, :target, :cap, :proto, :roster, :phase, NOW())
+        ON CONFLICT (game_id, steam_id) DO UPDATE SET
+            actor_number = EXCLUDED.actor_number,
+            region = EXCLUDED.region,
+            fighter_target = EXCLUDED.fighter_target,
+            room_capacity = EXCLUDED.room_capacity,
+            protocol = EXCLUDED.protocol,
+            roster = EXCLUDED.roster,
+            phase = EXCLUDED.phase,
+            attested_at = NOW()
+    """), {"gid": str(game["id"]), "sid": req.steam_id, "actor": req.actor_number,
+           "region": req.region, "target": req.fighter_target,
+           "cap": req.room_capacity, "proto": req.spectator_protocol,
+           "roster": req.roster, "phase": req.phase[:16]})
+    await db.commit()
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/spectate/games", tags=["Spectate"])
+async def spectate_games(db: AsyncSession = Depends(get_db)):
+    """Public spectatable-games list. NO room credentials in the response
+    (design §6.4) — game_id is the only handle a client ever needs."""
+    games = (await db.execute(text("""
+        SELECT id, mode, source_ref, room_name, room_region, roster,
+               fighter_target, room_capacity, spectator_cap, protocol_min, phase,
+               last_battle_at
+          FROM spectate_games
+         WHERE ended_at IS NULL
+           AND last_attest_at > NOW() - make_interval(secs => :fresh)
+         ORDER BY started_at DESC
+         LIMIT 30
+    """), {"fresh": SPECTATE_ATTEST_FRESH_SECONDS})).mappings().all()
+    # BATCHED metadata (Codex r5 find 4: the per-game shape reached ~122
+    # serial queries at 30 games; this bounds it at ~35 — one list query,
+    # one players/title batch, one seats batch, one colors + one podium
+    # call, plus one attest-freshness query per game).
+    all_sids = sorted({s for g in games for s in _spectate_roster_list(g["roster"])})
+    meta_by_sid: dict = {}
+    if all_sids:
+        rows = (await db.execute(text("""
+            SELECT p.steam_id, p.display_name, p.id::text AS player_id,
+                   p.allow_spectators,
+                   COALESCE(gr.rating, 1500) AS rating,
+                   si.name AS title, si.preview_color AS title_color,
+                   si.sku AS title_sku
+              FROM players p
+              LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+              LEFT JOIN shop_items si ON si.id = p.active_title_id
+             WHERE p.steam_id = ANY(:sids)
+        """), {"sids": all_sids})).mappings().all()
+        meta_by_sid = {r["steam_id"]: r for r in rows}
+    seats_by_game: dict = {}
+    if games:
+        seat_rows = (await db.execute(text("""
+            SELECT game_id, COUNT(*) AS n FROM spectate_leases
+             WHERE game_id = ANY(:gids) AND revoked_at IS NULL
+               AND heartbeat_expires_at > NOW()
+             GROUP BY game_id
+        """), {"gids": [g["id"] for g in games]})).mappings().all()
+        seats_by_game = {r["game_id"]: r["n"] for r in seat_rows}
+    _colors = await _rank_colors(db)
+    _pmap = await _podium_map(db)
+
+    async def _ready_batched(g) -> tuple[bool, str]:
+        """_spectate_game_ready with the players half prefetched — same
+        rules, one attest query instead of three queries per game."""
+        roster0 = _spectate_roster_list(g["roster"])
+        if len(roster0) != g["fighter_target"]:
+            return False, "room_not_ready"
+        if g["room_capacity"] < g["fighter_target"] + 1:
+            return False, "room_not_ready"
+        lba = g["last_battle_at"]
+        if lba is None or lba < datetime.now(timezone.utc) - timedelta(seconds=SPECTATE_ATTEST_FRESH_SECONDS):
+            return False, "room_not_ready"
+        arows = (await db.execute(text("""
+            SELECT steam_id, roster, region, fighter_target, room_capacity, protocol
+              FROM spectate_attestations
+             WHERE game_id = :gid
+               AND attested_at > NOW() - make_interval(secs => :fresh)
+        """), {"gid": str(g["id"]), "fresh": SPECTATE_ATTEST_FRESH_SECONDS})).mappings().all()
+        a_by_sid = {r["steam_id"]: r for r in arows}
+        for s in roster0:
+            a = a_by_sid.get(s)
+            if a is None:
+                return False, "room_not_ready"
+            if (a["roster"] != g["roster"] or a["region"] != g["room_region"]
+                    or a["fighter_target"] != g["fighter_target"]
+                    or a["room_capacity"] != g["room_capacity"]
+                    or a["protocol"] < g["protocol_min"]):
+                return False, "room_not_ready"
+            m = meta_by_sid.get(s)
+            if m is None or not bool(m["allow_spectators"]):
+                # Generic — never reveal WHICH participant opted out (§6.4).
+                return False, "spectating_disabled"
+        return True, ""
+
+    out = []
+    for g in games:
+        ready, reason = await _ready_batched(g)
+        seats = seats_by_game.get(g["id"], 0)
+        if ready and seats >= g["spectator_cap"]:
+            ready, reason = False, "spectator_full"
+        roster = _spectate_roster_list(g["roster"])
+        names = []
+        titles = []
+        ratings = []
+        for s in roster:
+            r = meta_by_sid.get(s)
+            if r is None:
+                names.append("?"); titles.append(""); ratings.append("1500")
+                continue
+            names.append(r["display_name"] or "?")
+            # Podium pos included (Codex r5 find 6: title_podium resolved
+            # to nothing without it).
+            t, _tc = _display_title_sync(_colors, r["title_sku"], r["title"],
+                                         r["title_color"], float(r["rating"]),
+                                         podium_pos=_pmap.get(r["player_id"]))
+            titles.append(t or "")
+            ratings.append(str(int(r["rating"])))
+        out.append({
+            "game_id": str(g["id"]),
+            "mode": g["mode"],
+            "source_ref": g["source_ref"],
+            # Pipe-joined, roster-aligned (titles can contain commas; pipes
+            # are stripped from display names at ingest).
+            "roster_titles": "|".join(titles),
+            "roster_ratings": ",".join(ratings),
+            # Roster steam ids are public identifiers used across the API;
+            # the client matches Live-panel series by them when source_ref
+            # is empty (1v1 rooms have no server-side series mapping).
+            "roster": g["roster"],
+            "phase": g["phase"],
+            "names": ", ".join(names),
+            "spectator_count": seats,
+            "spectator_cap": g["spectator_cap"],
+            "spectatable": ready,
+            "disabled_reason": reason,
+        })
+    return {"games": out}
+
+
+@app.post("/api/v1/spectate/grant", tags=["Spectate"])
+async def spectate_grant(req: SpectateGrantBody, request: Request,
+                         db: AsyncSession = Depends(get_db)):
+    if not await _strict_steam_session_ok(request, req.steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    if req.client_protocol < SPECTATE_PROTOCOL:
+        raise HTTPException(status_code=426, detail="spectator_upgrade_required")
+
+    game = (await db.execute(text("""
+        SELECT id, mode, source_ref, room_name, room_region, roster,
+               fighter_target, room_capacity, spectator_cap, protocol_min, phase,
+               last_attest_at, last_battle_at
+          FROM spectate_games
+         WHERE id = CAST(:gid AS UUID) AND ended_at IS NULL
+    """), {"gid": req.game_id})).mappings().first()
+    if game is None or game["last_attest_at"] is None:
+        raise HTTPException(status_code=404, detail="game_not_live")
+
+    # Advisory locks: spectator + every roster member, canonical sorted order
+    # (#197) — serializes against concurrent grants, opt-out toggles and the
+    # one-active-lease rule.
+    roster = _spectate_roster_list(game["roster"])
+    if req.steam_id in roster:
+        raise HTTPException(status_code=409, detail="already_in_game")
+    for sid in sorted(set(roster + [req.steam_id])):
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": sid})
+
+    # Authoritative re-reads under the locks (#208).
+    game = (await db.execute(text("""
+        SELECT id, mode, room_name, room_region, roster, fighter_target,
+               room_capacity, spectator_cap, protocol_min, phase,
+               last_attest_at, last_battle_at
+          FROM spectate_games
+         WHERE id = CAST(:gid AS UUID) AND ended_at IS NULL
+           AND last_attest_at > NOW() - make_interval(secs => :fresh)
+    """), {"gid": req.game_id, "fresh": SPECTATE_ATTEST_FRESH_SECONDS})).mappings().first()
+    if game is None:
+        raise HTTPException(status_code=404, detail="game_not_live")
+    ready, reason = await _spectate_game_ready(db, game)
+    if not ready:
+        raise HTTPException(status_code=409, detail=reason or "room_not_ready")
+
+    # One active lease per account, REVOKE-AND-REPLACE (Codex r1 find 14):
+    # a lost grant response leaves a live lease the client never learned of;
+    # a 409 here would strand them until expiry. The advisory lock above
+    # serializes concurrent grants for this account, so replacing is safe —
+    # the old seat dies (its heartbeat now 410s) and the new one is the only
+    # live lease. This runs BEFORE the seat-cap check (Codex r2 find 12: the
+    # caller's own stale lease occupying the last seat otherwise makes their
+    # retry 409 spectator_full).
+    await db.execute(text("""
+        UPDATE spectate_leases SET revoked_at = NOW()
+         WHERE spectator_steam_id = :sid AND revoked_at IS NULL
+    """), {"sid": req.steam_id})
+    if await _spectate_active_seats(db, game["id"]) >= game["spectator_cap"]:
+        raise HTTPException(status_code=409, detail="spectator_full")
+
+    token = secrets.token_urlsafe(24)
+    lease_id = str(uuid.uuid4())
+    await db.execute(text("""
+        INSERT INTO spectate_leases
+            (id, token_hash, game_id, spectator_steam_id,
+             join_expires_at, heartbeat_expires_at)
+        VALUES (CAST(:id AS UUID), :th, :gid, :sid,
+                NOW() + make_interval(secs => :joinw),
+                NOW() + make_interval(secs => :hbw))
+    """), {"id": lease_id, "th": hashlib.sha256(token.encode()).hexdigest(),
+           "gid": str(game["id"]), "sid": req.steam_id,
+           "joinw": SPECTATE_JOIN_WINDOW_SECONDS,
+           "hbw": SPECTATE_JOIN_WINDOW_SECONDS + SPECTATE_HEARTBEAT_TTL_SECONDS})
+    await db.commit()
+    # The ONLY place the room credential leaves the server (§6.2).
+    return {
+        "lease_id": lease_id,
+        "lease_token": token,
+        "room_name": game["room_name"],
+        "region": game["room_region"],
+        "join_expires_in": SPECTATE_JOIN_WINDOW_SECONDS,
+        "heartbeat_interval": 15,
+        "protocol": SPECTATE_PROTOCOL,
+    }
+
+
+@app.post("/api/v1/spectate/heartbeat", tags=["Spectate"])
+async def spectate_heartbeat(req: SpectateLeaseBody, request: Request,
+                             db: AsyncSession = Depends(get_db)):
+    if not await _strict_steam_session_ok(request, req.steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    lease = (await db.execute(text("""
+        SELECT l.id, l.game_id, l.revoked_at, l.heartbeat_expires_at,
+               g.ended_at, g.roster, g.last_attest_at, g.last_battle_at
+          FROM spectate_leases l
+          JOIN spectate_games g ON g.id = l.game_id
+         WHERE l.id = CAST(:lid AS UUID) AND l.spectator_steam_id = :sid
+    """), {"lid": req.lease_id, "sid": req.steam_id})).mappings().first()
+    if lease is None:
+        raise HTTPException(status_code=404, detail="lease_unknown")
+    now_dead = (lease["revoked_at"] is not None
+                or lease["ended_at"] is not None
+                or lease["heartbeat_expires_at"] < datetime.now(timezone.utc)
+                or lease["last_attest_at"] < datetime.now(timezone.utc) - timedelta(seconds=SPECTATE_ATTEST_FRESH_SECONDS * 2)
+                # No live COMBAT recently = the sitting is over (Codex r2
+                # find 13: attest freshness alone let a lease outlive the
+                # match by the full double window).
+                or lease["last_battle_at"] < datetime.now(timezone.utc) - timedelta(seconds=SPECTATE_ATTEST_FRESH_SECONDS * 2))
+    if not now_dead:
+        # Mid-match opt-out = immediate removal (design §6.7 recommendation):
+        # any roster member's revoked consent kills the lease on the next beat.
+        opt = (await db.execute(text("""
+            SELECT COUNT(*) FROM players
+             WHERE steam_id = ANY(:sids) AND allow_spectators IS NOT TRUE
+        """), {"sids": _spectate_roster_list(lease["roster"])})).scalar() or 0
+        if opt > 0:
+            now_dead = True
+    if now_dead:
+        await db.execute(text("""
+            UPDATE spectate_leases SET revoked_at = COALESCE(revoked_at, NOW())
+             WHERE id = CAST(:lid AS UUID)
+        """), {"lid": req.lease_id})
+        await db.commit()
+        raise HTTPException(status_code=410, detail="lease_ended")
+    await db.execute(text("""
+        UPDATE spectate_leases
+           SET heartbeat_expires_at = clock_timestamp() + make_interval(secs => :ttl)
+         WHERE id = CAST(:lid AS UUID)
+    """), {"lid": req.lease_id, "ttl": SPECTATE_HEARTBEAT_TTL_SECONDS})
+    await db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/spectate/leave", tags=["Spectate"])
+async def spectate_leave(req: SpectateLeaseBody, request: Request,
+                         db: AsyncSession = Depends(get_db)):
+    if not await _strict_steam_session_ok(request, req.steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    await db.execute(text("""
+        UPDATE spectate_leases SET revoked_at = COALESCE(revoked_at, NOW())
+         WHERE id = CAST(:lid AS UUID) AND spectator_steam_id = :sid
+    """), {"lid": req.lease_id, "sid": req.steam_id})
+    await db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/spectate/validate", tags=["Spectate"])
+async def spectate_validate(req: SpectateValidateBody, request: Request,
+                            db: AsyncSession = Depends(get_db)):
+    """Master-fighter validation of claimed spectator actors (§6.6). The
+    caller must itself be a session-verified member of the room's roster —
+    a stranger cannot use this endpoint as a lease oracle."""
+    if not await _strict_steam_session_ok(request, req.steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    game = (await db.execute(text("""
+        SELECT id, roster FROM spectate_games
+         WHERE room_name = :room AND ended_at IS NULL
+    """), {"room": req.room_name})).mappings().first()
+    if game is None:
+        raise HTTPException(status_code=404, detail="game_not_live")
+    if req.steam_id not in _spectate_roster_list(game["roster"]):
+        raise HTTPException(status_code=403, detail="not_a_participant")
+    results = []
+    for entry in req.spectators[:8]:
+        ok = False
+        display = ""
+        if entry.steam_id:
+            # ACTOR BINDING (Codex r1 find 3): the first validation binds the
+            # lease to this ActorNumber; any other actor claiming the same
+            # identity finds the lease bound elsewhere and fails. One lease =
+            # one Photon seat.
+            lease = (await db.execute(text("""
+                UPDATE spectate_leases
+                   SET bound_actor = :actor
+                 WHERE game_id = :gid AND spectator_steam_id = :sid
+                   AND revoked_at IS NULL AND heartbeat_expires_at > NOW()
+                   AND (bound_actor IS NULL OR bound_actor = :actor)
+                RETURNING id
+            """), {"gid": str(game["id"]), "sid": entry.steam_id,
+                   "actor": entry.actor_number})).first()
+            if lease is not None:
+                ok = True
+                display = (await db.execute(text("""
+                    SELECT display_name FROM players WHERE steam_id = :sid
+                """), {"sid": entry.steam_id})).scalar() or ""
+        results.append({"actor_number": entry.actor_number, "ok": ok,
+                        "display_name": display})
+    await db.commit()
+    return {"results": results}
+
+
+@app.post("/api/v1/settings/allow-spectators", tags=["Spectate"])
+async def set_allow_spectators(req: AllowSpectatorsBody, request: Request,
+                               db: AsyncSession = Depends(get_db)):
+    if not await _strict_steam_session_ok(request, req.steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    # Serialize against concurrent grant issuance (§6.7): the grant path
+    # advisory-locks every roster member, so locking ourselves here means a
+    # racing grant either sees the new value or completes first — and in the
+    # completes-first case the next heartbeat revokes within 15s.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"), {"sid": req.steam_id})
+    await db.execute(text("""
+        UPDATE players SET allow_spectators = :v WHERE steam_id = :sid
+    """), {"v": bool(req.allow), "sid": req.steam_id})
+    await db.commit()
+    return {"status": "ok", "allow_spectators": bool(req.allow)}

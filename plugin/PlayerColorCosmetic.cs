@@ -71,6 +71,8 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Spectator: no cosmetic publishes (design 3.5, Codex r1 find 13).
+                if (RoomActors.LocalIsSpectator) return;
                 if (!PhotonNetwork.IsConnected || PhotonNetwork.LocalPlayer == null) return;
                 var s = ApiClient.CachedPlayerStats;
                 var props = new ExitGames.Client.Photon.Hashtable();
@@ -218,7 +220,7 @@ namespace CompetitiveRounds
                 if (pm == null || pm.players == null) return;
 
                 Photon.Realtime.Player photonPlayer = null;
-                foreach (var pp in PhotonNetwork.PlayerList)
+                foreach (var pp in RoomActors.ActiveFighters())   // census: cosmetic bodies belong to fighters
                     if (pp != null && pp.ActorNumber == actor) { photonPlayer = pp; break; }
                 if (photonPlayer == null || photonPlayer.CustomProperties == null) return;
 
@@ -319,7 +321,7 @@ namespace CompetitiveRounds
                 int actor = pv.OwnerActorNr;
 
                 Photon.Realtime.Player photonPlayer = null;
-                foreach (var pp in PhotonNetwork.PlayerList)
+                foreach (var pp in RoomActors.ActiveFighters())   // census: cosmetic bodies belong to fighters
                     if (pp != null && pp.ActorNumber == actor) { photonPlayer = pp; break; }
 
                 string sku = "";

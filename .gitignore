@@ -50,6 +50,7 @@ docs/https-migration.md
 docs/bug140-session-analysis.md
 docs/ffa-configurable-lobbies.md
 docs/localization-design.md
+docs/spectator-design.md
 scripts/
 
 # Dual-AI (Codex CLI) setup — LOCAL ONLY, same reason as the internal docs

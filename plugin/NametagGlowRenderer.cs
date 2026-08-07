@@ -118,7 +118,8 @@ namespace CompetitiveRounds
             // room. Clean nicknames strip any rich-text tags so we can compare against
             // tmp.text (which is the already-wrapped styled nickname).
             var nickToGlow = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var pp in PhotonNetwork.PlayerList)
+            // Census: fighters only (same collision rule as the font renderer).
+            foreach (var pp in RoomActors.ActiveFighters())
             {
                 if (pp == null) continue;
                 string cleanNick = NametagStyler.Clean(pp.NickName ?? "");

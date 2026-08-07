@@ -188,6 +188,27 @@ namespace CompetitiveRounds
             // was reviewed in-game (learning #164/#165). 512x512, md5 verified
             // against the DB before writing the PNG.
             new CosmeticDef { Sku = "face_detail_spilled_icecream", DisplayName = "Spilled Icecream", Slot = CharacterItemType.Detail, PngFile = "detail_spilled_icecream.png", Scale = 1.3f, Offset = Vector2.zero },
+
+            // Magical Hat (Nix) — approved placement revision 1, Scale/Offset
+            // copied verbatim from cosmetic_submissions.approved_* (#164/#165).
+            // ANIMATED: 10 frames, detail_magical_hat.png + __f2..__f10.
+            //
+            // Fps = 2.5 is not a taste choice, it is the SOURCE RATE. The
+            // supplied GIF is 10 frames at 400 ms each = a 4.000 s loop, and the
+            // request was for it to play "about the gif's speed". At the 7 fps
+            // the extraction script suggests by default, those 10 frames finish
+            // in 1.43 s — 2.8x too fast, which is the flashing that prompted
+            // this. 10 frames / 2.5 fps = 4.000 s reproduces the source exactly.
+            //
+            // The frames were extracted with --no-trim on purpose. Measured
+            // first: the approved static PNG fills 97.5% of its canvas centred
+            // at (0.501, 0.469) and the GIF frames fill 97.1% centred at
+            // (0.499, 0.470) — already the same framing, so the script's default
+            // trim-and-repad would have RE-FRAMED the art and silently made the
+            // approved scale of 1.3 render the wrong size. Verified after
+            // extraction: every frame's alpha bbox equals its source frame's and
+            // the alpha mismatch is 0 px on all ten.
+            new CosmeticDef { Sku = "face_detail_magical_hat",      DisplayName = "Magical Hat",      Slot = CharacterItemType.Detail, PngFile = "detail_magical_hat.png",      Scale = 1.3f, Offset = Vector2.zero, Fps = 2.5f },
         };
 
         private static readonly Dictionary<int, CosmeticDef> byId = new Dictionary<int, CosmeticDef>();

@@ -129,7 +129,15 @@ namespace CompetitiveRounds
         private const int MAX_SOFT_RETRIES = 3;
         private const float SOFT_RETRY_BACKOFF_S = 5f;
         private const int MAX_CONSECUTIVE_FAILURES = 3;
-        private const float SETTLE_SECONDS = 0.9f;  // > PlayIn 0.35s + particle build
+        // Aug 6 item 3: 0.9s -> 0.55s so the native render shows up faster.
+        // 0.55 still clears PlayIn (0.35s) + a few particle-build frames; the
+        // #139 probe stays the correctness gate. If the FAST settle probes
+        // blank (slow rig, heavy scene), the item soft-retries ONCE with
+        // SETTLE_RETRY_BONUS_S added (1.2s total — above the old 0.9) before
+        // a probe failure is allowed to count toward SnapshotsHealthy, so
+        // the speedup can never cascade into disabling the pipeline.
+        private const float SETTLE_SECONDS = 0.55f; // > PlayIn 0.35s
+        private const float SETTLE_RETRY_BONUS_S = 0.65f;
         private const int SETTLE_MIN_FRAMES = 10;
         private const float TEXT_WAIT_EXTRA_S = 1.0f; // localized-string resolution slack
         private const float PUMP_STALE_SECONDS = 10f; // no pump tick this long = dead host (F4)
@@ -139,6 +147,9 @@ namespace CompetitiveRounds
             public string key;
             public string name;
             public int softRetries;
+            // Extra settle time granted after a fast-settle probe failure
+            // (see SETTLE_SECONDS comment). 0 = first, fast attempt.
+            public float settleBonus;
         }
 
         // FailedCapture: CaptureOne already logged the specific reason —
@@ -154,7 +165,11 @@ namespace CompetitiveRounds
         private static readonly List<string> _cacheOrder = new List<string>();
         private static readonly HashSet<string> _failed =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private static readonly Queue<PendingItem> _queue = new Queue<PendingItem>();
+        // List, not Queue: Aug 6 item 3 added front-of-line priority for the
+        // card the player is LOOKING AT (Card Stats popup / Tab hover) so it
+        // never waits behind a long prewarm backlog. Small (<= MAX_CACHED),
+        // so RemoveAt(0)/Insert(0) costs nothing.
+        private static readonly List<PendingItem> _queue = new List<PendingItem>();
         private static readonly HashSet<string> _queuedKeys =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -174,6 +189,25 @@ namespace CompetitiveRounds
         // hover path (Tab board) would cycle enqueue -> 3 retries -> drop ->
         // re-enqueue forever, spamming the log.
         private static float _softBlockUntil;
+        /// <summary>True while new capture requests are being refused (the
+        /// env-not-ready cooldown, or the cache cap). Codex round 2 (finding
+        /// 10): the seam treats "healthy + not failed + cache miss" as "a
+        /// capture is coming", but RequestSnapshot can DECLINE without
+        /// queuing anything — during the 30s soft block, or once the cache cap
+        /// is reached — and then nothing is coming, so returning null renders
+        /// a blank card while a perfectly good PNG sits on disk.</summary>
+        internal static bool RequestsBlocked
+        {
+            get
+            {
+                try
+                {
+                    return Time.realtimeSinceStartup < _softBlockUntil
+                           || _cache.Count >= MAX_CACHED;
+                }
+                catch { return false; }
+            }
+        }
         private static Outcome _lastOutcome = Outcome.None;
         private static string _lastSoftReason;
         // Generation guard: a locale switch (InvalidateAll) mid-capture must
@@ -240,7 +274,7 @@ namespace CompetitiveRounds
         /// <summary>Starts an async capture for the card if it is not
         /// already cached, failed, or queued. O(1) and log-silent on the
         /// common repeat-call path (called every frame from hover paths).</summary>
-        public static void RequestSnapshot(string cardName)
+        public static void RequestSnapshot(string cardName, bool prioritize = false)
         {
             try
             {
@@ -251,6 +285,19 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(key)) return;
                 if (_cache.ContainsKey(key) || _failed.Contains(key) || _queuedKeys.Contains(key))
                 {
+                    // Aug 6 item 3: a prioritized request for an
+                    // already-queued key jumps that item to the front —
+                    // the player is looking at it right now.
+                    if (prioritize && _queuedKeys.Contains(key) && !_cache.ContainsKey(key))
+                    {
+                        int idx = _queue.FindIndex(p => string.Equals(p.key, key, StringComparison.OrdinalIgnoreCase));
+                        if (idx > 0)
+                        {
+                            var moved = _queue[idx];
+                            _queue.RemoveAt(idx);
+                            _queue.Insert(0, moved);
+                        }
+                    }
                     // F4(a): a queued key must STILL kick the pump — the
                     // coroutine host can die (persistent-GO respawn) and
                     // strand the whole queue; without this, the per-key
@@ -269,7 +316,9 @@ namespace CompetitiveRounds
                     return;
                 }
                 _queuedKeys.Add(key);
-                _queue.Enqueue(new PendingItem { key = key, name = cardName, softRetries = 0 });
+                var pending = new PendingItem { key = key, name = cardName, softRetries = 0 };
+                if (prioritize) _queue.Insert(0, pending);
+                else _queue.Add(pending);
                 EnsurePump();
             }
             catch (Exception ex)
@@ -422,13 +471,14 @@ namespace CompetitiveRounds
                         _queuedKeys.Clear();
                         yield break;
                     }
-                    var item = _queue.Dequeue();
+                    var item = _queue[0];
+                    _queue.RemoveAt(0);
                     _queuedKeys.Remove(item.key);
                     if (_cache.ContainsKey(item.key) || _failed.Contains(item.key)) continue;
 
                     _lastOutcome = Outcome.None;
                     _lastSoftReason = null;
-                    var inner = CaptureOne(pumpId, item.key, item.name);
+                    var inner = CaptureOne(pumpId, item);
                     while (true)
                     {
                         object cur = null;
@@ -489,7 +539,7 @@ namespace CompetitiveRounds
                             {
                                 item.softRetries++;
                                 _queuedKeys.Add(item.key);
-                                _queue.Enqueue(item);
+                                _queue.Add(item);
                                 Plugin.Log?.LogInfo($"[CARDSNAP] '{item.name}' soft-deferred ({_lastSoftReason}) — retry {item.softRetries}/{MAX_SOFT_RETRIES} in {SOFT_RETRY_BACKOFF_S:F0}s");
                                 float until = Time.realtimeSinceStartup + SOFT_RETRY_BACKOFF_S;
                                 while (Time.realtimeSinceStartup < until)
@@ -547,8 +597,10 @@ namespace CompetitiveRounds
         /// manual MoveNext catches exceptions). Every early return records
         /// _lastOutcome and logs its reason (learning #66). pumpId is the
         /// owning pump's id — the cache insert is guarded on it (R2-1).</summary>
-        private static IEnumerator CaptureOne(int pumpId, string key, string cardName)
+        private static IEnumerator CaptureOne(int pumpId, PendingItem pending)
         {
+            string key = pending.key;
+            string cardName = pending.name;
             GameObject clone = null;
             GameObject camGO = null;
             RenderTexture rt = null;
@@ -663,9 +715,12 @@ namespace CompetitiveRounds
                 SetLayerRecursive(clone, _chosenLayer);
 
                 // ── Settle: the card is particle-built over frames ──
+                // settleBonus is 0 on the fast first attempt; a probe-failed
+                // retry re-runs with the bonus so slow rigs still capture.
+                float settleTarget = SETTLE_SECONDS + pending.settleBonus;
                 float settleStart = Time.realtimeSinceStartup;
                 int frames = 0;
-                while (Time.realtimeSinceStartup - settleStart < SETTLE_SECONDS || frames < SETTLE_MIN_FRAMES)
+                while (Time.realtimeSinceStartup - settleStart < settleTarget || frames < SETTLE_MIN_FRAMES)
                 {
                     yield return null;
                     frames++;
@@ -756,6 +811,18 @@ namespace CompetitiveRounds
                 float litFraction = ProbeLitFraction(tex);
                 if (litFraction < PROBE_MIN_LIT_FRACTION)
                 {
+                    if (pending.settleBonus <= 0f)
+                    {
+                        // Fast-settle miss (Aug 6 item 3): the 0.55s window
+                        // may simply have been too short on this rig. Grant
+                        // the retry bonus and soft-retry BEFORE letting a
+                        // probe failure count toward SnapshotsHealthy — the
+                        // speedup must never disable the pipeline.
+                        pending.settleBonus = SETTLE_RETRY_BONUS_S;
+                        _lastOutcome = Outcome.SoftRetry;
+                        _lastSoftReason = $"probe blank on fast settle (lit {litFraction:P2}) — retrying with +{SETTLE_RETRY_BONUS_S:F2}s settle";
+                        yield break;
+                    }
                     _lastOutcome = Outcome.FailedCapture;
                     Plugin.Log?.LogWarning($"[CARDSNAP] #139 probe FAILED for '{cardName}' (lit {litFraction:P2} < {PROBE_MIN_LIT_FRACTION:P1}) — blank capture NOT cached, PNG serves. Card PS shader: {DescribeCardParticleShader(clone)}");
                     yield break;

@@ -1,5 +1,108 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.37.0 — 2026-08-07 — Spectator mode, FFA achievements, Compare-tab depth
+
+Schema: migrations **191–201**. 191–194 were applied on Aug 7 before this release was
+cut (expanded combat telemetry, chat moderation, private lobbies, spectator mode) — verify
+they are applied rather than running them blind. 195 and 198 merge Turkish dotless-i card
+names, 196 back-grants the new FFA achievements, 197 publishes the animated Magical Hat,
+199 back-pays those achievements now that they are priced, 200 adds the tournament
+agreement marker, 201 adds 2v2/1v2 damage timelines.
+
+Release order matters and is specified in exactly one place — `.claude/commands/ship.md`,
+Deploy section. Do not restate it here.
+
+**Minimum version stays at 1.36.0 at release** and is raised to 1.37.0 about two hours
+later, so players have a window to update through Thunderstore or the auto-updater first.
+
+### Added
+
+- **Watch a live ranked match.** Open F5 → Leaderboard and look at **Live Ranked Games**:
+  any game that can be watched carries a **WATCH** button. Click it and you go in as a
+  spectator — no character, no team, no effect on the people playing. **Four seats per
+  game**; if they are full the button simply is not there, and you cannot watch a game you
+  are in.
+  You join to a black "SPECTATOR — Synchronizing" screen and start seeing the match at the
+  **next battle**, at most one point away. That wait is deliberate: rather than drop you
+  into a half-played round with the wrong health and the wrong deck, the mod waits for a
+  clean boundary, rebuilds exactly what both players are holding, and only then shows you
+  anything. After that you get the live match — the arena, both bodies, faces, colours,
+  trails and effects, the crown, cards being picked — plus a top bar with names, titles,
+  ratings, series score and game score. Hold **Tab** for the scoreboard. **Esc** → Leave to
+  stop; you are also returned to the menu automatically if the match ends, everyone leaves,
+  or a player turns spectating off mid-match.
+  **Players can see who is watching.** Everyone in the match sees a **Spectators (N)** line
+  with the watchers' names, taken from the server rather than a client-set nickname — there
+  is no anonymous spectating.
+  **It is opt-out and it is your call.** Settings → Data & Privacy has **Allow spectators**,
+  on by default. Turn it off and nobody can start watching any game you are in, and anyone
+  already watching is dropped within about fifteen seconds. If any one player in a match
+  has it off the whole match is unwatchable, and nobody is told which player it was.
+  Works in ranked 1v1 (queue and room-code) and ranked 2v2. Tournament and casual games are
+  deliberately not spectatable. A match only becomes watchable once *every* player is on
+  this version and their clients independently agree on the room, so nothing you do to your
+  own client makes someone else's game visible.
+  While spectating you cannot queue and cannot bet (a spectator sees what a bettor should
+  not), and betting stays blocked for five minutes afterwards. Spectating earns no XP,
+  gold, rating, achievements or history, and never counts as a disconnect for anyone.
+  *2v2 spectating ships first-playtest.*
+- **Six FFA achievements.** Clean House / Party Crasher / Hostile Takeover for winning a
+  ranked FFA 5–0 with 3, 4 or 5+ players and nobody else scoring; Rampage and Bodycount for
+  over 50 and over 100 kills in one ranked FFA; Heartbreak for losing while holding 10+
+  half points that never became a point. They pay 100/300/500 and 100/500 and 300. Games
+  already played were counted — the badges and the gold were granted retroactively.
+- **FFA Elo graphs in Compare** — "FFA Elo over games" and "FFA Elo over time", alongside
+  the 1v1 pair they mirror.
+- **Player Nemesis**, a new Compare metric listing each selected player's own worst five
+  ranked 1v1 opponents. The existing board is now **Nemesis Comparison** and shows which of
+  the selected players has actually faced each opponent.
+- **DPS over the course of a game.** Hover a DPS cell in match history for a damage-per-
+  second graph of that game. Live now for 1v1 and FFA; 2v2 and 1v2 started recording this
+  release, so their graphs fill in from games played from now on.
+- **Admin panel**: the admin roster, a searchable banned-player list, and a full admin
+  action log.
+- **T-chat moderation**: delete a message, mute or unmute a player with a reason, and see
+  who is currently muted. Translation moderators can moderate their own languages;
+  admins anywhere. Every action is logged.
+- **Private lobbies** for 1v2, 2v2 and FFA — create one with a password and share it.
+- **Magical Hat** (by Nix) is now animated.
+
+### Changed
+
+- **Nemesis counts ranked 1v1 *series*, not every game.** It previously mixed casual
+  matches into a board people read as a ranked stat.
+- **Your body colour now carries into your name, your points and team announcements**, and
+  the shop item is renamed **Body/Team Colour** to say what it actually does.
+- **FFA warns you at match point** with a banner when someone is one point from winning.
+- **A sync tournament is announced as ready when its entrants agree on a TIME**, not merely
+  when eight people have joined. The announcement no longer names a slot, because the
+  winning slot is not decided until the lock and votes can still change until then — the
+  lock's own DM delivers the final time.
+- **The game caps its frame rate at 120 while unfocused.**
+- **The T-chat language switcher moved from Shift to Alt.**
+
+### Fixed
+
+- **Card names were split across duplicate entries.** Turkish-locale clients minted a second
+  spelling of 19 cards (a dotless "ı"), and the server separately split every card by the
+  rarity recorded at pick time — one card could occupy several rows with divided stats.
+  Both are merged, history is repaired, and new reports are normalised on arrival so it
+  cannot come back.
+- **Four queue endpoints could be made to return a server error** by anyone, unauthenticated.
+- **The 2v2 queue poll accepted unauthenticated writes** — its 1v2 and FFA equivalents
+  already required a session.
+- **The FFA leaderboard reported the page size as the total player count.**
+- **Translators no longer see the same string several times.** Nine messages appeared as
+  separate entries that differed only by their colour, and colour is not something a
+  translator should have to re-translate around.
+- **Russian can write "Эло".** The glossary check demanded the Latin "Elo" verbatim and
+  rejected the correct Cyrillic rendering with an error that did not say what would be
+  accepted.
+- Chat moderation controls are now visible to translation moderators, not only to admins.
+- Banning from the admin panel now asks for confirmation first.
+- The per-game DPS graph no longer hides itself for builds that deal damage without firing
+  a shot or raising a block.
+
 ## v1.36.0 — 2026-08-04 — Spanish + Russian, translation portal, native cards
 
 Schema: migrations **179–189**. 187 adds the FFA kills-tiebreak capability columns, 188

@@ -71,6 +71,7 @@ namespace CompetitiveRounds
         internal static bool Send(int phraseId)
         {
             if (phraseId < 0 || phraseId >= Phrases.Length) return false;
+            if (RoomActors.LocalIsSpectator) return false;   // spectators cannot chat into the match
             if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return false;
             if (Time.unscaledTime - _lastSendAt < 2f) return false;
             _lastSendAt = Time.unscaledTime;
@@ -122,6 +123,9 @@ namespace CompetitiveRounds
                 {
                     var room = PhotonNetwork.CurrentRoom;
                     Photon.Realtime.Player p = room != null ? room.GetPlayer(e.Sender) : null;
+                    // A spectator's quick-chat is rejected at RECEIVE too — a
+                    // modified client could skip the send guard (design §3.5).
+                    if (p != null && RoomActors.IsSpectator(p)) return;
                     if (p != null && !string.IsNullOrEmpty(p.NickName)) name = p.NickName;
                 }
                 catch { }

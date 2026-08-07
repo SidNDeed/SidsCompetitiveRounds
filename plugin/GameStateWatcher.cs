@@ -151,6 +151,12 @@ namespace CompetitiveRounds
         // the local slot so all four players' fps series share one cadence
         // (the 1v1 report keeps using the 5s localFpsTimeline unchanged).
         private static readonly List<int> localFps3sTimeline = new List<int>();        // cap 128
+        // Aug 7 item 3: own cumulative damage dealt on that SAME 3s cadence,
+        // for the 2v2/1v2 reports. A peer's damage arrives one sample per
+        // cr_gstats seq advance — also 3s — so every slot in one telemetry row
+        // shares an x-axis and the DPS chart needs a single interval. The 1v1
+        // report keeps its own 5s localDamageTimeline unchanged.
+        private static readonly List<int> localDamage3sTimeline = new List<int>();     // cap 128
         public static float LocalDamageTakenThisMatch { get; private set; }
         // Seconds-since-match-start per matchPointTimeline entry, kept in
         // LOCKSTEP with it (only appended when TimelineAppend actually
@@ -169,6 +175,7 @@ namespace CompetitiveRounds
             public readonly List<int> ping = new List<int>();
             public readonly List<string> hit = new List<string>();
             public readonly List<string> block = new List<string>();
+            public readonly List<int> damage = new List<int>();   // Aug 7 item 3, cumulative
         }
         private static readonly Dictionary<int, PeerTelemetry> peerTele = new Dictionary<int, PeerTelemetry>();
 
@@ -218,6 +225,9 @@ namespace CompetitiveRounds
         private static DateTime sessionStartTime = DateTime.UtcNow;
         private static Dictionary<string, float> sessionTimeByOpponent = new Dictionary<string, float>();
         private static int sessionMatchCount = 0;
+        /// <summary>Spectator snapshot epoch (SpectatorSync.BuildSnapshot):
+        /// bumps at each game-over, so a rematch is visible as a change.</summary>
+        public static int SessionMatchCountValue => sessionMatchCount;
 
         // Per-opponent W/L tracking within session
         private static Dictionary<string, int[]> sessionWLByOpponent = new Dictionary<string, int[]>(); // [rW, rL, cW, cL]
@@ -321,6 +331,83 @@ namespace CompetitiveRounds
         public static int LocalBulletsHitThisMatch { get; private set; }
         public static int LocalBlocksActivatedThisMatch { get; private set; }
         public static int LocalBlocksSuccessfulThisMatch { get; private set; }
+
+        // ── Aug 6 items 1+4: expanded combat telemetry (fed by CombatTelemetry.cs) ──
+        // All reset in the same blocks as the counters above; all ride OUTSIDE
+        // every HMAC canonical.
+        public static float LocalDamageDealtThisMatch { get; private set; }
+        public static float LocalMaxSingleHit { get; private set; }
+        public static float LocalMaxHealthSeen { get; private set; }
+        public static int LocalBestBounceKill { get; private set; }
+        // Deaths observed LOCALLY for both seats (the reporter's observations
+        // cover the opponent — #4, only one client reports). kind: 1 = out of
+        // bounds, 2 = own bullet.
+        public static int LocalDeaths { get; private set; }
+        public static int LocalDeathsBoundary { get; private set; }
+        public static int LocalDeathsOwnBullet { get; private set; }
+        public static int OppDeathsObserved { get; private set; }
+        public static int OppDeathsBoundaryObserved { get; private set; }
+        public static int OppDeathsOwnBulletObserved { get; private set; }
+        // Cumulative damage dealt sampled on the SAME 5s tick as
+        // localFpsTimeline — the DPS chart's x-axis lines up with the FPS
+        // chart for free. Opp side arrives via cr_gstats field 19 (cumulative,
+        // sampled per seq advance ~3s).
+        private static readonly List<int> localDamageTimeline = new List<int>();
+        private static readonly List<int> oppDamageTimeline = new List<int>();
+        /// <summary>True once ANY 22-field cr_gstats has been harvested from
+        /// the peer this match. Codex round 1 (MEDIUM): without this, an
+        /// 18-field (older) peer leaves the expanded Opp* fields at their
+        /// reset ZEROES, and the reporter persists those zeroes as genuine
+        /// observations alongside the real match duration — permanently
+        /// depressing that player's ranked DPS average with data that was
+        /// never measured. NULL-vs-zero is exactly the distinction #257
+        /// exists for, so an unseen peer must report NOTHING, not 0.</summary>
+        public static bool OppExpandedTelemetrySeen { get; private set; }
+        public static float OppDamageDealt { get; private set; }
+        public static float OppMaxSingleHit { get; private set; }
+        public static float OppMaxHealthSeen { get; private set; }
+        public static int OppBestBounceKill { get; private set; }
+
+        public static void RecordLocalDamageDealt(float dmg)
+        {
+            if (dmg <= 0f || float.IsNaN(dmg) || float.IsInfinity(dmg)) return;
+            if (dmg > 100000f) dmg = 100000f;   // sanity clamp (modded/degenerate)
+            LocalDamageDealtThisMatch += dmg;
+            if (dmg > LocalMaxSingleHit) LocalMaxSingleHit = dmg;
+        }
+
+        public static void RecordMaxHealthSample(float maxHealth)
+        {
+            if (maxHealth > LocalMaxHealthSeen && !float.IsInfinity(maxHealth) && maxHealth < 10000000f)
+                LocalMaxHealthSeen = maxHealth;
+        }
+
+        public static void RecordBounceKill(int bounces)
+        {
+            if (bounces > LocalBestBounceKill && bounces < 100000) LocalBestBounceKill = bounces;
+        }
+
+        public static void RecordDeathObserved(bool isLocal, int kind)
+        {
+            if (isLocal)
+            {
+                LocalDeaths++;
+                if (kind == 1) LocalDeathsBoundary++;
+                else if (kind == 2) LocalDeathsOwnBullet++;
+            }
+            else
+            {
+                // In 2v2/1v2/FFA more than one non-local player dies; these
+                // opp counters are only consumed by the 1v1 report, where
+                // "not mine" IS the opponent. Other modes ignore them.
+                OppDeathsObserved++;
+                if (kind == 1) OppDeathsBoundaryObserved++;
+                else if (kind == 2) OppDeathsOwnBulletObserved++;
+            }
+        }
+
+        public static string LocalDamageTimelineCsv => string.Join(",", localDamageTimeline);
+        public static string OppDamageTimelineCsv => string.Join(",", oppDamageTimeline);
 
         // First-fire-per-match log lines let us confirm Harmony patches attach and fire without
         // spamming on every event. Reset in OnMatchStarted alongside the counters.
@@ -873,8 +960,40 @@ namespace CompetitiveRounds
 
         // \u2500\u2500 Main poll loop \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
+        // One-shot latch for the spectator quiesce below.
+        private static bool spectatorQuiesced = false;
+
         public static void Poll()
         {
+            // Spectator lifecycle tick FIRST, before any early return (Codex
+            // r2 find 2: placed after the spectator quiesce, the LeaveRequested
+            // backstop was unreachable in exactly the stuck state it exists
+            // for). Cheap flag checks.
+            try { SpectatorSession.TickPendingClear(); } catch { }
+
+            // SPECTATOR (design §3.5): the whole watcher sleeps — no room
+            // watchdogs, no match tracking, no card/FPS/telemetry publishing,
+            // no report paths. One reset on entry clears any fighter-session
+            // state carried in from before the grant; everything stays down
+            // until the session ends.
+            if (RoomActors.LocalIsSpectator)
+            {
+                if (!spectatorQuiesced)
+                {
+                    spectatorQuiesced = true;
+                    // Plain ResetMatchState — NOT the WithTrail variant
+                    // (playtest #2a): the trail/color/effect OnMatchEnd calls
+                    // revert cosmetics and stop the anim loops, and no fighter
+                    // OnMatchStart ever runs on a spectator to restart them —
+                    // which is why fighters rendered bare. SpectatorSync's
+                    // activation runs the cosmetic start hooks instead.
+                    try { ResetMatchState(); } catch { }
+                    Plugin.Log.LogInfo("[SPECTATE] GameStateWatcher quiesced");
+                }
+                return;
+            }
+            spectatorQuiesced = false;
+
             pollTimer += Time.deltaTime;
             if (pollTimer < 0.1f) return;
             pollTimer = 0f;
@@ -883,6 +1002,168 @@ namespace CompetitiveRounds
             PollMatchState();
             if (isTracking) TryRefreshSharedGameToken();
             PollRoomlessGameScene();
+            TickSpectateAttest();
+        }
+
+        // ── Spectator attestation ticker (design §6.3, fighter side) ─────
+        // Every fighter independently attests the live room every 60s so the
+        // server can list the game once ALL fighters agree; the master also
+        // revalidates claimed spectator actors on the same cadence. Both are
+        // fire-and-forget; nothing in the match waits on either.
+        private static float lastSpectateAttestAt = -999f;
+        private static float lastSpectateValidateAt = -999f;
+        private static bool lastSpectateBattleState = false;
+        // Armed on a battle rising edge; cleared only when an attest SENDS.
+        private static bool spectateAttestEdgePending = false;
+
+        /// <summary>Sid (playtest, Aug 7): PRIVATE/code-room ranked 1v1s are
+        /// spectatable too. True while this client is in a live RANKED
+        /// 1v1 whose room is NOT queue-issued (the #286 population).
+        /// matchIsRanked already requires a modded, consenting opponent
+        /// (#121/#106), and attestation still requires BOTH fighters'
+        /// strict sessions — so both clients are provably on spectator-
+        /// aware builds before the game can be listed.</summary>
+        public static bool RankedCodeRoom1v1InProgress
+        {
+            get
+            {
+                try
+                {
+                    if (!matchIsRanked || !isTracking) return false;
+                    if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return false;
+                    string rn = PhotonNetwork.CurrentRoom?.Name ?? "";
+                    if (rn.StartsWith("ranked_", StringComparison.Ordinal)
+                        || rn.StartsWith("team_", StringComparison.Ordinal)
+                        || rn.StartsWith("ovt_", StringComparison.Ordinal)
+                        || rn.StartsWith("ffa_", StringComparison.Ordinal)
+                        || rn.StartsWith("sct-", StringComparison.Ordinal)) return false;
+                    if (Diag2v2.IsActive()) return false;   // team-shaped rooms are out
+                    return RoomActors.ActiveFighterCount() == 2;
+                }
+                catch { return false; }
+            }
+        }
+
+        private static void TickSpectateAttest()
+        {
+            try
+            {
+                if (RoomActors.LocalIsSpectator) return;
+                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
+                string room = PhotonNetwork.CurrentRoom?.Name ?? "";
+                string mode =
+                    room.StartsWith("ranked_", StringComparison.Ordinal) ? "1v1"
+                    : room.StartsWith("team_", StringComparison.Ordinal) ? "2v2"
+                    : room.StartsWith("ovt_", StringComparison.Ordinal) ? "1v2"
+                    : room.StartsWith("ffa_", StringComparison.Ordinal) ? "ffa"
+                    : "";
+                bool codeRoom = false;
+                if (mode.Length == 0)
+                {
+                    // Private/code ranked 1v1s (Sid, Aug 7 playtest request).
+                    if (!RankedCodeRoom1v1InProgress) return;
+                    mode = "1v1";
+                    codeRoom = true;
+                }
+                if (!isTracking) return;        // only while a game is live
+
+                // Code rooms are created by VANILLA with MaxPlayers=2 — the
+                // master reserves the spectator seats and hides the room the
+                // moment the ranked game is live (queue rooms get this at
+                // creation). Runtime MaxPlayers/IsVisible changes are room
+                // property ops the shipped Photon supports (design §4.1
+                // option 2). Idempotent; master-only.
+                if (codeRoom && PhotonNetwork.IsMasterClient)
+                {
+                    try
+                    {
+                        var cr = PhotonNetwork.CurrentRoom;
+                        if (cr != null && cr.MaxPlayers < 2 + SpectatorSession.SEAT_CAP)
+                        {
+                            cr.MaxPlayers = (byte)(2 + SpectatorSession.SEAT_CAP);
+                            cr.IsVisible = false;
+                            Plugin.Log.LogInfo("[SPECTATE] reserved spectator seats on private ranked room");
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[SPECTATE] seat reserve: {ex.Message}"); }
+                }
+
+                // Master: revalidate claimed spectators (entry validation runs
+                // from the enter callback; this closes mid-match revocation)
+                // and kick any that never validated (fail closed, r1 find 3).
+                if (Time.unscaledTime - lastSpectateValidateAt > 60f)
+                {
+                    lastSpectateValidateAt = Time.unscaledTime;
+                    try { ApiClient.SpectateValidateActors(); } catch { }
+                }
+                try { SpectatorSync.MasterSweepUnvalidated(); } catch { }
+
+                // Battle-phase EDGE detection runs BEFORE the throttle (Codex
+                // r3: placed after it, the edge was unreachable during the
+                // 60s window and a short battle never stamped last_battle_at).
+                // The edge stays ARMED until an attest actually goes out
+                // (Codex r4: stamping the throttle before roster validation
+                // consumed the edge on an incomplete roster and the short
+                // battle still never attested). Timer + edge are cleared at
+                // the SEND site only.
+                bool battle = false;
+                try { battle = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
+                if (battle && !lastSpectateBattleState) spectateAttestEdgePending = true;
+                lastSpectateBattleState = battle;
+
+                if (!spectateAttestEdgePending && Time.unscaledTime - lastSpectateAttestAt < 60f) return;
+                var fighters = RoomActors.ActiveFighters();
+                int target;
+                if (mode == "2v2") target = 4;
+                else if (mode == "1v2") target = 3;
+                else if (mode == "ffa")
+                {
+                    // LIVE fighter count, not cr_ffa_n (Codex r2 find 14): the
+                    // locked size goes stale the moment a leaver drops out,
+                    // and a roster/target mismatch silently stops attesting.
+                    target = fighters.Length;
+                }
+                else target = 2;
+
+                var sids = new List<string>(fighters.Length);
+                foreach (var f in fighters)
+                {
+                    var s = RoomActors.SteamIdOf(f);
+                    if (!string.IsNullOrEmpty(s)) sids.Add(s);
+                }
+                // Canonical roster string: sorted ordinal — every fighter must
+                // produce the identical byte sequence (design §6.3).
+                sids.Sort(StringComparer.Ordinal);
+                if (sids.Count != target) return;   // roster incomplete — nothing to attest yet
+
+                // Roster-freeze catch-up: code rooms never pass the
+                // OnMatchStarted competitive gate (#286), so freeze here the
+                // first time a complete attestable roster exists. Idempotent
+                // for queue rooms (already frozen at match start).
+                try { if (!RoomActors.RosterFrozen) RoomActors.FreezeFighterRoster(sids); } catch { }
+
+                string sourceRef =
+                    mode == "1v1" ? (ApiClient.ActiveRankedSeriesId ?? "")
+                    : mode == "2v2" ? (ApiClient.ActiveTeamSeriesId ?? "")
+                    : mode == "1v2" ? (ApiClient.ActiveOvt1v2SeriesId ?? "")
+                    : (ApiClient.ActiveFfaLobbyId ?? "");
+                string region = "";
+                try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { }
+                int actor = -1;
+                try { actor = PhotonNetwork.LocalPlayer?.ActorNumber ?? -1; } catch { }
+                int cap = 0;
+                try { cap = PhotonNetwork.CurrentRoom?.MaxPlayers ?? 0; } catch { }
+
+                // SEND site: throttle + edge are consumed together, only on a
+                // send that actually happens (r4 — validations above return
+                // without consuming either).
+                lastSpectateAttestAt = Time.unscaledTime;
+                spectateAttestEdgePending = false;
+                ApiClient.SpectateAttest(mode, sourceRef, room, region, actor, target, cap,
+                                         battle ? "battle" : "transition",
+                                         string.Join(",", sids.ToArray()));
+            }
+            catch { }
         }
 
         // ── Bug #79 / July 21 item 3: dead-matchmaking detection + AUTO-REQUEUE ──
@@ -961,7 +1242,9 @@ namespace CompetitiveRounds
                 // C: full vanilla room, game never started.
                 bool fullNoGame = false;
                 if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null
-                    && PhotonNetwork.CurrentRoom.PlayerCount >= 2
+                    // Fighter count (census): a lone searcher + a spectator must
+                    // not read as "full room, no game" and fire the requeue.
+                    && RoomActors.ActiveFighterCount() >= 2
                     && GM_ArmsRace.instance == null)
                 {
                     string rn = PhotonNetwork.CurrentRoom.Name ?? "";
@@ -1115,6 +1398,9 @@ namespace CompetitiveRounds
         /// the opponent can read it. Only active while a match is being tracked.</summary>
         public static void TickFrame()
         {
+            // Spectator: no local input tracking, no KPS/macro metrics, no
+            // spawn-grace edges — there is no local fighter to measure.
+            if (RoomActors.LocalIsSpectator) return;
             // Bug #119: rising-edge detector for the FFA spawn grace window.
             // Runs BEFORE the isTracking gate — the window opens the instant
             // vanilla re-enables the local player at the end of Move, which is
@@ -1153,6 +1439,10 @@ namespace CompetitiveRounds
             {
                 if (localFpsTimeline.Count < 90)
                     localFpsTimeline.Add((int)Math.Round(tlFrames / (double)tlAccum));
+                // Aug 6 item 4: cumulative damage dealt on the same 5s grid,
+                // so the DPS chart shares the FPS chart's x-axis. Same cap.
+                if (localDamageTimeline.Count < 90)
+                    localDamageTimeline.Add((int)LocalDamageDealtThisMatch);
                 tlFrames = 0; tlAccum = 0f;
             }
             bcFrames++; bcAccum += dt;
@@ -1391,7 +1681,11 @@ namespace CompetitiveRounds
             return
                 $"{LocalBulletsFiredThisMatch}|{LocalBulletsHitThisMatch}|{LocalBlocksActivatedThisMatch}|{LocalBlocksSuccessfulThisMatch}|{LocalKeysThisMatch}|{LocalActiveSecondsThisMatch.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}" +
                 $"|{recentFps}|{gstatsSeq}|{localFreezeCount}|{localFreezeFocusedCount}|{localRecvGapCount}|{curPing}|{(int)LocalDamageTakenThisMatch}" +
-                $"|{LocalMacroSuspectSeconds}|{LocalMacroPeakKeysPerSecond}|{LocalMacroPeakClicksPerSecond}|{LocalMacroPeakEventsPerSecond}|{MacroTimelineForPeer()}";
+                $"|{LocalMacroSuspectSeconds}|{LocalMacroPeakKeysPerSecond}|{LocalMacroPeakClicksPerSecond}|{LocalMacroPeakEventsPerSecond}|{MacroTimelineForPeer()}" +
+                // Aug 6 items 1+4 — fields 19-22 (indexes 18-21): cumulative
+                // damage dealt, max single hit, max health seen, best bounce
+                // kill. Old clients ignore extras; parsers gate on Length.
+                $"|{(int)LocalDamageDealtThisMatch}|{(int)LocalMaxSingleHit}|{(int)LocalMaxHealthSeen}|{LocalBestBounceKill}";
         }
 
         private static void BroadcastGstatsImmediate()
@@ -1445,7 +1739,7 @@ namespace CompetitiveRounds
             try
             {
                 if (!PhotonNetwork.InRoom) return;
-                var players = PhotonNetwork.PlayerList;
+                var players = RoomActors.ActiveFighters();   // census: only fighters carry gstats worth harvesting
                 if (players == null) return;
                 // First non-local mod-reporting peer stays the single "opponent"
                 // for the 1v1-shaped fields; EVERY peer is harvested into the
@@ -1485,6 +1779,15 @@ namespace CompetitiveRounds
                                     OppStatMacroPeakEventsPerSecond = int.Parse(parts[16]);
                                     OppStatMacroTimeline = parts[17] ?? "";
                                 }
+                                // Aug 6 items 1+4: expanded telemetry (22-field clients).
+                                if (parts.Length >= 22)
+                                {
+                                    OppExpandedTelemetrySeen = true;
+                                    OppDamageDealt = int.Parse(parts[18]);
+                                    OppMaxSingleHit = int.Parse(parts[19]);
+                                    OppMaxHealthSeen = int.Parse(parts[20]);
+                                    OppBestBounceKill = int.Parse(parts[21]);
+                                }
                                 // July 21 item 2: extended telemetry (new clients only).
                                 if (parts.Length >= 11)
                                 {
@@ -1500,6 +1803,13 @@ namespace CompetitiveRounds
                                         {
                                             int op = int.Parse(parts[11]);
                                             if (op > 0 && oppPingTimeline.Count < 128) oppPingTimeline.Add(op);
+                                        }
+                                        // Aug 6 item 4: opp cumulative damage-dealt series
+                                        // (22-field clients), one sample per seq advance.
+                                        if (parts.Length >= 22 && oppDamageTimeline.Count < 128)
+                                        {
+                                            int od;
+                                            if (int.TryParse(parts[18], out od)) oppDamageTimeline.Add(od);
                                         }
                                         // July 22 item 1: cumulative pair series.
                                         // Review [3]: regression = stale previous-game
@@ -1538,6 +1848,24 @@ namespace CompetitiveRounds
                                     OppStatMacroPeakClicksPerSecond = 0;
                                     OppStatMacroPeakEventsPerSecond = 0;
                                     OppStatMacroTimeline = "";
+                                    /* Codex round 2 (MEDIUM): the expanded
+                                     * (22-field) telemetry has to be cleared
+                                     * by this same new-game signal. Without
+                                     * it, a quick rematch could finish before
+                                     * the peer's next heartbeat and the
+                                     * reporter would submit the PREVIOUS
+                                     * game's damage, max-hit, max-health and
+                                     * bounce record against the new match.
+                                     * OppExpandedTelemetrySeen resets too, so
+                                     * an unobserved peer correctly reports the
+                                     * -1 "never observed" sentinel (-> NULL)
+                                     * rather than a stale positive. */
+                                    OppDamageDealt = 0f;
+                                    OppMaxSingleHit = 0f;
+                                    OppMaxHealthSeen = 0f;
+                                    OppBestBounceKill = 0;
+                                    OppExpandedTelemetrySeen = false;
+                                    oppDamageTimeline.Clear();
                                 }
                             }
                             catch { }
@@ -1580,6 +1908,11 @@ namespace CompetitiveRounds
                 localHitTimeline.Add(LocalBulletsFiredThisMatch + ":" + LocalBulletsHitThisMatch);
             if (localBlockTimeline.Count < 128)
                 localBlockTimeline.Add((int)LocalDamageTakenThisMatch + ":" + LocalBlocksSuccessfulThisMatch);
+            // Aug 7 item 3: cumulative damage DEALT, same cadence and cap as
+            // the pair series above, so the 2v2/1v2 DPS chart shares their
+            // x-axis instead of needing a second interval.
+            if (localDamage3sTimeline.Count < 128)
+                localDamage3sTimeline.Add((int)LocalDamageDealtThisMatch);
         }
 
         // July 22 item 7: per-actor cumulative harvest (all peers, any room —
@@ -1614,7 +1947,7 @@ namespace CompetitiveRounds
                 if (int.TryParse(parts[0], out curFired)
                     && t.hit.Count > 0 && curFired < LastPairFirst(t.hit))
                 {
-                    t.fps.Clear(); t.ping.Clear(); t.hit.Clear(); t.block.Clear();
+                    t.fps.Clear(); t.ping.Clear(); t.hit.Clear(); t.block.Clear(); t.damage.Clear();
                 }
                 int rf = int.Parse(parts[6]);
                 if (rf > 0 && t.fps.Count < 128) t.fps.Add(rf);
@@ -1626,6 +1959,16 @@ namespace CompetitiveRounds
                 if (t.hit.Count < 128) t.hit.Add(parts[0] + ":" + parts[1]);
                 if (parts.Length >= 13 && t.block.Count < 128)
                     t.block.Add(parts[12] + ":" + parts[3]);
+                // Aug 7 item 3: field 19 (index 18) = the peer's cumulative
+                // damage dealt. Same >=22 gate the 1v1 opp harvest uses (the
+                // four expanded fields ship together). A pre-Aug-6 peer sends
+                // none, so this list stays EMPTY rather than filling with
+                // zeroes — "not recorded" must not read as "dealt none" (#257).
+                if (parts.Length >= 22 && t.damage.Count < 128)
+                {
+                    int pd;
+                    if (int.TryParse(parts[18], out pd)) t.damage.Add(pd);
+                }
             }
             catch { }
         }
@@ -1634,9 +1977,9 @@ namespace CompetitiveRounds
         /// Consumed by TryReportTeamMatch when assembling per-slot telemetry.</summary>
         internal static bool TryGetPeerTelemetry(int actorNumber,
             out string fpsTl, out string pingTl, out string hitTl, out string blockTl,
-            out int[] counters)
+            out string damageTl, out int[] counters)
         {
-            fpsTl = pingTl = hitTl = blockTl = null;
+            fpsTl = pingTl = hitTl = blockTl = damageTl = null;
             counters = null;
             PeerTelemetry t;
             if (!peerTele.TryGetValue(actorNumber, out t) || string.IsNullOrEmpty(t.lastRaw)) return false;
@@ -1648,6 +1991,10 @@ namespace CompetitiveRounds
                 pingTl = string.Join(",", t.ping);
                 hitTl = string.Join(",", t.hit);
                 blockTl = string.Join(",", t.block);
+                // Empty for a peer that never published damage (pre-Aug-6
+                // client) — the report must carry "" so the server can store
+                // NULL, never a synthesised 0 (#257).
+                damageTl = string.Join(",", t.damage);
                 counters = new int[] {
                     int.Parse(parts[0]), int.Parse(parts[1]),
                     int.Parse(parts[2]), int.Parse(parts[3]),
@@ -2140,7 +2487,7 @@ namespace CompetitiveRounds
                 double warnAfter = isTournamentRoom ? 90 : (isFfaRoom ? 45 : (isOvtRoom ? 35 : 25));
                 int fullAt = isFfaRoom ? Diag2v2.PlayersNeeded() : (isOvtRoom ? 3 : 2);
                 int pc = 0;
-                try { pc = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { }
+                try { pc = RoomActors.ActiveFighterCount(); } catch { }   // census: fighters fill a room, spectators don't
                 if (pc >= fullAt) rankedRoomEverFull = true;
                 if (!rankedRoomEverFull && !isTracking)
                 {
@@ -2338,7 +2685,10 @@ namespace CompetitiveRounds
                                            || FfaMode.EngineActive();
                     if (multiPlayerMode) { wasInRoom = inRoom; return; }
 
-                    int playerCount = PhotonNetwork.PlayerList?.Length ?? 0;
+                    // Census: the OPPONENT is a fighter; a spectator must not
+                    // set opponentWasPresent (that latch feeds the DC-win path)
+                    // or keep playerCount above the ReportDisconnect gate.
+                    int playerCount = RoomActors.ActiveFighterCount();
                     if (playerCount >= 2)
                         opponentWasPresent = true;
 
@@ -2392,6 +2742,17 @@ namespace CompetitiveRounds
                         {
                             Plugin.Log.LogInfo($"[DC] Opponent {opponentDisplayName} disconnected at game-rounds={localR}-{oppR}, pts={totalPts}, series-games={seriesGames} — reporting leave");
                             ApiClient.ReportDisconnect(localSteamId, opponentSteamId);
+                        }
+                        else if (!matchIsRanked && opponentSteamIdResolved
+                                 && !opponentSteamId.StartsWith("photon_"))
+                        {
+                            // Aug 6 item 1: casual rage-quit tracking. ANY
+                            // midgame leave counts, including at 4-0 (Sid's
+                            // explicit rule) — no meaningful-play or
+                            // match-point gate like the ranked branch.
+                            string _dcRoom = PhotonNetwork.CurrentRoom?.Name ?? "";
+                            Plugin.Log.LogInfo($"[DC] Casual midgame leave by {opponentDisplayName} at {localR}-{oppR} — reporting rage-quit");
+                            ApiClient.ReportCasualDc(localSteamId, opponentSteamId, _dcRoom);
                         }
                         else
                         {
@@ -2498,7 +2859,7 @@ namespace CompetitiveRounds
                                 FfaMode.RecordLeaver(luSid, name, luTeam);
                         }
                         catch { }
-                        int remaining = (PhotonNetwork.CurrentRoom?.PlayerCount ?? 0);
+                        int remaining = RoomActors.ActiveFighterCount();   // census: fighters remaining
                         text = remaining >= 3
                             ? $"{whoTag} left the FFA — the game continues"
                             : $"{whoTag} disconnected or quit mid-game";
@@ -2567,7 +2928,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                Photon.Realtime.Player[] players = PhotonNetwork.PlayerList;
+                Photon.Realtime.Player[] players = RoomActors.ActiveFighters();   // census: opponents are fighters
                 if (players == null) return;
 
                 foreach (var player in players)
@@ -2911,7 +3272,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                var players = PhotonNetwork.PlayerList;
+                var players = RoomActors.ActiveFighters();   // census: token capability is a two-FIGHTER consensus
                 string expectedRoom =
                     PhotonNetwork.CurrentRoom?.Name ?? "";
                 if (players == null
@@ -3130,6 +3491,27 @@ namespace CompetitiveRounds
 
         private static void OnMatchStarted()
         {
+            // Spectator: never tracks a match (defense in depth — the GM
+            // lifecycle that fires this is suppressed on a spectator).
+            if (RoomActors.LocalIsSpectator) return;
+            // Freeze the fighter roster at match start (design §3.2, Codex r1
+            // find 1): from here, a later actor is a spectator (role prop) or
+            // unauthorized — never a new fighter. Competitive rooms only; a
+            // casual quickplay room must keep vanilla late-join behaviour.
+            try
+            {
+                if (CompetitiveRoomDetect.IsCompetitiveRoom())
+                {
+                    var ids = new List<string>();
+                    foreach (var f in RoomActors.ActiveFighters())
+                    {
+                        var s = RoomActors.SteamIdOf(f);
+                        if (!string.IsNullOrEmpty(s)) ids.Add(s);
+                    }
+                    if (ids.Count >= 2) RoomActors.FreezeFighterRoster(ids);
+                }
+            }
+            catch { }
             isTracking = true;
             gameOverReported = false;
             macroEvidenceDispatched = false;
@@ -3149,8 +3531,9 @@ namespace CompetitiveRounds
                     && !roomName.StartsWith("team_", StringComparison.Ordinal)
                     && !roomName.StartsWith("ffa_", StringComparison.Ordinal)
                     && !(roomProps?.ContainsKey("cr_ff") ?? false)
-                    && PhotonNetwork.PlayerList != null
-                    && PhotonNetwork.PlayerList.Length == 2;
+                    // Census: exactly two FIGHTERS — a spectator's Photon seat
+                    // must not flip the 1v1 token path off (or on).
+                    && RoomActors.ActiveFighterCount() == 2;
             }
             catch { oneVOneMatchAtStart = false; }
             BeginSharedGameToken();
@@ -3367,7 +3750,7 @@ namespace CompetitiveRounds
             lastKnownOpponentBroadcastCount = 0;
             try
             {
-                var players = PhotonNetwork.PlayerList;
+                var players = RoomActors.ActiveFighters();   // census: cr_cards is a fighter property
                 foreach (var p in players)
                 {
                     if (p != null && !p.IsLocal && p.CustomProperties != null
@@ -3410,6 +3793,7 @@ namespace CompetitiveRounds
 
         private static void OnGameOver(int winnerTeam)
         {
+            if (RoomActors.LocalIsSpectator) return;   // spectator: no result paths
             if (!isTracking || gameOverReported) return;
             gameOverReported = true;
             sessionMatchCount++;
@@ -3435,10 +3819,10 @@ namespace CompetitiveRounds
             try
             {
                 if ((PhotonNetwork.CurrentRoom?.Name ?? "").StartsWith("ovt_")
-                    && PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length >= 3)
+                    && RoomActors.ActiveFighterCount() >= 3)   // census: label built from fighters
                 {
                     var others = new List<string>();
-                    foreach (var ppN in PhotonNetwork.PlayerList)
+                    foreach (var ppN in RoomActors.ActiveFighters())
                         if (ppN != null && !ppN.IsLocal)
                             others.Add(StripRichText(ppN.NickName ?? "?"));
                     if (others.Count > 0) oppLabel = string.Join(" + ", others);
@@ -3479,11 +3863,11 @@ namespace CompetitiveRounds
             // needed widening. >= 2 (not 3) so a DC-decided game still names
             // whoever is left.
             bool buildMultiKeys =
-                   (sessionRoomIsCrFf && PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length >= 4)
-                || (sessionRoomIsOvt && PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length >= 2);
+                   (sessionRoomIsCrFf && RoomActors.ActiveFighterCount() >= 4)
+                || (sessionRoomIsOvt && RoomActors.ActiveFighterCount() >= 2);
             if (buildMultiKeys)
             {
-                foreach (var pp in PhotonNetwork.PlayerList)
+                foreach (var pp in RoomActors.ActiveFighters())   // census: session keys name fighters only
                 {
                     if (pp == null) continue;
                     if (PhotonNetwork.LocalPlayer != null && pp.ActorNumber == PhotonNetwork.LocalPlayer.ActorNumber) continue;
@@ -3668,7 +4052,7 @@ namespace CompetitiveRounds
                 bool opponentHasMod = false;
                 try
                 {
-                    var players = PhotonNetwork.PlayerList;
+                    var players = RoomActors.ActiveFighters();   // census: reporter dedup keys on the FIGHTER's mod
                     foreach (var p in players)
                     {
                         if (p != null && !p.IsLocal && p.CustomProperties != null
@@ -3758,10 +4142,13 @@ namespace CompetitiveRounds
                 if (rn1.StartsWith("ovt_") && shouldReport)
                 {
                     bool sent = false;
-                    if (PhotonNetwork.PlayerList != null && PhotonNetwork.PlayerList.Length == 3)
+                    // Census: exactly three FIGHTERS — a spectator must not
+                    // suppress the whole 1v2 report (recon's exact-equality
+                    // class: one extra actor = silent no-rating game).
+                    if (RoomActors.ActiveFighterCount() == 3)
                         sent = TryReportOvtMatch(reportRoomId, duration);
                     if (!sent)
-                        Plugin.Log.LogWarning($"[1v2-REPORT-ROUTE] ovt_ room, report not routed (players={PhotonNetwork.PlayerList?.Length ?? -1}) — 1v1 fallback banned");
+                        Plugin.Log.LogWarning($"[1v2-REPORT-ROUTE] ovt_ room, report not routed (fighters={RoomActors.ActiveFighterCount()}) — 1v1 fallback banned");
                     EvaluateAchievements(localWon);
                     isTracking = false;
                     matchIsRanked = false;
@@ -3786,8 +4173,9 @@ namespace CompetitiveRounds
 
                 if (shouldReport
                     && hasSeries
-                    && PhotonNetwork.PlayerList != null
-                    && PhotonNetwork.PlayerList.Length == 4)
+                    // Census: exactly four FIGHTERS (same exact-equality class
+                    // as the 1v2 gate above).
+                    && RoomActors.ActiveFighterCount() == 4)
                 {
                     routedTeamMatch = TryReportTeamMatch(reportRoomId, duration);
                     if (routedTeamMatch)
@@ -3956,7 +4344,28 @@ namespace CompetitiveRounds
                     oppHitTimeline: string.Join(",", oppHitTimeline.ToArray()),
                     localBlockTimeline: string.Join(",", localBlockTimeline.ToArray()),
                     oppBlockTimeline: string.Join(",", oppBlockTimeline.ToArray()),
-                    pointTimes: string.Join(",", pointTimes)
+                    pointTimes: string.Join(",", pointTimes),
+                    // Aug 6 items 1+4: expanded combat telemetry.
+                    localDamageDealt: LocalDamageDealtThisMatch,
+                    // -1 = "this peer never sent expanded telemetry" (an
+                    // older client). The server maps negatives to NULL so the
+                    // averages divide by rows that actually carry the data.
+                    oppDamageDealt: OppExpandedTelemetrySeen ? OppDamageDealt : -1f,
+                    localMaxSingleHit: LocalMaxSingleHit,
+                    oppMaxSingleHit: OppExpandedTelemetrySeen ? OppMaxSingleHit : -1f,
+                    localMaxHealth: LocalMaxHealthSeen,
+                    oppMaxHealth: OppExpandedTelemetrySeen ? OppMaxHealthSeen : -1f,
+                    // Bounce-kill stat CUT (r4) — always report "not recorded".
+                    localBestBounceKill: -1,
+                    oppBestBounceKill: -1,
+                    localDamageTimeline: LocalDamageTimelineCsv,
+                    oppDamageTimeline: OppDamageTimelineCsv,
+                    localDeaths: LocalDeaths,
+                    localDeathsBoundary: LocalDeathsBoundary,
+                    localDeathsOwnBullet: LocalDeathsOwnBullet,
+                    oppDeaths: OppDeathsObserved,
+                    oppDeathsBoundary: OppDeathsBoundaryObserved,
+                    oppDeathsOwnBullet: OppDeathsOwnBulletObserved
                 );
             }
 
@@ -3984,13 +4393,16 @@ namespace CompetitiveRounds
             try
             {
                 if (UnityEngine.Time.time - lastContinuationRequestTime < 8f) return;
-                if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 4) return;
+                // Census: gate AND iteration use the same fighter view — they
+                // must convert together or disagree (recon structural hazard).
+                var fighters = RoomActors.ActiveFighters();
+                if (fighters.Length != 4) return;
 
                 var sids = new string[4];
                 var teams = new int[4];
                 for (int i = 0; i < 4; i++)
                 {
-                    var pp = PhotonNetwork.PlayerList[i];
+                    var pp = fighters[i];
                     if (pp == null) return;
                     string sid = ResolvePhotonSteamId(pp);
                     if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) return;
@@ -4031,13 +4443,15 @@ namespace CompetitiveRounds
             try
             {
                 if (UnityEngine.Time.time - lastOvtContinuationRequestTime < 8f) return;
-                if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 3) return;
+                // Census: gate + iteration from one fighter view (see 2v2 twin).
+                var fighters = RoomActors.ActiveFighters();
+                if (fighters.Length != 3) return;
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null) return;
                 var sids = new string[3]; var teams = new int[3];
                 for (int i = 0; i < 3; i++)
                 {
-                    var pp = PhotonNetwork.PlayerList[i]; if (pp == null) return;
+                    var pp = fighters[i]; if (pp == null) return;
                     string sid = ResolvePhotonSteamId(pp);
                     if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) return;
                     int team = -1;
@@ -4072,7 +4486,10 @@ namespace CompetitiveRounds
         /// is the lowest Steam ID of the three; others route correctly but no-op.</summary>
         private static bool TryReportOvtMatch(string reportRoomId, int duration)
         {
-            if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 3) return false;
+            // Census: gate + roster from ONE fighter view (converted together
+            // with the foreach below — recon structural hazard).
+            var reportFighters = RoomActors.ActiveFighters();
+            if (reportFighters.Length != 3) return false;
             var pm = PlayerManager.instance;
             if (pm == null || pm.players == null) return false;
             if (string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId))
@@ -4080,9 +4497,9 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning("[1v2-REPORT] no active series id — cannot report");
                 return false;
             }
-            // Resolve each Photon actor → Steam ID + in-game TeamID + cards + fps.
-            var info = new Dictionary<string, (string name, int teamId, List<MatchTracker.CardPickData> cards, int fps)>();
-            foreach (var pp in PhotonNetwork.PlayerList)
+            // Resolve each FIGHTER actor → Steam ID + in-game TeamID + cards + fps + damage series.
+            var info = new Dictionary<string, (string name, int teamId, List<MatchTracker.CardPickData> cards, int fps, string dmgTl)>();
+            foreach (var pp in reportFighters)
             {
                 if (pp == null) continue;
                 string sid = ResolvePhotonSteamId(pp);
@@ -4102,8 +4519,16 @@ namespace CompetitiveRounds
                     if (!string.IsNullOrEmpty(raw)) { int order = 1; foreach (var nm in raw.Split('|')) { string cn = CardRarityLookup.GetCanonicalName(ToTitleCase(nm.Trim())); if (string.IsNullOrEmpty(cn)) continue; picks.Add(new MatchTracker.CardPickData { CardName = cn, CardRarity = CardRarityLookup.GetRarity(cn), PickOrder = order++, RoundNumber = 1 }); } }
                 }
                 int fps = 0; if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(FPS_PROP_KEY)) { try { fps = Convert.ToInt32(pp.CustomProperties[FPS_PROP_KEY]); } catch { } }
-                if (pp.IsLocal) { if (localCards != null && localCards.Count > 0) picks = new List<MatchTracker.CardPickData>(localCards); int myFps = LocalAvgFps; if (myFps > 0) fps = myFps; }
-                info[sid] = (name, teamId, picks, fps);
+                // Aug 7 item 3: cumulative damage-dealt series on the 3s
+                // cadence — own side from the local sampler, peers from their
+                // cr_gstats heartbeat. 1v2 has no reporter-side damage table
+                // (the local-damage tracker is dealer-side only, and the FFA
+                // all-players tracker is FFA-gated), so a pre-Aug-6 peer simply
+                // sends nothing and stays EMPTY = NULL server-side, not 0 (#257).
+                string dmgTl = "";
+                if (pp.IsLocal) { if (localCards != null && localCards.Count > 0) picks = new List<MatchTracker.CardPickData>(localCards); int myFps = LocalAvgFps; if (myFps > 0) fps = myFps; dmgTl = string.Join(",", localDamage3sTimeline); }
+                else if (TryGetPeerTelemetry(pp.ActorNumber, out _, out _, out _, out _, out string pDmg, out _)) dmgTl = pDmg ?? "";
+                info[sid] = (name, teamId, picks, fps, dmgTl);
             }
             if (info.Count != 3) { Plugin.Log.LogWarning($"[1v2-REPORT] resolved {info.Count}/3 players"); return false; }
 
@@ -4137,7 +4562,8 @@ namespace CompetitiveRounds
                 duoASid, info[duoASid].name, info[duoASid].cards,
                 duoBSid, info[duoBSid].name, info[duoBSid].cards,
                 soloRounds, duoRounds, soloPoints, duoPoints,
-                localSteamId, info[soloSid].fps, info[duoASid].fps, info[duoBSid].fps);
+                localSteamId, info[soloSid].fps, info[duoASid].fps, info[duoBSid].fps,
+                info[soloSid].dmgTl, info[duoASid].dmgTl, info[duoBSid].dmgTl);
             Plugin.Log.LogInfo($"[1v2-REPORT] submitted solo={soloSid} duo={duoASid},{duoBSid} {soloRounds}-{duoRounds}");
             return true;
         }
@@ -4197,10 +4623,19 @@ namespace CompetitiveRounds
             // July 22 item 1/7: hit/block timelines + point stamps + per-actor harvest.
             localHitTimeline.Clear(); localBlockTimeline.Clear();
             oppHitTimeline.Clear(); oppBlockTimeline.Clear();
-            localFps3sTimeline.Clear();
+            localFps3sTimeline.Clear(); localDamage3sTimeline.Clear();
             pointTimes.Clear();
             LocalDamageTakenThisMatch = 0f;
             peerTele.Clear();
+            // Aug 6 items 1+4: expanded combat telemetry resets.
+            LocalDamageDealtThisMatch = 0f; LocalMaxSingleHit = 0f;
+            LocalMaxHealthSeen = 0f; LocalBestBounceKill = 0;
+            LocalDeaths = 0; LocalDeathsBoundary = 0; LocalDeathsOwnBullet = 0;
+            OppDeathsObserved = 0; OppDeathsBoundaryObserved = 0; OppDeathsOwnBulletObserved = 0;
+            localDamageTimeline.Clear(); oppDamageTimeline.Clear();
+            OppDamageDealt = 0f; OppMaxSingleHit = 0f; OppMaxHealthSeen = 0f; OppBestBounceKill = 0;
+            OppExpandedTelemetrySeen = false;
+            CombatTelemetry.ClearMatchState();
         }
 
         /// <summary>FFA game START hook — called by FfaMode.OnGameStart for
@@ -4215,6 +4650,20 @@ namespace CompetitiveRounds
         /// and its telemetry window never reset.</summary>
         public static void OnFfaMatchStarted()
         {
+            if (RoomActors.LocalIsSpectator) return;   // spectator: no tracking
+            // Roster freeze — same rule as OnMatchStarted (r1 find 1). Re-run
+            // per game: FFA leavers shrink the roster between games.
+            try
+            {
+                var ids = new List<string>();
+                foreach (var f in RoomActors.ActiveFighters())
+                {
+                    var s = RoomActors.SteamIdOf(f);
+                    if (!string.IsNullOrEmpty(s)) ids.Add(s);
+                }
+                if (ids.Count >= 2) RoomActors.FreezeFighterRoster(ids);
+            }
+            catch { }
             try
             {
                 // Per-game latches (the ones OnFfaGameOver / the report path read).
@@ -4294,7 +4743,7 @@ namespace CompetitiveRounds
                     return nm;
                 }
                 var pm = PlayerManager.instance;
-                foreach (var pp in PhotonNetwork.PlayerList ?? new Photon.Realtime.Player[0])
+                foreach (var pp in RoomActors.ActiveFighters())   // census: session records name fighters only
                 {
                     if (pp == null || pp.IsLocal) continue;
                     // Resolve this actor's TeamID the same way the report path
@@ -4383,6 +4832,7 @@ namespace CompetitiveRounds
         /// path can't fire). One-shot per game via gameOverReported.</summary>
         public static void OnFfaGameOver(int winnerTeam)
         {
+            if (RoomActors.LocalIsSpectator) return;   // spectator: no result paths
             if (gameOverReported) return;
             gameOverReported = true;
             isTracking = false;    // the next game re-arms via OnFfaMatchStarted
@@ -4469,7 +4919,9 @@ namespace CompetitiveRounds
             var presentSteams = new List<string>();
             string winnerSteam = null;
 
-            foreach (var pp in PhotonNetwork.PlayerList ?? new Photon.Realtime.Player[0])
+            // Census: the FFA report roster is fighters only — a spectator
+            // must never enter the present-player ledger (design §4.2).
+            foreach (var pp in RoomActors.ActiveFighters())
             {
                 if (pp == null) continue;
                 string sid = ResolvePhotonSteamId(pp);
@@ -4518,9 +4970,13 @@ namespace CompetitiveRounds
                         activeSeconds = LocalActiveSecondsThisMatch,
                     };
                 }
+                // FFA deliberately discards the peer's broadcast damage series:
+                // the reporter computes every player's damage locally (vanilla
+                // RPCs it to All — #127/#130), which is strictly better data,
+                // and it ships at player level below as damageTimeline.
                 else if (TryGetPeerTelemetry(pp.ActorNumber,
                              out string pFps, out string pPing, out string pHit, out string pBlock,
-                             out int[] pCounters))
+                             out _, out int[] pCounters))
                 {
                     int pingAvg = 0;
                     try
@@ -4625,9 +5081,12 @@ namespace CompetitiveRounds
 
         private static bool TryReportTeamMatch(string reportRoomId, int duration)
         {
-            if (PhotonNetwork.PlayerList == null || PhotonNetwork.PlayerList.Length != 4)
+            // Census: gate + roster from ONE fighter view (converted with the
+            // photonPlayers assignment below — recon structural hazard).
+            var reportFighters = RoomActors.ActiveFighters();
+            if (reportFighters.Length != 4)
             {
-                Plugin.Log.LogWarning($"[2v2-REPORT] aborting: PlayerList.Length={PhotonNetwork.PlayerList?.Length ?? -1} (expected 4)");
+                Plugin.Log.LogWarning($"[2v2-REPORT] aborting: fighters={reportFighters.Length} (expected 4)");
                 return false;
             }
 
@@ -4648,7 +5107,7 @@ namespace CompetitiveRounds
             // Resolve Photon ActorNumber → Steam ID via the same ck_id hint our existing
             // resolver writes; if missing, fall back to UserId. We also need each player's
             // teamID to know who's on team 1 vs team 2.
-            var photonPlayers = PhotonNetwork.PlayerList;
+            var photonPlayers = reportFighters;   // census: fighters only in the report roster
             var bySteam = new Dictionary<string, (string name, int teamId, List<MatchTracker.CardPickData> cards, int fps)>();
             // July 22 item 7: per-player telemetry blobs keyed by steam id —
             // local slot from own counters, peers from the cr_gstats harvest.
@@ -4724,6 +5183,9 @@ namespace CompetitiveRounds
                         pingAvg = pingSamples.Count > 0 ? (int)Math.Round(pingSamples.Average()) : 0,
                         hitTimeline = string.Join(",", localHitTimeline.ToArray()),
                         blockTimeline = string.Join(",", localBlockTimeline.ToArray()),
+                        // Aug 7 item 3: cumulative damage dealt on the same 3s
+                        // grid as the three series above.
+                        damageTimeline = string.Join(",", localDamage3sTimeline),
                         bulletsFired = LocalBulletsFiredThisMatch,
                         bulletsHit = LocalBulletsHitThisMatch,
                         blocksActivated = LocalBlocksActivatedThisMatch,
@@ -4734,7 +5196,7 @@ namespace CompetitiveRounds
                 }
                 else if (TryGetPeerTelemetry(pp.ActorNumber,
                              out string pFps, out string pPing, out string pHit, out string pBlock,
-                             out int[] pCounters))
+                             out string pDamage, out int[] pCounters))
                 {
                     int pingAvg = 0;
                     try
@@ -4752,6 +5214,10 @@ namespace CompetitiveRounds
                         pingAvg = pingAvg,
                         hitTimeline = pHit,
                         blockTimeline = pBlock,
+                        // Aug 7 item 3: only a peer running Aug-6-or-newer
+                        // publishes this; older peers leave it empty, which the
+                        // server must store as NULL, not 0 (#257).
+                        damageTimeline = pDamage,
                         bulletsFired = pCounters[0],
                         bulletsHit = pCounters[1],
                         blocksActivated = pCounters[2],
@@ -4892,6 +5358,10 @@ namespace CompetitiveRounds
                             Plugin.Log.LogInfo("[ACH] Player took damage");
                         achTookDamage = true;
                     }
+
+                    // Aug 6 item 1: highest max-health reached this match
+                    // (held-state read — poll cadence is fine, #120).
+                    RecordMaxHealthSample(data.MaxHealth);
 
                     // Death check: data.dead transitioned to true
                     if (data.dead && !lastDeadState)
@@ -5367,7 +5837,7 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.InRoom) return;
                 if (opponentCardsViaHarmony) return; // Harmony provides cards, skip Photon polling
 
-                Photon.Realtime.Player[] players = PhotonNetwork.PlayerList;
+                Photon.Realtime.Player[] players = RoomActors.ActiveFighters();   // census: opponents are fighters
                 if (players == null) return;
 
                 foreach (var player in players)
@@ -5483,7 +5953,11 @@ namespace CompetitiveRounds
             try
             {
                 if (!PhotonNetwork.InRoom) return false;
-                var players = PhotonNetwork.PlayerList;
+                // Census (recon standout): a SPECTATOR runs the mod and
+                // carries cr_spec, so scanning all actors would return true
+                // against a VANILLA opponent — every consumer of this
+                // predicate would then be wrong. Fighters only.
+                var players = RoomActors.ActiveFighters();
                 if (players == null) return false;
                 foreach (var p in players)
                 {
@@ -5507,15 +5981,21 @@ namespace CompetitiveRounds
             return Regex.Replace(input, "<.*?>", "").Trim();
         }
 
+        /* Aug 7 item 2 — INVARIANT casing. Twin of CardRarityLookup.ToTitleCase
+         * in Plugin.cs; see the long note there. Short version: `ToLower()` on a
+         * tr-TR client turns every capital I into U+0131 DOTLESS I, so this
+         * method — which sits on EVERY card-name capture path (log line, Photon
+         * cr_cards property, card-bar scan) — was minting locale-specific card
+         * names that became separate DB rows. Migration 195 merges the strays. */
         private static string ToTitleCase(string input)
         {
             if (string.IsNullOrEmpty(input)) return input;
             // Convert "POISON BULLETS" or "poison bullets" to "Poison Bullets"
-            var words = input.ToLower().Split(' ');
+            var words = input.ToLowerInvariant().Split(' ');
             for (int i = 0; i < words.Length; i++)
             {
                 if (words[i].Length > 0)
-                    words[i] = char.ToUpper(words[i][0]) + words[i].Substring(1);
+                    words[i] = char.ToUpperInvariant(words[i][0]) + words[i].Substring(1);
             }
             return string.Join(" ", words);
         }
@@ -5628,10 +6108,19 @@ namespace CompetitiveRounds
             // July 22 item 1/7: hit/block timelines + point stamps + per-actor harvest.
             localHitTimeline.Clear(); localBlockTimeline.Clear();
             oppHitTimeline.Clear(); oppBlockTimeline.Clear();
-            localFps3sTimeline.Clear();
+            localFps3sTimeline.Clear(); localDamage3sTimeline.Clear();
             pointTimes.Clear();
             LocalDamageTakenThisMatch = 0f;
             peerTele.Clear();
+            // Aug 6 items 1+4: expanded combat telemetry resets.
+            LocalDamageDealtThisMatch = 0f; LocalMaxSingleHit = 0f;
+            LocalMaxHealthSeen = 0f; LocalBestBounceKill = 0;
+            LocalDeaths = 0; LocalDeathsBoundary = 0; LocalDeathsOwnBullet = 0;
+            OppDeathsObserved = 0; OppDeathsBoundaryObserved = 0; OppDeathsOwnBulletObserved = 0;
+            localDamageTimeline.Clear(); oppDamageTimeline.Clear();
+            OppDamageDealt = 0f; OppMaxSingleHit = 0f; OppMaxHealthSeen = 0f; OppBestBounceKill = 0;
+            OppExpandedTelemetrySeen = false;
+            CombatTelemetry.ClearMatchState();
             OppStatMacroSuspectSeconds = 0;
             OppStatMacroPeakKeysPerSecond = 0;
             OppStatMacroPeakClicksPerSecond = 0;

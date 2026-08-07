@@ -862,6 +862,9 @@ namespace CompetitiveRounds
             liveSeriesAutoRefreshAt = Time.unscaledTime + 5f;
             ApiClient.FetchActiveSeries();
             ApiClient.FetchActiveTeamSeries();
+            // Spectatable-games list (10s self-throttle inside) — feeds the
+            // WATCH buttons on the live-series headers.
+            ApiClient.MaybeFetchSpectateGames();
             var sid = MatchTracker.LocalSteamId;
             // FFA betting moved into this column (item 4), so it rides the same
             // 5s tick rather than needing a ticker of its own (#62).
@@ -881,7 +884,11 @@ namespace CompetitiveRounds
           * a retained prefix), so the wrong line could satisfy the "is my echo
           * still on screen" test and the real canonical row would be dropped
           * for good. A monotonic id cannot be confused that way. */
-        public struct ChatEntry { public string Line; public DateTime AddedUtc; public DateTime SentUtc; public string Channel; public long Seq; }
+        /* ChatId (Aug 6 item 5): the SERVER row id, so a moderator
+         * retraction frame can locate and drop an already-rendered
+         * line. 0 = local echo / system line / pre-id row, which a
+         * retraction can never target. */
+        public struct ChatEntry { public string Line; public DateTime AddedUtc; public DateTime SentUtc; public string Channel; public long Seq; public int ChatId; }
         private static long chatSeqNext = 1;
         /* Newest server-issued timestamp observed this session, kept even after
          * the row itself is evicted or filtered away. It is the anchor a
@@ -946,7 +953,7 @@ namespace CompetitiveRounds
             return _historyCardsFull ? I18n.Tr("Cards: <color=#88FF88>FULL</color>")
                                      : I18n.Tr("Cards: <color=#FFCC66>chips</color>");
         }
-        private class HistoryRow{public GameObject root,seriesGO,btnId;public string currentMatchId;public object txtResult,txtOpp,txtFps,txtPing,txtXP,txtDate,txtCards,txtOppCards,txtSeriesHead,txtSeriesElo,txtStats,txtHitYou,txtBlockYou,txtKpsYou,txtHitOpp,txtBlockOpp,txtKpsOpp;}
+        private class HistoryRow{public GameObject root,seriesGO,btnId;public string currentMatchId;public object txtResult,txtOpp,txtFps,txtPing,txtXP,txtDate,txtCards,txtOppCards,txtSeriesHead,txtSeriesElo,txtStats,txtHitYou,txtBlockYou,txtKpsYou,txtHitOpp,txtBlockOpp,txtKpsOpp,txtDpsYou,txtDpsOpp;}
 
         // July 22 item 6: short game code — first 12 hex of the match UUID,
         // dashes stripped, uppercase (same convention as ranked_/sct- rooms).
@@ -1037,7 +1044,7 @@ namespace CompetitiveRounds
             try { MaybeShowLanguagePrompt(); } catch { }
         }
 
-        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
+        public static void Close(){if(pageGO!=null)pageGO.SetActive(false);isOpen=false;try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: the picker is parented to the PERSISTENT overlay canvas, which Close() never deactivates - without this an Escape with the dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
         /// <summary>Sid2's screenshot shows the page title/footer over live
         /// gameplay on his 16:10 monitor while 16:9 machines never see it.
@@ -1539,6 +1546,26 @@ namespace CompetitiveRounds
         private const int GROUP_ADMIN=6;   // GROUP_LABELS index of the admin-gated slot
         private static int GroupOf(int tabIdx){for(int g=0;g<GROUP_MEMBERS.Length;g++)for(int m=0;m<GROUP_MEMBERS[g].Length;m++)if(GROUP_MEMBERS[g][m]==tabIdx)return g;return 0;}
         private static bool TabVisible(int i){return i!=10||ApiClient.IsArtist;}
+
+        /* Aug 7 review find 2: T-chat moderation is NOT an admin-only power on the
+         * server. A live `chat_moderate` language grant authorises mute / unmute /
+         * delete inside that language's channel (main.py _chat_moderator_scope),
+         * but every one of those controls sat inside the admin-gated tab — so the
+         * grant was unreachable from the client and the feature it exists for
+         * could never be used by the people it was granted to.
+         *
+         * /admin/check-status now answers `chat_moderator` beside `is_admin`, so
+         * the authority is READ rather than inferred — it rides the same one-shot
+         * status call every client already makes and flips the tab on from the
+         * same late-resolution path as IsAdmin / IsArtist.
+         *
+         * This decides ONE thing: whether the moderation controls are worth
+         * showing. WHICH channels a moderator may act in stays entirely
+         * server-side (#159 — a client-side scope check is a rendering
+         * suggestion, not a gate); its 403 text is surfaced verbatim. */
+        /// <summary>May the local player reach the T-chat moderation controls?</summary>
+        private static bool CanModerateChat => ApiClient.IsAdmin || ApiClient.IsChatModerator;
+
         private static void BuildTabBar(Transform parent)
         {
             var bar=new GameObject("TabBar");bar.transform.SetParent(parent,false);bar.AddComponent<RectTransform>();UIFactory.AddHLG(bar,spacing:4);UIFactory.AddLE(bar,prefH:28,minH:28,flexH:0);
@@ -1586,7 +1613,16 @@ namespace CompetitiveRounds
             for(int g=0;g<GROUP_LABELS.Length;g++)
             {
                 if(groupButtons[g]==null)continue;
-                if(g==GROUP_ADMIN)groupButtons[g].SetActive(ApiClient.IsAdmin);
+                // A chat moderator reaches the tab too, but sees ONLY the T-chat
+                // moderation row — BuildAdminTab/RefreshAdmin hide the rest. The
+                // label has to say so: "Admin" on a panel that holds one chat
+                // control is a promise the tab does not keep, and it invites a
+                // moderator to report the missing sections as a bug.
+                if(g==GROUP_ADMIN)
+                {
+                    groupButtons[g].SetActive(CanModerateChat);
+                    UIFactory.SetText(groupTexts[g],ApiClient.IsAdmin?"Admin":"Moderation");
+                }
                 UIFactory.SetImageColor(groupButtons[g],g==ag?C_TABACT:C_TAB);
                 if(groupTexts[g]!=null){UIFactory.SetColor(groupTexts[g],g==ag?C_WHITE:C_LABEL);UIFactory.SetBold(groupTexts[g],g==ag);}
             }
@@ -1629,7 +1665,7 @@ namespace CompetitiveRounds
         // controls interactable for the host only, labels visible to all).
         private static GameObject ffaSettingsRow;
         private static object txtFfaCfgTarget, txtFfaCfgPicks, txtFfaCfgCap;
-        private static GameObject ffaCfgSameBtn, ffaCfgRankedBtn;
+        private static GameObject ffaCfgSameBtn, ffaCfgRankedBtn;   // sudden-death toggle cut (r4 HIGH)
         private static readonly List<GameObject> ffaCfgHostBtns = new List<GameObject>();
         private static float ffaCfgTickAt;   // 1s dirty ticker while lock countdown live (#62)
         private static GameObject ffaBrowserContainer;
@@ -1703,7 +1739,7 @@ namespace CompetitiveRounds
             // OWN hover region so the right graph pops for the cell under the
             // cursor, and a hover region is sized to its cell's rendered text
             // rather than a shared full-width strip (learnings #90/#143).
-            public object txtHit, txtBlock, txtFps, txtPing;
+            public object txtHit, txtBlock, txtFps, txtPing, txtDps;
             // Full chronological pick list for the hover tooltip; null/empty
             // when the inline line already shows everything (nothing rolled).
             public string cardsHoverText;
@@ -1843,6 +1879,28 @@ namespace CompetitiveRounds
             ffaCfgSameBtn=UIFactory.CreateButton("FfaCfgSame",ffaSettingsRow.transform,"Same Cards: OFF",16f,C_WHITE,C_BTN,
                 ()=>{if(!ApiClient.FfaLobbyIsHost){CompetitiveUI.ShowNotification("Only the host can change lobby settings.",C_DIM,3f);return;}
                      ApiClient.FfaSetLobbySetting("same_card_rule",0,!ApiClient.FfaLobbyCfgSame,true);dirty=true;},sizeDelta:new Vector2(172,30));
+            /* Aug 6 item 10 — SUDDEN DEATH IS CUT FROM THIS RELEASE.
+             *
+             * Codex round 4 (HIGH): the suppression decision reads each
+             * replica's own asynchronously-observed `data.dead`, so two
+             * clients can disagree about whether a hit between two
+             * non-match-point players exists at all. One applies it, the
+             * other suppresses it, and the victim's health permanently
+             * diverges — in a RANKED FFA, where it can change the round
+             * result. The author's own note called out a one-ping window;
+             * the review showed the window is not the whole problem.
+             *
+             * Making it correct needs a master-authoritative decision
+             * broadcast to every replica, the same shape as the poison
+             * protocol — which took several rounds and shipped INERT first.
+             * That is its own piece of work, so the TOGGLE IS REMOVED here
+             * rather than shipping a rule that can desync a rated match
+             * (#280: the failure mode must be no worse than what it
+             * replaces). The server column, config plumbing and capability
+             * gate all remain in place and default FALSE, so nothing can
+             * turn it on and re-enabling it later is a UI change plus a
+             * deterministic redesign.
+             */
             ffaCfgRankedBtn=UIFactory.CreateButton("FfaCfgRk",ffaSettingsRow.transform,"Ranked",16f,C_WHITE,C_BTN,
                 ()=>{if(!ApiClient.FfaLobbyIsHost){CompetitiveUI.ShowNotification("Only the host can change lobby settings.",C_DIM,3f);return;}
                      ApiClient.FfaSetLobbySetting("is_ranked",0,!ApiClient.FfaLobbyCfgRanked,true);dirty=true;},sizeDelta:new Vector2(110,30));
@@ -1861,7 +1919,7 @@ namespace CompetitiveRounds
             ffaBrowserContainer.transform.SetParent(lobbyPanel.transform,false);
             ffaBrowserContainer.AddComponent<RectTransform>();
             UIFactory.AddVLG(ffaBrowserContainer,spacing:3);
-            txtFfaLobbyBody=UIFactory.CreateText("FfaQLB",lobbyPanel.transform,"<color=#888>Loading...</color>",18f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1035,29));
+            txtFfaLobbyBody=UIFactory.CreateText("FfaQLB",lobbyPanel.transform,$"<color=#888>{I18n.Tr("Loading...")}</color>",18f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(1035,29));
             var qlbC=txtFfaLobbyBody as Component;
             if(qlbC!=null)UIFactory.AddLE(qlbC.gameObject,prefH:29,minH:29,flexH:0);
             UIFactory.SetWordWrap(txtFfaLobbyBody,true);
@@ -2158,6 +2216,9 @@ namespace CompetitiveRounds
             row.txtBlock=CreateFfaTextCell("Block",stats.transform,112,UIFactory.AlignMidLeft,13f,C_LABEL);
             row.txtFps=CreateFfaTextCell("Fps",stats.transform,74,UIFactory.AlignMidLeft,13f,C_LABEL);
             row.txtPing=CreateFfaTextCell("Ping",stats.transform,74,UIFactory.AlignMidLeft,13f,C_LABEL);
+            // Aug 6 item 4 — avg DPS. Row budget: 34+104+112+74+74+86 = 484 plus
+            // 5 gaps of 6 = 514, well inside the FFA row width.
+            row.txtDps=CreateFfaTextCell("Dps",stats.transform,86,UIFactory.AlignMidLeft,13f,C_LABEL);
             row.statsGO=stats;
 
             row.txtCards=UIFactory.CreateText("Cards",row.root.transform,"",15f,new Color(0.4f,0.47f,0.55f),
@@ -2248,7 +2309,7 @@ namespace CompetitiveRounds
             hoverText=null;
             if(player?.cards==null||player.cards.Count==0)return "";
             int rolled=0;
-            var sb=new StringBuilder("    "+I18n.Tr("<color=#667788>Cards:</color>")+" ");
+            var sb=new StringBuilder("    <color=#667788>"+I18n.Tr("Cards:")+"</color> ");
             bool firstHeld=true;
             for(int i=0;i<player.cards.Count;i++)
             {
@@ -2454,21 +2515,52 @@ namespace CompetitiveRounds
                 // row of dashes.
                 bool hasCombat=player.bullets_fired>0||player.blocks_activated>0;
                 bool hasConn=player.fps_avg>0||player.ping_avg>0;
-                if(ui.statsGO!=null)ui.statsGO.SetActive(hasCombat||hasConn);
-                if(hasCombat||hasConn)
+                // Aug 7 review find 4: damage stands on its own. A melee, body-
+                // damage or trap build deals real damage with zero shots and zero
+                // blocks, so hasCombat alone would hide its DPS. RECORD_NONE is
+                // the "not recorded" sentinel; 0 is a legitimate value (#257).
+                bool hasDamage=player.damage_dealt>=0;
+                if(ui.statsGO!=null)ui.statsGO.SetActive(hasCombat||hasConn||hasDamage);
+                if(hasCombat||hasConn||hasDamage)
                 {
                     string hitTxt="",blkTxt="",fpsTxt="",pingTxt="";
                     var inv=System.Globalization.CultureInfo.InvariantCulture;
+                    /* These two colour the LABEL and leave the value in the cell's
+                     * own colour, so the tag closes mid-message and the markup
+                     * cannot be hoisted out of the literal the way every other
+                     * telemetry string here was: the close tag would have to land
+                     * at a word boundary only the translation knows. "Block {0}%"
+                     * therefore stays a second key alongside the whole-wrapped one
+                     * the 1v1 history row uses. Wrapping the WHOLE string to merge
+                     * them would tint the number too — a silent restyle. */
                     if(player.bullets_fired>0)
                         hitTxt=I18n.TrF("<color=#FF9988>Hit</color> {0}%",(100f*player.bullets_hit/player.bullets_fired).ToString("F0",inv));
                     if(player.blocks_activated>0)
-                        blkTxt=I18n.TrF("<color=#99CCFF>Block</color> {0}%",(100f*player.blocks_successful/player.blocks_activated).ToString("F0",inv));
+                        /* Colour hoisted out of the literal so the key is the plain "Block {0}%",
+                         * matching the sibling call sites that already use it. The tag
+                         * used to close after the word, leaving the percentage
+                         * uncoloured; it is now tinted like every other Block cell in
+                         * the mod, which is the small deliberate visual change this
+                         * key collapse costs. */
+                        blkTxt="<color=#99CCFF>"+I18n.TrF("Block {0}%",(100f*player.blocks_successful/player.blocks_activated).ToString("F0",inv))+"</color>";
                     if(player.fps_avg>0)fpsTxt=I18n.TrF("<color=#8FA3B8>{0} fps</color>",player.fps_avg);
                     if(player.ping_avg>0)pingTxt=I18n.TrF("<color=#8FA3B8>{0} ms</color>",player.ping_avg);
+                    /* Aug 6 item 4 — avg DPS over the whole game. A NULL damage
+                     * column (every game before the telemetry clients) renders a
+                     * DASH, never "0.0" — 0 is a legitimate value here (#257).
+                     * The dash still needs hasCombat: it exists so a row that
+                     * ALREADY shows telemetry doesn't lose a column, whereas a
+                     * recorded damage value earns the cell on its own. */
+                    string dpsTxt="";
+                    if(hasDamage||hasCombat)
+                        dpsTxt="<color=#C9A6E8>"+I18n.TrF("{0} dps",
+                            hasDamage&&match.duration_seconds>0
+                                ?(player.damage_dealt/(float)match.duration_seconds).ToString("F1",inv):"-")+"</color>";
                     UIFactory.SetTextRaw(ui.txtHit,hitTxt);
                     UIFactory.SetTextRaw(ui.txtBlock,blkTxt);
                     UIFactory.SetTextRaw(ui.txtFps,fpsTxt);
                     UIFactory.SetTextRaw(ui.txtPing,pingTxt);
+                    UIFactory.SetTextRaw(ui.txtDps,dpsTxt);
                     // Only register a region when the cell actually rendered
                     // text: an EMPTY element has preferredWidth 0, which the
                     // hover resolver treats as "no fraction" = a FULL-width
@@ -2487,6 +2579,14 @@ namespace CompetitiveRounds
                         RegisterTeleGraphRectFor(ui.txtFps,player.fps_timeline,null,false,null,match.timeline,outerClip:ffaTabOuterViewport,subjectLabel:subjectName);
                     if(!string.IsNullOrEmpty(pingTxt))
                         RegisterTeleGraphRectFor(ui.txtPing,player.ping_timeline,null,true,null,match.timeline,outerClip:ffaTabOuterViewport,subjectLabel:subjectName);
+                    /* Aug 7 item 3d: per-second damage line. FFA samples every
+                     * participant on the one 3s telemetry tick, so unlike 1v1
+                     * there is a single cadence for the whole match. A row
+                     * predating the damage columns has no timeline, so the
+                     * converter returns an EMPTY series and nothing is registered
+                     * even though the cell renders its dash. */
+                    if(!string.IsNullOrEmpty(dpsTxt))
+                        RegisterDpsGraphRectFor(ui.txtDps,CumulativeToDps(player.damage_timeline,DPS_STEP_FFA),null,null,match.timeline,DPS_STEP_FFA,ffaTabOuterViewport,subjectName);
                 }
 
                 string cards=BuildFfaCardsText(player,out string cardsHover);
@@ -3160,7 +3260,7 @@ namespace CompetitiveRounds
                 UIFactory.SetText(txtFfaLobbyBody,n==0
                     ?(ApiClient.FfaLobbiesUnavailable
                         ?"<color=#FFAA55>Lobby browser unavailable right now — the server may be updating.</color>"
-                        :lobbies==null?"<color=#888>Loading...</color>"
+                        :lobbies==null?$"<color=#888>{I18n.Tr("Loading...")}</color>"
                                       :"<color=#888>No open lobbies — create one and invite players on Discord!</color>")
                     :"");
                 newH=n==0?29:2;
@@ -3640,7 +3740,7 @@ namespace CompetitiveRounds
             var onBox=UIFactory.CreatePanel("HOn",left.transform,C_PANEL);UIFactory.AddVLG(onBox,spacing:2,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(onBox,flexH:1);
             UIFactory.CreateText("HOnH",onBox.transform,"Players",19f,C_SUB,sizeDelta:new Vector2(380,28));
             var onSV=UIFactory.CreateScrollView("HOnSV",onBox.transform,spacing:0);UIFactory.AddLE(onSV.scrollGO,flexH:1);
-            txtHomeOnline=UIFactory.CreateText("HOnT",onSV.content.transform,"<color=#888><i>Loading...</i></color>",15f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(380,24));
+            txtHomeOnline=UIFactory.CreateText("HOnT",onSV.content.transform,$"<color=#888><i>{I18n.Tr("Loading...")}</i></color>",15f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(380,24));
             UIFactory.SetWordWrap(txtHomeOnline,true);UIFactory.SetTextAutoHeight(txtHomeOnline);
             /* Discord Link panel (moved from My Stats — same statics rewired). */
             var linkBox=UIFactory.CreatePanel("LkB",left.transform,C_PANEL);UIFactory.AddVLG(linkBox,spacing:4,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(linkBox,flexH:0);UIFactory.CreateText("LkL",linkBox.transform,"Discord Link",19f,new Color(0.55f,0.55f,0.95f),sizeDelta:new Vector2(340,28));var lkRow=new GameObject("LkR");lkRow.transform.SetParent(linkBox.transform,false);lkRow.AddComponent<RectTransform>();UIFactory.AddHLG(lkRow,spacing:8);UIFactory.AddLE(lkRow,prefH:28);linkCodeBtn=UIFactory.CreateButton("LkBtn",lkRow.transform,"Get Link Code",15f,C_WHITE,C_BTN,()=>{var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.GenerateLinkCode(id);},sizeDelta:new Vector2(130,26));/* Click-to-reveal on the link text - Discord ID/username defaults hidden for streamers.
@@ -3655,7 +3755,7 @@ namespace CompetitiveRounds
              * rows carry fixed prefH:80, the scroll itself takes the flex). */
             var cosBox=UIFactory.CreatePanel("HCos",left.transform,C_PANEL);UIFactory.AddVLG(cosBox,spacing:3,padL:10,padR:10,padT:6,padB:6);UIFactory.AddLE(cosBox,prefH:340,minH:280,flexH:0);
             UIFactory.CreateText("HCosH",cosBox.transform,"Newest Cosmetics",22f,new Color(0.85f,0.6f,1f),sizeDelta:new Vector2(380,30));
-            /* 400x40 + wrap (was 380x22): the RU "Updates of {0} & {1}..." caption runs ~450px at 15pt and clipped; two wrapped lines fit the 420-wide column, the rows ScrollView below absorbs the 18px. */txtHomeCosmetics=UIFactory.CreateText("HCosT",cosBox.transform,"<color=#888><i>Loading...</i></color>",15f,C_DIM,UIFactory.AlignTopLeft,sizeDelta:new Vector2(400,40));UIFactory.SetWordWrap(txtHomeCosmetics,true);
+            /* 400x40 + wrap (was 380x22): the RU "Updates of {0} & {1}..." caption runs ~450px at 15pt and clipped; two wrapped lines fit the 420-wide column, the rows ScrollView below absorbs the 18px. */txtHomeCosmetics=UIFactory.CreateText("HCosT",cosBox.transform,$"<color=#888><i>{I18n.Tr("Loading...")}</i></color>",15f,C_DIM,UIFactory.AlignTopLeft,sizeDelta:new Vector2(400,40));UIFactory.SetWordWrap(txtHomeCosmetics,true);
             var cosSV=UIFactory.CreateScrollView("HCosSV",cosBox.transform,spacing:2);UIFactory.AddLE(cosSV.scrollGO,flexH:1);
             homeCosRows.Clear();for(int i=0;i<HOME_COS_ROWS;i++)homeCosRows.Add(CreateHomeCosRow(cosSV.content.transform,i));
             var right=new GameObject("HRight");right.transform.SetParent(cols.transform,false);right.AddComponent<RectTransform>();UIFactory.AddVLG(right,spacing:4);UIFactory.AddLE(right,flexW:1,flexH:1);
@@ -3723,7 +3823,7 @@ namespace CompetitiveRounds
                 var sb=new StringBuilder();
                 var on=ApiClient.CachedOnlinePlayers;var rec=ApiClient.CachedRecentPlayers;
                 sb.Append(I18n.Tr("<color=#66FF88>Online now</color>")).Append('\n');
-                if(on==null)sb.Append(I18n.Tr("<color=#888><i>Loading...</i></color>")).Append('\n');
+                if(on==null)sb.Append($"<color=#888><i>{I18n.Tr("Loading...")}</i></color>").Append('\n');
                 else if(on.Count==0)sb.Append(I18n.Tr("<color=#888><i>Nobody visible right now.</i></color>")).Append('\n');
                 else foreach(var p in on)sb.Append($"<color=#66FF88>*</color> {HomeSan(p.name)}{HomeTitleSpan(p)}  <color=#8FA3B8>{p.rating}</color>\n");
                 sb.Append("\n"+I18n.Tr("<color=#99AAEE>Recently online</color>")+"\n");
@@ -3787,7 +3887,7 @@ namespace CompetitiveRounds
                 }
                 if(txtHomeCosmetics!=null)
                     UIFactory.SetTextRaw(txtHomeCosmetics,
-                        cos==null?I18n.Tr("<color=#888><i>Loading...</i></color>"):
+                        cos==null?$"<color=#888><i>{I18n.Tr("Loading...")}</i></color>":
                         cos.Count==0?I18n.Tr("<color=#888><i>None yet.</i></color>"):
                         cosCaption);
                 for(int i=0;i<homeCosRows.Count;i++)
@@ -3894,7 +3994,7 @@ namespace CompetitiveRounds
            1920 (#199), so that budget does not move with aspect or resolution.
            Wrap off so an over-long locale truncates on ONE line instead of pushing
            a second line down into the per-game stats row. */
-        row.txtXP=UIFactory.CreateText("x",main.transform,"",16f,C_BLUE,UIFactory.AlignMidRight,sizeDelta:new Vector2(135,25));UIFactory.SetWordWrap(row.txtXP,false);row.txtDate=UIFactory.CreateText("d",main.transform,"",15f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(45,25));/* Item 4 (v1.30): per-game combat stats line — sits in the dead space under the FPS values. Hidden (empty) for rows without telemetry. July 22 item 1: split into per-player elements so each Hit%/Block% is its own hover target popping its own graph. */var st=new GameObject("st");st.transform.SetParent(row.root.transform,false);st.AddComponent<RectTransform>();UIFactory.AddHLG(st,spacing:2);UIFactory.AddLE(st,prefH:20);var cStat=new Color(0.65f,0.7f,0.78f);/* Feedback item 4: widths hug the rendered text so the line reads like the old single-string layout (hover regions trim to preferredWidth regardless). */row.txtStats=UIFactory.CreateText("st0",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(70,20));row.txtHitYou=UIFactory.CreateText("hy",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,20));row.txtBlockYou=UIFactory.CreateText("by",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(88,20));row.txtKpsYou=UIFactory.CreateText("ky",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(96,20));row.txtHitOpp=UIFactory.CreateText("ho",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,20));row.txtBlockOpp=UIFactory.CreateText("bo",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(88,20));row.txtKpsOpp=UIFactory.CreateText("ko",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(96,20));row.txtCards=UIFactory.CreateText("c",row.root.transform,"",19f,new Color(0.6f,0.7f,0.9f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtCards,1.5f);row.txtOppCards=UIFactory.CreateText("oc",row.root.transform,"",19f,new Color(0.9f,0.6f,0.5f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtOppCards,1.5f);/* item 7c: both carry a translated "Cards:"/"Opp:" prefix at 19pt in a 25px box — the fallback line box does not fit and Truncate drops the whole row. */UIFactory.FitOneLine(row.txtCards);UIFactory.FitOneLine(row.txtOppCards);row.root.SetActive(false);return row;}
+        row.txtXP=UIFactory.CreateText("x",main.transform,"",16f,C_BLUE,UIFactory.AlignMidRight,sizeDelta:new Vector2(135,25));UIFactory.SetWordWrap(row.txtXP,false);row.txtDate=UIFactory.CreateText("d",main.transform,"",15f,C_DIM,UIFactory.AlignMidRight,sizeDelta:new Vector2(45,25));/* Item 4 (v1.30): per-game combat stats line — sits in the dead space under the FPS values. Hidden (empty) for rows without telemetry. July 22 item 1: split into per-player elements so each Hit%/Block% is its own hover target popping its own graph. */var st=new GameObject("st");st.transform.SetParent(row.root.transform,false);st.AddComponent<RectTransform>();UIFactory.AddHLG(st,spacing:2);UIFactory.AddLE(st,prefH:20);var cStat=new Color(0.65f,0.7f,0.78f);/* Feedback item 4: widths hug the rendered text so the line reads like the old single-string layout (hover regions trim to preferredWidth regardless). */row.txtStats=UIFactory.CreateText("st0",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(70,20));row.txtHitYou=UIFactory.CreateText("hy",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,20));row.txtBlockYou=UIFactory.CreateText("by",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(88,20));row.txtKpsYou=UIFactory.CreateText("ky",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(96,20));/* Aug 6 item 4: avg DPS cells. Width budget for this HLG row: 70+110+88+96+92 +110+88+96+92 = 842 plus 8 gaps of 2 = 858, inside the row's 900px content width — checked before adding, because an over-budget HLG compresses every cell and TMP paints the overflow across its neighbours (#199/#245). */row.txtDpsYou=UIFactory.CreateText("dy",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(92,20));row.txtHitOpp=UIFactory.CreateText("ho",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(110,20));row.txtBlockOpp=UIFactory.CreateText("bo",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(88,20));row.txtKpsOpp=UIFactory.CreateText("ko",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(96,20));row.txtDpsOpp=UIFactory.CreateText("do",st.transform,"",14f,cStat,UIFactory.AlignMidLeft,sizeDelta:new Vector2(92,20));row.txtCards=UIFactory.CreateText("c",row.root.transform,"",19f,new Color(0.6f,0.7f,0.9f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtCards,1.5f);row.txtOppCards=UIFactory.CreateText("oc",row.root.transform,"",19f,new Color(0.9f,0.6f,0.5f),sizeDelta:new Vector2(900,25));UIFactory.SetCharSpacing(row.txtOppCards,1.5f);/* item 7c: both carry a translated "Cards:"/"Opp:" prefix at 19pt in a 25px box — the fallback line box does not fit and Truncate drops the whole row. */UIFactory.FitOneLine(row.txtCards);UIFactory.FitOneLine(row.txtOppCards);row.root.SetActive(false);return row;}
 
         private static object txtLBPlayerName;
         private static GameObject BuildLeaderboardTab(Transform parent){var panel=new GameObject("Leaderboard");panel.transform.SetParent(parent,false);panel.AddComponent<RectTransform>();UIFactory.AddHLG(panel,spacing:6);UIFactory.AddLE(panel,flexH:1);/* === LEFT: Recent Ranked Series === */var seriesCol=UIFactory.CreatePanel("LBSeries",panel.transform,C_PANEL);UIFactory.AddVLG(seriesCol,spacing:2,padL:8,padR:8,padT:6,padB:6);/* Round 7: both SIDE panels carry identical prefW 400 + flexW 1 so the leftover splits evenly and the fixed-width table column sits in the TRUE screen center (sub-tabs anchor inside it and center with it). The flex value being EXPLICIT is still load-bearing — see learning #132. */UIFactory.AddLE(seriesCol,prefW:400,minW:340,flexW:1,flexH:1);txtLiveHeader=UIFactory.CreateText("RSL",seriesCol.transform,"<color=#FF6688>* Live Ranked Series</color>",17f,C_WHITE,UIFactory.AlignMidLeft,sizeDelta:new Vector2(280,26));txtLiveSeries=UIFactory.CreateText("LIVE",seriesCol.transform,"<color=#666><i>No live ranked series right now.</i></color>",13f,C_WHITE,UIFactory.AlignTopLeft,sizeDelta:new Vector2(280,24));UIFactory.SetWordWrap(txtLiveSeries,true);liveBetsContainer=new GameObject("LiveBets");liveBetsContainer.transform.SetParent(seriesCol.transform,false);liveBetsContainer.AddComponent<RectTransform>();UIFactory.AddVLG(liveBetsContainer,spacing:2);/* No LayoutElement: VLG on this container already sums child preferred heights with priority 0 and reports that as its preferred height, so the parent VLG sizes us correctly. Previously an LE with prefH:0 priority:1 was overriding that sum to 0, collapsing the live series into the recent series list below. */
@@ -4456,7 +4556,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // the image as the popup body. The art already contains
                 // the card's name + description + stats baked in, so we
                 // skip the text rendering paths entirely.
-                Sprite cardSprite = CardImageLoader.GetSprite(cardName);
+                Sprite cardSprite = CardImageLoader.GetSprite(cardName, prioritize: true);
                 /* item 6: remember the request key and the sprite this build
                  * actually bound, so TickCardPreviewUpgrade can rebuild once the
                  * async native capture lands. Recorded even when null — a card
@@ -4872,7 +4972,30 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // July 21 item 7: ordered key list per the active sort. Server gold
             // (ach[key].gold) replaces the old client hardcode; fall back to the
             // legacy values when the server hasn't sent gold yet (old server).
-            Func<string,int> goldOf=k=>{int g=ach!=null&&ach.ContainsKey(k)?ach[k].gold:0;if(g<=0)g=(k=="regicide"||k=="stan_slayer")?1000:100;return g;};
+            /* Codex Aug-7 r2 (MEDIUM): the legacy fallback fired on g<=0, which
+             * cannot distinguish "old server sent no gold" from "this
+             * achievement genuinely pays 0". The six FFA badges are explicitly
+             * 0g, so every one of them was advertised and sorted as +100g while
+             * unlocking paid nothing. Fall back ONLY when the key is absent from
+             * the server response (the real "old server" signal); an explicit 0
+             * is now honoured. */
+            /* The pending/failed fallback names the values this build knows, so
+             * the tab never advertises a reward the server would contradict.
+             * It briefly hard-coded the six FFA keys as 0g; Sid priced them on
+             * 2026-08-07, so they are listed with their real values instead —
+             * a stale 0 here would under-advertise exactly as badly as the
+             * original 100 over-advertised. Server response always wins; this
+             * only fills the gap before it arrives. */
+            Func<string,int> localGold=k=>{
+                switch(k){
+                    case "ffa_shutout_3": case "ffa_kills_50":            return 100;
+                    case "ffa_shutout_4": case "ffa_half_point_heartbreak": return 300;
+                    case "ffa_shutout_5": case "ffa_kills_100":           return 500;
+                    case "regicide": case "stan_slayer":                  return 1000;
+                }
+                return 100;
+            };
+            Func<string,int> goldOf=k=>{if(ach!=null&&ach.ContainsKey(k))return ach[k].gold;return localGold(k);};
             Func<string,float> pctOf=k=>ach!=null&&ach.ContainsKey(k)?ach[k].global_pct:0f;
             Func<string,bool> gotOf=k=>ach!=null&&ach.ContainsKey(k)&&ach[k].unlocked;
             Func<string,DateTime> dateOf=k=>{if(gotOf(k)){string ua=ach[k].unlocked_at;if(!string.IsNullOrEmpty(ua)&&ua!="null"){try{return DateTime.Parse(ua);}catch{}}}return DateTime.MinValue;};
@@ -4895,8 +5018,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetColor(row.txtDesc,got?C_LABEL:new Color(0.4f,0.4f,0.45f));
             /* Gold shows on EVERY row now (item 7: players should see the prize
              * before earning it); date joins it once unlocked. */
-            int ag=goldOf(key);string dt=got?"":$"<color=#8a7a4a>+{ag}g</color>";
-            if(got){string d="";string ua=ach[key].unlocked_at;if(!string.IsNullOrEmpty(ua)&&ua!="null"){try{d=DateFmt.Full(DateTime.Parse(ua));}catch{}}dt=$"{d}  <color=#FFD94D>+{ag}g</color>";}
+            /* A 0g achievement shows no reward chip at all rather than "+0g".
+             * Codex Aug-7 r3 (LOW): the UNLOCKED branch below used to append the
+             * chip unconditionally, so an earned 0g badge rendered "+0g" — the
+             * exact thing this comment promised never happens. The chip is now
+             * suppressed on both paths; an unlocked 0g badge shows just its date. */
+            int ag=goldOf(key);string dt=(got||ag<=0)?"":$"<color=#8a7a4a>+{ag}g</color>";
+            if(got){string d="";string ua=ach[key].unlocked_at;if(!string.IsNullOrEmpty(ua)&&ua!="null"){try{d=DateFmt.Full(DateTime.Parse(ua));}catch{}}dt=ag>0?$"{d}  <color=#FFD94D>+{ag}g</color>":d;}
             UIFactory.SetText(row.txtDate,dt);UIFactory.SetColor(row.txtDate,got?C_GREEN:C_DIM);
             /* Selected-row highlight so the earners panel has a visible anchor. */
             try{if(UIFactory.tImage!=null&&row.main!=null){var img=row.main.GetComponent(UIFactory.tImage);UIFactory.tImage.GetProperty("color",BindingFlags.Public|BindingFlags.Instance)?.SetValue(img,key==achSelectedKey?new Color(0.22f,0.25f,0.34f,0.95f):C_PANEL);}}catch{}
@@ -5882,6 +6010,49 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(384, 24));
             UIFactory.SetBold(t, true);
             UIFactory.SetWordWrap(t, false);
+            AddSpectateButton(row.transform, s.series_id, s.p1_steam_id, s.p2_steam_id);
+        }
+
+        /// <summary>Append a WATCH button when the spectate registry lists a
+        /// spectatable game for this series. Matching is by server-derived
+        /// source_ref when present (2v2/1v2/ffa), else by roster containment
+        /// (1v1 rooms have no server-side series mapping — Codex r1 find 4
+        /// moved source_ref server-side). The game_id is captured at
+        /// row-build time (#265: bind to the entity the row RENDERS, never
+        /// re-index a mutable cache in the click handler).</summary>
+        private static void AddSpectateButton(Transform rowParent, string seriesId,
+                                              string steamA = null, string steamB = null)
+        {
+            try
+            {
+                var games = ApiClient.CachedSpectateGames;
+                if (games == null) return;
+                ApiClient.SpectateGameInfo match = null;
+                foreach (var g in games)
+                {
+                    if (g == null || !g.spectatable) continue;
+                    if (!string.IsNullOrEmpty(seriesId) && g.source_ref == seriesId) { match = g; break; }
+                    if (!string.IsNullOrEmpty(steamA) && !string.IsNullOrEmpty(steamB)
+                        && !string.IsNullOrEmpty(g.roster))
+                    {
+                        var members = g.roster.Split(',');
+                        bool hasA = false, hasB = false;
+                        foreach (var m in members)
+                        {
+                            if (m == steamA) hasA = true;
+                            else if (m == steamB) hasB = true;
+                        }
+                        if (hasA && hasB) { match = g; break; }
+                    }
+                }
+                if (match == null) return;
+                string gameId = match.game_id;   // capture the ENTITY, not the cache index
+                var btn = UIFactory.CreateButton("watch", rowParent,
+                    I18n.Tr("WATCH"), 12f, Color.white, new Color(0.16f, 0.32f, 0.45f),
+                    () => ApiClient.RequestSpectateGrant(gameId),
+                    sizeDelta: new Vector2(64, 22));
+            }
+            catch { }
         }
 
         private static void ApplyBetRow(GameObject row, ApiClient.ActiveSeriesEntry s, bool betOnP1)
@@ -5953,6 +6124,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 14f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 24));
             UIFactory.SetWordWrap(t, false);
             UIFactory.SetBold(t, true);
+            AddSpectateButton(row.transform, s.series_id);
         }
 
         private static void ApplyTeamBetRow(GameObject row, ApiClient.ActiveTeamSeriesEntry s, int team)
@@ -6175,7 +6347,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // Index order MUST match the filter switch in RefreshShop:
         // 0 All, 1 Cosmetics, 2 Name Styles, 3 Maps, 4 Titles, 5 Trails, 6 Body Color, 7 Cursor, 8 Effects, 9 Other.
         // i18n: property for the same access-time-translation reason as TAB_NAMES.
-        private static string[] SHOP_TAB_NAMES => new[] { I18n.Tr("All"), I18n.Tr("Cosmetics"), I18n.Tr("Name Styles"), I18n.Tr("Maps"), I18n.Tr("Titles"), I18n.Tr("Trails"), I18n.Tr("Body Color"), I18n.Tr("Cursor"), I18n.Tr("Effects"), I18n.Tr("Other") };
+        private static string[] SHOP_TAB_NAMES => new[] { I18n.Tr("All"), I18n.Tr("Cosmetics"), I18n.Tr("Name Styles"), I18n.Tr("Maps"), I18n.Tr("Titles"), I18n.Tr("Trails"), I18n.Tr("Body/Team Color"), I18n.Tr("Cursor"), I18n.Tr("Effects"), I18n.Tr("Other") };
         private static readonly string[] SHOP_TAB_DESCS = {
             "All cosmetics - everything available, grouped by category.",
             "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
@@ -6650,7 +6822,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         {
                             UIFactory.SetTextRaw(txtShopStatus, ok
                                 ? I18n.Tr("<color=#88FF88>Equipped.</color>")
-                                : I18n.TrF("<color=#FF8888>Failed: {0}</color>", resp));
+                                : $"<color=#FF8888>{I18n.TrF("Failed: {0}", resp)}</color>");
                             dirty = true;
                             // Nametag styles change how our Photon NickName reads - republish so
                             // opponents (modded or not) see the update mid-room without needing
@@ -7328,9 +7500,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // -- Settings Tab ----------------------------------------
         private static object txtConsentStatus, txtDeleteStatus;
         private static GameObject consentToggleBtn, deleteBtn, confirmDeleteBtn, cancelDelBtn, notifToggleBtn;
-        private static GameObject fpsToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn;
+        private static GameObject fpsToggleBtn, fpsCapToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn;
         private static GameObject appearOfflineBtn; private static object appearOfflineTxt;
         private static GameObject showDiscordBtn; private static object showDiscordTxt;
+        private static GameObject allowSpectatorsBtn; private static object allowSpectatorsTxt;
         // v1.32 items 7+8 toggle rows.
         private static GameObject screenShakeToggleBtn, mapLightingToggleBtn, mapShadowsToggleBtn, animCosToggleBtn, bloomToggleBtn;
         private static object screenShakeToggleTxt, mapLightingToggleTxt, mapShadowsToggleTxt, animCosToggleTxt, bloomToggleTxt;
@@ -7343,7 +7516,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // Bug #159: heavier menu text (the game's own font at a higher SDF weight).
         private static GameObject heavyFontBtn;
         private static object heavyFontTxt;
-        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt;
+        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt;
         // v1.26.8 perf-pass toggles. Master + 7 per-patch flags; renders in a
         // collapsible section at the bottom of the Settings panel.
         private static GameObject perfMasterBtn, perfStunBtn, perfBulletsBtn, perfHitSndBtn, perfColorGhBtn, perfEdgeBnBtn, perfTagBtn, perfMenuBtn;
@@ -7500,6 +7673,35 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 "Shows your Discord name on the leaderboard (opt-in; link Discord on the Home tab first).");
             showDiscordTxt = UIFactory.GetButtonText(showDiscordBtn);
 
+            // Spectator opt-out (design §6.7). Server-authoritative: the
+            // toggle blocks NEW grants immediately and the heartbeat recheck
+            // removes CURRENT spectators within ~15s.
+            allowSpectatorsBtn = SettingsToggle(consentBox.transform, "SAllowSpec", new Vector2(340, 28),
+                () =>
+                {
+                    var st = ApiClient.CachedPlayerStats;
+                    var id = MatchTracker.LocalSteamId;
+                    if (st == null || string.IsNullOrEmpty(id) || id == "unknown") return;
+                    st.allow_spectators = !st.allow_spectators;
+                    bool requested = st.allow_spectators;
+                    dirty = true;
+                    ApiClient.SetAllowSpectators(id, requested, (ok, resp) =>
+                    {
+                        if (!ok)
+                        {
+                            // Roll the optimistic flip BACK (Codex r1 find 16):
+                            // a failed request must not leave the UI claiming a
+                            // privacy state the server never stored.
+                            var stNow = ApiClient.CachedPlayerStats;
+                            if (stNow != null) stNow.allow_spectators = !requested;
+                            CompetitiveUI.ShowNotification(I18n.Tr("Couldn't change the spectator setting - try again"), Color.yellow, 3f);
+                        }
+                        dirty = true;
+                    });
+                },
+                "Allow other players to spectate your ranked games. Turning this off also removes current spectators.");
+            allowSpectatorsTxt = UIFactory.GetButtonText(allowSpectatorsBtn);
+
             // -- Language & Translation --
             // Sid, Aug 3: pulled out of "Visuals & Effects" (where it sat
             // between chromatic aberration and map lighting) and placed
@@ -7532,6 +7734,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 },
                 "Frames per second, top-left corner. Handy for checking whether a setting actually helped.");
             fpsToggleTxt = UIFactory.GetButtonText(fpsToggleBtn);
+            fpsCapToggleBtn = SettingsToggle(intBox.transform, "SFPSCap", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Unfocused FPS cap toggled");
+                    Plugin.CapFpsUnfocused.Value = !Plugin.CapFpsUnfocused.Value;
+                    dirty = true;
+                },
+                "Caps the game at 120 FPS while the window is not focused. Saves GPU/CPU when alt-tabbed; lifts instantly when you come back.");
+            fpsCapToggleTxt = UIFactory.GetButtonText(fpsCapToggleBtn);
             pingToggleBtn = SettingsToggle(intBox.transform, "SPing", new Vector2(260, 28),
                 () =>
                 {
@@ -8009,6 +8220,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.ShowFps.Value
                         ? "FPS counter: <color=#88FF88>ON</color>"
                         : "FPS counter: <color=#FF9966>OFF</color>");
+            if (fpsCapToggleTxt != null && Plugin.CapFpsUnfocused != null)
+                UIFactory.SetText(fpsCapToggleTxt,
+                    Plugin.CapFpsUnfocused.Value
+                        ? "Unfocused 120 FPS cap: <color=#88FF88>ON</color>"
+                        : "Unfocused 120 FPS cap: <color=#FF9966>OFF</color>");
             if (appearOfflineTxt != null)
             {
                 var stAo = ApiClient.CachedPlayerStats;
@@ -8027,6 +8243,16 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         : (stSd.show_discord
                             ? "Show Discord on leaderboard: <color=#88FF88>ON</color>"
                             : "Show Discord on leaderboard: <color=#FF9966>OFF</color>"));
+            }
+            if (allowSpectatorsTxt != null)
+            {
+                var stAs = ApiClient.CachedPlayerStats;
+                UIFactory.SetText(allowSpectatorsTxt,
+                    stAs == null
+                        ? I18n.Tr("Allow spectators: <color=#888>...</color>")
+                        : (stAs.allow_spectators
+                            ? I18n.Tr("Allow spectators: <color=#88FF88>ON</color>")
+                            : I18n.Tr("Allow spectators: <color=#FF9966>OFF</color>")));
             }
             if (pingToggleTxt != null && Plugin.ShowRegionPing != null)
                 UIFactory.SetText(pingToggleTxt,
@@ -8364,7 +8590,39 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         /// rendered "6-x" (Sid's July 12 item 1). Treat >=2 as already-counted.</summary>
         private static string FmtHalfScore(int rounds,int pts){if(pts>=2)pts=0;return pts>0?(rounds+pts*0.5f).ToString("0.#",System.Globalization.CultureInfo.InvariantCulture):rounds.ToString();}
 
-        private static void FillRow(HistoryRow row,ApiClient.MatchHistoryEntry m,bool indent){string r=m.won?"W":"L";Color c=m.won?C_GREEN:C_RED;UIFactory.SetText(row.txtResult,$"{(indent?"    ":"  ")}{r}  {FmtHalfScore(m.player_rounds_won,m.player_points)}-{FmtHalfScore(m.opponent_rounds_won,m.opponent_points)}");UIFactory.SetColor(row.txtResult,c);/* r2 find 3: the character budget below is a first pass; the pixel fit is what actually keeps this cell out of the FPS column, because FitOneLine leaves it unclipped. 236 = the 240px cell less a hair of slack. *//* r3 find 14: TrF the whole template — `$"vs {name}"` produced the dynamic string "vs Alice", which can never match the catalogue key "vs {0}", so this cell stayed English in es/ru (compose-after-Tr, learning #298c). Raw because the text is already translated. */UIFactory.SetTextRaw(row.txtOpp,indent?"":UIFactory.FitToWidth(row.txtOpp,I18n.TrF("vs {0}",FormatOpponentForRow(m,HIST_OPP_BUDGET_ROW,HIST_OPP_BUDGET_ROW)),236f));UIFactory.SetText(row.txtFps,BuildFpsTag(m));UIFactory.SetText(row.txtPing,BuildPingTag(m));RegisterTeleGraphRectFor(row.txtFps,m.player_fps_timeline,m.opp_fps_timeline,false,m.point_times,m.point_timeline);RegisterTeleGraphRectFor(row.txtPing,m.player_ping_timeline,m.opp_ping_timeline,true,m.point_times,m.point_timeline);/* Item 4: per-game combat stats under the FPS line. Only rows with telemetry (post-mig-111 + both mods) render; old rows stay clean. July 22 item 1: split into per-player elements — hovering a Hit% pops that player's fired-vs-hit graph, a Block% pops dmg-taken-vs-blocks, all with point markers. */{string durTag=m.duration_seconds>0?$"      <color=#8FA3B8>{m.duration_seconds/60}:{m.duration_seconds%60:00}</color>":"";UIFactory.SetText(row.txtStats,durTag);string hy="",by="",ky="",ho="",bo="",ko="";if(m.player_bullets_fired>0||m.player_blocks_activated>0){float hp=m.player_bullets_fired>0?100f*m.player_bullets_hit/m.player_bullets_fired:0f;float bp=m.player_blocks_activated>0?100f*m.player_blocks_successful/m.player_blocks_activated:0f;float kps=m.player_active_seconds>0.5f?m.player_keys_pressed/m.player_active_seconds:0f;hy=I18n.TrF("<color=#99B3E6>You: Hit {0}%</color>",hp.ToString("F0",_INV));by=I18n.TrF("<color=#99B3E6>Block {0}%</color>",bp.ToString("F0",_INV));ky=I18n.TrF("<color=#99B3E6>{0} keys/s</color>",kps.ToString("F1",_INV));if(m.opp_bullets_fired>0||m.opp_blocks_activated>0){float ohp=m.opp_bullets_fired>0?100f*m.opp_bullets_hit/m.opp_bullets_fired:0f;float obp=m.opp_blocks_activated>0?100f*m.opp_blocks_successful/m.opp_blocks_activated:0f;float okps=m.opp_active_seconds>0.5f?m.opp_keys_pressed/m.opp_active_seconds:0f;ho=I18n.TrF("<color=#E69988>Opp: Hit {0}%</color>",ohp.ToString("F0",_INV));bo=I18n.TrF("<color=#E69988>Block {0}%</color>",obp.ToString("F0",_INV));ko=I18n.TrF("<color=#E69988>{0} keys/s</color>",okps.ToString("F1",_INV));}}UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline);}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);UIFactory.SetTextRaw(row.txtCards,!string.IsNullOrEmpty(m.cards_display)?$"        {I18n.Tr("Cards:")} {(_historyCardsFull ? m.cards_display : FormatCardLine(m.cards_display))}":"");UIFactory.SetTextRaw(row.txtOppCards,!string.IsNullOrEmpty(m.opp_cards_display)?$"        {I18n.Tr("Opp:")}   {(_historyCardsFull ? m.opp_cards_display : FormatCardLine(m.opp_cards_display))}":"");if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());RegisterHoverRectFor(row.txtCards,m.cards_display,false);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true);row.root.SetActive(true);}
+        private static void FillRow(HistoryRow row,ApiClient.MatchHistoryEntry m,bool indent){string r=m.won?"W":"L";Color c=m.won?C_GREEN:C_RED;UIFactory.SetText(row.txtResult,$"{(indent?"    ":"  ")}{r}  {FmtHalfScore(m.player_rounds_won,m.player_points)}-{FmtHalfScore(m.opponent_rounds_won,m.opponent_points)}");UIFactory.SetColor(row.txtResult,c);/* r2 find 3: the character budget below is a first pass; the pixel fit is what actually keeps this cell out of the FPS column, because FitOneLine leaves it unclipped. 236 = the 240px cell less a hair of slack. *//* r3 find 14: TrF the whole template — `$"vs {name}"` produced the dynamic string "vs Alice", which can never match the catalogue key "vs {0}", so this cell stayed English in es/ru (compose-after-Tr, learning #298c). Raw because the text is already translated. */UIFactory.SetTextRaw(row.txtOpp,indent?"":UIFactory.FitToWidth(row.txtOpp,I18n.TrF("vs {0}",FormatOpponentForRow(m,HIST_OPP_BUDGET_ROW,HIST_OPP_BUDGET_ROW)),236f));UIFactory.SetText(row.txtFps,BuildFpsTag(m));UIFactory.SetText(row.txtPing,BuildPingTag(m));RegisterTeleGraphRectFor(row.txtFps,m.player_fps_timeline,m.opp_fps_timeline,false,m.point_times,m.point_timeline);RegisterTeleGraphRectFor(row.txtPing,m.player_ping_timeline,m.opp_ping_timeline,true,m.point_times,m.point_timeline);/* Item 4: per-game combat stats under the FPS line. Only rows with telemetry (post-mig-111 + both mods) render; old rows stay clean. July 22 item 1: split into per-player elements — hovering a Hit% pops that player's fired-vs-hit graph, a Block% pops dmg-taken-vs-blocks, all with point markers. */{string durTag=m.duration_seconds>0?$"      <color=#8FA3B8>{m.duration_seconds/60}:{m.duration_seconds%60:00}</color>":"";UIFactory.SetText(row.txtStats,durTag);string hy="",by="",ky="",ho="",bo="",ko="";if(m.player_bullets_fired>0||m.player_blocks_activated>0){float hp=m.player_bullets_fired>0?100f*m.player_bullets_hit/m.player_bullets_fired:0f;float bp=m.player_blocks_activated>0?100f*m.player_blocks_successful/m.player_blocks_activated:0f;float kps=m.player_active_seconds>0.5f?m.player_keys_pressed/m.player_active_seconds:0f;hy=I18n.TrF("<color=#99B3E6>You: Hit {0}%</color>",hp.ToString("F0",_INV));by=$"<color=#99B3E6>{I18n.TrF("Block {0}%",bp.ToString("F0",_INV))}</color>";ky=$"<color=#99B3E6>{I18n.TrF("{0} keys/s",kps.ToString("F1",_INV))}</color>";if(m.opp_bullets_fired>0||m.opp_blocks_activated>0){float ohp=m.opp_bullets_fired>0?100f*m.opp_bullets_hit/m.opp_bullets_fired:0f;float obp=m.opp_blocks_activated>0?100f*m.opp_blocks_successful/m.opp_blocks_activated:0f;float okps=m.opp_active_seconds>0.5f?m.opp_keys_pressed/m.opp_active_seconds:0f;ho=I18n.TrF("<color=#E69988>Opp: Hit {0}%</color>",ohp.ToString("F0",_INV));bo=$"<color=#E69988>{I18n.TrF("Block {0}%",obp.ToString("F0",_INV))}</color>";ko=$"<color=#E69988>{I18n.TrF("{0} keys/s",okps.ToString("F1",_INV))}</color>";}}
+        /* Aug 6 item 4: avg DPS = damage dealt / game length. A row whose damage
+         * column is NULL shows a DASH rather than "0.0 dps" (#257 — 0 is a real
+         * value here: a player can genuinely deal no damage).
+         *
+         * Aug 7 review find 4: the cell is gated on DAMAGE, not on the row's
+         * shots/blocks. A melee, body-damage, trap or Pacifist build finishes a
+         * game with zero bullets and zero blocks and still deals real damage, so
+         * the old hy/ho gate hid a fully populated timeline from exactly the
+         * builds whose DPS is most worth seeing. The dash keeps the hy/ho gate,
+         * though: it exists only so a row that ALREADY shows combat telemetry
+         * doesn't lose a column, and widening it would stamp a dash across every
+         * pre-telemetry row in the history. */
+        /* The dash case goes through the SAME TrF template with "-" as the hole
+         * value, rather than its own Tr("- dps") literal: one catalogue key
+         * instead of two, and a bare "- dps" fragment is close to the
+         * extractor's <3-letter rejection floor (#295c). */
+        string dy="",dorp="";
+        bool dmgYou=m.player_damage_dealt>=0,dmgOpp=m.opp_damage_dealt>=0;
+        if(dmgYou||!string.IsNullOrEmpty(hy))
+            dy="<color=#99B3E6>"+I18n.TrF("{0} dps",
+                dmgYou&&m.duration_seconds>0
+                    ?(m.player_damage_dealt/(float)m.duration_seconds).ToString("F1",_INV):"-")+"</color>";
+        if(dmgOpp||!string.IsNullOrEmpty(ho))
+            dorp="<color=#E69988>"+I18n.TrF("{0} dps",
+                dmgOpp&&m.duration_seconds>0
+                    ?(m.opp_damage_dealt/(float)m.duration_seconds).ToString("F1",_INV):"-")+"</color>";
+        /* Which sample grid each side's timeline sits on follows the REPORTER,
+         * never the viewer — see ViewerWasReporter. */
+        bool viewerReported=ViewerWasReporter(m);
+        float dpsStepYou=viewerReported?DPS_STEP_LOCAL:DPS_STEP_PEER;
+        float dpsStepOpp=viewerReported?DPS_STEP_PEER:DPS_STEP_LOCAL;
+        UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtDpsYou,dy);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);UIFactory.SetTextRaw(row.txtDpsOpp,dorp);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline);/* Aug 7 item 3d: hovering a DPS cell pops that side's per-second damage line. ONE side per region, never the pair: the two series come off different emitters (a 5s own-seat grid vs a ~3s peer heartbeat) and the DPS chart drives both its lines from a single step, so pairing them would stretch one line 1.67x across the time axis AND scale its values wrong. Each cell registers its own series in the MY slot so the popup's blue subject label matches the blue line it names. CumulativeToDps returns an EMPTY series for a missing or one-sample timeline, and the register call early-returns on that, so a row with no damage timeline registers nothing even though the cell renders its dash. */if(!string.IsNullOrEmpty(dy))RegisterDpsGraphRectFor(row.txtDpsYou,CumulativeToDps(m.player_damage_timeline,dpsStepYou),null,m.point_times,m.point_timeline,dpsStepYou,null,I18n.Tr("you"));if(!string.IsNullOrEmpty(dorp))RegisterDpsGraphRectFor(row.txtDpsOpp,CumulativeToDps(m.opp_damage_timeline,dpsStepOpp),null,m.point_times,m.point_timeline,dpsStepOpp,null,FfaSafeRich(Trunc(string.IsNullOrEmpty(m.opponent_name)?I18n.Tr("opponent"):m.opponent_name,18)));}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);UIFactory.SetTextRaw(row.txtCards,!string.IsNullOrEmpty(m.cards_display)?$"        {I18n.Tr("Cards:")} {(_historyCardsFull ? m.cards_display : FormatCardLine(m.cards_display))}":"");UIFactory.SetTextRaw(row.txtOppCards,!string.IsNullOrEmpty(m.opp_cards_display)?$"        {I18n.Tr("Opp:")}   {(_historyCardsFull ? m.opp_cards_display : FormatCardLine(m.opp_cards_display))}":"");if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());RegisterHoverRectFor(row.txtCards,m.cards_display,false);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true);row.root.SetActive(true);}
 
         // Resolve a TMP text component's screen-space rect via its parent
         // chain. Handles both Screen Space - Overlay (corners are screen
@@ -8488,6 +8746,27 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             catch { }
         }
 
+        // Aug 7 item 3d: hover a DPS cell → that side's damage-per-second line.
+        // Copy of RegisterTeleGraphRectFor minus isPing. The series must ALREADY
+        // be differenced (CumulativeToDps) — the chart plots values, not slopes —
+        // and myStep is the cadence that produced it, which drives BOTH lines
+        // here, so a caller mixing two cadences into one region would misplot one.
+        private static void RegisterDpsGraphRectFor(object txt, string mySeries, string oppSeries,
+                                                    string pointTimes = null, string pointTimeline = null,
+                                                    float myStep = 0f,
+                                                    RectTransform outerClip = null, string subjectLabel = null)
+        {
+            if (txt == null || (string.IsNullOrEmpty(mySeries) && string.IsNullOrEmpty(oppSeries))) return;
+            try
+            {
+                RectTransform rt; Camera cam; float frac; Rect rect; RectTransform clip;
+                if (!ResolveHoverSource(txt, out rt, out cam, out frac, out rect, out clip)) return;
+                CompetitiveUI.RegisterDpsGraphRegion(rect, mySeries, oppSeries, rt, cam, frac, clip, txt,
+                                                     pointTimes, pointTimeline, myStep, outerClip, subjectLabel);
+            }
+            catch { }
+        }
+
         // July 22 item 1: hover a Hit%/Block% tag → that player's cumulative
         // pair chart (fired-vs-hit / dmg-vs-blocks) with point markers.
         private static void RegisterPairGraphRectFor(object txt, string pairSeries, bool isBlock, bool subjectIsOpp,
@@ -8588,6 +8867,116 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         private static string BuildFpsTag(ApiClient.MatchHistoryEntry m){if(m==null)return"";int p=m.player_fps_avg,o=m.opponent_fps_avg;if(p<=0&&o<=0)return"";string pStr=p>0?p.ToString():"-";string oStr=o>0?o.ToString():"-";return$"<color=#888>FPS:</color> <color=#99B3E6>{pStr}</color> <color=#888>/</color> <color=#E69988>{oStr}</color>";}
         // July 22 item 3: latency is its OWN tag (separate hover graph).
         private static string BuildPingTag(ApiClient.MatchHistoryEntry m){if(m==null)return"";int pp=m.player_ping_avg,op=m.opponent_ping_avg;if(pp<=0&&op<=0)return"";string a=pp>0?pp.ToString():"-";string b=op>0?op.ToString():"-";return$"<color=#888>Ping:</color> <color=#99B3E6>{a}</color> <color=#888>/</color> <color=#E69988>{b}</color><color=#888>ms</color>";}
+
+        /// <summary>Aug 6 item 4 — turn a CUMULATIVE damage timeline into a
+        /// per-interval DPS series the hover-graph parser can plot.
+        ///
+        /// The server stores damage as a running total ("0,12,40,55"), because
+        /// that is what the client accumulates during the match. A chart of the
+        /// raw values is a monotonically-rising line that says nothing about WHEN
+        /// the damage happened, so each sample is differenced against the previous
+        /// one and divided by the sample interval.
+        ///
+        /// IMPORTANT: in 1v1 the two sides are sampled at DIFFERENT rates — the
+        /// seat that REPORTED buckets its own damage at 5s, and it observes the
+        /// peer through ~3s cr_gstats heartbeats (the same asymmetry the FPS/ping
+        /// graphs already carry as myStep vs a hardcoded 3f). Pass each side its
+        /// own step, and derive which is which from the reporter, never from the
+        /// viewer (ViewerWasReporter) — a history row is re-oriented to the
+        /// viewer on read, so the two do not always coincide.
+        ///
+        /// The first sample is differenced against an implied 0, so the damage
+        /// dealt before the first tick is part of the chart rather than dropped.
+        /// That also keeps index i aligned with match time i*step, which is what
+        /// the chart assumes when it lays out the x-axis.
+        ///
+        /// Returns a comma-separated INT CSV, because the hover chart parses
+        /// kind-5 series with int.TryParse (CompetitiveUI.ParseIntSeriesKeepZeros)
+        /// — a "12.40" sample would fail to parse and be silently dropped, and a
+        /// whole series of them draws nothing at all. Sub-1 DPS therefore rounds
+        /// to 0; do not "restore" decimals here without a parser that reads them.
+        /// Returns "" when there is nothing plottable (fewer than 2 samples = no
+        /// segment to draw), which keeps the caller from registering a dead hover
+        /// region. Negative deltas are clamped to 0: a cumulative series should
+        /// never decrease, and a stale pre-reset peer heartbeat must not draw
+        /// below the axis.</summary>
+        public static string CumulativeToDps(string cumulativeCsv, float stepSeconds)
+        {
+            if (string.IsNullOrEmpty(cumulativeCsv) || stepSeconds <= 0f) return "";
+            try
+            {
+                var parts = cumulativeCsv.Split(',');
+                if (parts.Length < 2) return "";
+                var sb = new System.Text.StringBuilder();
+                float prev = 0f; int written = 0;
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    if (!float.TryParse(parts[i].Trim(), System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out float cur))
+                        continue;
+                    float d = (cur - prev) / stepSeconds;
+                    if (d < 0f) d = 0f;
+                    if (written++ > 0) sb.Append(',');
+                    sb.Append(Mathf.RoundToInt(d).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    prev = cur;
+                }
+                return written >= 2 ? sb.ToString() : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>Sample interval, in seconds, of the stream a client records for
+        /// ITS OWN seat. On a history row that is the REPORTER's side, which is not
+        /// always the viewer's — see ViewerWasReporter.</summary>
+        public const float DPS_STEP_LOCAL = 5f;
+        /// <summary>Sample interval of the stream a client records for the PEER it
+        /// observes (cr_gstats heartbeat cadence), in seconds.</summary>
+        public const float DPS_STEP_PEER = 3f;
+        /// <summary>FFA samples every participant on the one 3s telemetry tick,
+        /// so a whole match shares a single cadence — unlike 1v1, where the two
+        /// sides come off different emitters.</summary>
+        public const float DPS_STEP_FFA = 3f;
+
+        /// <summary>Did the VIEWER's client report this 1v1 match?
+        ///
+        /// This picks the DPS grid, and getting it from the viewer instead of
+        /// the reporter was a real bug: the 5s grid belongs to whichever client
+        /// SAMPLED ITS OWN SEAT, i.e. the reporter, and the ~3s grid to the peer
+        /// it observed over cr_gstats. The server preserves that reporter/peer
+        /// origin on write but re-orients the row to viewer/opponent on read, so
+        /// "player_damage_timeline" is only the 5s stream when the viewer
+        /// happened to be the reporter. Divide the other way round and the
+        /// numbers are off by 5/3 in one direction or 3/5 in the other.
+        ///
+        /// Mirrors the election in GameStateWatcher (search: "Opponent will
+        /// report this match") rather than re-deriving it: no reporter column is
+        /// stored server-side, so re-running the same rule is the only way back
+        /// to the answer. Both halves of that rule matter — the election only
+        /// runs when the opponent ALSO had the mod (otherwise only our client
+        /// could report), and it compares PARSED LONGS, not the id strings.</summary>
+        private static bool ViewerWasReporter(ApiClient.MatchHistoryEntry m)
+        {
+            if (m == null) return true;
+            // Surviving evidence that the opponent had the mod. Deliberately
+            // wider than the hit/block pair the row renders: a peer heartbeats
+            // fps and active-seconds every 3s regardless of playstyle, so a
+            // build that never fires or blocks (the same population find 4 in
+            // FillRow is about) is still recognisable as modded.
+            bool oppHadMod = m.opponent_fps_avg > 0 || m.opp_active_seconds > 0f
+                             || m.opp_bullets_fired > 0 || m.opp_blocks_activated > 0
+                             || m.opp_damage_dealt >= 0
+                             || !string.IsNullOrEmpty(m.opp_damage_timeline);
+            if (!oppHadMod) return true;
+            long mine = 0, theirs = 0;
+            long.TryParse(MatchTracker.LocalSteamId, out mine);
+            long.TryParse(m.opponent_steam_id, out theirs);
+            // A "photon_" placeholder or a missing id parses to 0. The election
+            // never runs in that case either (it requires a resolved, non-photon
+            // opponent id), and its outcome there is "we report" — so fall back
+            // to the viewer rather than letting a 0 decide the comparison.
+            if (mine <= 0 || theirs <= 0) return true;
+            return mine <= theirs;   // ties go to us, exactly as the election does
+        }
 
         /* Visible-character budgets for the two history opponent cells (see
          * FormatOpponentForRow). Characters, not pixels: Gravity averages ~0.62x
@@ -8792,7 +9181,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             }
         }
 
-        private static void RefreshLeaderboard(){_podiumLbRows.Clear();/* Item 1 (the "Oro v" bug): translate the base label FIRST, then append the arrow, and write Raw so the composed string is never re-looked-up. */string[]hL={I18n.Tr("#"),I18n.Tr("Lv"),I18n.Tr("Player"),I18n.Tr("Rating"),I18n.Tr("W"),I18n.Tr("L"),I18n.Tr("W/L"),I18n.Tr("Gold")};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetTextRaw(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":entries.Sort((a,b)=>lbSortDesc?b.gold.CompareTo(a.gold):a.gold.CompareTo(b.gold));break;}/* July 22 item 8: search filter (whole board is client-side; ~500 cap). Reset to page 0 when the query changes. */if(lbSearchField!=null)UIFactory.SetText(lbSearchField,"");string lbQ=(lbSearch??"").Trim();if(lbQ!=lbSearchLast){lbSearchLast=lbQ;lbPage=0;}if(lbQ.Length>0)entries.RemoveAll(e=>e.display_name==null||e.display_name.IndexOf(lbQ,StringComparison.OrdinalIgnoreCase)<0);int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,20);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){_podiumLbRows.Add(new object[]{row.txtName,_lbName,e.title,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(e.title,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}/* SetTextRaw (find 15): a bare display name must never hit the translation catalogue — a player literally named "Done." would render as "Hecho.". */UIFactory.SetTextRaw(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;/* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetTextRaw(txtLBCount,lbQ.Length>0?I18n.TrF("{0} of {1} players",entries.Count,board.total_players):I18n.TrF("{0} players ranked",board.total_players));lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetTextRaw(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>{I18n.TrF("Level {0}",ps.level)}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?I18n.TrF("Rank: <b><color={0}>{1}</color></b>",string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color,ps.rank_name)+"   ":"";string detail="\n"+_rkLine+I18n.TrF("Rating: {0}   RD: {1}   Peak: {2}",ps.rating.ToString("F0",_INV),ps.rating_deviation.ToString("F0",_INV),ps.peak_rating.ToString("F0",_INV))+"\n"+I18n.TrF("{0} matches ({1}W / {2}L)  WR: {3}%",ps.total_matches,ps.wins,ps.losses,(ps.total_matches>0?ps.wins*100f/ps.total_matches:0f).ToString("F0",_INV))+"\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=I18n.TrF("<color=#FFD94D>Ranked (series): {0}W / {1}L</color>",ps.ranked_series_wins,ps.ranked_series_losses)+"\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=I18n.TrF("<color={0}>Leave: {1}/{2} ({3}%)</color>",dcCol,dc,totalRanked,pct.ToString("F0",_INV))+"\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?I18n.TrF("<color=#FF9988>Hit:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.bullets_hit*100f/ps.bullets_fired).ToString("F1",_INV),ps.bullets_hit,ps.bullets_fired):I18n.Tr("<color=#FF9988>Hit:</color> -");string blkLine=ps.blocks_activated>0?I18n.TrF("<color=#99CCFF>Block:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.blocks_successful*100f/ps.blocks_activated).ToString("F1",_INV),ps.blocks_successful,ps.blocks_activated):I18n.Tr("<color=#99CCFF>Block:</color> -");detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
+        private static void RefreshLeaderboard(){_podiumLbRows.Clear();/* Item 1 (the "Oro v" bug): translate the base label FIRST, then append the arrow, and write Raw so the composed string is never re-looked-up. */string[]hL={I18n.Tr("#"),I18n.Tr("Lv"),I18n.Tr("Player"),I18n.Tr("Rating"),I18n.Tr("W"),I18n.Tr("L"),I18n.Tr("W/L"),I18n.Tr("Gold")};string[]hK={"rank","level","display_name","rating","wins","losses","wl_ratio","gold"};if(lbSortTexts!=null)for(int i=0;i<hK.Length&&i<lbSortTexts.Length;i++){if(lbSortTexts[i]==null)continue;string arrow=lbSort==hK[i]?(lbSortDesc?" v":" ^"):"";UIFactory.SetTextRaw(lbSortTexts[i],hL[i]+arrow);UIFactory.SetColor(lbSortTexts[i],lbSort==hK[i]?C_WHITE:C_LABEL);if(lbSortBtns!=null&&i<lbSortBtns.Length)UIFactory.SetImageColor(lbSortBtns[i],lbSort==hK[i]?C_TABACT:C_TAB);}var board=ApiClient.CachedLeaderboard;foreach(var r in lbRows)r.root.SetActive(false);if(board==null||board.entries==null||board.entries.Length==0){UIFactory.SetText(txtLBDetail,"No leaderboard data");UIFactory.SetText(txtLBDetailB,"");UIFactory.SetText(txtLBCount,"");return;}var entries=new List<ApiClient.LeaderboardEntry>(board.entries);switch(lbSort){case "rank":entries.Sort((a,b)=>lbSortDesc?b.rank.CompareTo(a.rank):a.rank.CompareTo(b.rank));break;case "level":entries.Sort((a,b)=>lbSortDesc?b.level.CompareTo(a.level):a.level.CompareTo(b.level));break;case "display_name":entries.Sort((a,b)=>lbSortDesc?string.Compare(b.display_name,a.display_name,StringComparison.OrdinalIgnoreCase):string.Compare(a.display_name,b.display_name,StringComparison.OrdinalIgnoreCase));break;case "rating":entries.Sort((a,b)=>lbSortDesc?b.rating.CompareTo(a.rating):a.rating.CompareTo(b.rating));break;case "wins":entries.Sort((a,b)=>lbSortDesc?b.wins.CompareTo(a.wins):a.wins.CompareTo(b.wins));break;case "losses":entries.Sort((a,b)=>lbSortDesc?b.losses.CompareTo(a.losses):a.losses.CompareTo(b.losses));break;case "wl_ratio":entries.Sort((a,b)=>{float ra=a.losses>0?(float)a.wins/a.losses:a.wins*100f;float rb=b.losses>0?(float)b.wins/b.losses:b.wins*100f;return lbSortDesc?rb.CompareTo(ra):ra.CompareTo(rb);});break;case "gold":/* Aug 6 item 6: hide_gold players carry gold==-1 — treat as +infinity so they sit at the TOP of the default descending sort (they were sorting below 0-gold players). */entries.Sort((a,b)=>{int ga=a.gold<0?int.MaxValue:a.gold;int gb=b.gold<0?int.MaxValue:b.gold;return lbSortDesc?gb.CompareTo(ga):ga.CompareTo(gb);});break;}/* July 22 item 8: search filter (whole board is client-side; ~500 cap). Reset to page 0 when the query changes. */if(lbSearchField!=null)UIFactory.SetText(lbSearchField,"");string lbQ=(lbSearch??"").Trim();if(lbQ!=lbSearchLast){lbSearchLast=lbQ;lbPage=0;}if(lbQ.Length>0)entries.RemoveAll(e=>e.display_name==null||e.display_name.IndexOf(lbQ,StringComparison.OrdinalIgnoreCase)<0);int lbPP=100,lbTotalP=(entries.Count+lbPP-1)/lbPP;lbPage=Math.Max(0,Math.Min(lbPage,lbTotalP-1));int lbStart=lbPage*lbPP,lbEnd=Math.Min(lbStart+lbPP,entries.Count);for(int i=lbStart;i<lbEnd&&(i-lbStart)<lbRows.Count;i++){var e=entries[i];var row=lbRows[i-lbStart];row.steamId=e.steam_id;bool local=e.steam_id==MatchTracker.LocalSteamId;string ratio=e.losses>0?$"{(float)e.wins/e.losses:F1}":e.wins>0?$"{e.wins}:0":"0:0";UIFactory.SetText(row.txtRank,$"{e.rank}");UIFactory.SetColor(row.txtRank,e.rank==1?new Color(1f,0.84f,0f):e.rank==2?new Color(0.75f,0.75f,0.75f):e.rank==3?new Color(0.8f,0.5f,0.2f):C_GOLD);UIFactory.SetText(row.txtLv,$"{e.level}");string _lbName=Trunc(e.display_name,20);if(!string.IsNullOrEmpty(e.title)){string _tc=string.IsNullOrEmpty(e.title_color)?"#FFFFFF":e.title_color;if(IsPodiumTitle(e.title)){_podiumLbRows.Add(new object[]{row.txtName,_lbName,e.title,_tc});_lbName=$"{_lbName} {PodiumSparkleSpan(e.title,_tc,_podiumTick)}";}else{_lbName=$"{_lbName} <b><color={_tc}>[{e.title}]</color></b>";}}/* SetTextRaw (find 15): a bare display name must never hit the translation catalogue — a player literally named "Done." would render as "Hecho.". */UIFactory.SetTextRaw(row.txtName,_lbName);UIFactory.SetColor(row.txtName,local?C_GREEN:C_WHITE);/* v1.29: rating cell carries the Discord rank-role color, so ranks read at a glance */string _rc=string.IsNullOrEmpty(e.rank_color)?"#FFFFFF":e.rank_color;UIFactory.SetText(row.txtRating,$"<color={_rc}>{e.rating}</color>");UIFactory.SetText(row.txtW,$"{e.wins}");UIFactory.SetText(row.txtL,$"{e.losses}");UIFactory.SetText(row.txtWL,ratio);if(e.gold<0){UIFactory.SetText(row.txtGold,"<color=#888><i>Hidden</i></color>");}else{UIFactory.SetText(row.txtGold,e.gold>0?$"{e.gold}":"0");}bool sel=e.steam_id==selectedSteamId;/* podium tint alphas halved per Sid feedback — 0.22 read too strong behind text */UIFactory.SetImageColor(row.hlWrap,sel?new Color(0.2f,0.25f,0.4f,0.4f):e.rank==1?new Color(1f,0.84f,0f,0.11f):e.rank==2?new Color(0.75f,0.75f,0.78f,0.10f):e.rank==3?new Color(0.8f,0.5f,0.2f,0.10f):new Color(0.15f,0.15f,0.2f,0.01f));SetLbRowOutline(row,e.rank<=3);row.root.SetActive(true);}UIFactory.SetTextRaw(txtLBCount,lbQ.Length>0?I18n.TrF("{0} of {1} players",entries.Count,board.total_players):I18n.TrF("{0} players ranked",board.total_players));lbPrev.SetActive(lbPage>0);lbNext.SetActive(lbPage<lbTotalP-1);UIFactory.SetText(txtLBPage,lbTotalP>1?$"{lbPage+1}/{lbTotalP}":"");if(!string.IsNullOrEmpty(selectedSteamId)&&selectedStats!=null){var ps=selectedStats;UIFactory.SetTextRaw(txtLBPlayerName,$"{ps.display_name}   <color=#66CCFF>{I18n.TrF("Level {0}",ps.level)}</color>");string _rkLine=!string.IsNullOrEmpty(ps.rank_name)?I18n.TrF("Rank: <b><color={0}>{1}</color></b>",string.IsNullOrEmpty(ps.rank_color)?"#FFFFFF":ps.rank_color,ps.rank_name)+"   ":"";string detail="\n"+_rkLine+I18n.TrF("Rating: {0}   RD: {1}   Peak: {2}",ps.rating.ToString("F0",_INV),ps.rating_deviation.ToString("F0",_INV),ps.peak_rating.ToString("F0",_INV))+"\n"+I18n.TrF("{0} matches ({1}W / {2}L)  WR: {3}%",ps.total_matches,ps.wins,ps.losses,(ps.total_matches>0?ps.wins*100f/ps.total_matches:0f).ToString("F0",_INV))+"\n";if(ps.ranked_series_wins+ps.ranked_series_losses>0)detail+=I18n.TrF("<color=#FFD94D>Ranked (series): {0}W / {1}L</color>",ps.ranked_series_wins,ps.ranked_series_losses)+"\n";/* Leave % - denominator includes DCs as their own events */if(ps.ranked_dc_count>0||ps.ranked_series_wins+ps.ranked_series_losses>0){int totalRanked=ps.ranked_series_wins+ps.ranked_series_losses+ps.ranked_dc_count;int dc=ps.ranked_dc_count;if(totalRanked>0){float pct=(float)dc/totalRanked*100f;string dcCol=pct<5f?"#44AA44":pct<15f?"#DDAA33":"#FF4444";detail+=I18n.TrF("<color={0}>Leave: {1}/{2} ({3}%)</color>",dcCol,dc,totalRanked,pct.ToString("F0",_INV))+"\n";}}/* Hit% / Block% - lifetime counters driven by Harmony patches (Gun.Attack / HealthHandler.TakeDamage / Block.TryBlock / Block.DoBlock). Accumulates only when this player reported a match. Show a dash for players who haven't reported yet so the rows stay consistent with the My Stats Record section (instead of silently disappearing). */{string hitLine=ps.bullets_fired>0?I18n.TrF("<color=#FF9988>Hit:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.bullets_hit*100f/ps.bullets_fired).ToString("F1",_INV),ps.bullets_hit,ps.bullets_fired):I18n.Tr("<color=#FF9988>Hit:</color> -");string blkLine=ps.blocks_activated>0?I18n.TrF("<color=#99CCFF>Block:</color> {0}% <color=#888>({1}/{2})</color>",((float)ps.blocks_successful*100f/ps.blocks_activated).ToString("F1",_INV),ps.blocks_successful,ps.blocks_activated):I18n.Tr("<color=#99CCFF>Block:</color> -");detail+=$"{hitLine}\n{blkLine}\n";}/* Head to head — server-computed (full matches table) replaces the
  * earlier client-side iteration over CachedMatchHistory which was
  * limited to the viewer's most-recent 500 matches and silently dropped
  * H2H rows for older opponents. */if(selectedSteamId!=MatchTracker.LocalSteamId){int h2hW=ps.h2h_ranked_wins,h2hL=ps.h2h_ranked_losses,h2hCW=ps.h2h_casual_wins,h2hCL=ps.h2h_casual_losses,h2hSW=ps.h2h_series_wins,h2hSL=ps.h2h_series_losses;int h2hAll=h2hW+h2hCW,h2hAllL=h2hL+h2hCL;if(h2hAll+h2hAllL>0){string h2hColor=h2hAll>h2hAllL?"#00FF00":h2hAll<h2hAllL?"#FF6666":"#AAAAAA";detail+="\n"+I18n.TrF("<b>vs You:</b> <color={0}>{1}W - {2}L ({3} games)</color>",h2hColor,h2hAll,h2hAllL,h2hAll+h2hAllL)+"\n";if(h2hSW+h2hSL>0)detail+="  "+I18n.TrF("Ranked Series: {0}W / {1}L",h2hSW,h2hSL)+"\n";if(h2hCW+h2hCL>0)detail+="  "+I18n.TrF("Casual: {0}W / {1}L",h2hCW,h2hCL)+"\n";}}/* Mod version this player was last seen running (X-Mod-Version
@@ -9045,16 +9434,67 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         private static GameObject comparePickerContent, compareGraphPanel, compareCardsScroll, compareCardsContent;
         private static object txtCompareStatus, compareMetricBtnTxt, txtCompareCards;
         private static GameObject compareMetricBtn;
+        // Aug 6 item 2 — left-column controls whose visibility flips per sub-tab.
+        private static object compareSearchCap, txtCompareHeader;
+        private static GameObject compareClrSearchBtn;
         // Metric index into COMPARE_METRICS. 0 = Elo-over-games graph; the rest are
         // table metrics rendered into the text/cards scroll panel.
         private static int compareMetric = 0;
+        /* Aug 6 item 2 — Compare sub-tabs. 0 = Players (everything that existed
+         * before), 1 = Cards. Each sub-tab keeps its OWN metric index so
+         * switching back and forth doesn't reset the other's selection, and both
+         * index into their own array (ActiveMetrics). */
+        private static int compareSubTab = 0;
+        private static int compareCardMetric = 0;
+        private static GameObject compareSubTabPlayersBtn, compareSubTabCardsBtn;
+        private const int COMPARE_CARDS_MAX = 8;
+        private static readonly List<string> compareCardsSelected = new List<string>();
+        private static string[] ActiveMetrics => compareSubTab == 1 ? CARD_METRICS : COMPARE_METRICS;
+        private static int ActiveMetricIndex
+        {
+            get => compareSubTab == 1 ? compareCardMetric : compareMetric;
+            set { if (compareSubTab == 1) compareCardMetric = value; else compareMetric = value; }
+        }
+        private static string ActiveMetricName
+        {
+            get
+            {
+                var arr = ActiveMetrics;
+                return arr[Math.Max(0, Math.Min(ActiveMetricIndex, arr.Length - 1))];
+            }
+        }
         private static readonly string[] COMPARE_METRICS = {
-            "Elo over games", "Elo over time", "Top Cards", "Worst Cards", "Hit / Block %",
+            // Aug 7 item 1: the two FFA Elo series sit immediately after their 1v1
+            // twins so the four graph metrics read as one group in the dropdown.
+            "Elo over games", "Elo over time", "FFA Elo over games", "FFA Elo over time",
+            "Top Cards", "Worst Cards", "Hit / Block %",
             "Avg Cards / Game", "Avg FPS", "Peak Elo", "Total XP",
             "Achievements", "Achievement Grid", "Region Time",
             // v1.29 additions (Sid's Compare wishlist).
             "Top Streaks", "5-0s Given / Taken", "Bets Won / Lost",
             "Keys / Sec", "Keys / Game", "Avg Game Length", "2v2 Rating",
+            // Aug 6 item 1. Simple bars first, then the three per-player pies,
+            // then the board/list panels (which read their own endpoints rather
+            // than PlayerStatsData).
+            "Rage Quit %", "FFA Avg Kills", "FFA Avg Placement",
+            "Ranked DPS", "FFA DPS", "Self-Death %", "Ranked Uniqueness %",
+            "Build Types", "Ranked Friends", "Gold Sources",
+            /* Aug 7 item 2: "Nemesis" became "Nemesis Comparison" (it is the board
+             * over the WHOLE selection) and gained a per-player sibling. The array
+             * doubles as the internal switch key, so both dispatch sites and
+             * TrMetric below move with it. The rename retires the old translation
+             * key — the catalogue is keyed on the English source (#289) — so the
+             * two entries need a fresh extractor pass before they translate. */
+            "Most Similar Player", "Nemesis Comparison", "Player Nemesis", "Records",
+        };
+        /// <summary>Aug 6 item 2: the Cards sub-tab's metric list. Kept as a
+        /// SEPARATE array (not appended to COMPARE_METRICS) because the two
+        /// sub-tabs select over different entities — a card metric can never be
+        /// meaningful for a player selection and vice versa. Names must stay
+        /// unique across BOTH arrays: TrMetric is shared and switches on the raw
+        /// English key.</summary>
+        private static readonly string[] CARD_METRICS = {
+            "Times Picked", "Card Win Rate", "Pass Rate", "Times Offered", "Top Pickers",
         };
         /// <summary>Aug-3 item 11: display-only translation for COMPARE_METRICS.
         /// The array itself must stay raw English because it doubles as the internal
@@ -9070,6 +9510,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             {
                 case "Elo over games": return I18n.Tr("Elo over games");
                 case "Elo over time": return I18n.Tr("Elo over time");
+                case "FFA Elo over games": return I18n.Tr("FFA Elo over games");
+                case "FFA Elo over time": return I18n.Tr("FFA Elo over time");
                 case "Top Cards": return I18n.Tr("Top Cards");
                 case "Worst Cards": return I18n.Tr("Worst Cards");
                 case "Hit / Block %": return I18n.Tr("Hit / Block %");
@@ -9087,6 +9529,27 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 case "Keys / Game": return I18n.Tr("Keys / Game");
                 case "Avg Game Length": return I18n.Tr("Avg Game Length");
                 case "2v2 Rating": return I18n.Tr("2v2 Rating");
+                // Aug 6 item 1 — Players sub-tab additions.
+                case "Rage Quit %": return I18n.Tr("Rage Quit %");
+                case "FFA Avg Kills": return I18n.Tr("FFA Avg Kills");
+                case "FFA Avg Placement": return I18n.Tr("FFA Avg Placement");
+                case "Ranked DPS": return I18n.Tr("Ranked DPS");
+                case "FFA DPS": return I18n.Tr("FFA DPS");
+                case "Self-Death %": return I18n.Tr("Self-Death %");
+                case "Ranked Uniqueness %": return I18n.Tr("Ranked Uniqueness %");
+                case "Build Types": return I18n.Tr("Build Types");
+                case "Ranked Friends": return I18n.Tr("Ranked Friends");
+                case "Gold Sources": return I18n.Tr("Gold Sources");
+                case "Most Similar Player": return I18n.Tr("Most Similar Player");
+                case "Nemesis Comparison": return I18n.Tr("Nemesis Comparison");
+                case "Player Nemesis": return I18n.Tr("Player Nemesis");
+                case "Records": return I18n.Tr("Records");
+                // Aug 6 item 2 — Cards sub-tab metrics.
+                case "Times Picked": return I18n.Tr("Times Picked");
+                case "Card Win Rate": return I18n.Tr("Card Win Rate");
+                case "Pass Rate": return I18n.Tr("Pass Rate");
+                case "Times Offered": return I18n.Tr("Times Offered");
+                case "Top Pickers": return I18n.Tr("Top Pickers");
                 default: return m;
             }
         }
@@ -9094,6 +9557,10 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         // Exposed so CompetitiveUI's IMGUI search field (drawn over the Compare tab)
         // can read/write the filter — the codebase does all text entry via IMGUI.
         public static string CompareSearch { get { return compareSearch; } set { compareSearch = value ?? ""; } }
+        /// <summary>Aug 7 item 2 — true while the Compare tab is on its Cards
+        /// sub-tab. Read by CompetitiveUI so the IMGUI search box's placeholder
+        /// says what it actually filters; the box itself is shared.</summary>
+        public static bool CompareCardsSubTab => compareSubTab == 1;
         // Screen-space (IMGUI/GUI coordinate) Rect of the Compare search placeholder
         // label, so CompetitiveUI can draw its IMGUI TextField exactly over it without
         // re-deriving the menu layout. The overlay canvas is ScreenSpaceOverlay, so
@@ -9105,6 +9572,15 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             {
                 var go = (compareSearchField as Component)?.gameObject;
                 if (go == null) return new Rect(0, 0, 0, 0);
+                /* GetWorldCorners on an INACTIVE RectTransform still returns its
+                 * last computed corners, so the IMGUI field would keep painting
+                 * over whatever replaced it. Explicit activeInHierarchy check,
+                 * not a size heuristic. (Aug 7 item 2: the anchor is now live on
+                 * BOTH Compare sub-tabs — it used to be deactivated on Cards,
+                 * and this guard is what turned that into "no search box". The
+                 * guard still matters for every other reason the anchor can be
+                 * inactive, e.g. the tab not being built yet.) */
+                if (!go.activeInHierarchy) return new Rect(0, 0, 0, 0);
                 var rt = go.GetComponent<RectTransform>();
                 if (rt == null) return new Rect(0, 0, 0, 0);
                 var c = new Vector3[4]; rt.GetWorldCorners(c); // 0=BL,1=TL,2=TR,3=BR
@@ -9163,6 +9639,371 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             new Color(0.65f, 0.85f, 0.75f), // sage
         };
 
+        // ── Searchable dropdown overlay (Aug 6 item 2) ───────────────────────
+        /* One generic picker serves BOTH the metric dropdown (single-select,
+         * closes on pick) and the Cards sub-tab's card chooser (multi-select,
+         * stays open) — there was no dropdown primitive in the plugin before
+         * this, and two near-identical ones would have drifted (#279).
+         *
+         * Modal discipline, all of it load-bearing:
+         *  - lives on the persistent overlay Canvas (sortingOrder 30000) and
+         *    NEVER touches mainMenuGroup.SetActive or the EventSystem (#8/#9);
+         *  - the backdrop is a full-rect panel with raycastTarget=true, so the
+         *    uGUI EventSystem can't reach anything behind it;
+         *  - raw-polling ClickHandlers ignore that backdrop entirely (#141), so
+         *    CompetitiveUI must OR PickerOpen into ClickHandler.ModalBlockInput —
+         *    see the wiring note in the handoff. The backdrop's own handler sets
+         *    bypassModalBlock so click-away-to-close still works (#200).
+         *  - rows are UIFactory.CreateButton, whose callback is ALREADY
+         *    ClickGuard-wrapped: never Claim inside one (#142/#158).
+         *  - the list is a ScrollView and every row carries a real prefH, since
+         *    a flexH child inside a scroll viewport collapses to zero (#63). */
+        private static GameObject pickerGO, pickerListContent;
+        private static RectTransform pickerBoxRT;
+        private static object pickerSearchAnchor, pickerCountTxt;
+        private static string pickerSearch = "";
+        private static readonly List<string> pickerItems = new List<string>();
+        /* The item set is a SUPPLIER, not a snapshot: the card list arrives from
+         * /cards asynchronously, so a picker opened before that response lands
+         * would otherwise show "No matches" forever (it only rebuilds on a
+         * keystroke). RebuildPickerList re-pulls from this every time, and
+         * RefreshCompare nudges it when the supplied count changes. */
+        private static Func<List<string>> pickerItemsFn;
+        private static Func<string, string> pickerLabelFn;
+        private static Func<string, Color> pickerColorFn;
+        private static Func<string, bool> pickerSelectedFn;
+        private static Action<string> pickerPickFn;
+        private static bool pickerMulti;
+        private static string pickerTitle = "";
+
+        public static bool PickerOpen => pickerGO != null;
+        /// <summary>Filter text for the picker's IMGUI search box. CompetitiveUI
+        /// owns the actual text field (all text entry in this codebase is IMGUI)
+        /// and writes through this property; the setter rebuilds the visible list
+        /// directly rather than relying on the tab's dirty pass, because the
+        /// picker is an overlay object the tab refresh never touches.</summary>
+        public static string PickerSearch
+        {
+            get { return pickerSearch; }
+            set
+            {
+                string v = value ?? "";
+                if (v == pickerSearch) return;
+                pickerSearch = v;
+                if (pickerGO != null) RebuildPickerList();
+            }
+        }
+
+        /// <summary>Screen-space (IMGUI, Y-down) rect of the picker's search
+        /// anchor, so CompetitiveUI can draw its TextField exactly over it. Same
+        /// contract as GetCompareSearchScreenRect.</summary>
+        public static Rect GetPickerSearchScreenRect()
+        {
+            try
+            {
+                var go = (pickerSearchAnchor as Component)?.gameObject;
+                if (go == null || !go.activeInHierarchy) return new Rect(0, 0, 0, 0);
+                var rt = go.GetComponent<RectTransform>();
+                if (rt == null) return new Rect(0, 0, 0, 0);
+                var c = new Vector3[4]; rt.GetWorldCorners(c); // 0=BL,1=TL,2=TR,3=BR
+                float x = c[0].x, w = c[2].x - c[0].x, h = c[1].y - c[0].y;
+                float guiY = Screen.height - c[1].y;
+                if (w < 1f || h < 1f) return new Rect(0, 0, 0, 0);
+                return new Rect(x, guiY, w, h);
+            }
+            catch { return new Rect(0, 0, 0, 0); }
+        }
+
+        private static void ShowPicker(string title, Func<List<string>> items,
+                                      Func<string, string> label, Func<string, Color> color,
+                                      Func<string, bool> isSelected, Action<string> onPick,
+                                      bool multiSelect)
+        {
+            try
+            {
+                HidePicker();
+                EnsureOverlayCanvas();
+                pickerTitle = title ?? "";
+                pickerItemsFn = items;
+                pickerItems.Clear();
+                pickerLabelFn = label; pickerColorFn = color;
+                pickerSelectedFn = isSelected; pickerPickFn = onPick;
+                pickerMulti = multiSelect;
+                pickerSearch = "";
+
+                pickerGO = new GameObject("CR_Picker");
+                pickerGO.hideFlags = HideFlags.HideAndDontSave;
+                pickerGO.transform.SetParent(overlayCanvasGO.transform, false);
+                var rt = pickerGO.AddComponent<RectTransform>();
+                rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
+                rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+
+                var bd = UIFactory.CreatePanel("BD", pickerGO.transform, new Color(0f, 0f, 0f, 0.55f));
+                var bdRT = bd.GetComponent<RectTransform>();
+                bdRT.anchorMin = Vector2.zero; bdRT.anchorMax = Vector2.one;
+                bdRT.offsetMin = Vector2.zero; bdRT.offsetMax = Vector2.zero;
+                var bdImg = bd.GetComponent(UIFactory.tImage);
+                if (bdImg != null)
+                    UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(bdImg, true);
+                var bdClick = bd.AddComponent<ClickHandler>();
+                bdClick.bypassModalBlock = true;   // #200 — the closer must survive its own block
+                /* ClickHandler does NO occlusion test — it hit-tests only its own
+                 * rect plus ancestor masks (#185), and this backdrop covers the
+                 * whole screen INCLUDING the box. Without the box-rect exclusion
+                 * below, every click on a row would fire the row's button AND
+                 * this closer (they hold different ClickGuard keys, so the
+                 * per-control guard does not dedupe them, #142). Single-select
+                 * survives that by luck because it closes anyway; the
+                 * MULTI-select card picker would shut on every toggle. */
+                bdClick.onClick = () =>
+                {
+                    if (MouseInsidePickerBox()) return;
+                    if (ClickGuard.Claim(bd)) HidePicker();
+                };
+
+                var box = UIFactory.CreatePanel("Box", pickerGO.transform, new Color(0.10f, 0.12f, 0.16f, 0.98f));
+                var boxRT = box.GetComponent<RectTransform>();
+                boxRT.anchorMin = new Vector2(0.5f, 0.5f);
+                boxRT.anchorMax = new Vector2(0.5f, 0.5f);
+                boxRT.pivot = new Vector2(0.5f, 0.5f);
+                /* Height is clamped to the LIVE canvas height, never a constant:
+                 * the F5 canvas is WIDTH-matched, so a 32:9 window gets far fewer
+                 * than 1080 vertical units and a fixed box would clip off-screen
+                 * with no way to reach the bottom rows (#199). The list
+                 * ScrollView absorbs whatever height is lost. */
+                float boxH = 760f;
+                try
+                {
+                    var canvasRT = overlayCanvasGO.GetComponent<RectTransform>();
+                    if (canvasRT != null && canvasRT.rect.height > 200f)
+                        boxH = Mathf.Min(760f, canvasRT.rect.height - 60f);
+                }
+                catch { }
+                if (boxH < 240f) boxH = 240f;
+                boxRT.sizeDelta = new Vector2(620, boxH);
+                pickerBoxRT = boxRT;   // read by the backdrop's click-away test
+                UIFactory.AddVLG(box, spacing: 8, padL: 18, padR: 18, padT: 14, padB: 14);
+
+                UIFactory.CreateText("PkTitle", box.transform, pickerTitle, 22f, C_GOLD,
+                    UIFactory.AlignMidCenter, sizeDelta: new Vector2(580, 30));
+                UIFactory.CreateText("PkCap", box.transform,
+                    "<color=#88AAFF>Type to filter</color>", 14f, C_SUB,
+                    UIFactory.AlignMidLeft, sizeDelta: new Vector2(580, 18));
+                // Empty anchor — CompetitiveUI.DrawPickerSearch paints the real
+                // IMGUI field over this rect. Keeping the TMP text empty avoids
+                // the double-layered box the Compare search originally had.
+                pickerSearchAnchor = UIFactory.CreateText("PkSearch", box.transform, "",
+                    14f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(580, 26));
+                pickerCountTxt = UIFactory.CreateText("PkCount", box.transform, "",
+                    13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(580, 18));
+
+                var sv = UIFactory.CreateScrollView("PkSV", box.transform, spacing: 2);
+                UIFactory.AddLE(sv.scrollGO, flexH: 1);
+                pickerListContent = sv.content;
+
+                var closeBtn = UIFactory.CreateButton("PkClose", box.transform, "Close", 15f, C_WHITE,
+                    new Color(0.28f, 0.30f, 0.38f, 0.95f), HidePicker,
+                    sizeDelta: new Vector2(580, 30));
+                // flexH:0 so the button keeps its 30px against the flexH:1 list
+                // above it. CreateButton already attached a LayoutElement; a
+                // second one is the codebase's normal idiom here because
+                // LayoutUtility takes the MAX of set values across components
+                // and treats the first one's unset (-1) flex as absent.
+                UIFactory.AddLE(closeBtn, prefH: 30, flexH: 0);
+
+                RebuildPickerList();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PICKER] show: {ex.Message}"); }
+        }
+
+        /// <summary>True when the cursor is over the picker's box. The picker
+        /// lives on the ScreenSpaceOverlay canvas, so world corners ARE screen
+        /// pixels and no WorldToScreenPoint is needed (that conversion is only
+        /// for ROUNDS' ScreenSpaceCamera canvases, #6).</summary>
+        private static bool MouseInsidePickerBox()
+        {
+            try
+            {
+                if (pickerBoxRT == null) return false;
+                var c = new Vector3[4]; pickerBoxRT.GetWorldCorners(c);
+                Vector3 mp = Input.mousePosition;
+                float minX = Mathf.Min(c[0].x, c[2].x), maxX = Mathf.Max(c[0].x, c[2].x);
+                float minY = Mathf.Min(c[0].y, c[2].y), maxY = Mathf.Max(c[0].y, c[2].y);
+                return mp.x >= minX && mp.x <= maxX && mp.y >= minY && mp.y <= maxY;
+            }
+            catch { return false; }
+        }
+
+        public static void HidePicker()
+        {
+            try
+            {
+                if (pickerGO != null) { UnityEngine.Object.Destroy(pickerGO); pickerGO = null; }
+                pickerBoxRT = null;
+                pickerListContent = null; pickerSearchAnchor = null; pickerCountTxt = null;
+                pickerSearch = "";
+                pickerItems.Clear();
+                pickerItemsFn = null;
+                pickerLabelFn = null; pickerColorFn = null; pickerSelectedFn = null; pickerPickFn = null;
+                dirty = true;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PICKER] hide: {ex.Message}"); }
+        }
+
+        /// <summary>Rebuild the visible rows from pickerItems + the filter. Rows
+        /// are destroyed and re-created rather than pooled: the list is at most a
+        /// few dozen entries and only changes on a keystroke, and pooling here
+        /// would have to survive the overlay being destroyed on close.</summary>
+        private static void RebuildPickerList()
+        {
+            if (pickerListContent == null) return;
+            try
+            {
+                // Re-pull the item set every rebuild so an async load (the card
+                // catalogue) appears without the user having to reopen.
+                if (pickerItemsFn != null)
+                {
+                    pickerItems.Clear();
+                    var fresh = pickerItemsFn();
+                    if (fresh != null) pickerItems.AddRange(fresh);
+                }
+
+                for (int c = pickerListContent.transform.childCount - 1; c >= 0; c--)
+                    UnityEngine.Object.Destroy(pickerListContent.transform.GetChild(c).gameObject);
+
+                string q = (pickerSearch ?? "").Trim();
+                var shown = new List<string>();
+                foreach (var key in pickerItems)
+                {
+                    // Filter on the TRANSLATED label — the user is reading and
+                    // typing the displayed text, not the raw English switch key.
+                    string disp = pickerLabelFn != null ? pickerLabelFn(key) : key;
+                    if (q.Length == 0 || (disp ?? "").IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0
+                        || (key ?? "").IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
+                        shown.Add(key);
+                }
+
+                if (pickerCountTxt != null)
+                    /* "Showing {0} of {1}", not a bare "{0} of {1}": the
+                     * extractor rejects any fragment with fewer than 3 LETTERS
+                     * (#295c), and "of" is two — the bare form was silently
+                     * unharvestable, i.e. permanently English in every locale.
+                     * Verified against tools/i18n_source.json, which contains
+                     * "{0} of {1} left" and "{0} of {1} players" but no bare
+                     * "{0} of {1}". */
+                    UIFactory.SetTextRaw(pickerCountTxt,
+                        $"<color=#888>{I18n.TrF("Showing {0} of {1}", shown.Count, pickerItems.Count)}</color>");
+
+                if (shown.Count == 0)
+                {
+                    var none = UIFactory.CreateText("PkNone", pickerListContent.transform,
+                        $"<color=#888>{I18n.Tr("No matches.")}</color>", 14f, C_DIM,
+                        UIFactory.AlignMidLeft, sizeDelta: new Vector2(560, 26));
+                    UIFactory.FitOneLine(none);
+                    return;
+                }
+
+                for (int i = 0; i < shown.Count; i++)
+                {
+                    string key = shown[i];
+                    string disp = pickerLabelFn != null ? pickerLabelFn(key) : key;
+                    bool sel = pickerSelectedFn != null && pickerSelectedFn(key);
+                    Color col = pickerColorFn != null ? pickerColorFn(key) : C_WHITE;
+                    string mark = pickerMulti
+                        ? (sel ? "<color=#77FF99>[X]</color> " : "<color=#555>[ ]</color> ")
+                        : (sel ? "<color=#77FF99>></color> " : "  ");
+                    var b = UIFactory.CreateButton($"Pk{i}", pickerListContent.transform,
+                        $"{mark}<color=#{ColorToHex(col)}>{FfaSafeRich(disp)}</color>", 15f, C_WHITE,
+                        sel ? new Color(0.18f, 0.30f, 0.24f, 0.95f) : C_TAB,
+                        // CreateButton already wraps this in ClickGuard.Claim —
+                        // claiming again here would be a same-frame no-op (#158).
+                        () =>
+                        {
+                            pickerPickFn?.Invoke(key);
+                            if (!pickerMulti) HidePicker();
+                            else RebuildPickerList();   // refresh the [X] marks in place
+                            dirty = true;
+                        },
+                        sizeDelta: new Vector2(560, 26));
+                    // Explicit prefH: a scroll-view child with no preferred height
+                    // sizes to zero inside the viewport (#63).
+                    UIFactory.AddLE(b, prefW: 560, prefH: 26, flexW: 0, flexH: 0);
+                    // The row text is sized for the base font; a translated label
+                    // in an OS-fallback script has taller metrics and the global
+                    // Truncate default would drop the whole line (#292/#297).
+                    UIFactory.FitOneLine(UIFactory.GetButtonText(b));
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PICKER] rebuild: {ex.Message}"); }
+        }
+
+        /// <summary>Open the metric dropdown for whichever sub-tab is active.</summary>
+        private static void OpenMetricPicker()
+        {
+            var arr = ActiveMetrics;
+            ShowPicker(I18n.Tr("Choose a metric"), () => new List<string>(arr),
+                TrMetric,
+                _ => C_WHITE,
+                k => k == ActiveMetricName,
+                k =>
+                {
+                    for (int i = 0; i < arr.Length; i++)
+                        if (arr[i] == k) { ActiveMetricIndex = i; break; }
+                },
+                multiSelect: false);
+        }
+
+        /// <summary>A card's display color. RARITY-based — the plugin has no
+        /// per-card theme color anywhere (the theme tint only ever reaches the
+        /// screen because CardSnapshot renders the real prefab), so rarity is the
+        /// only card color source that exists client-side.
+        ///
+        /// Aug 7 item 2 — resolution order is LOCAL REGISTRY FIRST, server value
+        /// second. CardRarityLookup is built from the live CardInfo prefabs in
+        /// THIS build of ROUNDS, so it is ground truth for what a card is today.
+        /// The catalogue's `rarity` is a historical PER-PICK SNAPSHOT written by
+        /// whichever client reported each match, so one card accumulates several
+        /// stored rarities over its life (prod: 20 names carry >=2 — Drill Ammo
+        /// is stored as Rare 610x, Common 3x and Unknown 3x) and a minority row
+        /// could win the server's sort and colour the card wrongly. The server
+        /// value is used only when the local registry has nothing: before the
+        /// first match of the session the scene scan has not run, and a card the
+        /// installed game no longer ships is Unknown forever.</summary>
+        private static Color CardColorFor(string cardName)
+        {
+            try
+            {
+                string local = null;
+                try { local = CardRarityLookup.GetRarity(cardName); } catch { }
+                if (!string.IsNullOrEmpty(local)
+                    && !string.Equals(local, "Unknown", StringComparison.OrdinalIgnoreCase))
+                    return GetRarityColor(local);
+                if (ApiClient.CardCatalog != null)
+                    foreach (var e in ApiClient.CardCatalog)
+                        if (string.Equals(e.name, cardName, StringComparison.OrdinalIgnoreCase))
+                            return GetRarityColor(e.rarity);
+                return GetRarityColor(local);
+            }
+            catch { return C_LABEL; }
+        }
+
+        private static void ToggleCompareCard(string cardName)
+        {
+            if (string.IsNullOrEmpty(cardName)) return;
+            if (compareCardsSelected.Contains(cardName)) compareCardsSelected.Remove(cardName);
+            else
+            {
+                if (compareCardsSelected.Count >= COMPARE_CARDS_MAX)
+                {
+                    CompetitiveUI.ShowNotification(I18n.TrF("Max {0} cards", COMPARE_CARDS_MAX),
+                        new Color(1f, 0.6f, 0.3f));
+                    return;
+                }
+                compareCardsSelected.Add(cardName);
+            }
+            dirty = true;
+        }
+
         private static GameObject BuildCompareTab(Transform parent)
         {
             // Round 5 item 3: outer VLG wrapper hosts the sub-tab anchor above
@@ -9173,6 +10014,34 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             UIFactory.AddVLG(outer, spacing: 4);
             UIFactory.AddLE(outer, flexH: 1);
             MakeSubTabAnchor(9, outer.transform, true);
+
+            /* Aug 6 item 2 — Players / Cards sub-tabs. This is a LOCAL row, not
+             * MakeSubTabAnchor: that mechanism parks the GLOBAL tab-group bar
+             * (GROUP_MEMBERS) into whichever tab is active and is already in use
+             * above for tab 9 itself. Two independent bars, two independent
+             * jobs. */
+            var subRow = new GameObject("CmpSubTabs");
+            subRow.transform.SetParent(outer.transform, false);
+            subRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(subRow, spacing: 4, padL: 8);
+            UIFactory.AddLE(subRow, prefH: 26, minH: 26, flexH: 0);
+            /* Aug 7 item 2: the search box is now SHARED by both sub-tabs, so a
+             * term left over from the other list would filter this one to
+             * nothing — "Cards" opening on an empty list reads as broken. Clear
+             * it on every switch. */
+            compareSubTabPlayersBtn = UIFactory.CreateButton("CmpSTP", subRow.transform, "Players",
+                14f, C_WHITE, C_TABACT, () => { if (compareSubTab != 0) { compareSubTab = 0; compareSearch = ""; dirty = true; } },
+                sizeDelta: new Vector2(120, 24));
+            UIFactory.AddLE(compareSubTabPlayersBtn, prefW: 120, prefH: 24, flexW: 0, flexH: 0);
+            compareSubTabCardsBtn = UIFactory.CreateButton("CmpSTC", subRow.transform, "Cards",
+                14f, C_LABEL, C_TAB, () => { if (compareSubTab != 1) { compareSubTab = 1; compareSearch = ""; ApiClient.FetchCardCatalog(); dirty = true; } },
+                sizeDelta: new Vector2(120, 24));
+            UIFactory.AddLE(compareSubTabCardsBtn, prefW: 120, prefH: 24, flexW: 0, flexH: 0);
+            // Trailing flex spacer keeps the two buttons left-aligned. It lives
+            // INSIDE this row, so the row's derived flexible width can't stretch
+            // a sibling column (#132) — the row is the full tab width anyway.
+            var stSpacer = new GameObject("S"); stSpacer.transform.SetParent(subRow.transform, false);
+            stSpacer.AddComponent<RectTransform>(); UIFactory.AddLE(stSpacer, flexW: 1);
 
             var panel = new GameObject("Compare");
             panel.transform.SetParent(outer.transform, false);
@@ -9195,7 +10064,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
              * and "Borrar busqueda" (~105px at 13pt) fits. Costs the chart panel
              * (flexW:1) 46px out of ~1600. */
             UIFactory.AddLE(left, prefW: 268, minW: 240, flexW: 0, flexH: 1);
-            UIFactory.CreateText("CmpLH", left.transform, "Compare Players", 19f, C_GOLD,
+            txtCompareHeader = UIFactory.CreateText("CmpLH", left.transform, "Compare Players", 19f, C_GOLD,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(204, 26));
             // Round 4 item 2: the status line is longer than the 204px column and
             // TMP's default overflow spilled it over the graph — wrap to two lines
@@ -9207,7 +10076,14 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             // CompetitiveUI over the empty `compareSearchField` anchor below — keeping the
             // anchor's TMP text EMPTY means only one layer of text shows in the box (was
             // double-layered before: native label text behind the IMGUI field).
-            UIFactory.CreateText("CmpSearchCap", left.transform, "<color=#88AAFF>Search players</color>",
+            /* Aug 7 item 2 — the search serves BOTH sub-tabs now. It used to be
+             * deactivated on Cards (whose chooser was a modal dropdown carrying
+             * its own search); the dropdown is gone and the card list is a
+             * persistent left-column list exactly like the player list, so the
+             * caption/anchor pair stays live and only its LABEL changes. The
+             * anchor's TMP text must stay EMPTY — CompetitiveUI paints the real
+             * IMGUI field over this rect, and text here shows through it. */
+            compareSearchCap = UIFactory.CreateText("CmpSearchCap", left.transform, $"<color=#88AAFF>{I18n.Tr("Search players")}</color>",
                 12f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(204, 16));
             compareSearchField = UIFactory.CreateText("CmpSearchLbl", left.transform, "",
                 13f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(204, 22));
@@ -9215,13 +10091,15 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             btnRow.AddComponent<RectTransform>(); UIFactory.AddHLG(btnRow, spacing: 4, forceExpandH: true);
             UIFactory.AddLE(btnRow, prefH: 24, flexH: 0);
             var clrBtn = UIFactory.CreateButton("CmpClr", btnRow.transform, "Clear", 13f, C_WHITE,
-                new Color(0.4f, 0.2f, 0.2f, 0.9f), () => { compareSelected.Clear(); dirty = true; },
+                new Color(0.4f, 0.2f, 0.2f, 0.9f),
+                // Clears whichever selection the active sub-tab owns.
+                () => { if (compareSubTab == 1) compareCardsSelected.Clear(); else compareSelected.Clear(); dirty = true; },
                 sizeDelta: new Vector2(120, 24));
             UIFactory.AddLE(clrBtn, prefH: 24, flexW: 1, flexH: 0);
-            var clrSearchBtn = UIFactory.CreateButton("CmpClrS", btnRow.transform, "Clear Search", 13f, C_WHITE,
+            compareClrSearchBtn = UIFactory.CreateButton("CmpClrS", btnRow.transform, "Clear Search", 13f, C_WHITE,
                 new Color(0.25f, 0.3f, 0.4f, 0.9f), () => { compareSearch = ""; dirty = true; },
                 sizeDelta: new Vector2(120, 24));
-            UIFactory.AddLE(clrSearchBtn, prefH: 24, flexW: 1, flexH: 0);
+            UIFactory.AddLE(compareClrSearchBtn, prefH: 24, flexW: 1, flexH: 0);
             // childForceExpandWidth:false → the row buttons keep their own (narrower)
             // width and sit left-aligned, leaving a dead strip on the right of the picker
             // that's still inside the scroll viewport. Sid can click/scroll there without
@@ -9238,19 +10116,16 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             var metricRow = new GameObject("CmpMetRow"); metricRow.transform.SetParent(right.transform, false);
             metricRow.AddComponent<RectTransform>(); UIFactory.AddHLG(metricRow, spacing: 4, forceExpandH: true);
             UIFactory.AddLE(metricRow, prefH: 30, flexH: 0);
-            var metricPrev = UIFactory.CreateButton("CmpMetP", metricRow.transform, "<", 15f, C_WHITE, C_TAB,
-                () => { compareMetric = (compareMetric - 1 + COMPARE_METRICS.Length) % COMPARE_METRICS.Length; dirty = true; },
-                sizeDelta: new Vector2(30, 30));
-            UIFactory.AddLE(metricPrev, prefW: 30, prefH: 30, flexW: 0, flexH: 0);
+            /* Aug 6 item 2: the < / label / > CYCLER is replaced by a searchable
+             * dropdown. Cycling was already awkward at 19 metrics; the Players
+             * list is 32 now, so a linear walk is not a usable control. */
             compareMetricBtn = UIFactory.CreateButton("CmpMet", metricRow.transform, "Showing: Elo over games",
-                15f, C_WHITE, C_TAB, () => { compareMetric = (compareMetric + 1) % COMPARE_METRICS.Length; dirty = true; },
-                sizeDelta: new Vector2(320, 30));
+                15f, C_WHITE, C_TAB, OpenMetricPicker, sizeDelta: new Vector2(320, 30));
             UIFactory.AddLE(compareMetricBtn, prefH: 30, flexW: 1, flexH: 0);
             compareMetricBtnTxt = UIFactory.GetButtonText(compareMetricBtn);
-            var metricNext = UIFactory.CreateButton("CmpMetN", metricRow.transform, ">", 15f, C_WHITE, C_TAB,
-                () => { compareMetric = (compareMetric + 1) % COMPARE_METRICS.Length; dirty = true; },
-                sizeDelta: new Vector2(30, 30));
-            UIFactory.AddLE(metricNext, prefW: 30, prefH: 30, flexW: 0, flexH: 0);
+            // The label is one line in a 30px row and carries a translated metric
+            // name; without this the global Truncate default clips it (#292).
+            UIFactory.FitOneLine(compareMetricBtnTxt);
 
             // Chart plot — FILLS the right panel (was a fixed 640x320 that used ~1/4 of
             // the space, forcing abbreviated/cut-off names). The chart math reads the
@@ -9297,6 +10172,11 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             if (rowIdx < 0 || rowIdx >= comparePickerSteamIds.Count) return;
             string sid = comparePickerSteamIds[rowIdx];
             if (string.IsNullOrEmpty(sid)) return;
+            /* The row pool is shared between sub-tabs, so the slot holds a card
+             * name while Cards is active. Dispatch on the sub-tab BEFORE touching
+             * compareSelected, or a card name lands in the player selection and
+             * every downstream stats lookup silently misses. */
+            if (compareSubTab == 1) { ToggleCompareCard(sid); return; }
             if (compareSelected.Contains(sid))
             {
                 compareSelected.Remove(sid);
@@ -9322,21 +10202,75 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         private static void RefreshCompare()
         {
             if (ApiClient.CachedLeaderboard == null) ApiClient.FetchLeaderboard();
-            string metricName = COMPARE_METRICS[Math.Max(0, Math.Min(compareMetric, COMPARE_METRICS.Length - 1))];
+            /* If the picker is open and its supplied item set has grown, rebuild
+             * it. Guarded on a COUNT CHANGE rather than rebuilt unconditionally
+             * so a routine dirty pass doesn't destroy the rows out from under a
+             * click or reset the user's scroll position.
+             *
+             * Aug 7 item 2: this was written for the card chooser's catalogue
+             * landing mid-open. That chooser is gone (cards are a persistent
+             * left-column list now) and the only remaining caller is the metric
+             * dropdown, whose supplier is a static array — so today this never
+             * fires. Kept because it is part of the generic picker's contract
+             * with an async supplier, not Compare-tab state. */
+            if (pickerGO != null && pickerItemsFn != null)
+            {
+                var fresh = pickerItemsFn();
+                if ((fresh?.Count ?? 0) != pickerItems.Count) RebuildPickerList();
+            }
+            bool cardsTab = compareSubTab == 1;
+            string metricName = ActiveMetricName;
+
+            // Sub-tab button state.
+            if (compareSubTabPlayersBtn != null)
+            {
+                UIFactory.SetImageColor(compareSubTabPlayersBtn, cardsTab ? C_TAB : C_TABACT);
+                var t = UIFactory.GetButtonText(compareSubTabPlayersBtn);
+                UIFactory.SetColor(t, cardsTab ? C_LABEL : C_WHITE);
+            }
+            if (compareSubTabCardsBtn != null)
+            {
+                UIFactory.SetImageColor(compareSubTabCardsBtn, cardsTab ? C_TABACT : C_TAB);
+                var t = UIFactory.GetButtonText(compareSubTabCardsBtn);
+                UIFactory.SetColor(t, cardsTab ? C_WHITE : C_LABEL);
+            }
+            /* Aug 7 item 2 — the search box is LIVE on both sub-tabs. It used to
+             * be deactivated on Cards, which is also what suppressed the IMGUI
+             * field (GetCompareSearchScreenRect returns zero for an inactive
+             * anchor). Now only the caption changes; the field itself filters
+             * whichever list the sub-tab is showing. The caption is re-set every
+             * refresh rather than at build time so a locale switch retranslates
+             * it, and each literal sits INSIDE its own Tr call (#295a). */
+            if (compareSearchCap != null)
+            {
+                ((Component)compareSearchCap).gameObject.SetActive(true);
+                UIFactory.SetTextRaw(compareSearchCap, "<color=#88AAFF>"
+                    + (cardsTab ? I18n.Tr("Search cards") : I18n.Tr("Search players")) + "</color>");
+            }
+            if (compareSearchField != null)
+                ((Component)compareSearchField).gameObject.SetActive(true);
+            if (compareClrSearchBtn != null) compareClrSearchBtn.SetActive(true);
+            if (txtCompareHeader != null)
+                UIFactory.SetTextRaw(txtCompareHeader, cardsTab
+                    ? I18n.Tr("Compare Cards") : I18n.Tr("Compare Players"));
+
             if (compareMetricBtnTxt != null)
                 /* item 11: composed BEFORE SetText, so the finished string could
                  * never match a catalogue key (only the build-time literal
                  * "Showing: Elo over games" was ever harvested). Translate the parts,
                  * then compose, then SetTextRaw so the chokepoint does not re-Tr it. */
                 UIFactory.SetTextRaw(compareMetricBtnTxt,
-                    I18n.TrF("Showing: {0}", TrMetric(metricName)) + "   <color=#888>" + I18n.Tr("(click / use < >)") + "</color>");
+                    I18n.TrF("Showing: {0}", TrMetric(metricName)) + "   <color=#888>" + I18n.Tr("(click to change)") + "</color>");
             if (txtCompareStatus != null)
-                UIFactory.SetTextRaw(txtCompareStatus,
-                    I18n.TrF("Selected {0}/{1}  -  click a player to add/remove", compareSelected.Count, COMPARE_MAX));
+                UIFactory.SetTextRaw(txtCompareStatus, cardsTab
+                    ? I18n.TrF("Selected {0}/{1}  -  click a card to add/remove", compareCardsSelected.Count, COMPARE_CARDS_MAX)
+                    : I18n.TrF("Selected {0}/{1}  -  click a player to add/remove", compareSelected.Count, COMPARE_MAX));
             // Keep the anchor label EMPTY — the IMGUI text field (CompetitiveUI.DrawCompareSearch)
             // draws over it and shows the value/placeholder. Setting text here too caused the
             // double-layered, hard-to-read box.
             if (compareSearchField != null) UIFactory.SetText(compareSearchField, "");
+
+            if (cardsTab) { RefreshCompareCardsTab(metricName); return; }
 
             // Build the picker list from the current leaderboard, filtered by the
             // search box. comparePickerSteamIds[rowIdx] maps the VISIBLE row index to
@@ -9383,14 +10317,131 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             //   "Top/Worst Cards"     → multi-column grid  (compareCardsScroll)
             //   everything else       → bar/grouped/stacked chart (compareGraphPanel)
             bool isCards = metricName == "Top Cards" || metricName == "Worst Cards";
-            bool useGraphPanel = !isCards;
-            if (compareGraphPanel != null) compareGraphPanel.SetActive(useGraphPanel);
-            if (compareCardsScroll != null) compareCardsScroll.SetActive(isCards);
+            /* Aug 7 item 2d: "Player Nemesis" joins the cards metrics on the
+             * SCROLLING surface. Its height grows with the selection (up to 12
+             * blocks of 6 lines) and compareGraphPanel is a fixed mask with no
+             * scroll, so anything past the first few players would be invisible
+             * there (#199/#245). */
+            bool useScroll = isCards || metricName == "Player Nemesis";
+            if (compareGraphPanel != null) compareGraphPanel.SetActive(!useScroll);
+            if (compareCardsScroll != null) compareCardsScroll.SetActive(useScroll);
 
             if (metricName == "Elo over games") BuildCompareGraph();
             else if (metricName == "Elo over time") BuildCompareGraph(timeAxis: true);
+            else if (metricName == "FFA Elo over games") BuildCompareGraph(ffa: true);
+            else if (metricName == "FFA Elo over time") BuildCompareGraph(timeAxis: true, ffa: true);
             else if (isCards) BuildCompareCardGrid(metricName);
+            else if (metricName == "Player Nemesis") BuildComparePlayerNemesisPanel();
             else BuildCompareBarChart(metricName);
+        }
+
+        /// <summary>Aug 7 item 2 — the Cards sub-tab's left column is now a
+        /// PERSISTENT list of the whole card catalogue, exactly like the player
+        /// picker: same pooled grow-only rows, same [X]/[ ] + name + stat
+        /// shape, same search box. It used to list only the already-SELECTED
+        /// cards, with a "Choose cards..." button raising a modal dropdown to add
+        /// any; that dropdown is gone.
+        ///
+        /// The catalogue arrives asynchronously, so an empty list here means
+        /// "still loading" and NOT "no cards" — the two are labelled differently
+        /// because a permanent "No cards" on a slow connection reads as a broken
+        /// tab. Everything else is drawn into compareGraphPanel, a masked
+        /// free-positioning surface, so no row can overpaint a sibling the way a
+        /// fixed-height VLG stack does (#199).</summary>
+        private static void RefreshCompareCardsTab(string metricName)
+        {
+            ApiClient.FetchCardCatalog();
+
+            /* Build the visible card list from the catalogue, filtered by the
+             * SAME search box the player list uses. Matched against both the
+             * localized display name (what the user is reading and typing) and
+             * the raw stored name, mirroring how the old dropdown filtered. */
+            var cat = ApiClient.CardCatalog;
+            string q = (compareSearch ?? "").Trim();
+            var shownCards = new List<ApiClient.CardCatalogEntry>();
+            if (cat != null)
+            {
+                foreach (var e in cat)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.name)) continue;
+                    if (q.Length == 0) { shownCards.Add(e); continue; }
+                    string disp = null;
+                    try { disp = CardTextLocalizer.PrettyName(e.name, e.name); } catch { }
+                    if ((disp != null && disp.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
+                        || e.name.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
+                        shownCards.Add(e);
+                }
+            }
+
+            // Left column: one row per VISIBLE card, colored by rarity, marked
+            // [X] when selected. Same pool as the player picker — only one
+            // sub-tab is ever visible, so the slot means "row key", player or
+            // card, and ToggleCompareSelect dispatches on compareSubTab.
+            int n = shownCards.Count;
+            while (comparePickerSteamIds.Count < n) comparePickerSteamIds.Add("");
+            for (int i = 0; i < n; i++)
+            {
+                var ent = shownCards[i];
+                string card = ent.name;
+                comparePickerSteamIds[i] = card;
+                while (comparePickerRows.Count <= i)
+                {
+                    int idx = comparePickerRows.Count;
+                    var b = UIFactory.CreateButton($"cmpP{idx}", comparePickerContent.transform, "",
+                        13f, C_WHITE, C_TAB, () => ToggleCompareSelect(idx), sizeDelta: new Vector2(168, 24));
+                    UIFactory.AddLE(b, prefW: 168, prefH: 24, flexW: 0, flexH: 0);
+                    comparePickerRows.Add(b);
+                    comparePickerTexts.Add(UIFactory.GetButtonText(b));
+                }
+                var row = comparePickerRows[i];
+                row.SetActive(true);
+                bool sel = compareCardsSelected.Contains(card);
+                Color cc = CardColorFor(card);
+                string disp2 = CardTextLocalizer.PrettyName(card, card) ?? card;
+                string mark = sel ? "<color=#77FF99>[X]</color> " : "<color=#555>[ ]</color> ";
+                /* 14 visible name characters, not the player list's 16: the card
+                 * row carries a wider trailing stat (pick counts run to 4-5
+                 * digits where a rating is always 4) inside the same 168px row,
+                 * and the global Truncate default would drop the overflow rather
+                 * than wrap it (#292). Card names are DB-stored strings, so they
+                 * go through FfaSafeRich before reaching TMP rich text. */
+                UIFactory.SetTextRaw(comparePickerTexts[i],
+                    $"{mark}<color=#{ColorToHex(cc)}>{FfaSafeRich(Trunc(disp2, 14))}</color>"
+                    + $"  <color=#888>{ent.times_picked}</color>");
+                UIFactory.SetImageColor(row, sel ? new Color(0.2f, 0.3f, 0.25f, 0.9f) : C_TAB);
+            }
+            for (int i = n; i < comparePickerRows.Count; i++) comparePickerRows[i].SetActive(false);
+
+            /* Empty-state line, reusing row 0 of the same pool so it can never
+             * outlive the list (a separately-created child would leak one object
+             * per refresh). Distinguishes "loading" from "nothing matched": the
+             * catalogue is null until /cards answers. */
+            if (n == 0)
+            {
+                if (comparePickerRows.Count == 0)
+                {
+                    // The pool is grown inside the row loop above, which does not
+                    // run when nothing is visible — so a user who opens Compare
+                    // straight onto Cards has no row to write into yet.
+                    var b0 = UIFactory.CreateButton("cmpP0", comparePickerContent.transform, "",
+                        13f, C_WHITE, C_TAB, () => ToggleCompareSelect(0), sizeDelta: new Vector2(168, 24));
+                    UIFactory.AddLE(b0, prefW: 168, prefH: 24, flexW: 0, flexH: 0);
+                    comparePickerRows.Add(b0);
+                    comparePickerTexts.Add(UIFactory.GetButtonText(b0));
+                }
+                comparePickerRows[0].SetActive(true);
+                UIFactory.SetImageColor(comparePickerRows[0], C_TAB);
+                UIFactory.SetTextRaw(comparePickerTexts[0], "<color=#888>"
+                    + (cat == null ? I18n.Tr("Loading...") : I18n.Tr("No matches.")) + "</color>");
+                // Slot 0 must not resolve to a real card while it shows this.
+                if (comparePickerSteamIds.Count == 0) comparePickerSteamIds.Add("");
+                comparePickerSteamIds[0] = "";
+            }
+
+            // Cards metrics all render into the chart panel.
+            if (compareGraphPanel != null) compareGraphPanel.SetActive(true);
+            if (compareCardsScroll != null) compareCardsScroll.SetActive(false);
+            BuildCompareCardMetric(metricName);
         }
 
         private static string ColorToHex(Color c)
@@ -9401,7 +10452,13 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             return $"{r:X2}{g:X2}{b:X2}";
         }
 
-        private static void BuildCompareGraph(bool timeAxis = false)
+        /// <summary>The Elo line graph. `ffa` (Aug 7 item 1) selects the FFA
+        /// rating series instead of the 1v1 one — same axes, colours and sizing,
+        /// because the two are the same shape of data and a second copy of this
+        /// method would drift (#279). The FFA series is parsed by ApiClient into
+        /// a parallel pair with the SAME 1500-baseline prepend as the 1v1 one, so
+        /// every length assumption below still holds.</summary>
+        private static void BuildCompareGraph(bool timeAxis = false, bool ffa = false)
         {
             if (compareGraphPanel == null) return;
             for (int c = compareGraphPanel.transform.childCount - 1; c >= 0; c--)
@@ -9419,17 +10476,23 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             {
                 string sid = compareSelected[i];
                 if (!compareStatsCache.TryGetValue(sid, out var ps) || ps == null) continue;
-                if (ps.rating_history == null || ps.rating_history.Count < 2) continue;
+                var hist = ffa ? ps.ffa_rating_history : ps.rating_history;
+                var histTimes = ffa ? ps.ffa_rating_history_times : ps.rating_history_times;
+                // <2 snapshots is SKIPPED, not drawn: a single point is a dot with
+                // no line, which reads as a rendering failure rather than as "this
+                // player has one rated game". Same rule the 1v1 series has always
+                // had — and it is the common case for FFA, which is newer.
+                if (hist == null || hist.Count < 2) continue;
                 float[] times = null;
                 if (timeAxis)
                 {
-                    if (ps.rating_history_times == null || ps.rating_history_times.Count != ps.rating_history.Count)
+                    if (histTimes == null || histTimes.Count != hist.Count)
                         continue; // no usable timestamps for this player
-                    times = ps.rating_history_times.ToArray();
+                    times = histTimes.ToArray();
                 }
                 names.Add(Trunc(ps.display_name ?? "?", 14));
                 cols.Add(COMPARE_COLORS[i % COMPARE_COLORS.Length]);
-                seriesList.Add(ps.rating_history.ToArray());
+                seriesList.Add(hist.ToArray());
                 timesList.Add(times);
             }
 
@@ -9439,8 +10502,13 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 
             if (seriesList.Count == 0)
             {
+                /* Name the LADDER in the empty state: with four Elo metrics in the
+                 * dropdown, "no ranked history" on the FFA chart reads as a bug to
+                 * a player who has plenty of 1v1 history. Both literals sit inside
+                 * their own Tr call — I18n.Tr(variable) harvests nothing (#295a). */
                 var msg = UIFactory.CreateText("CmpNone", compareGraphPanel.transform,
-                    "<color=#888>Select 2+ players with ranked history to compare Elo.</color>",
+                    ffa ? I18n.Tr("<color=#888>Select 2+ players with rated FFA history to compare FFA Elo.</color>")
+                        : "<color=#888>Select 2+ players with ranked history to compare Elo.</color>",
                     15f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(W - 20, 40));
                 var mrt = (msg as Component)?.gameObject.GetComponent<RectTransform>();
                 if (mrt != null) { mrt.anchorMin = new Vector2(0.5f, 0.5f); mrt.anchorMax = new Vector2(0.5f, 0.5f); mrt.anchoredPosition = Vector2.zero; }
@@ -9817,6 +10885,13 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 
             CompareChartSize(out float W, out float H);
 
+            /* Aug 6 item 1: "Records" is a GLOBAL board — the three career-record
+             * leaderboards exist independently of the selection, which only
+             * decides who gets highlighted. It must therefore be dispatched
+             * BEFORE the empty-selection guard, or the one metric that needs no
+             * selection is the one that refuses to render without one. */
+            if (metricName == "Records") { BuildCompareRecordsPanel(idxs, W, H); return; }
+
             if (idxs.Count == 0)
             {
                 MakeGraphLabel("CmpBarNone", $"<color=#888>{I18n.TrF("Select players (left) to chart {0}.", "<b>" + TrMetric(metricName) + "</b>")}</color>",
@@ -9828,6 +10903,15 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             if (metricName == "Region Time") { BuildComparePieChart(idxs, W, H); return; }
             // Per-achievement comparison grid (v1.29).
             if (metricName == "Achievement Grid") { BuildCompareAchievementGrid(idxs, W, H); return; }
+            /* Aug 6 item 1 — metrics whose data does NOT live on PlayerStatsData.
+             * Each reads its own endpoint through ApiClient's compare-board caches
+             * and renders a pie grid or a text board. Dispatched here (rather than
+             * from RefreshCompare) so they inherit the "no players selected"
+             * guard and the live chart size above. */
+            if (metricName == "Build Types" || metricName == "Ranked Friends" || metricName == "Gold Sources")
+            { BuildCompareGenericPie(idxs, W, H, metricName); return; }
+            if (metricName == "Most Similar Player") { BuildCompareSimilarPanel(idxs, W, H); return; }
+            if (metricName == "Nemesis Comparison") { BuildCompareNemesisPanel(idxs, W, H); return; }
 
             float padL = 60f, padR = 16f, padT = 34f, padB = 48f;
             float plotW = W - padL - padR, plotH = H - padT - padB;
@@ -9854,6 +10938,14 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 case "Keys / Game": title = I18n.Tr("Avg Key Presses per Game"); break;
                 case "Avg Game Length": title = I18n.Tr("Avg Game Length (minutes)"); break;
                 case "2v2 Rating": title = I18n.Tr("2v2 Rating"); break;
+                // Aug 6 item 1 — simple single-value bars off PlayerStatsData.
+                case "Rage Quit %": title = I18n.Tr("Casual Rage-Quit % (lower is better)"); unit = "%"; break;
+                case "FFA Avg Kills": title = I18n.Tr("FFA Average Kills per Game"); break;
+                case "FFA Avg Placement": title = I18n.Tr("FFA Average Placement (lower is better)"); break;
+                case "Ranked DPS": title = I18n.Tr("Ranked Damage per Second"); break;
+                case "FFA DPS": title = I18n.Tr("FFA Damage per Second"); break;
+                case "Self-Death %": title = I18n.Tr("Self-Inflicted Deaths % (boundary + own bullet)"); unit = "%"; break;
+                case "Ranked Uniqueness %": title = I18n.Tr("Opponent Variety % (unique opponents / series)"); unit = "%"; break;
                 default: title = TrMetric(metricName); break;
             }
             // Per-pair legend labels for grouped metrics (solid vs dim bars).
@@ -9898,6 +10990,23 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 case "Keys / Game": v1 = ps => ps.avg_keys_per_game; break;
                 case "Avg Game Length": v1 = ps => ps.avg_game_seconds / 60f; break;
                 case "2v2 Rating": v1 = ps => ps.team_rating; break;
+                /* Aug 6 item 1. Every one of these is a flat scalar the server
+                 * already computed — the client must NOT re-derive them (e.g.
+                 * self_death_pct's denominator is "deaths recorded", not
+                 * deaths_total-as-C#-default), or the two ends disagree. */
+                /* The three *_pct fields are FRACTIONS (0..1), not 0-100, despite
+                 * the suffix — every one is `round(a / b, 4)` server-side
+                 * (main.py:4673/4680/4715). Verified against the formulas, not
+                 * the field names (#152/#219): plotting them raw put a 3.1%
+                 * rage-quit rate on the axis as 0.03 and labelled it "0.0%".
+                 * ranked_dps / ffa_dps / ffa_avg_* are already real units. */
+                case "Rage Quit %": v1 = ps => ps.casual_rage_quit_pct * 100f; break;
+                case "FFA Avg Kills": v1 = ps => ps.ffa_avg_kills; break;
+                case "FFA Avg Placement": v1 = ps => ps.ffa_avg_placement; break;
+                case "Ranked DPS": v1 = ps => ps.ranked_dps; break;
+                case "FFA DPS": v1 = ps => ps.ffa_dps; break;
+                case "Self-Death %": v1 = ps => ps.self_death_pct * 100f; break;
+                case "Ranked Uniqueness %": v1 = ps => ps.ranked_uniqueness_pct * 100f; break;
                 default: v1 = ps => 0f; break;
             }
 
@@ -9997,6 +11106,16 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                                 // minute (Sid). 5.4m reads as 5m24s.
                                 : metricName == "Avg Game Length" ? $"{val:F1}m"
                                 : metricName == "Keys / Sec" ? val.ToString("F1")
+                                /* Aug 6 item 1: these are all small floats where
+                                 * FullNum's whole-number rounding destroys the
+                                 * comparison (a 2.4 vs 2.6 avg placement would
+                                 * both print "3"). Percentages carry their sign
+                                 * so the axis unit isn't the only cue. */
+                                : (metricName == "Rage Quit %" || metricName == "Self-Death %"
+                                   || metricName == "Ranked Uniqueness %") ? $"{val:F1}%"
+                                : (metricName == "Ranked DPS" || metricName == "FFA DPS"
+                                   || metricName == "FFA Avg Kills" || metricName == "FFA Avg Placement")
+                                    ? val.ToString("F1")
                                 : FullNum(val);
                     MakeGraphLabel($"CmpBarV{gi2}", $"<color=#EEE>{vlbl}</color>",
                         new Vector2(0, 0), new Vector2(bx - 6f, padB + clamped / maxV * plotH + 1f), new Vector2(bw + 12f, 12), UIFactory.AlignMidCenter);
@@ -10156,7 +11275,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     float cy = H - topPad - row * cellH - cellH * 0.5f; // bottom-left coord space
 
                     MakeGraphLabel($"CmpPieName{k}",
-                        $"<b><color=#{ColorToHex(COMPARE_COLORS[i % COMPARE_COLORS.Length])}>{Trunc(ps.display_name, 14)}</color></b>",
+                        $"<b><color=#{ColorToHex(COMPARE_COLORS[i % COMPARE_COLORS.Length])}>{FfaSafeRich(Trunc(ps.display_name, 14))}</color></b>",
                         new Vector2(0, 0), new Vector2(cx - cellW * 0.5f, cy + radius + 4f), new Vector2(cellW, 16), UIFactory.AlignMidCenter, 14f);
 
                     int tot = 0; if (ps.region_matches != null) foreach (var m in ps.region_matches) tot += m;
@@ -10201,15 +11320,717 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] pie chart failed: {ex.Message}"); }
         }
 
+        // ── Aug 6 item 1: generic per-player pie + board panels ──────────────
+        /* Slice palette. Deliberately NOT COMPARE_COLORS: a player's own compare
+         * color labels their pie's title, and reusing it for slices makes "this
+         * slice is me" read as meaningful when it isn't. */
+        private static readonly Color[] PIE_SLICE_COLORS = {
+            new Color(0.36f, 0.62f, 0.98f), new Color(0.98f, 0.55f, 0.30f),
+            new Color(0.42f, 0.86f, 0.48f), new Color(0.92f, 0.80f, 0.28f),
+            new Color(0.74f, 0.50f, 0.96f), new Color(0.30f, 0.86f, 0.82f),
+            new Color(0.96f, 0.52f, 0.72f), new Color(0.62f, 0.80f, 0.36f),
+            new Color(0.90f, 0.42f, 0.42f), new Color(0.50f, 0.58f, 0.90f),
+            new Color(0.80f, 0.66f, 0.44f), new Color(0.56f, 0.76f, 0.68f),
+        };
+
+        /// <summary>Per-player pie grid for Build Types / Ranked Friends / Gold
+        /// Sources. Structurally the same as BuildComparePieChart, but the labels
+        /// and values come from a per-metric endpoint cache instead of the
+        /// region breakdown, and colours are keyed by the label's position in the
+        /// UNION across players so one bucket is the same colour in every pie.</summary>
+        private static void BuildCompareGenericPie(List<int> idxs, float W, float H, string metricName)
+        {
+            try
+            {
+                string title = metricName == "Build Types" ? I18n.Tr("Ranked build types")
+                             : metricName == "Ranked Friends" ? I18n.Tr("Most-played ranked opponents")
+                             : I18n.Tr("Where their gold came from");
+                MakeGraphLabel("CmpGPTitle", $"<color=#CCC><b>{title}</b></color>",
+                    new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
+
+                // Kick any missing fetches, then bail to a loading line. Fetches
+                // are cached + in-flight-deduped, so calling them every render is
+                // free after the first (matches the achievement grid's shape).
+                bool missing = false;
+                foreach (int i in idxs)
+                {
+                    string sid = compareSelected[i];
+                    if (metricName == "Build Types")
+                    { if (!ApiClient.BuildTypes.ContainsKey(sid)) { ApiClient.FetchBuildType(sid); missing = true; } }
+                    else if (metricName == "Ranked Friends")
+                    { if (!ApiClient.RankedFriends.ContainsKey(sid)) { ApiClient.FetchRankedFriends(sid); missing = true; } }
+                    else
+                    { if (!ApiClient.GoldSources.ContainsKey(sid)) { ApiClient.FetchGoldSources(sid); missing = true; } }
+                }
+                if (missing)
+                {
+                    MakeGraphLabel("CmpGPLoad", $"<color=#888>{I18n.Tr("Loading...")}</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                    return;
+                }
+
+                // Gather each player's (labels, values) and the label union.
+                var labelsPer = new List<List<string>>();
+                var valuesPer = new List<List<int>>();
+                var union = new List<string>();
+                foreach (int i in idxs)
+                {
+                    string sid = compareSelected[i];
+                    List<string> L; List<int> V;
+                    if (metricName == "Build Types")
+                    { var d = ApiClient.BuildTypes[sid]; L = d.buckets; V = d.counts; }
+                    else if (metricName == "Ranked Friends")
+                    { var d = ApiClient.RankedFriends[sid]; L = d.names; V = d.seriesCounts; }
+                    else
+                    { var d = ApiClient.GoldSources[sid]; L = d.buckets; V = d.amounts; }
+                    labelsPer.Add(L); valuesPer.Add(V);
+                    for (int li = 0; li < L.Count; li++)
+                        if (V.Count > li && V[li] > 0 && !union.Contains(L[li])) union.Add(L[li]);
+                }
+
+                // Shared legend, 4 chips per line (same <mark> swatch trick as the
+                // region legend — a separately-positioned swatch drifts).
+                for (int li = 0; li < union.Count && li < 12; li++)
+                {
+                    float lxr = -14f - (li % 4) * 118f;
+                    float lyr = -4f - (li / 4) * 17f;
+                    string hex = ColorToHex(PIE_SLICE_COLORS[li % PIE_SLICE_COLORS.Length]);
+                    MakeGraphLabel($"CmpGPLeg{li}",
+                        /* R2 finding 16: Ranked Friends puts OPPONENT DISPLAY NAMES in this
+                         * legend, so it is user-authored text reaching TMP rich text. */
+                        $"<mark=#{hex}FF>  </mark> <b>{FfaSafeRich(Trunc(PieLabelDisplay(metricName, union[li]), 13))}</b>",
+                        new Vector2(1, 1), new Vector2(lxr, lyr), new Vector2(110, 14), UIFactory.AlignMidLeft, 13f);
+                }
+
+                int n = idxs.Count;
+                int cols = n <= 1 ? 1 : n <= 2 ? 2 : n <= 6 ? 3 : 4;
+                int rows = (n + cols - 1) / cols;
+                float topPad = 30f + Mathf.Ceil(Mathf.Min(union.Count, 12) / 4f) * 17f;
+                float cellW = (W - 20f) / cols;
+                float cellH = (H - topPad - 8f) / Mathf.Max(1, rows);
+                float radius = Mathf.Max(24f, Mathf.Min(cellW, cellH) * 0.34f);
+                bool leaderLines = cols <= 3;
+
+                for (int k = 0; k < n; k++)
+                {
+                    int i = idxs[k];
+                    var ps = compareStatsCache[compareSelected[i]];
+                    var L = labelsPer[k]; var V = valuesPer[k];
+                    int col = k % cols, row = k / cols;
+                    float cx = 10f + col * cellW + cellW * 0.5f;
+                    float cy = H - topPad - row * cellH - cellH * 0.5f;
+
+                    MakeGraphLabel($"CmpGPName{k}",
+                        $"<b><color=#{ColorToHex(COMPARE_COLORS[i % COMPARE_COLORS.Length])}>{FfaSafeRich(Trunc(ps.display_name, 14))}</color></b>",
+                        new Vector2(0, 0), new Vector2(cx - cellW * 0.5f, cy + radius + 4f),
+                        new Vector2(cellW, 16), UIFactory.AlignMidCenter, 14f);
+
+                    long tot = 0;
+                    for (int vi = 0; vi < V.Count; vi++) if (V[vi] > 0) tot += V[vi];
+                    if (tot <= 0)
+                    {
+                        MakeGraphLabel($"CmpGPNo{k}", $"<color=#888>{I18n.Tr("no data")}</color>",
+                            new Vector2(0, 0), new Vector2(cx - 40f, cy - 6f), new Vector2(80, 12), UIFactory.AlignMidCenter);
+                        continue;
+                    }
+                    DrawPieSlice($"CmpGPBdr{k}", cx, cy, radius + 2.5f, 0f, 1f, new Color(0.10f, 0.11f, 0.14f, 1f));
+                    float acc = 0f;
+                    for (int si = 0; si < L.Count; si++)
+                    {
+                        int v = V.Count > si ? V[si] : 0;
+                        if (v <= 0) continue;
+                        float frac = (float)v / tot;
+                        int ui = union.IndexOf(L[si]); if (ui < 0) ui = si;
+                        Color sc = PIE_SLICE_COLORS[ui % PIE_SLICE_COLORS.Length];
+                        DrawPieSlice($"CmpGP{k}_{si}", cx, cy, radius, acc, frac, sc);
+                        if (leaderLines && frac >= 0.08f)
+                        {
+                            float midFrac = acc + frac * 0.5f;
+                            float ang = Mathf.PI * 0.5f - midFrac * 2f * Mathf.PI;
+                            float ex = cx + Mathf.Cos(ang) * radius, ey = cy + Mathf.Sin(ang) * radius;
+                            float lx = cx + Mathf.Cos(ang) * (radius + 20f), ly = cy + Mathf.Sin(ang) * (radius + 20f);
+                            DrawGraphSegment($"CmpGPLn{k}_{si}", ex, ey, lx, ly, new Color(0.8f, 0.8f, 0.8f, 0.7f), 1.5f);
+                            bool rightSide = Mathf.Cos(ang) >= 0f;
+                            int align = rightSide ? UIFactory.AlignMidLeft : UIFactory.AlignMidRight;
+                            float lblX = rightSide ? lx + 2f : lx - 96f;
+                            MakeGraphLabel($"CmpGPLbl{k}_{si}",
+                                /* R3: leader labels carry the same user-authored names as the legend. */
+                                $"<color=#CCC>{FfaSafeRich(Trunc(PieLabelDisplay(metricName, L[si]), 10))} {frac * 100f:F0}%</color>",
+                                new Vector2(0, 0), new Vector2(lblX, ly - 6f), new Vector2(96, 12), align);
+                        }
+                        acc += frac;
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] generic pie failed: {ex.Message}"); }
+        }
+
+        /// <summary>Prettify a pie slice label. Gold-source buckets arrive as
+        /// server reason keys ("series_win", "level_reward"); opponent names and
+        /// build-type buckets are already display strings.</summary>
+        private static string PieLabelDisplay(string metricName, string raw)
+        {
+            if (metricName != "Gold Sources" || string.IsNullOrEmpty(raw)) return raw ?? "";
+            var parts = raw.Split('_');
+            for (int i = 0; i < parts.Length; i++)
+                if (parts[i].Length > 0) parts[i] = char.ToUpperInvariant(parts[i][0]) + parts[i].Substring(1);
+            return string.Join(" ", parts);
+        }
+
+        /// <summary>"Most Similar Player" — one column per selected player listing
+        /// their nearest profile matches. A text board rather than a chart: the
+        /// similarity score is only meaningful next to the name it belongs to.</summary>
+        private static void BuildCompareSimilarPanel(List<int> idxs, float W, float H)
+        {
+            try
+            {
+                MakeGraphLabel("CmpSimTitle", $"<color=#CCC><b>{I18n.Tr("Most similar players")}</b></color>",
+                    new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
+                MakeGraphLabel("CmpSimSub",
+                    $"<color=#888>{I18n.Tr("by hit %, block %, ranked DPS, keys/sec and build-type mix")}</color>",
+                    new Vector2(0, 1), new Vector2(16f, -22f), new Vector2(W - 20, 14), UIFactory.AlignMidLeft);
+
+                bool missing = false;
+                foreach (int i in idxs)
+                {
+                    string sid = compareSelected[i];
+                    if (!ApiClient.SimilarPlayers.ContainsKey(sid)) { ApiClient.FetchSimilarPlayers(sid); missing = true; }
+                }
+                if (missing)
+                {
+                    MakeGraphLabel("CmpSimLoad", $"<color=#888>{I18n.Tr("Loading...")}</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                    return;
+                }
+
+                int n = idxs.Count;
+                int cols = Mathf.Clamp(n, 1, 4);
+                int rows = (n + cols - 1) / cols;
+                float cellW = (W - 24f) / cols;
+                // Rows are laid out from a measured budget rather than a constant:
+                // an ultrawide window has far fewer vertical units than 1080 and a
+                // fixed stack would run off the bottom of the mask (#199).
+                float cellH = (H - 46f) / Mathf.Max(1, rows);
+                float lineH = 17f;
+                int maxLines = Mathf.Max(1, (int)((cellH - 22f) / lineH));
+
+                for (int k = 0; k < n; k++)
+                {
+                    int i = idxs[k];
+                    var ps = compareStatsCache[compareSelected[i]];
+                    var d = ApiClient.SimilarPlayers[compareSelected[i]];
+                    int col = k % cols, row = k / cols;
+                    float x = 12f + col * cellW;
+                    float yTop = -44f - row * cellH;
+
+                    MakeGraphLabel($"CmpSimN{k}",
+                        $"<b><color=#{ColorToHex(COMPARE_COLORS[i % COMPARE_COLORS.Length])}>{FfaSafeRich(Trunc(ps.display_name, 16))}</color></b>",
+                        new Vector2(0, 1), new Vector2(x, yTop), new Vector2(cellW - 8f, 16), UIFactory.AlignMidLeft, 14f);
+
+                    if (d.names.Count == 0)
+                    {
+                        MakeGraphLabel($"CmpSimNo{k}", $"<color=#888>{I18n.Tr("no data")}</color>",
+                            new Vector2(0, 1), new Vector2(x, yTop - 18f), new Vector2(cellW - 8f, 14), UIFactory.AlignMidLeft, 13f);
+                        continue;
+                    }
+                    for (int r = 0; r < d.names.Count && r < maxLines; r++)
+                    {
+                        float score = d.scores.Count > r ? d.scores[r] : 0f;
+                        MakeGraphLabel($"CmpSim{k}_{r}",
+                            $"<color=#CCC>{r + 1}. {FfaSafeRich(Trunc(d.names[r], 14))}</color>  <color=#88CC99>{score:F0}%</color>",
+                            new Vector2(0, 1), new Vector2(x, yTop - 18f - r * lineH),
+                            new Vector2(cellW - 8f, lineH), UIFactory.AlignMidLeft, 13f);
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] similar panel failed: {ex.Message}"); }
+        }
+
+        /// <summary>"Nemesis Comparison" — ONE board over the whole selection, not
+        /// per player: the question is "who beats these players most", which only
+        /// has an answer for the set. Needs 2+ selected (the server rejects fewer).
+        /// "Player Nemesis" (below) is the per-player counterpart.
+        ///
+        /// Aug 7: the endpoint was rescoped from ALL 1v1 matches (casual included)
+        /// to completed ranked 1v1 SERIES, so every count on this board is a
+        /// SERIES count. The wire field names are frozen (`wins`/`games`), so the
+        /// labels are the only place that can say so — they must.</summary>
+        private static void BuildCompareNemesisPanel(List<int> idxs, float W, float H)
+        {
+            try
+            {
+                MakeGraphLabel("CmpNemTitle", $"<color=#CCC><b>{I18n.Tr("Nemesis Comparison - who beats this group most")}</b></color>",
+                    new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
+
+                var sids = new List<string>();
+                foreach (int i in idxs) sids.Add(compareSelected[i]);
+                string key = ApiClient.NemesisKeyFor(sids);
+                if (key == null)
+                {
+                    MakeGraphLabel("CmpNemNeed",
+                        $"<color=#888>{I18n.Tr("Select 2-12 players to find their common nemesis.")}</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                    return;
+                }
+                if (!ApiClient.NemesisBoards.ContainsKey(key))
+                {
+                    ApiClient.FetchNemesis(key);
+                    MakeGraphLabel("CmpNemLoad", $"<color=#888>{I18n.Tr("Loading...")}</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                    return;
+                }
+                var d = ApiClient.NemesisBoards[key];
+                if (d.names.Count == 0)
+                {
+                    // "games" was left over from the pre-Aug-7 endpoint, which
+                    // counted all 1v1 matches. The threshold this empty state
+                    // reports is the subtitle's "minimum 5 series", so it has to
+                    // name the same unit or it reads as a different rule.
+                    MakeGraphLabel("CmpNemNone",
+                        $"<color=#888>{I18n.Tr("No opponent has enough ranked series against this group yet.")}</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                    return;
+                }
+
+                MakeGraphLabel("CmpNemSub",
+                    $"<color=#888>{I18n.Tr("ranked 1v1 series vs anyone in the selection, minimum 5 series")}</color>",
+                    new Vector2(0, 1), new Vector2(16f, -22f), new Vector2(W - 20, 14), UIFactory.AlignMidLeft);
+
+                /* Column budget, stated because an over-budget row compresses its
+                 * neighbours and TMP paints the overflow across them (#199/#245).
+                 * Left edge 24 + name (<=300) + Win% 90 @ +0 + Record 120 @ +100
+                 * (right-aligned, so it ends at name+220) + 12px gutter leaves the
+                 * "faced by" column everything from name+232 to W-24. At the 900px
+                 * default that is 900 - (24+300+232) - 24 = 320px; the column is
+                 * floored at 120px so an unusually narrow panel drops characters
+                 * rather than colliding with Record. */
+                float x = 24f, rowH = 22f, top = -46f;
+                float wName = Mathf.Min(300f, (W - 60f) * 0.45f);
+                float xFaced = x + wName + 232f;
+                float wFaced = Mathf.Max(120f, W - xFaced - 24f);
+                MakeGraphLabel("CmpNemH1", $"<color=#999><b>{I18n.Tr("Player")}</b></color>",
+                    new Vector2(0, 1), new Vector2(x, top), new Vector2(wName, 16), UIFactory.AlignMidLeft, 13f);
+                MakeGraphLabel("CmpNemH2", $"<color=#999><b>{I18n.Tr("Win %")}</b></color>",
+                    new Vector2(0, 1), new Vector2(x + wName, top), new Vector2(90, 16), UIFactory.AlignMidRight, 13f);
+                MakeGraphLabel("CmpNemH3", $"<color=#999><b>{I18n.Tr("Series")}</b></color>",
+                    new Vector2(0, 1), new Vector2(x + wName + 100f, top), new Vector2(120, 16), UIFactory.AlignMidRight, 13f);
+                MakeGraphLabel("CmpNemH4", $"<color=#999><b>{I18n.Tr("Faced by")}</b></color>",
+                    new Vector2(0, 1), new Vector2(xFaced, top), new Vector2(wFaced, 16), UIFactory.AlignMidLeft, 13f);
+
+                /* Aug 7 item 2b: attribution. The server sends STEAM IDS, so map
+                 * them back to the names the user picked on the left; a selected
+                 * player whose stats have not loaded yet falls back to their id
+                 * rather than vanishing from the list. ~7.2px per character at 13pt
+                 * Gravity is the same estimate the other text columns here use. */
+                int facedChars = Mathf.Max(8, (int)(wFaced / 7.2f));
+                var selNames = new Dictionary<string, string>();
+                foreach (int i in idxs)
+                {
+                    string sid = compareSelected[i];
+                    selNames[sid] = compareStatsCache.TryGetValue(sid, out var sps) && sps != null
+                                    && !string.IsNullOrEmpty(sps.display_name) ? sps.display_name : sid;
+                }
+
+                int maxRows = Mathf.Max(1, (int)((H - 70f) / rowH));
+                for (int r = 0; r < d.names.Count && r < maxRows; r++)
+                {
+                    float y = top - 20f - r * rowH;
+                    float wr = d.winRates.Count > r ? d.winRates[r] * 100f : 0f;
+                    int wins = d.wins.Count > r ? d.wins[r] : 0;
+                    int games = d.games.Count > r ? d.games[r] : 0;
+                    MakeGraphLabel($"CmpNemN{r}", $"<color=#DDD>{r + 1}. {FfaSafeRich(Trunc(d.names[r], 22))}</color>",
+                        new Vector2(0, 1), new Vector2(x, y), new Vector2(wName, rowH), UIFactory.AlignMidLeft, 14f);
+                    MakeGraphLabel($"CmpNemW{r}",
+                        $"<b><color=#{ColorToHex(GradeColor(Mathf.Clamp01(wr / 100f)))}>{wr:F0}%</color></b>",
+                        new Vector2(0, 1), new Vector2(x + wName, y), new Vector2(90, rowH), UIFactory.AlignMidRight, 14f);
+                    MakeGraphLabel($"CmpNemR{r}", $"<color=#999>{wins} / {games}</color>",
+                        new Vector2(0, 1), new Vector2(x + wName + 100f, y), new Vector2(120, rowH), UIFactory.AlignMidRight, 14f);
+                    /* facedBy is EMPTY when the server predates the field, and it is
+                     * cleared wholesale rather than partially filled, so a bounds
+                     * check is the whole guard needed. An empty cell (rather than a
+                     * placeholder) is right: the row above it already says which
+                     * group was queried. */
+                    if (d.facedBy.Count > r && d.facedBy[r] != null && d.facedBy[r].Count > 0)
+                    {
+                        var who = new List<string>();
+                        foreach (string fid in d.facedBy[r])
+                            who.Add(selNames.TryGetValue(fid, out var nm) ? nm : fid);
+                        MakeGraphLabel($"CmpNemF{r}", $"<color=#8FA3B8>{FfaSafeRich(FitNameList(who, facedChars))}</color>",
+                            new Vector2(0, 1), new Vector2(xFaced, y), new Vector2(wFaced, rowH), UIFactory.AlignMidLeft, 13f);
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] nemesis panel failed: {ex.Message}"); }
+        }
+
+        /// <summary>"Player Nemesis" (Aug 7 item 2d) — one block per selected
+        /// player: their own top-5 worst opponents, going DOWN the panel. Unlike
+        /// the comparison board this is a per-player question, so a selected
+        /// player's nemesis MAY be another selected player and the server
+        /// deliberately does not exclude them.
+        ///
+        /// It renders into compareCardsScroll, NOT compareGraphPanel: the height
+        /// is unbounded by the selection (12 players x (1 header + 5 rows) at
+        /// ~18px per line + 10px between blocks = 12 x 118 = 1416px against a
+        /// ~460px viewport — and far less than 460 on an ultrawide, where the
+        /// WIDTH-matched canvas gives well under 1080 vertical units, #199).
+        /// compareGraphPanel free-positions into a fixed mask with no scroll, so
+        /// the lower blocks would simply be invisible there. Each block is an
+        /// auto-height text, i.e. a real preferred height — a flexH child inside a
+        /// scroll viewport collapses to zero (#63).</summary>
+        private static void BuildComparePlayerNemesisPanel()
+        {
+            if (compareCardsContent == null || txtCompareCards == null) return;
+            try
+            {
+                ClearCompareScrollContainers();
+
+                var sids = new List<string>();
+                foreach (var s in compareSelected) sids.Add(s);
+                string key = ApiClient.NemesisKeyFor(sids);
+                if (key == null)
+                {
+                    UIFactory.SetTextRaw(txtCompareCards,
+                        $"<color=#888>{I18n.Tr("Select 2-12 players (left) to see who beats each of them most.")}</color>");
+                    ((Component)txtCompareCards).gameObject.SetActive(true);
+                    return;
+                }
+                if (!ApiClient.PlayerNemesisBoards.ContainsKey(key))
+                {
+                    ApiClient.FetchPlayerNemesis(key);
+                    UIFactory.SetTextRaw(txtCompareCards, $"<color=#888>{I18n.Tr("Loading...")}</color>");
+                    ((Component)txtCompareCards).gameObject.SetActive(true);
+                    return;
+                }
+                ((Component)txtCompareCards).gameObject.SetActive(false);
+
+                var d = ApiClient.PlayerNemesisBoards[key];
+                var col = new GameObject("CmpPNemCol");
+                col.transform.SetParent(compareCardsContent.transform, false);
+                col.AddComponent<RectTransform>();
+                UIFactory.AddVLG(col, spacing: 10, padL: 8, padR: 8, padT: 4, padB: 8);
+
+                UIFactory.SetTextAutoHeight(UIFactory.CreateText("CmpPNemSub", col.transform,
+                    $"<color=#888>{I18n.Tr("Each player's worst ranked 1v1 opponents - minimum 3 series, top 5")}</color>",
+                    13f, C_DIM, UIFactory.AlignTopLeft, sizeDelta: new Vector2(820, 18)));
+
+                if (d.players.Count == 0)
+                {
+                    UIFactory.SetTextAutoHeight(UIFactory.CreateText("CmpPNemNone", col.transform,
+                        $"<color=#888>{I18n.Tr("No ranked 1v1 series recorded for the selected players yet.")}</color>",
+                        14f, C_DIM, UIFactory.AlignTopLeft, sizeDelta: new Vector2(820, 20)));
+                    return;
+                }
+
+                /* Driven off the SERVER's list, in the server's order (it echoes the
+                 * requested order): a steam id the server does not know is absent
+                 * from `players` entirely, so iterating the selection instead would
+                 * invent empty blocks for unknown players. The header colour is
+                 * matched back to the left picker BY STEAM ID rather than by
+                 * position — the two orderings are not guaranteed equal. */
+                for (int p = 0; p < d.players.Count; p++)
+                {
+                    var g = d.players[p];
+                    int selIdx = compareSelected.IndexOf(g.steamId);
+                    Color pc = COMPARE_COLORS[(selIdx >= 0 ? selIdx : p) % COMPARE_COLORS.Length];
+
+                    var sb = new System.Text.StringBuilder(256);
+                    string who = string.IsNullOrEmpty(g.name) ? g.steamId : g.name;
+                    sb.Append($"<color=#{ColorToHex(pc)}><b>{FfaSafeRich(Trunc(who, 22))}</b></color>");
+                    if (g.nemeses == null || g.nemeses.Count == 0)
+                        // A complete answer, not a failure: nobody has taken 3+
+                        // series off them. Rendering nothing at all would read as a
+                        // dropped row.
+                        sb.Append($"\n   <color=#777>{I18n.Tr("no opponent has taken 3+ series from them")}</color>");
+                    else
+                        for (int r = 0; r < g.nemeses.Count; r++)
+                        {
+                            var e = g.nemeses[r];
+                            string hex = ColorToHex(GradeColor(Mathf.Clamp01(e.lossRate)));
+                            sb.Append($"\n   <color=#DDD>{r + 1}. {FfaSafeRich(Trunc(string.IsNullOrEmpty(e.name) ? e.steamId : e.name, 20))}</color>"
+                                    + $"   <b><color=#{hex}>{e.lossRate * 100f:F0}%</color></b>"
+                                    + $"   <color=#999>{I18n.TrF("lost {0} of {1}", e.seriesLost, e.seriesPlayed)}</color>");
+                        }
+
+                    /* Wrap ON + auto-height, exactly like the card-grid cells: the
+                     * content height then tracks the rendered text so the scroll
+                     * really scrolls (#63), and a long OS-fallback name wraps
+                     * instead of being clipped by the global Truncate default
+                     * (#292/#297). */
+                    var blk = UIFactory.CreateText($"CmpPNem{p}", col.transform, sb.ToString(),
+                        14f, C_DIM, UIFactory.AlignTopLeft, sizeDelta: new Vector2(820, 24));
+                    UIFactory.SetWordWrap(blk, true);
+                    UIFactory.SetTextAutoHeight(blk);
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] player nemesis panel failed: {ex.Message}"); }
+        }
+
+        /* "bounce_kill" is DELIBERATELY absent. The bounce-kill telemetry was
+         * cut in the Aug-6 round-4 review, and GameStateWatcher now always
+         * reports -1 for it, which _obs() maps to NULL — so players.record_bounce_kill
+         * stays NULL forever and /records?board=bounce_kill (which filters
+         * IS NOT NULL) can only ever return empty arrays. Leaving it listed
+         * rendered a third column headed "Most Bounces Before A Kill" that no
+         * game could ever populate: the same half-cut shape as #279, where a
+         * feature was removed and its UI sibling left live.
+         * The server endpoint and column are intentionally kept — they cost
+         * nothing and are ready if the telemetry is ever revived; re-adding the
+         * string here is then the only client change needed. */
+        private static readonly string[] RECORD_BOARDS = { "single_hit", "max_health" };
+
+        /// <summary>"Records" — the GLOBAL career-record mini-leaderboards side
+        /// by side (count comes from RECORD_BOARDS, which lost its third entry
+        /// when bounce-kill telemetry was cut). These
+        /// are not per-selection boards, so the selected players are highlighted
+        /// in their compare colour where they appear rather than filtered to.</summary>
+        private static void BuildCompareRecordsPanel(List<int> idxs, float W, float H)
+        {
+            try
+            {
+                MakeGraphLabel("CmpRecTitle", $"<color=#CCC><b>{I18n.Tr("Career records (all players)")}</b></color>",
+                    new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
+
+                bool missing = false;
+                foreach (var b in RECORD_BOARDS)
+                    if (!ApiClient.RecordsBoards.ContainsKey(b)) { ApiClient.FetchRecordsBoard(b); missing = true; }
+                if (missing)
+                {
+                    MakeGraphLabel("CmpRecLoad", $"<color=#888>{I18n.Tr("Loading...")}</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                    return;
+                }
+
+                // Which selected players to highlight, and in what colour.
+                var hi = new Dictionary<string, Color>();
+                foreach (int i in idxs)
+                    hi[compareSelected[i]] = COMPARE_COLORS[i % COMPARE_COLORS.Length];
+
+                // Divide by the ACTUAL board count, not a hardcoded 3 — with
+                // bounce_kill removed, /3f left a third of the panel blank.
+                float colW = (W - 32f) / Mathf.Max(1, RECORD_BOARDS.Length);
+                float rowH = 21f;
+                int maxRows = Mathf.Max(1, (int)((H - 74f) / rowH));
+                for (int c = 0; c < RECORD_BOARDS.Length; c++)
+                {
+                    string board = RECORD_BOARDS[c];
+                    // The old third arm ("Most Bounces Before A Kill") is gone
+                    // with its board — an unreachable arm is still a live i18n
+                    // key, i.e. a string translators would keep maintaining for
+                    // a column that can never render.
+                    string heading = board == "single_hit" ? I18n.Tr("Highest Single Hit")
+                                                           : I18n.Tr("Highest Health");
+                    float x = 16f + c * colW;
+                    MakeGraphLabel($"CmpRecH{c}", $"<b><color=#DDCC88>{heading}</color></b>",
+                        new Vector2(0, 1), new Vector2(x, -26f), new Vector2(colW - 10f, 16), UIFactory.AlignMidLeft, 14f);
+
+                    var d = ApiClient.RecordsBoards[board];
+                    if (d.names.Count == 0)
+                    {
+                        MakeGraphLabel($"CmpRecNo{c}", $"<color=#888>{I18n.Tr("no data yet")}</color>",
+                            new Vector2(0, 1), new Vector2(x, -48f), new Vector2(colW - 10f, 14), UIFactory.AlignMidLeft, 13f);
+                        continue;
+                    }
+                    for (int r = 0; r < d.names.Count && r < maxRows; r++)
+                    {
+                        float y = -48f - r * rowH;
+                        string sid = d.steamIds.Count > r ? d.steamIds[r] : "";
+                        bool isSel = !string.IsNullOrEmpty(sid) && hi.ContainsKey(sid);
+                        string nameHex = isSel ? ColorToHex(hi[sid]) : "CCCCCC";
+                        string bold = isSel ? "<b>" : "", boldEnd = isSel ? "</b>" : "";
+                        MakeGraphLabel($"CmpRecN{c}_{r}",
+                            $"<color=#777>{r + 1}.</color> {bold}<color=#{nameHex}>{FfaSafeRich(Trunc(d.names[r], 13))}</color>{boldEnd}",
+                            new Vector2(0, 1), new Vector2(x, y), new Vector2(colW - 84f, rowH), UIFactory.AlignMidLeft, 13f);
+                        MakeGraphLabel($"CmpRecV{c}_{r}",
+                            $"<color=#99CCAA>{FullNum(d.values.Count > r ? d.values[r] : 0)}</color>",
+                            new Vector2(0, 1), new Vector2(x + colW - 84f, y), new Vector2(74, rowH), UIFactory.AlignMidRight, 13f);
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] records panel failed: {ex.Message}"); }
+        }
+
+        // ── Aug 6 item 2: Cards sub-tab renderers ────────────────────────────
+        /// <summary>Chart the selected CARDS. Four of the five metrics come off
+        /// the /cards catalogue row the picker already loaded; "Top Pickers"
+        /// reads /cards/top-pickers per card.</summary>
+        private static void BuildCompareCardMetric(string metricName)
+        {
+            if (compareGraphPanel == null) return;
+            for (int c = compareGraphPanel.transform.childCount - 1; c >= 0; c--)
+                UnityEngine.Object.Destroy(compareGraphPanel.transform.GetChild(c).gameObject);
+
+            CompareChartSize(out float W, out float H);
+            try
+            {
+                if (compareCardsSelected.Count == 0)
+                {
+                    MakeGraphLabel("CmpCMNone",
+                        $"<color=#888>{I18n.TrF("Choose cards (left) to compare {0}.", "<b>" + TrMetric(metricName) + "</b>")}</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 40), UIFactory.AlignMidCenter);
+                    return;
+                }
+                if (ApiClient.CardCatalog == null)
+                {
+                    MakeGraphLabel("CmpCMLoad", $"<color=#888>{I18n.Tr("Loading...")}</color>",
+                        new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                    return;
+                }
+                if (metricName == "Top Pickers") { BuildCompareCardPickers(W, H); return; }
+
+                string title = metricName == "Times Picked" ? I18n.Tr("Times picked (all players)")
+                             : metricName == "Card Win Rate" ? I18n.Tr("Win rate holding this card")
+                             : metricName == "Pass Rate" ? I18n.Tr("Pass rate (offered but not taken)")
+                             : I18n.Tr("Times offered");
+                bool pct = metricName == "Card Win Rate" || metricName == "Pass Rate";
+                MakeGraphLabel("CmpCMTitle", $"<color=#CCC><b>{title}</b></color>",
+                    new Vector2(0, 1), new Vector2(60f, -4f), new Vector2(W - 60, 18), UIFactory.AlignMidLeft);
+
+                // Resolve each selected card's row once.
+                var names = new List<string>(); var vals = new List<float>(); var cols = new List<Color>();
+                foreach (var card in compareCardsSelected)
+                {
+                    ApiClient.CardCatalogEntry hit = null;
+                    foreach (var e in ApiClient.CardCatalog)
+                        if (string.Equals(e.name, card, StringComparison.OrdinalIgnoreCase)) { hit = e; break; }
+                    names.Add(CardTextLocalizer.PrettyName(card, card) ?? card);
+                    cols.Add(CardColorFor(card));
+                    float v = 0f;
+                    if (hit != null)
+                        v = metricName == "Times Picked" ? hit.times_picked
+                          : metricName == "Card Win Rate" ? hit.win_rate * 100f
+                          : metricName == "Pass Rate" ? hit.pass_rate * 100f
+                          : hit.times_offered;
+                    vals.Add(v);
+                }
+
+                float padL = 60f, padR = 16f, padT = 34f, padB = 48f;
+                float plotW = W - padL - padR, plotH = H - padT - padB;
+                int n = names.Count;
+                float groupW = plotW / n;
+
+                float maxV, step;
+                if (pct) { maxV = 100f; step = 25f; }
+                else
+                {
+                    float dataMax = 0.0001f;
+                    foreach (var v in vals) if (v > dataMax) dataMax = v;
+                    step = NiceStep(dataMax / 4f);
+                    maxV = Mathf.Ceil(dataMax * 1.08f / step) * step;
+                    if (maxV < step) maxV = step;
+                }
+                int yDivs = Mathf.Clamp(Mathf.RoundToInt(maxV / step), 2, 10);
+                for (int gi = 0; gi <= yDivs; gi++)
+                {
+                    float val = gi * step;
+                    if (val > maxV + 0.001f) break;
+                    float yy = padB + (val / maxV) * plotH;
+                    DrawBar($"CmpCMGrid{gi}", padL, yy, plotW, 1f, new Color(1f, 1f, 1f, 0.10f));
+                    MakeGraphLabel($"CmpCMY{gi}", $"<color=#999>{FullNum(val)}{(pct ? "%" : "")}</color>",
+                        new Vector2(0, 0), new Vector2(padL - 4f, yy - 6f), new Vector2(52, 12), UIFactory.AlignMidRight);
+                }
+
+                int nameLen = Mathf.Clamp((int)(groupW / 8f), 5, 18);
+                for (int gi = 0; gi < n; gi++)
+                {
+                    float gx = padL + gi * groupW;
+                    float bw = groupW * 0.58f;
+                    float bx = gx + (groupW - bw) * 0.5f;
+                    float clamped = Mathf.Clamp(vals[gi], 0f, maxV);
+                    // Bars carry the card's RARITY colour — the only per-card
+                    // colour source the plugin has (see CardColorFor).
+                    DrawBar($"CmpCMBar{gi}", bx, padB, bw, clamped / maxV * plotH, cols[gi]);
+                    MakeGraphLabel($"CmpCMV{gi}",
+                        $"<color=#EEE>{(pct ? vals[gi].ToString("F1") + "%" : FullNum(vals[gi]))}</color>",
+                        new Vector2(0, 0), new Vector2(bx - 6f, padB + clamped / maxV * plotH + 1f),
+                        new Vector2(bw + 12f, 12), UIFactory.AlignMidCenter);
+                    MakeGraphLabel($"CmpCMName{gi}",
+                        $"<b><color=#{ColorToHex(cols[gi])}>{FfaSafeRich(Trunc(names[gi], nameLen))}</color></b>",
+                        new Vector2(0, 0), new Vector2(gx - 4f, padB - 18f), new Vector2(groupW + 8f, 16),
+                        UIFactory.AlignMidCenter, 13f);
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] card metric failed: {ex.Message}"); }
+        }
+
+        /// <summary>"Top Pickers" — a mini-leaderboard per selected card, laid out
+        /// as columns.</summary>
+        private static void BuildCompareCardPickers(float W, float H)
+        {
+            MakeGraphLabel("CmpCPTitle", $"<color=#CCC><b>{I18n.Tr("Who picks these cards the most")}</b></color>",
+                new Vector2(0, 1), new Vector2(16f, -4f), new Vector2(W - 20, 18), UIFactory.AlignMidLeft);
+
+            bool missing = false;
+            foreach (var card in compareCardsSelected)
+                if (!ApiClient.CardTopPickers.ContainsKey(card)) { ApiClient.FetchCardTopPickers(card); missing = true; }
+            if (missing)
+            {
+                MakeGraphLabel("CmpCPLoad", $"<color=#888>{I18n.Tr("Loading...")}</color>",
+                    new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(W - 40, 30), UIFactory.AlignMidCenter);
+                return;
+            }
+
+            int n = compareCardsSelected.Count;
+            int cols = Mathf.Clamp(n, 1, 4);
+            int rows = (n + cols - 1) / cols;
+            float cellW = (W - 24f) / cols;
+            float cellH = (H - 40f) / Mathf.Max(1, rows);
+            float rowH = 18f;
+            int maxRows = Mathf.Max(1, (int)((cellH - 24f) / rowH));
+
+            for (int k = 0; k < n; k++)
+            {
+                string card = compareCardsSelected[k];
+                var d = ApiClient.CardTopPickers[card];
+                int col = k % cols, row = k / cols;
+                float x = 12f + col * cellW;
+                float yTop = -30f - row * cellH;
+                Color cc = CardColorFor(card);
+                MakeGraphLabel($"CmpCPH{k}",
+                    $"<b><color=#{ColorToHex(cc)}>{FfaSafeRich(Trunc(CardTextLocalizer.PrettyName(card, card) ?? card, 18))}</color></b>",
+                    new Vector2(0, 1), new Vector2(x, yTop), new Vector2(cellW - 8f, 16), UIFactory.AlignMidLeft, 14f);
+                if (d.names.Count == 0)
+                {
+                    MakeGraphLabel($"CmpCPNo{k}", $"<color=#888>{I18n.Tr("no data")}</color>",
+                        new Vector2(0, 1), new Vector2(x, yTop - 20f), new Vector2(cellW - 8f, 14), UIFactory.AlignMidLeft, 13f);
+                    continue;
+                }
+                for (int r = 0; r < d.names.Count && r < maxRows; r++)
+                {
+                    float y = yTop - 20f - r * rowH;
+                    int picks = d.picks.Count > r ? d.picks[r] : 0;
+                    float wr = d.winRates.Count > r ? d.winRates[r] * 100f : 0f;
+                    MakeGraphLabel($"CmpCP{k}_{r}",
+                        $"<color=#CCC>{r + 1}. {FfaSafeRich(Trunc(d.names[r], 12))}</color> <color=#999>x{picks}</color> <color=#88CC99>{wr:F0}%</color>",
+                        new Vector2(0, 1), new Vector2(x, y), new Vector2(cellW - 8f, rowH), UIFactory.AlignMidLeft, 13f);
+                }
+            }
+        }
+
         // Card metrics (Top / Worst) as a multi-column grid of per-player blocks so
         // many players wrap sideways instead of running off the bottom of the page.
         // Built into compareCardsContent (the card scroll's content). 3 columns.
+        /// <summary>Removes every metric-owned container from the Compare tab's
+        /// shared scroll surface. Two metrics build into it (the card grids and
+        /// the Player Nemesis stack) and each must leave the other's leftovers
+        /// destroyed, or switching between them stacks both.</summary>
+        private static void ClearCompareScrollContainers()
+        {
+            if (compareCardsContent == null) return;
+            var a = compareCardsContent.transform.Find("CmpCardCols");
+            if (a != null) UnityEngine.Object.Destroy(a.gameObject);
+            var b = compareCardsContent.transform.Find("CmpPNemCol");
+            if (b != null) UnityEngine.Object.Destroy(b.gameObject);
+        }
+
         private static void BuildCompareCardGrid(string metricName)
         {
             if (compareCardsContent == null || txtCompareCards == null) return;
-            // Tear down any prior grid container.
-            var prev = compareCardsContent.transform.Find("CmpCardCols");
-            if (prev != null) UnityEngine.Object.Destroy(prev.gameObject);
+            // Tear down any prior grid container. Both containers are cleared
+            // because this scroll surface now serves the card grids AND the
+            // Player Nemesis stack — leaving the other metric's container behind
+            // renders two metrics at once (Aug 7 item 2d).
+            ClearCompareScrollContainers();
 
             if (compareSelected.Count == 0)
             {
@@ -10981,7 +12802,10 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 
                     // Card art — fills most of the cell. preserveAspect=true
                     // so non-2:3 art letterboxes rather than distorts.
-                    Sprite sp = CardImageLoader.GetSprite(c.card_name);
+                    /* Tier export keeps the PNG-while-pending fallback: a
+                     * bulk export with uncaptured cards reads far better
+                     * with old art than with 60+ placeholder cells. */
+                    Sprite sp = CardImageLoader.GetSprite(c.card_name, allowPngWhilePending: true);
                     var imgGO = new GameObject("Img");
                     imgGO.transform.SetParent(cell.transform, false);
                     imgGO.AddComponent<RectTransform>();
@@ -11147,6 +12971,12 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         // hazard called out in localization-design §2.6). Local echoes carry
         // no id and always render.
         private static readonly HashSet<int> _seenChatIds = new HashSet<int>();
+        /// <summary>Ids retracted by a moderator. A delete can arrive before
+        /// the message it deletes (a live WS frame overtaking an in-flight
+        /// scrollback fetch), so the id is remembered and the message is
+        /// dropped on arrival. Same FIFO cap as the seen set.</summary>
+        private static readonly HashSet<int> _retractedChatIds = new HashSet<int>();
+        private static readonly Queue<int> _retractedChatOrder = new Queue<int>();
         private static readonly Queue<int> _seenChatOrder = new Queue<int>();
         private const int SEEN_CHAT_CAP = 600;
         // Wave-2 find 15: local echoes carry no id, so a locale-change
@@ -11224,7 +13054,66 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 string title = ExtractChatField(json, "title");
                 string titleColor = ExtractChatField(json, "title_color");
                 string channel = ExtractChatField(json, "channel");
-                if (string.IsNullOrEmpty(message)) return;
+                /* Aug 6 item 5 (Codex round 1, MEDIUM): moderator retraction.
+                 * The server broadcasts {"type":"delete","id":N,"channel":...}
+                 * with NO message key, and the empty-message guard below used
+                 * to swallow it — so a deleted line stayed on screen until the
+                 * client restarted, which is exactly the case the delete
+                 * endpoint exists for.
+                 *
+                 * Handled HERE, before that guard, and deliberately BEFORE the
+                 * chatId read further down: a retraction's id must never reach
+                 * lastServerStampSeen (it is the local-echo ordering anchor,
+                 * #310) nor the seen-id set (that would make the real message
+                 * unrenderable if it arrived after the delete). */
+                if (string.IsNullOrEmpty(message))
+                {
+                    string frameType = ExtractChatField(json, "type");
+                    if (frameType == "delete")
+                    {
+                        int delId = ExtractChatIntField(json, "id");
+                        if (delId > 0)
+                        {
+                            bool removed = false;
+                            lock (chatLinesLock)
+                            {
+                                for (int i = chatLines.Count - 1; i >= 0; i--)
+                                {
+                                    if (chatLines[i].ChatId != delId) continue;
+                                    chatLines.RemoveAt(i);
+                                    removed = true;
+                                    break;   // ids are unique
+                                }
+                            }
+                            // R2 finding 9: TOMBSTONE regardless of whether a
+                            // row was present. A retraction can arrive BEFORE
+                            // its own message — the live WS delete overtaking
+                            // an in-flight /chat/recent snapshot is the normal
+                            // case, not an exotic one — and without a
+                            // tombstone that snapshot row renders the deleted
+                            // content and it stays on screen. Bounded by the
+                            // same FIFO discipline as the seen-id set.
+                            // R3 (LOW): only enqueue when the id is genuinely
+                            // NEW. Idempotent moderation retries rebroadcast
+                            // the same id, and enqueuing every copy meant a
+                            // later dequeue of an early duplicate removed the
+                            // set entry while other copies still sat in the
+                            // queue — evicting a tombstone that was still
+                            // supposed to be live.
+                            if (_retractedChatIds.Add(delId))
+                                _retractedChatOrder.Enqueue(delId);
+                            while (_retractedChatOrder.Count > SEEN_CHAT_CAP)
+                                _retractedChatIds.Remove(_retractedChatOrder.Dequeue());
+                            if (removed)
+                            {
+                                RefreshChatLog();
+                                MarkDirty();
+                                Plugin.Log.LogInfo($"[CHAT] message {delId} retracted by a moderator");
+                            }
+                        }
+                    }
+                    return;
+                }
                 /* item 13: server created_at (ISO-8601, TIMESTAMPTZ) — present on
                  * live frames, on every scrollback entry, and on ChatClient's local
                  * echo. Falls back to now for pre-field rows and system lines so the
@@ -11292,6 +13181,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 {
                     if (chatId > 0)
                     {
+                        if (_retractedChatIds.Contains(chatId)) return;  // deleted before it arrived
                         if (!_seenChatIds.Add(chatId)) return;  // already rendered
                         _seenChatOrder.Enqueue(chatId);
                         while (_seenChatOrder.Count > SEEN_CHAT_CAP)
@@ -11372,7 +13262,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                         DateTime stamp = chatId > 0 ? sentUtc : NextLocalStamp();
                         long seq = chatSeqNext++;
                         var entry = new ChatEntry { Line = line, AddedUtc = DateTime.UtcNow, SentUtc = stamp,
-                            Channel = string.IsNullOrEmpty(channel) ? "global" : channel, Seq = seq };
+                            Channel = string.IsNullOrEmpty(channel) ? "global" : channel, Seq = seq,
+                            ChatId = chatId };
                         /* r4 find 3: compare against `stamp`, the value actually
                          * being stored — comparing the raw parsed `sentUtc` here
                          * placed a local line by a timestamp it does not carry,
@@ -11651,7 +13542,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 UIFactory.SetTextRaw(UIFactory.GetButtonText(chatViewBtn), I18n.Tr("Change view"));
             if (chatSendBtn != null)
                 UIFactory.SetTextRaw(UIFactory.GetButtonText(chatSendBtn),
-                    I18n.TrF("Typing: {0}  (Shift to change)", ChatChannelDisplayName(send)));
+                    I18n.TrF("Typing: {0}  (Alt to change)", ChatChannelDisplayName(send)));
             if (txtChatLog == null) return;
             // "all" (and the "auto" default) keeps the merged view; only an explicit
             // concrete channel filters. System lines (null channel) always show.
@@ -11957,9 +13848,36 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // off the top before sharing what's left between the names.
             int sepChars=(Math.Max(0,leftCount-1)+Math.Max(0,rightCount-1))*LBL_SEP.Length;
             int pool=Math.Max(n*2,budget-sepChars);
-            // Water-fill in ascending length order: the shortest name can never
-            // consume more than it needs, so its surplus is what buys the long
-            // names their extra characters.
+            WaterFillGrants(n,pool);
+            outLeft=JoinFitted(0,leftCount);
+            outRight=JoinFitted(leftCount,rightCount);
+            // Unconditional backstop (review find): the LBL_MIN_VISIBLE floor can
+            // hand out more than the pool when there are many names, and a display
+            // name that itself contains " + " inflates the name count — a player
+            // can therefore author a label that overruns the budget and clips at
+            // the mask again. Clamp the joined result so this function's contract
+            // ("the two labels fit `budget` visible characters") holds for any
+            // input, not just well-formed ones.
+            int over=(outLeft.Length+outRight.Length)-budget;
+            if(over>0)
+            {
+                // Shave the longer side first so one huge label can't starve the other.
+                if(outLeft.Length>=outRight.Length)outLeft=Trunc(outLeft,Math.Max(2,outLeft.Length-over));
+                else outRight=Trunc(outRight,Math.Max(2,outRight.Length-over));
+            }
+        }
+
+        /// <summary>The max-min fair water-fill itself (#260), over the first `n`
+        /// entries of _lblParts, writing visible-character grants into _lblGrant.
+        /// Extracted so FitLabelPair and FitNameList share ONE implementation —
+        /// two copies of a fitting rule drift and the drift is invisible until a
+        /// name is annihilated on one surface and not the other (#279).
+        ///
+        /// Ascending length order is what makes it fair: the shortest name can
+        /// never consume more than it needs, so its surplus rolls forward and buys
+        /// the long names their extra characters.</summary>
+        private static void WaterFillGrants(int n,int pool)
+        {
             _lblOrder.Clear();
             for(int i=0;i<n;i++)_lblOrder.Add(i);
             _lblOrder.Sort((a,b)=>_lblParts[a].Length.CompareTo(_lblParts[b].Length));
@@ -11977,22 +13895,43 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 remaining=Math.Max(0,remaining-grant);
                 left_n--;
             }
-            outLeft=JoinFitted(0,leftCount);
-            outRight=JoinFitted(leftCount,rightCount);
-            // Unconditional backstop (review find): the LBL_MIN_VISIBLE floor can
-            // hand out more than the pool when there are many names, and a display
-            // name that itself contains " + " inflates the name count — a player
-            // can therefore author a label that overruns the budget and clips at
-            // the mask again. Clamp the joined result so this function's contract
-            // ("the two labels fit `budget` visible characters") holds for any
-            // input, not just well-formed ones.
-            int over=(outLeft.Length+outRight.Length)-budget;
-            if(over>0)
+        }
+
+        /// <summary>Aug 7 item 2 — fits N names into ONE shared budget and joins
+        /// them with ", ". Same water-fill as FitLabelPair; the separator and the
+        /// variable arity are the only differences, which is why it is a thin
+        /// wrapper rather than a second algorithm. Used for the nemesis rows'
+        /// "faced by" attribution, where a flat per-name cap would spend the whole
+        /// budget on the first selected player and render the rest as ".." (#260,
+        /// the exact bug that motivated the helper).
+        ///
+        /// `budget` counts the separators, so it maps straight onto how much of
+        /// the column the finished string may occupy.</summary>
+        private static string FitNameList(List<string> names,int budget)
+        {
+            if(names==null||names.Count==0)return "";
+            _lblParts.Clear();
+            foreach(var nm in names)_lblParts.Add(nm??"");
+            int n=_lblParts.Count;
+            // Beyond the scratch array, fall back to an even split rather than
+            // indexing past it — still BOUNDED, because returning raw names would
+            // let an authored display name overrun the column.
+            if(n>_lblGrant.Length)
             {
-                // Shave the longer side first so one huge label can't starve the other.
-                if(outLeft.Length>=outRight.Length)outLeft=Trunc(outLeft,Math.Max(2,outLeft.Length-over));
-                else outRight=Trunc(outRight,Math.Max(2,outRight.Length-over));
+                var sbOver=new System.Text.StringBuilder(64);
+                int evenShare=Math.Max(2,budget/n);
+                for(int i=0;i<n;i++){if(i>0)sbOver.Append(", ");sbOver.Append(Trunc(_lblParts[i],evenShare));}
+                return Trunc(sbOver.ToString(),budget);
             }
+            int sepChars=Math.Max(0,n-1)*2;   // ", "
+            WaterFillGrants(n,Math.Max(n*2,budget-sepChars));
+            var sb=new System.Text.StringBuilder(64);
+            for(int i=0;i<n;i++){if(i>0)sb.Append(", ");sb.Append(Trunc(_lblParts[i],_lblGrant[i]));}
+            // Unconditional backstop, same reason FitLabelPair has one: the
+            // LBL_MIN_VISIBLE floor can hand out more than the pool when there are
+            // many names, so clamp the joined result to keep the contract true for
+            // any input rather than only for well-formed ones.
+            return Trunc(sb.ToString(),Math.Max(4,budget));
         }
 
         private static int SplitLabel(string label,List<string> into)
@@ -12051,6 +13990,31 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static List<GameObject> adminQuarantineRowPool = new List<GameObject>();
         private static List<ApiClient.QuarantineReportEntry> adminQuarantineRowBindings = new List<ApiClient.QuarantineReportEntry>();
         private const int ADMIN_QUARANTINE_ROW_CAP = 20;
+        /* Every section of the Admin panel a chat moderator must NOT see. The tab
+         * is now reachable by two different authorities (CanModerateChat), so the
+         * panel has to gate its own contents — the tab button alone no longer
+         * implies "this player is an admin". Collected while BuildAdminTab runs
+         * and toggled by ApplyAdminPanelScope. A moderator is left with the
+         * header and the T-chat row. */
+        private static readonly List<GameObject> adminOnlySections = new List<GameObject>();
+        private static object txtAdminPanelHdr;
+
+        /// <summary>Show or hide the admin-only half of the Admin panel, and title
+        /// it for whoever is looking. Called at BUILD time as well as from
+        /// RefreshAdmin: SwitchTab activates the panel and only marks the UI
+        /// dirty, so a refresh-only gate would show a moderator the full admin
+        /// panel for the frame between the two. Building hidden is the fail-safe
+        /// direction — IsAdmin resolves asynchronously, so the worst case is an
+        /// admin seeing their own panel a frame late.</summary>
+        private static void ApplyAdminPanelScope()
+        {
+            bool full = ApiClient.IsAdmin;
+            for (int i = 0; i < adminOnlySections.Count; i++)
+                if (adminOnlySections[i] != null) adminOnlySections[i].SetActive(full);
+            UIFactory.SetText(txtAdminPanelHdr, full
+                ? "<b>Admin Panel</b>  <color=#888>(admins only)</color>"
+                : "<b>Chat Moderation</b>  <color=#888>(your granted channels only)</color>");
+        }
 
         /* Supported translation languages, mirroring the server's I18N_LANGS —
          * it rejects anything else outright (a transposed code would mint a
@@ -12111,28 +14075,39 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddVLG(panel, spacing: 6, padL: 8, padR: 8, padT: 6, padB: 6);
             UIFactory.AddLE(panel, flexH: 1);
 
+            // BuildPage re-runs on a language switch, so the collected set has to
+            // start empty or it accumulates destroyed objects across rebuilds.
+            adminOnlySections.Clear();
+
             var hdrRow = new GameObject("AHdr"); hdrRow.transform.SetParent(panel.transform, false); hdrRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(hdrRow, spacing: 8); UIFactory.AddLE(hdrRow, prefH: 32, flexH: 0);
-            UIFactory.CreateText("AT", hdrRow.transform, "<b>Admin Panel</b>  <color=#888>(admins only)</color>", 18f, new Color(1f, 0.7f, 0.3f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 28));
+            txtAdminPanelHdr = UIFactory.CreateText("AT", hdrRow.transform, "<b>Admin Panel</b>  <color=#888>(admins only)</color>", 18f, new Color(1f, 0.7f, 0.3f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(600, 28));
             UIFactory.CreateButton("ARefresh", hdrRow.transform, "Refresh", 13f, C_WHITE, C_BTN, () =>
             {
                 var sid = MatchTracker.LocalSteamId;
-                if (!string.IsNullOrEmpty(sid)) { ApiClient.FetchFlaggedMatches(sid); ApiClient.FetchBannedUsers(sid); ApiClient.FetchAdminRecentSeries(sid); ApiClient.FetchAdminQuarantine(sid); }
+                if (string.IsNullOrEmpty(sid)) return;
+                // Every fetch below is admin-HMAC gated, so for a moderator they
+                // are four guaranteed 403s. Refresh what a moderator can actually
+                // read instead — the mute list is the only live data on their view.
+                if (!ApiClient.IsAdmin) { ApiClient.FetchChatMutes(sid); return; }
+                ApiClient.FetchFlaggedMatches(sid); ApiClient.FetchBannedUsers(sid); ApiClient.FetchAdminRecentSeries(sid); ApiClient.FetchAdminQuarantine(sid);
             }, sizeDelta: new Vector2(90, 26));
 
             var actionRow = new GameObject("AAct"); actionRow.transform.SetParent(panel.transform, false); actionRow.AddComponent<RectTransform>();
+            adminOnlySections.Add(actionRow);
             UIFactory.AddHLG(actionRow, spacing: 8); UIFactory.AddLE(actionRow, prefH: 30, flexH: 0);
             UIFactory.CreateButton("ABan", actionRow.transform, "Ban Steam ID...", 13f, C_WHITE, new Color(0.55f, 0.15f, 0.15f, 0.9f), () =>
-                CompetitiveUI.OpenAdminPrompt("ban"), sizeDelta: new Vector2(140, 26));
+                StartAdminBanFlow(), sizeDelta: new Vector2(140, 26));
             UIFactory.CreateButton("AGrant", actionRow.transform, "Grant Achievement...", 13f, C_WHITE, new Color(0.2f, 0.45f, 0.2f, 0.9f), () =>
                 CompetitiveUI.OpenAdminPrompt("grant"), sizeDelta: new Vector2(170, 26));
             UIFactory.CreateButton("ARev", actionRow.transform, "Reverse Series...", 13f, C_WHITE, new Color(0.45f, 0.3f, 0.55f, 0.9f), () =>
-                CompetitiveUI.OpenAdminPrompt("reverse"), sizeDelta: new Vector2(150, 26));
+                StartAdminReverseFlow(), sizeDelta: new Vector2(150, 26));
             UIFactory.CreateButton("ABugRpt", actionRow.transform, "Bug Reports...", 13f, C_WHITE, new Color(0.2f, 0.3f, 0.5f, 0.9f), () =>
                 CompetitiveUI.OpenBugReportAdminViewer(), sizeDelta: new Vector2(150, 26));
             var artistActionRow = new GameObject("AArtistAct");
             artistActionRow.transform.SetParent(panel.transform, false);
             artistActionRow.AddComponent<RectTransform>();
+            adminOnlySections.Add(artistActionRow);
             UIFactory.AddHLG(artistActionRow, spacing: 8);
             UIFactory.AddLE(artistActionRow, prefH: 30, flexH: 0);
             // Item 1 (v1.30): artist-role management. Assigning ITEMS to an
@@ -12238,12 +14213,44 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.CreateButton("ACosQ", artistActionRow.transform, "Approved Update Queue...", 13f, C_WHITE, new Color(0.35f, 0.3f, 0.6f, 0.95f), () =>
                 CompetitiveUI.OpenCosmeticReleaseQueue(), sizeDelta: new Vector2(190, 26));
 
+            /* Aug 7 item 4: the four moderation surfaces that had no client code
+             * at all. Width budget for this row: 130+165+165+185+235 = 880 plus
+             * 4 gaps of 8 = 912, against the ~1828px the panel's content width
+             * gives an HLG at the 1920-unit canvas — half of it spare, so nothing
+             * here compresses a neighbour (#199/#245).
+             * Each button is sized for a TRANSLATED label, not the English one:
+             * CreateButton routes its text through CreateText, which calls
+             * I18n.Tr, and the global Truncate default would drop the tail of a
+             * ~30%-longer ru/es label in an English-sized box (#292). At 13pt
+             * Gravity averages ~8px per glyph, so 235px carries ~29 characters
+             * against "Delete Chat Message..."'s 22. */
+            var modActionRow = new GameObject("AModAct");
+            modActionRow.transform.SetParent(panel.transform, false);
+            modActionRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(modActionRow, spacing: 8);
+            UIFactory.AddLE(modActionRow, prefH: 30, flexH: 0);
+            // The roster and the audit log are admin-HMAC endpoints, so they join
+            // the admin-only set even though they share this row with the three
+            // controls a moderator is here for.
+            adminOnlySections.Add(UIFactory.CreateButton("AAdmins", modActionRow.transform, "Admins...", 13f, C_WHITE, new Color(0.28f, 0.38f, 0.5f, 0.9f), () =>
+                OpenAdminRosterPicker(), sizeDelta: new Vector2(130, 26)));
+            adminOnlySections.Add(UIFactory.CreateButton("AActions", modActionRow.transform, "Action Log...", 13f, C_WHITE, new Color(0.3f, 0.34f, 0.42f, 0.9f), () =>
+                OpenAdminActionLogPicker(0), sizeDelta: new Vector2(165, 26)));
+            UIFactory.CreateButton("AMutes", modActionRow.transform, "Chat Mutes...", 13f, C_WHITE, new Color(0.34f, 0.32f, 0.45f, 0.9f), () =>
+                OpenChatMutePicker(), sizeDelta: new Vector2(165, 26));
+            UIFactory.CreateButton("AMuteNew", modActionRow.transform, "Mute Player...", 13f, C_WHITE, new Color(0.5f, 0.33f, 0.2f, 0.9f), () =>
+                StartChatMuteFlow(), sizeDelta: new Vector2(185, 26));
+            UIFactory.CreateButton("AChatDel", modActionRow.transform, "Delete Chat Message...", 13f, C_WHITE, new Color(0.5f, 0.22f, 0.22f, 0.9f), () =>
+                OpenChatDeletePicker(), sizeDelta: new Vector2(235, 26));
+
             // Recent Ranked Series — the main series-management section (Award/Void/Reverse).
             var seriesHdrRow = new GameObject("ASHRow"); seriesHdrRow.transform.SetParent(panel.transform, false); seriesHdrRow.AddComponent<RectTransform>();
+            adminOnlySections.Add(seriesHdrRow);
             UIFactory.AddHLG(seriesHdrRow, spacing: 8); UIFactory.AddLE(seriesHdrRow, prefH: 24, flexH: 0);
             txtAdminSeriesHdr = UIFactory.CreateText("ASH", seriesHdrRow.transform, "Recent Ranked Series", 16f, new Color(0.6f, 0.85f, 1f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
             UIFactory.SetBold(txtAdminSeriesHdr, true);
             var seriesSV = UIFactory.CreateScrollView("ASSV", panel.transform, spacing: 3);
+            adminOnlySections.Add(seriesSV.scrollGO);
             // Responsive 1:2 split: enough series space to operate at 1024x576,
             // while Flagged Matches receives the larger share at every height.
             UIFactory.AddLE(seriesSV.scrollGO, minH: 80, flexH: 1);
@@ -12253,14 +14260,17 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // the Admin panel's outer VLG cannot absorb an unbounded fixed-height
             // list on wide monitors (#199/#245). Each child has prefH (#63).
             var quarantineHdrRow = new GameObject("AQHRow"); quarantineHdrRow.transform.SetParent(panel.transform, false); quarantineHdrRow.AddComponent<RectTransform>();
+            adminOnlySections.Add(quarantineHdrRow);
             UIFactory.AddHLG(quarantineHdrRow, spacing: 8); UIFactory.AddLE(quarantineHdrRow, prefH: 24, flexH: 0);
             txtAdminQuarantineHdr = UIFactory.CreateText("AQH", quarantineHdrRow.transform, "Rejected Reports", 16f, new Color(1f, 0.65f, 0.35f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
             UIFactory.SetBold(txtAdminQuarantineHdr, true);
             var quarantineSV = UIFactory.CreateScrollView("AQSV", panel.transform, spacing: 3);
+            adminOnlySections.Add(quarantineSV.scrollGO);
             UIFactory.AddLE(quarantineSV.scrollGO, minH: 72, flexH: 1);
             adminQuarantineContainer = quarantineSV.content;
 
             var split = new GameObject("ASplit"); split.transform.SetParent(panel.transform, false); split.AddComponent<RectTransform>();
+            adminOnlySections.Add(split);
             UIFactory.AddHLG(split, spacing: 8); UIFactory.AddLE(split, minH: 140, flexH: 2);
 
             // Left column: flagged matches.
@@ -12275,17 +14285,44 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // Right column: banned users.
             var rightCol = new GameObject("AFRight"); rightCol.transform.SetParent(split.transform, false); rightCol.AddComponent<RectTransform>();
             UIFactory.AddVLG(rightCol, spacing: 4); UIFactory.AddLE(rightCol, prefW: 360, flexH: 1);
-            txtAdminBansHdr = UIFactory.CreateText("ABH", rightCol.transform, "Banned Players", 16f, new Color(1f, 0.45f, 0.45f), sizeDelta: new Vector2(340, 24));
+            /* Aug 7 item 4: the header is now a row so the SEARCH control can sit
+             * beside it. Width budget inside the 360px column: header 232 (flexW 1,
+             * minW 180) + 6 spacing + button 100 (flexW 0) = 338, leaving 22px of
+             * slack — an over-budget HLG compresses its children and TMP paints the
+             * overflow across the neighbour (#199/#245). The explicit flexW:0 on the
+             * button is load-bearing: without a SET value it inherits nothing and the
+             * group-derived flex would stretch it (#132). */
+            var bansHdrRow = new GameObject("ABHRow"); bansHdrRow.transform.SetParent(rightCol.transform, false); bansHdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(bansHdrRow, spacing: 6); UIFactory.AddLE(bansHdrRow, prefH: 26, flexH: 0);
+            txtAdminBansHdr = UIFactory.CreateText("ABH", bansHdrRow.transform, "Banned Players", 16f, new Color(1f, 0.45f, 0.45f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(232, 24));
             UIFactory.SetBold(txtAdminBansHdr, true);
+            {
+                var hdrGO = (txtAdminBansHdr as Component)?.gameObject;
+                if (hdrGO != null) UIFactory.AddLE(hdrGO, minW: 180, prefW: 232, flexW: 1, flexH: 0);
+            }
+            var banSearchBtn = UIFactory.CreateButton("ABSearch", bansHdrRow.transform, "Search...", 12f, C_WHITE,
+                new Color(0.28f, 0.30f, 0.38f, 0.95f), OpenBanSearchPicker, sizeDelta: new Vector2(100, 24));
+            UIFactory.AddLE(banSearchBtn, prefW: 100, prefH: 24, flexW: 0, flexH: 0);
             var banSV = UIFactory.CreateScrollView("ABSV", rightCol.transform, spacing: 2);
             UIFactory.AddLE(banSV.scrollGO, flexH: 1);
             adminBansContainer = banSV.content;
 
+            ApplyAdminPanelScope();
             return panel;
         }
 
         private static void RefreshAdmin()
         {
+            /* The tab is reachable by two authorities now (find 2), so decide what
+             * this panel IS before rendering anything. Re-applied every refresh
+             * rather than only at build: IsAdmin and the moderator probe both
+             * resolve asynchronously and can flip on after the panel exists — the
+             * same reason UpdateTabBarVisual repaints the tab buttons. */
+            ApplyAdminPanelScope();
+            // Everything below renders into a container that is now hidden, and
+            // every list it reads is admin-only data a moderator never fetches.
+            if (!ApiClient.IsAdmin) return;
+
             // Flag rows
             var flags = ApiClient.CachedFlaggedMatches ?? new List<ApiClient.FlaggedMatchEntry>();
             UIFactory.SetText(txtAdminFlagsHdr, $"Flagged Matches ({flags.Count} actionable)");
@@ -12612,16 +14649,679 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 foreach (var c in txt.GetComponents<Component>()) if (c.GetType().Name == "TextMeshProUGUI") { UIFactory.SetText(c, line); break; }
             }
             var unbanBtn = row.transform.Find("ABU" + row.name.Substring(2));
-            if (unbanBtn != null) WireButton(unbanBtn.gameObject, () =>
+            // Aug 7 item 4: unbanning used to fire on the raw click. Every
+            // DESTRUCTIVE admin control in this panel now goes through the same
+            // confirm the series controls use — the ban list is a dense pooled
+            // column and a mis-click silently reinstated an account. (The claim
+            // said "state-changing" and was false until the Aug 7 review: Ban
+            // and reverse-by-UUID still wrote on Submit. Grant Achievement is
+            // the deliberate exception — it is additive, and its second field is
+            // a fixed picker rather than free text, so a mis-click grants a
+            // listed achievement rather than destroying anything.)
+            if (unbanBtn != null) WireButton(unbanBtn.gameObject, () => ConfirmUnban(e.steam_id, e.display_name));
+        }
+
+        /// <summary>Confirm + unban, shared by the inline row button and the
+        /// search picker so the two paths cannot drift apart (#279).</summary>
+        private static void ConfirmUnban(string targetSteamId, string displayName)
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || string.IsNullOrEmpty(targetSteamId)) return;
+            string who = AdminDisplay(string.IsNullOrEmpty(displayName) ? targetSteamId : displayName, 28);
+            CompetitiveUI.OpenConfirm($"Unban {who}?\n\n{targetSteamId}\n\nThey can queue and report matches again immediately.", () =>
             {
-                var sid = MatchTracker.LocalSteamId;
-                if (string.IsNullOrEmpty(sid)) return;
-                ApiClient.AdminUnban(sid, e.steam_id, (ok, resp) =>
+                ApiClient.AdminUnban(sid, targetSteamId, (ok, resp) =>
                 {
-                    Plugin.Log.LogInfo($"[ADMIN] unban {e.steam_id}: {(ok?"OK":"FAIL")} {resp}");
+                    Plugin.Log.LogInfo($"[ADMIN] unban {targetSteamId}: {(ok ? "OK" : "FAIL")} {resp}");
                     if (ok) { ApiClient.FetchBannedUsers(sid); ApiClient.FetchFlaggedMatches(sid); }
                 });
             });
+        }
+
+        /* Aug 7 review find 3: Ban was the ONE state-changing control in this
+         * panel that still wrote on the raw Submit — CompetitiveUI's two-field
+         * admin prompt calls AdminBan the instant the button is pressed, so a
+         * mistyped-but-well-formed Steam64 banned a bystander with no way back
+         * except finding them in the ban list. It is also the most destructive
+         * control here (the account loses its sessions and its queue state), so
+         * it now walks the same id -> reason -> confirm chain the mute flow uses
+         * and the same OpenConfirm the series and unban controls use.
+         *
+         * The raw-Steam64 field is kept rather than swapped for the player
+         * search: the search only offers players the server already knows, and
+         * an admin acting on an id from a bug report or a Discord message needs
+         * to be able to type it. The confirm is what makes that safe. */
+        private static void StartAdminBanFlow()
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            // Each modal clears itself BEFORE invoking its callback, so the chain
+            // nests safely — the same property StartChatMuteFlow relies on. A
+            // cancel never invokes the callback at all, so there is no "" case to
+            // distinguish from a real empty submit.
+            // Tr'd like every other title raised into a SHARED overlay, even though
+            // the Admin panel itself is English — the same split OpenBanSearchPicker
+            // and the mute flow already use. Confirm BODIES stay bare, as they are
+            // in ConfirmUnban and ConfirmChatMute.
+            CompetitiveUI.OpenArtistInput(I18n.Tr("Ban a player"), I18n.Tr("Target Steam ID"), "", raw =>
+            {
+                string target = (raw ?? "").Trim();
+                if (string.IsNullOrEmpty(target)) return;
+                CompetitiveUI.OpenArtistInput(I18n.TrF("Ban {0}", target), I18n.Tr("Reason (optional)"), "", why =>
+                {
+                    // "violation" is the same fallback the old prompt applied, so
+                    // an empty reason still produces the ban row it always did.
+                    string reason = (why ?? "").Trim();
+                    if (string.IsNullOrEmpty(reason)) reason = "violation";
+                    ConfirmAdminBan(sid, target, reason);
+                });
+            });
+        }
+
+        /// <summary>Confirm + ban. The Steam64 is shown on its own line because
+        /// re-reading the id is the whole point of the step — that is the digit
+        /// a mistype lands in, and no name is available to cross-check it
+        /// against (the target may not be in any cache).</summary>
+        private static void ConfirmAdminBan(string sid, string targetSteamId, string reason)
+        {
+            if (string.IsNullOrEmpty(sid) || string.IsNullOrEmpty(targetSteamId)) return;
+            // AdminDisplay because the reason is free text the operator just
+            // typed and the confirm body renders through a GUIStyle, same
+            // treatment every other operator-authored string in this panel gets.
+            string why = AdminDisplay(reason, 80);
+            CompetitiveUI.OpenConfirm(
+                $"Ban this Steam ID?\n\n{targetSteamId}\n\nReason: {why}\n\n"
+                + "It ends their sessions and clears their queue state immediately.",
+                () => ApiClient.AdminBan(sid, targetSteamId, reason, (ok, resp) =>
+                {
+                    Plugin.Log.LogInfo($"[ADMIN] ban {targetSteamId}: {(ok ? "OK" : "FAIL")} {resp}");
+                    // Mirrors the old prompt's refresh set: a new ban can also
+                    // resolve a flag, so both lists are re-pulled.
+                    if (ok) { ApiClient.FetchBannedUsers(sid); ApiClient.FetchFlaggedMatches(sid); }
+                }));
+        }
+
+        /* Same treatment for the reverse-by-UUID path, which was unconfirmed for
+         * the same reason (both rode CompetitiveUI's raw two-field prompt). The
+         * INLINE reverse on a series row has confirmed since it shipped —
+         * ConfirmReverseSeries — so this closes the one entrance that did not.
+         * It is 1v1 only, exactly as the prompt it replaces was: the 2v2 ladder
+         * needs AdminReverseTeamSeries and a UUID carries no ladder, so a raw id
+         * cannot choose between them. 2v2 reversal stays on the series rows,
+         * where the ladder is known. */
+        private static void StartAdminReverseFlow()
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            CompetitiveUI.OpenArtistInput(I18n.Tr("Reverse a ranked 1v1 series"), I18n.Tr("Series ID (UUID)"), "", raw =>
+            {
+                string seriesId = (raw ?? "").Trim();
+                if (string.IsNullOrEmpty(seriesId)) return;
+                CompetitiveUI.OpenArtistInput(I18n.TrF("Reverse {0}", Trunc(seriesId, 36)), I18n.Tr("Reason (optional)"), "", why =>
+                {
+                    string reason = (why ?? "").Trim();
+                    if (string.IsNullOrEmpty(reason)) reason = "admin_reverse";   // the prompt's old default
+                    CompetitiveUI.OpenConfirm(
+                        $"Reverse this ranked 1v1 series?\n\n{seriesId}\n\nReason: {AdminDisplay(reason, 80)}\n\n"
+                        + "Undoes the ratings + gold and cancels the series.",
+                        () => ApiClient.AdminReverseSeries(sid, seriesId, reason, (ok, resp) =>
+                        {
+                            Plugin.Log.LogInfo($"[ADMIN] reverse {seriesId}: {(ok ? "OK" : "FAIL")} {resp}");
+                            if (ok) ApiClient.FetchAdminRecentSeries(sid);
+                        }));
+                });
+            });
+        }
+
+        /// <summary>Aug 7 item 4 — the banned list as a SEARCHABLE list. It is
+        /// served through the generic picker overlay (the same one the Compare
+        /// tab's metric/card dropdown uses) rather than a second in-panel filter
+        /// box: all text entry in this codebase is IMGUI painted by CompetitiveUI
+        /// over a native anchor, and the picker's anchor is the only one that is
+        /// already gated on the overlay being open rather than on a tab index —
+        /// so it works from the Admin tab with no new painter. Filtering matches
+        /// the rendered label AND the raw key, so a name, a reason word or a bare
+        /// Steam64 all find the row.
+        ///
+        /// Picking opens the unban confirm rather than acting: in a filtered list
+        /// the row under the cursor changes as you type.</summary>
+        private static void OpenBanSearchPicker()
+        {
+            // Tr'd like every other title raised into a shared overlay (the metric
+            // picker, the artist/translator pickers) even though the Admin panel
+            // itself is English — the overlay's own chrome is translated.
+            ShowPicker(I18n.Tr("Banned players - type to search"),
+                () =>
+                {
+                    // Supplier, not a snapshot: RebuildPickerList re-pulls this on
+                    // every keystroke, so a Refresh landing while the picker is
+                    // open updates it in place.
+                    var keys = new List<string>();
+                    var src = ApiClient.CachedBannedUsers;
+                    if (src != null)
+                        foreach (var b in src)
+                            if (b != null && !string.IsNullOrEmpty(b.steam_id)) keys.Add(b.steam_id);
+                    return keys;
+                },
+                BanPickerLabel,
+                _ => new Color(1f, 0.62f, 0.62f),
+                _ => false,                       // no persistent selection in this list
+                sid => { var e = FindBannedUser(sid); ConfirmUnban(sid, e?.display_name); },
+                multiSelect: false);
+        }
+
+        private static ApiClient.BannedUserEntry FindBannedUser(string steamId)
+        {
+            var src = ApiClient.CachedBannedUsers;
+            if (src == null || string.IsNullOrEmpty(steamId)) return null;
+            foreach (var b in src) if (b != null && b.steam_id == steamId) return b;
+            return null;
+        }
+
+        /// <summary>One picker row: name, ban date, reason and the raw id, as
+        /// PLAIN text. No markup here on purpose — RebuildPickerList runs every
+        /// label through FfaSafeRich, which escapes '&lt;' and '&gt;', so a colour
+        /// tag would render as literal "&amp;lt;color=..." — and the same string is
+        /// what the search filter matches, so markup would also make tag text
+        /// searchable. Colour comes from the picker's colour callback instead.
+        /// Names and reasons are free text written by other people; AdminDisplay
+        /// flattens control characters and angle brackets (all four fields end up
+        /// searchable, so a name, a reason word, a date or a bare Steam64 all
+        /// find the row).</summary>
+        private static string BanPickerLabel(string steamId)
+        {
+            var e = FindBannedUser(steamId);
+            if (e == null) return steamId;
+            string name = AdminDisplay(string.IsNullOrEmpty(e.display_name) ? steamId : e.display_name, 22);
+            string reason = AdminDisplay(e.reason, 40);
+            string when = "";
+            try { if (!string.IsNullOrEmpty(e.banned_at)) when = DateFmt.Short(DateTime.Parse(e.banned_at)) + "  "; } catch { }
+            return $"{name}   {when}{reason}   {steamId}";
+        }
+
+        // -- Moderation: admin roster, audit log, chat mutes, chat deletion -
+        /* Aug 7 item 4. All four had a complete, deployed server half and no
+         * client code at all. They live in the picker/confirm OVERLAYS rather
+         * than as new sections of this panel, for two structural reasons: the
+         * Admin panel's outer VLG already carries six fixed rows plus three
+         * flexible lists and has no vertical budget left for three more scroll
+         * sections on a wide monitor (#199/#245); and the picker is the only
+         * searchable list in this codebase whose IMGUI text field is gated on
+         * the overlay being open rather than on a tab index, so it works from
+         * here with no new painter (the same reasoning as the ban search).
+         *
+         * The three server-backed lists FETCH FIRST and open from the callback,
+         * the shape "Revoke Artist..." uses: the picker re-pulls its supplier
+         * only on a keystroke, so opening before the data lands would show an
+         * empty box that never fills itself.
+         *
+         * Every row is keyed by its SERVER ID, so a click resolves the entity
+         * the row rendered rather than an index into a list that a refresh may
+         * have reordered (#265), and each confirm captures the resolved values
+         * up front so a refresh between "are you sure" and "yes" cannot retarget
+         * it. All free text goes through AdminDisplay, which flattens control
+         * characters and neutralises angle brackets — these surfaces carry chat
+         * bodies and ban reasons written by other people (#237). */
+
+        /// <summary>Server refusals reach the operator WORD FOR WORD. Moderator
+        /// scope is decided entirely server-side (`_chat_moderator_scope`), and a
+        /// translation moderator confined to their own languages learns that ONLY
+        /// from this text — substituting friendlier wording would hide the actual
+        /// rule. The transport prefix ("HTTP 403: ") is kept because it separates
+        /// a refusal from an outage; only the JSON envelope is unwrapped.</summary>
+        private static string ModerationFailure(string resp)
+        {
+            if (string.IsNullOrEmpty(resp)) return "request failed";
+            string prefix = "", rest = resp;
+            if (rest.StartsWith("HTTP ", StringComparison.Ordinal))
+            {
+                int cut = rest.IndexOf(": ", StringComparison.Ordinal);
+                if (cut > 0) { prefix = rest.Substring(0, cut + 2); rest = rest.Substring(cut + 2); }
+            }
+            string detail = ApiClient.ExtractJsonStringPublic(rest, "detail");
+            return AdminDisplay(prefix + (string.IsNullOrEmpty(detail) ? rest : detail), 200);
+        }
+
+        /// <summary>A refusal goes to the POPUP, not a toast: ShowNotification
+        /// early-returns when the player has notifications switched off, and an
+        /// admin who did that would otherwise click a moderation button and see
+        /// nothing happen at all. Falls back to the toast when the page is shut
+        /// (a late response must not throw a full-screen modal over gameplay).
+        /// A GET's refusal arrives via ApiClient's per-surface error string
+        /// because those callbacks are Action&lt;bool&gt; and carry no text.</summary>
+        private static void ShowModerationRefusal(string surface, string raw)
+        {
+            string text = ModerationFailure(raw);
+            Plugin.Log.LogWarning($"[CHAT-MOD] {surface} refused: {text}");
+            if (IsOpen) ShowInfoPopup($"{surface} - refused", text);
+            else CompetitiveUI.ShowNotification($"{surface}: {text}", new Color(1f, 0.45f, 0.35f), 8f);
+            dirty = true;
+        }
+
+        private static void ShowModerationOk(string message)
+        {
+            Plugin.Log.LogInfo($"[CHAT-MOD] {message}");
+            CompetitiveUI.ShowNotification(message, new Color(0.45f, 0.9f, 0.5f), 4f);
+            dirty = true;
+        }
+
+        private static void ShowModerationResult(bool ok, string surface, string okText, string resp)
+        {
+            if (ok) ShowModerationOk(okText);
+            else ShowModerationRefusal(surface, resp);
+        }
+
+        // -- Admin roster --------------------------------------------------
+        private static ApiClient.AdminUserEntry FindAdminUser(string steamId)
+        {
+            var src = ApiClient.CachedAdmins;
+            if (src == null || string.IsNullOrEmpty(steamId)) return null;
+            foreach (var a in src) if (a != null && a.steam_id == steamId) return a;
+            return null;
+        }
+
+        /// <summary>One picker row, PLAIN text — RebuildPickerList escapes '&lt;'
+        /// and '&gt;' on every label, so markup here would render literally, and
+        /// the same string is what the filter matches. Every field is searchable,
+        /// so a name, a granter or a bare Steam64 all find the row.</summary>
+        private static string AdminRosterLabel(string steamId)
+        {
+            var e = FindAdminUser(steamId);
+            if (e == null) return steamId;
+            string name = AdminDisplay(string.IsNullOrEmpty(e.display_name) ? steamId : e.display_name, 24);
+            string by = AdminDisplay(string.IsNullOrEmpty(e.granted_by_name) ? e.granted_by_steam_id : e.granted_by_name, 20);
+            string when = "";
+            try { if (!string.IsNullOrEmpty(e.granted_at)) when = DateFmt.Short(DateTime.Parse(e.granted_at)) + "  "; } catch { }
+            return $"{name}   {when}{(string.IsNullOrEmpty(by) ? "" : "by " + by + "   ")}{steamId}";
+        }
+
+        private static void OpenAdminRosterPicker()
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            ApiClient.FetchAdminAdmins(sid, ok =>
+            {
+                if (!ok) { ShowModerationRefusal("Admin roster", ApiClient.AdminAdminsError); return; }
+                ShowPicker(I18n.Tr("Admins - type to search"),
+                    () =>
+                    {
+                        var keys = new List<string>();
+                        var src = ApiClient.CachedAdmins;
+                        if (src != null)
+                            foreach (var a in src)
+                                if (a != null && !string.IsNullOrEmpty(a.steam_id)) keys.Add(a.steam_id);
+                        return keys;
+                    },
+                    AdminRosterLabel,
+                    _ => new Color(0.65f, 0.85f, 1f),
+                    _ => false,                       // read-only roster, nothing stays selected
+                    steamId =>
+                    {
+                        var e = FindAdminUser(steamId);
+                        if (e == null) return;
+                        // The roster is informational; picking opens the full
+                        // record because `notes` never fits on a one-line row.
+                        ShowInfoPopup("Admin",
+                            $"{AdminDisplay(string.IsNullOrEmpty(e.display_name) ? steamId : e.display_name, 60)}\n"
+                          + $"{steamId}\n\n"
+                          + $"Granted: {AdminDisplay(e.granted_at, 40)}\n"
+                          + $"Granted by: {AdminDisplay(string.IsNullOrEmpty(e.granted_by_name) ? e.granted_by_steam_id : e.granted_by_name, 60)}\n\n"
+                          + $"Notes: {AdminDisplay(string.IsNullOrEmpty(e.notes) ? "(none)" : e.notes, 600)}");
+                    },
+                    multiSelect: false);
+            });
+        }
+
+        // -- Admin action log ----------------------------------------------
+        private const int ADMIN_ACTION_PAGE = 100;
+        /* Paging sentinels. The picker treats its item keys as opaque strings and
+         * dispatches on equality, so the only requirement is that no server row
+         * id can equal one — a leading control character guarantees that against
+         * the log's ids. They are ROWS in the list rather than extra chrome
+         * because the picker's box is fixed and has no room for a footer.
+         * The text filter only ever searches the LOADED page; paging is what
+         * reaches the rest of the log. */
+        private const string ADMIN_ACTION_NEWER = "\u0001newer";
+        private const string ADMIN_ACTION_OLDER = "\u0001older";
+        private static int adminActionsOffset;
+
+        private static ApiClient.AdminActionEntry FindAdminAction(string id)
+        {
+            var src = ApiClient.CachedAdminActions;
+            if (src == null || string.IsNullOrEmpty(id)) return null;
+            foreach (var a in src) if (a != null && a.id == id) return a;
+            return null;
+        }
+
+        private static string AdminActionLabel(string id)
+        {
+            // ASCII arrows and brackets only: the picker escapes '<' and '>', so
+            // a "->"-style marker is the widest thing that survives intact.
+            if (id == ADMIN_ACTION_NEWER) return $"[ Newer {ADMIN_ACTION_PAGE} ]";
+            if (id == ADMIN_ACTION_OLDER) return $"[ Older {ADMIN_ACTION_PAGE} ]";
+            var e = FindAdminAction(id);
+            if (e == null) return id;
+            string who = AdminDisplay(string.IsNullOrEmpty(e.admin_name) ? e.admin_steam_id : e.admin_name, 20);
+            string what = AdminDisplay(e.action, 28);
+            string target = AdminDisplay(string.IsNullOrEmpty(e.target_name) ? e.target_steam_id : e.target_name, 22);
+            return $"{FormatAdminQuarantineTime(e.created_at)}   {who} -> {what}"
+                 + (string.IsNullOrEmpty(target) ? "" : $"   {target}");
+        }
+
+        private static void OpenAdminActionLogPicker(int offset)
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            if (offset < 0) offset = 0;
+            // No filters: the picker's own text box filters the loaded page, and
+            // a server-side action/target filter would need a second prompt for
+            // a log this small.
+            ApiClient.FetchAdminActions(sid, ADMIN_ACTION_PAGE, offset, "", "", ok =>
+            {
+                if (!ok) { ShowModerationRefusal("Action log", ApiClient.AdminActionsError); return; }
+                adminActionsOffset = offset;
+                int loaded = ApiClient.CachedAdminActions?.Count ?? 0;
+                int total = ApiClient.CachedAdminActionsTotal;
+                ShowPicker(
+                    I18n.TrF("Admin action log ({0}-{1} of {2})",
+                             (offset + (loaded > 0 ? 1 : 0)).ToString(_INV),
+                             (offset + loaded).ToString(_INV), total.ToString(_INV)),
+                    () =>
+                    {
+                        var keys = new List<string>();
+                        if (adminActionsOffset > 0) keys.Add(ADMIN_ACTION_NEWER);
+                        var src = ApiClient.CachedAdminActions;
+                        if (src != null)
+                            foreach (var a in src)
+                                if (a != null && !string.IsNullOrEmpty(a.id)) keys.Add(a.id);
+                        /* A FULL page also offers "older" even when the total is
+                         * missing (0): a total the response never carried would
+                         * otherwise dead-end paging at page 1 with no way to tell
+                         * that from a genuinely short log. */
+                        int have = src?.Count ?? 0;
+                        int knownTotal = ApiClient.CachedAdminActionsTotal;
+                        if (adminActionsOffset + have < knownTotal
+                            || (knownTotal <= 0 && have >= ADMIN_ACTION_PAGE))
+                            keys.Add(ADMIN_ACTION_OLDER);
+                        return keys;
+                    },
+                    AdminActionLabel,
+                    k => k == ADMIN_ACTION_NEWER || k == ADMIN_ACTION_OLDER
+                         ? new Color(0.55f, 0.75f, 1f) : new Color(0.82f, 0.84f, 0.88f),
+                    _ => false,
+                    k =>
+                    {
+                        if (k == ADMIN_ACTION_NEWER) { OpenAdminActionLogPicker(adminActionsOffset - ADMIN_ACTION_PAGE); return; }
+                        if (k == ADMIN_ACTION_OLDER) { OpenAdminActionLogPicker(adminActionsOffset + ADMIN_ACTION_PAGE); return; }
+                        var e = FindAdminAction(k);
+                        if (e == null) return;
+                        /* `details` is the raw JSONB blob and carries whatever the
+                         * action recorded — chat message bodies, ban reasons,
+                         * display names. AdminDisplay is what makes it safe to put
+                         * in a rich-text element: it turns '<' and '>' into square
+                         * brackets, so a body containing tag shapes renders as
+                         * literal text instead of restyling the popup (#237). */
+                        ShowInfoPopup("Admin action",
+                            $"{AdminDisplay(e.action, 40)}   {FormatAdminQuarantineTime(e.created_at)}\n\n"
+                          + $"By: {AdminDisplay(string.IsNullOrEmpty(e.admin_name) ? e.admin_steam_id : e.admin_name, 60)}  ({AdminDisplay(e.admin_steam_id, 20)})\n"
+                          + $"Target: {AdminDisplay(string.IsNullOrEmpty(e.target_name) ? e.target_steam_id : e.target_name, 60)}  ({AdminDisplay(e.target_steam_id, 20)})\n"
+                          + (string.IsNullOrEmpty(e.target_match_id) ? "" : $"Match: {AdminDisplay(e.target_match_id, 40)}\n")
+                          + (string.IsNullOrEmpty(e.target_series_id) ? "" : $"Series: {AdminDisplay(e.target_series_id, 40)}\n")
+                          + $"\nDetails: {AdminDisplay(string.IsNullOrEmpty(e.details) ? "(none)" : e.details, 2000)}");
+                    },
+                    multiSelect: false);
+            });
+        }
+
+        // -- T-chat mutes ---------------------------------------------------
+        /// <summary>An EMPTY channel is the server's NULL: the mute covers EVERY
+        /// channel. Rendered "ALL" so it can never be read as "no channel".</summary>
+        private static string ChatChannelLabel(string channel)
+        {
+            return string.IsNullOrEmpty(channel) ? "ALL" : AdminDisplay(channel, 12).ToUpperInvariant();
+        }
+
+        private static ApiClient.ChatMuteEntry FindChatMute(string key)
+        {
+            var src = ApiClient.CachedChatMutes;
+            if (src == null || string.IsNullOrEmpty(key)) return null;
+            foreach (var m in src) if (m != null && m.id.ToString(_INV) == key) return m;
+            return null;
+        }
+
+        private static string ChatMuteLabel(string key)
+        {
+            var e = FindChatMute(key);
+            if (e == null) return key;
+            string name = AdminDisplay(string.IsNullOrEmpty(e.display_name) ? e.steam_id : e.display_name, 22);
+            string until = e.permanent ? "permanent"
+                         : string.IsNullOrEmpty(e.expires_at) ? "no expiry recorded"
+                         : "until " + FormatAdminQuarantineTime(e.expires_at);
+            string reason = AdminDisplay(e.reason, 32);
+            return $"{name}   [{ChatChannelLabel(e.channel)}]   {until}"
+                 + (string.IsNullOrEmpty(reason) ? "" : $"   {reason}")
+                 + $"   {AdminDisplay(e.steam_id, 20)}";
+        }
+
+        private static void OpenChatMutePicker()
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            ApiClient.FetchChatMutes(sid, ok =>
+            {
+                if (!ok) { ShowModerationRefusal("Chat mutes", ApiClient.ChatMutesError); return; }
+                ShowPicker(I18n.Tr("Chat mutes - type to search"),
+                    () =>
+                    {
+                        var keys = new List<string>();
+                        var src = ApiClient.CachedChatMutes;
+                        if (src != null)
+                            foreach (var m in src)
+                                // id > 0 is a correctness gate, not tidiness: the
+                                // row id IS the click's identity, and two rows that
+                                // both failed to parse an id would both key on "0",
+                                // so a click would unmute whichever came first.
+                                if (m != null && m.id > 0 && !string.IsNullOrEmpty(m.steam_id))
+                                    keys.Add(m.id.ToString(_INV));
+                        return keys;
+                    },
+                    ChatMuteLabel,
+                    _ => new Color(1f, 0.72f, 0.55f),
+                    _ => false,
+                    ConfirmChatUnmute,
+                    multiSelect: false);
+            });
+        }
+
+        private static void ConfirmChatUnmute(string key)
+        {
+            var e = FindChatMute(key);
+            var sid = MatchTracker.LocalSteamId;
+            if (e == null || string.IsNullOrEmpty(e.steam_id) || string.IsNullOrEmpty(sid)) return;
+            // Resolve everything NOW: the mute list refetches itself after any
+            // moderation write, and the confirm can outlive that refresh.
+            string target = e.steam_id, channel = e.channel;
+            string who = AdminDisplay(string.IsNullOrEmpty(e.display_name) ? target : e.display_name, 28);
+            string chan = ChatChannelLabel(channel);
+            // An all-channels row sends channel=null, which clears EVERY mute on
+            // that player the caller is entitled to clear — not just this row. Say
+            // so, or an admin unmuting one line silently lifts three.
+            string tail = string.IsNullOrEmpty(channel)
+                ? "This clears every chat mute on them that you are allowed to clear."
+                : "They can post there again immediately.";
+            CompetitiveUI.OpenConfirm(
+                $"Unmute {who} in [{chan}]?\n\n{target}\n\n{tail}",
+                () => ApiClient.AdminChatUnmute(sid, target, channel,
+                    (ok, resp) => ShowModerationResult(ok, "Unmute", $"Unmuted {who} in [{chan}].", resp)));
+        }
+
+        /* Channel and duration menus for a NEW mute. "*" is the all-channels
+         * sentinel rather than "": OpenArtistPicker reports a cancel as an empty
+         * id, so an empty channel id would be indistinguishable from backing out.
+         * It maps to null (= every channel) on the way to the request, which the
+         * server allows for admins only — a scoped translation moderator gets a
+         * refusal that says so, and that refusal is the whole point (we do not
+         * re-implement `_chat_moderator_scope` here).
+         * Codes are wire values and are never translated, exactly as the
+         * translator-grant picker above leaves its language codes alone. */
+        private static readonly string[] CHAT_MUTE_CHANNEL_LABELS =
+            { "All channels", "Global", "Russkiy (ru)", "Espanol (es)" };
+        private static readonly string[] CHAT_MUTE_CHANNEL_IDS = { "*", "global", "ru", "es" };
+        private static readonly string[] CHAT_MUTE_DURATION_LABELS =
+            { "10 minutes", "1 hour", "6 hours", "1 day", "7 days", "30 days", "Permanent" };
+        // Minutes as the server reads them; 0 is permanent.
+        private static readonly string[] CHAT_MUTE_DURATION_IDS =
+            { "10", "60", "360", "1440", "10080", "43200", "0" };
+
+        private static string ChatMuteDurationLabel(string id)
+        {
+            for (int i = 0; i < CHAT_MUTE_DURATION_IDS.Length; i++)
+                if (CHAT_MUTE_DURATION_IDS[i] == id) return CHAT_MUTE_DURATION_LABELS[i];
+            return id;
+        }
+
+        private static void StartChatMuteFlow()
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            // Player search -> channel -> duration -> reason -> confirm. Each
+            // modal clears itself before invoking its callback, so the chain is
+            // safe to nest (the translator-grant flow above relies on the same
+            // property).
+            CompetitiveUI.OpenPlayerSearch(I18n.Tr("Mute a player in chat - find the player"),
+                (target, pname) =>
+                {
+                    if (string.IsNullOrEmpty(target)) return;
+                    // AdminDisplay, not the raw name: the picker titles render as
+                    // rich text and a display name is someone else's free text.
+                    string who = AdminDisplay(string.IsNullOrEmpty(pname) ? target : pname, 28);
+                    CompetitiveUI.OpenArtistPicker(I18n.TrF("Which channel for {0}?", who),
+                        CHAT_MUTE_CHANNEL_LABELS, CHAT_MUTE_CHANNEL_IDS,
+                        chanId =>
+                        {
+                            if (string.IsNullOrEmpty(chanId)) return;   // cancelled
+                            string channel = chanId == "*" ? null : chanId;
+                            CompetitiveUI.OpenArtistPicker(I18n.TrF("How long for {0}?", who),
+                                CHAT_MUTE_DURATION_LABELS, CHAT_MUTE_DURATION_IDS,
+                                durId =>
+                                {
+                                    if (string.IsNullOrEmpty(durId)) return;   // cancelled
+                                    int minutes;
+                                    // The ids are ASCII digit literals owned by this
+                                    // file, so no culture can reinterpret them.
+                                    if (!int.TryParse(durId, out minutes)) return;
+                                    /* Reason step (Sid, Aug 7). OPTIONAL — submitting
+                                     * an empty field still mutes, which is why this is
+                                     * a plain input rather than a required field: the
+                                     * reason is context for the audit log and the mute
+                                     * list, not part of the decision. Cancelling here
+                                     * abandons the mute, matching every other step. */
+                                    CompetitiveUI.OpenArtistInput(
+                                        I18n.TrF("Why is {0} being muted?", who),
+                                        I18n.Tr("Reason (optional)"), "",
+                                        why => ConfirmChatMute(sid, target, who, channel, minutes,
+                                                               ChatMuteDurationLabel(durId), (why ?? "").Trim()));
+                                },
+                                actionLabel: I18n.Tr("Next"), showClear: false, itemNoun: "");
+                        },
+                        actionLabel: I18n.Tr("Next"), showClear: false, itemNoun: "");
+                });
+        }
+
+        private static void ConfirmChatMute(string sid, string target, string who,
+                                            string channel, int minutes, string durLabel, string reason)
+        {
+            string chan = ChatChannelLabel(channel);
+            string tail = minutes > 0
+                ? "They cannot post there until it expires."
+                : "It lasts until someone unmutes them.";
+            /* Echoed back so the operator sees what will be stored, and through
+             * AdminDisplay because it is free text they just typed rendering
+             * into a rich-text confirm body — the same treatment the ban reason
+             * and every other operator string in this panel gets. A blank reason
+             * drops the line entirely rather than showing "Reason: ". */
+            string whyLine = string.IsNullOrEmpty(reason) ? "" : $"Reason: {AdminDisplay(reason, 80)}\n\n";
+            CompetitiveUI.OpenConfirm(
+                $"Mute {who} in [{chan}] for {durLabel}?\n\n{target}\n\n{whyLine}{tail}",
+                // The reason is NOT in the HMAC canonical
+                // (admin:{admin}:chat_mute:{target}:{channel|all}), so passing it
+                // cannot move the signature; the server clamps it to 256.
+                () => ApiClient.AdminChatMute(sid, target, channel, minutes,
+                    (ok, resp) => ShowModerationResult(ok, "Mute",
+                        $"Muted {who} in [{chan}] for {durLabel}.", resp), reason));
+        }
+
+        // -- T-chat message removal -----------------------------------------
+        /* The candidate list is the client's OWN chat log, so this one opens
+         * without a fetch. Only SERVER-issued lines are offered: ChatId is 0 on a
+         * local echo, on a system line and on any row predating the id, and the
+         * endpoint keys on the server row id. The deletion itself comes back over
+         * the chat WS, which already drops the rendered line, so there is nothing
+         * to refresh here on success. */
+        private static readonly List<ChatEntry> chatDeleteCandidates = new List<ChatEntry>();
+
+        private static List<string> ChatDeleteKeys()
+        {
+            chatDeleteCandidates.Clear();
+            var keys = new List<string>();
+            var snap = SnapshotChat(CHAT_LOG_MAX);
+            // Newest first: a moderator is nearly always deleting something that
+            // just landed, and the picker opens scrolled to the top.
+            for (int i = snap.Length - 1; i >= 0; i--)
+            {
+                if (snap[i].ChatId <= 0) continue;
+                chatDeleteCandidates.Add(snap[i]);
+                keys.Add(snap[i].ChatId.ToString(_INV));
+            }
+            return keys;
+        }
+
+        private static string ChatDeleteLabel(string key)
+        {
+            for (int i = 0; i < chatDeleteCandidates.Count; i++)
+            {
+                var e = chatDeleteCandidates[i];
+                if (e.ChatId.ToString(_INV) != key) continue;
+                /* The stored line is already rendered rich text (name colour,
+                 * nametag markup). STRIP it rather than escape it: this same
+                 * string is what the filter matches, so leaving the tags in would
+                 * make the markup searchable and push the actual words off the
+                 * end of the row. */
+                string body = AdminDisplay(GameStateWatcher.StripRichText(e.Line ?? ""), 92);
+                return $"[{ChatChannelLabel(e.Channel)}] {body}   #{key}";
+            }
+            return key;
+        }
+
+        private static void OpenChatDeletePicker()
+        {
+            var sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid)) return;
+            if (ChatDeleteKeys().Count == 0)
+            {
+                ShowInfoPopup("Delete chat message",
+                    "No server-issued chat lines are in this session's log.\n\n"
+                  + "Only messages this client received from the server can be deleted - "
+                  + "the request keys on the server's row id, which a local echo does not carry.");
+                return;
+            }
+            ShowPicker(I18n.Tr("Delete a chat message - type to search"),
+                ChatDeleteKeys, ChatDeleteLabel,
+                _ => new Color(1f, 0.75f, 0.7f),
+                _ => false,
+                key => ConfirmChatDelete(sid, key),
+                multiSelect: false);
+        }
+
+        private static void ConfirmChatDelete(string sid, string key)
+        {
+            int id;
+            if (!int.TryParse(key, out id) || id <= 0) return;
+            string preview = ChatDeleteLabel(key);
+            CompetitiveUI.OpenConfirm(
+                $"Delete this chat message?\n\n{preview}\n\nIt disappears for everyone in that channel.",
+                () => ApiClient.AdminChatDelete(sid, id,
+                    (ok, resp) => ShowModerationResult(ok, "Delete message", $"Message #{key} deleted.", resp)));
         }
 
         // -- Admin recent-series rows -------------------------------------
@@ -14648,8 +17348,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             var queueListPanel = UIFactory.CreatePanel("TQL", queueRow.transform, C_PANEL);
             UIFactory.AddVLG(queueListPanel, spacing: 2, padL: 10, padR: 10, padT: 6, padB: 6);
             UIFactory.AddLE(queueListPanel, flexW: 1, flexH: 0);
+            /* No explicit <b> here: CreateText's _BoldWrap adds it, so the literal
+             * stays the plain key the refresh path already translates. */
             txtTeamQueueListHeader = UIFactory.CreateText("TQLH", queueListPanel.transform,
-                "<b>Random Queue</b>", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+                "Random Queue", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
             txtTeamQueueListBody = UIFactory.CreateText("TQLB", queueListPanel.transform,
                 "<color=#888>Loading…</color>", 14f, C_LABEL, UIFactory.AlignTopLeft,
                 sizeDelta: new Vector2(440, 22));
@@ -14662,7 +17364,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddVLG(manualPanel, spacing: 2, padL: 10, padR: 10, padT: 6, padB: 6);
             UIFactory.AddLE(manualPanel, flexW: 1, flexH: 0);
             txtTeamQueueManualHeader = UIFactory.CreateText("TQMH", manualPanel.transform,
-                "<b>Custom Lobbies</b>", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
+                "Custom Lobbies", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
             txtTeamQueueManualBody = UIFactory.CreateText("TQMB", manualPanel.transform,
                 "<color=#888>Loading…</color>", 14f, C_LABEL, UIFactory.AlignTopLeft,
                 sizeDelta: new Vector2(440, 22));

@@ -124,11 +124,16 @@ namespace CompetitiveRounds
             // FIRST, before anything that can throw: releases the chat input lock
             // if the box stopped rendering (bug #128 — see TickChatLockWatchdog).
             TickChatLockWatchdog();
+            // Spectator blackout/HUD draws EARLY (#255): it must not be
+            // starveable by a later overlay throwing, and everything after it
+            // may legitimately paint on top (notifications, Tab stats, chat).
+            SpectatorHud.Draw();
             DrawFPS();
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             PlayerEffectCosmetic.DrawPreview();  // shop effect preview (IMGUI sim, always above the menu)
             DrawSpawnSpotlight();
             DrawNotification();
+            DrawSpectatorRoster();   // fighter-side "Spectators (N)" (design §6.8)
             DrawFfaScoreStrip();
             DrawMatchStatus();
             DrawInGameChat();
@@ -152,6 +157,7 @@ namespace CompetitiveRounds
             DrawScoreHoverGraph();
             DrawFpsHoverGraph();
             DrawCompareSearch();
+            DrawPickerSearch();   // Aug 6 item 2 — searchable metric/card dropdown
             DrawLeaderboardSearch();
             DrawMapColorToast();
             DrawCustomBetPrompt();
@@ -183,14 +189,85 @@ namespace CompetitiveRounds
                           // live F5 buttons — a phrase click must not ALSO
                           // fire the shop/queue control underneath, on
                           // EITHER input path.
-                          || quickChatOpen;
+                          || quickChatOpen
+                          // Spectator leave-confirm: an IMGUI modal with no
+                          // uGUI backdrop of its own, so it needs BOTH gates
+                          // (#200) — a [Leave] click must not fall through to
+                          // an F5 button underneath.
+                          || SpectatorHud.MenuOpen
+                          // Aug 7: the generic yes/no confirm was missing from
+                          // this list since it was written — also backdrop-less,
+                          // so while it was up a click outside its box still
+                          // reached the very Unban/Reverse/Void rows it exists
+                          // to guard, on both input paths. It can't strand
+                          // either gate on: DrawConfirm runs earlier in this
+                          // same DrawUI pass and clears confirmOpen on Escape,
+                          // on either button, and on the menu closing.
+                          || confirmOpen;
             NativeUI.SetClickBlocker(anyModal);
             // InfoPopupOpen: the uGUI info popup's backdrop absorbs EventSystem
             // clicks itself, but raw-polling ClickHandlers behind it need this
             // flag (learning #141); its own backdrop sets bypassModalBlock.
-            ClickHandler.ModalBlockInput = anyModal || NativeUI.InfoPopupOpen || NativeUI.LangPromptOpen || !Plugin.DataConsentAsked;
+            // Aug 6 item 2: PickerOpen joins ModalBlockInput ONLY — deliberately
+            // not anyModal/SetClickBlocker. The picker raises its own uGUI
+            // backdrop, so it needs the raw-poll half of the gate (#141/#200)
+            // and nothing else; adding it to anyModal would double-blocker it.
+            // Mirrors InfoPopupOpen, which is in this list for the same reason.
+            ClickHandler.ModalBlockInput = anyModal || NativeUI.InfoPopupOpen || NativeUI.PickerOpen || NativeUI.LangPromptOpen || !Plugin.DataConsentAsked;
             // Consent modal drawn LAST so it paints on top of everything.
             DrawConsentModal();
+        }
+
+        // -- Spectator roster (fighter-side, design §6.8) -------------------
+        // Compact top-right line while any spectator is in the room. Names
+        // come from the cr_spec_roster room property — validated identities
+        // published by the master, never NickName (#162: 3s string cache,
+        // Repaint draws cached only).
+        private static string specRosterLine = "";
+        private static float specRosterCachedAt = -999f;
+
+        private static void DrawSpectatorRoster()
+        {
+            try
+            {
+                if (RoomActors.LocalIsSpectator) return;   // spectator has its own HUD
+                if (Time.unscaledTime - specRosterCachedAt > 3f)
+                {
+                    specRosterCachedAt = Time.unscaledTime;
+                    specRosterLine = "";
+                    if (Photon.Pun.PhotonNetwork.InRoom && !Photon.Pun.PhotonNetwork.OfflineMode)
+                    {
+                        int n = RoomActors.SpectatorCount();
+                        if (n > 0)
+                        {
+                            string names = "";
+                            try
+                            {
+                                var rp = Photon.Pun.PhotonNetwork.CurrentRoom?.CustomProperties;
+                                if (rp != null && rp.ContainsKey("cr_spec_roster"))
+                                    names = (rp["cr_spec_roster"] as string ?? "").Replace("|", ", ");
+                            }
+                            catch { }
+                            // Neutralise rich-text (IMGUI label, same rule as quick-chat).
+                            names = names.Replace("<", "(").Replace(">", ")");
+                            if (names.Length > 60) names = names.Substring(0, 60);
+                            specRosterLine = names.Length > 0
+                                ? I18n.TrF("Spectators ({0}): {1}", n, names)
+                                : I18n.TrF("Spectators ({0})", n);
+                        }
+                    }
+                }
+                if (specRosterLine.Length == 0) return;
+                var style = GUI.skin.label;
+                var prev = GUI.color;
+                GUI.color = new Color(1f, 1f, 1f, 0.75f);
+                // BOTTOM-right (Sid, playtest #169c): the top-right corner
+                // already carries the card bars — the roster was crowding it.
+                GUI.Label(new Rect(Screen.width - 420, Screen.height - 28, 412, 22), specRosterLine,
+                          new GUIStyle(style) { alignment = TextAnchor.MiddleRight, fontStyle = FontStyle.Bold, clipping = TextClipping.Overflow });
+                GUI.color = prev;
+            }
+            catch { }
         }
 
         // -- FFA score HUD --------------------------------------------------
@@ -272,6 +349,8 @@ namespace CompetitiveRounds
                     ffaHudRowExtent = 0;
                     ffaPickBannerText = "";
                     ffaPickBannerSeconds = -1;
+                    ffaMpBannerText = "";      // item 10: never survive the match
+                    ffaMpSignature = null;
                     return;
                 }
 
@@ -291,6 +370,7 @@ namespace CompetitiveRounds
                     }
                     else ffaHudRowExtent = 0;
                     RefreshFfaPickBanner(now, pickActive);
+                    RefreshFfaMatchPointBanner(now, inMatch);
                     return;
                 }
                 if (Event.current.type != EventType.Repaint) return;
@@ -300,6 +380,7 @@ namespace CompetitiveRounds
                 if (inMatch) DrawFfaScoreRows();
                 DrawFfaPickBanner(now);
                 DrawFfaSettingsBanner(now);
+                DrawFfaMatchPointBanner(now);
             }
             catch { }
         }
@@ -386,8 +467,21 @@ namespace CompetitiveRounds
                 Color rawColor = Color.white;
                 try
                 {
-                    var skin = PlayerSkinBank.GetPlayerSkinColors(slot);
-                    if (skin != null) rawColor = skin.color;
+                    // Aug 6 item 7: in FFA every player IS their own team, so the
+                    // strip's identity colour is simply that player's equipped body
+                    // colour when they have one. Falls through to the vanilla slot
+                    // skin (which repeats every 4 slots — see the FFA clamp in
+                    // PlayerSkinBank_GetPlayerSkinColors_2v2_Patch) otherwise.
+                    Color equipped;
+                    if (TeamColorIdentity.TryGetColor(slot, out equipped))
+                    {
+                        rawColor = equipped;
+                    }
+                    else
+                    {
+                        var skin = PlayerSkinBank.GetPlayerSkinColors(slot);
+                        if (skin != null) rawColor = skin.color;
+                    }
                 }
                 catch { }
 
@@ -622,6 +716,149 @@ namespace CompetitiveRounds
             GUI.DrawTexture(rect, Texture2D.whiteTexture);
             GUI.color = new Color(1f, 0.86f, 0.30f, fade);
             GUI.Label(rect, ffaCfgBannerText, ffaCfgBannerStyle);
+            GUI.color = previous;
+        }
+
+        // ── Aug 6 item 10: match-point warning banner ─────────────────────────
+        // "When someone is half a point from winning, warn everyone so they know
+        // to target them." Yellow, names the player(s), and carries the sudden-
+        // death note when that lobby option is on. Multiple players can sit at
+        // match point at once (they each need one more half point), so the plural
+        // case is first-class rather than an afterthought.
+        //
+        // Names keep their rich-text styling (same choice as the leaver banner) —
+        // this is the one FFA surface that does NOT strip tags, because "who do I
+        // shoot" is exactly the moment a player's nametag should be recognisable.
+        private const int FfaMpMaxNames = 4;
+        private static string ffaMpBannerText = "";
+        private static string ffaMpSignature;
+        private static float ffaMpCachedAt = -999f;
+        private static Vector2 ffaMpBannerSize;
+        private static GUIStyle ffaMpBannerStyle;
+        private static readonly List<int> ffaMpTeams = new List<int>(10);
+
+        private static void RefreshFfaMatchPointBanner(float now, bool inMatch)
+        {
+            if (!inMatch)
+            {
+                ffaMpBannerText = "";
+                ffaMpSignature = null;
+                return;
+            }
+            if (now - ffaMpCachedAt < 0.5f) return;
+            ffaMpCachedAt = now;
+
+            FfaMode.CollectMatchPointTeams(ffaMpTeams);
+            if (ffaMpTeams.Count == 0)
+            {
+                // Cleared as soon as nobody is at match point any more — a
+                // converted point or a fresh game both land here.
+                ffaMpBannerText = "";
+                ffaMpSignature = null;
+                return;
+            }
+
+            // Signature covers the roster AND the sudden-death flag, so the
+            // string is rebuilt only when the banner's meaning changes.
+            var sig = new System.Text.StringBuilder(24);
+            foreach (int t in ffaMpTeams) sig.Append(t).Append(',');
+            sig.Append(FfaMode.SuddenDeath ? '1' : '0');
+            string signature = sig.ToString();
+            if (signature == ffaMpSignature && !string.IsNullOrEmpty(ffaMpBannerText)) return;
+            ffaMpSignature = signature;
+
+            var names = new System.Text.StringBuilder(96);
+            int shown = 0, extra = 0;
+            foreach (int t in ffaMpTeams)
+            {
+                string nm = FfaMatchPointName(t);
+                if (string.IsNullOrEmpty(nm)) continue;
+                if (shown >= FfaMpMaxNames) { extra++; continue; }
+                if (shown > 0) names.Append(", ");
+                names.Append(nm);
+                shown++;
+            }
+            if (shown == 0) { ffaMpBannerText = ""; return; }
+            // Whole phrase, not a bare " +N more" connector: a fragment with
+            // under three letters can never be harvested as a key (#295c), and
+            // composing after Tr is the recurring i18n bug shape (#298c).
+            string who = extra > 0
+                ? I18n.TrF("{0} and {1} more", names.ToString(), extra)
+                : names.ToString();
+            string text = shown == 1
+                ? I18n.TrF("MATCH POINT - {0} is half a point from the win!", who)
+                : I18n.TrF("MATCH POINT - {0} are half a point from the win!", who);
+            if (FfaMode.SuddenDeath)
+                text += I18n.Tr("   -   SUDDEN DEATH: everyone else cannot damage each other");
+            ffaMpBannerText = text;
+            ffaMpBannerSize = Vector2.zero;   // re-measure on the next Repaint
+        }
+
+        /// <summary>Styled nickname for the player holding a match-point slot.
+        /// Rich text is preserved, but an absurdly long nickname falls back to the
+        /// tag-stripped form rather than being cut mid-tag (a truncated
+        /// "&lt;colo" would corrupt the rest of the banner's markup).</summary>
+        private static string FfaMatchPointName(int teamId)
+        {
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return null;
+                foreach (var p in pm.players)
+                {
+                    if (p == null || p.gameObject == null || p.data == null) continue;
+                    if (p.TeamID != teamId) continue;
+                    string raw = null;
+                    try { raw = p.data.view != null && p.data.view.Owner != null ? p.data.view.Owner.NickName : null; }
+                    catch { }
+                    if (string.IsNullOrEmpty(raw)) return "P" + (teamId + 1);
+                    // Control characters are hostile input for a GUI label (#100).
+                    var sb = new System.Text.StringBuilder(raw.Length);
+                    foreach (char c in raw) sb.Append(c < ' ' ? ' ' : c);
+                    string safe = sb.ToString();
+                    if (safe.Length <= 64) return safe;
+                    string clean = NametagStyler.Clean(safe) ?? "";
+                    if (clean.Length > 16) clean = clean.Substring(0, 16);
+                    return clean.Length == 0 ? "P" + (teamId + 1) : clean;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static void DrawFfaMatchPointBanner(float now)
+        {
+            if (string.IsNullOrEmpty(ffaMpBannerText)) return;
+            if (Event.current.type != EventType.Repaint) return;   // #162
+            if (ffaMpBannerStyle == null)
+            {
+                ffaMpBannerStyle = new GUIStyle(GUI.skin.label)
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontSize = Mathf.Max(14, Mathf.RoundToInt(19f * (Screen.height / 1080f))),
+                    fontStyle = FontStyle.Bold,
+                    richText = true,                    // styled nametags
+                    clipping = TextClipping.Overflow,   // #143 — IMGUI metrics run tall
+                };
+            }
+            if (ffaMpBannerSize == Vector2.zero)
+                ffaMpBannerSize = ffaMpBannerStyle.CalcSize(new GUIContent(ffaMpBannerText));
+            float w = Mathf.Min(ffaMpBannerSize.x + 34f, Screen.width - 20f);
+            float h = ffaMpBannerSize.y + 14f;
+            // Sits in the settings banner's slot. In practice they never collide
+            // (the settings banner runs for 9s at game start, when every score is
+            // 0 and match point is arithmetically impossible), but stacking below
+            // a live one costs two lines and removes the question entirely.
+            float y = ffaPickBannerRect.yMax + 8f;
+            if (!string.IsNullOrEmpty(ffaCfgBannerText) && now <= ffaCfgBannerUntil)
+                y += ffaCfgBannerSize.y + 20f;
+            var rect = new Rect((Screen.width - w) * 0.5f, y, w, h);
+            float pulse = 0.80f + 0.20f * Mathf.Sin(now * 5f);
+            Color previous = GUI.color;
+            GUI.color = new Color(0.36f, 0.26f, 0.03f, 0.92f * pulse);
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = new Color(1f, 0.88f, 0.22f, 1f);
+            GUI.Label(rect, ffaMpBannerText, ffaMpBannerStyle);
             GUI.color = previous;
         }
 
@@ -1039,13 +1276,66 @@ namespace CompetitiveRounds
                 string next = GUI.TextField(fieldRect, cur, compareSearchStyle);
                 compareSearchFocused = GUI.GetNameOfFocusedControl() == CMP_SEARCH_CTRL;
                 if (string.IsNullOrEmpty(next))
+                    /* Aug 7 item 2 — one shared field, two lists. The Cards
+                     * sub-tab's chooser used to be a modal dropdown with its own
+                     * search; it is now a persistent left-column list filtered by
+                     * THIS box, so the placeholder has to name what it filters or
+                     * it reads as the wrong control. Both literals sit inside
+                     * their own Tr call — I18n.Tr(variable) harvests nothing
+                     * (#295a), so a composed string would never be translatable. */
                     GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
-                              I18n.Tr("<color=#7788AA><i>search players...</i></color>"), compareSearchHintStyle);
+                              NativeUI.CompareCardsSubTab
+                                ? I18n.Tr("<color=#7788AA><i>search cards...</i></color>")
+                                : I18n.Tr("<color=#7788AA><i>search players...</i></color>"),
+                              compareSearchHintStyle);
                 if (next != cur)
                 {
                     NativeUI.CompareSearch = next;
                     NativeUI.MarkDirty();
                 }
+            }
+            catch { /* search is best-effort cosmetic */ }
+        }
+
+        // Aug 6 item 2: the searchable metric/card dropdown. Same
+        // IMGUI-over-anchor clone as the two searches above, but gated on the
+        // PICKER being open rather than on a tab index — the overlay can be
+        // raised from more than one tab, and it must stop painting the instant
+        // it closes or the field would linger over whatever is underneath.
+        //
+        // Two contracts that are easy to get wrong:
+        //  - Do NOT MarkDirty() on change. NativeUI's PickerSearch setter
+        //    rebuilds the filtered list itself; a second rebuild per keystroke
+        //    is pure waste on a per-frame IMGUI path (#162).
+        //  - pickerSearchFocused MUST feed the same chat mutex the other two
+        //    do, or typing "t" here opens the in-game chat box mid-search.
+        private static bool pickerSearchFocused = false;
+        public static bool IsPickerSearchFocused => pickerSearchFocused;
+        private const string PICKER_SEARCH_CTRL = "PickerSearchField";
+        private static GUIStyle pickerSearchStyle, pickerSearchHintStyle;
+        private static void DrawPickerSearch()
+        {
+            pickerSearchFocused = false;
+            try
+            {
+                if (!NativeUI.IsOpen || !NativeUI.PickerOpen) return;
+                Rect r = NativeUI.GetPickerSearchScreenRect();
+                if (r.width < 1f || r.height < 1f) return;
+                if (pickerSearchStyle == null)
+                    pickerSearchStyle = new GUIStyle(GUI.skin.textField) { fontSize = 13, alignment = TextAnchor.MiddleLeft };
+                if (pickerSearchHintStyle == null)
+                    pickerSearchHintStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, alignment = TextAnchor.MiddleLeft, richText = true };
+                float h = Mathf.Max(r.height, 22f);
+                var fieldRect = new Rect(r.x, r.y, Mathf.Max(r.width, 200f), h);
+                string cur = NativeUI.PickerSearch ?? "";
+                GUI.SetNextControlName(PICKER_SEARCH_CTRL);
+                string next = GUI.TextField(fieldRect, cur, pickerSearchStyle);
+                pickerSearchFocused = GUI.GetNameOfFocusedControl() == PICKER_SEARCH_CTRL;
+                if (string.IsNullOrEmpty(next))
+                    GUI.Label(new Rect(fieldRect.x + 6f, fieldRect.y, fieldRect.width - 8f, h),
+                              I18n.Tr("<color=#7788AA><i>search...</i></color>"), pickerSearchHintStyle);
+                if (next != cur)
+                    NativeUI.PickerSearch = next;   // setter rebuilds the list
             }
             catch { /* search is best-effort cosmetic */ }
         }
@@ -1346,7 +1636,7 @@ namespace CompetitiveRounds
             public Rect screenRect;
             public string mySeries;
             public string oppSeries;
-            public int kind;            // 0=fps 1=ping 2=hit pairs 3=block pairs 4=player combo (2v2)
+            public int kind;            // 0=fps 1=ping 2=hit pairs 3=block pairs 4=player combo (2v2) 5=dps
             public float myStep;        // seconds per "my" sample (5 = 1v1 fps buckets, else 3)
             public bool subjectIsOpp;   // kind 2/3/4: hovered player uses the red/orange palette
             public string pairHit;      // kind 4: "fired:hit,..." for the combo popup
@@ -1377,6 +1667,31 @@ namespace CompetitiveRounds
             _fpsGraphRegions.Add(new FpsGraphRegion {
                 screenRect = screenRect, mySeries = mySeries ?? "", oppSeries = oppSeries ?? "",
                 kind = isPing ? 1 : 0, myStep = myStep > 0f ? myStep : (isPing ? 3f : 5f),
+                pointTimes = pointTimes, pointTimeline = pointTimeline,
+                outerClipRT = outerClipRT, subjectLabel = subjectLabel,
+                sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
+                sourceTxt = sourceTxt,
+            });
+        }
+
+        // Aug 7 item 3d: damage-per-second. Shares the fps/ping popup (one big
+        // plot, point markers, auto Y) but is its OWN kind because a DPS series
+        // is DERIVED — an idle interval is a genuine 0, and kind 0/1's parser
+        // drops zeros, which would shift every later sample left and make the
+        // time axis lie. `myStep` is the emitter's sample interval; unlike
+        // fps/ping (where the opponent line is always the 3s heartbeat) BOTH
+        // DPS lines come from the same cadence, so the caller's step drives both.
+        public static void RegisterDpsGraphRegion(Rect screenRect, string mySeries, string oppSeries,
+                                                  RectTransform sourceRT, Camera sourceCam, float widthFrac,
+                                                  RectTransform clipRT, object sourceTxt = null,
+                                                  string pointTimes = null, string pointTimeline = null,
+                                                  float myStep = 0f,
+                                                  RectTransform outerClipRT = null, string subjectLabel = null)
+        {
+            if (string.IsNullOrEmpty(mySeries) && string.IsNullOrEmpty(oppSeries)) return;
+            _fpsGraphRegions.Add(new FpsGraphRegion {
+                screenRect = screenRect, mySeries = mySeries ?? "", oppSeries = oppSeries ?? "",
+                kind = 5, myStep = myStep > 0f ? myStep : 3f,
                 pointTimes = pointTimes, pointTimeline = pointTimeline,
                 outerClipRT = outerClipRT, subjectLabel = subjectLabel,
                 sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
@@ -1454,6 +1769,20 @@ namespace CompetitiveRounds
             return true;
         }
 
+        // Flat int series that KEEPS zeros — same rule as ParsePairSeries, no
+        // pair split and no prepended origin (a DPS sample IS an interval, so
+        // the caller's first entry is already the first one). Dropping a 0 here
+        // would not just lose a point, it would slide every later sample one
+        // interval earlier on the shared time axis.
+        private static int[] ParseIntSeriesKeepZeros(string csv)
+        {
+            if (string.IsNullOrEmpty(csv)) return null;
+            var parts = csv.Split(',');
+            var vals = new List<int>(parts.Length);
+            foreach (var s in parts) { int v; if (int.TryParse(s, out v)) vals.Add(v); }
+            return vals.Count >= 2 ? vals.ToArray() : null;
+        }
+
         // July 22 item 1: vertical marker per point scored, colored by scorer
         // (green = the viewer, red = opponent side). Times come from point_times
         // (seconds since start); who-scored is derived by diffing the
@@ -1522,13 +1851,22 @@ namespace CompetitiveRounds
 
             int kind = hit.Value.kind;
             if (kind == 4) { DrawPlayerComboGraph(hit.Value, mp); return; }
-            if (kind >= 2) { DrawPairHoverGraph(hit.Value, mp); return; }
+            // Only 2/3 are the pair chart — 5 (dps) is a flat series and falls
+            // through to this popup, so the old `kind >= 2` catch-all would have
+            // sent it to the wrong renderer.
+            if (kind == 2 || kind == 3) { DrawPairHoverGraph(hit.Value, mp); return; }
 
             bool isPing = kind == 1;
+            bool isDps = kind == 5;
             float myStep = hit.Value.myStep;
-            var mine = ParseFpsSeries(hit.Value.mySeries);
-            var opp = ParseFpsSeries(hit.Value.oppSeries);
+            // DPS keeps its zeros (see ParseIntSeriesKeepZeros); fps/ping drop
+            // theirs, where a 0 means "no sample", not "zero frames".
+            var mine = isDps ? ParseIntSeriesKeepZeros(hit.Value.mySeries) : ParseFpsSeries(hit.Value.mySeries);
+            var opp = isDps ? ParseIntSeriesKeepZeros(hit.Value.oppSeries) : ParseFpsSeries(hit.Value.oppSeries);
             if (mine == null && opp == null) return;
+            // Both DPS lines share the emitter cadence; fps/ping opponent
+            // samples are always the 3s heartbeat.
+            float oppStep = isDps ? myStep : 3f;
 
             // One big chart per hover (July 22): the whole popup is the plot, so
             // a 600-vs-30 FPS gap or a big latency spike still reads clearly.
@@ -1546,11 +1884,18 @@ namespace CompetitiveRounds
             // the finished string could never match a catalogue key — and the
             // you/vs/opponent legend has to travel WITH the sentence to be
             // translatable as one unit.
+            // Aug 7: the metric name is baked INTO each sentence, so a new kind
+            // needs its own pair of whole templates — there is no hole a caller
+            // could fill to stop the fps one saying FPS.
             string header = !string.IsNullOrEmpty(hit.Value.subjectLabel)
-                ? (isPing
+                ? (isDps
+                    ? I18n.TrF("<color=#CCCCCC>Damage per second over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel)
+                    : isPing
                     ? I18n.TrF("<color=#CCCCCC>Latency (ms) over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel)
                     : I18n.TrF("<color=#CCCCCC>FPS over the match</color>  <color=#99B3E6>{0}</color>", hit.Value.subjectLabel))
-                : (isPing
+                : (isDps
+                    ? I18n.Tr("<color=#CCCCCC>Damage per second over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>")
+                    : isPing
                     ? I18n.Tr("<color=#CCCCCC>Latency (ms) over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>")
                     : I18n.Tr("<color=#CCCCCC>FPS over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>"));
             GUI.Label(new Rect(gx + 8, gy + 2, w - 16, 24),
@@ -1559,7 +1904,7 @@ namespace CompetitiveRounds
 
             float maxT = 1f;
             if (mine != null) maxT = Mathf.Max(maxT, (mine.Length - 1) * myStep);
-            if (opp != null) maxT = Mathf.Max(maxT, (opp.Length - 1) * 3f);
+            if (opp != null) maxT = Mathf.Max(maxT, (opp.Length - 1) * oppStep);
             // Marker times can outrun the series (samples cap earlier) — include
             // them in the axis so late points still land inside the plot.
             Rect plotProbe = default(Rect);
@@ -1568,7 +1913,9 @@ namespace CompetitiveRounds
 
             // Auto-scaled Y so a huge FPS ceiling or a latency spike both fit,
             // with a small headroom margin so the peak isn't glued to the top.
-            int maxV = isPing ? 60 : 90;
+            // DPS seeds low (a quiet match genuinely peaks in single digits) and
+            // auto-scales up from there like the other two.
+            int maxV = isDps ? 10 : isPing ? 60 : 90;
             if (mine != null) foreach (var v in mine) if (v > maxV) maxV = v;
             if (opp != null) foreach (var v in opp) if (v > maxV) maxV = v;
             maxV = Mathf.CeilToInt(maxV * 1.08f);
@@ -1577,7 +1924,11 @@ namespace CompetitiveRounds
 
             // Adaptive gridlines: a "nice" step that yields ~4-6 lines across the
             // current range — so a 30-FPS chart and a 600-FPS chart both read.
-            int[] steps = { 10, 20, 25, 30, 50, 60, 100, 120, 150, 200, 250, 300, 500, 600, 1000 };
+            // DPS borrows the pair chart's finer ladder: its range often ends at
+            // ~11, where the fps ladder's 10 floor draws exactly one line.
+            int[] steps = isDps
+                ? new[] { 1, 2, 5, 10, 20, 25, 50, 100, 150, 200, 300, 500, 1000 }
+                : new[] { 10, 20, 25, 30, 50, 60, 100, 120, 150, 200, 250, 300, 500, 600, 1000 };
             int gstep = steps[steps.Length - 1];
             foreach (int s in steps) { if (maxV / s <= 6) { gstep = s; break; } }
             for (int gl = gstep; gl <= maxV; gl += gstep)
@@ -1602,7 +1953,7 @@ namespace CompetitiveRounds
                     GuiLine(new Vector2(x0, y0), new Vector2(x1, y1), col, 2f);
                 }
             };
-            drawSeries(opp, 3f, new Color(0.90f, 0.60f, 0.53f, 0.95f));
+            drawSeries(opp, oppStep, new Color(0.90f, 0.60f, 0.53f, 0.95f));
             drawSeries(mine, myStep, new Color(0.60f, 0.70f, 0.90f, 0.95f));
         }
 
@@ -4233,8 +4584,14 @@ namespace CompetitiveRounds
                     {
                         // The failure detail is server-sent English (class D) —
                         // it stays raw inside the translated template's hole.
-                        bugSubmitStatus = I18n.TrF("<color=#FF6666>Failed: {0}</color>",
-                                                   (resp ?? "").Replace("\n", " "));
+                        // Colour lives OUTSIDE the translated literal so the key is
+                        // the plain sentence. Baked-in markup made this the same
+                        // message as NativeUI's "Failed: {0}" under two different
+                        // keys, so translators had to translate it twice (reported
+                        // by a translator, 2026-08-07).
+                        bugSubmitStatus = "<color=#FF6666>"
+                                        + I18n.TrF("Failed: {0}", (resp ?? "").Replace("\n", " "))
+                                        + "</color>";
                     }
                 });
         }
@@ -4762,8 +5119,8 @@ namespace CompetitiveRounds
             // Item 13: never carry a half-observed shift hold into the next
             // time the box opens — a KeyUp we never saw would otherwise leave
             // the tap armed and switch channels on the next release.
-            chatShiftHeld = false;
-            chatShiftTapClean = false;
+            chatAltHeld = false;
+            chatAltTapClean = false;
             // Disarm the resume-caret window with the box — it is re-armed by
             // the next open that actually resumes something.
             chatCaretToEndUntil = -999f;
@@ -4825,8 +5182,8 @@ namespace CompetitiveRounds
 
         // Shift-tap state for the channel cycle (see the KeyUp handler in
         // DrawChatInput for why a tap, not a press, is the trigger).
-        private static bool chatShiftHeld, chatShiftTapClean;
-        private static float chatShiftDownAt;
+        private static bool chatAltHeld, chatAltTapClean;
+        private static float chatAltDownAt;
         // F4 companion, armed only when a stashed draft is resumed. Runtime
         // IMGUI's TextEditor.DetectFocusChange calls OnFocus() -> SelectAll()
         // on a single-line field the frame after keyboard focus lands, which is
@@ -4882,6 +5239,8 @@ namespace CompetitiveRounds
             if (bugModalOpen || logViewerOpen || bugAdminOpen || compareSearchFocused
                 // July 22 item 8: leaderboard search takes typed text too.
                 || lbSearchFocused
+                // Aug 6 item 2: the metric/card dropdown's search field.
+                || pickerSearchFocused
                 || NativeUI.CustomBetPromptOpen
                 // July 21 item 8: the LFP message box takes typed text — 't'
                 // there must not open chat.
@@ -4927,8 +5286,8 @@ namespace CompetitiveRounds
                     chatInputText = TakeStashedDraft();
                     if (chatInputText.Length > 0)
                         chatCaretToEndUntil = Time.unscaledTime + 1f;
-                    chatShiftHeld = false;
-                    chatShiftTapClean = false;
+                    chatAltHeld = false;
+                    chatAltTapClean = false;
                     // Belt-and-suspenders re-derive. Since F10 the memo's key
                     // covers every input that can change the line (channel,
                     // locale, catalogue generation), so this is no longer the
@@ -4974,30 +5333,33 @@ namespace CompetitiveRounds
             bool submit = false, cancel = false;
             if (ev != null && ev.type == EventType.KeyDown)
             {
-                if (ev.keyCode == KeyCode.LeftShift || ev.keyCode == KeyCode.RightShift)
+                if (ev.keyCode == KeyCode.LeftAlt || ev.keyCode == KeyCode.RightAlt)
                 {
-                    // Arm a tap on the FIRST shift-down of a hold (key repeat
-                    // must not re-arm a hold that already typed something).
-                    // Deliberately not ev.Use()'d: a bare shift KeyDown carries
+                    // Aug 6 item 11: the channel cycle moved from Shift to Alt
+                    // (Shift kept firing while players typed capitals). Arm a
+                    // tap on the FIRST alt-down of a hold (key repeat must not
+                    // re-arm a hold that already typed something).
+                    // Deliberately not ev.Use()'d: a bare alt KeyDown carries
                     // no character, and TextField reads the modifier off the
-                    // arrow/Home keys that follow, not off this event.
-                    if (!chatShiftHeld)
+                    // keys that follow, not off this event.
+                    if (!chatAltHeld)
                     {
-                        chatShiftHeld = true;
-                        chatShiftTapClean = true;
-                        chatShiftDownAt = Time.unscaledTime;
+                        chatAltHeld = true;
+                        chatAltTapClean = true;
+                        chatAltDownAt = Time.unscaledTime;
                     }
                 }
                 else if (ev.keyCode != KeyCode.None || ev.character != '\0')
                 {
-                    // ANY other real KeyDown during the hold means shift was a
-                    // MODIFIER (a capital letter, shift+arrow selection), not a
-                    // tap. Unity fires TWO KeyDown events per physical key (one
-                    // with keyCode, one with ev.character — see the
-                    // chatJustOpened note above) and either one disarms.
-                    // Padding events with neither are skipped, or the shift's
-                    // own key-down pair could disarm the tap it just armed.
-                    chatShiftTapClean = false;
+                    // ANY other real KeyDown during the hold means alt was a
+                    // MODIFIER (Alt+Tab, AltGr-typed characters on intl
+                    // layouts), not a tap. Unity fires TWO KeyDown events per
+                    // physical key (one with keyCode, one with ev.character —
+                    // see the chatJustOpened note above) and either one
+                    // disarms. Padding events with neither are skipped, or the
+                    // alt's own key-down pair could disarm the tap it just
+                    // armed.
+                    chatAltTapClean = false;
                 }
 
                 if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter)
@@ -5017,26 +5379,34 @@ namespace CompetitiveRounds
                 }
             }
             else if (ev != null && ev.type == EventType.KeyUp
-                     && (ev.keyCode == KeyCode.LeftShift || ev.keyCode == KeyCode.RightShift))
+                     && (ev.keyCode == KeyCode.LeftAlt || ev.keyCode == KeyCode.RightAlt))
             {
-                // Item 13: a TAP of shift rotates the SEND channel through the
-                // whole allowed set (global -> es -> ru -> global), ungated by
-                // locale — the old Tab cycle only existed when the player HAD a
-                // locale channel, so English clients had no cycle at all.
+                // Item 13 (Shift->Alt per Aug 6 item 11): a TAP of alt rotates
+                // the SEND channel through the whole allowed set
+                // (global -> es -> ru -> global), ungated by locale — the old
+                // Tab cycle only existed when the player HAD a locale channel,
+                // so English clients had no cycle at all.
                 //
-                // The discriminator is the whole trick: a bare shift KeyDown
-                // also fires as the first half of every capital letter, so
-                // acting on the PRESS would switch channels on every "Hello".
-                // Acting on the RELEASE instead, and only when nothing was
-                // typed between the press and the release (chatShiftTapClean,
-                // cleared above by any other KeyDown) and the hold was shorter
-                // than 0.6s, means a shift used as a modifier can never trigger
-                // it — the letter's own KeyDown always lands inside the hold.
-                bool tap = chatShiftHeld && chatShiftTapClean
-                           && Time.unscaledTime - chatShiftDownAt < 0.6f;
-                chatShiftHeld = false;
-                chatShiftTapClean = false;
+                // The discriminator is the whole trick: acting on the RELEASE,
+                // and only when nothing was typed between the press and the
+                // release (chatAltTapClean, cleared above by any other
+                // KeyDown) and the hold was shorter than 0.6s, means an alt
+                // used as a modifier (Alt+Tab, AltGr) can never trigger it —
+                // the other key's own KeyDown always lands inside the hold.
+                bool tap = chatAltHeld && chatAltTapClean
+                           && Time.unscaledTime - chatAltDownAt < 0.6f;
+                chatAltHeld = false;
+                chatAltTapClean = false;
                 if (tap) { CycleChatSendChannel(); ev.Use(); }
+            }
+
+            // Alt+Tab safety: if focus left while alt was held, the KeyUp
+            // never arrives — clear the armed state so the first alt tap
+            // after returning doesn't act on a stale hold.
+            if (!Application.isFocused && (chatAltHeld || chatAltTapClean))
+            {
+                chatAltHeld = false;
+                chatAltTapClean = false;
             }
 
             // Position: above the F5 menu's bottom bar (Discord/GitHub/Refresh buttons
@@ -5057,7 +5427,7 @@ namespace CompetitiveRounds
             {
                 chatHeaderChan = hdrChan; chatHeaderLocale = hdrLoc; chatHeaderGen = hdrGen;
                 chatHeaderCache = I18n.TrF(
-                    "Chat [{0}]  —  Enter to send, Esc to cancel, Shift switches channel",
+                    "Chat [{0}]  —  Enter to send, Esc to cancel, Alt switches channel",
                     ChannelDisplayLabel(hdrChan));
             }
             GUI.Label(new Rect(x, y - 22, w, 20), chatHeaderCache);
@@ -5152,7 +5522,7 @@ namespace CompetitiveRounds
             // those inputs, not open the popup — and an already-open popup
             // yields to them.
             if (chatInputOpen || bugModalOpen || logViewerOpen || bugAdminOpen
-                || compareSearchFocused || lbSearchFocused
+                || compareSearchFocused || lbSearchFocused || pickerSearchFocused
                 || NativeUI.CustomBetPromptOpen || NativeUI.LfpPromptOpen
                 || ArtistPromptOpen) { quickChatOpen = false; return; }
             if (IsVanillaChatTyping()) { quickChatOpen = false; return; }
@@ -5635,7 +6005,7 @@ namespace CompetitiveRounds
                     var mp = Photon.Pun.PhotonNetwork.LocalPlayer?.CustomProperties;
                     if (mp != null && mp.ContainsKey("t_id"))
                         int.TryParse(mp["t_id"]?.ToString(), out myTeam);
-                    foreach (var pp in Photon.Pun.PhotonNetwork.PlayerList)
+                    foreach (var pp in RoomActors.ActiveFighters())   // census: a spectator is neither mate nor foe
                     {
                         if (pp == null || pp.IsLocal) continue;
                         string nm = GameStateWatcher.StripRichText(pp.NickName ?? "?");

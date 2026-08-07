@@ -377,6 +377,8 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Spectator: no cosmetic publishes (design §3.5).
+                if (RoomActors.LocalIsSpectator) return;
                 if (!PhotonNetwork.IsConnected || PhotonNetwork.LocalPlayer == null) return;
 
                 // Capture the base name once per session. On subsequent calls the LocalPlayer

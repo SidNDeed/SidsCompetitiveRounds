@@ -138,6 +138,32 @@ class MatchReport(BaseModel):
     local_block_timeline: str | None = Field(None, max_length=1024)
     opp_block_timeline: str | None = Field(None, max_length=1024)
     point_times: str | None = Field(None, max_length=512)
+    # Aug 6 items 1+4 — expanded combat telemetry. All advisory, outside the
+    # frozen 7-field HMAC. Damage timelines are cumulative ints (local = 5s
+    # buckets, opp = ~3s cr_gstats samples). Deaths are the reporter's LOCAL
+    # observations of both seats (every client simulates every death).
+    # -1 is the client's "never observed" sentinel for the OPPONENT fields:
+    # an older (18-field cr_gstats) peer sends no expanded telemetry, and
+    # persisting its reset ZEROES alongside a real match duration would
+    # permanently depress that player's DPS average with data nobody measured
+    # (#257 — NULL and 0 are different facts). ge=-1 lets the sentinel through
+    # validation; submit_match maps any negative to NULL before storing.
+    local_damage_dealt: int | None = Field(None, ge=-1, le=100_000_000)
+    opp_damage_dealt: int | None = Field(None, ge=-1, le=100_000_000)
+    local_max_single_hit: int | None = Field(None, ge=-1, le=10_000_000)
+    opp_max_single_hit: int | None = Field(None, ge=-1, le=10_000_000)
+    local_max_health: int | None = Field(None, ge=-1, le=100_000_000)
+    opp_max_health: int | None = Field(None, ge=-1, le=100_000_000)
+    local_best_bounce_kill: int | None = Field(None, ge=-1, le=100_000)
+    opp_best_bounce_kill: int | None = Field(None, ge=-1, le=100_000)
+    local_damage_timeline: str | None = Field(None, max_length=1024)
+    opp_damage_timeline: str | None = Field(None, max_length=1024)
+    local_deaths: int | None = Field(None, ge=0, le=1000)
+    local_deaths_boundary: int | None = Field(None, ge=0, le=1000)
+    local_deaths_own_bullet: int | None = Field(None, ge=0, le=1000)
+    opp_deaths: int | None = Field(None, ge=0, le=1000)
+    opp_deaths_boundary: int | None = Field(None, ge=0, le=1000)
+    opp_deaths_own_bullet: int | None = Field(None, ge=0, le=1000)
 
 
 # ── Responses ──────────────────────────────────────────────────
@@ -180,6 +206,8 @@ class PlayerStatsResponse(BaseModel):
     # to other players on the leaderboard detail panel.
     discord_display_name: str | None = None
     show_discord: bool = False
+    # Spectator opt-out (migration 194) — Settings-tab toggle state.
+    allow_spectators: bool = True
     gold_earned: int = 0
     gold_spent: int = 0
     # Lifetime gun accuracy + block success counters (v1.23).
@@ -220,6 +248,16 @@ class PlayerStatsResponse(BaseModel):
     active_nametag_skus: list[str] = Field(default_factory=list)
     last_match: datetime | None
     recent_rating_history: list[dict] = Field(default_factory=list)
+    # Aug 7 — the same series for FFA (ffa_match_players.rating_after joined to
+    # ffa_matches.created_at, ranked games only, ghost rows excluded, oldest ->
+    # newest, same cap as the 1v1 list). The two lists do NOT share a key set:
+    # a 1v1 entry is {rating, rd, date}, an FFA entry is {rating, recorded_at,
+    # date} — no rd (FFA has no rating_history row to take one from), and the
+    # timestamp is emitted under BOTH spellings on purpose, because the frozen
+    # contract names it 'recorded_at' while the 1v1 client parser this one was
+    # copied from reads 'date'. That duplication is what actually lets the
+    # Compare graph read both series through one code path.
+    ffa_rating_history: list[dict] = Field(default_factory=list)
     top_cards: list[dict] = Field(default_factory=list)
     level: int = 0
     total_xp: int = 0
@@ -298,6 +336,37 @@ class PlayerStatsResponse(BaseModel):
     h2h_casual_losses: int = 0
     h2h_series_wins: int = 0
     h2h_series_losses: int = 0
+    # Aug 6 item 1 — Compare-tab scalar additions (migration 191). All FLAT
+    # scalars so the client's JsonUtility parse picks them up with zero parser
+    # changes (learnings #25 / #73). Defaults are the zero-data shape — a fresh
+    # account (or the deploy-order window before migration 191) renders these
+    # as "no data", never 500s.
+    # Casual rage-quit. Denominator is the UNION of casual games the player
+    # took part in: recorded casual matches PLUS disconnect events whose room
+    # produced no match row. (It is deliberately NOT matches + dc_count —
+    # a leave at 4-0 is BOTH, and counting it twice halved the rate.)
+    casual_rage_quit_pct: float = 0.0
+    casual_dc_count: int = 0
+    casual_matches: int = 0
+    # Damage-per-second over matches that CARRY damage telemetry (#257 —
+    # pre-telemetry rows are excluded from both numerator and denominator).
+    ranked_dps: float = 0.0
+    ffa_dps: float = 0.0
+    # Death breakdown, both-seat side-mapped sums over non-invalidated 1v1s.
+    # self_death_pct = (boundary + own_bullet) / total deaths recorded.
+    self_death_pct: float = 0.0
+    deaths_total: int = 0
+    deaths_boundary: int = 0
+    deaths_own_bullet: int = 0
+    # Career records (players.record_*). None = never recorded, not zero.
+    record_max_single_hit: int | None = None
+    record_max_health: int | None = None
+    record_bounce_kill: int | None = None
+    # Opponent variety over COMPLETED (non-invalidated) ranked series:
+    # distinct opponents / total series.
+    ranked_unique_opponents: int = 0
+    ranked_total_series: int = 0
+    ranked_uniqueness_pct: float = 0.0
 
     model_config = {"from_attributes": True}
 
@@ -412,6 +481,19 @@ class MatchHistoryEntry(BaseModel):
     point_times: str | None = None
     # Bug batch item 4 — total game length in seconds (0 = unknown/legacy row).
     duration_seconds: int = 0
+    # Aug 6 item 1 (migration 191) — viewer-relative damage + death telemetry.
+    # None on every row recorded before the expanded-telemetry clients (#257:
+    # "not recorded", never zero). damage_timeline is a cumulative-int CSV.
+    player_damage_dealt: int | None = None
+    opp_damage_dealt: int | None = None
+    player_damage_timeline: str | None = None
+    opp_damage_timeline: str | None = None
+    player_deaths: int | None = None
+    player_deaths_boundary: int | None = None
+    player_deaths_own_bullet: int | None = None
+    opp_deaths: int | None = None
+    opp_deaths_boundary: int | None = None
+    opp_deaths_own_bullet: int | None = None
 
     model_config = {"from_attributes": True}
 
@@ -479,10 +561,15 @@ class AchievementEntry(BaseModel):
     # Steam-style global unlock rate: percent of all (non-deleted) players who
     # have this achievement. Cached server-side ~5 min; 0.0 when unknown.
     global_pct: float = 0.0
-    # Gold paid on unlock (v1.32). Server truth from _achievement_gold() — the
-    # slayer achievements pay 1000, everything else the uniform 100. The client
-    # currently hardcodes "+100g" (NativeUI.RefreshAchievements); this field
-    # lets it render the per-key amount instead.
+    # Gold paid on unlock (v1.32). Server truth from _achievement_gold(),
+    # which reads ACHIEVEMENT_GOLD_OVERRIDES: values run from the 100 default
+    # through the 300/500 tiers to 1000 for the slayers. The six FFA keys sit
+    # on those same tiers (two at 100, two at 300, two at 500; priced
+    # 2026-08-07) after shipping unpaid for one day — the second time this
+    # comment has needed correcting, so read the table, not a restatement.
+    #
+    # The default below stays 100 only for OLD servers that omit the field;
+    # a modern response always carries the real number.
     gold: int = 100
 
     model_config = {"from_attributes": True}
@@ -786,6 +873,10 @@ class TeamPlayerTelemetry(BaseModel):
     ping_avg: int | None = Field(None, ge=0, le=30000)
     hit_timeline: str | None = Field(None, max_length=1024)
     block_timeline: str | None = Field(None, max_length=1024)
+    # Aug 7 — cumulative damage-dealt CSV, matching the column migration 201
+    # adds to team_match_telemetry. None from clients that predate it; NULL is
+    # "not recorded", which is a different fact from a real zero (#257).
+    damage_dealt_timeline: str | None = Field(None, max_length=1024)
     bullets_fired: int | None = Field(None, ge=0, le=1000000)
     bullets_hit: int | None = Field(None, ge=0, le=1000000)
     blocks_activated: int | None = Field(None, ge=0, le=1000000)
@@ -898,6 +989,15 @@ class OvtMatchReport(BaseModel):
     solo_fps: int | None = Field(None, ge=0, le=10000)
     duo_a_fps: int | None = Field(None, ge=0, le=10000)
     duo_b_fps: int | None = Field(None, ge=0, le=10000)
+    # Aug 7 — per-seat cumulative damage-dealt CSVs, matching the columns
+    # migration 201 adds to ovt_matches. 1v2 has no telemetry table, so these
+    # hang off the match row beside the fps averages rather than mirroring the
+    # 2v2 per-slot blob. Advisory: outside the frozen 10-field HMAC canonical.
+    # None from clients that predate them; NULL is "not recorded", never a real
+    # zero (#257).
+    solo_damage_timeline: str | None = Field(None, max_length=1024)
+    duo_a_damage_timeline: str | None = Field(None, max_length=1024)
+    duo_b_damage_timeline: str | None = Field(None, max_length=1024)
 
 
 class OvtMatchResponse(BaseModel):
@@ -1102,3 +1202,161 @@ class FfaLeaderboardResponse(BaseModel):
     total_players: int
     last_updated: datetime
     is_ranked: bool = True
+
+
+# ── Compare-tab stat boards (Aug 6 item 1) ────────────────────────────
+# All of these use PARALLEL ARRAYS instead of nested objects on purpose:
+# the client parses flat arrays natively and JsonUtility silently fails on
+# nested arrays (learning #25).
+
+class RecordsBoardResponse(BaseModel):
+    """Mini-leaderboard over one of the players.record_* career columns."""
+    board: str
+    display_names: list[str] = Field(default_factory=list)
+    steam_ids: list[str] = Field(default_factory=list)
+    values: list[int] = Field(default_factory=list)
+
+
+class CardTopPickersResponse(BaseModel):
+    """Who picks one card the most, with their win rate holding it."""
+    card_name: str
+    display_names: list[str] = Field(default_factory=list)
+    steam_ids: list[str] = Field(default_factory=list)
+    picks: list[int] = Field(default_factory=list)
+    win_rates: list[float] = Field(default_factory=list)  # 0..1 per entry
+
+
+class CardPickersSummaryResponse(BaseModel):
+    """Top pickers for EVERY card, flattened as 'card|name|picks|winrate'
+    pipe-CSV strings (the client parses pipe strings natively; pipes are
+    stripped from display names before assembly — names are adversarial
+    input, #156)."""
+    entries: list[str] = Field(default_factory=list)
+
+
+class RankedFriendsResponse(BaseModel):
+    """Most-played ranked opponents (completed series count), pie source."""
+    display_names: list[str] = Field(default_factory=list)
+    steam_ids: list[str] = Field(default_factory=list)
+    series_counts: list[int] = Field(default_factory=list)
+
+
+class GoldSourcesResponse(BaseModel):
+    """Where a player's positive gold came from, bucketed. Only buckets
+    with a nonzero total appear; sorted by amount desc."""
+    buckets: list[str] = Field(default_factory=list)
+    amounts: list[int] = Field(default_factory=list)
+
+
+class NemesisResponse(BaseModel):
+    """Opponents with the best win rate against a set of target players."""
+    display_names: list[str] = Field(default_factory=list)
+    steam_ids: list[str] = Field(default_factory=list)
+    wins: list[int] = Field(default_factory=list)
+    games: list[int] = Field(default_factory=list)
+    win_rates: list[float] = Field(default_factory=list)  # 0..1 per entry
+    # Aug 7 — which of the REQUESTED targets actually faced this opponent,
+    # index-aligned with the arrays above (element i is entry i's subset).
+    # Nested rather than a comma-joined string because the entries are numeric
+    # steam ids only: no user-authored text can appear inside, so the client may
+    # slice this with a plain depth counter (the string-aware matcher of #156 is
+    # only required where display names can carry brackets).
+    faced_by: list[list[str]] = Field(default_factory=list)
+
+
+class PlayerNemesisEntry(BaseModel):
+    """One opponent on a single player's personal nemesis list. Counts are
+    ranked 1v1 SERIES, not individual games."""
+    steam_id: str
+    display_name: str
+    series_played: int
+    series_lost: int
+    loss_rate: float  # 0..1 — series_lost / series_played
+
+
+class PlayerNemesisPlayer(BaseModel):
+    """One of the requested players, with their own nemeses attached."""
+    steam_id: str
+    display_name: str
+    nemeses: list[PlayerNemesisEntry] = Field(default_factory=list)
+
+
+class PlayerNemesisResponse(BaseModel):
+    """Per-player nemesis lists (Aug 7). NESTED, unlike the parallel-array
+    boards above: the answer is grouped BY player, and flattening it would need
+    a second index array for the client to regroup from. The client parses it by
+    hand either way — JsonUtility silently fails on nested arrays (#25) — and
+    display_name is user-authored, so that slicing must use the string-aware
+    bracket matcher (#156).
+
+    Semantic difference from NemesisResponse worth stating where it is easy to
+    miss: co-selected targets are deliberately NOT excluded here. "Who beats me
+    most" is a per-player question, and dropping a rival because they happen to
+    also be selected would answer a different one."""
+    players: list[PlayerNemesisPlayer] = Field(default_factory=list)
+
+
+class BuildTypeResponse(BaseModel):
+    """Ranked card picks classified into build-type buckets (weighted:
+    a card touching N buckets adds 1 to each). Display-only taxonomy."""
+    buckets: list[str] = Field(default_factory=list)
+    counts: list[int] = Field(default_factory=list)
+    total_picks: int = 0
+
+
+class SimilarPlayersResponse(BaseModel):
+    """Most similar players by profile vector (hit%, block%, ranked DPS,
+    keys/sec, build-type shares). Scores are 0-100 display values."""
+    display_names: list[str] = Field(default_factory=list)
+    steam_ids: list[str] = Field(default_factory=list)
+    similarity_scores: list[float] = Field(default_factory=list)
+
+
+# ── Spectator mode (Aug 6 item 13, design §6) ─────────────────────────────
+
+class SpectateAttestBody(BaseModel):
+    """Fighter-side room attestation. Strict-session; POST body so the room
+    credential never reaches access-log URLs (design §6.3)."""
+    steam_id: str = Field(min_length=1, max_length=32)
+    mode: str = Field(min_length=3, max_length=8)
+    source_ref: str = Field(default="", max_length=64)
+    room_name: str = Field(min_length=1, max_length=64)
+    region: str = Field(default="", max_length=16)
+    actor_number: int = Field(default=-1, ge=-1, le=255)
+    fighter_target: int = Field(ge=2, le=10)
+    room_capacity: int = Field(default=0, ge=0, le=32)
+    spectator_protocol: int = Field(default=1, ge=1, le=100)
+    phase: str = Field(default="", max_length=16)
+    # Sorted comma-joined fighter steam ids — must be byte-identical across
+    # all attesters (design §6.3).
+    roster: str = Field(default="", max_length=400)
+
+
+class SpectateGrantBody(BaseModel):
+    steam_id: str = Field(min_length=1, max_length=32)
+    game_id: str = Field(min_length=1, max_length=64)
+    client_protocol: int = Field(default=1, ge=1, le=100)
+
+
+class SpectateLeaseBody(BaseModel):
+    """Heartbeat / leave — identifies the lease by id; identity comes from
+    the strict session, never the body."""
+    steam_id: str = Field(min_length=1, max_length=32)
+    lease_id: str = Field(min_length=1, max_length=64)
+
+
+class SpectateValidateEntry(BaseModel):
+    actor_number: int = Field(ge=0, le=255)
+    steam_id: str = Field(default="", max_length=32)
+
+
+class SpectateValidateBody(BaseModel):
+    """Master-fighter validation of claimed spectator actors (design §6.6)."""
+    steam_id: str = Field(min_length=1, max_length=32)
+    room_name: str = Field(min_length=1, max_length=64)
+    spectators: list[SpectateValidateEntry] = Field(default_factory=list, max_length=8)
+
+
+class AllowSpectatorsBody(BaseModel):
+    steam_id: str = Field(min_length=1, max_length=32)
+    allow: bool

@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.36.0";   // Aug 4: Spanish + Russian throughout, translation portal, native card rendering, merged time-ordered chat, FFA kills tie-break, date-order setting, thicker menu font
+        public const string ModVersion = "1.37.0";   // Aug 7: spectator mode, FFA achievements, Compare FFA-Elo + Player Nemesis, per-game DPS graphs, admin panel + T-chat moderation, private lobbies
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
@@ -51,6 +51,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> RankedDisabledByConsent;
         internal static ConfigEntry<bool> ShowNotifications;
         internal static ConfigEntry<bool> ShowFps;
+        internal static ConfigEntry<bool> CapFpsUnfocused;
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowIngameChat;
         internal static ConfigEntry<bool> ShowTrails;
@@ -352,6 +353,12 @@ namespace CompetitiveRounds
                 "UI", "ShowFps",
                 true,
                 "Show FPS counter in the top-left corner"
+            );
+
+            CapFpsUnfocused = Config.Bind(
+                "Performance", "CapFpsUnfocused",
+                true,
+                "Cap the frame rate at 120 FPS while the game window is not focused (Aug 6 item 8). Saves GPU/CPU for alt-tabbed players without affecting gameplay; the cap is lifted the moment focus returns."
             );
 
             ShowRegionPing = Config.Bind(
@@ -675,6 +682,9 @@ namespace CompetitiveRounds
             // modDisabled/startup, and a client that advertises authority but never
             // subscribed to the commit path would never apply its OWN damage.
             try { PoisonSync.StageCapability("Awake"); PoisonSync.Hook(); } catch { }
+            // Spectator snapshot protocol: subscribe the Photon event handler
+            // before any room can be joined (same reasoning as PoisonSync).
+            try { SpectatorSync.Hook(); } catch { }
 
             // Create persistent object with maximum protection
             if (!spawned)
@@ -1056,11 +1066,25 @@ namespace CompetitiveRounds
                         // room stamps it and late joiners read one truth.
                         if (is1v2 && ApiClient.OvtSoloExtraPick) roomProps["cr_ovt_xp"] = true;
                         if (isFfa) roomProps["cr_ffa_n"] = ffaCount;
+                        // Spectator seats (design §4.1): server-issued rooms
+                        // reserve SEAT_CAP extra Photon actors above the
+                        // fighter count. Vanilla match-found fires on a
+                        // hardcoded PlayerList.Length == 2, and every mod
+                        // force-start path counts PlayersNeeded — neither
+                        // reads MaxPlayers, so the bump is start-inert. The
+                        // grant server only admits spectators once the match
+                        // is live (all fighters attested "battle"), so a
+                        // spectator can never occupy a seat pre-assembly.
+                        int fighterTarget = is2v2 ? 4 : (is1v2 ? 3 : (isFfa ? ffaCount : 2));
                         var roomOptions = new Photon.Realtime.RoomOptions
                         {
-                            MaxPlayers = (byte)(is2v2 ? 4 : (is1v2 ? 3 : (isFfa ? ffaCount : 2))),
+                            MaxPlayers = (byte)(fighterTarget + SpectatorSession.SEAT_CAP),
                             IsOpen = true,
-                            IsVisible = true,
+                            // Queue rooms are joined by exact server-issued
+                            // name only — never listed, never lobby-matched.
+                            // Hidden so the reserved seats cannot be found by
+                            // room browsing (design §4.1, Codex r1 find 1).
+                            IsVisible = false,
                             CustomRoomProperties = roomProps,
                             CustomRoomPropertiesForLobby = new string[] { "C2" }
                         };
@@ -1205,6 +1229,15 @@ namespace CompetitiveRounds
         private float startupTimer = 0f;
         private bool startupComplete = false;
 
+        // Aug 6 item 8: unfocused FPS cap state. We only restore what we set
+        // (value-checked) so a vanilla Optionshandler change made while
+        // unfocused is never stomped. Vanilla never touches targetFrameRate
+        // (only vSyncCount, Optionshandler.cs:75), so -1/uncapped is the
+        // common saved value.
+        private bool fpsCapApplied = false;
+        private int fpsCapSavedTarget = -1;
+        private int fpsCapSavedVsync = 0;
+
         // Ranked queue room joining — now handled by Plugin.Update()
         // (Plugin's MonoBehaviour survives scene changes via BepInEx)
 
@@ -1216,9 +1249,55 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo("[PERSIST] Behaviour Awake, DontDestroyOnLoad set");
         }
 
+        private void TickUnfocusedFpsCap()
+        {
+            try
+            {
+                bool wantCap = Plugin.CapFpsUnfocused != null && Plugin.CapFpsUnfocused.Value
+                               && !Application.isFocused;
+                if (wantCap && !fpsCapApplied)
+                {
+                    int cur = Application.targetFrameRate; // -1/0 = uncapped
+                    // Only cap when it would REDUCE the rate: an existing cap
+                    // at or below 120 stays untouched.
+                    if (cur > 0 && cur <= 120) return;
+                    // Codex round 1 (LOW): vSync is the OTHER cap, and killing
+                    // it can RAISE the effective rate — the whole point of
+                    // this feature is to lower it. With targetFrameRate=-1,
+                    // vSyncCount=1 and a 60 Hz display the player is at 60;
+                    // zeroing vSync and setting 120 would DOUBLE their
+                    // unfocused framerate. Leave any vSync-capped client
+                    // alone: their refresh rate is already the cap, and on a
+                    // >120 Hz display the difference is not worth overriding
+                    // a display setting the player chose.
+                    if (QualitySettings.vSyncCount > 0) return;
+                    fpsCapSavedTarget = cur;
+                    fpsCapSavedVsync = QualitySettings.vSyncCount;
+                    QualitySettings.vSyncCount = 0; // vSync overrides targetFrameRate
+                    Application.targetFrameRate = 120;
+                    fpsCapApplied = true;
+                }
+                else if (!wantCap && fpsCapApplied)
+                {
+                    // Restore only if our values are still in place — if the
+                    // player changed video settings mid-unfocus, keep theirs.
+                    if (Application.targetFrameRate == 120)
+                        Application.targetFrameRate = fpsCapSavedTarget;
+                    if (QualitySettings.vSyncCount == 0)
+                        QualitySettings.vSyncCount = fpsCapSavedVsync;
+                    fpsCapApplied = false;
+                }
+            }
+            catch { }
+        }
+
         private void Update()
         {
             if (Plugin.modDisabled) return;
+
+            // Aug 6 item 8: cap FPS at 120 while the window is unfocused.
+            // Runs pre-init on purpose — it has no dependency on the API.
+            TickUnfocusedFpsCap();
 
             // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }
@@ -1248,6 +1327,9 @@ namespace CompetitiveRounds
 
             // Per-frame FPS sampling (active only while a match is being tracked).
             try { GameStateWatcher.TickFrame(); } catch { }
+
+            // Aug 7 item 3: card-bar tint (self-throttled to 0.5s internally).
+            try { CardBarTeamColor.Tick(); } catch { }
 
             // Poll game state
             try
@@ -1863,7 +1945,11 @@ namespace CompetitiveRounds
             try
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.CurrentRoom == null) return;
-                if (PhotonNetwork.CurrentRoom.PlayerCount < 2) return;
+                // Census: "match found" means a second FIGHTER — a lone
+                // searcher plus a spectator must not freeze the churn timer
+                // (the client would sit in an empty room believing a match
+                // was found; recon's highest-risk Plugin pair).
+                if (RoomActors.ActiveFighterCount() < 2) return;
                 var nch = NetworkConnectionHandler.instance;
                 if (nch == null) return;
                 // Publicized private field — freeze the churn timer the moment a
@@ -1905,7 +1991,7 @@ namespace CompetitiveRounds
             try
             {
                 if (PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null &&
-                    PhotonNetwork.CurrentRoom.PlayerCount >= 2)
+                    RoomActors.ActiveFighterCount() >= 2)   // census: see churn-freeze twin above
                 {
                     Plugin.Log.LogWarning("[QUICKPLAY-GUARD] PlayOnBestActiveRegion suppressed — match already found in this room");
                     try { NetworkConnectionHandler.instance.untilTryOtherRegionCounter = 15f; } catch { }
@@ -2098,18 +2184,58 @@ namespace CompetitiveRounds
 
         public void OnPlayerEnteredRoom(Photon.Realtime.Player p)
         {
+            // Roster changed: drop the same-frame fighter cache (r3).
+            try { RoomActors.InvalidateFighterCache(); } catch { }
+
             // Poison protocol: re-evaluate whether every peer speaks it, and arm
             // the roster quarantine. Ungated — a joiner in ANY room type matters,
             // and the persistent tick is only a backstop for a missed callback.
             try { PoisonSync.NoteRosterChange("PlayerEntered"); } catch { }
 
+            // Spectator entry: the master validates the claimed lease with the
+            // server immediately (design §6.6) — invalid actors get kicked,
+            // valid names go up as cr_spec_roster for the roster display.
+            try
+            {
+                if (RoomActors.IsSpectator(p) && Photon.Pun.PhotonNetwork.IsMasterClient)
+                    ApiClient.SpectateValidateActors();
+            }
+            catch { }
+            // Playtest #169b: vanilla sends faces via an UNBUFFERED RPC at
+            // spawn (#226) — a late-joining spectator missed it, so bodies
+            // rendered faceless. Every fighter re-sends its OWN face when a
+            // spectator arrives (the proven FFA resync pattern; EquipFace is
+            // idempotent, so fighters receiving the echo are unaffected).
+            try
+            {
+                if (RoomActors.IsSpectator(p) && !RoomActors.LocalIsSpectator && Plugin.Instance != null)
+                    Plugin.Instance.StartCoroutine(ResendLocalFaceForSpectator());
+            }
+            catch { }
+            // UNAUTHORIZED entrant (frozen roster, no spectator role, not a
+            // fighter we froze): the master closes the connection at the door
+            // (Codex r1 find 1 — the reserved seats must admit only granted
+            // spectators). Inert until a roster is frozen.
+            try
+            {
+                if (Photon.Pun.PhotonNetwork.IsMasterClient && RoomActors.IsUnauthorized(p))
+                {
+                    Plugin.Log.LogWarning($"[SPECTATE] closing unauthorized entrant actor {p?.ActorNumber}");
+                    Photon.Pun.PhotonNetwork.CloseConnection(p);
+                }
+            }
+            catch { }
+
             // Republish our cr_face every time a new player joins the room.
             // This fixes the "two characters missing in card-pick" bug where
             // a peer joined after our OnJoinedRoom-time publish so they never
             // received the cr_face property update.
+            // Spectator: never publishes cosmetics (side-effect shutdown,
+            // design §3.5) — but fighters DO republish when a spectator
+            // arrives, which is exactly how the spectator learns their faces.
             try
             {
-                if (CompetitiveRoomDetect.IsCompetitiveRoom())
+                if (CompetitiveRoomDetect.IsCompetitiveRoom() && !RoomActors.LocalIsSpectator)
                     FacePublisher.PublishLocal();
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] PlayerEntered face republish: {ex.Message}"); }
@@ -2130,11 +2256,27 @@ namespace CompetitiveRounds
 
         public void OnPlayerLeftRoom(Photon.Realtime.Player p)
         {
+            // Roster changed: same-frame reads must not see the cached view
+            // (Codex r3 — two same-frame departures vs the DC reporter).
+            try { RoomActors.InvalidateFighterCache(); } catch { }
+
+            // A SPECTATOR (or unauthorized impostor — r3 CRITICAL: a copied
+            // u_id leaving must never read as the REAL fighter's DC) leaving
+            // is invisible to the match (design §3.6): no leaver banner, no
+            // DC reporting, no FFA leaver ledger. The vanilla teardown
+            // cascade is already suppressed by Spectator_LeaveIsInvisible;
+            // this covers the MOD's own leave bookkeeping in the same
+            // callback. PoisonSync's roster note still runs below — its scan
+            // excludes spectators, and a missed roster-change note is worse
+            // than a redundant one.
+            bool leaverIsSpectator = false;
+            try { leaverIsSpectator = RoomActors.IsSpectator(p) || RoomActors.IsUnauthorized(p); } catch { }
+
             // July 22 item 2 (bug #81): universal leaver banner — BEFORE the
             // Diag2v2 gate so casual/ranked 1v1 rooms get it too. Photon fires
             // this on every remaining seat, so the ally AND both opponents all
             // see who left. Display-only; every report path below is untouched.
-            try { GameStateWatcher.NotifyPlayerLeftRoom(p); } catch { }
+            try { if (!leaverIsSpectator) GameStateWatcher.NotifyPlayerLeftRoom(p); } catch { }
             // Poison protocol: arm the roster quarantine. The "we saw an incapable
             // peer" flag is deliberately STICKY for the room and is NOT cleared
             // here — a peer that appears briefly and leaves must not re-enable
@@ -2160,6 +2302,7 @@ namespace CompetitiveRounds
             // recorded outcome). FFA likewise: leavers are recorded in the
             // normal FFA report (left_early), never via the 2v2 DC pipeline.
             if (Diag2v2.IsOvt() || Diag2v2.IsFfa()) return;
+            if (leaverIsSpectator) return;   // spectator exit: no DC pipeline
             try
             {
                 if (p == null) return;
@@ -2201,7 +2344,7 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(myId)) return;
                 long myVal; if (!long.TryParse(myId, out myVal)) return;
                 bool iAmLowest = true;
-                foreach (var pp in PhotonNetwork.PlayerList)
+                foreach (var pp in RoomActors.ActiveFighters())   // census: reporter election over fighters only
                 {
                     if (pp == null || pp.ActorNumber == p.ActorNumber) continue;  // skip the leaver
                     if (pp.IsLocal) continue;
@@ -2223,10 +2366,63 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
         }
 
+        /// <summary>Fighter-side face re-send for a just-joined spectator
+        /// (playtest #169b — mirrors FfaMode.ResyncLocalFace, including the
+        /// all-zero-face guard from its review find 13).</summary>
+        private static System.Collections.IEnumerator ResendLocalFaceForSpectator()
+        {
+            yield return new WaitForSecondsRealtime(2f);   // let the join settle
+            try
+            {
+                if (!Photon.Pun.PhotonNetwork.InRoom) yield break;
+                global::Player lp = null;
+                var players = PlayerManager.instance?.players;
+                if (players != null)
+                    foreach (var pl in players)
+                        if (pl != null && pl.data != null && pl.data.view != null && pl.data.view.IsMine) { lp = pl; break; }
+                if (lp == null) yield break;
+                var face = CharacterCreatorHandler.instance.selectedPlayerFaces[0];
+                if (face.eyeID == 0 && face.mouthID == 0 && face.detailID == 0 && face.detail2ID == 0)
+                    yield break;   // never wipe a stock face with an all-zero payload
+                lp.data.view.RPC("RPCA_SetFace", Photon.Pun.RpcTarget.Others,
+                    face.eyeID, face.eyeOffset, face.mouthID, face.mouthOffset,
+                    face.detailID, face.detailOffset, face.detail2ID, face.detail2Offset);
+                Plugin.Log.LogInfo("[SPECTATE] face re-sent for new spectator");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SPECTATE] face resend: {ex.Message}"); }
+        }
+
         public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps) { }
         public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) { }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {
+            // Master authority must never rest on a spectator (design §3.6):
+            // simulation ownership on a client with no characters and no
+            // stake. Photon assigns the LOWEST ActorNumber, and spectators
+            // join later (higher numbers), so this is a rare-churn case —
+            // but a long FFA can reach it. Only the new master itself can
+            // call SetMasterClient, so the handoff runs on the spectator's
+            // own client, targeted at the lowest fighter.
+            try
+            {
+                if (newMasterClient != null && newMasterClient.IsLocal
+                    && SpectatorSession.IsLocalSpectator)
+                {
+                    var fighters = RoomActors.ActiveFighters();
+                    if (fighters.Length > 0)
+                    {
+                        Plugin.Log.LogWarning($"[SPECTATE] became master — transferring to fighter actor {fighters[0].ActorNumber}");
+                        Photon.Pun.PhotonNetwork.SetMasterClient(fighters[0]);
+                    }
+                    else
+                    {
+                        // No fighter can accept: the match is over. Leave.
+                        SpectatorSync.LeaveToMenu("no fighter to hold master");
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SPECTATE] master handoff: {ex.Message}"); }
+
             if (!Diag2v2.IsActive()) return;
             try { Plugin.Log.LogInfo($"[2v2-DIAG] MasterClientSwitched: new='{newMasterClient?.NickName}' actor={newMasterClient?.ActorNumber}"); }
             catch { }
@@ -2253,6 +2449,27 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+            // Fresh room: the previous room's frozen fighter roster and the
+            // master's spectator-admission state are both stale (Codex r1
+            // find 1 family). Runs for every role, before any branch.
+            try { RoomActors.OnJoinedNewRoom(); } catch { }
+            try { SpectatorSync.MasterResetSpectatorState(); } catch { }
+
+            // SPECTATOR BRANCH (design §3.3): before ANY fighter work. A
+            // spectator client runs none of the fighter setup below — no
+            // face publish, no cosmetic reapply, no 2v2 GM activation or
+            // force-start, no pending-slot logic. SpectatorSync owns the
+            // session from here.
+            try
+            {
+                if (SpectatorSession.IsLocalSpectator)
+                {
+                    SpectatorSync.OnJoinedSpectatorRoom();
+                    return;
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogError($"[SPECTATE] joined-room branch: {ex.Message}"); }
+
             // Stale-slot hygiene: a pending team-mode slot only makes sense for
             // the room it was issued for. Joining any OTHER kind of room means
             // that pending join was abandoned — without this clear, the stale
@@ -2453,7 +2670,7 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.InRoom) yield break;
                 try
                 {
-                    var list = PhotonNetwork.PlayerList;
+                    var list = RoomActors.ActiveFighters();   // census: only fighters carry body cosmetics
                     if (list != null)
                     {
                         foreach (var pp in list)
@@ -2618,16 +2835,82 @@ namespace CompetitiveRounds
                 }
                 yield return new WaitForSeconds(0.5f);
             }
-            Plugin.Log.LogWarning($"[2v2] Force-StartGame timed out — never reached {Diag2v2.PlayersNeeded()} spawned players");
+
+            // ── Aug 6, bug #167: don't give up SILENTLY ──────────────────
+            // This warning used to be the whole handling. Root cause from
+            // Sid's Aug-6 log: the FFA lobby locked with a roster of 5 but
+            // only 4 ever reached the Photon room (one player never
+            // connected), so `counted >= need` was never true, the loop hit
+            // its deadline, logged this line, and stopped. Nothing recovered
+            // and nothing on screen explained it, so from a player's seat it
+            // is indistinguishable from the old press-jump freeze.
+            //
+            // SCOPE, deliberately cut after Codex round 1 (CRITICAL 2).
+            // The first version of this also force-STARTED the match with
+            // whoever had arrived. That is not a safe thing to do from here
+            // and the review was right to kill it:
+            //   * this deadline is LOCAL, so each replica would fire at a
+            //     different wall-clock moment and start the game at a
+            //     different time;
+            //   * StartGame() invoked locally is not a networked decision —
+            //     there is no agreement that the game began;
+            //   * the room stays open, so the missing player can still walk
+            //     in mid-match; and
+            //   * the report path cannot represent a member who never
+            //     arrived at all, so a permanently absent player yields a
+            //     short roster and a server rejection — no rating, no XP, no
+            //     gold for anyone.
+            // Starting a real ranked FFA on four independent guesses is
+            // strictly worse than not starting it (#280's ship criterion:
+            // the failure mode must be no worse than what it replaces).
+            //
+            // What ships is the half that actually addresses the report:
+            // TELL THEM. A proper partial-start needs a master-authoritative
+            // decision plus a server-side absent-member report path, which is
+            // its own piece of work.
+            int present = 0;
+            try
+            {
+                if (PlayerManager.instance != null)
+                    foreach (var p in PlayerManager.instance.players) if (p != null) present++;
+            }
+            catch { }
+            int wanted = Diag2v2.PlayersNeeded();
+            Plugin.Log.LogWarning($"[2v2] Force-StartGame timed out — never reached {wanted} spawned players (present={present})");
+            try
+            {
+                CompetitiveUI.ShowNotification(
+                    I18n.TrF("Match could not start — only {0} of {1} players connected. Leave to the menu to requeue.", present, wanted),
+                    new Color(1f, 0.5f, 0.3f), 12f);
+            }
+            catch { }
         }
         public void OnJoinRoomFailed(short returnCode, string message)
         {
+            // Spectator join refused (room gone / full / expired grant):
+            // clean up and return to menu — no room event ever occurred.
+            try { SpectatorJoiner.OnJoinRoomFailed(returnCode, message); } catch { }
             if (Diag2v2.PendingSlot() < 0) return;
             Plugin.Log.LogWarning($"[2v2-DIAG] JoinRoomFailed: code={returnCode} msg={message}");
         }
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
+            // Spectator room exit observed — the point where the session's
+            // statics are actually dropped (#249: clear local state in the
+            // response/observation handler, never optimistically before).
+            try
+            {
+                if (SpectatorSession.IsLocalSpectator)
+                {
+                    SpectatorSession.EndSession("left room");
+                    SpectatorSync.OnLeftSpectatorRoom();
+                }
+            }
+            catch { }
+            // Role/roster caches die with the room, on every client.
+            try { RoomActors.Reset(); } catch { }
+            try { SpectatorSync.MasterResetSpectatorState(); } catch { }
             if (Diag2v2.PendingSlot() < 0) return;
             try { Plugin.Log.LogWarning($"[2v2-DIAG] LeftRoom (Photon callback) stack={Diag2v2.ShortStack()}"); }
             catch { }
@@ -2771,6 +3054,9 @@ namespace CompetitiveRounds
         {
             try
             {
+                // Spectator: publishes NO cosmetic properties (design §3.5) —
+                // guarded here at the source so no call site can leak one.
+                if (RoomActors.LocalIsSpectator) return;
                 var cch = CharacterCreatorHandler.instance;
                 if (cch == null)
                 {
@@ -2836,7 +3122,7 @@ namespace CompetitiveRounds
             try
             {
                 Photon.Realtime.Player photonPlayer = null;
-                foreach (var pp in PhotonNetwork.PlayerList)
+                foreach (var pp in RoomActors.ActiveFighters())   // census: a picker is always a fighter
                     if (pp != null && pp.ActorNumber == pickerActorNumber) { photonPlayer = pp; break; }
                 if (photonPlayer == null || photonPlayer.CustomProperties == null)
                 {
@@ -3035,9 +3321,9 @@ namespace CompetitiveRounds
             bool hasCustom = false;
             try
             {
-                if (pickerActor > 0 && PhotonNetwork.PlayerList != null)
+                if (pickerActor > 0)
                 {
-                    foreach (var pl in PhotonNetwork.PlayerList)
+                    foreach (var pl in RoomActors.ActiveFighters())   // census: a picker is always a fighter
                     {
                         if (pl == null || pl.ActorNumber != pickerActor) continue;
                         if (pl.CustomProperties != null && pl.CustomProperties.ContainsKey("cr_pcolor_color"))
@@ -3329,6 +3615,11 @@ namespace CompetitiveRounds
     class GameCrownHandler2v2Patch
     {
         private static GameObject mateCrown;   // Unity fake-null after scene unload → lazily re-cloned
+        // Bug #166: has the FFA crown's entrance animation been fired for the
+        // current leader-present stretch? Reset whenever the crown goes away
+        // (no leader / tie) so the next leader gets a fresh entrance, and on
+        // game start so a new map's crown animates in again.
+        private static bool _ffaCrownAnimatedIn;
 
         static bool Prefix(GameCrownHandler __instance)
         {
@@ -3352,9 +3643,44 @@ namespace CompetitiveRounds
                     if (leader == null || !leader.gameObject.activeInHierarchy)
                     {
                         if (ffaCrown.activeSelf) ffaCrown.SetActive(false);
+                        _ffaCrownAnimatedIn = false;   // re-arm for the next leader
                         return false;
                     }
                     if (!ffaCrown.activeSelf) ffaCrown.SetActive(true);
+
+                    // ── Bug #166: "there's no crown on 1st in FFA" ─────────
+                    // SetActive alone is NOT enough. Vanilla's crown is
+                    // animated IN by CurveAnimation.PlayIn(), which vanilla
+                    // calls from GameCrownHandler.PointOver — and that method
+                    // is only ever reached through GM_ArmsRace.pointOverAction
+                    // (GameCrownHandler.cs:19 subscribes it; GM_ArmsRace.cs
+                    // invokes it at :556/:568/:574/:581, all inside
+                    // RPCA_NextRound).
+                    //
+                    // FFA REPLACES RPCA_NextRound wholesale (FfaMode.
+                    // HandleNextRound via a Prefix returning false), so
+                    // pointOverAction is never invoked in FFA — grep confirms
+                    // neither FfaMode nor Plugin raises it. The crown object
+                    // therefore stays in its un-animated initial state:
+                    // active, positioned correctly, and visually absent.
+                    // That is exactly the reported symptom, and it is why the
+                    // 2v2 crown (which runs vanilla's round flow, so PointOver
+                    // fires) has always worked while FFA's never did.
+                    //
+                    // Fire the entrance ourselves, once per leader-emergence.
+                    if (!_ffaCrownAnimatedIn)
+                    {
+                        _ffaCrownAnimatedIn = true;
+                        try
+                        {
+                            var anim = __instance.GetComponent<CurveAnimation>();
+                            if (anim != null) anim.PlayIn();
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning($"[FFA] crown PlayIn failed: {ex.Message}");
+                        }
+                    }
                     __instance.transform.position = leader.data.GetCrownPos();
                     return false;
                 }
@@ -3487,6 +3813,11 @@ namespace CompetitiveRounds
             try
             {
                 if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return true;
+                // Spectator: never answers a rematch/continue prompt (design
+                // §2 census — the auto-confirm would make the spectator
+                // release every player immediately). Defense in depth: the
+                // GM lifecycle that opens the prompt is already suppressed.
+                if (RoomActors.LocalIsSpectator) return false;
                 Plugin.Log.LogInfo("[POPUP] Auto-confirming Continue prompt (competitive room bypass)");
                 try { functionToCall?.Invoke(PopUpHandler.YesNo.Yes); }
                 catch (Exception ex) { Plugin.Log.LogError($"[POPUP] Continue auto-invoke failed: {ex.Message}"); }
@@ -4636,13 +4967,22 @@ namespace CompetitiveRounds
             return outp;
         }
 
+        /* Aug 7 item 2 — INVARIANT casing, not the current culture's (#47 family).
+         * `ToLower()`/`char.ToUpper()` are culture-sensitive: on a tr-TR client
+         * "WIND UP".ToLower() yields "wınd up" with U+0131 DOTLESS I, so that
+         * client reported (and the DB stored) "Wınd Up" as a card name entirely
+         * separate from "Wind Up" — 19 such twins accumulated in match_cards and
+         * 21 in card_offers, all resolving to rarity Unknown because they match
+         * nothing in the live CardInfo registry. Card names are DB keys, so they
+         * must never depend on the player's locale. Migration 195 merges the rows
+         * this produced. */
         private static string ToTitleCase(string input)
         {
             if (string.IsNullOrEmpty(input)) return input;
-            var words = input.ToLower().Split(' ');
+            var words = input.ToLowerInvariant().Split(' ');
             for (int i = 0; i < words.Length; i++)
                 if (words[i].Length > 0)
-                    words[i] = char.ToUpper(words[i][0]) + words[i].Substring(1);
+                    words[i] = char.ToUpperInvariant(words[i][0]) + words[i].Substring(1);
             return string.Join(" ", words);
         }
 

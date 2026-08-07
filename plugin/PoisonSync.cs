@@ -391,7 +391,7 @@ namespace CompetitiveRounds
                     // rejoin can look like this) — same reset, same reason.
                     if (_tickRoom != "") ResetForRoomExit();
                     _tickRoom = room;
-                    _lastRosterCount = PhotonNetwork.PlayerList != null ? PhotonNetwork.PlayerList.Length : 0;
+                    _lastRosterCount = RoomActors.ActiveFighterCount();   // census: fighters, in lockstep with ScanRoster
                     NoteRosterChange("room-change");
                     return;
                 }
@@ -399,7 +399,7 @@ namespace CompetitiveRounds
                 if (Time.unscaledTime - _lastScan < 1f) return;
                 _lastScan = Time.unscaledTime;
 
-                int n = PhotonNetwork.PlayerList != null ? PhotonNetwork.PlayerList.Length : 0;
+                int n = RoomActors.ActiveFighterCount();   // census: fighters, in lockstep with ScanRoster
                 if (n != _lastRosterCount)
                 {
                     // Belt and braces: we also hook the room callbacks, but a
@@ -443,7 +443,11 @@ namespace CompetitiveRounds
             try
             {
                 if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode) return;
-                var list = PhotonNetwork.PlayerList;
+                // FIGHTERS only (census): a spectator never stages the poison
+                // capability, and _sawIncapablePeer is deliberately STICKY for
+                // the room — one spectator would otherwise permanently disable
+                // block-honouring for every fighter (the recon's worst find).
+                var list = RoomActors.ActiveFighters();
                 if (list == null || list.Length == 0) return;
 
                 bool anyIncapable = false;

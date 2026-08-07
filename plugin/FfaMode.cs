@@ -44,13 +44,24 @@ namespace CompetitiveRounds
         public static int CardCandidates = 5;    // knob LOCKED at 5 for v1.36 (§9c)
         public static bool SameCardRule = false;
         public static bool LobbyRanked = true;
+        /// <summary>Aug 6 item 10 — sudden death. While at least one LIVE player is
+        /// at match point, damage between two players who are NOT at match point is
+        /// suppressed, so the lobby has to deal with the leader.
+        ///
+        /// Whether the option is even offered is a SERVER decision: the lobby row
+        /// carries `sudden_death` and the server collapses it to false unless the
+        /// whole locked roster advertised a build that implements it. A pre-item-10
+        /// client cannot turn it on either — see the parse in LatchConfigFromRoom.
+        /// Default false, which is the inert direction on every unknown path.</summary>
+        public static bool SuddenDeath = false;
         // Room prop: master re-asserts the frozen config in-room so a client
         // whose poll payload predates a late settings write still pins the
-        // same rule set. Format "target:cand:picks:cap:sameCard:ranked".
+        // same rule set. Format "target:cand:picks:cap:sameCard:ranked[:suddenDeath]".
         private const string PropConfig = "cr_ffa_cfg";
 
         public static void SetPendingConfig(int scoreTarget, int candidates, int initialPicks,
-                                            int cardCap, bool sameCard, bool ranked)
+                                            int cardCap, bool sameCard, bool ranked,
+                                            bool suddenDeath = false)
         {
             RoundsToWin = Mathf.Clamp(scoreTarget, 3, 10);
             CardCandidates = Mathf.Clamp(candidates, 1, 5);
@@ -58,13 +69,18 @@ namespace CompetitiveRounds
             CardCap = Mathf.Clamp(cardCap, 3, 6);
             SameCardRule = sameCard;
             LobbyRanked = ranked;
-            Plugin.Log.LogInfo($"[FFA-CFG] pending config: target={RoundsToWin} cand={CardCandidates} picks={InitialPicks} cap={CardCap} same={SameCardRule} ranked={LobbyRanked}");
+            // Optional with a false default ON PURPOSE: any caller that predates
+            // item 10 (or any config source that does not carry the field) turns
+            // sudden death OFF rather than leaving a stale true behind.
+            SuddenDeath = suddenDeath;
+            Plugin.Log.LogInfo($"[FFA-CFG] pending config: target={RoundsToWin} cand={CardCandidates} picks={InitialPicks} cap={CardCap} same={SameCardRule} ranked={LobbyRanked} sudden={SuddenDeath}");
         }
 
         public static void ResetConfigToDefaults()
         {
             RoundsToWin = 5; CardCandidates = 5; InitialPicks = 1;
             CardCap = 5; SameCardRule = false; LobbyRanked = true;
+            SuddenDeath = false;
         }
 
         private static void MasterPublishConfig()
@@ -73,7 +89,9 @@ namespace CompetitiveRounds
             {
                 if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
                 var h = new ExitGames.Client.Photon.Hashtable();
-                h[PropConfig] = $"{RoundsToWin}:{CardCandidates}:{InitialPicks}:{CardCap}:{(SameCardRule ? 1 : 0)}:{(LobbyRanked ? 1 : 0)}";
+                // 7th segment appended: an old client's parser takes p[0..5] and
+                // ignores the tail, so the string stays readable both ways.
+                h[PropConfig] = $"{RoundsToWin}:{CardCandidates}:{InitialPicks}:{CardCap}:{(SameCardRule ? 1 : 0)}:{(LobbyRanked ? 1 : 0)}:{(SuddenDeath ? 1 : 0)}";
                 PhotonNetwork.CurrentRoom.SetCustomProperties(h);
             }
             catch { }
@@ -94,9 +112,22 @@ namespace CompetitiveRounds
                 var p = raw.Split(':');
                 if (p.Length < 6) return;
                 int st, cc, ip, cap, sc, rk;
+                // Aug 6 item 10: the sudden-death segment is OPTIONAL and defaults
+                // to FALSE when absent. That is load-bearing, not tidiness — a
+                // 6-segment string means the MASTER is on a pre-item-10 build,
+                // i.e. a mixed room, and a mixed room must not run a rule half the
+                // clients would ignore (they would then disagree about health).
+                // Turning it off on the new clients is the only direction that
+                // keeps every replica in step.
+                bool sd = false;
+                if (p.Length >= 7)
+                {
+                    int sdv;
+                    if (int.TryParse(p[6], out sdv)) sd = sdv != 0;
+                }
                 if (int.TryParse(p[0], out st) && int.TryParse(p[1], out cc) && int.TryParse(p[2], out ip)
                     && int.TryParse(p[3], out cap) && int.TryParse(p[4], out sc) && int.TryParse(p[5], out rk))
-                    SetPendingConfig(st, cc, ip, cap, sc != 0, rk != 0);
+                    SetPendingConfig(st, cc, ip, cap, sc != 0, rk != 0, sd);
             }
             catch { }
         }
@@ -257,8 +288,124 @@ namespace CompetitiveRounds
 
         public static int RoundsFor(int teamId) { return rounds.TryGetValue(teamId, out var v) ? v : 0; }
         public static int PointsFor(int teamId) { return points.TryGetValue(teamId, out var v) ? v : 0; }
+
+        /// <summary>Spectator-only (SpectatorSync boundary apply): overwrite
+        /// the score tables with the master's snapshot values. FFA accounting
+        /// is INCREMENTAL per client (HandleNextRound applies deltas from the
+        /// winner broadcast), so a late joiner starts at zero and would be
+        /// wrong forever without this seed; after it, the normal broadcasts
+        /// keep the tables current. Never called on a fighter.</summary>
+        internal static void SpectatorSeedScores(int[] roundsByTeam, int[] pointsByTeam)
+        {
+            try
+            {
+                if (!RoomActors.LocalIsSpectator) return;
+                rounds.Clear();
+                points.Clear();
+                if (roundsByTeam != null)
+                    for (int t = 0; t < roundsByTeam.Length; t++) rounds[t] = roundsByTeam[t];
+                if (pointsByTeam != null)
+                    for (int t = 0; t < pointsByTeam.Length; t++) points[t] = pointsByTeam[t];
+                // Codex r2 find 17: the multi-player FFA score strip gates on
+                // InFfaMatch (= EngineActive && matchStartRealtime > 0), and
+                // no participant path ever stamps it on a spectator — the
+                // 10-player HUD silently fell back to a 2-team line. UI-only:
+                // duration/report consumers of this value are all
+                // spectator-guarded.
+                if (matchStartRealtime <= 0f) matchStartRealtime = Time.realtimeSinceStartup;
+            }
+            catch { }
+        }
         public static int PointsTotalFor(int teamId) { return pointsTotal.TryGetValue(teamId, out var v) ? v : 0; }
         public static int KillsFor(int teamId) { return kills.TryGetValue(teamId, out var v) ? v : 0; }
+
+        // ── Match point + sudden death (Aug 6 item 10) ─────────────────────────
+
+        /// <summary>True when this team is HALF A POINT from winning the game:
+        /// one point short of the target, and holding the first of the two half
+        /// points that convert into it. Reads only the score dictionaries, which
+        /// HandleNextRound advances from the master's single RpcTarget.All
+        /// broadcast — so the answer is identical on every client.</summary>
+        public static bool IsAtMatchPoint(int teamId)
+        {
+            return RoundsFor(teamId) == RoundsToWin - 1
+                && PointsFor(teamId) == PointsToWinRound - 1;
+        }
+
+        /// <summary>Fill <paramref name="into"/> with the team ids currently at
+        /// match point, in ascending slot order (deterministic for display).
+        /// Caller-owned buffer — no per-frame allocation (#162).</summary>
+        public static void CollectMatchPointTeams(List<int> into)
+        {
+            if (into == null) return;
+            into.Clear();
+            try
+            {
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return;
+                foreach (var p in pm.players)
+                {
+                    if (p == null || p.gameObject == null || p.data == null) continue;
+                    int t = p.TeamID;
+                    if (!IsAtMatchPoint(t)) continue;
+                    if (!into.Contains(t)) into.Add(t);
+                }
+                into.Sort();
+            }
+            catch { }
+        }
+
+        /// <summary>Sudden-death damage gate. True = this damage event must be
+        /// SUPPRESSED entirely.
+        ///
+        /// Rule: while at least one LIVE player is at match point, two players who
+        /// are BOTH not at match point cannot damage each other. Damage to or from
+        /// a match-point player is always allowed, as is out-of-bounds damage
+        /// (vanilla passes a null dealer there) and self damage.
+        ///
+        /// CROSS-CLIENT DETERMINISM. Every input is replicated:
+        ///  * <c>SuddenDeath</c> — the frozen lobby config, from the server row and
+        ///    re-asserted by the master as one room property.
+        ///  * rounds / points — advanced only inside <c>HandleNextRound</c>, which
+        ///    runs from the master's <c>RPCA_NextRound</c> RpcTarget.All broadcast.
+        ///  * <c>TeamID</c> — vanilla's networked player assignment.
+        ///  * <c>data.dead</c> — set by <c>RPCA_Die</c>, also RpcTarget.All.
+        /// And the gated method itself is reached identically everywhere:
+        /// <c>CallTakeDamage</c> RPCs <c>RPCA_SendTakeDamage</c> to All
+        /// (HealthHandler.cs:208-236), so every client runs <c>DoDamage</c> for the
+        /// same hit with the same dealer/victim — the same property FFA kill credit
+        /// and damage telemetry already rely on.
+        ///
+        /// Residual: <c>data.dead</c> lands at RPC-delivery time, so a hit inside
+        /// that ~one-ping window after the last match-point player dies can be
+        /// suppressed on one replica and applied on another. That window is the
+        /// same one vanilla block/DOT already lives with, it needs the last
+        /// match-point player to die in the same instant as an unrelated hit, and
+        /// closing it would need a round trip per bullet.</summary>
+        public static bool SuddenDeathSuppresses(Player dealer, Player victim)
+        {
+            try
+            {
+                if (!SuddenDeath) return false;
+                if (!EngineActive()) return false;
+                if (dealer == null || victim == null) return false;
+                if (dealer.data == null || victim.data == null) return false;
+                if (dealer.TeamID == victim.TeamID) return false;          // self / own-team
+                if (IsAtMatchPoint(dealer.TeamID)) return false;
+                if (IsAtMatchPoint(victim.TeamID)) return false;
+
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return false;
+                foreach (var p in pm.players)
+                {
+                    if (p == null || p.gameObject == null || p.data == null) continue;
+                    if (p.data.dead) continue;
+                    if (IsAtMatchPoint(p.TeamID)) return true;   // a live leader → FF off
+                }
+                return false;                                     // all leaders dead → normal
+            }
+            catch { return false; }
+        }
 
         /// <summary>Kills as used for ORDERING, saturated at the report bound.
         /// Full-wipe battles advance no point, so raw kills are structurally
@@ -743,7 +890,7 @@ namespace CompetitiveRounds
             if (!EngineActive()) yield break;
             PurgeDepartedPlayers("after leave");
             int remaining = 0;
-            try { remaining = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { }
+            try { remaining = RoomActors.ActiveFighterCount(); } catch { }   // spectators are not fighters (census)
 
             bool battle = false;
             try { battle = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
@@ -785,7 +932,7 @@ namespace CompetitiveRounds
             {
                 yield return new WaitForSecondsRealtime(2.5f);   // let a resolving point finish
                 if (!EngineActive()) yield break;
-                try { remaining = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { }
+                try { remaining = RoomActors.ActiveFighterCount(); } catch { }   // census: a spectator must not keep the FFA "alive"
                 if (remaining > 1) yield break;
                 Plugin.Log.LogInfo("[FFA] last player in the room — ending the FFA and returning to menu");
                 try
@@ -814,6 +961,12 @@ namespace CompetitiveRounds
                 if (gameOverFired || !GameManager.instance.battleOngoing) return;
                 var alive = AlivePlayers();
                 if (alive.Count > 1) return;
+                // Spectator gate BEFORE any state mutation (Codex r2 find 9:
+                // DoSlowDown ran first, and with the participant transition
+                // suppressed nothing ever restored timescale on the
+                // spectator). Also keeps a transiently-master spectator from
+                // latching/broadcasting a round result.
+                if (RoomActors.LocalIsSpectator) return;
                 TimeHandler.instance.DoSlowDown();
                 if (!PhotonNetwork.IsMasterClient || pointLatched || isTransitioning) return;
                 // Review find 5: vanilla invokes PlayerDied per victim, so a
@@ -881,6 +1034,43 @@ namespace CompetitiveRounds
                 pointLatched = false;
                 Plugin.Log.LogError($"[FFA] ResolvePointNow: {ex.Message}");
             }
+        }
+
+        /// <summary>SPECTATOR-ONLY score observation (Codex spectator r1 find
+        /// 8): the full HandleNextRound runs the participant transition
+        /// engine (visibility, revives, pick phase, sync-up, reports), none
+        /// of which a spectator may execute. This applies EXACTLY the score
+        /// accounting from the master's broadcast — the same deltas every
+        /// fighter applies — on top of the boundary-snapshot seed. Map load,
+        /// call-in and body moves reach the spectator through the master's
+        /// own MapManager RPCs; nothing else is needed.</summary>
+        internal static void SpectatorObserveRound(int winnerTeam)
+        {
+            try
+            {
+                if (!RoomActors.LocalIsSpectator) return;
+                if (winnerTeam >= 0)
+                {
+                    points[winnerTeam] = PointsFor(winnerTeam) + 1;
+                    pointsTotal[winnerTeam] = PointsTotalFor(winnerTeam) + 1;
+                    if (points[winnerTeam] >= PointsToWinRound)
+                    {
+                        rounds[winnerTeam] = RoundsFor(winnerTeam) + 1;
+                        points.Clear();
+                    }
+                }
+                else if (winnerTeam == WINNER_DOUBLE_KO)
+                {
+                    try
+                    {
+                        CompetitiveUI.ShowNotification(
+                            I18n.Tr("Double KO - nobody scored this round."),
+                            new Color(1f, 0.85f, 0.5f), 4f);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
         }
 
         /// <summary>RPCA_NextRound replacement — deterministic accounting on
@@ -963,7 +1153,9 @@ namespace CompetitiveRounds
                     // below the mode minimum (server FFA_MIN_PLAYERS).
                     try
                     {
-                        int remaining = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0;
+                        // Census: spectators must not prevent the below-minimum
+                        // shutdown (design §4.2 — FFA survivor/quorum).
+                        int remaining = RoomActors.ActiveFighterCount();
                         if (remaining < 3 && Plugin.Instance != null)
                             Plugin.Instance.StartCoroutine(EndSittingBelowMinimum());
                     }
@@ -1077,8 +1269,19 @@ namespace CompetitiveRounds
         private static IEnumerator BoundedSyncUp(GM_ArmsRace gm, float maxSeconds)
         {
             if (PhotonNetwork.OfflineMode) yield break;
+            // SPECTATOR: never SEND a sync request. Vanilla RPCO_RequestSyncUp
+            // makes each receiver broadcast RPCM_ReturnSyncUp, and a waiting
+            // FIGHTER can be released early by a return triggered from OUR
+            // request — a player-visible timing change, the one thing the
+            // spectator design forbids (design §2). The spectator's own
+            // transitions are driven by observation, not by this handshake.
+            if (RoomActors.LocalIsSpectator) yield break;
+            // Census (design §2, FFA row): sync PEERS are other FIGHTERS.
+            // Spectators never reply (their RPCO_RequestSyncUp handler is
+            // suppressed), so counting one here would guarantee the timeout
+            // path every round once all real fighters have left.
             int others = 0;
-            try { others = (PhotonNetwork.CurrentRoom?.PlayerCount ?? 1) - 1; } catch { }
+            try { others = RoomActors.OtherActiveFighterCount(); } catch { }
             if (others <= 0) yield break;
             float start = Time.realtimeSinceStartup;
             gm.isWaiting = true;
@@ -1104,7 +1307,10 @@ namespace CompetitiveRounds
         /// the finished game already went out.</summary>
         private static int RoomCount()
         {
-            try { return PhotonNetwork.CurrentRoom?.PlayerCount ?? 0; } catch { return 0; }
+            // FIGHTER count, not actor count: every caller is a below-minimum
+            // quorum check, and a spectator must not satisfy any of them
+            // (census, design §4.2). Inert when no spectator is in the room.
+            try { return RoomActors.ActiveFighterCount(); } catch { return 0; }
         }
 
         private static int TotalPointsScored()
@@ -2255,6 +2461,36 @@ namespace CompetitiveRounds
             return null;
         }
 
+        // ── spectator accessors (SpectatorSync) ──────────────────────────
+        // The spectator snapshot needs (a) the silent apply primitive and
+        // (b) FFA's authoritative rolling deck by pid. Exposed as narrow
+        // wrappers rather than widening the members themselves — the
+        // internals stay owned by this file.
+
+        /// <summary>Silent single-card apply for spectator deck replay.
+        /// Same primitive the rolling replay uses (scrub + Start() +
+        /// sourceCard + OFFLINE_Pick). Caller owns frame-spacing (#225).</summary>
+        internal static void SpectatorApplyCard(Player player, CardInfo prefab)
+        {
+            ApplyCardTo(player, prefab);
+        }
+
+        /// <summary>GameObject names of the live rolling deck for a pid, or
+        /// null when FFA holds no deck for it (non-FFA rooms, unknown pid).
+        /// Snapshot-only: returns a copy, never the live list.</summary>
+        internal static List<string> SpectatorDeckNames(int pid)
+        {
+            try
+            {
+                if (!decks.TryGetValue(pid, out var deck) || deck == null) return null;
+                var names = new List<string>(deck.Count);
+                foreach (var c in deck)
+                    if (c != null) names.Add(c.gameObject.name);
+                return names;
+            }
+            catch { return null; }
+        }
+
         /// <summary>Silent apply: local clone -> ApplyCardStats component init
         /// -> OFFLINE_Pick (applies stats + card bar, no networking, no
         /// "Picking Card:" log, no Steam achievements) -> destroy clone.
@@ -2659,7 +2895,9 @@ namespace CompetitiveRounds
             if (!FfaMode.EngineActive()) return true;
             try
             {
-                int remaining = PhotonNetwork.CurrentRoom?.PlayerCount ?? 0;
+                // Log-only, but fighter count — an actor count here over-reports
+                // by the spectator count and misleads triage (census recon).
+                int remaining = RoomActors.ActiveFighterCount();
                 // Review find 6: ALWAYS suppress the cascade in a live FFA —
                 // the old `remaining >= 2` form handed the last departure back
                 // to vanilla, which tore the room down before the survivor

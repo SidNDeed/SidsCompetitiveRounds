@@ -165,6 +165,8 @@ namespace CompetitiveRounds
             // detail. Flat scalars — JsonUtility parses them for free (#73).
             public string discord_display_name;
             public bool show_discord;
+            // Spectator opt-out toggle state (flat bool — free parse, #73).
+            public bool allow_spectators = true;
             // Stackable rich-text nametag styles by sku. Parsed manually (JsonUtility can't handle
             // string arrays without a wrapper class). Null or empty = no styling applied.
             public List<string> active_nametag_skus;
@@ -179,6 +181,14 @@ namespace CompetitiveRounds
             // (v1.29, "Elo over time" compare graph). Same length as
             // rating_history, including the prepended 1500 baseline point.
             public List<float> rating_history_times;
+            // Aug 7: the same pair for the FFA rating series ("FFA Elo over
+            // games" / "over time"). [NonSerialized] is load-bearing — unlike the
+            // 1v1 pair (C# `rating_history` vs JSON `recent_rating_history`) the
+            // field name and the JSON key are IDENTICAL here, so JsonUtility
+            // would try to fill a List<float> from an array of OBJECTS before the
+            // manual parser runs (#25). Skipping it leaves exactly one writer.
+            [NonSerialized] public List<float> ffa_rating_history;        // oldest→newest
+            [NonSerialized] public List<float> ffa_rating_history_times;  // days since 2020-01-01, parallel
             // Compare-tab metrics (v1.28). Scalars parse free via JsonUtility;
             // worst_cards + region_breakdown are nested arrays parsed manually.
             public int avg_fps;
@@ -234,7 +244,37 @@ namespace CompetitiveRounds
             // is how we tell that apart from a legitimate average of 0.0 (a real
             // game where the player dealt no damage) — review find.
             public int ffa_damage_games;
+            // ── Aug 6 item 1: Compare-tab scalar additions (server migration 191).
+            // Every one of these is a FLAT scalar, so JsonUtility populates them
+            // with ZERO parser changes (#73) — only nested arrays need the manual
+            // slicers (#25). Field names are copied verbatim from
+            // schemas.py PlayerStatsResponse; a rename on either side silently
+            // yields 0 with no error (#152), so do not "tidy" them.
+            public float casual_rage_quit_pct;
+            public int casual_dc_count;
+            public int casual_matches;
+            public float ranked_dps;
+            public float ffa_dps;
+            public float self_death_pct;
+            public int deaths_total;
+            public int deaths_boundary;
+            public int deaths_own_bullet;
+            // record_* are `int | None` server-side: None = NEVER RECORDED, which is
+            // NOT zero (#257). JsonUtility maps a JSON null onto 0 for an int field
+            // and would erase that distinction, so ParseTopCards re-reads them and
+            // writes RECORD_NONE (-1) when the key is null/absent. Render a dash for
+            // RECORD_NONE, never "0".
+            public int record_max_single_hit;
+            public int record_max_health;
+            public int record_bounce_kill;
+            public int ranked_unique_opponents;
+            public int ranked_total_series;
+            public float ranked_uniqueness_pct;
         }
+
+        /// <summary>Sentinel for a `record_*` career column the server returned as
+        /// JSON null ("never recorded"). Distinct from a genuine 0.</summary>
+        public const int RECORD_NONE = -1;
 
         [Serializable]
         public class CardStatData
@@ -315,6 +355,25 @@ namespace CompetitiveRounds
             public string point_timeline;
             // Bug batch item 4 — total game length in seconds (0 = no data).
             public int duration_seconds;
+            // Aug 6 item 4 — viewer-relative damage + death telemetry (server
+            // migration 191). Server names verified against main.py:5208-5217
+            // and schemas.py MatchHistoryEntry. NOTE the wire naming differs by
+            // DIRECTION: the client UPLOADS "local_"/"opp_" prefixes and
+            // DOWNLOADS "player_"/"opp_". Do not assume symmetry (#152).
+            //
+            // damage is `int | None` server-side: null on every row recorded
+            // before the expanded-telemetry clients. RECORD_NONE = NOT RECORDED
+            // (render a dash), 0 = a real game where this side dealt no damage
+            // (#257). The timelines are CUMULATIVE ints; per-interval DPS needs
+            // consecutive differences (see NativeUI.CumulativeToDps).
+            // Initialised to RECORD_NONE, not left at C#'s 0: both current
+            // parsers set them explicitly, but 0 is a MEANINGFUL value here, so
+            // a future third construction site that forgets would otherwise
+            // report "dealt no damage" instead of "not recorded".
+            public int player_damage_dealt = RECORD_NONE, opp_damage_dealt = RECORD_NONE;
+            public string player_damage_timeline, opp_damage_timeline;
+            public int player_deaths = RECORD_NONE, player_deaths_boundary = RECORD_NONE, player_deaths_own_bullet = RECORD_NONE;
+            public int opp_deaths = RECORD_NONE, opp_deaths_boundary = RECORD_NONE, opp_deaths_own_bullet = RECORD_NONE;
         }
 
         [Serializable]
@@ -382,6 +441,16 @@ namespace CompetitiveRounds
             {"touch_grass",         new[]{"Touch Grass",         "Win 500 casual games in a row"}},
             // July 17 round 3 (Sid item 3): server-granted to BOTH players.
             {"twins",               new[]{"Twins!",              "Finish a game with the exact same 5 cards (and copies) as your opponent"}},
+            // Aug 7 FFA achievements (Sid's six). Mirrors ACHIEVEMENT_DEFS in
+            // main.py VERBATIM — the F5 Achievements tab iterates THIS dict, so a
+            // key missing here is invisible in-game even though the server grants
+            // it (unlock toasts already fall back to the server-sent name).
+            {"ffa_shutout_3",            new[]{"Clean House",          "Win a ranked FFA 5-0 with 3 or more players (nobody else takes a point)"}},
+            {"ffa_shutout_4",            new[]{"Party Crasher",        "Win a ranked FFA 5-0 with 4 or more players (nobody else takes a point)"}},
+            {"ffa_shutout_5",            new[]{"Hostile Takeover",     "Win a ranked FFA 5-0 with 5 or more players (nobody else takes a point)"}},
+            {"ffa_kills_50",             new[]{"Rampage",              "Get over 50 kills in a single ranked FFA"}},
+            {"ffa_kills_100",            new[]{"Bodycount",            "Get over 100 kills in a single ranked FFA"}},
+            {"ffa_half_point_heartbreak",  new[]{"Heartbreak",           "Lose a ranked FFA holding 10 or more half points that never became a point"}},
         };
 
         // Cached data
@@ -1161,7 +1230,14 @@ namespace CompetitiveRounds
             try { secret = Plugin.AdminHmacSecret?.Value; } catch { }
             if (string.IsNullOrWhiteSpace(secret))
             {
-                if (!_adminSecretWarned)
+                // Only an ADMIN is missing anything here. The T-chat moderation
+                // endpoints also accept a Steam session as proof (see the canonical
+                // block further down), so a scoped moderator signs an empty string
+                // by design and their actions are NOT rejected — telling them
+                // otherwise describes a failure that isn't happening. Skipping
+                // deliberately does not latch, so an admin whose status resolves
+                // after their first signed call still gets the line once.
+                if (!_adminSecretWarned && IsAdmin)
                 {
                     _adminSecretWarned = true;
                     Plugin.Log.LogWarning(
@@ -1502,6 +1578,7 @@ namespace CompetitiveRounds
         /// <summary>Place a bet. HMAC over "bet:{bettor}:{series_id}:{bet_on}:{amount}".</summary>
         public static void PlaceBet(string bettorSteamId, string seriesId, string betOnSteamId, int amount, Action<bool, string> callback)
         {
+            if (SpectatorBlocksBet(callback)) return;
             string sig = ComputeHmacHex($"bet:{bettorSteamId}:{seriesId}:{betOnSteamId}:{amount}");
             string url = $"{baseUrl}/api/v1/bets?steam_id={Escape(bettorSteamId)}&series_id={Escape(seriesId)}&bet_on_steam_id={Escape(betOnSteamId)}&amount={amount}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
@@ -1605,6 +1682,7 @@ namespace CompetitiveRounds
 
         public static void PlaceTeamBet(string bettorSteamId, string seriesId, int betOnTeam, int amount, Action<bool, string> callback)
         {
+            if (SpectatorBlocksBet(callback)) return;
             string sig = ComputeHmacHex($"team-bet:{bettorSteamId}:{seriesId}:{betOnTeam}:{amount}");
             string url = $"{baseUrl}/api/v1/team-bets?steam_id={Escape(bettorSteamId)}&team_series_id={Escape(seriesId)}&bet_on_team={betOnTeam}&amount={amount}&sig={sig}";
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
@@ -1826,6 +1904,21 @@ namespace CompetitiveRounds
                 callback?.Invoke(ok, resp);
                 if (ok) FetchPlayerStats(steamId);
             }));
+        }
+
+        /// <summary>Spectator opt-out toggle (design §6.7). Strict-session
+        /// JSON POST — the server also revokes live leases via the heartbeat
+        /// recheck, so flipping OFF removes current spectators within ~15s.</summary>
+        public static void SetAllowSpectators(string steamId, bool allow, Action<bool, string> callback = null)
+        {
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"allow\":{(allow ? "true" : "false")}}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/settings/allow-spectators", json, (ok, resp) =>
+                {
+                    Plugin.Log.LogInfo($"[SETTINGS] set allow_spectators {allow}: ok={ok}");
+                    callback?.Invoke(ok, resp);
+                    if (ok) FetchPlayerStats(steamId);
+                }));
         }
 
         /// <summary>Toggle a nametag rich-text style on/off. Stackable — multiple styles can be active.
@@ -2050,6 +2143,15 @@ namespace CompetitiveRounds
         // ── Admin ─────────────────────────────────────────────
 
         public static bool IsAdmin { get; private set; }
+        /// <summary>Does the local player hold T-chat moderation authority — a live
+        /// `chat_moderate` language grant, or admin? Answered by check-status'
+        /// `chat_moderator` field, and a DISPLAY HINT ONLY: check-status
+        /// authenticates nothing, and every moderation endpoint re-resolves scope
+        /// AND identity for itself, so a forged flag only buys buttons that 403
+        /// (#159 — a client-side scope check is a rendering suggestion).
+        /// Admins are OR-ed in on this side as well as the server's, so a response
+        /// that predates the field still leaves an admin reaching the controls.</summary>
+        public static bool IsChatModerator { get; private set; }
         // Cached lists, refreshed by FetchFlaggedMatches / FetchBannedUsers.
         public static List<FlaggedMatchEntry> CachedFlaggedMatches { get; private set; } = new List<FlaggedMatchEntry>();
         public static List<BannedUserEntry> CachedBannedUsers { get; private set; } = new List<BannedUserEntry>();
@@ -2089,15 +2191,19 @@ namespace CompetitiveRounds
 
         public static void CheckAdminStatus(string steamId, Action<bool> callback = null)
         {
-            if (string.IsNullOrEmpty(steamId)) { IsAdmin = false; callback?.Invoke(false); return; }
+            if (string.IsNullOrEmpty(steamId)) { IsAdmin = false; IsChatModerator = false; callback?.Invoke(false); return; }
             string url = $"{baseUrl}/api/v1/admin/check-status?steam_id={steamId}";
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
             {
-                bool admin = false;
+                bool admin = false, chatMod = false;
                 if (ok && !string.IsNullOrEmpty(body))
+                {
                     admin = body.Contains("\"is_admin\":true") || body.Contains("\"is_admin\": true");
+                    chatMod = body.Contains("\"chat_moderator\":true") || body.Contains("\"chat_moderator\": true");
+                }
                 IsAdmin = admin;
-                Plugin.Log.LogInfo($"[ADMIN] check-status for {steamId}: is_admin={admin}");
+                IsChatModerator = chatMod || admin;
+                Plugin.Log.LogInfo($"[ADMIN] check-status for {steamId}: is_admin={admin} chat_moderator={IsChatModerator}");
                 callback?.Invoke(admin);
                 // Artist status rides the same one-shot init call site — a
                 // separate CheckArtistStatus call everywhere CheckAdminStatus is
@@ -3414,6 +3520,425 @@ namespace CompetitiveRounds
             return list;
         }
 
+        // ── Admin panel: roster, audit log, T-chat moderation (Aug 7) ─────────
+        // Transport for the Admin tab's remaining surfaces. It lives here rather
+        // than in NativeUI because ComputeAdminHmacHex, GetRequest/PostRequest and
+        // baseUrl are private to this file — and baseUrl in particular holds the
+        // session-scoped HTTPS fallback (#194), which a parallel transport would
+        // silently miss for exactly the players whose endpoint probe failed.
+        //
+        // Canonicals are verified against the live handlers in main.py, not
+        // transcribed: _admin_canonical is "admin:{admin}:{action}:{target}" and
+        //   /admin/admins            -> action "admins_list",        target ""
+        //   /admin/actions           -> action "admin_actions_list", target ""
+        //   /chat/moderate/delete    -> action "chat_delete",        target "{message_id}"
+        //   /chat/moderate/mute      -> action "chat_mute",          target "{steam}:{chan|all}"
+        //   /chat/moderate/unmute    -> action "chat_unmute",        target "{steam}:{chan|all}"
+        //   /chat/moderate/mutes     -> action "chat_mutes_list",    target ""
+        // A canonical that is one byte off is a silent 403 for every admin, so
+        // any edit here needs re-reading the handler, not the comment.
+        //
+        // The three chat endpoints accept EITHER an admin HMAC (role "admin") or
+        // a Steam session (role "moderator") — StampVersionHeader already carries
+        // X-Session-Token, so signing unconditionally is correct: the server picks
+        // the proof that matches the caller's role. Scope enforcement
+        // (_chat_moderator_scope: a translation moderator is confined to their
+        // languages) is deliberately NOT mirrored here; the refusal text is
+        // surfaced verbatim instead.
+
+        public class AdminUserEntry
+        {
+            public string steam_id, display_name, granted_by_steam_id, granted_by_name, granted_at, notes;
+        }
+
+        public class AdminActionEntry
+        {
+            public string id, admin_steam_id, admin_name, action, target_steam_id, target_name;
+            public string target_match_id, target_series_id, created_at;
+            // Raw JSONB blob, verbatim. Carries user-authored text (chat bodies,
+            // ban reasons), so a renderer must treat it as hostile input.
+            public string details;
+        }
+
+        public class ChatMuteEntry
+        {
+            public int id;
+            // channel "" means EVERY channel — the server stores NULL for an
+            // all-channels mute and the string readers below return "" for null.
+            public string steam_id, display_name, channel, muted_by_steam_id, muted_by_name;
+            public string reason, created_at, expires_at;
+            public bool permanent;
+        }
+
+        public static List<AdminUserEntry> CachedAdmins { get; private set; } = new List<AdminUserEntry>();
+        public static List<AdminActionEntry> CachedAdminActions { get; private set; } = new List<AdminActionEntry>();
+        public static int CachedAdminActionsTotal { get; private set; }
+        public static List<ChatMuteEntry> CachedChatMutes { get; private set; } = new List<ChatMuteEntry>();
+        // Last refusal text per surface, mirroring AdminQuarantineError: the fetch
+        // callbacks are Action<bool>, so this is where a 403 explains itself.
+        // Cleared on every success so a stale message can't outlive its cause.
+        public static string AdminAdminsError { get; private set; } = "";
+        public static string AdminActionsError { get; private set; } = "";
+        public static string ChatMutesError { get; private set; } = "";
+        // "Loaded" distinguishes an empty list from one that was never fetched —
+        // without it the panel shows "no admins" before the first request lands.
+        public static bool AdminAdminsLoaded { get; private set; }
+        public static bool AdminActionsLoaded { get; private set; }
+        public static bool ChatMutesLoaded { get; private set; }
+
+        public static void FetchAdminAdmins(string adminSteamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:admins_list:");
+            string url = $"{baseUrl}/api/v1/admin/admins"
+                       + $"?admin_steam_id={UnityWebRequest.EscapeURL(adminSteamId)}"
+                       + $"&hmac_signature={UnityWebRequest.EscapeURL(sig)}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                if (!ok)
+                {
+                    AdminAdminsError = string.IsNullOrEmpty(body) ? "request failed" : body;
+                    Plugin.Log.LogWarning($"[ADMIN] admins fetch failed: {Trunc120(body)}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(false);
+                    return;
+                }
+                try
+                {
+                    CachedAdmins = ParseAdminUsers(body);
+                    AdminAdminsLoaded = true;
+                    AdminAdminsError = "";
+                    Plugin.Log.LogInfo($"[ADMIN] admins: {CachedAdmins.Count}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(true);
+                }
+                catch (Exception ex)
+                {
+                    AdminAdminsError = "response parse failed";
+                    Plugin.Log.LogWarning($"[ADMIN] admins parse: {ex.Message}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(false);
+                }
+            }, detailedErrors: true));
+        }
+
+        /// <summary>Page of the admin_actions audit log, newest first. `action` and
+        /// `targetSteamId` are optional filters (empty = no filter). Bounds mirror
+        /// the server's Query constraints so a slider overrun becomes a clamp
+        /// rather than a 422 the admin has to decode.</summary>
+        public static void FetchAdminActions(string adminSteamId, int limit, int offset,
+            string action, string targetSteamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(adminSteamId)) { callback?.Invoke(false); return; }
+            limit = Mathf.Clamp(limit, 1, 200);
+            offset = Mathf.Max(0, offset);
+            action = ClampLen(action, 32);
+            targetSteamId = ClampLen(targetSteamId, 20);
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:admin_actions_list:");
+            string url = $"{baseUrl}/api/v1/admin/actions"
+                       + $"?admin_steam_id={UnityWebRequest.EscapeURL(adminSteamId)}"
+                       + $"&hmac_signature={UnityWebRequest.EscapeURL(sig)}"
+                       + $"&limit={limit}&offset={offset}"
+                       + $"&action={UnityWebRequest.EscapeURL(action)}"
+                       + $"&target_steam_id={UnityWebRequest.EscapeURL(targetSteamId)}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                if (!ok)
+                {
+                    AdminActionsError = string.IsNullOrEmpty(body) ? "request failed" : body;
+                    Plugin.Log.LogWarning($"[ADMIN] actions fetch failed: {Trunc120(body)}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(false);
+                    return;
+                }
+                try
+                {
+                    CachedAdminActions = ParseAdminActions(body);
+                    // `total` is a top-level sibling of the array; read it from the
+                    // body AFTER the array has been sliced out of the way so a
+                    // "total" key nested in someone's details blob can't win.
+                    CachedAdminActionsTotal = ExtractJsonInt(StripArray(body, "actions"), "total");
+                    AdminActionsLoaded = true;
+                    AdminActionsError = "";
+                    Plugin.Log.LogInfo($"[ADMIN] actions: {CachedAdminActions.Count} of {CachedAdminActionsTotal}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(true);
+                }
+                catch (Exception ex)
+                {
+                    AdminActionsError = "response parse failed";
+                    Plugin.Log.LogWarning($"[ADMIN] actions parse: {ex.Message}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(false);
+                }
+            }, detailedErrors: true));
+        }
+
+        public static void FetchChatMutes(string steamId, Action<bool> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId)) { callback?.Invoke(false); return; }
+            string sig = ComputeAdminHmacHex($"admin:{steamId}:chat_mutes_list:");
+            string url = $"{baseUrl}/api/v1/chat/moderate/mutes"
+                       + $"?steam_id={UnityWebRequest.EscapeURL(steamId)}"
+                       + $"&hmac_signature={UnityWebRequest.EscapeURL(sig)}";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
+            {
+                if (!ok)
+                {
+                    ChatMutesError = string.IsNullOrEmpty(body) ? "request failed" : body;
+                    Plugin.Log.LogWarning($"[CHAT-MOD] mutes fetch failed: {Trunc120(body)}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(false);
+                    return;
+                }
+                try
+                {
+                    CachedChatMutes = ParseChatMutes(body);
+                    ChatMutesLoaded = true;
+                    ChatMutesError = "";
+                    Plugin.Log.LogInfo($"[CHAT-MOD] live mutes: {CachedChatMutes.Count}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(true);
+                }
+                catch (Exception ex)
+                {
+                    ChatMutesError = "response parse failed";
+                    Plugin.Log.LogWarning($"[CHAT-MOD] mutes parse: {ex.Message}");
+                    NativeUI.MarkDirty();
+                    callback?.Invoke(false);
+                }
+            }, detailedErrors: true));
+        }
+
+        /// <summary>Soft-delete one T-chat message. Idempotent server-side (a second
+        /// call re-broadcasts the retraction and returns already_deleted), so the
+        /// caller never has to reason about a lost response.</summary>
+        public static void AdminChatDelete(string steamId, int messageId, Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId)) { callback?.Invoke(false, "missing steam id"); return; }
+            // One invariant rendering feeds both the canonical and the body: the
+            // server signs str(message_id), so the two must agree byte-for-byte,
+            // and a locale-formatted number in the body would also be bad JSON.
+            string mid = messageId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string sig = ComputeAdminHmacHex($"admin:{steamId}:chat_delete:{mid}");
+            string body = $"{{\"steam_id\":\"{Escape(steamId)}\","
+                        + $"\"message_id\":{mid},"
+                        + $"\"hmac_signature\":\"{sig}\"}}";
+            // Plain PostRequest, not PostRequestWithRetry: a moderation refusal is
+            // a 403 the operator must see NOW, and the retry wrapper spends ~20s
+            // re-sending a request the server has already judged (#252 — a 4xx
+            // means "the server spoke", not "the transport may have dropped it").
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/chat/moderate/delete", body, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[CHAT-MOD] delete msg {mid}: ok={ok} resp={Trunc120(resp)}");
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        /// <summary>Mute a steam_id. `channel` null/blank means EVERY channel, which
+        /// the server allows only for admins; durationMinutes &lt;= 0 is permanent.
+        /// `reason` is optional operator free text, stored on the mute row and in
+        /// the admin audit log. It is last in the list so the existing call sites
+        /// keep compiling.</summary>
+        public static void AdminChatMute(string steamId, string targetSteamId, string channel,
+            int durationMinutes, Action<bool, string> callback = null, string reason = "")
+        {
+            if (string.IsNullOrEmpty(steamId) || string.IsNullOrEmpty(targetSteamId))
+            { callback?.Invoke(false, "missing steam id"); return; }
+            string chan = NormalizeChatChannel(channel);
+            // Clamp BEFORE escaping. The server stores `(reason or "")[:256]` in both
+            // the mute row and the audit details, so anything past 256 is discarded
+            // anyway — and cutting the ESCAPED form could slice a \uXXXX sequence in
+            // half and hand the parser a malformed literal.
+            string why = ClampLen(reason, 256);
+            string sig = ComputeAdminHmacHex(
+                $"admin:{steamId}:chat_mute:{targetSteamId}:{chan ?? "all"}");
+            string body = "{"
+                + $"\"steam_id\":\"{Escape(steamId)}\","
+                + $"\"target_steam_id\":\"{Escape(targetSteamId)}\","
+                + $"\"channel\":{(chan == null ? "null" : $"\"{Escape(chan)}\"")},"
+                // Typed by a human, so JsonEscapeFull rather than Escape: one raw TAB
+                // or console ESC byte makes FastAPI reject the whole request with a
+                // 422 before validation ever runs (#100). Always a string and never
+                // null — the server's field is a plain `str`, so null is a validation
+                // error. Absent from the canonical
+                // (`admin:{admin}:chat_mute:{target}:{channel|all}`), so no value here
+                // can move the signature.
+                + $"\"reason\":\"{JsonEscapeFull(why)}\","
+                // Omitting a duration is how the server spells "permanent"; sending
+                // 0 works too but null is the honest wire value for "no expiry".
+                + $"\"duration_minutes\":{(durationMinutes > 0 ? durationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null")},"
+                + $"\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/chat/moderate/mute", body, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[CHAT-MOD] mute {targetSteamId} in [{chan ?? "ALL"}] "
+                                 + $"for {(durationMinutes > 0 ? durationMinutes + "m" : "ever")}: ok={ok} resp={Trunc120(resp)}");
+                // Keep the mute list honest for the next panel open without making
+                // the caller remember to refetch (mirrors AdminSetI18nGrant).
+                if (ok) FetchChatMutes(steamId);
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        /// <summary>Revoke mutes for a steam_id. `channel` null/blank clears every
+        /// mute the CALLER is entitled to clear — all of them for an admin, only the
+        /// moderator's own languages otherwise. The server decides that; we don't.</summary>
+        public static void AdminChatUnmute(string steamId, string targetSteamId, string channel,
+            Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId) || string.IsNullOrEmpty(targetSteamId))
+            { callback?.Invoke(false, "missing steam id"); return; }
+            string chan = NormalizeChatChannel(channel);
+            string sig = ComputeAdminHmacHex(
+                $"admin:{steamId}:chat_unmute:{targetSteamId}:{chan ?? "all"}");
+            string body = "{"
+                + $"\"steam_id\":\"{Escape(steamId)}\","
+                + $"\"target_steam_id\":\"{Escape(targetSteamId)}\","
+                + $"\"channel\":{(chan == null ? "null" : $"\"{Escape(chan)}\"")},"
+                + $"\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/chat/moderate/unmute", body, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[CHAT-MOD] unmute {targetSteamId} in [{chan ?? "their scope"}]: ok={ok} resp={Trunc120(resp)}");
+                if (ok) FetchChatMutes(steamId);
+                callback?.Invoke(ok, resp);
+            }));
+        }
+
+        /// <summary>Byte-for-byte mirror of the server's own channel normalization
+        /// (`(req.channel or "").lower().strip() or None`). The result feeds BOTH the
+        /// HMAC canonical and the request body, so any divergence here is a 403 the
+        /// admin cannot diagnose. Invariant casing on purpose — a Turkish locale
+        /// would otherwise fold 'I' to a dotless 'ı' and break the signature (#47).</summary>
+        private static string NormalizeChatChannel(string channel)
+        {
+            if (string.IsNullOrWhiteSpace(channel)) return null;
+            return channel.Trim().ToLowerInvariant();
+        }
+
+        // Hard cut to a length limit. Distinct from Trunc(), which appends ".."
+        // and would push a 32-char filter to 34 — straight past the server's
+        // max_length and into a 422.
+        private static string ClampLen(string s, int max) =>
+            string.IsNullOrEmpty(s) ? "" : (s.Length > max ? s.Substring(0, max) : s);
+
+        private static List<AdminUserEntry> ParseAdminUsers(string json)
+        {
+            var list = new List<AdminUserEntry>();
+            if (string.IsNullOrEmpty(json)) return list;
+            // display_name/notes are user-authored, so both the array boundary and
+            // the entry slicing are string-aware (#156).
+            if (!LocateArray(json, "admins", out int open, out int close)) return list;
+            foreach (string chunk in SliceTopLevelObjects(json.Substring(open + 1, close - open - 1)))
+            {
+                var e = new AdminUserEntry
+                {
+                    steam_id = ExtractJsonString(chunk, "steam_id"),
+                    display_name = ExtractJsonString(chunk, "display_name"),
+                    granted_by_steam_id = ExtractJsonString(chunk, "granted_by_steam_id"),
+                    granted_by_name = ExtractJsonString(chunk, "granted_by_name"),
+                    granted_at = ExtractJsonString(chunk, "granted_at"),
+                    notes = ExtractJsonString(chunk, "notes"),
+                };
+                if (!string.IsNullOrEmpty(e.steam_id)) list.Add(e);
+            }
+            return list;
+        }
+
+        private static List<AdminActionEntry> ParseAdminActions(string json)
+        {
+            var list = new List<AdminActionEntry>();
+            if (string.IsNullOrEmpty(json)) return list;
+            if (!LocateArray(json, "actions", out int open, out int close)) return list;
+            foreach (string chunk in SliceTopLevelObjects(json.Substring(open + 1, close - open - 1)))
+            {
+                // `details` is a nested JSONB object whose keys collide with this
+                // entry's own ("author_steam_id", "moderator_steam_id", "channel",
+                // "reason"...). The scalar readers below are plain IndexOf lookups
+                // with no notion of depth, so the blob has to come OUT of the chunk
+                // before them — otherwise a details key wins whenever it appears
+                // first, and the log renders another player's steam id as the target.
+                string details = TakeNestedObject(chunk, "details", out string flat);
+                var e = new AdminActionEntry
+                {
+                    id = ExtractJsonString(flat, "id"),
+                    admin_steam_id = ExtractJsonString(flat, "admin_steam_id"),
+                    admin_name = ExtractJsonString(flat, "admin_name"),
+                    action = ExtractJsonString(flat, "action"),
+                    target_steam_id = ExtractJsonString(flat, "target_steam_id"),
+                    target_name = ExtractJsonString(flat, "target_name"),
+                    target_match_id = ExtractJsonString(flat, "target_match_id"),
+                    target_series_id = ExtractJsonString(flat, "target_series_id"),
+                    created_at = ExtractJsonString(flat, "created_at"),
+                    details = details,
+                };
+                if (!string.IsNullOrEmpty(e.id)) list.Add(e);
+            }
+            return list;
+        }
+
+        private static List<ChatMuteEntry> ParseChatMutes(string json)
+        {
+            var list = new List<ChatMuteEntry>();
+            if (string.IsNullOrEmpty(json)) return list;
+            if (!LocateArray(json, "mutes", out int open, out int close)) return list;
+            foreach (string chunk in SliceTopLevelObjects(json.Substring(open + 1, close - open - 1)))
+            {
+                var e = new ChatMuteEntry
+                {
+                    id = ExtractJsonInt(chunk, "id"),
+                    steam_id = ExtractJsonString(chunk, "steam_id"),
+                    display_name = ExtractJsonString(chunk, "display_name"),
+                    // Stays "" when the server sends null, which is precisely the
+                    // all-channels mute — the reader can't match "channel":null.
+                    channel = ExtractJsonString(chunk, "channel"),
+                    muted_by_steam_id = ExtractJsonString(chunk, "muted_by_steam_id"),
+                    muted_by_name = ExtractJsonString(chunk, "muted_by_name"),
+                    reason = ExtractJsonString(chunk, "reason"),
+                    created_at = ExtractJsonString(chunk, "created_at"),
+                    expires_at = ExtractJsonString(chunk, "expires_at"),
+                    permanent = ExtractJsonBool(chunk, "permanent"),
+                };
+                if (e.id > 0) list.Add(e);
+            }
+            return list;
+        }
+
+        /// <summary>Lift the object value of `key` out of `chunk`: returns it raw and
+        /// writes the remainder — with the whole `"key":{...}` pair excised — to
+        /// `rest`. That remainder is no longer valid JSON (it keeps a dangling
+        /// comma), which is fine: every reader that consumes it is a substring
+        /// lookup, not a parser. Returns "" (and `rest` unchanged) when the value is
+        /// absent or null, so a NULL details column degrades to an empty blob.</summary>
+        private static string TakeNestedObject(string chunk, string key, out string rest)
+        {
+            rest = chunk;
+            if (string.IsNullOrEmpty(chunk)) return "";
+            int k = FindKeyOutsideStrings(chunk, key);
+            if (k < 0) return "";
+            // Step past the `"key":` needle and demand a '{' right there rather than
+            // scanning for the next one — with a null value that scan would happily
+            // swallow an unrelated sibling object.
+            int v = k + key.Length + 3;
+            while (v < chunk.Length && (chunk[v] == ' ' || chunk[v] == '\t')) v++;
+            if (v >= chunk.Length || chunk[v] != '{') return "";
+            int close = FindMatchingBraceStringAware(chunk, v);
+            if (close <= v) return "";
+            rest = chunk.Remove(k, close - k + 1);
+            return chunk.Substring(v, close - v + 1);
+        }
+
+        /// <summary>The body with `key`'s array removed, so a scalar reader can't be
+        /// captured by a same-named key nested inside it.</summary>
+        private static string StripArray(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json)) return "";
+            if (!LocateArray(json, key, out int open, out int close)) return json;
+            return json.Remove(open, close - open + 1);
+        }
+
         // ── Opponent ranked check ─────────────────────────────
 
         public static void CheckOpponentRanked(string steamId, Action<bool> callback)
@@ -3595,8 +4120,21 @@ namespace CompetitiveRounds
             // per-point second stamps for the graph markers. Advisory.
             string localHitTimeline = null, string oppHitTimeline = null,
             string localBlockTimeline = null, string oppBlockTimeline = null,
-            string pointTimes = null)
+            string pointTimes = null,
+            // Aug 6 items 1+4 — expanded combat telemetry (advisory, not in
+            // HMAC; the 7-field canonical is frozen). Damage timelines are
+            // cumulative ints (own = 5s buckets, opp = their ~3s gstats
+            // samples); deaths are the REPORTER's local observations of both
+            // seats (every client simulates every death).
+            float localDamageDealt = 0f, float oppDamageDealt = 0f,
+            float localMaxSingleHit = 0f, float oppMaxSingleHit = 0f,
+            float localMaxHealth = 0f, float oppMaxHealth = 0f,
+            int localBestBounceKill = 0, int oppBestBounceKill = 0,
+            string localDamageTimeline = null, string oppDamageTimeline = null,
+            int localDeaths = 0, int localDeathsBoundary = 0, int localDeathsOwnBullet = 0,
+            int oppDeaths = 0, int oppDeathsBoundary = 0, int oppDeathsOwnBullet = 0)
         {
+            if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             var sb = new StringBuilder();
             sb.Append("{");
             sb.Append($"\"player1\":{{\"steam_id\":\"{Escape(p1SteamId)}\",\"display_name\":\"{Escape(p1Name)}\",\"cards\":[");
@@ -3680,6 +4218,23 @@ namespace CompetitiveRounds
             sb.Append($"\"local_block_timeline\":\"{Escape(ClampTimeline(localBlockTimeline, 1024))}\",");
             sb.Append($"\"opp_block_timeline\":\"{Escape(ClampTimeline(oppBlockTimeline, 1024))}\",");
             sb.Append($"\"point_times\":\"{Escape(ClampTimeline(pointTimes))}\",");
+            // Aug 6 items 1+4 — expanded combat telemetry (advisory, not in HMAC).
+            sb.Append($"\"local_damage_dealt\":{(int)localDamageDealt},");
+            sb.Append($"\"opp_damage_dealt\":{(int)oppDamageDealt},");
+            sb.Append($"\"local_max_single_hit\":{(int)localMaxSingleHit},");
+            sb.Append($"\"opp_max_single_hit\":{(int)oppMaxSingleHit},");
+            sb.Append($"\"local_max_health\":{(int)localMaxHealth},");
+            sb.Append($"\"opp_max_health\":{(int)oppMaxHealth},");
+            sb.Append($"\"local_best_bounce_kill\":{localBestBounceKill},");
+            sb.Append($"\"opp_best_bounce_kill\":{oppBestBounceKill},");
+            sb.Append($"\"local_damage_timeline\":\"{Escape(ClampTimeline(localDamageTimeline, 1024))}\",");
+            sb.Append($"\"opp_damage_timeline\":\"{Escape(ClampTimeline(oppDamageTimeline, 1024))}\",");
+            sb.Append($"\"local_deaths\":{localDeaths},");
+            sb.Append($"\"local_deaths_boundary\":{localDeathsBoundary},");
+            sb.Append($"\"local_deaths_own_bullet\":{localDeathsOwnBullet},");
+            sb.Append($"\"opp_deaths\":{oppDeaths},");
+            sb.Append($"\"opp_deaths_boundary\":{oppDeathsBoundary},");
+            sb.Append($"\"opp_deaths_own_bullet\":{oppDeathsOwnBullet},");
             string sig = ComputeHmac(p1SteamId, p2SteamId, p1RoundsWon, p2RoundsWon, isRanked, reporterSteamId, photonRoomId);
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
@@ -4083,7 +4638,12 @@ namespace CompetitiveRounds
                             // player props persist for the room lifetime and the
                             // room-join hooks republish on entry, so identical
                             // re-publishes add nothing.
-                            string cosmeticSig = BuildCosmeticSig(CachedPlayerStats);
+                            // Spectator: publishes NOTHING to the watched room
+                            // (Codex r1 find 13 — a stats refresh mid-session
+                            // was re-publishing cosmetic props).
+                            string cosmeticSig = RoomActors.LocalIsSpectator
+                                ? _lastPublishedCosmeticSig
+                                : BuildCosmeticSig(CachedPlayerStats);
                             if (cosmeticSig != _lastPublishedCosmeticSig)
                             {
                                 _lastPublishedCosmeticSig = cosmeticSig;
@@ -4359,9 +4919,37 @@ namespace CompetitiveRounds
             // Parse recent_rating_history (rating + snapshot date per entry).
             data.rating_history = new List<float>();
             data.rating_history_times = new List<float>();
+            ParseRatingSeries(response, "recent_rating_history", data.rating_history, data.rating_history_times);
+            // Aug 7: the FFA rating series, same entry shape and therefore the
+            // same parser. Every rated FFA game snapshots rating_after, so the
+            // game rows ARE the history — there is no rating_history table for it.
+            data.ffa_rating_history = new List<float>();
+            data.ffa_rating_history_times = new List<float>();
+            ParseRatingSeries(response, "ffa_rating_history", data.ffa_rating_history, data.ffa_rating_history_times);
+            Plugin.Log.LogInfo($"[STATS] Parsed {data.rating_history.Count} 1v1 + {data.ffa_rating_history.Count} FFA rating history points for {data.display_name} (oldest→newest, 1500 baseline prepended)");
+
+            /* Aug 6 item 1: re-read the three nullable career records. JsonUtility
+             * has already written 0 for a JSON null, which would render as a real
+             * "0 damage biggest hit" instead of "never recorded" (#257 / #2 — match
+             * the client default to the server's intended semantics). RECORD_NONE
+             * is the only value a render site may treat as "no data". */
+            data.record_max_single_hit = ExtractNullableInt(response, "record_max_single_hit");
+            data.record_max_health     = ExtractNullableInt(response, "record_max_health");
+            data.record_bounce_kill    = ExtractNullableInt(response, "record_bounce_kill");
+        }
+
+        /// <summary>Parse one `[{"rating":…, <timestamp>:…}, …]` rating series into
+        /// a parallel (rating, days-since-2020-01-01) pair, then prepend the 1500
+        /// baseline point. ONE implementation for the 1v1 and FFA series on
+        /// purpose: the compare graph indexes the two output lists in lockstep, so
+        /// two hand-copied parsers drifting apart would render an off-by-one lie
+        /// rather than an obviously missing point.</summary>
+        private static void ParseRatingSeries(string response, string jsonKey,
+                                              List<float> ratings, List<float> times)
+        {
             try
             {
-                int rhStart = response.IndexOf("\"recent_rating_history\"");
+                int rhStart = response.IndexOf($"\"{jsonKey}\"");
                 if (rhStart >= 0)
                 {
                     int arrStart = response.IndexOf("[", rhStart);
@@ -4387,14 +4975,19 @@ namespace CompetitiveRounds
                                     if (vEnd > vStart)
                                     {
                                         float val = float.Parse(parts[i].Substring(vStart, vEnd - vStart), System.Globalization.CultureInfo.InvariantCulture);
-                                        data.rating_history.Add(val);
+                                        ratings.Add(val);
                                         // Snapshot date → fractional days since 2020-01-01 (the
                                         // "Elo over time" x-axis). Missing/bad date → nudge past
                                         // the previous point so the lists stay parallel.
                                         float t = lastT + 0.01f;
                                         try
                                         {
-                                            string ds = ExtractJsonString(parts[i], "date");
+                                            // The 1v1 entries key the timestamp "date"; the FFA
+                                            // ones carry BOTH "recorded_at" (the contract name)
+                                            // and "date". Try the contract name first so a future
+                                            // server that drops the "date" alias still plots.
+                                            string ds = ExtractJsonString(parts[i], "recorded_at");
+                                            if (string.IsNullOrEmpty(ds)) ds = ExtractJsonString(parts[i], "date");
                                             if (!string.IsNullOrEmpty(ds))
                                             {
                                                 var dt = DateTime.Parse(ds, System.Globalization.CultureInfo.InvariantCulture,
@@ -4404,7 +4997,7 @@ namespace CompetitiveRounds
                                         }
                                         catch { }
                                         lastT = t;
-                                        data.rating_history_times.Add(t);
+                                        times.Add(t);
                                     }
                                 }
                             }
@@ -4422,16 +5015,42 @@ namespace CompetitiveRounds
             // player's initial rating instead of wherever their first recorded series
             // happened to land. This matches user expectation ("shouldn't it start at
             // 1500 for everyone?") and turns the first slope into a meaningful "your
-            // first series gain/loss from baseline" visualization.
-            if (data.rating_history.Count > 0 && data.rating_history[0] != 1500f)
+            // first series gain/loss from baseline" visualization. 1500 is the default
+            // for the FFA ladder too (glicko_ratings_ffa.rating DEFAULT 1500), so the
+            // same baseline is correct for both series.
+            if (ratings.Count > 0 && ratings[0] != 1500f)
             {
-                data.rating_history.Insert(0, 1500f);
+                ratings.Insert(0, 1500f);
                 // Keep the time axis parallel: baseline sits one day before the
                 // first real snapshot.
-                if (data.rating_history_times.Count > 0)
-                    data.rating_history_times.Insert(0, data.rating_history_times[0] - 1f);
+                if (times.Count > 0)
+                    times.Insert(0, times[0] - 1f);
             }
-            Plugin.Log.LogInfo($"[STATS] Parsed {data.rating_history.Count} rating history points for {data.display_name} (oldest→newest, 1500 baseline prepended)");
+        }
+
+        /// <summary>Read an `int | None` JSON field: the integer when present,
+        /// <see cref="RECORD_NONE"/> when the key is absent or literally null.
+        /// Deliberately NOT a JsonUtility field — JsonUtility collapses null to 0
+        /// and the whole point here is telling those two apart.</summary>
+        private static int ExtractNullableInt(string json, string key)
+        {
+            try
+            {
+                int k = json.IndexOf($"\"{key}\":", StringComparison.Ordinal);
+                if (k < 0) return RECORD_NONE;
+                int i = k + key.Length + 3;
+                while (i < json.Length && json[i] == ' ') i++;
+                if (i >= json.Length) return RECORD_NONE;
+                if (json[i] == 'n') return RECORD_NONE;   // null
+                int start = i;
+                if (json[i] == '-') i++;
+                while (i < json.Length && char.IsDigit(json[i])) i++;
+                if (i <= start) return RECORD_NONE;
+                return int.TryParse(json.Substring(start, i - start),
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out int v) ? v : RECORD_NONE;
+            }
+            catch { return RECORD_NONE; }
         }
 
         // ── Selected player achievements (for LB detail) ─────────
@@ -4513,6 +5132,761 @@ namespace CompetitiveRounds
                     catch { }
                 }
             ));
+        }
+
+        // ── Compare-tab stat boards (Aug 6 item 1) ───────────────
+        /* Every endpoint below answers with PARALLEL PRIMITIVE ARRAYS rather than
+         * an array of objects, because JsonUtility silently fails on nested arrays
+         * (#25) and manual slicing over user-authored display names needs the
+         * string-aware helpers anyway (#156). The parse for all of them is
+         * therefore "pull N same-length arrays by key"; ArraysAligned() drops any
+         * response whose arrays disagree in length rather than rendering a row
+         * built from mismatched columns.
+         *
+         * Caching mirrors FetchAchievementsForCompare exactly: a public result
+         * dictionary keyed by whatever identifies the request, plus a private
+         * in-flight set so a metric that re-renders every frame can call the
+         * fetch unconditionally without issuing duplicate requests. Nothing here
+         * blocks; render sites read the cache and show a loading line on a miss. */
+
+        public class RecordsBoardData
+        {
+            public List<string> names = new List<string>();
+            public List<string> steamIds = new List<string>();
+            public List<int> values = new List<int>();
+        }
+        public class CardTopPickersData
+        {
+            public string cardName;
+            public List<string> names = new List<string>();
+            public List<string> steamIds = new List<string>();
+            public List<int> picks = new List<int>();
+            public List<float> winRates = new List<float>();   // 0..1
+        }
+        public class RankedFriendsData
+        {
+            public List<string> names = new List<string>();
+            public List<string> steamIds = new List<string>();
+            public List<int> seriesCounts = new List<int>();
+        }
+        public class GoldSourcesData
+        {
+            public List<string> buckets = new List<string>();
+            public List<int> amounts = new List<int>();
+        }
+        public class NemesisData
+        {
+            public List<string> names = new List<string>();
+            public List<string> steamIds = new List<string>();
+            // Aug 7: the endpoint was rescoped from ALL 1v1 matches (casual
+            // included) to completed ranked 1v1 SERIES. The wire names are frozen
+            // but these now count SERIES won / SERIES played — label them as such.
+            public List<int> wins = new List<int>();
+            public List<int> games = new List<int>();
+            public List<float> winRates = new List<float>();   // 0..1
+            // Which of the SELECTED players actually faced this opponent, as steam
+            // ids. Index-aligned with the lists above; EMPTY when the server predates
+            // the field, so render sites must tolerate a short/absent list rather
+            // than assume one entry per row.
+            public List<List<string>> facedBy = new List<List<string>>();
+        }
+        /// <summary>One opponent inside a single player's own nemesis list.
+        /// Counts are completed ranked 1v1 SERIES, never individual games.</summary>
+        public class PlayerNemesisEntry
+        {
+            public string steamId, name;
+            public int seriesPlayed, seriesLost;
+            public float lossRate;                              // 0..1
+        }
+        /// <summary>One selected player and their top-5 nemeses. The list can be
+        /// EMPTY (nobody has beaten them 3+ times) — that is a complete answer, so
+        /// the panel still renders the header.</summary>
+        public class PlayerNemesisGroup
+        {
+            public string steamId, name;
+            public List<PlayerNemesisEntry> nemeses = new List<PlayerNemesisEntry>();
+        }
+        public class PlayerNemesisData
+        {
+            public List<PlayerNemesisGroup> players = new List<PlayerNemesisGroup>();
+        }
+        public class BuildTypeData
+        {
+            public List<string> buckets = new List<string>();
+            public List<int> counts = new List<int>();
+            public int totalPicks;
+        }
+        public class SimilarPlayersData
+        {
+            public List<string> names = new List<string>();
+            public List<string> steamIds = new List<string>();
+            public List<float> scores = new List<float>();     // 0..100 display
+        }
+        /// <summary>One card name + rarity, for the Compare tab's Cards sub-tab
+        /// picker. Sourced from /cards, but kept in its OWN cache so it can't
+        /// fight the Card Stats tab's CachedCardStats (different limit/sort/filter
+        /// on every render there).</summary>
+        public class CardCatalogEntry
+        {
+            public string name;
+            public string rarity;
+            // The same /cards row already carries every per-card stat the Cards
+            // sub-tab charts, so they ride along rather than costing a second
+            // request per card.
+            public int times_picked, times_offered;
+            public float win_rate, pass_rate;
+        }
+
+        public static readonly Dictionary<string, RecordsBoardData> RecordsBoards
+            = new Dictionary<string, RecordsBoardData>();
+        public static readonly Dictionary<string, CardTopPickersData> CardTopPickers
+            = new Dictionary<string, CardTopPickersData>();
+        public static readonly Dictionary<string, RankedFriendsData> RankedFriends
+            = new Dictionary<string, RankedFriendsData>();
+        public static readonly Dictionary<string, GoldSourcesData> GoldSources
+            = new Dictionary<string, GoldSourcesData>();
+        public static readonly Dictionary<string, NemesisData> NemesisBoards
+            = new Dictionary<string, NemesisData>();
+        // Keyed by the SAME joined-selection string as NemesisBoards (NemesisKeyFor).
+        public static readonly Dictionary<string, PlayerNemesisData> PlayerNemesisBoards
+            = new Dictionary<string, PlayerNemesisData>();
+        public static readonly Dictionary<string, BuildTypeData> BuildTypes
+            = new Dictionary<string, BuildTypeData>();
+        public static readonly Dictionary<string, SimilarPlayersData> SimilarPlayers
+            = new Dictionary<string, SimilarPlayersData>();
+        public static List<CardCatalogEntry> CardCatalog { get; private set; }
+
+        private static readonly HashSet<string> _cmpFetching = new HashSet<string>();
+
+        /// <summary>True when every supplied list is the same length. The server
+        /// builds these arrays from one row set so they always agree — but a
+        /// truncated/garbled body would otherwise pair name[i] with value[j] and
+        /// render a confident lie. Cheaper to drop the response.</summary>
+        private static bool ArraysAligned(int n, params int[] others)
+        {
+            for (int i = 0; i < others.Length; i++) if (others[i] != n) return false;
+            return true;
+        }
+
+        /// <summary>Shared plumbing for the boards above: dedupe on `cacheKey`,
+        /// GET `url`, hand the body to `parse`. `parse` returns false to reject a
+        /// malformed body (nothing is cached, so a later render retries).</summary>
+        private static void FetchCompareBoard(string cacheKey, string url, Func<string, bool> parse)
+        {
+            if (string.IsNullOrEmpty(cacheKey) || _cmpFetching.Contains(cacheKey)) return;
+            _cmpFetching.Add(cacheKey);
+            Plugin.Instance.StartCoroutine(GetRequest(url, (success, response) =>
+            {
+                _cmpFetching.Remove(cacheKey);
+                if (!success || string.IsNullOrEmpty(response)) return;
+                try { if (parse(response)) NativeUI.MarkDirty(); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[COMPARE] {cacheKey} parse failed: {ex.Message}"); }
+            }));
+        }
+
+        /// <param name="board">single_hit | max_health | bounce_kill</param>
+        public static void FetchRecordsBoard(string board)
+        {
+            if (string.IsNullOrEmpty(board) || RecordsBoards.ContainsKey(board)) return;
+            // EscapeURL, never Escape(): Escape() is the JSON string escaper and
+            // does nothing useful in a query string (a card name with a space
+            // would go out raw). Matches the /players/search call site.
+            FetchCompareBoard($"rec:{board}",
+                $"{baseUrl}/api/v1/records?board={UnityWebRequest.EscapeURL(board)}&limit=10", resp =>
+            {
+                var d = new RecordsBoardData
+                {
+                    names = JsonStringArrayByKey(resp, "display_names"),
+                    steamIds = JsonStringArrayByKey(resp, "steam_ids"),
+                    values = JsonIntArrayByKey(resp, "values"),
+                };
+                if (!ArraysAligned(d.names.Count, d.steamIds.Count, d.values.Count)) return false;
+                RecordsBoards[board] = d;
+                return true;
+            });
+        }
+
+        public static void FetchCardTopPickers(string cardName)
+        {
+            if (string.IsNullOrEmpty(cardName) || CardTopPickers.ContainsKey(cardName)) return;
+            FetchCompareBoard($"cardpick:{cardName}",
+                $"{baseUrl}/api/v1/cards/top-pickers?card_name={UnityWebRequest.EscapeURL(cardName)}&limit=10", resp =>
+            {
+                var d = new CardTopPickersData
+                {
+                    cardName = cardName,
+                    names = JsonStringArrayByKey(resp, "display_names"),
+                    steamIds = JsonStringArrayByKey(resp, "steam_ids"),
+                    picks = JsonIntArrayByKey(resp, "picks"),
+                    winRates = JsonFloatArrayByKey(resp, "win_rates"),
+                };
+                if (!ArraysAligned(d.names.Count, d.steamIds.Count, d.picks.Count, d.winRates.Count)) return false;
+                CardTopPickers[cardName] = d;
+                return true;
+            });
+        }
+
+        public static void FetchRankedFriends(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown" || RankedFriends.ContainsKey(steamId)) return;
+            FetchCompareBoard($"friends:{steamId}",
+                $"{baseUrl}/api/v1/players/{steamId}/ranked-friends?limit=8", resp =>
+            {
+                var d = new RankedFriendsData
+                {
+                    names = JsonStringArrayByKey(resp, "display_names"),
+                    steamIds = JsonStringArrayByKey(resp, "steam_ids"),
+                    seriesCounts = JsonIntArrayByKey(resp, "series_counts"),
+                };
+                if (!ArraysAligned(d.names.Count, d.steamIds.Count, d.seriesCounts.Count)) return false;
+                RankedFriends[steamId] = d;
+                return true;
+            });
+        }
+
+        public static void FetchGoldSources(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown" || GoldSources.ContainsKey(steamId)) return;
+            FetchCompareBoard($"gold:{steamId}",
+                $"{baseUrl}/api/v1/players/{steamId}/gold-sources", resp =>
+            {
+                var d = new GoldSourcesData
+                {
+                    buckets = JsonStringArrayByKey(resp, "buckets"),
+                    amounts = JsonIntArrayByKey(resp, "amounts"),
+                };
+                if (!ArraysAligned(d.buckets.Count, d.amounts.Count)) return false;
+                GoldSources[steamId] = d;
+                return true;
+            });
+        }
+
+        public static void FetchBuildType(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown" || BuildTypes.ContainsKey(steamId)) return;
+            FetchCompareBoard($"build:{steamId}",
+                $"{baseUrl}/api/v1/players/{steamId}/build-type", resp =>
+            {
+                var d = new BuildTypeData
+                {
+                    buckets = JsonStringArrayByKey(resp, "buckets"),
+                    counts = JsonIntArrayByKey(resp, "counts"),
+                    totalPicks = ExtractJsonInt(resp, "total_picks"),
+                };
+                if (!ArraysAligned(d.buckets.Count, d.counts.Count)) return false;
+                BuildTypes[steamId] = d;
+                return true;
+            });
+        }
+
+        public static void FetchSimilarPlayers(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown" || SimilarPlayers.ContainsKey(steamId)) return;
+            FetchCompareBoard($"similar:{steamId}",
+                $"{baseUrl}/api/v1/players/{steamId}/similar?limit=5", resp =>
+            {
+                var d = new SimilarPlayersData
+                {
+                    names = JsonStringArrayByKey(resp, "display_names"),
+                    steamIds = JsonStringArrayByKey(resp, "steam_ids"),
+                    scores = JsonFloatArrayByKey(resp, "similarity_scores"),
+                };
+                if (!ArraysAligned(d.names.Count, d.steamIds.Count, d.scores.Count)) return false;
+                SimilarPlayers[steamId] = d;
+                return true;
+            });
+        }
+
+        /// <summary>Nemesis is asked over the WHOLE selected set at once, so the
+        /// cache key is the joined id list. The server requires 2-12 numeric ids
+        /// and 400s otherwise — refuse locally rather than burning a request, and
+        /// key on the same string that is sent so a re-ordered selection is a
+        /// genuinely different query rather than a false cache hit.</summary>
+        public static string NemesisKeyFor(List<string> steamIds)
+        {
+            if (steamIds == null || steamIds.Count < 2 || steamIds.Count > 12) return null;
+            var clean = new List<string>();
+            foreach (var s in steamIds)
+            {
+                if (string.IsNullOrEmpty(s)) return null;
+                foreach (char c in s) if (c < '0' || c > '9') return null;   // numeric ids only
+                if (!clean.Contains(s)) clean.Add(s);
+            }
+            if (clean.Count < 2) return null;
+            clean.Sort(StringComparer.Ordinal);
+            return string.Join(",", clean.ToArray());
+        }
+
+        public static void FetchNemesis(string joinedKey)
+        {
+            if (string.IsNullOrEmpty(joinedKey) || NemesisBoards.ContainsKey(joinedKey)) return;
+            FetchCompareBoard($"nemesis:{joinedKey}",
+                $"{baseUrl}/api/v1/compare/nemesis?targets={UnityWebRequest.EscapeURL(joinedKey)}", resp =>
+            {
+                var d = new NemesisData
+                {
+                    names = JsonStringArrayByKey(resp, "display_names"),
+                    steamIds = JsonStringArrayByKey(resp, "steam_ids"),
+                    wins = JsonIntArrayByKey(resp, "wins"),
+                    games = JsonIntArrayByKey(resp, "games"),
+                    winRates = JsonFloatArrayByKey(resp, "win_rates"),
+                    facedBy = JsonStringArrayOfArraysByKey(resp, "faced_by"),
+                };
+                if (!ArraysAligned(d.names.Count, d.steamIds.Count, d.wins.Count, d.games.Count, d.winRates.Count))
+                    return false;
+                // faced_by is deliberately OUTSIDE the alignment gate: it is
+                // attribution garnish, and a server that predates it omits the key
+                // entirely. Dropping the whole board over a missing optional field
+                // would blank the panel for the entire pre-deploy window. Anything
+                // that does not line up 1:1 is discarded instead.
+                if (d.facedBy.Count != d.names.Count) d.facedBy.Clear();
+                NemesisBoards[joinedKey] = d;
+                return true;
+            });
+        }
+
+        /// <summary>Per-player nemeses (`/compare/player-nemesis`). Same selection
+        /// key as FetchNemesis — the board is asked over the whole selected set at
+        /// once, so a re-ordered selection is the same query and a genuinely
+        /// different selection is a different cache entry. Unlike the comparison
+        /// board, a player's nemesis MAY be another selected player: "who beats me
+        /// most" is a per-player question and excluding a co-selected rival would
+        /// answer it wrongly, so the server does not filter them and neither do we.</summary>
+        public static void FetchPlayerNemesis(string joinedKey)
+        {
+            if (string.IsNullOrEmpty(joinedKey) || PlayerNemesisBoards.ContainsKey(joinedKey)) return;
+            FetchCompareBoard($"pnemesis:{joinedKey}",
+                $"{baseUrl}/api/v1/compare/player-nemesis?targets={UnityWebRequest.EscapeURL(joinedKey)}", resp =>
+            {
+                var d = new PlayerNemesisData();
+                // Every slice here crosses display_name, i.e. adversarial user text
+                // — key location and bracket/brace matching are string-aware (#156).
+                if (!LocateArray(resp, "players", out int pOpen, out int pClose)) return false;
+                foreach (string pObj in SliceTopLevelObjects(resp.Substring(pOpen + 1, pClose - pOpen - 1)))
+                {
+                    // The nested nemesis objects repeat "steam_id"/"display_name",
+                    // so read the player's OWN scalars from the text BEFORE the
+                    // nemeses array — otherwise the FIRST nemesis shadows them.
+                    int nKey = FindKeyOutsideStrings(pObj, "nemeses");
+                    string head = nKey > 0 ? pObj.Substring(0, nKey) : pObj;
+                    var g = new PlayerNemesisGroup
+                    {
+                        steamId = ExtractJsonString(head, "steam_id"),
+                        name = ExtractJsonString(head, "display_name"),
+                    };
+                    if (string.IsNullOrEmpty(g.steamId)) continue;
+                    if (LocateArray(pObj, "nemeses", out int nOpen, out int nClose))
+                    {
+                        foreach (string nObj in SliceTopLevelObjects(pObj.Substring(nOpen + 1, nClose - nOpen - 1)))
+                        {
+                            string nsid = ExtractJsonString(nObj, "steam_id");
+                            if (string.IsNullOrEmpty(nsid)) continue;
+                            g.nemeses.Add(new PlayerNemesisEntry
+                            {
+                                steamId = nsid,
+                                name = ExtractJsonString(nObj, "display_name"),
+                                seriesPlayed = ExtractJsonInt(nObj, "series_played"),
+                                seriesLost = ExtractJsonInt(nObj, "series_lost"),
+                                lossRate = ExtractJsonFloat(nObj, "loss_rate"),
+                            });
+                        }
+                    }
+                    // An empty nemeses list is a real answer (nobody has taken 3+
+                    // series off them), so the group is kept either way.
+                    d.players.Add(g);
+                }
+                // An empty players array (neither target known to the server) is
+                // cached like every other board's empty result. Returning false
+                // here would leave the key uncached and make the per-frame render
+                // path re-request it forever.
+                PlayerNemesisBoards[joinedKey] = d;
+                return true;
+            });
+        }
+
+        /// <summary>Card-name catalogue for the Cards sub-tab picker. `/cards` is
+        /// the only server-side list of card names the client can enumerate —
+        /// CardRarityLookup's dictionaries are populated from the live scene and
+        /// expose no key accessor. min_picks=1 means a card nobody has ever picked
+        /// is absent, which is correct here: there would be nothing to compare.</summary>
+        public static void FetchCardCatalog()
+        {
+            if (CardCatalog != null) return;
+            FetchCompareBoard("cardcatalog",
+                $"{baseUrl}/api/v1/cards?limit=200&sort_by=times_picked&min_picks=1", resp =>
+            {
+                var list = new List<CardCatalogEntry>();
+                /* R3 (LOW): splitting the raw body on the literal
+                 * "card_name" is not string-aware — a stored card name that
+                 * itself contains that token (escaped inside its own value)
+                 * splits its object in half and caches malformed entries with
+                 * zeroed statistics. Card names are server-stored but
+                 * originate from reported match data, so they are not a
+                 * closed set. Use the same string-aware object slicer the
+                 * other array parsers use (#156). */
+                int _cOpen = resp.IndexOf('[');
+                int _cClose = _cOpen >= 0 ? FindMatchingBracketStringAware(resp, _cOpen) : -1;
+                var parts = (_cOpen >= 0 && _cClose > _cOpen)
+                    ? SliceTopLevelObjects(resp.Substring(_cOpen + 1, _cClose - _cOpen - 1))
+                    : new List<string>();
+                for (int i = 0; i < parts.Count; i++)
+                {
+                    string nm = ExtractJsonString(parts[i], "card_name");
+                    if (string.IsNullOrEmpty(nm)) continue;
+                    list.Add(new CardCatalogEntry
+                    {
+                        name = nm,
+                        rarity = ExtractJsonString(parts[i], "card_rarity"),
+                        times_picked = ExtractJsonInt(parts[i], "times_picked"),
+                        times_offered = ExtractJsonInt(parts[i], "times_offered"),
+                        win_rate = ExtractJsonFloat(parts[i], "win_rate"),
+                        pass_rate = ExtractJsonFloat(parts[i], "pass_rate"),
+                    });
+                }
+                /* Aug 6 review find 9: an EMPTY catalogue must not be
+                 * cached. The guard above is `CardCatalog != null`, so a 200
+                 * returning [] would pin an empty list for the session and
+                 * the Cards sub-tab picker would read "No matches." forever
+                 * with no retry. Returning false leaves it null AND skips the
+                 * success-cache in FetchCompareBoard, so the next open
+                 * re-fetches. Matches what the other seven parsers do. */
+                if (list.Count == 0) return false;
+                CardCatalog = CollapseCardDuplicates(list);
+                return true;
+            });
+        }
+
+        /// <summary>Aug 7 item 2 — collapse duplicate catalogue rows to ONE entry
+        /// per canonical card name, keeping the row with the highest
+        /// times_picked.
+        ///
+        /// Two independent sources of duplicates, and this closes both from the
+        /// client side:
+        ///  - the server groups /cards by (card_name, card_rarity), and
+        ///    card_rarity is a PER-PICK SNAPSHOT written by whichever client
+        ///    reported the match, so one card accumulates several stored
+        ///    rarities and comes back as several rows with the SAME name (prod:
+        ///    110 (name,rarity) groups over 88 distinct names = 22 dupe rows);
+        ///  - GetCanonicalName folds ROUNDS' own name variants together
+        ///    ("Leach" -> "Leech", "PoisonBullets" -> "Poison"), which a
+        ///    name-only server GROUP BY still cannot merge.
+        /// Rows that collapse together are AGGREGATED, not picked between
+        /// (Codex Aug-7): sums for counts, weighted means for rates. The
+        /// surviving entry keeps the DOMINANT RAW name, because that name is
+        /// also the exact-match query key for /cards/top-pickers.
+        ///
+        /// The rarity note that used to live here is now stale: since the
+        /// server groups /cards by card_name alone and elects the rarity by
+        /// MODE, a minority-rarity row no longer exists to be picked.
+        ///
+        /// Belt and braces: it also fixes already-installed clients before the
+        /// server-side GROUP BY change deploys. The key is lower-INVARIANT (#47
+        /// family) so it can never fold two distinct cards together on a
+        /// Turkish-locale client the way a culture-sensitive ToLower would.
+        ///
+        /// The rows are RE-SORTED after merging, not left in server order: the
+        /// comment here used to claim "insertion order is preserved, so the
+        /// server's sort survives", which stopped being true the moment merging
+        /// started changing times_picked (Codex Aug-7).</summary>
+        private static List<CardCatalogEntry> CollapseCardDuplicates(List<CardCatalogEntry> list)
+        {
+            try
+            {
+                /* Rewritten as BUCKET-then-AGGREGATE (Codex Aug-7 r3). The
+                 * previous incremental merge folded each new row into a running
+                 * survivor, and three separate findings all traced back to that
+                 * shape: the running total had already overwritten the value the
+                 * dominant-name test compared against, and a two-way
+                 * same-name/different-name flag could not express "this raw
+                 * spelling's offer row has already been counted once". Patching
+                 * it a fourth time was the wrong move (#310) — collecting the
+                 * bucket first and aggregating once makes each rule statable on
+                 * its own. */
+                var buckets = new Dictionary<string, List<CardCatalogEntry>>(StringComparer.Ordinal);
+                var order = new List<string>();
+                foreach (var e in list)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.name)) continue;
+                    string canon = e.name;
+                    // GetCanonicalName reads the live CardInfo registry, which is
+                    // empty until the first match — it then returns the input
+                    // unchanged, so the key degrades to the raw name and the
+                    // (name,rarity) dupes still collapse. Never throws, but the
+                    // whole method is defensive anyway: a failure here must not
+                    // cost the catalogue.
+                    try { canon = CardRarityLookup.GetCanonicalName(e.name) ?? e.name; } catch { }
+                    string key = canon.ToLowerInvariant();
+                    List<CardCatalogEntry> b;
+                    if (!buckets.TryGetValue(key, out b))
+                    {
+                        b = new List<CardCatalogEntry>(2);
+                        buckets[key] = b;
+                        order.Add(key);
+                    }
+                    b.Add(e);
+                }
+
+                var outp = new List<CardCatalogEntry>(buckets.Count);
+                int dropped = 0;
+                foreach (var key in order)
+                {
+                    var rows = buckets[key];
+                    if (rows.Count == 1) { outp.Add(rows[0]); continue; }
+                    dropped += rows.Count - 1;
+
+                    /* PICKS always SUM. Every row is a distinct server GROUP BY
+                     * bucket, so no pick is represented twice — true whether the
+                     * server groups by (name, rarity) or by name alone. */
+                    int totalPicks = 0;
+                    float winAcc = 0f;
+                    foreach (var r in rows)
+                    {
+                        totalPicks += r.times_picked;
+                        winAcc += r.win_rate * r.times_picked;
+                    }
+
+                    /* OFFERS sum ONCE PER DISTINCT RAW NAME. The server LEFT
+                     * JOINs the offer counts on card_name alone, so two rows
+                     * sharing a raw name (an old server's two rarity rows) each
+                     * repeat the SAME name-level total and must not be added
+                     * twice; two rows with DIFFERENT raw names that canonicalise
+                     * together (Leech + Leach, or Leech + LEECH on the current
+                     * server) each carry their own offers and must be. Keying on
+                     * the raw name states exactly that, which the old
+                     * boolean could not: it asked "are these two rows' names
+                     * equal" rather than "has this spelling been counted yet",
+                     * so Leech/LEECH took a maximum instead of summing while an
+                     * alternating old-server sequence could add one spelling
+                     * more than once. */
+                    var offersByRaw = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    var passByRaw = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+                    var picksByRaw = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var r in rows)
+                    {
+                        string raw = r.name ?? "";
+                        int prevOffers;
+                        if (!offersByRaw.TryGetValue(raw, out prevOffers) || r.times_offered > prevOffers)
+                        {
+                            offersByRaw[raw] = r.times_offered;
+                            passByRaw[raw] = r.pass_rate;
+                        }
+                        int prevPicks;
+                        picksByRaw.TryGetValue(raw, out prevPicks);
+                        picksByRaw[raw] = prevPicks + r.times_picked;
+                    }
+
+                    int totalOffered = 0;
+                    float passAcc = 0f;
+                    foreach (var kv in offersByRaw)
+                    {
+                        totalOffered += kv.Value;
+                        passAcc += passByRaw[kv.Key] * kv.Value;
+                    }
+
+                    /* The survivor keeps the DOMINANT RAW spelling — the one
+                     * whose OWN rows account for the most picks, compared across
+                     * per-spelling totals rather than against a running sum that
+                     * has already absorbed the other spellings (that comparison
+                     * is what made the first-seen name win regardless). The name
+                     * is not canonicalised because it doubles as the exact-match
+                     * query key for /cards/top-pickers; renaming Leach to Leech
+                     * made that follow-up query return nothing.
+                     *
+                     * KNOWN, ACCEPTED: querying the dominant spelling returns
+                     * only that spelling's pickers, and /cards/top-pickers also
+                     * excludes invalidated/deleted history that /cards includes
+                     * (Codex Aug-7 r3), so the panel can legitimately come back
+                     * empty for a card the catalogue shows picks for. Both are
+                     * display-only and neither can be fixed client-side; the
+                     * real fix is canonicalising in /cards/top-pickers. */
+                    var best = rows[0];
+                    int bestPicks = -1;
+                    foreach (var r in rows)
+                    {
+                        int own;
+                        picksByRaw.TryGetValue(r.name ?? "", out own);
+                        // Tie-break by name so the choice is stable across refreshes.
+                        if (own > bestPicks ||
+                            (own == bestPicks &&
+                             string.Compare(r.name, best.name, StringComparison.OrdinalIgnoreCase) < 0))
+                        {
+                            bestPicks = own;
+                            best = r;
+                        }
+                    }
+
+                    best.times_picked = totalPicks;
+                    best.times_offered = totalOffered;
+                    best.win_rate = totalPicks > 0 ? winAcc / totalPicks : best.win_rate;
+                    best.pass_rate = totalOffered > 0 ? passAcc / totalOffered : best.pass_rate;
+                    outp.Add(best);
+                }
+
+                if (dropped > 0)
+                {
+                    /* Aggregation changes the values the server sorted on —
+                     * [Other=100, AliasA=60, AliasB=50] merges to
+                     * [Other=100, AliasA=110] and would display the more-picked
+                     * card second. Re-sort on the merged counts, matching the
+                     * fixed catalogue request's times_picked DESC. Stable by
+                     * name on a tie so the order is deterministic. */
+                    outp.Sort((x, y) =>
+                    {
+                        int c = y.times_picked.CompareTo(x.times_picked);
+                        return c != 0 ? c : string.Compare(x.name, y.name, StringComparison.OrdinalIgnoreCase);
+                    });
+                    Plugin.Log.LogInfo($"[CARDS] catalogue collapsed {list.Count} rows -> {outp.Count} ({dropped} duplicate)");
+                }
+                return outp.Count > 0 ? outp : list;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[CARDS] collapse failed, using raw catalogue: {ex.Message}");
+                return list;
+            }
+        }
+
+        // ── Primitive-array readers keyed by field name ──────────
+        /* The existing ParseJsonStringArray takes explicit open/close indices; the
+         * responses above are flat objects of arrays, so these wrappers locate the
+         * array for a key first. Bracket matching is the STRING-AWARE variant in
+         * every case — display_names carries adversarial user text and a name like
+         * ">:[" would otherwise derail the depth counter for the whole body
+         * (#156). */
+
+        private static bool LocateArray(string json, string key, out int open, out int close)
+        {
+            open = close = -1;
+            /* Aug 6 review find 6: the bracket MATCHING below is string-aware,
+             * but locating the key with a plain IndexOf was not — and every
+             * one of these boards carries `display_names` straight from
+             * players.display_name, i.e. adversarial user text (#156). A
+             * player literally named  ", "values": [  serializes that exact
+             * substring into the body, so IndexOf would find the fake key
+             * BEFORE the real one and anchor the scan inside a string
+             * literal. Best case the arrays mis-align and ArraysAligned drops
+             * the board; worst case a crafted equal-length payload renders
+             * fabricated names and values on a GLOBAL leaderboard.
+             *
+             * Fix: walk the body string-aware and only accept a key match that
+             * begins OUTSIDE a string literal — i.e. at a real key position. */
+            int k = FindKeyOutsideStrings(json, key);
+            if (k < 0) return false;
+            open = json.IndexOf('[', k);
+            if (open < 0) return false;
+            close = FindMatchingBracketStringAware(json, open);
+            return close > open;
+        }
+
+        /// <summary>Index of `"key":` occurring as a REAL object key (not inside
+        /// a string value), or -1. Mirrors the scanning discipline of
+        /// FindMatchingBracketStringAware.</summary>
+        private static int FindKeyOutsideStrings(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return -1;
+            string needle = "\"" + key + "\":";
+            bool inStr = false;
+            for (int i = 0; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (inStr)
+                {
+                    if (c == '\\') { i++; continue; }
+                    if (c == '"') inStr = false;
+                    continue;
+                }
+                if (c == '"')
+                {
+                    // A key starts HERE, outside any string value. Test the
+                    // needle at this position before entering the literal.
+                    if (i + needle.Length <= json.Length
+                        && string.CompareOrdinal(json, i, needle, 0, needle.Length) == 0)
+                        return i;
+                    inStr = true;
+                }
+            }
+            return -1;
+        }
+
+        private static List<string> JsonStringArrayByKey(string json, string key)
+        {
+            return LocateArray(json, key, out int open, out int close)
+                ? ParseJsonStringArray(json, open, close)
+                : new List<string>();
+        }
+
+        /// <summary>Numbers inside a JSON array slice. Scans string-aware so a
+        /// quoted element can never contribute its digits to the number list.</summary>
+        private static List<float> JsonFloatArrayByKey(string json, string key)
+        {
+            var list = new List<float>();
+            if (!LocateArray(json, key, out int open, out int close)) return list;
+            var sb = new StringBuilder();
+            bool inStr = false;
+            for (int i = open + 1; i <= close; i++)
+            {
+                // At `close` the char is ']'; substitute a separator so the final
+                // number is flushed by the same branch as every other element.
+                char c = i < close ? json[i] : ',';
+                if (inStr)
+                {
+                    if (c == '\\') i++;
+                    else if (c == '"') inStr = false;
+                    continue;
+                }
+                if (c == '"') { inStr = true; sb.Length = 0; continue; }
+                if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')
+                {
+                    sb.Append(c);
+                    continue;
+                }
+                if (sb.Length > 0)
+                {
+                    if (float.TryParse(sb.ToString(), System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out float v))
+                        list.Add(v);
+                    sb.Length = 0;
+                }
+            }
+            return list;
+        }
+
+        /// <summary>Read a JSON array OF string arrays (`[["a","b"],["c"]]`) by key.
+        /// The nemesis board's `faced_by` is nested rather than flat because it is
+        /// index-aligned with the other parallel arrays and each row carries a
+        /// SUBSET of the selected ids. Fully string-aware: the sibling
+        /// display_names in the same body are adversarial user text, and a name
+        /// like "&gt;:[" would otherwise derail the inner scan (#156).</summary>
+        private static List<List<string>> JsonStringArrayOfArraysByKey(string json, string key)
+        {
+            var outer = new List<List<string>>();
+            if (!LocateArray(json, key, out int open, out int close)) return outer;
+            bool inStr = false;
+            for (int i = open + 1; i < close; i++)
+            {
+                char c = json[i];
+                if (inStr)
+                {
+                    if (c == '\\') i++;
+                    else if (c == '"') inStr = false;
+                    continue;
+                }
+                if (c == '"') { inStr = true; continue; }
+                if (c != '[') continue;
+                int innerClose = FindMatchingBracketStringAware(json, i);
+                if (innerClose < 0 || innerClose > close) break;
+                outer.Add(ParseJsonStringArray(json, i, innerClose));
+                i = innerClose;   // the loop's i++ steps past the closing bracket
+            }
+            return outer;
+        }
+
+        private static List<int> JsonIntArrayByKey(string json, string key)
+        {
+            var src = JsonFloatArrayByKey(json, key);
+            var list = new List<int>(src.Count);
+            foreach (var f in src) list.Add(Mathf.RoundToInt(f));
+            return list;
         }
 
         private static int FindMatchingBracket(string s, int openPos)
@@ -4923,7 +6297,29 @@ namespace CompetitiveRounds
             entry.opp_block_timeline = ExtractJsonString(chunk, "opp_block_timeline");
             entry.point_times = ExtractJsonString(chunk, "point_times");
             entry.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
+            ParseDamageTelemetry(entry, chunk);
             return entry;
+        }
+
+        /// <summary>Aug 6 item 4 — damage + death telemetry off a /matches row.
+        /// Shared by BOTH history parsers on purpose: they read the SAME endpoint
+        /// and a field added to only one of them silently reports 0 on the other
+        /// path (#279 — fix the sibling in the same pass). ExtractNullableInt
+        /// rather than ExtractJsonInt because the server sends JSON null for
+        /// every row predating the telemetry clients, and "no data" must render
+        /// as a dash, never as "0.0 dps" (#257).</summary>
+        private static void ParseDamageTelemetry(MatchHistoryEntry entry, string chunk)
+        {
+            entry.player_damage_dealt = ExtractNullableInt(chunk, "player_damage_dealt");
+            entry.opp_damage_dealt = ExtractNullableInt(chunk, "opp_damage_dealt");
+            entry.player_damage_timeline = ExtractJsonString(chunk, "player_damage_timeline");
+            entry.opp_damage_timeline = ExtractJsonString(chunk, "opp_damage_timeline");
+            entry.player_deaths = ExtractNullableInt(chunk, "player_deaths");
+            entry.player_deaths_boundary = ExtractNullableInt(chunk, "player_deaths_boundary");
+            entry.player_deaths_own_bullet = ExtractNullableInt(chunk, "player_deaths_own_bullet");
+            entry.opp_deaths = ExtractNullableInt(chunk, "opp_deaths");
+            entry.opp_deaths_boundary = ExtractNullableInt(chunk, "opp_deaths_boundary");
+            entry.opp_deaths_own_bullet = ExtractNullableInt(chunk, "opp_deaths_own_bullet");
         }
 
         /// <summary>Parse a /matches JSON array into a MatchHistoryEntry list. Manual parse
@@ -4961,6 +6357,12 @@ namespace CompetitiveRounds
                 entry.player_fps_avg = ExtractJsonInt(chunk, "player_fps_avg");
                 entry.opponent_fps_avg = ExtractJsonInt(chunk, "opponent_fps_avg");
                 entry.duration_seconds = ExtractJsonInt(chunk, "duration_seconds");
+                // This parser is deliberately lean (the leaderboard detail view
+                // renders no hover telemetry), but the damage fields MUST be read
+                // here too: they default to 0 in C#, and 0 is a legitimate "dealt
+                // no damage" value, so skipping them would print a confident
+                // "0.0 dps" on every row instead of a dash (#257).
+                ParseDamageTelemetry(entry, chunk);
                 entries.Add(entry);
             }
             return entries;
@@ -5647,6 +7049,8 @@ namespace CompetitiveRounds
 
         public static void JoinQueue(string steamId, string displayName, string region, bool rankedOnly)
         {
+            if (SpectatorBlocksQueue()) return;
+            NoteQueueRequestInFlight();   // r3: WATCH is blocked for the whole join round-trip   // design §3.1: leave the spectator seat first
             // A join landing while a leave retry is still in flight could get
             // its fresh row deleted by that retry — suppress until the leave
             // resolves (review finding), force-recover if stuck.
@@ -6619,6 +8023,10 @@ namespace CompetitiveRounds
         {
             try
             {
+                // A spectator is not IN a match — an in_match claim from a
+                // spectator would veto queue-lifecycle cleanup for a group it
+                // is not part of (design §3.5, #281's evidence discipline).
+                if (RoomActors.LocalIsSpectator) return null;
                 if (!CompetitiveRoomDetect.IsCompetitiveRoom()
                     || PhotonNetwork.CurrentRoom == null)
                     return null;
@@ -6739,6 +8147,8 @@ namespace CompetitiveRounds
 
         public static void JoinTeamQueue(string steamId, string displayName, string region, string queueType = "auto")
         {
+            if (SpectatorBlocksQueue()) return;
+            NoteQueueRequestInFlight();   // r3: WATCH is blocked for the whole join round-trip   // design §3.1
             // Suppress joining while a leave retry is in flight (same rationale
             // as JoinQueue); force-recover past the safety timeout.
             if (CurrentTeamQueueState == TeamQueueState.Leaving)
@@ -7312,6 +8722,14 @@ namespace CompetitiveRounds
         public class TeamTelemetry
         {
             public string fpsTimeline, pingTimeline, hitTimeline, blockTimeline;
+            // Aug 7: cumulative damage-dealt CSV, for the DPS hover graph. Must be
+            // sampled on the SAME grid as fpsTimeline (the 3s / cap-128 series) —
+            // the graph plots its derivative beside the fps chart and a different
+            // cadence puts the two on different x-axes. Null/empty = not recorded,
+            // which the server stores as NULL so the row draws no graph (#257).
+            // NOTE: the FFA report path does NOT read this — FFA carries its own
+            // per-entry damage_dealt_timeline; only the 2v2 blob uses it.
+            public string damageTimeline;
             public int pingAvg;
             public int bulletsFired, bulletsHit, blocksActivated, blocksSuccessful, keysPressed;
             public float activeSeconds;
@@ -7326,6 +8744,10 @@ namespace CompetitiveRounds
             sb.Append($"\"ping_avg\":{Math.Max(0, Math.Min(30000, t.pingAvg))},");
             sb.Append($"\"hit_timeline\":\"{Escape(ClampTimeline(t.hitTimeline, 1024))}\",");
             sb.Append($"\"block_timeline\":\"{Escape(ClampTimeline(t.blockTimeline, 1024))}\",");
+            // Mirrors team_match_telemetry.damage_dealt_timeline (migration 201).
+            // An empty string is stored as NULL server-side, so an old/unwired
+            // caller costs nothing beyond two bytes on the wire.
+            sb.Append($"\"damage_dealt_timeline\":\"{Escape(ClampTimeline(t.damageTimeline, 1024))}\",");
             sb.Append($"\"bullets_fired\":{Math.Max(0, t.bulletsFired)},");
             sb.Append($"\"bullets_hit\":{Math.Max(0, t.bulletsHit)},");
             sb.Append($"\"blocks_activated\":{Math.Max(0, t.blocksActivated)},");
@@ -7350,6 +8772,7 @@ namespace CompetitiveRounds
             TeamTelemetry t1aTele = null, TeamTelemetry t1bTele = null,
             TeamTelemetry t2aTele = null, TeamTelemetry t2bTele = null)
         {
+            if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             var sb = new StringBuilder();
             sb.Append("{");
             sb.Append($"\"series_id\":\"{Escape(seriesId)}\",");
@@ -7516,6 +8939,11 @@ namespace CompetitiveRounds
         public class TeamPlayerTele
         {
             public string fps_timeline, ping_timeline, hit_timeline, block_timeline;
+            // Aug 7. Cumulative damage CSV on the same grid as fps_timeline; the
+            // DPS hover graph plots its per-sample derivative. Empty/absent for
+            // every game recorded before migration 201 — forward-only, and a row
+            // without it must register NO hover target rather than a flat zero.
+            public string damage_dealt_timeline;
             public int ping_avg, bullets_fired, bullets_hit, blocks_activated, blocks_successful;
         }
 
@@ -7706,6 +9134,7 @@ namespace CompetitiveRounds
                                 ping_timeline = ExtractJsonString(ob, "ping_timeline"),
                                 hit_timeline = ExtractJsonString(ob, "hit_timeline"),
                                 block_timeline = ExtractJsonString(ob, "block_timeline"),
+                                damage_dealt_timeline = ExtractJsonString(ob, "damage_dealt_timeline"),
                                 ping_avg = ExtractJsonInt(ob, "ping_avg"),
                                 bullets_fired = ExtractJsonInt(ob, "bullets_fired"),
                                 bullets_hit = ExtractJsonInt(ob, "bullets_hit"),
@@ -8033,6 +9462,8 @@ namespace CompetitiveRounds
 
         public static void OvtJoinQueue(int preferredSide, bool soloExtraPick)
         {
+            if (SpectatorBlocksQueue()) return;
+            NoteQueueRequestInFlight();   // r3: WATCH is blocked for the whole join round-trip   // design §3.1
             // No loop-breaker reset on join — see FfaJoinQueue's comment
             // (Codex sitting-over review find 2).
             string sid = MatchTracker.LocalSteamId;
@@ -8435,8 +9866,16 @@ namespace CompetitiveRounds
             string duoASteam, string duoAName, List<MatchTracker.CardPickData> duoACards,
             string duoBSteam, string duoBName, List<MatchTracker.CardPickData> duoBCards,
             int soloRounds, int duoRounds, int soloPoints, int duoPoints,
-            string reporterSteam, int soloFps, int duoAFps, int duoBFps)
+            string reporterSteam, int soloFps, int duoAFps, int duoBFps,
+            // Aug 7 — cumulative damage-dealt CSVs per seat, for the DPS graph.
+            // Same 3s grid as the fps timelines these sit beside. Optional so a
+            // caller that has no sample for a seat simply omits it (the server
+            // stores an empty string as NULL, i.e. "not recorded", not zero).
+            string soloDamageTimeline = null,
+            string duoADamageTimeline = null,
+            string duoBDamageTimeline = null)
         {
+            if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             int winnerSide = soloRounds > duoRounds ? 1 : 2;
             bool isRanked = false;  // unscored at launch
             var sb = new StringBuilder();
@@ -8459,6 +9898,12 @@ namespace CompetitiveRounds
             sb.Append($"\"is_ranked\":{(isRanked ? "true" : "false")},");
             sb.Append($"\"reported_by_steam_id\":\"{Escape(reporterSteam)}\",");
             sb.Append($"\"solo_fps\":{soloFps},\"duo_a_fps\":{duoAFps},\"duo_b_fps\":{duoBFps},");
+            // Mirrors ovt_matches.<seat>_damage_timeline (migration 201). Flat on
+            // the report, not a telemetry blob — 1v2 has no telemetry table. These
+            // ride OUTSIDE the 10-field HMAC canonical below, which is frozen.
+            sb.Append($"\"solo_damage_timeline\":\"{Escape(ClampTimeline(soloDamageTimeline, 1024))}\",");
+            sb.Append($"\"duo_a_damage_timeline\":\"{Escape(ClampTimeline(duoADamageTimeline, 1024))}\",");
+            sb.Append($"\"duo_b_damage_timeline\":\"{Escape(ClampTimeline(duoBDamageTimeline, 1024))}\",");
             string canonical = $"{soloSteam}:{duoASteam}:{duoBSteam}:{soloRounds}:{duoRounds}:" +
                                $"{(isRanked ? "true" : "false")}:{reporterSteam}:{room ?? ""}:{winnerSide}:{seriesId}";
             sb.Append($"\"hmac_signature\":\"{ComputeHmacHex(canonical)}\"");
@@ -8508,6 +9953,10 @@ namespace CompetitiveRounds
             public int winner_side, solo_rounds, duo_rounds, solo_points, duo_points, duration_seconds;
             public Dictionary<string, int> fps_by_steam = new Dictionary<string, int>();
             public Dictionary<string, List<string>> cards_by_steam = new Dictionary<string, List<string>>();
+            // Aug 7. Cumulative damage CSV per seat, for the DPS hover graph. The
+            // server OMITS a seat whose timeline is null, so an absent key means
+            // "not recorded" — register no graph rather than an empty one (#257).
+            public Dictionary<string, string> damage_timeline_by_steam = new Dictionary<string, string>();
         }
         public class OvtRecentSeries
         {
@@ -8551,6 +10000,59 @@ namespace CompetitiveRounds
                 int val = 0;
                 if (e > st) int.TryParse(json.Substring(st, e - st), out val);
                 if (!string.IsNullOrEmpty(sid)) d[sid] = val;
+                i = e + 1;
+            }
+            return d;
+        }
+
+        /// <summary>Parse a {"7656...": "0,0,55,...", ...} object. Keys are numeric
+        /// steam ids; the VALUES originate from a client-submitted report field, so
+        /// they are read escape-aware rather than scanned for a bare closing quote.
+        /// A key the server omitted simply never lands in the map.</summary>
+        private static Dictionary<string, string> ParseSteamStringMap(string json, string key)
+        {
+            var d = new Dictionary<string, string>();
+            int k = json.IndexOf($"\"{key}\":");
+            if (k < 0) return d;
+            int open = json.IndexOf('{', k);
+            if (open < 0) return d;
+            int close = FindMatchingBraceStringAware(json, open);
+            if (close < 0) return d;
+            int i = open + 1;
+            while (i < close)
+            {
+                int q1 = json.IndexOf('"', i); if (q1 < 0 || q1 >= close) break;
+                int q2 = json.IndexOf('"', q1 + 1); if (q2 < 0 || q2 >= close) break;
+                string sid = json.Substring(q1 + 1, q2 - q1 - 1);
+                int colon = json.IndexOf(':', q2); if (colon < 0 || colon >= close) break;
+                // The value MUST be the next non-space token. Today the server
+                // omits a seat whose timeline is null, but scanning ahead for the
+                // next quote would silently pair this key with the NEXT entry's
+                // value if it ever emits `"765":null` instead — so bail out of the
+                // whole map rather than record a mis-attributed timeline.
+                int vq = colon + 1;
+                while (vq < close && (json[vq] == ' ' || json[vq] == '\t')) vq++;
+                if (vq >= close || json[vq] != '"') break;
+                // Escape-aware value scan (same translation table as
+                // ParseJsonStringArray): a bare IndexOf('"') would stop inside an
+                // escaped quote and leave the cursor mid-value for the next entry.
+                var sb = new StringBuilder();
+                int e = vq + 1;
+                while (e < close)
+                {
+                    char c = json[e];
+                    if (c == '\\' && e + 1 < close)
+                    {
+                        char nx = json[e + 1];
+                        sb.Append(nx == 'n' ? '\n' : nx == 't' ? '\t' : nx == 'r' ? '\r' : nx);
+                        e += 2;
+                        continue;
+                    }
+                    if (c == '"') break;
+                    sb.Append(c);
+                    e++;
+                }
+                if (!string.IsNullOrEmpty(sid)) d[sid] = sb.ToString();
                 i = e + 1;
             }
             return d;
@@ -8692,6 +10194,7 @@ namespace CompetitiveRounds
                                         duration_seconds = ExtractJsonInt(mObj, "duration_seconds"),
                                         fps_by_steam = ParseSteamIntMap(mObj, "fps_by_steam"),
                                         cards_by_steam = ParseSteamCardsMap(mObj, "cards_by_steam"),
+                                        damage_timeline_by_steam = ParseSteamStringMap(mObj, "damage_timeline_by_steam"),
                                     });
                                 }
                             }
@@ -8733,6 +10236,13 @@ namespace CompetitiveRounds
             // 1v1 has had since v1.30. Timelines drive the hover graphs.
             public int ping_avg, bullets_fired, bullets_hit, blocks_activated, blocks_successful;
             public string fps_timeline, ping_timeline, hit_timeline, block_timeline;
+            /* Aug 6 item 4 — damage telemetry. /ffa/recent sends damage_dealt as
+             * `int | None` (null on every game recorded before the telemetry
+             * clients), so this holds RECORD_NONE for "not recorded" and a real
+             * 0 for "dealt no damage" (#257). damage_timeline is CUMULATIVE
+             * ints — difference consecutive samples for per-interval DPS. */
+            public int damage_dealt = RECORD_NONE;
+            public string damage_timeline;
             public bool left_early;
             public float rating_change;
             public bool has_rating_change;
@@ -8787,6 +10297,9 @@ namespace CompetitiveRounds
             // this GAME's xp-conversion + level-ding gold; series_gold_gained is
             // the series bonus, which lands only on the closing game.
             public int gold_gained, series_gold_gained;
+            // Aug 7. The REQUESTER's own seat, already oriented by the server, so
+            // no solo/duo_a/duo_b resolution is needed here. Empty = not recorded.
+            public string damage_dealt_timeline;
         }
         public class PlayerFfaHistoryEntry
         {
@@ -8849,6 +10362,9 @@ namespace CompetitiveRounds
         public static int FfaLobbyCfgPicks = 1;
         public static int FfaLobbyCfgCap = 5;
         public static bool FfaLobbyCfgSame = false;
+        // Aug 6 item 10: sudden death (host lobby option). Mirrors the
+        // server's clamped echo like every other config scalar.
+        public static bool FfaLobbyCfgSudden = false;
         public static bool FfaLobbyCfgRanked = true;
         // Settings-lock countdown: server sends REMAINING seconds (#180);
         // anchored to unscaledTime locally for a smooth per-second label.
@@ -8947,6 +10463,8 @@ namespace CompetitiveRounds
 
         public static void FfaJoinQueue()
         {
+            if (SpectatorBlocksQueue()) return;
+            NoteQueueRequestInFlight();   // r3: WATCH is blocked for the whole join round-trip   // design §3.1
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
             // NO loop-breaker reset here (Codex sitting-over review find 2):
@@ -9066,6 +10584,7 @@ namespace CompetitiveRounds
                 FfaLobbyCfgPicks = ecP > 0 ? ecP : 1;
                 FfaLobbyCfgCap = ecC > 0 ? ecC : 5;
                 FfaLobbyCfgSame = ExtractJsonBool(resp, "same_card_rule");
+                FfaLobbyCfgSudden = ExtractJsonBool(resp, "sudden_death");
                 FfaLobbyCfgRanked = !resp.Contains("\"lobby_ranked\":false");
                 _ffaLeaveIntent = false;
                 IsFfaQueuePolling = true; FfaQueueStatus = "lobby";
@@ -9129,6 +10648,8 @@ namespace CompetitiveRounds
 
         public static void FfaCreateLobby()
         {
+            if (SpectatorBlocksQueue()) return;   // r4: the one enrollment POST that lacked the guard
+            NoteQueueRequestInFlight();
             if (!FfaLobbyActionPreflight(out string sid)) return;
             _ffaLeaveIntent = false;
             int gen = ++ffaGen;
@@ -9144,6 +10665,8 @@ namespace CompetitiveRounds
 
         public static void FfaJoinLobby(string lobbyId)
         {
+            if (SpectatorBlocksQueue()) return;
+            NoteQueueRequestInFlight();   // r3: WATCH is blocked for the whole join round-trip   // design §3.1
             if (string.IsNullOrEmpty(lobbyId)) return;
             if (!FfaLobbyActionPreflight(out string sid)) return;
             bool wasRecovery = OpenFfaLobbyId == lobbyId;
@@ -9222,6 +10745,7 @@ namespace CompetitiveRounds
                 int p = ExtractJsonInt(resp, "initial_picks"); if (p > 0) FfaLobbyCfgPicks = p;
                 int c = ExtractJsonInt(resp, "card_cap"); if (c > 0) FfaLobbyCfgCap = c;
                 FfaLobbyCfgSame = ExtractJsonBool(resp, "same_card_rule");
+                FfaLobbyCfgSudden = ExtractJsonBool(resp, "sudden_death");
                 FfaLobbyCfgRanked = !resp.Contains("\"lobby_ranked\":false");
                 // A real change arms the 60s server gate — mirror it now; the
                 // next poll re-syncs the authoritative remainder.
@@ -9491,6 +11015,7 @@ namespace CompetitiveRounds
                     int cfgP = ExtractJsonInt(resp, "initial_picks"); if (cfgP > 0) FfaLobbyCfgPicks = cfgP;
                     int cfgC = ExtractJsonInt(resp, "card_cap"); if (cfgC > 0) FfaLobbyCfgCap = cfgC;
                     FfaLobbyCfgSame = ExtractJsonBool(resp, "same_card_rule");
+                FfaLobbyCfgSudden = ExtractJsonBool(resp, "sudden_death");
                     FfaLobbyCfgRanked = !resp.Contains("\"lobby_ranked\":false");
                     FfaLobbySettingsLockSeconds = Math.Max(0, ExtractJsonInt(resp, "settings_lock_seconds"));
                     _ffaLobbyLockAnchorAt = Time.unscaledTime;
@@ -9660,10 +11185,16 @@ namespace CompetitiveRounds
                         int cfgCap = ExtractJsonInt(resp, "card_cap");
                         bool cfgSame = ExtractJsonBool(resp, "same_card_rule");
                         bool cfgRanked = !resp.Contains("\"lobby_ranked\":false");
+                        // Aug 6 item 10: sudden death. Absent/false from an
+                        // older server (or a roster the server collapsed for
+                        // capability) reads as FALSE, which is the only safe
+                        // direction — a client that armed the rule while its
+                        // peers had not would suppress damage they applied.
+                        bool cfgSudden = ExtractJsonBool(resp, "sudden_death");
                         if (cfgTarget > 0)
                             FfaMode.SetPendingConfig(cfgTarget, cfgCand > 0 ? cfgCand : 5,
                                 cfgPicks > 0 ? cfgPicks : 1, cfgCap > 0 ? cfgCap : 5,
-                                cfgSame, cfgRanked);
+                                cfgSame, cfgRanked, cfgSudden);
                     }
                     catch (Exception cfgEx) { Plugin.Log.LogWarning($"[FFA] config parse: {cfgEx.Message}"); }
 
@@ -10059,6 +11590,11 @@ namespace CompetitiveRounds
                                         ping_timeline = ExtractJsonString(pObj, "ping_timeline"),
                                         hit_timeline = ExtractJsonString(pObj, "hit_timeline"),
                                         block_timeline = ExtractJsonString(pObj, "block_timeline"),
+                                        // Aug 6 item 4 — nullable reader (#257): null
+                                        // => RECORD_NONE ("not recorded"), which the
+                                        // DPS tag renders as a dash, not "0.0".
+                                        damage_dealt = ExtractNullableInt(pObj, "damage_dealt"),
+                                        damage_timeline = ExtractJsonString(pObj, "damage_dealt_timeline"),
                                         xp_gained = ExtractJsonInt(pObj, "xp_gained"),
                                         gold_gained = ExtractJsonInt(pObj, "gold_gained"),
                                         left_early = ExtractJsonBool(pObj, "left_early"),
@@ -10278,6 +11814,7 @@ namespace CompetitiveRounds
                                     ended_at = ExtractJsonString(obj, "ended_at"),
                                     gold_gained = ExtractJsonInt(obj, "gold_gained"),
                                     series_gold_gained = ExtractJsonInt(obj, "series_gold_gained"),
+                                    damage_dealt_timeline = ExtractJsonString(obj, "damage_dealt_timeline"),
                                 });
                             }
                         }
@@ -10388,6 +11925,7 @@ namespace CompetitiveRounds
         public static void PlaceFfaBet(string bettorSteamId, string lobbyId,
             string betOnSteamId, int amount, int gameNumber, Action<bool, string> callback)
         {
+            if (SpectatorBlocksBet(callback)) return;
             // game_number is INSIDE the signature (server review find 2) so a
             // lost-response retry can never be replayed onto a later game.
             string sig = ComputeHmacHex($"ffa-bet:{bettorSteamId}:{lobbyId}:{betOnSteamId}:{amount}:{gameNumber}");
@@ -10441,6 +11979,7 @@ namespace CompetitiveRounds
             List<FfaReportPlayer> players, string winnerSteam, string reporterSteam,
             string timeline = null)
         {
+            if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             if (players == null || players.Count < 2)
             {
                 Plugin.Log.LogWarning("[FFA-REPORT] not enough players to report");
@@ -10633,6 +12172,31 @@ namespace CompetitiveRounds
                         Plugin.Log.LogInfo($"[DC] Reported disconnect by {disconnectedSteamId}: {response}");
                     else
                         Plugin.Log.LogWarning($"[DC] Failed to report disconnect: {response}");
+                }
+            ));
+        }
+
+        /// <summary>Aug 6 item 1 — casual rage-quit report. The surviving
+        /// client reports a mid-game leave in a CASUAL 1v1 (any midgame
+        /// leave, including 4-0 — Sid's rule). Server dedups per
+        /// (room, leaver) and rate-limits per reporter.</summary>
+        public static void ReportCasualDc(string reporterSteamId, string leaverSteamId, string roomId)
+        {
+            if (string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(leaverSteamId)
+                || string.IsNullOrEmpty(roomId)) return;
+            Plugin.Instance.StartCoroutine(PostRequest(
+                /* EscapeURL, never Escape() — the latter is the JSON string
+                 * escaper and does nothing useful in a query string (review
+                 * find 10). Harmless for numeric steam ids, wrong by
+                 * construction. */
+                $"{baseUrl}/api/v1/matches/casual-dc?reporter_steam_id={UnityWebRequest.EscapeURL(reporterSteamId)}&leaver_steam_id={UnityWebRequest.EscapeURL(leaverSteamId)}&room_id={UnityWebRequest.EscapeURL(roomId)}",
+                "",
+                (success, response) =>
+                {
+                    if (success)
+                        Plugin.Log.LogInfo($"[DC] Casual rage-quit recorded for {leaverSteamId}: {response}");
+                    else
+                        Plugin.Log.LogWarning($"[DC] Casual rage-quit report failed: {response}");
                 }
             ));
         }
@@ -10864,7 +12428,15 @@ namespace CompetitiveRounds
             }
         }
 
-        private static IEnumerator GetRequest(string url, Action<bool, string> callback)
+        /// <param name="detailedErrors">Report failures through FormatRequestError
+        /// (status + response body) instead of Unity's bare status text. Opt-in
+        /// because the default shape is what ~100 existing callers log; the
+        /// admin reads need it because every refusal on those endpoints is a
+        /// FastAPI {"detail": ...} that has to reach the operator verbatim —
+        /// "HTTP/1.1 403 Forbidden" cannot tell a moderator that their grant
+        /// does not cover a channel.</param>
+        private static IEnumerator GetRequest(string url, Action<bool, string> callback,
+            bool detailedErrors = false)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             NoteAttempt();
@@ -10877,7 +12449,9 @@ namespace CompetitiveRounds
                 if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
                 bool success = request.result == UnityWebRequest.Result.Success;
                 NoteResult(success, request.responseCode);
-                callback(success, success ? request.downloadHandler.text : request.error);
+                callback(success, success
+                    ? request.downloadHandler.text
+                    : (detailedErrors ? FormatRequestError(request) : request.error));
             }
         }
 
@@ -11940,6 +13514,414 @@ namespace CompetitiveRounds
                     catch (Exception e) { Plugin.Log.LogWarning($"[TOURNAMENT-SITEHIST] parse: {e.Message}"); }
                 }
             ));
+        }
+
+        // ── Spectator mode (Aug 6 item 13, Phases 2/3/6) ─────────────────
+        // All spectate traffic is strict-session POST (bodies, never query
+        // strings — room credentials must not reach access logs, design
+        // §6.3). The lease token is held ONLY here and in SpectatorSession;
+        // it is never published to Photon or logged.
+
+        /// <summary>Queue actions are disabled while spectating (design §3.1:
+        /// never silently cancel the seat — the user leaves it explicitly).
+        /// Also blocked while a spectate grant is in flight (Codex r1 find 6:
+        /// a queue join landing between grant and Photon join would race the
+        /// spectator joiner for the connection).</summary>
+        private static bool SpectatorBlocksQueue()
+        {
+            if (!SpectatorSession.IsLocalSpectator && !spectateGrantInFlight) return false;
+            try { CompetitiveUI.ShowNotification(I18n.Tr("Stop spectating first (Esc)."), Color.yellow, 4f); } catch { }
+            return true;
+        }
+
+        /// <summary>Spectators cannot bet — they see live match state other
+        /// bettors cannot (Codex r1 find 7). The server enforces the same
+        /// rule on an active lease; this is the polite half.</summary>
+        private static bool SpectatorBlocksBet(Action<bool, string> callback)
+        {
+            if (!SpectatorSession.IsLocalSpectator) return false;
+            try { CompetitiveUI.ShowNotification(I18n.Tr("Spectators can't place bets."), Color.yellow, 4f); } catch { }
+            try { callback?.Invoke(false, "spectators_cannot_bet"); } catch { }
+            return true;
+        }
+
+        public class SpectateGameInfo
+        {
+            public string game_id = "";
+            public string mode = "";
+            public string source_ref = "";
+            public string roster = "";   // sorted comma-joined fighter steam ids
+            public string names = "";
+            public string roster_titles = "";    // pipe-joined, roster-aligned
+            public string roster_ratings = "";   // comma-joined ints, roster-aligned
+            public int spectator_count;
+            public int spectator_cap;
+            public bool spectatable;
+            public string disabled_reason = "";
+        }
+
+        public static List<SpectateGameInfo> CachedSpectateGames = new List<SpectateGameInfo>();
+        private static float lastSpectateGamesFetch = -999f;
+        private static string spectateLeaseId = "";
+
+        /// <summary>Fighter-side attestation (design §6.3): every fighter
+        /// independently reports the live room so the server can list the
+        /// game once ALL fighters agree. Fire-and-forget; called from
+        /// GameStateWatcher's attest ticker while a competitive match is
+        /// live. The roster is the sorted comma-joined fighter steam ids —
+        /// all attesters must submit byte-identical tuples.</summary>
+        public static void SpectateAttest(string mode, string sourceRef, string roomName,
+                                          string region, int actorNumber, int fighterTarget,
+                                          int roomCapacity, string phase, string rosterCsv)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            if (string.IsNullOrEmpty(SteamAuth.SessionToken)) return;   // strict-session endpoint
+            string json = "{"
+                + $"\"steam_id\":\"{Escape(sid)}\","
+                + $"\"mode\":\"{Escape(mode)}\","
+                + $"\"source_ref\":\"{Escape(sourceRef ?? "")}\","
+                + $"\"room_name\":\"{Escape(roomName)}\","
+                + $"\"region\":\"{Escape(region ?? "")}\","
+                + $"\"actor_number\":{actorNumber},"
+                + $"\"fighter_target\":{fighterTarget},"
+                + $"\"room_capacity\":{roomCapacity},"
+                + $"\"spectator_protocol\":{SpectatorSession.PROTOCOL},"
+                + $"\"phase\":\"{Escape(phase)}\","
+                + $"\"roster\":\"{Escape(rosterCsv ?? "")}\""
+                + "}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/spectate/participant-attest", json,
+                (ok, resp) =>
+                {
+                    if (!ok && !resp.Contains("HTTP 4"))
+                        Plugin.Log.LogInfo($"[SPECTATE] attest failed (transport): {resp}");
+                }));
+        }
+
+        /// <summary>Refresh the public spectatable-games list (10s throttle).
+        /// Parsed with the string-aware slicers — display names are
+        /// adversarial input (#156).</summary>
+        public static void MaybeFetchSpectateGames()
+        {
+            if (Plugin.Instance == null) return;
+            if (Time.realtimeSinceStartup - lastSpectateGamesFetch < 10f) return;
+            lastSpectateGamesFetch = Time.realtimeSinceStartup;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/spectate/games",
+                (ok, resp) =>
+                {
+                    if (!ok) return;
+                    try
+                    {
+                        var list = new List<SpectateGameInfo>();
+                        int arr = resp.IndexOf("\"games\"", StringComparison.Ordinal);
+                        if (arr >= 0)
+                        {
+                            int open = resp.IndexOf('[', arr);
+                            if (open >= 0)
+                            {
+                                int close = FindMatchingBracketStringAware(resp, open);
+                                if (close > open)
+                                {
+                                    string body = resp.Substring(open + 1, close - open - 1);
+                                    foreach (var raw in SliceTopLevelObjects(body))
+                                    {
+                                        var g = new SpectateGameInfo
+                                        {
+                                            game_id = ExtractJsonString(raw, "game_id") ?? "",
+                                            mode = ExtractJsonString(raw, "mode") ?? "",
+                                            source_ref = ExtractJsonString(raw, "source_ref") ?? "",
+                                            roster = ExtractJsonString(raw, "roster") ?? "",
+                                            names = ExtractJsonString(raw, "names") ?? "",
+                                            roster_titles = ExtractJsonString(raw, "roster_titles") ?? "",
+                                            roster_ratings = ExtractJsonString(raw, "roster_ratings") ?? "",
+                                            spectator_count = ExtractJsonInt(raw, "spectator_count"),
+                                            spectator_cap = ExtractJsonInt(raw, "spectator_cap"),
+                                            spectatable = ExtractJsonBool(raw, "spectatable"),
+                                            disabled_reason = ExtractJsonString(raw, "disabled_reason") ?? "",
+                                        };
+                                        if (!string.IsNullOrEmpty(g.game_id)) list.Add(g);
+                                    }
+                                }
+                            }
+                        }
+                        CachedSpectateGames = list;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception e) { Plugin.Log.LogWarning($"[SPECTATE] games parse: {e.Message}"); }
+                }));
+        }
+
+        // A grant round-trip is a commitment window (Codex r1 find 6):
+        // queue joins are blocked while one is in flight, and a second WATCH
+        // click is ignored rather than double-granted.
+        private static bool spectateGrantInFlight;
+        public static bool SpectateGrantInFlight => spectateGrantInFlight;
+
+        // Stamped by every queue/lobby JOIN at POST time (Codex r3: the
+        // status flags flip only on the RESPONSE, so a WATCH click inside
+        // the round-trip saw no commitment). 25s: PostRequest's timeout is
+        // 20s, so the window must OUTLIVE the slowest possible response
+        // (Codex r4 — a 15s window expired before an 18s join landed).
+        private static float queueRequestInFlightUntil = -999f;
+        internal static void NoteQueueRequestInFlight()
+        {
+            queueRequestInFlightUntil = Time.realtimeSinceStartup + 25f;
+        }
+
+        /// <summary>True when the client holds ANY fighter commitment a
+        /// spectate session would race: an in-flight queue lock, a pending
+        /// room join, an active lobby, or an online room.</summary>
+        private static bool SpectateCommitmentBlocked(out string why)
+        {
+            why = "";
+            try
+            {
+                if (SpectatorSession.IsLocalSpectator) { why = "already spectating"; return true; }
+                if (Time.realtimeSinceStartup < queueRequestInFlightUntil)
+                { why = "a queue action is in flight"; return true; }
+                if (PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode) { why = "in a game"; return true; }
+                // Offline sandbox: a LIVE offline battle would leave its scene
+                // and state behind the spectator join (Codex r2 find 9). The
+                // lingering post-sandbox InRoom at the MENU (#122) stays
+                // allowed — battleOngoing is false there.
+                try
+                {
+                    if (PhotonNetwork.OfflineMode && GameManager.instance != null
+                        && GameManager.instance.battleOngoing)
+                    { why = "leave the sandbox first"; return true; }
+                }
+                catch { }
+                if (!string.IsNullOrEmpty(Plugin.PendingRankedRoom)
+                    || Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0
+                    || Plugin.PendingFfaSlot >= 0) { why = "match pending"; return true; }
+                if (IsQueuePolling) { why = "in the 1v1 queue"; return true; }
+                if (CurrentTeamQueueState != TeamQueueState.Idle) { why = "in the 2v2 queue"; return true; }
+                if (IsOvtQueuePolling || !string.IsNullOrEmpty(OvtQueueStatus)) { why = "in the 1v2 queue"; return true; }
+                if (IsFfaQueuePolling || !string.IsNullOrEmpty(ActiveFfaLobbyId)) { why = "in an FFA lobby"; return true; }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>Ask the server for a seat. On success, begins the local
+        /// spectator session and starts the joiner. Refusals surface as a
+        /// notification with the server's stable reason.</summary>
+        public static void RequestSpectateGrant(string gameId)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            if (spectateGrantInFlight) return;
+            string blocked;
+            if (SpectateCommitmentBlocked(out blocked))
+            {
+                CompetitiveUI.ShowNotification(I18n.TrF("Cannot spectate: {0}", blocked), Color.yellow, 4f);
+                return;
+            }
+            if (string.IsNullOrEmpty(SteamAuth.SessionToken))
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Sign-in still pending - try again in a moment."), Color.yellow, 4f);
+                return;
+            }
+            spectateGrantInFlight = true;
+            string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"game_id\":\"{Escape(gameId)}\",\"client_protocol\":{SpectatorSession.PROTOCOL}}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/spectate/grant", json,
+                (ok, resp) =>
+                {
+                    spectateGrantInFlight = false;
+                    if (!ok)
+                    {
+                        string why = I18n.Tr("Could not spectate this game.");
+                        if (resp.Contains("spectator_full")) why = I18n.Tr("All spectator seats are taken.");
+                        else if (resp.Contains("spectating_disabled")) why = I18n.Tr("A player in this game has spectating disabled.");
+                        else if (resp.Contains("game_not_live")) why = I18n.Tr("That game is no longer live.");
+                        else if (resp.Contains("already_in_game")) why = I18n.Tr("Leave your current game first.");
+                        Plugin.Log.LogInfo($"[SPECTATE] grant refused: {resp}");
+                        CompetitiveUI.ShowNotification(why, Color.yellow, 5f);
+                        return;
+                    }
+                    string room = ExtractJsonString(resp, "room_name");
+                    string region = ExtractJsonString(resp, "region");
+                    string leaseId = ExtractJsonString(resp, "lease_id");
+                    string leaseToken = ExtractJsonString(resp, "lease_token");
+                    if (string.IsNullOrEmpty(room) || string.IsNullOrEmpty(leaseId))
+                    {
+                        Plugin.Log.LogWarning("[SPECTATE] grant response missing fields");
+                        return;
+                    }
+                    // RE-CHECK commitments (r1 find 6): a queue lock can have
+                    // landed during the grant round-trip; the fighter path
+                    // always wins, and the unused lease is released.
+                    string blockedNow;
+                    if (SpectateCommitmentBlocked(out blockedNow))
+                    {
+                        Plugin.Log.LogInfo($"[SPECTATE] grant discarded — {blockedNow}");
+                        spectateLeaseId = leaseId;
+                        SpectateLeaveNotify();
+                        return;
+                    }
+                    spectateLeaseId = leaseId;
+                    // Cache the fighters' display metadata for the HUD
+                    // (playtest #2b): clean DB names + title + elo, keyed by
+                    // the roster steam order.
+                    try
+                    {
+                        foreach (var g in CachedSpectateGames)
+                            if (g != null && g.game_id == gameId)
+                            {
+                                SpectatorSession.SetWatchedMeta(g.roster, g.names, g.roster_titles, g.roster_ratings);
+                                break;
+                            }
+                    }
+                    catch { }
+                    string refusal;
+                    if (!SpectatorSession.BeginSession(room, region, leaseId, leaseToken ?? "", gameId, out refusal))
+                    {
+                        Plugin.Log.LogWarning($"[SPECTATE] session refused: {refusal}");
+                        CompetitiveUI.ShowNotification(I18n.TrF("Cannot spectate: {0}", refusal), Color.yellow, 5f);
+                        SpectateLeaveNotify();   // release the lease we won't use
+                        return;
+                    }
+                    SpectatorJoiner.StartJoin();
+                }));
+        }
+
+        /// <summary>Spectator lease heartbeat (15s cadence from
+        /// SpectatorSync.HeartbeatLoop). A definitive server rejection —
+        /// 4xx/410 — ends the session; transport failures do not (#249's
+        /// direction: the lease outlives a lost beat, the server's own
+        /// expiry is the backstop).</summary>
+        public static void SpectateHeartbeat()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || string.IsNullOrEmpty(spectateLeaseId) || Plugin.Instance == null) return;
+            string leaseAtSend = spectateLeaseId;   // generation fence (r2 find 12)
+            string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"lease_id\":\"{Escape(leaseAtSend)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/spectate/heartbeat", json,
+                (ok, resp) =>
+                {
+                    if (ok) return;
+                    // A delayed rejection for an OLD lease must not end the
+                    // CURRENT session (r2 find 12).
+                    if (!string.Equals(spectateLeaseId, leaseAtSend, StringComparison.Ordinal)) return;
+                    if (resp.StartsWith("HTTP 4", StringComparison.Ordinal))
+                    {
+                        Plugin.Log.LogInfo($"[SPECTATE] heartbeat rejected: {resp}");
+                        SpectatorSync.OnHeartbeatRejected(resp);
+                    }
+                }));
+        }
+
+        /// <summary>Best-effort lease release on leave. Fire-and-forget —
+        /// the server's heartbeat expiry frees the seat if this is lost
+        /// (#276: absence of renewal frees; nothing depends on this call).</summary>
+        public static void SpectateLeaveNotify()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            string lease = spectateLeaseId;
+            spectateLeaseId = "";
+            if (string.IsNullOrEmpty(sid) || string.IsNullOrEmpty(lease) || Plugin.Instance == null) return;
+            string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"lease_id\":\"{Escape(lease)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/spectate/leave", json, (ok, resp) => { }));
+        }
+
+        /// <summary>Master-side spectator validation (design §6.6): confirm
+        /// each claimed spectator actor holds a live lease for THIS room.
+        /// Invalid actors are kicked; valid names are published as a room
+        /// property for the roster display (names only — no credentials).
+        /// Called on spectator entry and from the periodic attest ticker.</summary>
+        public static void SpectateValidateActors()
+        {
+            try
+            {
+                if (!Photon.Pun.PhotonNetwork.InRoom || !Photon.Pun.PhotonNetwork.IsMasterClient) return;
+                if (RoomActors.LocalIsSpectator) return;
+                var specs = RoomActors.Spectators();
+                if (specs.Length == 0) return;
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || Plugin.Instance == null) return;
+                if (string.IsNullOrEmpty(SteamAuth.SessionToken)) return;
+
+                string roomAtSend = Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "";
+                var sb = new StringBuilder();
+                sb.Append('{')
+                  .Append($"\"steam_id\":\"{Escape(sid)}\",")
+                  .Append($"\"room_name\":\"{Escape(roomAtSend)}\",")
+                  .Append("\"spectators\":[");
+                for (int i = 0; i < specs.Length; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append('{')
+                      .Append($"\"actor_number\":{specs[i].ActorNumber},")
+                      .Append($"\"steam_id\":\"{Escape(RoomActors.SteamIdOf(specs[i]))}\"")
+                      .Append('}');
+                }
+                sb.Append("]}");
+                Plugin.Instance.StartCoroutine(PostRequest(
+                    $"{baseUrl}/api/v1/spectate/validate", sb.ToString(),
+                    (ok, resp) =>
+                    {
+                        if (!ok) return;   // no kick on transport failure — fail open, revalidated next tick
+                        // Room fence (Codex r3): a delayed verdict from room A
+                        // must not validate the same ActorNumber in room B.
+                        try
+                        {
+                            if (!string.Equals(Photon.Pun.PhotonNetwork.CurrentRoom?.Name ?? "", roomAtSend, StringComparison.Ordinal))
+                                return;
+                        }
+                        catch { return; }
+                        try
+                        {
+                            // Response: {"results":[{"actor_number":N,"ok":true,"display_name":"..."}]}
+                            var names = new List<string>();
+                            int arr = resp.IndexOf("\"results\"", StringComparison.Ordinal);
+                            if (arr < 0) return;
+                            int open = resp.IndexOf('[', arr);
+                            if (open < 0) return;
+                            int close = FindMatchingBracketStringAware(resp, open);
+                            if (close <= open) return;
+                            foreach (var raw in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
+                            {
+                                int actor = ExtractJsonInt(raw, "actor_number");
+                                bool valid = ExtractJsonBool(raw, "ok");
+                                // Feed the master's admission set: only
+                                // validated actors are answered with match
+                                // state (Codex r1 find 3).
+                                try { SpectatorSync.MasterNoteValidated(actor, valid); } catch { }
+                                if (!valid)
+                                {
+                                    try
+                                    {
+                                        var room = Photon.Pun.PhotonNetwork.CurrentRoom;
+                                        var p = room != null ? room.GetPlayer(actor) : null;
+                                        if (p != null && RoomActors.IsSpectator(p))
+                                        {
+                                            Plugin.Log.LogWarning($"[SPECTATE] kicking invalid spectator actor {actor}");
+                                            Photon.Pun.PhotonNetwork.CloseConnection(p);
+                                        }
+                                    }
+                                    catch { }
+                                    continue;
+                                }
+                                string nm = ExtractJsonString(raw, "display_name") ?? "";
+                                if (!string.IsNullOrEmpty(nm)) names.Add(nm);
+                            }
+                            // Publish the validated roster (names only) so every
+                            // fighter can render "Spectators (N)".
+                            var props = new ExitGames.Client.Photon.Hashtable
+                            {
+                                { "cr_spec_roster", string.Join("|", names) }
+                            };
+                            Photon.Pun.PhotonNetwork.CurrentRoom?.SetCustomProperties(props);
+                        }
+                        catch (Exception e) { Plugin.Log.LogWarning($"[SPECTATE] validate parse: {e.Message}"); }
+                    }));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SPECTATE] validate: {ex.Message}"); }
         }
     }
 }

@@ -37,6 +37,9 @@ class Player(Base):
     # default TRUE; a player hides via the Settings toggle.
     discord_display_name = Column(String(64), nullable=True)
     show_discord = Column(Boolean, nullable=False, default=True)
+    # Spectator opt-out (migration 194). TRUE = this player's live games may
+    # be listed/spectated. Grant + heartbeat both recheck it (design §6.7).
+    allow_spectators = Column(Boolean, nullable=False, default=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     gold_earned = Column(Integer, nullable=False, default=0)
     team_gold_earned = Column(Integer, nullable=False, default=0)
@@ -65,6 +68,18 @@ class Player(Base):
     # every valid match submit; both start counting from the 112 deploy.
     consecutive_sweeps = Column(Integer, nullable=False, default=0)
     casual_win_streak = Column(Integer, nullable=False, default=0)
+    # Aug 6 item 1 (migration 191) — career records for the mini-leaderboards.
+    # Updated for BOTH seats at 1v1 submit via GREATEST(); the single-hit and
+    # health records only advance when the seat's build QUALIFIED that match
+    # (<= 5 cards, no growth-damage card) so the boards stay meaningful.
+    # NULL = never recorded (#257), not zero.
+    record_max_single_hit = Column(Integer, nullable=True)
+    record_max_health = Column(Integer, nullable=True)
+    record_bounce_kill = Column(Integer, nullable=True)
+    # Casual rage-quit tracking (Aug 6 item 1): mid-game leaves in CASUAL
+    # matches, reported by the surviving client. Denominator = casual matches
+    # played (counted from the matches table at query time).
+    casual_dc_count = Column(Integer, nullable=False, default=0)
     active_title_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_trail_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
     active_color_id = Column(BigInteger, ForeignKey("shop_items.id", ondelete="SET NULL"), nullable=True)
@@ -244,6 +259,27 @@ class Match(Base):
     p1_block_timeline = Column(String(1024), nullable=True)
     p2_block_timeline = Column(String(1024), nullable=True)
     point_times = Column(String(512), nullable=True)
+    # Aug 6 items 1+4 (migration 191) — expanded combat telemetry. NULLable by
+    # design (#257): pre-telemetry matches must read as "not recorded", never
+    # as zero, and every average divides by rows that CARRY the column.
+    # Orientation follows the p1/p2 convention of the surrounding columns
+    # (reporter's local_* mapped by seat at submit).
+    p1_damage_dealt = Column(Integer, nullable=True)
+    p2_damage_dealt = Column(Integer, nullable=True)
+    p1_max_single_hit = Column(Integer, nullable=True)
+    p2_max_single_hit = Column(Integer, nullable=True)
+    p1_max_health = Column(Integer, nullable=True)
+    p2_max_health = Column(Integer, nullable=True)
+    p1_best_bounce_kill = Column(Integer, nullable=True)
+    p2_best_bounce_kill = Column(Integer, nullable=True)
+    p1_damage_timeline = Column(String(1024), nullable=True)
+    p2_damage_timeline = Column(String(1024), nullable=True)
+    p1_deaths = Column(SmallInteger, nullable=True)
+    p2_deaths = Column(SmallInteger, nullable=True)
+    p1_deaths_boundary = Column(SmallInteger, nullable=True)
+    p2_deaths_boundary = Column(SmallInteger, nullable=True)
+    p1_deaths_own_bullet = Column(SmallInteger, nullable=True)
+    p2_deaths_own_bullet = Column(SmallInteger, nullable=True)
 
     player1 = relationship("Player", foreign_keys=[player1_id])
     player2 = relationship("Player", foreign_keys=[player2_id])
@@ -583,11 +619,19 @@ class PlayerBan(Base):
 
 
 class AdminAction(Base):
-    """Audit log for everything admins do — bans, achievement grants, series reversals."""
+    """Audit log for everything privileged actors do — bans, achievement grants,
+    series reversals, and (Aug 6 item 5) T-chat moderation.
+
+    admin_steam_id deliberately carries NO ForeignKey to admin_users. Migration
+    192 dropped that constraint for two reasons: scoped chat moderators
+    (language_grants scope='chat_moderate') are not admins yet must be
+    auditable here, and an audit log must not be constrained by the CURRENT
+    roster — otherwise removing a retired admin is blocked by their own
+    history. Do not re-add it."""
     __tablename__ = "admin_actions"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    admin_steam_id = Column(String(20), ForeignKey("admin_users.steam_id"), nullable=False)
+    admin_steam_id = Column(String(20), nullable=False)
     action = Column(String(32), nullable=False)
     target_steam_id = Column(String(20), nullable=True)
     target_match_id = Column(UUID(as_uuid=True), nullable=True)
@@ -607,6 +651,10 @@ class Tournament(Base):
     format = Column(String(24), nullable=False, default="single_elim_bo3")
     default_start_ts = Column(DateTime(timezone=True), nullable=False)
     scheduled_start_ts = Column(DateTime(timezone=True), nullable=True)
+    # Set once, the first time a sync tournament's time vote reaches
+    # min_players on a single slot. Guards the Discord feed announcement
+    # against re-firing when votes change (migration 200).
+    agreement_announced_at = Column(DateTime(timezone=True), nullable=True)
     voting_closes_at = Column(DateTime(timezone=True), nullable=True)
     lock_at = Column(DateTime(timezone=True), nullable=False)
     locked_at = Column(DateTime(timezone=True), nullable=True)
@@ -840,6 +888,14 @@ class TeamMatchTelemetry(Base):
     ping_avg = Column(SmallInteger, nullable=True)
     hit_timeline = Column(String(1024), nullable=True)
     block_timeline = Column(String(1024), nullable=True)
+    # Aug-7b item 3 (migration 201): cumulative damage dealt on fps_timeline's
+    # own 3s grid, so the DPS derivative shares its x-axis. NULL = not recorded
+    # (pre-migration game or old client) — never zero-filled, because a 0 would
+    # read as "dealt no damage" rather than "we have no data" (#257).
+    # VARCHAR(1024), not Text — matches every sibling timeline column and the
+    # 1v1 p1/p2_damage_timeline pair exactly (migration 201). Client-supplied
+    # string, so the width is a real backstop, not decoration.
+    damage_dealt_timeline = Column(String(1024), nullable=True)
     bullets_fired = Column(Integer, nullable=True)
     bullets_hit = Column(Integer, nullable=True)
     blocks_activated = Column(Integer, nullable=True)
@@ -915,3 +971,64 @@ class TournamentNotice(Base):
     notified_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (UniqueConstraint("tournament_id", "player_id", "notice_type"),)
+
+
+class SpectateGame(Base):
+    """Spectator registry (migration 194, design §6.2): one LIVE row per
+    attested competitive room. room_name/room_region are JOIN CREDENTIALS —
+    they leave the server only inside a grant response, never in lists,
+    logs, or Discord output."""
+    __tablename__ = "spectate_games"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mode = Column(String(8), nullable=False)
+    source_ref = Column(String(64), nullable=False, default="")
+    room_name = Column(String(64), nullable=False)
+    room_region = Column(String(16), nullable=False, default="")
+    roster = Column(Text, nullable=False, default="")
+    fighter_target = Column(Integer, nullable=False)
+    room_capacity = Column(Integer, nullable=False, default=0)
+    spectator_cap = Column(Integer, nullable=False, default=4)
+    protocol_min = Column(Integer, nullable=False, default=1)
+    phase = Column(String(16), nullable=False, default="")
+    started_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_attest_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    # Stamped only by phase='battle' attests — the grant/listing gate.
+    last_battle_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class SpectateAttestation(Base):
+    """One row per (game, fighter). A game is spectatable only while every
+    roster member holds a FRESH attestation whose tuple byte-matches the
+    game row (design §6.3)."""
+    __tablename__ = "spectate_attestations"
+
+    game_id = Column(UUID(as_uuid=True), ForeignKey("spectate_games.id", ondelete="CASCADE"), primary_key=True)
+    steam_id = Column(String(32), primary_key=True)
+    actor_number = Column(Integer, nullable=False, default=-1)
+    region = Column(String(16), nullable=False, default="")
+    fighter_target = Column(Integer, nullable=False)
+    room_capacity = Column(Integer, nullable=False, default=0)
+    protocol = Column(Integer, nullable=False, default=1)
+    roster = Column(Text, nullable=False, default="")
+    phase = Column(String(16), nullable=False, default="")
+    attested_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class SpectateLease(Base):
+    """An issued spectator seat. token_hash only (sha256) — the raw token is
+    returned once in the grant response and never stored (design §6.5).
+    One ACTIVE (revoked_at IS NULL) lease per spectator account."""
+    __tablename__ = "spectate_leases"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    token_hash = Column(String(64), nullable=False)
+    game_id = Column(UUID(as_uuid=True), ForeignKey("spectate_games.id", ondelete="CASCADE"), nullable=False)
+    spectator_steam_id = Column(String(32), nullable=False)
+    issued_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    join_expires_at = Column(DateTime(timezone=True), nullable=False)
+    heartbeat_expires_at = Column(DateTime(timezone=True), nullable=False)
+    # Photon ActorNumber bound at first master validation (one lease = one actor).
+    bound_actor = Column(Integer, nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
