@@ -1521,7 +1521,7 @@ app.include_router(tournaments_router)
 # compatibility carve-out around steam-session enforcement, so the floor climbs
 # until the carve-out is gone. 1.33.0 is stage one; raise to 1.34.0 once
 # players.mod_version shows adoption. Old clients get 426 → auto-update.
-MIN_MOD_VERSION = "1.36.0"
+MIN_MOD_VERSION = "1.37.0"
 REQUIRE_MOD_VERSION = True  # Missing-header clients are pre-1.18.7 and should be locked out.
 
 # First client build with the fixed hit/block counting semantics (July 21:
