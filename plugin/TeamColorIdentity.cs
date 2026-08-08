@@ -413,6 +413,35 @@ namespace CompetitiveRounds
             return null;
         }
 
+        /// <summary>All uGUI Images under <paramref name="root"/>, in the same
+        /// traversal order as <see cref="FindImage(Transform)"/> (index 0 is the
+        /// Image that method returns). Aug 8 (Sid): the card-bar buttons carry
+        /// TWO Images — outline first, fill second — and the surfaces need to
+        /// treat them differently, so the single-Image finder stopped being
+        /// enough.</summary>
+        public static List<Component> FindImages(Transform root, bool includeInactive = false)
+        {
+            var list = new List<Component>();
+            if (root == null) return list;
+            try
+            {
+                var imageType = UIFactory.tImage;
+                foreach (var c in root.GetComponentsInChildren<Component>(includeInactive))
+                {
+                    if (c == null) continue;
+                    if (imageType != null)
+                    {
+                        if (imageType.IsInstanceOfType(c)) list.Add(c);
+                        continue;
+                    }
+                    for (var t = c.GetType(); t != null; t = t.BaseType)
+                        if (t.Name == "Image") { list.Add(c); break; }
+                }
+            }
+            catch { }
+            return list;
+        }
+
         /// <summary>The TMP label behind a <c>UILocalizedString</c>. Reached by
         /// reflection because the property's return type is <c>TextMeshProUGUI</c> and
         /// TMPro is deliberately not a csproj reference (#15) — naming it in source
@@ -502,6 +531,15 @@ namespace CompetitiveRounds
             try
             {
                 if (__instance == null || __instance.m_localizedText == null) return;
+                /* Aug 8 (Sid): the announcement text recolored but the BALLS
+                 * and their point FILLS stayed vanilla orange/blue through the
+                 * whole animation, snapping to the right colour only when the
+                 * round counter took over afterwards. Tint them here — the
+                 * balls become visible immediately before every DoShowPoints
+                 * call in both sequences, so this covers point, half-point and
+                 * win animations. Runs BEFORE the winner-identity early-return
+                 * because each ball tints (or restores) independently. */
+                TintBalls(__instance);
                 int team = orangeWinner ? 0 : 1;
                 TeamColorIdentity.TeamIdentity id;
                 if (!TeamColorIdentity.TryGet(team, out id)) return;   // vanilla untouched
@@ -552,6 +590,75 @@ namespace CompetitiveRounds
                 catch { }
                 if (current == text) continue;
                 Apply(pv, text, color);
+            }
+        }
+
+        /// <summary>Images this patch has tinted (ball rings + point fills),
+        /// with their pre-tint colours — restored per team the moment that
+        /// team has no identity (feature toggled off / colour unequipped), so
+        /// a stale tint never outlives its cause.</summary>
+        private static readonly Dictionary<int, KeyValuePair<Component, Color>> _ballTinted =
+            new Dictionary<int, KeyValuePair<Component, Color>>();
+        private static FieldInfo _orangeFillField, _blueFillField;
+        private static bool _fillFieldsResolved;
+
+        private static void TintBalls(PointVisualizer pv)
+        {
+            try
+            {
+                if (!_fillFieldsResolved)
+                {
+                    _fillFieldsResolved = true;
+                    // The fills are typed UnityEngine.UI.Image — reached by
+                    // reflection because UnityEngine.UI is deliberately not a
+                    // csproj reference (#15).
+                    _orangeFillField = typeof(PointVisualizer).GetField("orangeFill",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    _blueFillField = typeof(PointVisualizer).GetField("blueFill",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                }
+                TintBallSet(pv.orangeBall, _orangeFillField?.GetValue(pv) as Component, 0);
+                TintBallSet(pv.blueBall, _blueFillField?.GetValue(pv) as Component, 1);
+            }
+            catch { }
+        }
+
+        private static void TintBallSet(Transform ball, Component fill, int team)
+        {
+            TeamColorIdentity.TeamIdentity id;
+            bool has = TeamColorIdentity.TryGet(team, out id);
+            Color tint = has ? TeamColorIdentity.ReadableOnDark(id.Color) : Color.white;
+            var targets = TeamColorIdentity.FindImages(ball, includeInactive: true);
+            if (fill != null && !targets.Contains(fill)) targets.Add(fill);
+            foreach (var img in targets)
+            {
+                if (img == null) continue;
+                int iid = img.GetInstanceID();
+                if (has)
+                {
+                    Color prev;
+                    TeamColorIdentity.TrySetComponentColor(img, tint, out prev);
+                    if (!_ballTinted.ContainsKey(iid))
+                        _ballTinted[iid] = new KeyValuePair<Component, Color>(img, prev);
+                    // Keep the element's own alpha — the ring and the fill ship
+                    // different alphas and a hard 1.0 would change the look.
+                    if (prev.a < 0.999f)
+                    {
+                        Color ignored;
+                        TeamColorIdentity.TrySetComponentColor(img,
+                            new Color(tint.r, tint.g, tint.b, prev.a), out ignored);
+                    }
+                }
+                else
+                {
+                    KeyValuePair<Component, Color> rec;
+                    if (_ballTinted.TryGetValue(iid, out rec))
+                    {
+                        Color ignored;
+                        TeamColorIdentity.TrySetComponentColor(img, rec.Value, out ignored);
+                        _ballTinted.Remove(iid);
+                    }
+                }
             }
         }
 
@@ -892,23 +999,51 @@ namespace CompetitiveRounds
                     // painting it would leak the colour into the next clone
                     // made from it, so only ACTIVE children are touched, which
                     // is also what the player can actually see.
+                    /* Aug 8 (Sid, screenshots): each button carries TWO Images
+                     * — the OUTLINE first in traversal order, the orange/blue
+                     * FILL second — and the old single-Image paint hit the
+                     * outline and left the fill vanilla, exactly backwards.
+                     * Now: the outline keeps its vanilla colour (and any tint
+                     * an earlier sweep applied is undone), every FURTHER Image
+                     * gets the player's colour, and the two-letter label is
+                     * darkened to a deep version of the same hue when the fill
+                     * is too light to carry light lettering. */
                     var t = bar.transform;
                     int painted = 0, noImage = 0;
                     for (int i = 0; i < t.childCount; i++)
                     {
                         var child = t.GetChild(i);
                         if (child == null || !child.gameObject.activeSelf) continue;
-                        var img = TeamColorIdentity.FindImage(child);
-                        if (img == null) { noImage++; continue; }
-                        Color prev;
-                        TeamColorIdentity.TrySetComponentColor(img, tint, out prev);
-                        // Remember the ORIGINAL only the first time we touch
-                        // this Image — re-recording on a later sweep would save
-                        // our own tint as the "original".
-                        int iid = img.GetInstanceID();
-                        if (!_tinted.ContainsKey(iid))
-                            _tinted[iid] = new KeyValuePair<Component, Color>(img, prev);
-                        painted++;
+                        var imgs = TeamColorIdentity.FindImages(child);
+                        if (imgs.Count == 0) { noImage++; continue; }
+                        for (int k = 0; k < imgs.Count; k++)
+                        {
+                            var img = imgs[k];
+                            if (img == null) continue;
+                            int iid = img.GetInstanceID();
+                            if (k == 0 && imgs.Count > 1)
+                            {
+                                // Outline: vanilla. Undo a tint this session's
+                                // earlier sweeps applied, then forget it.
+                                KeyValuePair<Component, Color> outlineRec;
+                                if (_tinted.TryGetValue(iid, out outlineRec))
+                                {
+                                    Color ignored;
+                                    TeamColorIdentity.TrySetComponentColor(img, outlineRec.Value, out ignored);
+                                    _tinted.Remove(iid);
+                                }
+                                continue;
+                            }
+                            Color prev;
+                            TeamColorIdentity.TrySetComponentColor(img, tint, out prev);
+                            // Remember the ORIGINAL only the first time we touch
+                            // this Image — re-recording on a later sweep would
+                            // save our own tint as the "original".
+                            if (!_tinted.ContainsKey(iid))
+                                _tinted[iid] = new KeyValuePair<Component, Color>(img, prev);
+                            painted++;
+                        }
+                        TintButtonLabel(child, tint);
                     }
 
                     // Codex Aug-7: the old version of this line announced
@@ -940,9 +1075,47 @@ namespace CompetitiveRounds
         /// <summary>Images this sweep has painted, with the colour they had
         /// BEFORE we touched them, so the tint can be undone when the player
         /// disables the feature or leaves the room. Keyed by instance id;
-        /// entries for destroyed Images are dropped on restore.</summary>
+        /// entries for destroyed Images are dropped on restore. Aug 8: label
+        /// TMP components ride the same map (TrySetComponentColor handles any
+        /// colour-bearing component), so every restore path covers them too.</summary>
         private static readonly Dictionary<int, KeyValuePair<Component, Color>> _tinted =
             new Dictionary<int, KeyValuePair<Component, Color>>();
+
+        /// <summary>Aug 8 (Sid): with the FILL now carrying the player's
+        /// colour, a very light colour (Pearl/Ivory class) makes the vanilla
+        /// light lettering unreadable — darken the label to a deep version of
+        /// the SAME hue in that case; otherwise make sure any earlier
+        /// darkening is undone.</summary>
+        private static void TintButtonLabel(Transform button, Color fill)
+        {
+            try
+            {
+                var uls = button.GetComponentInChildren<UILocalizedString>();
+                var label = TeamColorIdentity.TmpOf(uls);
+                if (label == null) return;
+                int iid = label.GetInstanceID();
+                float lum = 0.299f * fill.r + 0.587f * fill.g + 0.114f * fill.b;
+                if (lum > 0.62f)
+                {
+                    Color deep = new Color(fill.r * 0.30f, fill.g * 0.30f, fill.b * 0.30f, 1f);
+                    Color prev;
+                    TeamColorIdentity.TrySetComponentColor(label, deep, out prev);
+                    if (!_tinted.ContainsKey(iid))
+                        _tinted[iid] = new KeyValuePair<Component, Color>(label, prev);
+                }
+                else
+                {
+                    KeyValuePair<Component, Color> rec;
+                    if (_tinted.TryGetValue(iid, out rec))
+                    {
+                        Color ignored;
+                        TeamColorIdentity.TrySetComponentColor(label, rec.Value, out ignored);
+                        _tinted.Remove(iid);
+                    }
+                }
+            }
+            catch { }
+        }
 
         private static void RestoreTinted()
         {
@@ -975,18 +1148,26 @@ namespace CompetitiveRounds
             {
                 var child = bar.GetChild(i);
                 if (child == null) continue;
-                var img = TeamColorIdentity.FindImage(child);
-                if (img == null) continue;
-                int iid = img.GetInstanceID();
-                KeyValuePair<Component, Color> rec;
-                if (!_tinted.TryGetValue(iid, out rec)) continue;
-                try
-                {
-                    Color ignored;
-                    TeamColorIdentity.TrySetComponentColor(img, rec.Value, out ignored);
-                }
+                // Aug 8: restore EVERY recorded component under the button —
+                // fills (and any outline an earlier build painted) plus the
+                // darkened label; the single-Image restore missed the rest.
+                var comps = new List<Component>(TeamColorIdentity.FindImages(child, includeInactive: true));
+                try { comps.Add(TeamColorIdentity.TmpOf(child.GetComponentInChildren<UILocalizedString>())); }
                 catch { }
-                (drop ?? (drop = new List<int>())).Add(iid);
+                foreach (var comp in comps)
+                {
+                    if (comp == null) continue;
+                    int iid = comp.GetInstanceID();
+                    KeyValuePair<Component, Color> rec;
+                    if (!_tinted.TryGetValue(iid, out rec)) continue;
+                    try
+                    {
+                        Color ignored;
+                        TeamColorIdentity.TrySetComponentColor(comp, rec.Value, out ignored);
+                    }
+                    catch { }
+                    (drop ?? (drop = new List<int>())).Add(iid);
+                }
             }
             // Prune destroyed Images in the same pass — cheap, and it bounds the
             // dictionary across a long sitting.

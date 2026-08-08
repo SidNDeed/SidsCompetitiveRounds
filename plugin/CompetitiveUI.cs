@@ -3064,7 +3064,6 @@ namespace CompetitiveRounds
              * moot; IMGUI paints above the uGUI page, and DrawUI order keeps
              * every modal painting above THIS. */
             if (NativeUI.HomeChatPaneVisible) return;  // the Home tab chat pane covers this
-            bool overMenu = NativeUI.IsOpen;
 
             NativeUI.CopyChatTail(_chatEntryScratch, 8);
             var entries = _chatEntryScratch;
@@ -3097,12 +3096,11 @@ namespace CompetitiveRounds
             }
             if (visibleCount == 0) return;
 
-            // Anchor bottom-left in-game; bottom-RIGHT while the menu is open
-            // (the left column is dense tables on most tabs; the right edge
-            // below the detail panels is the quietest region — and the menu's
-            // bottom bar ends ~40px up, which yBottom already clears).
+            // Anchor bottom-left always (Sid, Aug 8: the right-edge menu
+            // placement was jarring — chat lives on the left everywhere except
+            // the Home tab, where the dedicated pane shows instead).
             float w = 440, padding = 6, lineGap = 2;
-            float x = overMenu ? Screen.width - w - 16 : 12;
+            float x = 12;
 
             // Measure every visible line first so the backdrop matches the
             // true stacked height (wrapped lines are taller than one row).
