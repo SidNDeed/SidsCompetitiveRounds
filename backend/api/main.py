@@ -23696,11 +23696,27 @@ async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_i
             mine = {"status": "searching", "series_id": None}
     if mine is not None and mine["status"] == "lobby":
         if mine["series_id"] == lobby_id:
-            # Idempotent same-lobby rejoin — the client's recovery path.
+            # Idempotent same-lobby rejoin — the client's recovery path AND
+            # (Aug 8, client find 1) its seated-preference editor: the hosted
+            # panel re-sends this join to change preferred_team /
+            # preferred_side / solo_extra_pick, so the branch must ADOPT
+            # those fields, not just refresh liveness. Same clamps as the
+            # fresh-enroll path below.
+            _re_pref = getattr(req, "preferred_team" if mode == "team" else "preferred_side", None)
+            if _re_pref is not None and int(_re_pref) not in (1, 2):
+                _re_pref = None
+            _re_pref = int(_re_pref) if _re_pref is not None else None
+            if mode == "ovt" and _re_pref is None:
+                _re_pref = 0
+            _re_pref_col = "preferred_team" if mode == "team" else "preferred_side"
+            _re_sep_sql = ", solo_extra_pick = :sep" if mode == "ovt" else ""
             await db.execute(text(
-                f"UPDATE {q} SET last_polled = NOW(), display_name = :dn"
+                f"UPDATE {q} SET last_polled = NOW(), display_name = :dn,"
+                f"       {_re_pref_col} = :pref{_re_sep_sql}"
                 f" WHERE player_id = :pid"
-            ), {"pid": player.id, "dn": (req.display_name or "Player")[:64]})
+            ), {"pid": player.id, "dn": (req.display_name or "Player")[:64],
+                "pref": _re_pref,
+                **({"sep": bool(getattr(req, "solo_extra_pick", False))} if mode == "ovt" else {})})
             return
         raise HTTPException(409, "Leave your current lobby first")
     if mine is not None and mine["status"] != "searching":

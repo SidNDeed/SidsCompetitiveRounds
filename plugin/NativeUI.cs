@@ -1413,6 +1413,7 @@ namespace CompetitiveRounds
             comparePickerRows.Clear();comparePickerTexts.Clear();comparePickerSteamIds.Clear();
             ffaBrowserRows.Clear();ffaBetLobbyRows.Clear();ffaCfgHostBtns.Clear();
             teamLobbyBrowserRows.Clear();ovtLobbyBrowserRows.Clear();   // v1.37 host-lobby pools (#147/#149/#150)
+            teamLobbyMemberRows.Clear();ovtLobbyMemberRows.Clear();ffaLobbyMemberRows.Clear();   // Aug 8 kick-row pools
             teamLiveRows.Clear();teamLiveRowsHost=null;ovtLiveRows.Clear();ovtLiveRowsHost=null;
             /* Codex review: these are keyed by Image components owned by the
              * DESTROYED page. A stale key makes the next animation tick throw
@@ -1737,6 +1738,18 @@ namespace CompetitiveRounds
         }
         private static readonly List<HostLobbyBrowserRow> teamLobbyBrowserRows = new List<HostLobbyBrowserRow>();
         private static readonly List<HostLobbyBrowserRow> ovtLobbyBrowserRows = new List<HostLobbyBrowserRow>();
+        // Aug 8 (Sid): pooled SEATED member rows — one text cell + a host-only
+        // [Kick] button. targetSteamId is bound at fill time and read at click
+        // time (#265); the CreateButton callback is ClickGuard-wrapped (#158).
+        private sealed class LobbyMemberRow
+        {
+            public GameObject root, kickBtn;
+            public object txt;
+            public string targetSteamId;
+        }
+        private static readonly List<LobbyMemberRow> teamLobbyMemberRows = new List<LobbyMemberRow>();
+        private static readonly List<LobbyMemberRow> ovtLobbyMemberRows = new List<LobbyMemberRow>();
+        private static readonly List<LobbyMemberRow> ffaLobbyMemberRows = new List<LobbyMemberRow>();
         private static object txtTeamLobbyHeader, txtTeamLobbyBody, txtOvtHostLobbyHeader, txtOvtHostLobbyBody;
         private static GameObject teamLobbyBrowserHost, ovtLobbyBrowserHost;
         private static GameObject teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyPrefBtn, teamLobbyStartBtn, teamLobbyLeaveBtn;
@@ -3322,8 +3335,22 @@ namespace CompetitiveRounds
             if(inLobby)
             {
                 for(int i=0;i<ffaBrowserRows.Count;i++)ffaBrowserRows[i].root.SetActive(false);
-                var mem=ApiClient.FfaLobbyMembers;
-                int n=mem?.Count??0;
+                // Aug 8 (Sid): pooled member ROWS with a host-only [Kick]
+                // beside every member but the host themselves.
+                int n=FillLobbyMemberRows(ffaLobbyMemberRows,ffaBrowserContainer.transform,"FfaMem",
+                    17f,t=>ApiClient.FfaKickFromLobby(t),ApiClient.FfaLobbyMembers,ApiClient.FfaLobbyIsHost,
+                    m=>m.steam_id,
+                    m=>{
+                        bool isMe=m.steam_id==MatchTracker.LocalSteamId;
+                        string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
+                        string ratingDisplay=m.rating>0
+                            ?$"<color=#FFFFFF>FFA {m.rating}</color>"
+                            :$"<color=#DDDDDD>1v1 {m.rating_1v1}</color>";
+                        string hostTag=m.is_host?"  <color=#FFD94D>"+I18n.Tr("HOST")+"</color>":"";
+                        int waitMin=m.wait_seconds/60,waitSec=m.wait_seconds%60;
+                        string waitStr=waitMin>0?$"{waitMin}m{waitSec:D2}s":$"{waitSec}s";
+                        return $"{nameC}{FfaSafeRich(Trunc(m.display_name,18))}</color>  {ratingDisplay}{hostTag}  <color=#888>{waitStr}</color>";
+                    });
                 UIFactory.SetText(txtFfaLobbyHeader,
                     I18n.TrF("<b>Your Lobby</b>  <color=#888>({0}/{1} - host starts at {2}+)</color>",Math.Max(n,ApiClient.FfaLobbyMemberCount),ApiClient.FfaLobbyMaxPlayers,ApiClient.FfaLobbyMinPlayers));
                 if(n==0)
@@ -3333,25 +3360,14 @@ namespace CompetitiveRounds
                 }
                 else
                 {
-                    var sb=new StringBuilder();
-                    foreach(var m in mem)
-                    {
-                        bool isMe=m.steam_id==MatchTracker.LocalSteamId;
-                        string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
-                        string ratingDisplay=m.rating>0
-                            ?$"<color=#FFFFFF>FFA {m.rating}</color>"
-                            :$"<color=#DDDDDD>1v1 {m.rating_1v1}</color>";
-                        string hostTag=m.is_host?"  <color=#FFD94D>HOST</color>":"";
-                        int waitMin=m.wait_seconds/60,waitSec=m.wait_seconds%60;
-                        string waitStr=waitMin>0?$"{waitMin}m{waitSec:D2}s":$"{waitSec}s";
-                        sb.Append($"  {nameC}{FfaSafeRich(Trunc(m.display_name,18))}</color>  {ratingDisplay}{hostTag}  <color=#888>{waitStr}</color>\n");
-                    }
-                    UIFactory.SetText(txtFfaLobbyBody,sb.ToString());
-                    newH=(int)(n*23f+6);
+                    UIFactory.SetText(txtFfaLobbyBody,"");
+                    newH=2;
                 }
             }
             else
             {
+                for(int i=0;i<ffaLobbyMemberRows.Count;i++)
+                { ffaLobbyMemberRows[i].targetSteamId=null; ffaLobbyMemberRows[i].root.SetActive(false); }
                 var lobbies=ApiClient.CachedFfaLobbies;
                 int n=lobbies?.Count??0;
                 UIFactory.SetText(txtFfaLobbyHeader,n==0
@@ -3371,9 +3387,15 @@ namespace CompetitiveRounds
                     /* ASCII marker only — Gravity has no padlock glyph (#47).
                      * Compose-after-Tr, written Raw (#298c). */
                     string privTag=l.has_password?I18n.Tr("<color=#FFD94D>[PRIVATE]</color>")+"  ":"";
+                    // Aug 8 (Sid): second line = WHO is inside ("(1v1)" suffix
+                    // when the FFA glicko isn't established yet).
+                    string memberLine=BuildLobbyMemberLine(l.members,showUnestablished:true);
                     UIFactory.SetTextRaw(row.txtInfo,
                         privTag+I18n.TrF("<color=#FFFFFF>{0}'s lobby</color>  <color=#7FD4FF>{1}/{2}</color>  <color=#888>open {3}</color>",
-                            FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age));
+                            FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age)
+                        +(memberLine!=null?"\n<size=13>"+memberLine+"</size>":""));
+                    // Re-asserted per fill — pooled rows swap shapes (#63).
+                    UIFactory.SetPrefH(row.root,memberLine!=null?54f:31f);
                     bool joinable=l.player_count<l.max_players
                         &&ApiClient.FfaQueueStatus!="leaving";
                     row.joinBtn.SetActive(joinable);
@@ -3402,6 +3424,104 @@ namespace CompetitiveRounds
         }
 
         // ── Shared host-lobby panel machinery (v1.37 private lobbies) ──────
+        private static LobbyMemberRow CreateLobbyMemberRow(Transform parent,string name,float fontSize,Action<string> kick)
+        {
+            var row=new LobbyMemberRow();
+            row.root=new GameObject(name);
+            row.root.transform.SetParent(parent,false);
+            row.root.AddComponent<RectTransform>();
+            UIFactory.AddHLG(row.root,spacing:8,padL:6,padR:6,forceExpandH:false);
+            UIFactory.AddLE(row.root,prefH:27,minH:27,flexH:0);
+            row.txt=CreateFfaTextCell("M",row.root.transform,700,UIFactory.AlignMidLeft,fontSize,C_WHITE,true,300);
+            UIFactory.SetOverflowMode(row.txt,3);
+            row.kickBtn=UIFactory.CreateButton("Kick",row.root.transform,"Kick",13f,C_WHITE,
+                new Color(0.5f,0.2f,0.2f,0.9f),
+                ()=>{if(!string.IsNullOrEmpty(row.targetSteamId))kick(row.targetSteamId);dirty=true;},
+                sizeDelta:new Vector2(64,22));
+            SetFfaLayoutWidth(row.kickBtn,64f,0f,64f);
+            row.kickBtn.SetActive(false);
+            row.root.SetActive(false);
+            return row;
+        }
+
+        /// <summary>Validate a server-sent hex color before it enters rich
+        /// text; returns "#RRGGBB" or null.</summary>
+        private static string SafeHexColor(string c)
+        {
+            if(string.IsNullOrEmpty(c))return null;
+            string s=c.StartsWith("#")?c:"#"+c;
+            if(s.Length!=7)return null;
+            for(int i=1;i<7;i++)
+            {
+                char ch=s[i];
+                if(!((ch>='0'&&ch<='9')||(ch>='a'&&ch<='f')||(ch>='A'&&ch<='F')))return null;
+            }
+            return s;
+        }
+
+        /// <summary>Aug 8 (Sid): browser second line — who's inside a lobby
+        /// before joining: "Name Title (1234)". Names AND titles are
+        /// user-authored -> FfaSafeRich; per-member Trunc; first 5 members +
+        /// "+N more" so a 10-player FFA can't snake off the row. Returns null
+        /// when the server sent no members array (old server) -> one-line row.</summary>
+        private static string BuildLobbyMemberLine(List<ApiClient.LobbyBrowserMember> members,bool showUnestablished)
+        {
+            if(members==null||members.Count==0)return null;
+            var sb=new StringBuilder();
+            int shown=0;
+            foreach(var m in members)
+            {
+                if(shown>=5)
+                {
+                    sb.Append("  ").Append(I18n.TrF("<color=#888>+{0} more</color>",members.Count-shown));
+                    break;
+                }
+                if(shown>0)sb.Append("<color=#555>,</color>  ");
+                string nm=FfaSafeRich(Trunc(m.name,12));
+                string title="";
+                if(!string.IsNullOrEmpty(m.title))
+                {
+                    string tc=SafeHexColor(m.title_color)??"#9AA6B5";
+                    title=$" <color={tc}>{FfaSafeRich(Trunc(m.title,14))}</color>";
+                }
+                string est=(showUnestablished&&!m.established)?" 1v1":"";
+                sb.Append($"<color=#DDD>{nm}</color>{title} <color=#888>({m.rating}{est})</color>");
+                shown++;
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Fill the pooled seated member rows shared by the 2v2/1v2
+        /// hosted panels and the FFA in-lobby list. lineFor renders one
+        /// member's text; kick buttons show for the HOST beside everyone but
+        /// themselves (admin refusal is the server's call — token-mapped).</summary>
+        private static int FillLobbyMemberRows<T>(List<LobbyMemberRow> rows,Transform parent,string poolTag,
+            float fontSize,Action<string> kick,List<T> members,bool localIsHost,
+            Func<T,string> steamIdOf,Func<T,string> lineFor)
+        {
+            int n=members?.Count??0;
+            while(rows.Count<Math.Min(n,12))
+                rows.Add(CreateLobbyMemberRow(parent,$"{poolTag}{rows.Count}",fontSize,kick));
+            string mySid=MatchTracker.LocalSteamId;
+            for(int i=0;i<rows.Count;i++)
+            {
+                var row=rows[i];
+                if(members==null||i>=members.Count)
+                {
+                    row.targetSteamId=null;
+                    row.root.SetActive(false);
+                    continue;
+                }
+                var m=members[i];
+                string sid=steamIdOf(m);
+                row.targetSteamId=sid;   // #265: bind what this row RENDERS
+                UIFactory.SetTextRaw(row.txt,lineFor(m));
+                row.kickBtn.SetActive(localIsHost&&!string.IsNullOrEmpty(sid)&&sid!=mySid);
+                row.root.SetActive(true);
+            }
+            return n;
+        }
+
         private static HostLobbyBrowserRow CreateHostLobbyBrowserRow(Transform parent,string name,bool team)
         {
             var row=new HostLobbyBrowserRow();
@@ -3448,6 +3568,7 @@ namespace CompetitiveRounds
         /// dynamic-height write mirrors RenderFfaLobbySection's prefH+minH+
         /// sizeDelta triple so #63's collapse can't happen.</summary>
         private static void RenderHostLobbySection(ApiClient.HostLobbyClient cli,List<HostLobbyBrowserRow> rows,
+            List<LobbyMemberRow> memberRows,Action<string> kickAction,
             GameObject browserHost,object headerTxt,object bodyTxt,bool team,
             GameObject createBtn,GameObject createPrivBtn,GameObject startBtn,GameObject leaveBtn,GameObject prefBtn)
         {
@@ -3486,21 +3607,12 @@ namespace CompetitiveRounds
             if(seated)
             {
                 for(int i=0;i<rows.Count;i++)rows[i].root.SetActive(false);
-                var mem=cli.Members;
-                int n=mem?.Count??0;
-                UIFactory.SetTextRaw(headerTxt,seatedHdr
-                    +I18n.TrF("  <color=#888>({0}/{1}{2})</color>",Math.Max(n,cli.MemberCount),cli.MaxPlayers,
-                        cli.HasPassword?" - "+I18n.Tr("private"):""));
-                if(n==0)
-                {
-                    UIFactory.SetTextRaw(bodyTxt,I18n.Tr("<color=#888>Loading members...</color>"));
-                    newH=24;
-                }
-                else
-                {
-                    var sb=new StringBuilder();
-                    foreach(var m in mem)
-                    {
+                // Aug 8 (Sid): pooled member ROWS with a host-only [Kick]
+                // beside every member but the host themselves.
+                int n=FillLobbyMemberRows(memberRows,browserHost.transform,team?"THLM":"O1HM",
+                    team?14f:16f,kickAction,cli.Members,cli.IsHost,
+                    m=>m.steam_id,
+                    m=>{
                         bool isMe=m.steam_id==MatchTracker.LocalSteamId;
                         string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
                         string hostTag=m.is_host?"  <color=#FFD94D>"+I18n.Tr("HOST")+"</color>":"";
@@ -3519,16 +3631,26 @@ namespace CompetitiveRounds
                         string ratingStr=team&&m.rating>0
                             ?$"<color=#FFFFFF>2v2 {m.rating}</color>"
                             :$"<color=#DDDDDD>1v1 {m.rating_1v1}</color>";
-                        sb.Append($"  {nameC}{FfaSafeRich(Trunc(m.display_name,18))}</color>  {ratingStr}{prefTag}{hostTag}  <color=#888>{waitStr}</color>\n");
-                    }
-                    UIFactory.SetTextRaw(bodyTxt,sb.ToString());
-                    // 22px/line covers the 1v2 panel's 16pt body and the OS
-                    // fallback fonts' taller metrics (#297's class).
-                    newH=(int)(n*22f+8);
+                        return $"{nameC}{FfaSafeRich(Trunc(m.display_name,18))}</color>  {ratingStr}{prefTag}{hostTag}  <color=#888>{waitStr}</color>";
+                    });
+                UIFactory.SetTextRaw(headerTxt,seatedHdr
+                    +I18n.TrF("  <color=#888>({0}/{1}{2})</color>",Math.Max(n,cli.MemberCount),cli.MaxPlayers,
+                        cli.HasPassword?" - "+I18n.Tr("private"):""));
+                if(n==0)
+                {
+                    UIFactory.SetTextRaw(bodyTxt,I18n.Tr("<color=#888>Loading members...</color>"));
+                    newH=24;
+                }
+                else
+                {
+                    UIFactory.SetTextRaw(bodyTxt,"");
+                    newH=2;
                 }
             }
             else
             {
+                for(int i=0;i<memberRows.Count;i++)
+                { memberRows[i].targetSteamId=null; memberRows[i].root.SetActive(false); }
                 var lobbies=cli.CachedLobbies;
                 int n=lobbies?.Count??0;
                 UIFactory.SetTextRaw(headerTxt,n==0
@@ -3547,9 +3669,16 @@ namespace CompetitiveRounds
                     string age=ageMin>0?$"{ageMin}m":$"{l.age_seconds}s";
                     /* ASCII marker only — no padlock glyph in Gravity (#47). */
                     string privTag=l.has_password?I18n.Tr("<color=#FFD94D>[PRIVATE]</color>")+"  ":"";
+                    // Aug 8 (Sid): second line = WHO is inside (1v2 is unrated,
+                    // so no "(1v1)" fallback suffix there).
+                    string memberLine=BuildLobbyMemberLine(l.members,showUnestablished:team);
                     UIFactory.SetTextRaw(row.txtInfo,
                         privTag+I18n.TrF("<color=#FFFFFF>{0}'s lobby</color>  <color=#7FD4FF>{1}/{2}</color>  <color=#888>open {3}</color>",
-                            FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age));
+                            FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age)
+                        +(memberLine!=null?"\n<size=13>"+memberLine+"</size>":""));
+                    // Two-line rows grow; re-asserted every fill because the
+                    // pooled row may swap between shapes (#63 prefH rules).
+                    UIFactory.SetPrefH(row.root,memberLine!=null?50f:29f);
                     row.joinBtn.SetActive(l.player_count<l.max_players&&!leaving&&!busy);
                     row.root.SetActive(true);
                 }
@@ -3577,15 +3706,27 @@ namespace CompetitiveRounds
         }
 
         // ── 1v2 tab (solo vs duo; UNSCORED beta) ──────────────────────────
-        private static object txtOvtStatus, txtOvtLobbyHeader, txtOvtLobbyBody, txtOvtSoloLbHeader, txtOvtDuoLbHeader, txtOvtRecentHeader, txtOvtRecentPage;
+        private static object txtOvtStatus, txtOvtSoloLbHeader, txtOvtDuoLbHeader, txtOvtRecentHeader, txtOvtRecentPage;
         // Aug 7 item 13: live 1v2 games panel (fed by the spectate eligibility
         // feed; reuses the TeamLiveRow shape — text + bound WATCH button).
         private static GameObject ovtLivePanel, ovtLiveRowsHost;
         private static object txtOvtLiveHeader;
         private static readonly List<TeamLiveRow> ovtLiveRows = new List<TeamLiveRow>();
-        private static GameObject ovtJoinBtn, ovtLeaveBtn, ovtSideBtn, ovtExtraBtn, ovtSoloLbContainer, ovtDuoLbContainer, ovtRecentContainer, ovtRecentPrevBtn, ovtRecentNextBtn;
+        private static GameObject ovtLeaveBtn, ovtSideBtn, ovtExtraBtn, ovtSoloLbContainer, ovtDuoLbContainer, ovtRecentContainer, ovtRecentPrevBtn, ovtRecentNextBtn;
         private static int ovtPreferredSide = 0;   // 0 any, 1 solo, 2 duo
         private static bool ovtSoloExtraPick = false;
+        /// <summary>Aug 8: the extra pick is the HOST's setting. Seated =
+        /// render the host member's row value (ground truth from the state
+        /// payload); browsing = the local toggle that rides create/join.</summary>
+        private static bool OvtEffectiveExtraPick()
+        {
+            if(!string.IsNullOrEmpty(ApiClient.OvtLobby.OpenLobbyId))
+            {
+                var mem=ApiClient.OvtLobby.Members;
+                if(mem!=null)foreach(var m in mem)if(m.is_host)return m.solo_extra_pick;
+            }
+            return ovtSoloExtraPick;
+        }
         private static readonly List<object> ovtSoloLbRows = new List<object>();
         private static readonly List<object> ovtDuoLbRows = new List<object>();
         private static readonly List<object> ovtRecentRows = new List<object>();
@@ -3615,36 +3756,21 @@ namespace CompetitiveRounds
             UIFactory.CreateButton("O1Info",o1HdrRow.transform,"Info",18f,C_WHITE,C_BTN,()=>ShowInfoPopup(ModeInfoText.OvtTitle,ModeInfoText.Ovt),sizeDelta:new Vector2(110,34));
             UIFactory.CreateText("O1Beta",panel.transform,"<color=#FFCC44>UNRATED</color> — stats, gold and XP count. Ratings never change.",19f,C_DIM,sizeDelta:new Vector2(915,29));
 
-            // Queue controls row.
-            var ctl=new GameObject("O1Ctl");ctl.transform.SetParent(panel.transform,false);ctl.AddComponent<RectTransform>();
-            UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:46,flexH:0);
-            ovtSideBtn=UIFactory.CreateButton("O1Side",ctl.transform,"Side: Any",18f,C_WHITE,C_BTN,()=>{ovtPreferredSide=(ovtPreferredSide+1)%3;dirty=true;},sizeDelta:new Vector2(144,37));
-            ovtExtraBtn=UIFactory.CreateButton("O1Extra",ctl.transform,"Solo Extra Initial Pick: OFF",18f,C_WHITE,C_BTN,()=>{ovtSoloExtraPick=!ovtSoloExtraPick;dirty=true;},sizeDelta:new Vector2(283,37));
-            /* 217 (was 181): RU "Войти в лобби 1v2" clipped at 181 (Aug 3 screenshot) — +20%; the ctl row runs ~764/915 so the slack exists. */ovtJoinBtn=UIFactory.CreateButton("O1Join",ctl.transform,"Join 1v2 Lobby",19f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.OvtJoinQueue(ovtPreferredSide,ovtSoloExtraPick);dirty=true;},sizeDelta:new Vector2(217,37));
-            ovtLeaveBtn=UIFactory.CreateButton("O1Leave",ctl.transform,"Leave",19f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.OvtLeaveQueue();dirty=true;},sizeDelta:new Vector2(108,37));
-            // How the toggle actually resolves (server ORs it across the
-            // lobby) + honest status: recorded but not yet applied in-game.
-            var ovtNote=UIFactory.CreateText("O1Note",panel.transform,"<color=#888>Solo Extra Initial Pick: the solo gets one extra card in the game's FIRST draw only. It's ON for the match if ANY of the three lobby members turned it on.  <color=#7FDF7F>Active in-game</color> <color=#888>— the solo's first pick screen deals twice.</color>",16f,C_DIM,sizeDelta:new Vector2(915,46));
+            /* Aug 8 (Sid): the consent-queue "Join 1v2 Lobby" surface is
+             * retired - the hosted Custom 1v2 Lobbies panel below is the only
+             * way in. The QUEUE-FLOW code (ready_join auto-join, polls,
+             * OvtLeaveQueue) all stays: the hosted Start hands off to it.
+             * Side / Solo-extra-pick moved into the hosted panel's row. */
+            var ovtNote=UIFactory.CreateText("O1Note",panel.transform,"<color=#888>Solo Extra Initial Pick: the solo gets one extra card in the game's FIRST draw only. The HOST's toggle decides it for the match.  <color=#7FDF7F>Active in-game</color> <color=#888>— the solo's first pick screen deals twice.</color>",16f,C_DIM,sizeDelta:new Vector2(915,46));
             UIFactory.SetWordWrap(ovtNote,true);
             txtOvtStatus=UIFactory.CreateText("O1St",panel.transform,"Not in queue.",20f,C_LABEL,sizeDelta:new Vector2(915,32));
 
-            // In-lobby panel (2v2 "In Queue" parity): who's queueing, their
-            // 1v1/2v2 elo, side preference, wait time, status.
-            var lobbyPanel=UIFactory.CreatePanel("O1QL",panel.transform,C_PANEL);
-            UIFactory.AddVLG(lobbyPanel,spacing:2,padL:10,padR:10,padT:6,padB:6);
-            UIFactory.AddLE(lobbyPanel,flexH:0);
-            txtOvtLobbyHeader=UIFactory.CreateText("O1QLH",lobbyPanel.transform,"<b>1v2 Lobby</b>",21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(891,29));
-            txtOvtLobbyBody=UIFactory.CreateText("O1QLB",lobbyPanel.transform,"<color=#888>Loading…</color>",19f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(891,29));
-            var qlbComp=txtOvtLobbyBody as Component;
-            if(qlbComp!=null)UIFactory.AddLE(qlbComp.gameObject,prefH:29,minH:29,flexH:0);
-            UIFactory.SetWordWrap(txtOvtLobbyBody,true);
-
-            /* v1.37 private lobbies: host-controlled CUSTOM lobbies (create /
-             * browse / password / host Start), distinct from the consent
-             * QUEUE panel above — which this tab already calls "1v2 Lobby",
-             * hence "Custom 1v2 Lobby" here (recon C naming note). The Side /
-             * Solo-Extra-Pick toggles above apply to BOTH: their values ride
-             * the custom lobby's create/join body too. */
+            /* v1.37 private lobbies, Aug 8 revision: hosted CUSTOM lobbies
+             * (create / browse / password / host Start) are the ONLY custom
+             * 1v2 entry — the consent-queue Join button and its list panel
+             * are retired (the queue-flow CODE stays; Start hands off to it).
+             * Side / Solo-extra-pick live in this panel's row and ride the
+             * create/join body; the extra pick is the HOST's setting. */
             var ovtHostPanel=UIFactory.CreatePanel("O1Host",panel.transform,C_PANEL);
             UIFactory.AddVLG(ovtHostPanel,spacing:3,padL:10,padR:10,padT:6,padB:6);
             UIFactory.AddLE(ovtHostPanel,flexH:0);
@@ -3656,12 +3782,43 @@ namespace CompetitiveRounds
             ovtLobbyCreatePrivBtn=UIFactory.CreateButton("O1HPriv",o1hCtl.transform,"Create Private...",16f,C_WHITE,new Color(0.40f,0.30f,0.55f,0.9f),
                 ()=>{CompetitiveUI.OpenArtistInput(I18n.Tr("Create Private 1v2 Lobby"),I18n.Tr("Password (share it with friends)"),"",
                     pw=>{ApiClient.OvtLobbyCreate(ovtPreferredSide,ovtSoloExtraPick,pw);dirty=true;});},sizeDelta:new Vector2(180,28));
+            ovtSideBtn=UIFactory.CreateButton("O1HSide",o1hCtl.transform,"Side: Any",16f,C_WHITE,C_BTN,
+                ()=>{
+                    ovtPreferredSide=(ovtPreferredSide+1)%3;
+                    // Seated members push the change via the idempotent
+                    // same-lobby rejoin (needs the server to adopt prefs on
+                    // that path - flagged to Sid; harmless no-op until then).
+                    if(!string.IsNullOrEmpty(ApiClient.OvtLobby.OpenLobbyId))
+                        ApiClient.OvtLobbyResendPrefs(ovtPreferredSide,ovtSoloExtraPick);
+                    dirty=true;
+                },sizeDelta:new Vector2(120,28));
+            /* Aug 8 (Sid): the extra pick is the HOST's setting now - the
+             * server's hosted Start reads only the host's value. Non-hosts
+             * see it; only the host's click changes it (FFA settings-row
+             * host-gating pattern - the server stays the real gate). */
+            ovtExtraBtn=UIFactory.CreateButton("O1HExtra",o1hCtl.transform,"Solo extra pick (host): OFF",16f,C_WHITE,C_BTN,
+                ()=>{
+                    bool seated=!string.IsNullOrEmpty(ApiClient.OvtLobby.OpenLobbyId);
+                    if(seated&&!ApiClient.OvtLobby.IsHost)
+                    {
+                        CompetitiveUI.ShowNotification(I18n.Tr("Only the host decides this."),C_DIM,3f);
+                        return;
+                    }
+                    ovtSoloExtraPick=!OvtEffectiveExtraPick();
+                    if(seated)ApiClient.OvtLobbyResendPrefs(ovtPreferredSide,ovtSoloExtraPick);
+                    dirty=true;
+                },sizeDelta:new Vector2(250,28));
             ovtLobbyStartBtn=UIFactory.CreateButton("O1HStart",o1hCtl.transform,"Start Game",16f,C_WHITE,new Color(0.55f,0.42f,0.10f,0.95f),
                 ()=>{ApiClient.OvtLobby.StartLobby();dirty=true;},sizeDelta:new Vector2(190,28));
             ovtLobbyStartBtn.SetActive(false);
             ovtLobbyLeaveBtn=UIFactory.CreateButton("O1HLeave",o1hCtl.transform,"Leave Lobby",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),
                 ()=>{ApiClient.OvtLobby.LeaveLobby();dirty=true;},sizeDelta:new Vector2(140,28));
             ovtLobbyLeaveBtn.SetActive(false);
+            // QUEUE-flow escape (post-Start locks, legacy states) - kept from
+            // the retired queue row; visibility managed by RefreshOneVTwoTab.
+            ovtLeaveBtn=UIFactory.CreateButton("O1QLeave",o1hCtl.transform,"Leave Queue",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),
+                ()=>{ApiClient.OvtLeaveQueue();dirty=true;},sizeDelta:new Vector2(140,28));
+            ovtLeaveBtn.SetActive(false);
             ovtLobbyBrowserHost=new GameObject("O1HBrowser");
             ovtLobbyBrowserHost.transform.SetParent(ovtHostPanel.transform,false);
             ovtLobbyBrowserHost.AddComponent<RectTransform>();
@@ -3762,7 +3919,6 @@ namespace CompetitiveRounds
         {
             if(currentTab!=11)return;
             ApiClient.UpdateOvtQueuePoll(false);   // safe no-op when not polling
-            ApiClient.UpdateOvtQueueList(false);   // lobby panel snapshot (2s throttle)
             // v1.37 custom lobbies: one-shot membership rediscovery (a
             // relaunched client's seat must be found before its lease dies)
             // + the browser fetch. The state HEARTBEAT itself runs from
@@ -3792,7 +3948,9 @@ namespace CompetitiveRounds
         private static void RefreshOneVTwoTab()
         {
             if(ovtSideBtn!=null)UIFactory.SetText(UIFactory.GetButtonText(ovtSideBtn),ovtPreferredSide==1?"Side: Solo":ovtPreferredSide==2?"Side: Duo":"Side: Any");
-            if(ovtExtraBtn!=null)UIFactory.SetText(UIFactory.GetButtonText(ovtExtraBtn),ovtSoloExtraPick?"Solo extra pick: ON":"Solo extra pick: OFF");
+            // Aug 8: host's setting - seated members render the HOST's row
+            // value (ground truth from the state payload), not their local.
+            if(ovtExtraBtn!=null)UIFactory.SetText(UIFactory.GetButtonText(ovtExtraBtn),OvtEffectiveExtraPick()?"Solo extra pick (host): ON":"Solo extra pick (host): OFF");
             bool polling=ApiClient.IsOvtQueuePolling;
             // Locked = a lock landed (pending slot / active series) even though
             // polling stopped. In that state Join must stay HIDDEN (re-joining
@@ -3804,10 +3962,7 @@ namespace CompetitiveRounds
             bool ovtLocked=Plugin.PendingOvtSlot>=0||!string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId);
             bool inOvtRoom=false;
             try{inOvtRoom=PhotonNetwork.InRoom&&(PhotonNetwork.CurrentRoom?.Name??"").StartsWith("ovt_");}catch{}
-            // v1.37: a held custom-lobby seat hides the consent-queue Join —
-            // OvtJoinQueue would clobber the seat's row server-side.
             bool ovtSeated=!string.IsNullOrEmpty(ApiClient.OvtLobby.OpenLobbyId);
-            if(ovtJoinBtn!=null)ovtJoinBtn.SetActive(!polling&&!ovtLocked&&!inOvtRoom&&!ovtSeated&&ApiClient.OvtQueueStatus!="leaving");
             if(ovtLeaveBtn!=null)ovtLeaveBtn.SetActive((polling||ovtLocked)&&!inOvtRoom);
             if(txtOvtStatus!=null)
             {
@@ -3830,10 +3985,10 @@ namespace CompetitiveRounds
                 else msg=I18n.Tr("Not in queue.");
                 UIFactory.SetTextRaw(txtOvtStatus,msg);
             }
-            RenderOvtLobbySection();
             // v1.37 custom lobbies panel (create/browse/password/host Start).
-            RenderHostLobbySection(ApiClient.OvtLobby,ovtLobbyBrowserRows,ovtLobbyBrowserHost,
-                txtOvtHostLobbyHeader,txtOvtHostLobbyBody,team:false,
+            RenderHostLobbySection(ApiClient.OvtLobby,ovtLobbyBrowserRows,
+                ovtLobbyMemberRows,t=>ApiClient.OvtLobby.Kick(t),
+                ovtLobbyBrowserHost,txtOvtHostLobbyHeader,txtOvtHostLobbyBody,team:false,
                 ovtLobbyCreateBtn,ovtLobbyCreatePrivBtn,ovtLobbyStartBtn,ovtLobbyLeaveBtn,null);
             // Aug 7 item 13: live 1v2 games straight from the spectate feed.
             RenderOvtLiveGames();
@@ -3986,64 +4141,7 @@ namespace CompetitiveRounds
             return sb.ToString();
         }
 
-        // Same shape as RenderTeamQueueSection: text-line body with a dynamic
-        // LayoutElement height so an empty lobby collapses to one line. 1v2 is
-        // unscored, so the context ratings are the queuer's 1v1 elo (always)
-        // and 2v2 elo (when they have a completed 2v2 series).
-        private static void RenderOvtLobbySection()
-        {
-            if(txtOvtLobbyHeader==null||txtOvtLobbyBody==null)return;
-            var list=ApiClient.CachedOvtQueueList;
-            int n=list!=null?list.Count:0;
-            float perRow=24f;
-            int newH;
-            if(n==0)
-            {
-                UIFactory.SetText(txtOvtLobbyHeader,"<b>1v2 Lobby</b>  <color=#888>(empty)</color>");
-                UIFactory.SetText(txtOvtLobbyBody,list==null?"<color=#888>Loading…</color>":"<color=#888>No one in the 1v2 lobby right now.</color>");
-                newH=29;
-            }
-            else
-            {
-                UIFactory.SetTextRaw(txtOvtLobbyHeader,I18n.TrF("<b>1v2 Lobby</b>  <color=#888>({0} — locks at 3)</color>",n));
-                var sb=new StringBuilder();
-                foreach(var q in list)
-                {
-                    bool isMe=q.steam_id==MatchTracker.LocalSteamId;
-                    string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
-                    string ratingDisplay=$"<color=#FFFFFF>{q.rating_1v1}</color> <color=#888>1v1</color>";
-                    if(q.rating_2v2>0)ratingDisplay+=$"  <color=#DDDDDD>{q.rating_2v2}</color> <color=#888>2v2</color>";
-                    string sideTag;
-                    if(q.side_assigned==1)sideTag=I18n.Tr("<color=#FFB347><b>SOLO</b></color>");
-                    else if(q.side_assigned==2)sideTag=I18n.Tr("<color=#88AAFF><b>DUO</b></color>");
-                    else if(q.preferred_side==1)sideTag=I18n.Tr("<color=#FFB347>wants solo</color>");
-                    else if(q.preferred_side==2)sideTag=I18n.Tr("<color=#88AAFF>wants duo</color>");
-                    else sideTag=I18n.Tr("<color=#888>any side</color>");
-                    // Wire values (q.status) stay untranslated in the fallback branch.
-                    string statusTag=q.status=="searching"?I18n.Tr("<color=#66CCFF>searching</color>")
-                        :q.status=="ready_join"?I18n.Tr("<color=#88FF88>locked</color>"):$"<color=#FFD94D>{q.status}</color>";
-                    int waitMin=q.wait_seconds/60,waitSec=q.wait_seconds%60;
-                    string waitStr=waitMin>0?$"{waitMin}m{waitSec:D2}s":$"{waitSec}s";
-                    string extraTag=q.solo_extra_pick?"  "+I18n.Tr("<color=#888>+pick</color>"):"";
-                    sb.Append($"  {nameC}{Trunc(q.display_name,18)}</color>  {ratingDisplay}  {sideTag}  {statusTag}  <color=#888>{waitStr}</color>{extraTag}\n");
-                }
-                UIFactory.SetTextRaw(txtOvtLobbyBody,sb.ToString());
-                newH=(int)(n*perRow+6);
-            }
-            var bodyComp=txtOvtLobbyBody as Component;
-            if(bodyComp!=null)
-            {
-                var le=bodyComp.gameObject.GetComponent(UIFactory.tLE);
-                if(le!=null)
-                {
-                    UIFactory.tLE.GetProperty("preferredHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,(float)newH);
-                    UIFactory.tLE.GetProperty("minHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,(float)newH);
-                }
-                var rt=bodyComp.GetComponent<RectTransform>();
-                if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
-            }
-        }
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -18031,7 +18129,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
 
         // ── 2v2 tab ───────────────────────────────────────────────
         private static object txtTeamHeader, txtTeamStatus, txtTeamMembers, txtTeamLBHeader;
-        private static GameObject teamSearchBtn, teamSearchCustomBtn, teamLeaveBtn, teamReadyBtn, teamLBContainer;
+        private static GameObject teamSearchBtn, teamLeaveBtn, teamReadyBtn, teamLBContainer;
         // Bug #76: inner-ScrollRect handle for the nested-scroll wheel fix.
         private static Component teamLBScrollRect;
         private static List<TeamLBRow> teamLBRows = new List<TeamLBRow>();
@@ -18139,24 +18237,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 },
                 sizeDelta: new Vector2(160, 28));
 
-            teamSearchCustomBtn = UIFactory.CreateButton("TSC", btnRow.transform, "Find Custom Lobby", 16f, C_WHITE,
-                new Color(0.40f, 0.30f, 0.55f, 0.95f),
-                () =>
-                {
-                    Plugin.Log.LogInfo("[TEAM-QUEUE-UI] Find Custom Lobby clicked");
-                    var sid = MatchTracker.LocalSteamId;
-                    if (string.IsNullOrEmpty(sid) || sid == "unknown")
-                    {
-                        CompetitiveUI.ShowNotification("Steam ID not ready yet — try again in a few seconds", new Color(1f, 0.6f, 0.2f), 4f);
-                        return;
-                    }
-                    string region = "";
-                    try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { }
-                    Plugin.Log.LogInfo($"[TEAM-QUEUE-UI] joining manual team queue sid={sid} region='{region}'");
-                    ApiClient.JoinTeamQueue(sid, MatchTracker.LocalDisplayName, region, "manual");
-                },
-                sizeDelta: new Vector2(180, 28));
-
+            /* Aug 8 (Sid): "Find Custom Lobby" (the blind manual queue) is
+             * retired — hosted lobbies below are the only custom-2v2 entry.
+             * The manual-queue CODE PATH stays (the hosted Start hands off to
+             * it, and JoinTeamQueue's queueType param is unchanged); only the
+             * direct join surface is gone. */
             teamLeaveBtn = UIFactory.CreateButton("TLB", btnRow.transform, "Leave Queue", 16f, C_WHITE,
                 new Color(0.55f, 0.20f, 0.20f, 0.95f),
                 () =>
@@ -18177,25 +18262,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 sizeDelta: new Vector2(160, 28));
             teamReadyBtn.SetActive(false);
 
-            // Pick-teams row: visible inside the manual (custom-lobby) queue.
-            // Hidden when in the random queue or not queueing — choosing a queue
-            // type is the consent now, not a separate checkbox.
-            var pickRow = new GameObject("TPR");
-            pickRow.transform.SetParent(statusBox.transform, false);
-            pickRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(pickRow, spacing: 8);
-            UIFactory.AddLE(pickRow, prefH: 30, minH: 30, flexH: 0);
-            teamPickT1Btn = UIFactory.CreateButton("TPT1", pickRow.transform, "Team 1 (Orange)",
-                14f, C_WHITE, new Color(0.55f, 0.30f, 0.10f, 0.5f),
-                () => { var sid = MatchTracker.LocalSteamId; if (!string.IsNullOrEmpty(sid)) ApiClient.SetTeamPreferredTeam(sid, 1); },
-                sizeDelta: new Vector2(140, 26));
-            teamPickT2Btn = UIFactory.CreateButton("TPT2", pickRow.transform, "Team 2 (Blue)",
-                14f, C_WHITE, new Color(0.10f, 0.30f, 0.55f, 0.5f),
-                () => { var sid = MatchTracker.LocalSteamId; if (!string.IsNullOrEmpty(sid)) ApiClient.SetTeamPreferredTeam(sid, 2); },
-                sizeDelta: new Vector2(140, 26));
-            txtPickStatus = UIFactory.CreateText("TPS", pickRow.transform,
-                "<color=#888>Custom lobby — claim Team 1 or Team 2.</color>",
-                13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 26));
+            /* Aug 8 (Sid): the claim-team pick row is retired with the manual
+             * queue's join surface — the hosted panel's own Team button is
+             * the claim mechanism now (same endpoint underneath). */
 
             // Live 2v2 Now — compact strip showing active 2v2 series. Mirrors
             // the leaderboard-tab Live Ranked Games panel but lives directly
@@ -18312,18 +18381,9 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             if (qlbComp != null) UIFactory.AddLE(qlbComp.gameObject, prefH: 22, minH: 22, flexH: 0);
             UIFactory.SetWordWrap(txtTeamQueueListBody, true);
 
-            // Custom Lobbies (right column)
-            var manualPanel = UIFactory.CreatePanel("TQM", queueRow.transform, C_PANEL);
-            UIFactory.AddVLG(manualPanel, spacing: 2, padL: 10, padR: 10, padT: 6, padB: 6);
-            UIFactory.AddLE(manualPanel, flexW: 1, flexH: 0);
-            txtTeamQueueManualHeader = UIFactory.CreateText("TQMH", manualPanel.transform,
-                "Custom Lobbies", 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(440, 22));
-            txtTeamQueueManualBody = UIFactory.CreateText("TQMB", manualPanel.transform,
-                "<color=#888>Loading…</color>", 14f, C_LABEL, UIFactory.AlignTopLeft,
-                sizeDelta: new Vector2(440, 22));
-            var qmbComp = txtTeamQueueManualBody as Component;
-            if (qmbComp != null) UIFactory.AddLE(qmbComp.gameObject, prefH: 22, minH: 22, flexH: 0);
-            UIFactory.SetWordWrap(txtTeamQueueManualBody, true);
+            /* Aug 8 (Sid): the "Custom Lobbies" manual-queue column is retired
+             * — hosted lobbies (their own panel above, with a member browser)
+             * replaced the blind manual bucket. Random Queue keeps the row. */
 
             // Defensive: turn off raycastTarget on these panel backgrounds so
             // mouse-wheel scroll + drag-scroll bubble cleanly to the outer
@@ -18336,7 +18396,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             disablePanelRaycast(liveTeamPanel);
             disablePanelRaycast(tHostPanel);   // v1.37 host-lobby panel scrolls like its siblings
             disablePanelRaycast(queueListPanel);
-            disablePanelRaycast(manualPanel);
 
             // Scroll-discoverability hint. Tester feedback: "the scroll
             // only works on the grey background, people don't know they can
@@ -18515,11 +18574,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static Dictionary<string, bool> _teamSeriesExpanded = new Dictionary<string, bool>();
         private static object txtTeamQueueListHeader;
         private static object txtTeamQueueListBody;
-        private static object txtTeamQueueManualHeader;
-        private static object txtTeamQueueManualBody;
         private static object txtTeamDcGrace;
-        private static GameObject teamPickT1Btn, teamPickT2Btn;
-        private static object txtPickStatus;
         // Live 2v2 strip in the 2v2 tab — mirrors the leaderboard tab's Live
         // Ranked Games panel but lives directly inside the 2v2 view.
         private static GameObject teamLivePanel;
@@ -18788,9 +18843,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             switch (st)
             {
                 case ApiClient.TeamQueueState.Idle:
-                    status = I18n.Tr("<color=#888>Pick <b>Search Random</b> for matchmaking, or <b>Find Custom Lobby</b> to choose teams.</color>");
+                    status = I18n.Tr("<color=#888>Pick <b>Search Random</b> for ranked matchmaking, or host a 2v2 lobby below to choose teams.</color>");
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(true);
-                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(true);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(false);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     break;
@@ -18801,14 +18855,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     string qLabel = ApiClient.CurrentTeamQueueType == "manual" ? I18n.Tr("custom 2v2 lobby") : "2v2";
                     status = I18n.TrF("<color=#66CCFF>Searching for {0}...</color>  <b>{1}/4</b>", qLabel, found);
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
-                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(true);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     break;
                 case ApiClient.TeamQueueState.Matched:
                     status = I18n.Tr("<color=#FFD94D>Match found! Click <b>Ready Up</b>.</color>");
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
-                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(true);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(true);
                     members = BuildTeamMembersString(poll);
@@ -18816,7 +18868,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 case ApiClient.TeamQueueState.ReadySent:
                     status = I18n.Tr("<color=#88FF88>Ready! Waiting for the other 3...</color>");
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
-                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(true);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     members = BuildTeamMembersString(poll);
@@ -18824,7 +18875,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 case ApiClient.TeamQueueState.Leaving:
                     status = I18n.Tr("<color=#888>Leaving queue…</color>");
                     if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
-                    if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
                     if (teamLeaveBtn != null) teamLeaveBtn.SetActive(false);
                     if (teamReadyBtn != null) teamReadyBtn.SetActive(false);
                     break;
@@ -18839,15 +18889,15 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             if (teamSeated || ApiClient.TeamLobby.Status == "leaving")
             {
                 if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
-                if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
                 if (teamSeated && st == ApiClient.TeamQueueState.Idle)
                     status = I18n.Tr("<color=#88FF88>In a hosted 2v2 lobby</color> <color=#888>— manage it in the panel below.</color>");
             }
             UIFactory.SetTextRaw(txtTeamStatus, status);
             UIFactory.SetTextRaw(txtTeamMembers, members);
             // v1.37 host-lobby panel (create/browse/password/host Start).
-            RenderHostLobbySection(ApiClient.TeamLobby, teamLobbyBrowserRows, teamLobbyBrowserHost,
-                txtTeamLobbyHeader, txtTeamLobbyBody, team: true,
+            RenderHostLobbySection(ApiClient.TeamLobby, teamLobbyBrowserRows,
+                teamLobbyMemberRows, t => ApiClient.TeamLobby.Kick(t),
+                teamLobbyBrowserHost, txtTeamLobbyHeader, txtTeamLobbyBody, team: true,
                 teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyStartBtn, teamLobbyLeaveBtn, teamLobbyPrefBtn);
 
             // DC grace banner. Driven by ApiClient.LastSeriesStateStatus etc. —
@@ -18874,52 +18924,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             }
 
             // In Queue panel — refresh from /team/queue/list (2s throttle).
+            // Aug 8 (Sid): the manual "Custom Lobbies" column and its claim-
+            // team pick row are retired with the manual-queue join surface;
+            // the hosted panel's Team button is the claim mechanism now.
             ApiClient.UpdateTeamQueueList(force: false);
             var autoList = ApiClient.CachedTeamQueueAuto;
-            var manualList = ApiClient.CachedTeamQueueManual;
-
-            // Pick-teams row: only shown inside the manual queue. Highlight
-            // the user's currently-claimed team (✓ in label + bright color).
-            int myPreferred = 0;
-            bool inManualQueue = ApiClient.CurrentTeamQueueType == "manual"
-                && (st == ApiClient.TeamQueueState.Searching || st == ApiClient.TeamQueueState.Matched);
-            if (manualList != null)
-            {
-                foreach (var q in manualList)
-                {
-                    if (q.steam_id == MatchTracker.LocalSteamId) { myPreferred = q.preferred_team; break; }
-                }
-            }
-            if (teamPickT1Btn != null) teamPickT1Btn.SetActive(inManualQueue);
-            if (teamPickT2Btn != null) teamPickT2Btn.SetActive(inManualQueue);
-            var pickStatusComp = txtPickStatus as Component;
-            if (pickStatusComp != null) pickStatusComp.gameObject.SetActive(inManualQueue);
-            if (inManualQueue)
-            {
-                float t1Alpha = 0.95f, t2Alpha = 0.95f;
-                var t1Color = myPreferred == 1
-                    ? new Color(1.00f, 0.65f, 0.20f, t1Alpha)
-                    : new Color(0.40f, 0.25f, 0.10f, t1Alpha * 0.7f);
-                var t2Color = myPreferred == 2
-                    ? new Color(0.30f, 0.70f, 1.00f, t2Alpha)
-                    : new Color(0.10f, 0.25f, 0.45f, t2Alpha * 0.7f);
-                UIFactory.SetImageColor(teamPickT1Btn, t1Color);
-                UIFactory.SetImageColor(teamPickT2Btn, t2Color);
-                UIFactory.SetText(UIFactory.GetButtonText(teamPickT1Btn),
-                    myPreferred == 1 ? "<b>✓ Team 1 (Orange)</b>" : "Team 1 (Orange)");
-                UIFactory.SetText(UIFactory.GetButtonText(teamPickT2Btn),
-                    myPreferred == 2 ? "<b>✓ Team 2 (Blue)</b>" : "Team 2 (Blue)");
-                int manualSearching = 0;
-                if (manualList != null)
-                    foreach (var q in manualList) if (q.status == "searching") manualSearching++;
-                string ps = myPreferred == 0
-                    ? $"<color=#FFB347>Claim Team 1 or Team 2.</color>  <color=#888>({manualSearching}/4 in lobby)</color>"
-                    : $"<color=#88FF88>Locked in to Team {myPreferred}.</color>  <color=#888>({manualSearching}/4 in lobby)</color>";
-                UIFactory.SetText(txtPickStatus, ps);
-            }
 
             RenderTeamQueueSection(autoList, txtTeamQueueListHeader, txtTeamQueueListBody, I18n.Tr("Random Queue"));
-            RenderTeamQueueSection(manualList, txtTeamQueueManualHeader, txtTeamQueueManualBody, I18n.Tr("Custom Lobbies"));
 
             // Live 2v2 Now strip. One pooled ROW per active team series (Aug 7
             // item 13: rows instead of one text body so each series carries a

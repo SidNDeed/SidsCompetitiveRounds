@@ -11006,6 +11006,7 @@ namespace CompetitiveRounds
             public string lobby_id, host_name;
             public int player_count, max_players, age_seconds;
             public bool has_password;   // v1.37: private lobbies are LISTED with a marker (Sid's spec)
+            public List<LobbyBrowserMember> members;   // Aug 8: who's inside (null on old server)
         }
         public static List<FfaOpenLobbyEntry> CachedFfaLobbies = null;
         public static bool FfaLobbiesUnavailable = false;   // old server / fetch failing
@@ -11248,6 +11249,23 @@ namespace CompetitiveRounds
                 // API contract (main.py LOBBY_PW_*_DETAIL) — map them to a
                 // readable prompt instead of toasting the raw token.
                 string pwDetail = serverSpoke ? (ExtractJsonString(resp ?? "", "detail") ?? "") : "";
+                // Aug 8 (Sid): KICKED IS TERMINAL. Every FFA join funnels here
+                // — user clicks AND the ghost-prune same-lobby rejoin — and a
+                // kicked client that retried would fight the kick forever.
+                // Clear belief AND leave-intent, never retry, never reprompt.
+                if (pwDetail == "kicked_from_lobby")
+                {
+                    OpenFfaLobbyId = null; FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+                    FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
+                    IsFfaQueuePolling = false;
+                    _ffaAmbiguousPollUntil = -999f;
+                    _ffaLeaveIntent = false; _ffaLeaveTargetLobby = null; _ffaLeaveCause = "";
+                    if (FfaQueueStatus == "lobby") FfaQueueStatus = "";
+                    CompetitiveUI.ShowNotification(I18n.Tr("The host removed you from this lobby."), new Color(1f, 0.7f, 0.3f), 7f);
+                    FetchFfaLobbies(force: true);
+                    NativeUI.MarkDirty();
+                    return;
+                }
                 if (pwDetail == "password_required" || pwDetail == "password_incorrect")
                 {
                     bool pwWrong = pwDetail == "password_incorrect";
@@ -11469,6 +11487,7 @@ namespace CompetitiveRounds
                                 max_players = Math.Max(1, ExtractJsonInt(obj, "max_players")),
                                 age_seconds = ExtractJsonInt(obj, "age_seconds"),
                                 has_password = ExtractJsonBool(obj, "has_password"),
+                                members = ParseBrowserMembers(obj),
                             };
                             if (!string.IsNullOrEmpty(e.lobby_id)) list.Add(e);
                         }
@@ -12131,6 +12150,7 @@ namespace CompetitiveRounds
             public string lobby_id, host_name;
             public int player_count, max_players, age_seconds;
             public bool has_password;
+            public List<LobbyBrowserMember> members;   // Aug 8: who's inside (null on old server)
         }
 
         public sealed class HostLobbyClient
@@ -12327,6 +12347,20 @@ namespace CompetitiveRounds
                     bool serverSpoke = resp != null && resp.StartsWith("HTTP 4", StringComparison.Ordinal);
                     Plugin.Log.LogWarning($"[{label}-LOBBY] enroll failed (recovery={wasRecovery}, serverSpoke={serverSpoke}): {resp}");
                     string detail = serverSpoke ? (ExtractJsonString(resp ?? "", "detail") ?? "") : "";
+                    // Aug 8 (Sid): KICKED IS TERMINAL. Every join path funnels
+                    // through here — user clicks, the ghost-prune same-lobby
+                    // rejoin, the handoff's not_in_queue recovery — and a
+                    // kicked client that retried would fight the kick forever.
+                    // Clear belief AND intent, never retry, never reprompt.
+                    if (detail == "kicked_from_lobby")
+                    {
+                        ClearMembershipSilent();
+                        leaveIntent = false; leaveTarget = null;
+                        CompetitiveUI.ShowNotification(I18n.Tr("The host removed you from this lobby."), new Color(1f, 0.7f, 0.3f), 7f);
+                        FetchLobbies(force: true);
+                        NativeUI.MarkDirty();
+                        return;
+                    }
                     if (detail == "password_required" || detail == "password_incorrect")
                     {
                         bool wrong = detail == "password_incorrect";
@@ -12796,6 +12830,52 @@ namespace CompetitiveRounds
                 Polling = !string.IsNullOrEmpty(OpenLobbyId);
             }
 
+            /// <summary>Aug 8 (Sid): host kicks a member. Refusal tokens are
+            /// exact API contract (not_host / target_not_in_lobby /
+            /// target_is_admin / cannot_kick_yourself). Success refreshes the
+            /// member list on the next state poll tick.</summary>
+            public void Kick(string targetSteamId)
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown" || string.IsNullOrEmpty(targetSteamId)) return;
+                if (actionInFlight && Time.realtimeSinceStartup - actionAt > 30f)
+                    actionInFlight = false;
+                if (actionInFlight) return;
+                int g = gen;   // NOT ++: kicking must not orphan the poll lifecycle
+                ActionBegin(); int aGen = actionGen;
+                string body = $"{{\"steam_id\":\"{Escape(sid)}\",\"target_steam_id\":\"{Escape(targetSteamId)}\"}}";
+                Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/kick", body, (ok, resp) =>
+                {
+                    ActionEnd(aGen);
+                    if (g != gen) return;
+                    if (ok)
+                    {
+                        Plugin.Log.LogInfo($"[{label}-LOBBY] kicked {targetSteamId}");
+                        CompetitiveUI.ShowNotification(I18n.Tr("Player removed from the lobby."), new Color(1f, 0.75f, 0.4f), 4f);
+                        lastPollAt = -999f;   // pull the shrunken member list now
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] kick failed: {resp}");
+                        CompetitiveUI.ShowNotification(
+                            KickRefusalText(resp) ?? DetailOr(resp, I18n.Tr("Couldn't kick that player.")),
+                            new Color(1f, 0.6f, 0.2f), 5f);
+                    }
+                    NativeUI.MarkDirty();
+                }));
+            }
+
+            /// <summary>Aug 8: re-send the idempotent same-lobby join carrying
+            /// updated extras (preferred_side / solo_extra_pick / preferred_
+            /// team). NOTE: needs the server's idempotent-rejoin branch to
+            /// ADOPT the preference fields (flagged to Sid) — until then it is
+            /// a harmless heartbeat-only no-op server-side.</summary>
+            public void ResendEnrollExtras(string extras)
+            {
+                if (string.IsNullOrEmpty(OpenLobbyId)) return;
+                Join(OpenLobbyId, lastPassword, extras);
+            }
+
             /// <summary>Adopt a seat discovered by the MODE's queue poll (a
             /// still-armed queue poll seeing 'lobby' after an enroll converted
             /// its searching row). The state heartbeat owns it from here.</summary>
@@ -12864,6 +12944,7 @@ namespace CompetitiveRounds
                                     max_players = Math.Max(1, ExtractJsonInt(obj, "max_players")),
                                     age_seconds = ExtractJsonInt(obj, "age_seconds"),
                                     has_password = ExtractJsonBool(obj, "has_password"),
+                                    members = ParseBrowserMembers(obj),
                                 };
                                 if (!string.IsNullOrEmpty(e.lobby_id)) list.Add(e);
                             }
@@ -12904,8 +12985,96 @@ namespace CompetitiveRounds
             => OvtLobby.Create(password, OvtLobbyExtras(preferredSide, soloExtraPick));
         public static void OvtLobbyJoin(string lobbyId, int preferredSide, bool soloExtraPick, string password = null)
             => OvtLobby.Join(lobbyId, password, OvtLobbyExtras(preferredSide, soloExtraPick));
+        /// <summary>Aug 8: seated preference update — rides the idempotent
+        /// same-lobby rejoin (see ResendEnrollExtras' server-adoption note).</summary>
+        public static void OvtLobbyResendPrefs(int preferredSide, bool soloExtraPick)
+            => OvtLobby.ResendEnrollExtras(OvtLobbyExtras(preferredSide, soloExtraPick));
         private static string OvtLobbyExtras(int preferredSide, bool soloExtraPick)
             => $",\"preferred_side\":{((preferredSide == 1 || preferredSide == 2) ? preferredSide : 0)},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}";
+
+        /// <summary>Aug 8 (Sid): kick refusal detail -> readable toast, or
+        /// null for an unrecognized detail (caller falls back to DetailOr).
+        /// Tokens are exact API contract.</summary>
+        private static string KickRefusalText(string resp)
+        {
+            switch (ExtractJsonString(resp ?? "", "detail") ?? "")
+            {
+                case "not_host": return I18n.Tr("Only the host can kick players.");
+                case "target_not_in_lobby": return I18n.Tr("They already left the lobby.");
+                case "target_is_admin": return I18n.Tr("Admins can't be kicked.");
+                case "cannot_kick_yourself": return I18n.Tr("You can't kick yourself.");
+                default: return null;
+            }
+        }
+
+        /// <summary>Aug 8 (Sid): browser member lines — WHO is inside each
+        /// open lobby before joining. name/title are user-authored, so the
+        /// slicing is string-aware (#156) and the renderer sanitizes.</summary>
+        public class LobbyBrowserMember
+        {
+            public string name, title, title_color;
+            public int rating;
+            public bool established;   // 2v2/FFA: mode glicko vs 1v1 fallback
+        }
+
+        private static List<LobbyBrowserMember> ParseBrowserMembers(string lobbyObj)
+        {
+            try
+            {
+                int mStart = lobbyObj.IndexOf("\"members\"", StringComparison.Ordinal);
+                if (mStart < 0) return null;   // old server — renderer degrades to one line
+                int arrStart = lobbyObj.IndexOf('[', mStart);
+                int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(lobbyObj, arrStart) : -1;
+                if (arrStart < 0 || arrEnd <= arrStart) return null;
+                var list = new List<LobbyBrowserMember>();
+                foreach (string m in SliceTopLevelObjects(lobbyObj.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                {
+                    list.Add(new LobbyBrowserMember
+                    {
+                        name = ExtractJsonString(m, "name") ?? "?",
+                        title = ExtractJsonString(m, "title") ?? "",
+                        title_color = ExtractJsonString(m, "title_color") ?? "",
+                        rating = ExtractJsonInt(m, "rating"),
+                        established = ExtractJsonBool(m, "established"),
+                    });
+                }
+                return list;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Aug 8 (Sid): FFA host kicks a member — same contract as
+        /// the team/ovt kicks (HostLobbyClient.Kick).</summary>
+        public static void FfaKickFromLobby(string targetSteamId)
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(sid) || sid == "unknown" || string.IsNullOrEmpty(targetSteamId)) return;
+            if (_ffaLobbyActionInFlight && Time.realtimeSinceStartup - _ffaLobbyActionAt > 30f)
+                _ffaLobbyActionInFlight = false;
+            if (_ffaLobbyActionInFlight) return;
+            int gen = ffaGen;   // NOT ++: kicking must not orphan the poll lifecycle
+            FfaLobbyActionBegin(); int actionGen = _ffaLobbyActionGen;
+            string body = $"{{\"steam_id\":\"{Escape(sid)}\",\"target_steam_id\":\"{Escape(targetSteamId)}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/lobby/kick", body, (ok, resp) =>
+            {
+                FfaLobbyActionEnd(actionGen);
+                if (gen != ffaGen) return;
+                if (ok)
+                {
+                    Plugin.Log.LogInfo($"[FFA-LOBBY] kicked {targetSteamId}");
+                    CompetitiveUI.ShowNotification(I18n.Tr("Player removed from the lobby."), new Color(1f, 0.75f, 0.4f), 4f);
+                    UpdateFfaQueuePoll(force: true);   // pull the shrunken member list now
+                }
+                else
+                {
+                    Plugin.Log.LogWarning($"[FFA-LOBBY] kick failed: {resp}");
+                    CompetitiveUI.ShowNotification(
+                        KickRefusalText(resp) ?? DetailOr(resp, I18n.Tr("Couldn't kick that player.")),
+                        new Color(1f, 0.6f, 0.2f), 5f);
+                }
+                NativeUI.MarkDirty();
+            }));
+        }
 
         public static void UpdateFfaQueueList(bool force = false)
         {
