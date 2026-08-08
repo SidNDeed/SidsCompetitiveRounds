@@ -13386,6 +13386,21 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                             }
                         }
                     }
+                    /* Aug 7 item 9: auto-mod notice. The server censors the
+                     * message (it never persisted or broadcast) and tells THIS
+                     * socket only: {"type":"muted","minutes":N} — no "message"
+                     * key, so old clients ignore it. Rendered as a system line
+                     * so the sender knows why their line vanished; without it
+                     * the local echo shows and then silently evaporates on the
+                     * next scrollback (today's confusing muted-sender UX). */
+                    if (frameType == "muted")
+                    {
+                        int mins = ExtractChatIntField(json, "minutes");
+                        if (mins <= 0) mins = 15;
+                        AppendSystemChatLine(I18n.TrF(
+                            "Your message was removed and you are muted for {0} minutes (auto-moderation).", mins));
+                        MarkDirty();
+                    }
                     return;
                 }
                 /* item 13: server created_at (ISO-8601, TIMESTAMPTZ) — present on

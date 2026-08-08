@@ -9725,6 +9725,122 @@ async def get_recent_series(
 # locally but every socket stays subscribed to it server-side.
 CHAT_CHANNELS_ALLOWED = ("global", "ru", "es")
 
+# ── Aug 7 item 9: automatic slur censor ─────────────────────────────────────
+# DELIBERATELY NARROW: hard slurs only. Every term must be reviewed for
+# innocent-word containment before inclusion (the Scunthorpe class) because a
+# hit is an ESCALATING all-channel auto-mute — a wrong hit silences an
+# innocent player everywhere and doubles their next one. Known residual false
+# positives, accepted and documented: the British "snigger"/"sniggering"
+# contains term 1 as a plain substring, and the stretch pass's run-collapse
+# maps the country "Niger" onto it. Both are vanishingly rare in a gaming
+# chat, the mute is 15 minutes, and the admin unmute is the correction lever.
+# Deliberately EXCLUDED for false-positive reasons: terms contained in common
+# words ("coon" in raccoon/tycoon, "gook" in gobbledygook, "spic" in
+# conspicuous/spice, "chink" in chink-in-the-armor). A constant, not a table:
+# matches the SHOP_OWNER_STEAM_IDS precedent (#71) and the list should change
+# rarely — extending it is a one-line deploy.
+_CHAT_CENSOR_TERMS = ("nigger", "nigga", "faggot", "kike", "wetback")
+# 0→o 1→i 3→e 4→a 5→s 7→t @→a $→s !→i
+_CHAT_CENSOR_LEET = str.maketrans("013457@$!", "oieastasi")
+_CHAT_MUTE_BASE_MINUTES = 15          # Sid asked 10-20; doubles per repeat offense
+_CHAT_MUTE_CAP_MINUTES = 7 * 24 * 60  # 7-day ceiling on the doubling
+
+
+def _chat_censor_hit(message: str) -> str | None:
+    """Return the matched term, or None. Two passes over a normalized copy:
+    (1) STRICT — lowercase, leet-mapped, non-alphanumerics stripped, term as
+    plain substring (catches n1gg3r, n i g g e r); (2) STRETCH — same but with
+    letter-runs collapsed to one on BOTH sides (catches niiiggggeeer). The hit
+    decision is in-memory: it must not depend on the DB, so a DB outage can
+    never let a slur through (#276's failure-direction test)."""
+    try:
+        low = (message or "").lower().translate(_CHAT_CENSOR_LEET)
+        stripped = "".join(ch for ch in low if ch.isalnum())
+        if not stripped:
+            return None
+        collapsed = []
+        for ch in stripped:
+            if not collapsed or collapsed[-1] != ch:
+                collapsed.append(ch)
+        collapsed_s = "".join(collapsed)
+        for term in _CHAT_CENSOR_TERMS:
+            if term in stripped:
+                return term
+            tc = []
+            for ch in term:
+                if not tc or tc[-1] != ch:
+                    tc.append(ch)
+            if "".join(tc) in collapsed_s:
+                return term
+        return None
+    except Exception:
+        return None
+
+
+async def _chat_censor_strike(steam_id: str, display_name: str, channel: str,
+                              message: str, matched: str, source: str) -> int:
+    """Escalating auto-mute + audit + #scr-admin post, all best-effort in ONE
+    own-session transaction (the WS handler has no Depends db — mirror
+    _is_chat_muted). Returns the mute duration in minutes (0 if the DB write
+    failed — the MESSAGE IS STILL DROPPED by the caller either way; the hit
+    decision never depends on this succeeding)."""
+    from database import async_session
+    try:
+        async with async_session() as db:
+            # Offense ledger = prior system-issued mutes. Rows are never
+            # deleted (the mutes list filters rather than deletes — "the row
+            # is the audit trail"); if anyone ever adds a cleanup DELETE on
+            # chat_mutes, this ledger silently resets (#276) — documented
+            # here on the query that depends on it. 90-day decay window so an
+            # offense from months ago doesn't double a mute forever.
+            offenses = (await db.execute(text(
+                "SELECT COUNT(*) FROM chat_mutes "
+                "WHERE steam_id = :sid AND muted_by_steam_id = 'system' "
+                "AND created_at > NOW() - INTERVAL '90 days'"
+            ), {"sid": steam_id})).scalar() or 0
+            minutes = min(_CHAT_MUTE_BASE_MINUTES * (2 ** int(offenses)), _CHAT_MUTE_CAP_MINUTES)
+            # Supersede-then-insert, same shape as the human mute endpoint;
+            # channel=NULL = ALL channels (a slur in 'ru' must not leave
+            # 'global' open).
+            await db.execute(text(
+                "UPDATE chat_mutes SET revoked_at = NOW() "
+                "WHERE steam_id = :sid AND channel IS NULL AND revoked_at IS NULL"
+            ), {"sid": steam_id})
+            await db.execute(text(
+                "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at) "
+                "VALUES (:sid, NULL, 'system', :reason, NOW() + make_interval(mins => :m))"
+            ), {"sid": steam_id, "reason": f"auto: slur filter (offense {int(offenses) + 1})",
+                "m": int(minutes)})
+            await _log_admin_action(db, admin_steam_id="system", action="chat_automute",
+                                    target_steam_id=steam_id,
+                                    details={"channel": channel, "matched_term": matched,
+                                             "message": message[:200], "offense": int(offenses) + 1,
+                                             "duration_minutes": int(minutes), "source": source})
+            # #scr-admin post via the durable outbox. The bot sends outbox
+            # content with users-allowed mentions (#261) — neutralize mention
+            # syntax; the quoted message goes angle-bracket-neutered too.
+            safe_msg = (message or "")[:200].replace("<", "(").replace(">", ")").replace("`", "'")
+            safe_msg = _re.sub(r"@everyone", "everyone", safe_msg, flags=_re.IGNORECASE)
+            safe_msg = _re.sub(r"@here", "here", safe_msg, flags=_re.IGNORECASE)
+            safe_name = (display_name or steam_id or "?").replace("<", "(").replace(">", ")").replace("`", "'")
+            try:
+                async with db.begin_nested():
+                    await db.execute(text(
+                        "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"
+                    ), {"ch": "1495392567687250061",
+                        "c": f"\N{NO ENTRY SIGN} **Auto-mod**: removed a message from "
+                             f"**{safe_name}** (`{steam_id}`) in `{channel}` and muted them for "
+                             f"**{int(minutes)} min** (offense {int(offenses) + 1}, matched "
+                             f"`{matched}`). Message: {safe_msg}"})
+            except Exception as ex:
+                print(f"[CHAT-MOD] automute channel post failed: {ex}")
+            await db.commit()
+            print(f"[CHAT-MOD] automute {steam_id} {int(minutes)}m (offense {int(offenses) + 1}, {source})")
+            return int(minutes)
+    except Exception as ex:
+        print(f"[CHAT-MOD] automute strike failed for {steam_id}: {ex}")
+        return 0
+
 
 class _ChatManager:
     """Subscribe to a SET of channels, send to ONE (§2.6). Every accepted
@@ -10212,6 +10328,22 @@ async def ws_chat(ws: WebSocket):
             if await _is_chat_muted(steam_id, channel):
                 print(f"[CHAT-MOD] dropped muted {display_name} ({steam_id}) in [{channel}]")
                 continue
+            # Aug 7 item 9: slur censor — MUST sit before _persist_chat and the
+            # broadcast: a hit that persists is already in /chat/recent and en
+            # route to Discord, and deletion-after-the-fact races both. The
+            # message never enters the system; the sender is auto-muted with
+            # escalation and told so on their own socket (a frame with no
+            # "message" key is ignored by every shipped parser).
+            _hit = _chat_censor_hit(message)
+            if _hit is not None:
+                minutes = await _chat_censor_strike(steam_id, display_name, channel,
+                                                    message, _hit, "ingame")
+                try:
+                    await ws.send_text(_json.dumps(
+                        {"type": "muted", "minutes": int(minutes or _CHAT_MUTE_BASE_MINUTES)}))
+                except Exception:
+                    pass
+                continue
             meta = await _lookup_chat_meta(steam_id=steam_id)
             out = {
                 "source": "ingame",
@@ -10291,6 +10423,19 @@ async def post_chat_from_discord(
         print(f"[CHAT-MOD] dropped muted discord chatter discord_id={discord_id} "
               f"steam={_linked_steam} in [{channel}]")
         return {"status": "muted"}
+    # Aug 7 item 9: slur censor on the relay path too — this stops the slur
+    # reaching IN-GAME chat; the original Discord message stays visible in
+    # Discord (that side is Discord AutoMod's jurisdiction). Mute only when a
+    # linked steam identity exists (unlinked = nothing to moderate on,
+    # mirroring the gates above), but log + post regardless.
+    _hit = _chat_censor_hit(message)
+    if _hit is not None:
+        if _linked_steam:
+            await _chat_censor_strike(_linked_steam, str(payload.get("display_name", "Discord"))[:64],
+                                      channel, message, _hit, "discord")
+        else:
+            print(f"[CHAT-MOD] censored unlinked discord chatter discord_id={discord_id} (no mute possible)")
+        return {"status": "censored"}
     out = {
         "source": "discord",
         "discord_id": discord_id,
