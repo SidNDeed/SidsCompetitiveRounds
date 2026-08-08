@@ -770,6 +770,189 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>Bug #153 — "Started with leftover parasite stacks from previous round."
+    ///
+    /// <para>MECHANISM (established from the reporter's bundle — an ffa_ lobby —
+    /// plus the decompile): Parasite/Poison bullets carry RayHitPoison, whose
+    /// DoHitEffect starts a DamageOverTime coroutine on the victim
+    /// (RayHitPoison.cs:32). Every stream hosted there is killed at the
+    /// transition — HealthHandler.Revive's LAST statement is
+    /// dot.StopAllCoroutines() (HealthHandler.cs:362), and both
+    /// PlayerManager.RevivePlayers and the tail of PlayerManager.Move call
+    /// Revive for every player — so the only way a DoT can exist at round start
+    /// is a stream STARTED AFTER the victim's final spawn revive. The starter
+    /// is a leftover PROJECTILE: nothing destroys mid-air bullets at the
+    /// point/round boundary (MapTransition.ClearObjects only sweeps
+    /// RemoveAfterSeconds carriers), hits are decided on the bullet OWNER's
+    /// client and replicated via ProjectileHit.RPCA_DoHit, and per-client
+    /// transition pacing skews — so an end-of-round parasite bullet can register
+    /// a hit that lands after the victim has already spawned, draining them for
+    /// the full DoT duration with nobody shooting. The reporter's log carries
+    /// the signature: RPCA_DoHit RPC bursts arriving immediately after MOVE
+    /// PLAYERS END (copies whose local bullet was already gone NRE'd; ones whose
+    /// bullet survived apply real damage + DoT). FFA amplifies it — 5-10
+    /// players, staggered transitions — but the window exists in every mode.</para>
+    ///
+    /// <para>FIX: each client despawns the projectiles IT OWNS the moment the
+    /// point is decided. RPCA_NextRound is a server-ordered All-RPC, so the
+    /// sweep is near-simultaneous room-wide regardless of transition pacing
+    /// skew; a second sweep at MovePlayers mops up anything fired during the
+    /// win sequence (and covers the rematch/game-start boundary). Destruction
+    /// is exactly vanilla's own despawn path — owner-side PhotonNetwork.Destroy,
+    /// the same call ProjectileHit.DestroyMe makes and the one sanctioned
+    /// exception in learning #94 — so every client agrees the bullet is gone
+    /// and no health/stream divergence is possible.</para>
+    ///
+    /// <para>SCOPE: AnyGameScope, not GameplayScope (#151/#286). Bug #153's
+    /// room was a mod-issued ffa_ lobby, which GameplayScope would cover — but
+    /// the identical window exists in privately hosted room-code ranked games
+    /// (the majority of rated play), which GameplayScope silently excludes.
+    /// Owner-authoritative destruction cannot make two clients disagree: an
+    /// unpatched peer simply keeps ITS OWN bullets alive, which is today's
+    /// behaviour for those bullets, so a mixed room degrades to the status quo
+    /// per unpatched owner and is never worse than vanilla (#198 asymmetry
+    /// concern does not apply — we never ask the peer to do anything).</para>
+    ///
+    /// <para>POOL SAFETY (#94/#156): destroying a bullet before FriendlyFoe's
+    /// BulletPoolInstancer.Start has run NREs its OnDestroy inside
+    /// PrefabPool.Release and corrupts the pool for the session. Two guards:
+    /// the sweep runs on Plugin.Instance two frames after the trigger (so
+    /// everything it can see was instantiated in an earlier frame and its Start
+    /// batch has run), and bullets whose ProjectileHit.view is still null
+    /// (view is assigned in ProjectileHit.Start) are skipped outright — never
+    /// Object.Destroyed.</para></summary>
+    [HarmonyPatch]
+    internal static class StaleProjectileSweepPatch
+    {
+        // Pending flag carries a TTL (#270c): the coroutine host can die
+        // (persistent-GO respawn), and a suppression keyed on "a coroutine
+        // will clear this" with no expiry is a permanent wedge. A dead host
+        // costs at most one 2-second suppression window, self-healing.
+        private static bool _sweepPending;
+        private static float _pendingSince = -10f;
+
+        [HarmonyPostfix]
+        [HarmonyPatch(
+            typeof(GM_ArmsRace),
+            "RPCA_NextRound",
+            new Type[]
+            {
+                typeof(int), typeof(int), typeof(int),
+                typeof(int), typeof(int), typeof(int)
+            })]
+        private static void AfterNextRound()
+        {
+            // Runs in FFA too: FfaMode's prefix replaces the body (returns
+            // false) but Harmony still runs postfixes, and the RPC itself is
+            // the round-decided broadcast in every mode.
+            Schedule("point-over");
+        }
+
+        // BOTH a prefix and a postfix on MovePlayers, deliberately:
+        //  * the prefix covers vanilla THROWING mid-loop on a departed
+        //    player's entry (#272) — a postfix never runs then;
+        //  * the postfix covers the prefix being SKIPPED — the FFA map-scale
+        //    patch takes MovePlayers over entirely (returns false) on scaled
+        //    maps, and per this file's DeadPlayerDot note HarmonyX skips
+        //    subsequent prefixes once one returns false, with UNDEFINED
+        //    relative order between ours and the takeover's.
+        // Schedule() coalesces, so when both fire the second is a no-op.
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(PlayerManager), "MovePlayers")]
+        private static void BeforeMovePlayers()
+        {
+            Schedule("move-players");
+        }
+
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(PlayerManager), "MovePlayers")]
+        private static void AfterMovePlayers()
+        {
+            Schedule("move-players");
+        }
+
+        private static void Schedule(string reason)
+        {
+            try
+            {
+                if (!VanillaFixSupport.AnyGameScope()) return;
+                if (_sweepPending && Time.realtimeSinceStartup - _pendingSince < 2f) return;
+                if (Plugin.Instance == null) return;
+                _sweepPending = true;
+                _pendingSince = Time.realtimeSinceStartup;
+                Plugin.Instance.StartCoroutine(SweepAfterFrames(reason));
+            }
+            catch (Exception ex)
+            {
+                _sweepPending = false;
+                VanillaFixSupport.LogError("StaleProjectileSweep", ex);
+            }
+        }
+
+        private static System.Collections.IEnumerator SweepAfterFrames(string reason)
+        {
+            // Two frames: see POOL SAFETY note. Hosted on Plugin.Instance
+            // (persistent GO, #85) so a mid-transition map teardown cannot
+            // kill the coroutine before it runs.
+            yield return null;
+            yield return null;
+            _sweepPending = false;
+            SweepNow(reason);
+        }
+
+        private static void SweepNow(string reason)
+        {
+            try
+            {
+                // Re-check at sweep time — the player can leave the room in
+                // the two-frame gap.
+                if (!VanillaFixSupport.AnyGameScope()) return;
+
+                int swept = 0;
+                ProjectileHit[] projectiles = UnityEngine.Object.FindObjectsOfType<ProjectileHit>();
+                if (projectiles == null) return;
+                foreach (ProjectileHit projectile in projectiles)
+                {
+                    try
+                    {
+                        if (projectile == null || projectile.gameObject == null) continue;
+                        // view is assigned in ProjectileHit.Start — null means
+                        // this bullet is younger than one Start batch (or a
+                        // rare non-networked spawn). Skip it: #94, swallow
+                        // only, never Object.Destroy a pooled carrier.
+                        PhotonView view = projectile.view;
+                        if (view == null || !view.IsMine) continue;
+                        PhotonNetwork.Destroy(projectile.gameObject);
+                        swept++;
+                    }
+                    catch
+                    {
+                        // A bullet destroyed mid-sweep is the goal state.
+                    }
+                }
+
+                if (swept > 0)
+                    VanillaFixSupport.DiagLimited(
+                        "StaleProjectileSweep-despawn",
+                        "StaleProjectileSweep despawned " +
+                        swept.ToString(CultureInfo.InvariantCulture) +
+                        " leftover projectile(s) at " + reason,
+                        10);
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("StaleProjectileSweep", ex);
+            }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("StaleProjectileSweep", exception);
+        }
+    }
+
     /// <summary>Bug #128 — keep our T chat's own keystrokes out of ROUNDS' Enter chat.
     ///
     /// <para>Vanilla <c>DevConsole.Update()</c> is <c>if (Input.GetKeyDown(KeyCode.Return))

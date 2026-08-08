@@ -1569,6 +1569,9 @@ _VERSION_GATE_BYPASS = frozenset({
     "/api/v1/admin/i18n/grants",
     "/api/v1/admin/i18n/grants/list",
     "/api/v1/admin/i18n/sync-keys",
+    # Aug 7 item 1: below-min clients (the ones being told to update) are a
+    # prime audience for a standing "update out / server issue" notice.
+    "/api/v1/alerts/active",
 })
 
 
@@ -1591,7 +1594,52 @@ _MAINT_BYPASS = frozenset({
     "/api/v1/admin/maintenance/start",
     "/api/v1/admin/maintenance/stop",
     "/api/v1/admin/maintenance/status",
+    # Aug 7 item 1: an OUTAGE alert must survive maintenance 503s — reading
+    # the notice is most valuable exactly while everything else is down.
+    "/api/v1/alerts/active",
 })
+
+# ── Aug 7 item 1: standing admin alerts ──────────────────────────────────────
+# In-memory cache + revision counter (single worker per the compose override,
+# #125, so module globals are safe). The rev piggybacks on the presence ping;
+# clients refetch /alerts/active only when it changes. Seeded LAZILY from DB
+# timestamps on first read — a rev reset to 0 on container boot would equal a
+# fresh client's default and suppress the change-edge.
+_alerts_cache: list | None = None
+_alerts_rev: int = 0
+
+
+async def _alerts_load(db) -> list:
+    """(Re)build the cache from live rows; seeds the rev on first load."""
+    global _alerts_cache, _alerts_rev
+    rows = (await db.execute(text("""
+        SELECT id, admin_name, category, message, created_at, expires_at
+          FROM admin_alerts
+         WHERE revoked_at IS NULL
+           AND (expires_at IS NULL OR expires_at > NOW())
+      ORDER BY created_at DESC
+         LIMIT 10"""))).mappings().all()
+    _alerts_cache = [
+        {
+            "id": int(r["id"]),
+            "category": r["category"],
+            "admin_name": r["admin_name"] or "Admin",
+            "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+            "expires_at": r["expires_at"].isoformat() if r["expires_at"] else "",
+            # message LAST: user-authored free text, keep it at the tail for
+            # the client's manual parser (same key-order discipline as
+            # presence_online, and it is sliced string-aware regardless).
+            "message": r["message"] or "",
+        }
+        for r in rows
+    ]
+    if _alerts_rev == 0:
+        seed = (await db.execute(text(
+            "SELECT COALESCE(EXTRACT(EPOCH FROM MAX(GREATEST(created_at, "
+            "COALESCE(revoked_at, 'epoch'::timestamptz))))::bigint, 1) FROM admin_alerts"
+        ))).scalar()
+        _alerts_rev = max(1, int(seed or 1))
+    return _alerts_cache
 
 
 # ── Rate limiting + body-size cap (F7/F9 hardening) ─────────────────────────
@@ -8217,7 +8265,10 @@ async def presence_ping(request: Request,
             await db.commit()
         except Exception as ex:
             print(f"[PRESENCE] last_seen stamp failed for {steam_id}: {ex}")
-    return {"online": _presence_online_count()}
+    # Aug 7 item 1: alerts revision piggybacks on the cheapest always-on poll
+    # — clients refetch /alerts/active only when it moves. Flat-scalar
+    # addition, ignored by old parsers (#73).
+    return {"online": _presence_online_count(), "alerts_rev": _alerts_rev}
 
 
 @app.get("/api/v1/presence/online", tags=["Queue"])
@@ -18462,6 +18513,134 @@ async def maintenance_stop(
 async def maintenance_status():
     """Public-readable — clients can poll this if they want to confirm the API is back."""
     return {"in_maintenance": _in_maintenance}
+
+
+# ── Aug 7 item 1: standing admin alerts ──────────────────────────────
+
+@app.get("/api/v1/alerts/active", tags=["Alerts"])
+async def alerts_active(db: AsyncSession = Depends(get_db)):
+    """Public: currently-standing admin notices. Served from the in-memory
+    cache (#125 single worker); expiry is ALSO filtered at read time because
+    an alert can lapse between cache rebuilds. In _MAINT_BYPASS (an outage
+    notice must survive maintenance 503s) and _VERSION_GATE_BYPASS (below-min
+    clients are a prime audience); deliberately NOT rate-limit-bypassed —
+    three separate lists, three separate decisions (#285)."""
+    global _alerts_cache
+    if _alerts_cache is None:
+        await _alerts_load(db)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    live = [a for a in (_alerts_cache or [])
+            if not a["expires_at"] or a["expires_at"] > now_iso]
+    return {"rev": _alerts_rev, "alerts": live}
+
+
+class _AdminAlertCreateReq(BaseModel):
+    admin_steam_id: str = Field(..., max_length=20)
+    category: str = Field(..., max_length=16)
+    message: str = Field(..., max_length=500)
+    expires_minutes: int | None = None    # None = stands until revoked
+    hmac_signature: str = Field(..., max_length=128)
+
+
+@app.post("/api/v1/admin/alerts", tags=["Alerts"])
+async def admin_alert_create(req: _AdminAlertCreateReq, db: AsyncSession = Depends(get_db)):
+    global _alerts_rev
+    # Category from a closed Python set — never a Query enum (#188).
+    if req.category not in ("outage", "issue", "update", "info"):
+        raise HTTPException(400, "category must be outage|issue|update|info")
+    msg = _re.sub(r"[\r\n]+", " ", (req.message or "")).strip()[:500]
+    if not msg:
+        raise HTTPException(400, "message required")
+    # The canonical target binds category + a UTF-8 sha256 prefix of the
+    # message (raw text cannot ride a colon-joined canonical) so a captured
+    # create cannot be replayed with a different payload. The client computes
+    # the identical hash — byte-for-byte discipline (#5/#152).
+    msg_hash = hashlib.sha256(msg.encode("utf-8")).hexdigest()[:16]
+    await _require_admin(db, req.admin_steam_id, "alert_create",
+                         f"{req.category}:{msg_hash}", req.hmac_signature)
+    admin_name = (await db.execute(text(
+        "SELECT display_name FROM players WHERE steam_id = :sid"
+    ), {"sid": req.admin_steam_id})).scalar() or "Admin"
+    exp_min = int(req.expires_minutes) if req.expires_minutes else 0
+    row = (await db.execute(text("""
+        INSERT INTO admin_alerts (admin_steam_id, admin_name, category, message, expires_at)
+        VALUES (:sid, :name, :cat, :msg,
+                CASE WHEN :m > 0 THEN NOW() + make_interval(mins => :m) ELSE NULL END)
+        RETURNING id"""), {
+        "sid": req.admin_steam_id, "name": str(admin_name)[:64],
+        "cat": req.category, "msg": msg, "m": exp_min,
+    })).scalar()
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="alert_create",
+                            details={"alert_id": int(row), "category": req.category, "message": msg[:200]})
+    # Discord echo to #scr-admin via the durable outbox (the bot's 30s
+    # poll_channel_posts loop delivers + acks; zero new bot code). The bot
+    # sends outbox content with users-allowed mentions, so neutralize mention
+    # syntax at compose time (#261's exact shape).
+    safe = msg.replace("<", "(").replace(">", ")")
+    safe = _re.sub(r"@everyone", "everyone", safe, flags=_re.IGNORECASE)
+    safe = _re.sub(r"@here", "here", safe, flags=_re.IGNORECASE)
+    try:
+        async with db.begin_nested():
+            await db.execute(text(
+                "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"
+            ), {"ch": "1495392567687250061",  # #scr-admin (bot env default; migration-110 precedent)
+                "c": f"\N{LARGE ORANGE DIAMOND} **Server alert** [{req.category}] by "
+                     f"{str(admin_name)[:64]}: {safe}"})
+    except Exception as ex:
+        print(f"[ALERTS] channel-post queue failed (alert stands): {ex}")
+    await db.commit()
+    _alerts_rev += 1
+    await _alerts_load(db)
+    return {"status": "ok", "alert_id": int(row), "rev": _alerts_rev}
+
+
+class _AdminAlertRevokeReq(BaseModel):
+    admin_steam_id: str = Field(..., max_length=20)
+    alert_id: int
+    hmac_signature: str = Field(..., max_length=128)
+
+
+@app.post("/api/v1/admin/alerts/revoke", tags=["Alerts"])
+async def admin_alert_revoke(req: _AdminAlertRevokeReq, db: AsyncSession = Depends(get_db)):
+    global _alerts_rev
+    await _require_admin(db, req.admin_steam_id, "alert_revoke",
+                         str(int(req.alert_id)), req.hmac_signature)
+    res = await db.execute(text(
+        "UPDATE admin_alerts SET revoked_at = NOW() "
+        "WHERE id = :aid AND revoked_at IS NULL"
+    ), {"aid": int(req.alert_id)})
+    if not res.rowcount:
+        raise HTTPException(404, "alert not found or already revoked")
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="alert_revoke",
+                            details={"alert_id": int(req.alert_id)})
+    await db.commit()
+    _alerts_rev += 1
+    await _alerts_load(db)
+    return {"status": "ok", "rev": _alerts_rev}
+
+
+@app.get("/api/v1/admin/alerts/list", tags=["Alerts"])
+async def admin_alerts_list(admin_steam_id: str, sig: str = Query(...),
+                            db: AsyncSession = Depends(get_db)):
+    """Recent alerts including revoked/expired — feeds the revoke picker."""
+    await _require_admin(db, admin_steam_id, "alerts_list", "", sig)
+    rows = (await db.execute(text("""
+        SELECT id, admin_name, category, message, created_at, expires_at, revoked_at
+          FROM admin_alerts
+      ORDER BY created_at DESC
+         LIMIT 25"""))).mappings().all()
+    return {"alerts": [
+        {
+            "id": int(r["id"]),
+            "category": r["category"],
+            "admin_name": r["admin_name"] or "Admin",
+            "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+            "expires_at": r["expires_at"].isoformat() if r["expires_at"] else "",
+            "revoked": r["revoked_at"] is not None,
+            "message": r["message"] or "",
+        }
+        for r in rows
+    ]}
 
 
 # ════════════════════════════════════════════════════════════════════

@@ -837,6 +837,9 @@ namespace CompetitiveRounds
         // Server-down banner (in-menu only, replaces the in-game IMGUI version).
         private static GameObject srvStatusRow;
         private static object txtServerStatus;
+        // Aug 7 item 1: standing admin-alert banner (its sibling row).
+        private static GameObject alertBannerRow;
+        private static object txtAlertBanner;
         // Auto-refresh of /series/active when Leaderboard tab is open. Throttled to every 10s.
         private static float liveSeriesAutoRefreshAt;
         // F8: manual Refresh-button debounce. Mashing it fired a burst of fetches
@@ -1433,6 +1436,17 @@ namespace CompetitiveRounds
             UIFactory.SetBold(txtServerStatus,true);
             srvRow.SetActive(false);  // off until ApiLooksDown
             srvStatusRow=srvRow;
+
+            // Aug 7 item 1: standing admin-alert banner — visible on EVERY tab
+            // while any alert is active (persistent; the one-time toast is the
+            // announcement, this is the standing notice).
+            var alRow=new GameObject("AlertRow");alRow.transform.SetParent(content.transform,false);alRow.AddComponent<RectTransform>();UIFactory.AddHLG(alRow,spacing:6,forceExpandH:true);UIFactory.AddLE(alRow,prefH:22,minH:22,flexH:0);
+            txtAlertBanner=UIFactory.CreateText("AlertSt",alRow.transform,"",14f,new Color(1f,0.85f,0.4f),UIFactory.AlignMidCenter,sizeDelta:new Vector2(0,22));
+            var alTxtGO=(txtAlertBanner as Component)?.gameObject;if(alTxtGO!=null&&UIFactory.tLE!=null){var tle2=alTxtGO.GetComponent(UIFactory.tLE);if(tle2!=null)UnityEngine.Object.Destroy(tle2 as UnityEngine.Object);}if(alTxtGO!=null)UIFactory.AddLE(alTxtGO,flexW:1,prefH:22);
+            UIFactory.SetBold(txtAlertBanner,true);
+            UIFactory.FitOneLine(txtAlertBanner);   // single 22px line (#292/#297); full text lives in the toast
+            alRow.SetActive(false);
+            alertBannerRow=alRow;
 
             BuildRankedRow(content.transform);
             // TOURNAMENT GAME indicator row - lights up yellow when the local
@@ -5824,7 +5838,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         }
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshTournamentGameIndicator();/* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;}}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();/* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;}}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
         // every-refresh toggle from re-firing and re-posting /toggle-ranked
@@ -5906,6 +5920,31 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     : "<color=#FF8866>* Server reconnecting...</color>";
                 UIFactory.SetText(txtServerStatus, msg);
             }
+        }
+
+        /// <summary>Aug 7 item 1: the standing alert line under the title.
+        /// Highest-severity alert wins the single line; the category colors
+        /// the whole row. Message + admin name are user-authored — angle
+        /// brackets neutralized before touching rich text.</summary>
+        private static void RefreshAlertBanner()
+        {
+            if (alertBannerRow == null) return;
+            var alerts = ApiClient.CachedAlerts;
+            if (alerts == null || alerts.Count == 0) { alertBannerRow.SetActive(false); return; }
+            ApiClient.AlertEntry top = null;
+            int Sev(string c) => c == "outage" ? 3 : c == "issue" ? 2 : c == "update" ? 1 : 0;
+            foreach (var a in alerts)
+                if (top == null || Sev(a.category) > Sev(top.category)) top = a;
+            if (top == null) { alertBannerRow.SetActive(false); return; }
+            string hex = top.category == "outage" ? "#FF6055" : top.category == "issue" ? "#FFB84D"
+                       : top.category == "update" ? "#73D9FF" : "#C0C8E0";
+            string msg = (top.message ?? "").Replace("<", "(").Replace(">", ")");
+            string who = (top.admin_name ?? "Admin").Replace("<", "(").Replace(">", ")");
+            string when = !string.IsNullOrEmpty(top.created_at) && top.created_at.Length >= 16
+                ? top.created_at.Substring(5, 11).Replace("T", " ") : "";
+            UIFactory.SetTextRaw(txtAlertBanner,
+                $"<color={hex}>* [{top.category.ToUpperInvariant()}] {msg}  <color=#8899AA>- {who} {when} UTC</color></color>");
+            alertBannerRow.SetActive(true);
         }
 
         // Active-series fetch hook - fire on leaderboard tab open in SwitchTab.
@@ -14465,6 +14504,50 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 OpenAdminRosterPicker(), sizeDelta: new Vector2(130, 26)));
             adminOnlySections.Add(UIFactory.CreateButton("AActions", modActionRow.transform, "Action Log...", 13f, C_WHITE, new Color(0.3f, 0.34f, 0.42f, 0.9f), () =>
                 OpenAdminActionLogPicker(0), sizeDelta: new Vector2(165, 26)));
+            /* Aug 7 item 1: standing server alerts — compose (category picker →
+             * message prompt → confirm) and revoke (recent-alert picker). */
+            adminOnlySections.Add(UIFactory.CreateButton("AAlertNew", modActionRow.transform, "Server Alert...", 13f, C_WHITE, new Color(0.55f, 0.38f, 0.12f, 0.9f), () =>
+                CompetitiveUI.OpenArtistPicker(I18n.Tr("Alert category"),
+                    new[] { "Outage", "Issue", "Update", "Info" },
+                    new[] { "outage", "issue", "update", "info" },
+                    cat =>
+                    {
+                        if (string.IsNullOrEmpty(cat)) return;
+                        CompetitiveUI.OpenArtistInput(I18n.Tr("Server alert"), I18n.Tr("Message (shown to every player)"), "",
+                            msg =>
+                            {
+                                if (string.IsNullOrEmpty(msg) || msg.Trim().Length == 0) return;
+                                CompetitiveUI.OpenConfirm(
+                                    I18n.TrF("Broadcast [{0}] \"{1}\" to ALL players? It stands until revoked.", cat.ToUpperInvariant(), Trunc(msg, 60)),
+                                    () => ApiClient.AdminCreateAlert(cat, msg, 0,
+                                        (ok, resp) => ShowArtistResult(ok, ok ? I18n.Tr("Alert is live.") : resp)));
+                            });
+                    },
+                    actionLabel: I18n.Tr("Pick"), showClear: false, itemNoun: ""),
+                sizeDelta: new Vector2(150, 26)));
+            adminOnlySections.Add(UIFactory.CreateButton("AAlertEnd", modActionRow.transform, "End Alert...", 13f, C_WHITE, new Color(0.42f, 0.3f, 0.3f, 0.9f), () =>
+                ApiClient.FetchAdminAlerts(() =>
+                {
+                    var alerts = ApiClient.CachedAdminAlerts;
+                    if (alerts == null || alerts.Count == 0)
+                    { ShowArtistResult(false, "{\"detail\":\"no alerts on record\"}"); return; }
+                    var names = new string[alerts.Count];
+                    var ids = new string[alerts.Count];
+                    for (int ai = 0; ai < alerts.Count; ai++)
+                    {
+                        names[ai] = $"[{alerts[ai].category}] {Trunc(alerts[ai].message, 40)}";
+                        ids[ai] = alerts[ai].id.ToString();
+                    }
+                    CompetitiveUI.OpenArtistPicker(I18n.Tr("Revoke which alert?"), names, ids,
+                        aid =>
+                        {
+                            if (string.IsNullOrEmpty(aid) || !int.TryParse(aid, out int idNum)) return;
+                            ApiClient.AdminRevokeAlert(idNum,
+                                (ok, resp) => ShowArtistResult(ok, ok ? I18n.Tr("Alert revoked.") : resp));
+                        },
+                        actionLabel: I18n.Tr("Revoke"), showClear: false, itemNoun: "");
+                }),
+                sizeDelta: new Vector2(135, 26)));
             UIFactory.CreateButton("AMutes", modActionRow.transform, "Chat Mutes...", 13f, C_WHITE, new Color(0.34f, 0.32f, 0.45f, 0.9f), () =>
                 OpenChatMutePicker(), sizeDelta: new Vector2(165, 26));
             UIFactory.CreateButton("AMuteNew", modActionRow.transform, "Mute Player...", 13f, C_WHITE, new Color(0.5f, 0.33f, 0.2f, 0.9f), () =>

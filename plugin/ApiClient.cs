@@ -499,6 +499,10 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(SteamAuthLoop());
             // Bug #65: replay match reports that failed in an earlier session.
             LoadOutbox();
+            // Aug 7 item 1: startup alerts fetch — covers the launch-time
+            // window before the presence loop's first tick (15s) and players
+            // launching mid-outage whose presence pings may never succeed.
+            FetchActiveAlerts();
         }
 
         // July 22: fast Steam-session establishment at startup (see Initialize).
@@ -7997,6 +8001,11 @@ namespace CompetitiveRounds
                                             CachedOnlineCount = on;
                                             NativeUI.MarkDirty();
                                         }
+                                        // Aug 7 item 1: alerts revision rides the
+                                        // ping; refetch only on a change-edge.
+                                        int arev = ExtractJsonInt(response, "alerts_rev");
+                                        if (arev > 0 && arev != LastAlertsRev)
+                                            FetchActiveAlerts();
                                     }
                                 }));
                         }
@@ -8048,6 +8057,175 @@ namespace CompetitiveRounds
             }
             catch { }
             return null;
+        }
+
+        // ── Aug 7 item 1: standing admin alerts ─────────────────────
+        public class AlertEntry
+        {
+            public int id;
+            public string category, admin_name, created_at, expires_at, message;
+        }
+        public static List<AlertEntry> CachedAlerts = new List<AlertEntry>();
+        public static int LastAlertsRev;
+        private static bool alertsFetchInFlight;
+        private const string PP_SEEN_ALERTS = "CR_SeenAlertIds";
+
+        public static void FetchActiveAlerts()
+        {
+            if (alertsFetchInFlight || Plugin.Instance == null) return;
+            alertsFetchInFlight = true;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/alerts/active",
+                (ok, resp) =>
+                {
+                    alertsFetchInFlight = false;
+                    if (!ok) return;
+                    try
+                    {
+                        int rev = ExtractJsonInt(resp, "rev");
+                        if (rev > 0) LastAlertsRev = rev;
+                        var list = new List<AlertEntry>();
+                        int arr = resp.IndexOf("\"alerts\"", StringComparison.Ordinal);
+                        int open = arr >= 0 ? resp.IndexOf('[', arr) : -1;
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (close > open)
+                        {
+                            // message is admin-authored free text — string-aware
+                            // slicing only (#156).
+                            foreach (var raw in SliceTopLevelObjects(resp.Substring(open, close - open + 1)))
+                            {
+                                var a = new AlertEntry
+                                {
+                                    id = ExtractJsonInt(raw, "id"),
+                                    category = ExtractJsonString(raw, "category") ?? "info",
+                                    admin_name = ExtractJsonString(raw, "admin_name") ?? "Admin",
+                                    created_at = ExtractJsonString(raw, "created_at") ?? "",
+                                    expires_at = ExtractJsonString(raw, "expires_at") ?? "",
+                                    message = ExtractJsonString(raw, "message") ?? "",
+                                };
+                                if (a.id > 0 && !string.IsNullOrEmpty(a.message)) list.Add(a);
+                            }
+                        }
+                        CachedAlerts = list;
+                        AnnounceUnseenAlerts(list);
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[ALERTS] parse: {ex.Message}"); }
+                }));
+        }
+
+        /// <summary>One toast per alert id per install (PlayerPrefs seen-set,
+        /// pruned to live ids + a small tail so it cannot grow forever). This
+        /// is what makes "coming online" players see a standing notice once
+        /// without being re-toasted every session.</summary>
+        private static void AnnounceUnseenAlerts(List<AlertEntry> live)
+        {
+            try
+            {
+                var seen = new HashSet<int>();
+                foreach (var tok in (PlayerPrefs.GetString(PP_SEEN_ALERTS, "") ?? "").Split(','))
+                    if (int.TryParse(tok, out int v)) seen.Add(v);
+                bool changed = false;
+                foreach (var a in live)
+                {
+                    if (seen.Contains(a.id)) continue;
+                    seen.Add(a.id); changed = true;
+                    Color c = a.category == "outage" ? new Color(0.95f, 0.35f, 0.30f)
+                            : a.category == "issue" ? new Color(1f, 0.72f, 0.30f)
+                            : a.category == "update" ? new Color(0.45f, 0.85f, 1f)
+                            : new Color(0.75f, 0.80f, 0.90f);
+                    // Neutralize rich-text tags in user-authored fields before
+                    // they touch a richText IMGUI style (mirror NativeUI.Escape).
+                    string msg = (a.message ?? "").Replace("<", "(").Replace(">", ")");
+                    string who = (a.admin_name ?? "Admin").Replace("<", "(").Replace(">", ")");
+                    CompetitiveUI.QueueNotification(
+                        I18n.TrF("[SERVER NOTICE] {0}: {1}", who, msg), c, 9f);
+                    if (a.category == "outage") { try { TaskbarFlash.Flash(); } catch { } }
+                }
+                if (changed)
+                {
+                    // Prune: keep only ids that are still live plus the newest
+                    // 50 — a revoked alert's id can drop out safely (a revoked
+                    // alert is never re-announced because it never returns).
+                    var keep = new List<int>();
+                    foreach (var a in live) keep.Add(a.id);
+                    foreach (var s in seen) { if (!keep.Contains(s)) keep.Add(s); if (keep.Count >= 50) break; }
+                    PlayerPrefs.SetString(PP_SEEN_ALERTS, string.Join(",", keep.ConvertAll(i => i.ToString()).ToArray()));
+                    PlayerPrefs.Save();
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[ALERTS] announce: {ex.Message}"); }
+        }
+
+        // Admin side — mirrors AdminBan's shape. The create canonical binds
+        // category + sha256(message)[:16] so a captured signature cannot be
+        // replayed with a different payload (server computes the identical
+        // UTF-8 lowercase-hex prefix).
+        public static void AdminCreateAlert(string category, string message, int expiresMinutes, Action<bool, string> cb = null)
+        {
+            string admin = MatchTracker.LocalSteamId;
+            string msg = (message ?? "").Trim();
+            string sig = ComputeAdminHmacHex($"admin:{admin}:alert_create:{category}:{ComputeSha256Hex(msg).Substring(0, 16)}");
+            string json = $"{{\"admin_steam_id\":\"{Escape(admin)}\",\"category\":\"{Escape(category)}\",\"message\":\"{JsonEscapeFull(msg)}\",\"expires_minutes\":{(expiresMinutes > 0 ? expiresMinutes.ToString() : "null")},\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/alerts", json, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ALERTS] create ok={ok} resp={(resp != null && resp.Length > 200 ? resp.Substring(0, 200) : resp)}");
+                if (ok) FetchActiveAlerts();
+                cb?.Invoke(ok, resp);
+            }));
+        }
+
+        public static void AdminRevokeAlert(int alertId, Action<bool, string> cb = null)
+        {
+            string admin = MatchTracker.LocalSteamId;
+            string sig = ComputeAdminHmacHex($"admin:{admin}:alert_revoke:{alertId}");
+            string json = $"{{\"admin_steam_id\":\"{Escape(admin)}\",\"alert_id\":{alertId},\"hmac_signature\":\"{sig}\"}}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry($"{baseUrl}/api/v1/admin/alerts/revoke", json, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[ALERTS] revoke {alertId} ok={ok}");
+                if (ok) FetchActiveAlerts();
+                cb?.Invoke(ok, resp);
+            }));
+        }
+
+        public static List<AlertEntry> CachedAdminAlerts = new List<AlertEntry>();
+        public static void FetchAdminAlerts(Action onDone = null)
+        {
+            string admin = MatchTracker.LocalSteamId;
+            string sig = ComputeAdminHmacHex($"admin:{admin}:alerts_list:");
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/admin/alerts/list?admin_steam_id={Escape(admin)}&sig={sig}",
+                (ok, resp) =>
+                {
+                    if (!ok) return;
+                    try
+                    {
+                        var list = new List<AlertEntry>();
+                        int arr = resp.IndexOf("\"alerts\"", StringComparison.Ordinal);
+                        int open = arr >= 0 ? resp.IndexOf('[', arr) : -1;
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (close > open)
+                        {
+                            foreach (var raw in SliceTopLevelObjects(resp.Substring(open, close - open + 1)))
+                            {
+                                list.Add(new AlertEntry
+                                {
+                                    id = ExtractJsonInt(raw, "id"),
+                                    category = (ExtractJsonBool(raw, "revoked") ? "revoked " : "")
+                                               + (ExtractJsonString(raw, "category") ?? "info"),
+                                    admin_name = ExtractJsonString(raw, "admin_name") ?? "Admin",
+                                    created_at = ExtractJsonString(raw, "created_at") ?? "",
+                                    expires_at = ExtractJsonString(raw, "expires_at") ?? "",
+                                    message = ExtractJsonString(raw, "message") ?? "",
+                                });
+                            }
+                        }
+                        CachedAdminAlerts = list;
+                        NativeUI.MarkDirty();
+                        onDone?.Invoke();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[ALERTS] admin list parse: {ex.Message}"); }
+                }));
         }
 
         // ════════════════════════════════════════════════════════════
