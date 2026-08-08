@@ -7647,26 +7647,85 @@ namespace CompetitiveRounds
                 CachedReleaseNotes = null;
             }
             _releasesFetchInFlight = true;
-            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/releases/recent?limit=3", (ok, resp) =>
+            /* Aug 7 item 6: PRIMARY is the server's own uncut store
+             * (release_notes_i18n, English rows POSTed at ship time) — full
+             * formatted bodies, locale-resolved server-side. The Discord
+             * mirror became the fallback: its bodies arrive pre-truncated to
+             * what one 2000-char Discord message carried (v1.37.0 lost 63% of
+             * its notes that way). */
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/release-notes/full/{Escape(want)}", (fOk, fResp) =>
             {
-                var list = ok ? ParseReleasePosts(resp) : null;
-                if (list != null && list.Count > 0)
+                var full = fOk ? ParseFullReleaseNotes(fResp, want) : null;
+                if (full != null && full.Count > 0)
                 {
                     _releasesFetchInFlight = false;
-                    CachedReleaseNotes = list;
-                    Plugin.Log.LogInfo($"[HOME] release posts loaded: {list.Count} (channel mirror)");
+                    CachedReleaseNotes = full;
+                    _releaseNotesLocale = want;
+                    Plugin.Log.LogInfo($"[HOME] release notes loaded: {full.Count} (server store, {want})");
                     NativeUI.MarkDirty();
-                    // Codex review: the overlay used to run ONLY on the GitHub
-                    // fallback, so on a healthy server (mirror populated — the
-                    // normal case) translated notes were never requested.
-                    MaybeLocalizeReleaseNotes();
+                    return;
                 }
-                else
+                Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/releases/recent?limit=3", (ok, resp) =>
                 {
-                    Plugin.Log.LogInfo("[HOME] release mirror empty/unreachable - falling back to GitHub");
-                    Plugin.Instance.StartCoroutine(DoFetchReleaseNotes());
-                }
+                    var list = ok ? ParseReleasePosts(resp) : null;
+                    if (list != null && list.Count > 0)
+                    {
+                        _releasesFetchInFlight = false;
+                        CachedReleaseNotes = list;
+                        Plugin.Log.LogInfo($"[HOME] release posts loaded: {list.Count} (channel mirror)");
+                        NativeUI.MarkDirty();
+                        // Codex review: the overlay used to run ONLY on the GitHub
+                        // fallback, so on a healthy server (mirror populated — the
+                        // normal case) translated notes were never requested.
+                        MaybeLocalizeReleaseNotes();
+                    }
+                    else
+                    {
+                        Plugin.Log.LogInfo("[HOME] release mirror empty/unreachable - falling back to GitHub");
+                        Plugin.Instance.StartCoroutine(DoFetchReleaseNotes());
+                    }
+                }));
             }));
+        }
+
+        /// <summary>Aug 7 item 6: parse /release-notes/full/{locale} — uncut
+        /// bodies, formatted for TMP instead of stripped to a flat block.</summary>
+        private static List<ReleaseNoteEntry> ParseFullReleaseNotes(string resp, string locale)
+        {
+            try
+            {
+                var list = new List<ReleaseNoteEntry>();
+                if (string.IsNullOrEmpty(resp)) return list;
+                int k = resp.IndexOf("\"releases\"", StringComparison.Ordinal);
+                if (k < 0) return list;
+                int open = resp.IndexOf('[', k);
+                if (open < 0) return list;
+                int close = FindMatchingBracketStringAware(resp, open);
+                if (close < 0) return list;
+                foreach (string chunk in SliceTopLevelObjects(resp.Substring(open, close - open + 1)))
+                {
+                    string body = ExtractJsonString(chunk, "body");
+                    bool machine = ExtractJsonBool(chunk, "machine");
+                    var e = new ReleaseNoteEntry
+                    {
+                        tag = ExtractJsonString(chunk, "tag"),
+                        title = ExtractJsonString(chunk, "title"),
+                        date = ExtractJsonString(chunk, "updated_at"),
+                        body = locale == "en" ? MarkdownToTmp(body, unicode: false)
+                                              : MarkdownToTmp(body, unicode: true),
+                    };
+                    if (machine && !string.IsNullOrEmpty(e.body))
+                        e.body += "\n<color=#667788><i>" + I18n.Tr("Machine translation - corrections welcome in Discord.") + "</i></color>";
+                    if (!string.IsNullOrEmpty(e.date) && e.date.Length >= 10) e.date = e.date.Substring(0, 10);
+                    if (!string.IsNullOrEmpty(e.tag) && !string.IsNullOrEmpty(e.body)) list.Add(e);
+                }
+                return list;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[HOME] full release notes parse failed: {ex.Message}");
+                return null;
+            }
         }
 
         private static List<ReleaseNoteEntry> ParseReleasePosts(string resp)
@@ -7908,8 +7967,102 @@ namespace CompetitiveRounds
             t = keep.ToString();
             while (t.Contains("\n\n\n")) t = t.Replace("\n\n\n", "\n\n");
             t = t.Trim();
-            if (t.Length > 2500) t = t.Substring(0, 2500).TrimEnd() + " ...";
+            // Aug 7 item 6: 2500 -> 9000. The es/ru bodies run ~6k and this
+            // cap was cutting them mid-list; the panel scrolls.
+            if (t.Length > 9000) t = t.Substring(0, 9000).TrimEnd() + " ...";
             return t;
+        }
+
+        /// <summary>Aug 7 item 6: Markdown -> TMP rich text for the Home tab's
+        /// uncut release notes. Order is load-bearing: neutralize SOURCE angle
+        /// brackets FIRST, then insert our tags — a changelog line containing
+        /// "&lt;b&gt;" must render as text, never inject markup (same class as
+        /// the overlay sanitizer). ASCII variant maps typography to ASCII and
+        /// drops other non-ASCII (Gravity coverage, #47); Unicode variant
+        /// keeps accents/Cyrillic for the runtime fallback font.</summary>
+        internal static string MarkdownToTmp(string body, bool unicode)
+        {
+            if (string.IsNullOrEmpty(body)) return "";
+            string t = body.Replace("\r\n", "\n").Replace("\r", "\n");
+            t = NativeUI.UnwrapHardBreaks(t);
+            t = t.Replace("<", "(").Replace(">", ")");
+            if (!unicode)
+            {
+                t = t.Replace("—", "-").Replace("–", "-").Replace("×", "x")
+                     .Replace("•", "-").Replace("→", "->").Replace("·", "-")
+                     .Replace("‘", "'").Replace("’", "'")
+                     .Replace("“", "\"").Replace("”", "\"");
+            }
+            var sb = new StringBuilder(t.Length + 256);
+            foreach (string rawLine in t.Split('\n'))
+            {
+                string line = rawLine.TrimEnd();
+                string trimmed = line.TrimStart();
+                if (trimmed.StartsWith("#", StringComparison.Ordinal))
+                {
+                    string h = trimmed.TrimStart('#').Trim();
+                    sb.Append("<size=+3><color=#FFD94D><b>").Append(InlineMdToTmp(h))
+                      .Append("</b></color></size>\n");
+                    continue;
+                }
+                bool bullet = (trimmed.StartsWith("- ", StringComparison.Ordinal)
+                            || trimmed.StartsWith("* ", StringComparison.Ordinal)
+                            || trimmed.StartsWith("+ ", StringComparison.Ordinal))
+                            && !trimmed.StartsWith("**", StringComparison.Ordinal);
+                if (bullet)
+                {
+                    int indent = line.Length - trimmed.Length;
+                    sb.Append(indent >= 2 ? "      " : "  ")
+                      .Append("<color=#FFD94D>-</color> ")
+                      .Append(InlineMdToTmp(trimmed.Substring(2))).Append('\n');
+                    continue;
+                }
+                sb.Append(InlineMdToTmp(line)).Append('\n');
+            }
+            string outp = sb.ToString();
+            var filtered = new StringBuilder(outp.Length);
+            foreach (char ch in outp)
+            {
+                if (ch == '\n') { filtered.Append(ch); continue; }
+                if (ch < 32) continue;
+                if (!unicode && ch >= 127) continue;
+                filtered.Append(ch);
+            }
+            outp = filtered.ToString();
+            while (outp.Contains("\n\n\n")) outp = outp.Replace("\n\n\n", "\n\n");
+            outp = outp.Trim();
+            // 9000 cap: real changelogs run 5-6k; the panel scrolls.
+            if (outp.Length > 9000) outp = outp.Substring(0, 9000).TrimEnd() + " ...";
+            return outp;
+        }
+
+        /// <summary>Inline markdown: **bold**, __underline__, `code` (light
+        /// blue). Runs AFTER angle-bracket neutralization, so our own tags are
+        /// the only markup in the string. Markers inside a code span are
+        /// LITERAL (identifiers like __init__ or cr_ffa_cfg must not toggle
+        /// styling); single * / _ are left alone for the same reason.
+        /// Unbalanced markers are closed at end of line — the global Truncate
+        /// default plus TMP both misbehave on dangling tags (#292).</summary>
+        private static string InlineMdToTmp(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return line ?? "";
+            var sb = new StringBuilder(line.Length + 24);
+            bool bold = false, under = false, code = false;
+            for (int i = 0; i < line.Length; i++)
+            {
+                char c = line[i];
+                if (c == '`')
+                { sb.Append(code ? "</color>" : "<color=#AAD4FF>"); code = !code; continue; }
+                if (!code && c == '*' && i + 1 < line.Length && line[i + 1] == '*')
+                { sb.Append(bold ? "</b>" : "<b>"); bold = !bold; i++; continue; }
+                if (!code && c == '_' && i + 1 < line.Length && line[i + 1] == '_')
+                { sb.Append(under ? "</u>" : "<u>"); under = !under; i++; continue; }
+                sb.Append(c);
+            }
+            if (code) sb.Append("</color>");
+            if (bold) sb.Append("</b>");
+            if (under) sb.Append("</u>");
+            return sb.ToString();
         }
 
         private static string CleanReleaseBody(string body)
@@ -7947,9 +8100,10 @@ namespace CompetitiveRounds
             t = ascii.ToString();
             while (t.Contains("\n\n\n")) t = t.Replace("\n\n\n", "\n\n");
             t = t.Trim();
-            /* 2500: channel release posts should read in full (Sid's item 2 —
-             * "players should see update notes properly"); the panel scrolls. */
-            if (t.Length > 2500) t = t.Substring(0, 2500).TrimEnd() + " ...";
+            /* Aug 7 item 6: 2500 -> 9000 — the GitHub fallback body for a real
+             * release runs ~5-6k and the old cap cut it mid-list ("... ").
+             * The panel scrolls; length costs nothing. */
+            if (t.Length > 9000) t = t.Substring(0, 9000).TrimEnd() + " ...";
             return t;
         }
 

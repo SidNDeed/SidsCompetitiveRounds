@@ -14374,18 +14374,44 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             if (string.IsNullOrEmpty(body) || body.IndexOf('\n') < 0) return body;
             string[] lines = body.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
             var sb = new StringBuilder(body.Length);
+            /* Aug 7 item 6 (bug 160's ACTUAL regression): the original rules
+             * classified BOTH sides of nearly every break in a real changelog
+             * as "structure" — the house note style is `- ` bullets whose
+             * hard-wrapped continuations are 2-space-indented, and "**Bold"
+             * prose openers start with '*'. Result: the unwrapper fired on
+             * approximately zero lines and the column stayed at the author's
+             * ~90 chars. Two corrections: `**` is BOLD, not a bullet; and a
+             * 2-space-indented line that does NOT itself start a bullet is a
+             * CONTINUATION of the bullet above it — joinable by definition. */
+            bool StartsBullet(string t)
+            {
+                if (t.Length == 0) return false;
+                char c0 = t[0];
+                if ((c0 == '-' || c0 == '*' || c0 == '+') && !(c0 == '*' && t.Length > 1 && t[1] == '*'))
+                    return t.Length > 1 && t[1] == ' ';
+                int d = 0; while (d < t.Length && char.IsDigit(t[d])) d++;
+                return d > 0 && d < t.Length && (t[d] == '.' || t[d] == ')');
+            }
             bool StartsStructure(string l)
             {
                 string t = l.TrimStart();
                 if (t.Length == 0) return true;
+                if (StartsBullet(t)) return true;
                 char c0 = t[0];
-                if (c0 == '-' || c0 == '*' || c0 == '+' || c0 == '#' || c0 == '>' || c0 == '|') return true;
+                if (c0 == '*' && t.Length > 1 && t[1] == '*') return false;  // "**Bold" = prose
+                if (c0 == '#' || c0 == '>' || c0 == '|') return true;
                 if (c0 == '`') return true;                       // fenced/inline code
-                if (l.StartsWith("  ", StringComparison.Ordinal)) return true;   // indented block
-                // "1." / "2)" ordered list
-                int d = 0; while (d < t.Length && char.IsDigit(t[d])) d++;
-                if (d > 0 && d < t.Length && (t[d] == '.' || t[d] == ')')) return true;
+                if (l.StartsWith("    ", StringComparison.Ordinal)) return true; // 4-space code block
                 return false;
+            }
+            // A 2-space continuation joins its bullet; anything else with its
+            // own structure keeps the break.
+            bool IsContinuation(string l)
+            {
+                if (!l.StartsWith("  ", StringComparison.Ordinal)) return false;
+                if (l.StartsWith("    ", StringComparison.Ordinal)) return false;
+                string t = l.TrimStart();
+                return t.Length > 0 && !StartsBullet(t) && t[0] != '#';
             }
             for (int i = 0; i < lines.Length; i++)
             {
@@ -14395,8 +14421,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 string next = lines[i + 1];
                 bool joinable = cur.Trim().Length > 0            // not a blank line
                              && next.Trim().Length > 0           // next is not a paragraph break
-                             && !StartsStructure(cur)            // we are not inside a list item
-                             && !StartsStructure(next);          // next does not begin one
+                             && (IsContinuation(next)            // bullet continuation joins up
+                                 || (!StartsStructure(cur) && !StartsStructure(next)));
                 sb.Append(joinable ? " " : "\n");
             }
             return sb.ToString();

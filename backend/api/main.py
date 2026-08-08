@@ -8375,10 +8375,14 @@ async def push_release_posts(payload: dict, request: Request,
 async def get_recent_releases(limit: int = Query(3, ge=1, le=10),
                               db: AsyncSession = Depends(get_db)):
     """Newest #scr-releases posts for the Home tab (v1.33). Key order is
-    load-bearing for the mod's manual parser: author first, posted_at last."""
+    load-bearing for the mod's manual parser: author first, posted_at last.
+    Aug 7 item 6: rows under 200 chars are skipped — bot chatter like "Posted
+    v1.37.0 to #releases." was consuming one of the panel's 3 slots. (This is
+    now the FALLBACK source; /release-notes/full/{locale} is primary.)"""
     rows = (await db.execute(text("""
         SELECT author, content, posted_at
         FROM release_posts
+        WHERE LENGTH(content) > 200
         ORDER BY posted_at DESC
         LIMIT :lim
     """), {"lim": limit})).mappings().all()
@@ -11506,6 +11510,44 @@ async def release_notes_localized(locale: str, db: AsyncSession = Depends(get_db
          "machine": r["source"] == "machine"} for r in rows]}
 
 
+# Aug 7 item 6: release-note languages = the translation set PLUS canonical
+# English. Scoped here rather than widening I18N_LANGS — that set gates the
+# i18n pack/portal endpoints too (#285's shared-list trap, language edition).
+_RELEASE_NOTE_LANGS = tuple(["en"] + list(I18N_LANGS))
+
+
+@app.get("/api/v1/release-notes/full/{locale}", tags=["I18n"])
+async def release_notes_full(locale: str, db: AsyncSession = Depends(get_db)):
+    """Aug 7 item 6: the Home tab's UNCUT primary source. Serves the newest
+    releases from release_notes_i18n with per-tag locale preference and
+    English fallback — replacing the Discord-mirror path whose bodies arrived
+    pre-truncated to what a 2000-char Discord message could carry (v1.37.0
+    lost 63% of its notes that way). English rows are POSTed at ship time
+    (ship.md step 8b). Empty when no en rows exist yet — the client falls back
+    to the mirror/GitHub path unchanged."""
+    locale = (locale or "en").lower()[:8]
+    if locale not in _RELEASE_NOTE_LANGS:
+        locale = "en"
+    rows = (await db.execute(text(
+        """SELECT DISTINCT ON (tag) tag, title, body, source, language_code, updated_at
+             FROM release_notes_i18n
+            WHERE language_code IN ('en', :l)
+         ORDER BY tag,
+                  CASE WHEN language_code = :l THEN 0 ELSE 1 END,
+                  updated_at DESC"""
+    ), {"l": locale})).mappings().all()
+    # Newest 3 releases by row recency (tags are vX.Y.Z strings — recency by
+    # updated_at, not string order).
+    ordered = sorted(rows, key=lambda r: r["updated_at"] or datetime.min.replace(tzinfo=timezone.utc),
+                     reverse=True)[:3]
+    return {"locale": locale, "releases": [
+        {"tag": r["tag"], "title": r["title"] or "",
+         "machine": r["source"] == "machine" and r["language_code"] != "en",
+         "updated_at": r["updated_at"].isoformat() if r["updated_at"] else "",
+         # body LAST — free markdown text, client slices string-aware (#156).
+         "body": r["body"] or ""} for r in ordered]}
+
+
 @app.post("/api/v1/admin/release-notes", tags=["Admin"])
 async def admin_set_release_notes(payload: dict, db: AsyncSession = Depends(get_db)):
     """Ship-time upload of a translated release note (admin-HMAC signed).
@@ -11519,8 +11561,11 @@ async def admin_set_release_notes(payload: dict, db: AsyncSession = Depends(get_
     source = "human" if str(payload.get("source", "")) == "human" else "machine"
     await _require_admin(db, admin_id, "release_notes", f"{tag}:{lang}",
                          payload.get("signature"))
-    if not tag or lang not in I18N_LANGS or not body.strip():
-        raise HTTPException(400, f"tag, body and a supported language ({', '.join(I18N_LANGS)}) are required")
+    # Aug 7 item 6: 'en' joins the accepted set (canonical uncut English for
+    # the Home tab's new full endpoint) — scoped via _RELEASE_NOTE_LANGS, not
+    # by widening I18N_LANGS (#285's shared-list trap).
+    if not tag or lang not in _RELEASE_NOTE_LANGS or not body.strip():
+        raise HTTPException(400, f"tag, body and a supported language ({', '.join(_RELEASE_NOTE_LANGS)}) are required")
     await db.execute(text(
         "INSERT INTO release_notes_i18n (tag, language_code, title, body, source, translated_by)"
         " VALUES (:t, :l, :ti, :b, :s, :by)"

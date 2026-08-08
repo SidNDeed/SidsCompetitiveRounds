@@ -2422,6 +2422,13 @@ async def _maybe_answer_faq_ingame(data: dict) -> None:
 # Home tab shows update notes as they're posted. Upsert by message id, so the
 # startup backfill and edit re-pushes are safe to repeat.
 
+# Aug 7 item 6: continuation chunks of a multi-message release announcement
+# start with this zero-width space. The mirror skips them — only the FIRST
+# message becomes a Home-tab fallback row (the tab's primary source is now
+# the API's own uncut release-notes store).
+RELEASE_CONT_MARK = "\u200b"
+
+
 async def _push_release_posts(msgs) -> None:
     if http_session is None or not API_SECRET_KEY:
         return
@@ -2430,6 +2437,8 @@ async def _push_release_posts(msgs) -> None:
         content = (m.content or "").strip()
         if not content:
             continue  # embed/attachment-only posts have nothing to mirror
+        if content.startswith(RELEASE_CONT_MARK):
+            continue  # release-announcement continuation chunk (Aug 7 item 6)
         posts.append({
             "discord_message_id": str(m.id),
             "author": getattr(m.author, "display_name", None) or m.author.name,
@@ -5992,23 +6001,44 @@ _release_poller_initialized = False
 
 
 def _format_release_message(release_json):
-    """Build the Discord-flavored release message. Trim body to fit Discord's
-    2000-char message limit, with a 'see full notes' link footer that always
-    fits regardless of how long the body is."""
+    """Aug 7 item 6: build the release announcement as a LIST of messages so
+    the notes post UNCUT — the old single-message form lost 63% of the
+    v1.37.0 notes to Discord's 2000-char message cap, ending mid-sentence.
+    Chunks split at paragraph boundaries (line boundaries as fallback);
+    continuation messages start with a zero-width space so the server mirror
+    skips them (only the first message becomes a Home-tab fallback row — the
+    Home tab's primary source is now the API's own uncut store)."""
     tag = release_json.get("tag_name") or "v?"
     name = release_json.get("name") or tag
     url = release_json.get("html_url") or f"https://github.com/{GITHUB_RELEASES_REPO}/releases/tag/{tag}"
     body = release_json.get("body") or ""
-    # Strip GitHub-specific markdown that Discord renders weirdly. Keep the
-    # rest mostly intact since both platforms support similar markdown.
     body = body.replace("\r\n", "\n").strip()
-    header = f"**🚀 New release: {name}**\n{url}\n\n"
+    header = f"**\N{ROCKET} New release: {name}**\n{url}\n\n"
     footer = f"\n\n— Full notes: {url}"
-    # Discord per-message limit is 2000 chars. Reserve room for header + footer.
-    budget = 2000 - len(header) - len(footer) - 20  # 20 for safety/ellipsis
-    if len(body) > budget:
-        body = body[:budget].rstrip() + "…"
-    return header + body + footer
+    budget = 1900  # per-message body budget under the 2000 cap
+    pieces = []
+    remaining = body
+    while remaining:
+        prefix = header if not pieces else RELEASE_CONT_MARK
+        room = budget - len(prefix)
+        if len(remaining) <= room:
+            pieces.append(prefix + remaining)
+            break
+        # Prefer a paragraph boundary, then a line boundary, then hard cut.
+        cut = remaining.rfind("\n\n", 0, room)
+        if cut < room // 2:
+            cut = remaining.rfind("\n", 0, room)
+        if cut < room // 2:
+            cut = room
+        pieces.append(prefix + remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip("\n")
+        if len(pieces) >= 5:  # ~9.5k chars — enough for any real changelog
+            pieces.append(RELEASE_CONT_MARK + "… (truncated)")
+            break
+    if not pieces:
+        pieces = [header.rstrip()]
+    pieces[-1] = pieces[-1] + footer
+    return pieces
 
 
 @tasks.loop(minutes=5)
@@ -6055,7 +6085,7 @@ async def poll_github_releases():
 
     # New release — post to #releases only (chat mirror dropped per user
     # request: "only post new releases in the Releases channel instead of both").
-    msg = _format_release_message(payload)
+    msgs = _format_release_message(payload)
     posted = 0
     if RELEASES_CHANNEL_ID:
         try:
@@ -6063,12 +6093,14 @@ async def poll_github_releases():
             if ch is None:
                 print(f"[RELEASES] channel {RELEASES_CHANNEL_ID} not resolvable")
             else:
-                await ch.send(msg)
+                for msg in msgs:
+                    await ch.send(msg[:2000])
+                    await asyncio.sleep(0.4)
                 posted = 1
         except Exception as e:
             print(f"[RELEASES] post error: {e}")
     _last_release_tag = tag
-    print(f"[RELEASES] announced {tag} to {posted} channel(s)")
+    print(f"[RELEASES] announced {tag} to {posted} channel(s) in {len(msgs)} message(s)")
 
 
 @bot.hybrid_command(
@@ -6101,13 +6133,15 @@ async def announce_release(ctx):
         return
 
     tag = payload.get("tag_name") or "?"
-    msg = _format_release_message(payload)
+    msgs = _format_release_message(payload)
     posted = []
     if RELEASES_CHANNEL_ID:
         try:
             ch = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
             if ch is not None:
-                await ch.send(msg)
+                for msg in msgs:
+                    await ch.send(msg[:2000])
+                    await asyncio.sleep(0.4)
                 posted.append("#releases")
         except Exception as e:
             print(f"[RELEASES] manual post error: {e}")

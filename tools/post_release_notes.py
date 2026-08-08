@@ -11,12 +11,15 @@ Usage (Sid's PC, needs the admin secret in the environment):
     python tools/post_release_notes.py --admin <steam64> --tag v1.37.0 \\
         --notes-dir dist/release-notes-v1.37.0
 
-The notes dir holds one file per language, named <lang>.md (es.md, ru.md).
-English is NOT posted — GitHub already serves it and the client falls back to it.
+The notes dir holds one file per language, named <lang>.md (en.md, es.md, ru.md).
+Aug 7 item 6: ENGLISH IS POSTED TOO — the Home tab's primary source is now the
+server's own uncut store (/api/v1/release-notes/full/{locale}); the Discord
+mirror only ever carried what one 2000-char message could, and GitHub is the
+last-resort fallback. English rows are marked source=human.
 
-`source` is left at the server default `machine`, which makes the client append
-a "machine translation" note. That is deliberate: Sid cannot read these, so
-players must know a human did not write them.
+For es/ru, `source` is left at the server default `machine`, which makes the
+client append a "machine translation" note. That is deliberate: Sid cannot
+read these, so players must know a human did not write them.
 
 The HMAC canonical mirrors the server's _admin_canonical exactly:
     admin:{steam_id}:release_notes:{tag}:{lang}
@@ -32,7 +35,7 @@ import urllib.error
 import urllib.request
 
 BASE = os.environ.get("SCR_API_BASE", "http://192.168.72.90:8443")
-LANGS = ("es", "ru")
+LANGS = ("en", "es", "ru")
 
 
 def main() -> int:
@@ -71,6 +74,9 @@ def main() -> int:
             "tag": args.tag,
             "language_code": lang,
             "body": body,
+            # English is the canonical text Sid can read — mark it human so
+            # the client never appends the machine-translation footer to it.
+            **({"source": "human"} if lang == "en" else {}),
             # The handler reads "signature", NOT "hmac_signature" (main.py:11325).
             # Sending the wrong key is a 403 "Bad admin signature" that looks
             # exactly like a wrong secret — verified against the handler.
