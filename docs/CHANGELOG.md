@@ -116,6 +116,53 @@ seed migration for the new i18n keys is a ship-time step.
 - The FFA "GET READY" banner no longer clips its text top and bottom — the
   banner box now sizes to the rendered text instead of a fixed 260px slot.
 
+### Stan's feature requests (#178–181, all accepted)
+
+- **Discord FFA results show every player's before→after rating** (stamped at
+  match time, so later games never rewrite history), and **every ranked
+  result post carries its `/game` codes** — inspect a game from Discord
+  without opening ROUNDS.
+- **"How stats are tracked"** — a Settings-tab page stating the verified
+  mechanics: what counts as a shot, why one block absorbing three bullets is
+  one success, which cards do and don't count as attempts, what Rage Quit %
+  vs Leave actually measure, when the game-length clock runs, and which
+  modes feed which lifetime stats.
+- **Stat hover graphs redesigned**: two-line headers with the legend colored
+  as the lines (distinct hues), real x-axis time ticks scaled to the game's
+  actual length, the block graph now charts **activations vs successful
+  blocks** (older games keep their honest damage-taken labels), and the
+  marker footer is replaced by a real green/red "point won / point lost"
+  legend that only appears when markers do.
+- **The graph-vs-summary discrepancy Stan caught was real and is fixed at the
+  root**: every stat timeline stopped recording at 6 minutes 24 seconds (a
+  128-sample cap) while the totals kept counting — nearly every 2v2 and FFA
+  game overran it. Timelines now compress as they grow and always span the
+  whole game. Also found in the same audit: FFA spawn-grace right-clicks
+  were counting as block attempts that could never block — no longer.
+
+### Review hardening (Codex adversarial round 2 — 12 confirmed findings fixed)
+
+- Hosted-lobby groups are released (never recycled into public matchmaking)
+  by EVERY dissolution path now — ready timeouts, dead-lock resets, ban
+  evictions, account deletion — via one shared disposition authority; queue
+  leaves are incarnation-fenced so a delayed retry can't tear down a newer
+  enrollment, and joining is blocked while a leave is still settling.
+- The chat auth token is never sent over the plaintext fallback socket — a
+  downgraded session stays unverified (censored without strikes) instead of
+  exposing the session bearer.
+- Preference writes serialize one-at-a-time with Start disabled until the
+  host's last change is acknowledged; recovery rejoins re-send the current
+  preferences, not a stale join-time snapshot; "Team: Any" clears server-side.
+- The team-color coin flip distributes to every seat and spectator via a
+  room property (the continuation response only ever reached one client);
+  an all-vanilla decision is now explicitly frozen so a mid-series color
+  equip can't re-open it; spectators never repaint a watched room with their
+  own previous series' colors.
+- The Leaderboard live column enforces a single row budget across all modes
+  so it can never overpaint the bet ledger; release announcements survive
+  bot restarts mid-post and the manual command can no longer mark a partial
+  announcement complete.
+
 ### Review hardening (Codex adversarial round 1 — 16 confirmed findings fixed)
 
 - **Hosted lobbies:** survivors of a dissolved hosted 2v2/1v2 start are
