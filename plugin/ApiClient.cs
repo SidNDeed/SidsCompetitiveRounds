@@ -1228,8 +1228,21 @@ namespace CompetitiveRounds
         // secret -> empty signature -> clean server-side 403; the one-time log
         // line tells an admin why their admin menu suddenly stopped working.
         private static bool _adminSecretWarned = false;
+        /// <summary>Codex r5/r6/r7 structural fix (learning #319): the ONE
+        /// place every admin-signed request passes through. Signing arms this
+        /// latch; the next request helper invocation consumes it and refuses
+        /// the send on plaintext-to-public transport. This replaces guessing
+        /// sensitivity from URL substrings and body tokens — three rounds of
+        /// review each found another surface the guessing missed
+        /// (/chat/moderate/*, bodies keyed on the TARGET steam_id, ...).
+        /// Same-frame coupling is safe because every caller signs immediately
+        /// before dispatching, on the single-threaded Unity main thread; a
+        /// stale latch can only ever cause ONE extra refusal, never a leak
+        /// (fail-closed), and it self-clears on the very next request.</summary>
+        private static bool _nextRequestCarriesAdminCredential;
         private static string ComputeAdminHmacHex(string message)
         {
+            _nextRequestCarriesAdminCredential = true;
             string secret = null;
             try { secret = Plugin.AdminHmacSecret?.Value; } catch { }
             if (string.IsNullOrWhiteSpace(secret))
@@ -15052,6 +15065,11 @@ namespace CompetitiveRounds
         private static bool SensitiveTransportBlocked(string url, string json,
             Action<bool, string> callback)
         {
+            // CONSUME the admin-credential latch on every request, whatever
+            // the transport — leaving it armed would make the NEXT unrelated
+            // request inherit it (learning #319's structural gate).
+            bool adminSigned = _nextRequestCarriesAdminCredential;
+            _nextRequestCarriesAdminCredential = false;
             try
             {
                 if (CredentialedTransportAllowed(url)) return false;
@@ -15070,8 +15088,14 @@ namespace CompetitiveRounds
                 // admin_steam_id would otherwise block their own match
                 // reports (a value can't contain the raw key sequence; its
                 // quotes arrive escaped).
+                // adminSigned is the STRUCTURAL half and covers every
+                // admin-HMAC surface by construction. The URL/body matches
+                // stay as defence-in-depth for the non-signed sensitive
+                // payloads (lobby passwords) and as a belt-and-braces net if
+                // a future admin path ever bypasses ComputeAdminHmacHex.
                 bool sensitive =
-                    url.IndexOf("/admin/", StringComparison.OrdinalIgnoreCase) >= 0
+                    adminSigned
+                    || url.IndexOf("/admin/", StringComparison.OrdinalIgnoreCase) >= 0
                     || url.IndexOf("/chat/moderate/", StringComparison.OrdinalIgnoreCase) >= 0
                     || url.IndexOf("admin_steam_id=", StringComparison.OrdinalIgnoreCase) >= 0
                     || (json != null
