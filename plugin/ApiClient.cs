@@ -7082,6 +7082,34 @@ namespace CompetitiveRounds
         // the retry worst case (3 attempts × 10s timeout + 2 × 2s delay = 34s).
         private const float LEAVE_STUCK_TIMEOUT = 45f;
         private static float rankedLeavingSince = -999f;
+        // F2 (Codex r3): ONE enrollment may be in flight per mode. A hosted
+        // Join click and a public Search click could both be in flight at
+        // once — the server refuses overwrites of live locked rows now, but
+        // the client shouldn't fire the second enrollment at all. Shared
+        // latch across the mode's entry points (public queue join, hosted
+        // Create, hosted Join): set at send, cleared in each response
+        // handler, 25s self-expiry so a lost response (dead coroutine host)
+        // can never wedge it (#270c).
+        private const float ENROLL_IN_FLIGHT_EXPIRY = 25f;
+        private static float _teamEnrollInFlightAt = -999f;
+        private static float _ovtEnrollInFlightAt = -999f;
+        private static bool EnrollGateBegin(string mode)
+        {
+            float at = mode == "team" ? _teamEnrollInFlightAt : _ovtEnrollInFlightAt;
+            if (Time.realtimeSinceStartup - at < ENROLL_IN_FLIGHT_EXPIRY)
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Still joining - one moment..."), new Color(1f, 0.6f, 0.2f), 4f);
+                return false;
+            }
+            if (mode == "team") _teamEnrollInFlightAt = Time.realtimeSinceStartup;
+            else _ovtEnrollInFlightAt = Time.realtimeSinceStartup;
+            return true;
+        }
+        private static void EnrollGateEnd(string mode)
+        {
+            if (mode == "team") _teamEnrollInFlightAt = -999f;
+            else _ovtEnrollInFlightAt = -999f;
+        }
         // Lifecycle generation (Codex verify findings 2-4): bumped synchronously
         // on EVERY lifecycle edge (join send, leave start, stuck-recovery).
         // Every async queue callback captures the value at send time and applies
@@ -7117,6 +7145,10 @@ namespace CompetitiveRounds
             {
                 teamGen++;
                 CurrentTeamQueueState = TeamQueueState.Idle;
+                // F3 (Codex r3): the leave callback now owns clearing the
+                // series belief (#249) — when it dies with its coroutine
+                // host, this watchdog is the clear's durable home.
+                ActiveTeamSeriesId = null;
                 Plugin.Log.LogWarning("[TEAM-QUEUE] Leaving state stuck past timeout -- recovered to Idle");
                 NativeUI.MarkDirty();
             }
@@ -7124,6 +7156,8 @@ namespace CompetitiveRounds
             {
                 ovtGen++;
                 OvtQueueStatus = "";
+                // F3: see the team branch above.
+                ActiveOvt1v2SeriesId = null;
                 Plugin.Log.LogWarning("[1v2] Leaving state stuck past timeout -- recovered");
                 NativeUI.MarkDirty();
             }
@@ -8889,6 +8923,9 @@ namespace CompetitiveRounds
             {
                 try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
             }
+            // F2 (Codex r3): last gate before the send — one enrollment in
+            // flight per mode, shared with the hosted Create/Join paths.
+            if (!EnrollGateBegin("team")) return;
             string qt = (queueType == "manual") ? "manual" : "auto";
             string safeName = Escape(displayName ?? steamId);
             string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"queue_type\":\"{qt}\"}}";
@@ -8897,6 +8934,9 @@ namespace CompetitiveRounds
                 $"{baseUrl}/api/v1/team/queue/join", json,
                 (success, response) =>
                 {
+                    // F2: release the latch BEFORE the gen check — a stale ack
+                    // must still free the mode for the next enrollment.
+                    EnrollGateEnd("team");
                     if (gen != teamGen)
                     {
                         Plugin.Log.LogInfo("[TEAM-QUEUE] stale join ack ignored (lifecycle moved on)");
@@ -8930,26 +8970,53 @@ namespace CompetitiveRounds
             // queue_contended) with local state already Idle strands our row
             // and can ghost-lock the other three (review finding).
             // Idempotent request; Idle finalized only in the callback.
+            //
+            // F3 (Codex r3): capture the series incarnation BEFORE any local
+            // clear — this legacy public path used to null ActiveTeamSeriesId
+            // first and then build an UNFENCED leave URL, so a delayed retry
+            // could tear down a NEWER enrollment (HostLobbyClient's
+            // DirectQueueLeave already fences). The id clears in the RESPONSE
+            // handler (#249), never before the request; the stuck-Leaving
+            // watchdog in TickLeaveRecovery clears it if the callback dies.
+            string fenceSeriesId = ActiveTeamSeriesId;
             int gen = ++teamGen;
             CurrentTeamQueueState = TeamQueueState.Leaving;
             teamLeavingSince = Time.realtimeSinceStartup;
+            // Eager poll disarm stays: it is what prevents a fresh poll from
+            // re-adopting the match while the leave is in flight.
             IsTeamQueuePolling = false;
             LastTeamPollData = null;
-            ActiveTeamSeriesId = null;
             Plugin.ClearPending2v2Slot();
             NativeUI.MarkDirty();
+            string leaveUrl = $"{baseUrl}/api/v1/team/queue/leave?steam_id={Escape(steamId)}";
+            if (!string.IsNullOrEmpty(fenceSeriesId))
+                leaveUrl += $"&expected_series_id={UnityWebRequest.EscapeURL(fenceSeriesId)}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
-                $"{baseUrl}/api/v1/team/queue/leave?steam_id={Escape(steamId)}", "",
+                leaveUrl, "",
                 (success, response) =>
                 {
                     if (gen != teamGen) return;  // watchdog recovered / new lifecycle
                     if (success)
-                        Plugin.Log.LogInfo("[TEAM-QUEUE] Left 2v2 queue");
+                    {
+                        // {"stale":true} = the row's CURRENT series differs from
+                        // the fenced incarnation — that incarnation is gone,
+                        // which is exactly what this leave wanted.
+                        if (ExtractJsonBool(response ?? "", "stale"))
+                            Plugin.Log.LogInfo("[TEAM-QUEUE] fenced leave hit a newer incarnation — old seat already gone");
+                        else
+                            Plugin.Log.LogInfo("[TEAM-QUEUE] Left 2v2 queue");
+                    }
                     else
                     {
                         Plugin.Log.LogWarning($"[TEAM-QUEUE] Leave failed after retries: {response} — server will prune the stale row");
                         CompetitiveUI.ShowNotification("Couldn't confirm 2v2 queue leave — the server will clear you shortly.", new Color(1f, 0.6f, 0.2f), 5f);
                     }
+                    // F3/#249: the series belief clears on the RESPONSE, both
+                    // outcomes — failure keeps today's best-effort semantics
+                    // (the server prunes the row) while the fence above kept
+                    // the request honest about WHICH incarnation it targeted.
+                    if (string.Equals(ActiveTeamSeriesId, fenceSeriesId, StringComparison.Ordinal))
+                        ActiveTeamSeriesId = null;
                     if (CurrentTeamQueueState == TeamQueueState.Leaving)
                         CurrentTeamQueueState = TeamQueueState.Idle;
                     NativeUI.MarkDirty();
@@ -10319,11 +10386,17 @@ namespace CompetitiveRounds
             // server pins every 1v2 room to "us" even for an all-EU trio.
             string region = "";
             try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+            // F2 (Codex r3): last gate before the send — one enrollment in
+            // flight per mode, shared with the hosted Create/Join paths.
+            if (!EnrollGateBegin("ovt")) return;
             string body = $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"," +
                           $"\"preferred_side\":{preferredSide},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}}}";
             int gen = ++ovtGen;
             Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ovt/queue/join", body, (ok, resp) =>
             {
+                // F2: release the latch BEFORE the gen check — a stale ack
+                // must still free the mode for the next enrollment.
+                EnrollGateEnd("ovt");
                 if (gen != ovtGen) { Plugin.Log.LogInfo("[1v2] stale join ack ignored (lifecycle moved on)"); return; }
                 if (ok)
                 {
@@ -10342,16 +10415,27 @@ namespace CompetitiveRounds
         {
             string sid = MatchTracker.LocalSteamId;
             if (OvtQueueStatus == "leaving") return; // leave already in flight
+            // F3 (Codex r3): capture the series incarnation BEFORE any local
+            // clear — this legacy public path used to null ActiveOvt1v2SeriesId
+            // first and then build an UNFENCED leave URL, so a delayed retry
+            // could tear down a NEWER enrollment (HostLobbyClient's
+            // DirectQueueLeave already fences). The id clears in the RESPONSE
+            // handler (#249); the stuck-Leaving watchdog in TickLeaveRecovery
+            // clears it if the callback dies with its coroutine host.
+            string fenceSeriesId = ActiveOvt1v2SeriesId;
+            // Eager disarm stays: polling/lineup/pending-slot are the "stop
+            // acting on it" half and must not survive into the leave window
+            // (a lingering pending slot would still auto-join the ovt room).
             IsOvtQueuePolling = false; OvtQueueCount = 0;
             OvtLockedSoloName = null; OvtLockedDuo = null;
-            // Leaving the queue abandons any husk lock along with it — the
-            // server dissolves a zero-game lock (canceling the series and
-            // resetting the other two rows), so clear the matching local
-            // state. A mid-series reporter can't reach this (the tab hides
-            // Leave while inside an ovt_ room).
-            ActiveOvt1v2SeriesId = null;
             Plugin.ClearPendingOvtSlot();
-            if (string.IsNullOrEmpty(sid) || sid == "unknown") { OvtQueueStatus = ""; return; }
+            if (string.IsNullOrEmpty(sid) || sid == "unknown")
+            {
+                // No request can be sent — nothing to fence; local-only reset.
+                ActiveOvt1v2SeriesId = null;
+                OvtQueueStatus = "";
+                return;
+            }
             // "leaving" holds until the server confirms — a failed leave with
             // local state already cleared strands our row (and any husk lock)
             // server-side, ghost-locking the other two until the 75s janitor
@@ -10361,19 +10445,34 @@ namespace CompetitiveRounds
             OvtQueueStatus = "leaving";
             _ovtLeavingSince = Time.realtimeSinceStartup;
             NativeUI.MarkDirty();
+            string leaveUrl = $"{baseUrl}/api/v1/ovt/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}"
+                + (string.IsNullOrEmpty(cause) ? "" : $"&cause={UnityWebRequest.EscapeURL(cause)}");
+            if (!string.IsNullOrEmpty(fenceSeriesId))
+                leaveUrl += $"&expected_series_id={UnityWebRequest.EscapeURL(fenceSeriesId)}";
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(
-                $"{baseUrl}/api/v1/ovt/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}"
-                    + (string.IsNullOrEmpty(cause) ? "" : $"&cause={UnityWebRequest.EscapeURL(cause)}"), "",
+                leaveUrl, "",
                 (ok, resp) =>
                 {
                     if (gen != ovtGen) return;  // watchdog recovered / new lifecycle
                     if (ok)
-                        Plugin.Log.LogInfo("[1v2] Left 1v2 queue");
+                    {
+                        // {"stale":true} = the row carries a NEWER series than
+                        // the fenced one — that incarnation is already gone.
+                        if (ExtractJsonBool(resp ?? "", "stale"))
+                            Plugin.Log.LogInfo("[1v2] fenced leave hit a newer incarnation — old seat already gone");
+                        else
+                            Plugin.Log.LogInfo("[1v2] Left 1v2 queue");
+                    }
                     else
                     {
                         Plugin.Log.LogWarning($"[1v2] Leave failed after retries: {resp} — server will prune the stale row");
                         CompetitiveUI.ShowNotification("Couldn't confirm 1v2 queue leave — the server will clear you shortly.", new Color(1f, 0.6f, 0.2f), 5f);
                     }
+                    // F3/#249: series belief clears on the RESPONSE, both
+                    // outcomes — guarded so a NEWER series adopted mid-leave
+                    // is never wiped by this older leave's ack.
+                    if (string.Equals(ActiveOvt1v2SeriesId, fenceSeriesId, StringComparison.Ordinal))
+                        ActiveOvt1v2SeriesId = null;
                     if (OvtQueueStatus == "leaving") OvtQueueStatus = "";
                     UpdateOvtQueueList(force: true);
                     NativeUI.MarkDirty();
@@ -12432,9 +12531,18 @@ namespace CompetitiveRounds
             // state when its generation matches the newest request. While
             // ANYTHING here is unacked, PrefsInFlight suppresses hydration
             // and the host's Start button.
+            // F5 (Codex r3): each queued write also carries the lobby
+            // INCARNATION the seat belonged to when it was QUEUED — sent as
+            // expected_lobby_id so the server no-ops (409 not_in_open_lobby)
+            // when the seat moved lobbies between enqueue and send.
+            private sealed class PendingPref
+            {
+                public string FieldJson;
+                public string LobbyId;   // captured at ENQUEUE, never at send
+            }
             private bool prefsInFlight; private float prefsAt = -999f;
             private int prefsGen;
-            private readonly Dictionary<string, string> prefsPending = new Dictionary<string, string>();
+            private readonly Dictionary<string, PendingPref> prefsPending = new Dictionary<string, PendingPref>();
             private float prefsPumpRetryAt = -999f;
             // Codex r2 f5-residual: the caller's CURRENT structured
             // preferences — updated on every local selection (the static
@@ -12550,6 +12658,13 @@ namespace CompetitiveRounds
             { curPreferredSide = (side == 1 || side == 2) ? side : 0; }
             public void SetLocalOvtExtraPick(bool extraPick)
             { curSoloExtraPick = extraPick; }
+            /// <summary>F6 (Codex r3): the LOCAL desired value — the last
+            /// value the user selected (kept server-true by the ack echo and
+            /// idle hydration). The ovt extra-pick toggle derives its next
+            /// value from THIS while a prefs write is unacked: the server
+            /// member row is stale in that window, so ON-then-OFF before the
+            /// first ack used to send ON twice.</summary>
+            public bool LocalDesiredExtraPick => curSoloExtraPick;
             /// <summary>Recovery-rejoin enrollment extras, built from the
             /// CURRENT structured preferences — never a join-time snapshot
             /// (Codex r2 f5-residual: the snapshot replayed stale values
@@ -12565,6 +12680,9 @@ namespace CompetitiveRounds
                 if (PasswordTooLong(password)) return;
                 if (BlocksOnPendingLeave()) return;
                 if (!ActionPreflight(out string sid)) return;
+                // F2 (Codex r3): one enrollment in flight per mode, shared
+                // with the public queue join.
+                if (!EnrollGateBegin(mode)) return;
                 leaveIntent = false;
                 lastPassword = password;
                 int g = ++gen;
@@ -12572,6 +12690,7 @@ namespace CompetitiveRounds
                 Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/create",
                     EnrollBody(sid, null, password, extras), (ok, resp) =>
                 {
+                    EnrollGateEnd(mode);   // F2: before the gen check — a stale ack still frees the mode
                     ActionEnd(aGen);
                     if (g != gen) return;
                     if (ok) IsHost = true;
@@ -12587,6 +12706,11 @@ namespace CompetitiveRounds
                 if (PasswordTooLong(password)) return;
                 if (BlocksOnPendingLeave()) return;
                 if (!ActionPreflight(out string sid)) return;
+                // F2 (Codex r3): one enrollment in flight per mode, shared
+                // with the public queue join. Recovery rejoins ride the same
+                // latch — they are enrollments too, and their 60s throttle
+                // makes a collision with a user click rare.
+                if (!EnrollGateBegin(mode)) return;
                 bool wasRecovery = OpenLobbyId == lobbyId;
                 if (!wasRecovery) { leaveIntent = false; confirmedMember = false; }
                 lastPassword = password;
@@ -12595,6 +12719,7 @@ namespace CompetitiveRounds
                 Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/join",
                     EnrollBody(sid, lobbyId, password, extras), (ok, resp) =>
                 {
+                    EnrollGateEnd(mode);   // F2: before the gen check — a stale ack still frees the mode
                     ActionEnd(aGen);
                     if (g != gen) return;
                     EnrollResult(ok, resp, lobbyId, wasRecovery);
@@ -12610,7 +12735,21 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     string lid = ExtractJsonString(resp, "lobby_id");
+                    string prevLobbyId = OpenLobbyId;
                     OpenLobbyId = string.IsNullOrEmpty(lid) ? intendedLobbyId : lid;
+                    // F5 (Codex r3): adopting a DIFFERENT lobby id is a
+                    // membership change — queued pref writes were bound to the
+                    // previous seat; drop them (and stale-ify any in-flight
+                    // ack) instead of landing them on the new lobby.
+                    if (!string.IsNullOrEmpty(prevLobbyId)
+                        && !string.Equals(prevLobbyId, OpenLobbyId, StringComparison.Ordinal)
+                        && (prefsPending.Count > 0 || prefsInFlight))
+                    {
+                        prefsPending.Clear();
+                        prefsInFlight = false;
+                        prefsGen++;
+                        Plugin.Log.LogInfo($"[{label}-LOBBY] dropped queued pref writes on lobby change ({prevLobbyId} -> {OpenLobbyId})");
+                    }
                     HasPassword = ExtractJsonBool(resp, "has_password") || !string.IsNullOrEmpty(lastPassword);
                     int mx = ExtractJsonInt(resp, "max_players"); if (mx > 0) MaxPlayers = mx;
                     int pc = ExtractJsonInt(resp, "player_count"); if (pc > 0) MemberCount = pc;
@@ -12724,6 +12863,13 @@ namespace CompetitiveRounds
                 Polling = false; confirmedMember = false;
                 ambiguousUntil = -999f; handoffUntil = -999f;
                 if (Status == "lobby") Status = "";
+                // F5 (Codex r3): a teardown is a membership change — queued
+                // pref writes were bound to the dead seat and can never land;
+                // the gen bump makes any in-flight ack stale so it can't fold
+                // echoes from the dead lobby into the fresh state.
+                prefsPending.Clear();
+                prefsInFlight = false;
+                prefsGen++;
             }
 
             public void StartLobby()
@@ -13406,7 +13552,10 @@ namespace CompetitiveRounds
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
                 if (string.IsNullOrEmpty(OpenLobbyId)) return;   // seated-only surface
-                prefsPending[PrefFieldKey(fieldJson)] = fieldJson;
+                // F5 (Codex r3): bind the write to the lobby the seat belongs
+                // to NOW (enqueue time) — a later rejoin into a different
+                // lobby must not inherit this write.
+                prefsPending[PrefFieldKey(fieldJson)] = new PendingPref { FieldJson = fieldJson, LobbyId = OpenLobbyId };
                 PumpPrefs();
             }
 
@@ -13425,10 +13574,28 @@ namespace CompetitiveRounds
                     return;
                 }
                 if (prefsInFlight && Time.realtimeSinceStartup - prefsAt < 25f) return;
+                // F5 (Codex r3): a queued write is bound to the lobby the seat
+                // belonged to at ENQUEUE. A membership change (rejoin adopted
+                // a NEW lobby) makes it moot — drop it here rather than land
+                // it on the new lobby (the server's expected_lobby_id fence
+                // below is the authoritative backstop).
+                if (prefsPending.Count > 0)
+                {
+                    List<string> moot = null;
+                    foreach (var kv in prefsPending)
+                        if (!string.Equals(kv.Value.LobbyId, OpenLobbyId, StringComparison.Ordinal))
+                            (moot ?? (moot = new List<string>())).Add(kv.Key);
+                    if (moot != null)
+                    {
+                        foreach (var k in moot) prefsPending.Remove(k);
+                        Plugin.Log.LogInfo($"[{label}-LOBBY] dropped {moot.Count} queued pref write(s) bound to a previous lobby");
+                    }
+                }
                 if (prefsPending.Count == 0) { prefsInFlight = false; return; }
                 string key = null;
                 foreach (var k in prefsPending.Keys) { key = k; break; }
-                string fieldJson = prefsPending[key];
+                PendingPref pend = prefsPending[key];
+                string fieldJson = pend.FieldJson;
                 prefsInFlight = true; prefsAt = Time.realtimeSinceStartup;
                 // r2 f4: generation token — a response may only clear the
                 // in-flight state when it belongs to the NEWEST request (a
@@ -13436,8 +13603,10 @@ namespace CompetitiveRounds
                 // successor's single-flight slot).
                 int pg = ++prefsGen;
                 int g = gen;
+                // F5: the fence rides the request body — server no-ops with
+                // 409 not_in_open_lobby when the seat moved lobbies.
                 Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/prefs",
-                    $"{{\"steam_id\":\"{Escape(sid)}\"{fieldJson}}}", (ok, resp) =>
+                    $"{{\"steam_id\":\"{Escape(sid)}\",\"expected_lobby_id\":\"{Escape(pend.LobbyId)}\"{fieldJson}}}", (ok, resp) =>
                 {
                     if (g != gen) return;
                     if (pg != prefsGen) return;   // stale generation — newest request owns the state
@@ -13447,8 +13616,8 @@ namespace CompetitiveRounds
                         // Acked: drop the pending entry unless the user changed
                         // the field again mid-flight (the newer value then goes
                         // out on the drain pump below).
-                        string cur;
-                        if (prefsPending.TryGetValue(key, out cur) && cur == fieldJson)
+                        PendingPref cur;
+                        if (prefsPending.TryGetValue(key, out cur) && cur.FieldJson == fieldJson)
                             prefsPending.Remove(key);
                         // Fold the echoed STORED values into our cached member
                         // row so the hydration pass can't briefly revert the
@@ -14565,14 +14734,40 @@ namespace CompetitiveRounds
 
         // ── HTTP helpers ──────────────────────────────────────
 
-        // Comma-aware 512-char clamp for the fps timeline columns: cut at the
-        // last full sample so the parser never sees a truncated fragment.
+        // Column-cap clamp for the timeline CSVs. F8 (Codex r3 finding 8):
+        // the old head-truncation kept the OLDEST prefix — 127 four-digit
+        // pairs ≈ 1272 chars against the 1024 cap, so the newest ~25 samples
+        // (including the FINAL TOTALS) were silently dropped from any long
+        // game. DECIMATE-TO-FIT instead: drop every other INTERIOR sample
+        // (the first and the LAST always survive) until the joined CSV fits.
+        // The "v2|" dialect marker is preserved. Name/signature unchanged so
+        // no call site moves.
         private static string ClampTimeline(string t, int max = 512)
         {
             t = t ?? "";
             if (t.Length <= max) return t;
-            int cut = t.LastIndexOf(',', max - 1);
-            return cut > 0 ? t.Substring(0, cut) : t.Substring(0, max);
+            string prefix = "";
+            if (t.StartsWith("v2|", StringComparison.Ordinal)) { prefix = "v2|"; t = t.Substring(3); }
+            int budget = max - prefix.Length;
+            var parts = t.Split(',');
+            string joined = t;
+            while (joined.Length > budget && parts.Length > 2)
+            {
+                var kept = new List<string>(parts.Length / 2 + 2) { parts[0] };
+                for (int i = 2; i + 1 < parts.Length; i += 2) kept.Add(parts[i]);
+                kept.Add(parts[parts.Length - 1]);
+                parts = kept.ToArray();
+                joined = string.Join(",", parts);
+            }
+            // Degenerate backstop (a single oversize sample / two-sample
+            // floor still over budget): the cap is a hard server contract,
+            // so hard-cut at the last full sample rather than exceed it.
+            if (joined.Length > budget)
+            {
+                int cut = joined.LastIndexOf(',', Math.Min(budget, joined.Length) - 1);
+                joined = cut > 0 ? joined.Substring(0, cut) : joined.Substring(0, Math.Max(0, budget));
+            }
+            return prefix + joined;
         }
 
         // July 21 review fix ([9]): 401 session_required recovery. Without this
@@ -14594,6 +14789,29 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        // F1 (Codex r3): authenticated REST must never ride plaintext HTTP to a
+        // PUBLIC host — the TLS-probe fallback can retarget baseUrl to
+        // Plugin.LegacyApiUrl (http://), and after that an on-path observer
+        // would capture the 24h bearer off every request. The PRIVATE/loopback
+        // carve-out is load-bearing: Sid's own dev config deliberately
+        // overrides BaseUrl to http://192.168.72.90:8443 and must keep working.
+        private static readonly char[] _hostEndChars = { ':', '/', '?', '#' };
+        private static bool CredentialedTransportAllowed(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return false;
+            if (url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return true;
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) return false;
+            string host = url.Substring(7);
+            int cut = host.IndexOfAny(_hostEndChars);
+            if (cut >= 0) host = host.Substring(0, cut);
+            return host.StartsWith("192.168.", StringComparison.Ordinal)
+                || host.StartsWith("10.", StringComparison.Ordinal)
+                || host.StartsWith("127.", StringComparison.Ordinal)
+                || string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase);
+        }
+        private static bool _loggedTokenWithheld;     // once-per-session log (F1)
+        private static bool _insecureAuthNotified;    // once-per-session toast (F1)
+
         // Stamp every outbound API call with the mod's own version so the server
         // can reject (426) any client that drops below the configured floor.
         // July 21 item 4: also stamps the Steam session token when one is held —
@@ -14605,7 +14823,19 @@ namespace CompetitiveRounds
             try
             {
                 if (!string.IsNullOrEmpty(SteamAuth.SessionToken))
-                    req.SetRequestHeader("X-Session-Token", SteamAuth.SessionToken);
+                {
+                    // F1: withhold the bearer on plaintext-to-public transport.
+                    // The request still goes out anonymously — reads keep
+                    // working; session-gated endpoints 401 and their features
+                    // degrade, which is the accepted design.
+                    if (CredentialedTransportAllowed(req.url))
+                        req.SetRequestHeader("X-Session-Token", SteamAuth.SessionToken);
+                    else if (!_loggedTokenWithheld)
+                    {
+                        _loggedTokenWithheld = true;
+                        Plugin.Log.LogWarning("[STEAM-AUTH] plaintext public endpoint — X-Session-Token withheld (session-gated features degrade this session)");
+                    }
+                }
             }
             catch { }
         }
@@ -14616,6 +14846,24 @@ namespace CompetitiveRounds
         {
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return;
+            // F1 (Codex r3): never exchange a Steam ticket over plaintext to a
+            // PUBLIC host — the returned 24h bearer would be capturable in
+            // transit. SteamAuth keeps minting tickets on a 4s backoff while
+            // no session lands, so the log + toast are once-per-session.
+            if (!CredentialedTransportAllowed(baseUrl))
+            {
+                if (!_insecureAuthNotified)
+                {
+                    _insecureAuthNotified = true;
+                    Plugin.Log.LogWarning($"[STEAM-AUTH] refusing ticket exchange over plaintext public endpoint {baseUrl} — signed-in features disabled this session");
+                    try
+                    {
+                        CompetitiveUI.ShowNotification(I18n.Tr("Secure connection unavailable - signed-in features are disabled this session."), new Color(1f, 0.6f, 0.2f), 8f);
+                    }
+                    catch { }
+                }
+                return;
+            }
             string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"ticket_hex\":\"{Escape(ticketHex)}\",\"mod_version\":\"{Escape(Plugin.ModVersion ?? "0.0.0")}\"}}";
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/auth/steam",

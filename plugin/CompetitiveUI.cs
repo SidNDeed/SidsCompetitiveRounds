@@ -1724,7 +1724,8 @@ namespace CompetitiveRounds
                                                   RectTransform clipRT, object sourceTxt = null,
                                                   string pointTimes = null, string pointTimeline = null,
                                                   float myStep = 0f,
-                                                  RectTransform outerClipRT = null, string subjectLabel = null)
+                                                  RectTransform outerClipRT = null, string subjectLabel = null,
+                                                  int durationSeconds = 0)
         {
             if (string.IsNullOrEmpty(mySeries) && string.IsNullOrEmpty(oppSeries)) return;
             _fpsGraphRegions.Add(new FpsGraphRegion {
@@ -1732,6 +1733,10 @@ namespace CompetitiveRounds
                 kind = isPing ? 1 : 0, myStep = myStep > 0f ? myStep : (isPing ? 3f : 5f),
                 pointTimes = pointTimes, pointTimeline = pointTimeline,
                 outerClipRT = outerClipRT, subjectLabel = subjectLabel,
+                // F7 (Codex r3): decimated timelines have variable stride —
+                // the row's real duration lets the chart spread each series
+                // across the whole game instead of assuming 3s/5s cadence.
+                durationSeconds = durationSeconds > 0 ? durationSeconds : 0,
                 sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
                 sourceTxt = sourceTxt,
             });
@@ -1749,7 +1754,8 @@ namespace CompetitiveRounds
                                                   RectTransform clipRT, object sourceTxt = null,
                                                   string pointTimes = null, string pointTimeline = null,
                                                   float myStep = 0f,
-                                                  RectTransform outerClipRT = null, string subjectLabel = null)
+                                                  RectTransform outerClipRT = null, string subjectLabel = null,
+                                                  int durationSeconds = 0)
         {
             if (string.IsNullOrEmpty(mySeries) && string.IsNullOrEmpty(oppSeries)) return;
             _fpsGraphRegions.Add(new FpsGraphRegion {
@@ -1757,6 +1763,7 @@ namespace CompetitiveRounds
                 kind = 5, myStep = myStep > 0f ? myStep : 3f,
                 pointTimes = pointTimes, pointTimeline = pointTimeline,
                 outerClipRT = outerClipRT, subjectLabel = subjectLabel,
+                durationSeconds = durationSeconds > 0 ? durationSeconds : 0,   // F7 (Codex r3)
                 sourceRT = sourceRT, sourceCam = sourceCam, widthFrac = widthFrac, clipRT = clipRT,
                 sourceTxt = sourceTxt,
             });
@@ -1932,6 +1939,17 @@ namespace CompetitiveRounds
             // Both DPS lines share the emitter cadence; fps/ping opponent
             // samples are always the 3s heartbeat.
             float oppStep = isDps ? myStep : 3f;
+            // F7 (Codex r3): decimated timelines have variable stride — when
+            // the registration site knew the row's real duration, spread each
+            // series across it (interval = duration/(n-1)) instead of the
+            // fixed 3s/5s cadence, exactly like the pair chart already does.
+            // Legacy rows (no duration) keep the cadence estimate.
+            int knownDur = hit.Value.durationSeconds;
+            if (knownDur > 0)
+            {
+                if (mine != null && mine.Length >= 2) myStep = knownDur / (float)(mine.Length - 1);
+                if (opp != null && opp.Length >= 2) oppStep = knownDur / (float)(opp.Length - 1);
+            }
 
             // One big chart per hover (July 22): the whole popup is the plot, so
             // a 600-vs-30 FPS gap or a big latency spike still reads clearly.
@@ -1970,6 +1988,7 @@ namespace CompetitiveRounds
             float maxT = 1f;
             if (mine != null) maxT = Mathf.Max(maxT, (mine.Length - 1) * myStep);
             if (opp != null) maxT = Mathf.Max(maxT, (opp.Length - 1) * oppStep);
+            if (knownDur > maxT) maxT = knownDur;   // F7: the real match length owns the axis
             // Marker times can outrun the series (samples cap earlier) — include
             // them in the axis so late points still land inside the plot.
             Rect plotProbe = default(Rect);

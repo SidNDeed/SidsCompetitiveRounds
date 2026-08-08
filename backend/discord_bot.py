@@ -4136,6 +4136,18 @@ def _render_game_detail_png_locked(game):
                     if explicit_x is not None and len(explicit_x) == len(vals):
                         return explicit_x
                     if step_seconds is not None:
+                        # Codex r3 f7: decimated timelines (bug 181 fix) have a
+                        # variable stride — scale each series to the game's real
+                        # duration instead of assuming 3s/sample. Legacy capped
+                        # rows stretch slightly (they genuinely ended early);
+                        # matches the in-game renderer's choice.
+                        _dur = 0
+                        try:
+                            _dur = int(game.get("duration_seconds") or 0)
+                        except Exception:
+                            _dur = 0
+                        if _dur > 0 and len(vals) > 1:
+                            return [_dur * i / (len(vals) - 1) for i in range(len(vals))]
                         return [i * step_seconds for i in range(len(vals))]
                     return range(len(vals))
 
@@ -6077,6 +6089,13 @@ async def _send_release_chunks(tag: str, msgs: list) -> bool:
         if ch is None:
             print(f"[RELEASES] channel {RELEASES_CHANNEL_ID} not resolvable — will retry")
             return False
+        # Codex r3 f11a: persist tag:0 BEFORE the first send — a crash between
+        # chunk 1 landing and the first cursor write left no entry, so cold
+        # start anchored past chunks 2..N. Worst case now is one duplicated
+        # chunk after a crash, the correct at-least-once trade (#167).
+        if tag not in st:
+            st[tag] = 0
+            _release_state_save(st)
         for i in range(start, len(msgs)):
             await ch.send(msgs[i][:2000])
             st = _release_state_load()
@@ -6168,11 +6187,34 @@ async def poll_github_releases():
         return
 
     # Cold-start: don't repost on bot restart — EXCEPT when the durable
-    # cursor says this very tag was mid-announcement when the process died
-    # (Codex r2 f12): anchoring past it would permanently truncate the post,
-    # so drain the remaining chunks first.
+    # cursor says an announcement was mid-flight when the process died
+    # (Codex r2 f12 / r3 f11b): anchoring past it would permanently truncate
+    # the post. Drain EVERY incomplete tag, not just the current latest — an
+    # older tag can remain in the cursor while a newer release became
+    # /latest, and each is fetched by ITS OWN tag endpoint.
     if not _release_poller_initialized:
         _release_poller_initialized = True
+        for _pend in [t for t in _release_state_load() if t != tag]:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(
+                        f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/tags/{_pend}",
+                        headers={"Accept": "application/vnd.github+json",
+                                 "User-Agent": "comp-rounds-bot"},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as _pr:
+                        if _pr.status != 200:
+                            # Tag gone (deleted release) — drop the cursor so it
+                            # can't block anchoring forever.
+                            _st = _release_state_load()
+                            _st.pop(_pend, None)
+                            _release_state_save(_st)
+                            continue
+                        _ppayload = await _pr.json()
+                if await _send_release_chunks(_pend, _format_release_message(_ppayload)):
+                    print(f"[RELEASES] cold start: drained incomplete {_pend}")
+            except Exception as _pe:
+                print(f"[RELEASES] cold-start drain of {_pend} failed: {_pe}")
         if tag in _release_state_load():
             msgs = _format_release_message(payload)
             if await _send_release_chunks(tag, msgs):

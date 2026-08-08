@@ -19425,19 +19425,28 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
     if _other:
         raise HTTPException(status_code=409,
                             detail="You're in a live match in another mode - finish it first")
-    # SAME-mode open-lobby guard (Aug 6 item 9). _locked_in_other_queue cannot
-    # cover this: the lease mode IS 'team', so it returns None for a 2v2
-    # caller. Without the guard this upsert sets status='searching' on a
-    # 'lobby' row and silently yanks the player out of the lobby they are
-    # sitting in — the lobby's member query stops seeing them while the lobby
-    # row and their lease still reference it.
-    _inlob = (await db.execute(text(
-        "SELECT series_id FROM team_queue WHERE player_id = :pid AND status = 'lobby'"
-    ), {"pid": player.id})).scalar()
-    if _inlob is not None:
+    # SAME-mode guards. Codex r3 f2 (HIGH): the caller's row is LOCKED first
+    # so the checks and the upsert below are one atomic step — the old
+    # unlocked pre-check let a hosted Start convert the row to 'matched' in
+    # the gap, and the unconditional upsert then rewrote a LIVE rated group's
+    # member to searching (dissolving the other three). Any live locked
+    # lifecycle now refuses the join outright; only a lease-dead husk may be
+    # reclaimed (#276 — the row-without-lease class must never block forever).
+    _mine = (await db.execute(text(
+        "SELECT status, series_id FROM team_queue WHERE player_id = :pid FOR UPDATE"
+    ), {"pid": player.id})).mappings().first()
+    if _mine is not None and _mine["status"] in ("matched", "ready", "ready_join"):
+        if await _lease_live_mode(db, player.id) is not None:
+            raise HTTPException(status_code=409,
+                                detail="You're locked into a 2v2 match - finish or leave it first")
+    if _mine is not None and _mine["status"] == "lobby":
+        # Open-lobby guard (Aug 6 item 9): _locked_in_other_queue cannot cover
+        # this — the lease mode IS 'team', so it returns None for a 2v2
+        # caller. Joining the public queue from an open lobby seat would yank
+        # the player out of the lobby they are sitting in.
         _lob_open = (await db.execute(text(
             "SELECT 1 FROM team_lobbies WHERE id = :lid AND status = 'open'"
-        ), {"lid": _inlob})).scalar()
+        ), {"lid": _mine["series_id"]})).scalar()
         if _lob_open:
             raise HTTPException(status_code=409,
                                 detail="Leave your 2v2 lobby first")
@@ -19791,13 +19800,19 @@ async def team_queue_poll(steam_id: str, request: Request,
         if _lstatus != "open":
             # The lobby started, was disbanded, or vanished. Authoritative
             # re-read under the group lock (#208) — never serve a husk.
+            # Codex r3 f4 (HIGH): DELETE the seat, never reset it to
+            # searching — the player's last consent was to THIS lobby, and a
+            # searching row re-arms a stale public poll into matching them
+            # with strangers. Lease dies with the seat, fenced to the lobby.
             await db.execute(text(
-                "UPDATE team_queue SET status='searching', series_id=NULL,"
-                "       team_assigned=NULL, room_name=NULL, room_region=NULL,"
-                "       ready=false, matched_at=NULL, joined_at=NOW()"
+                "DELETE FROM team_queue"
                 " WHERE player_id = :pid AND status = 'lobby'"), {"pid": my_pid})
+            await db.execute(text(
+                "DELETE FROM queue_leases WHERE player_id = :pid"
+                "   AND mode = 'team' AND group_id = :lid"),
+                {"pid": my_pid, "lid": me["series_id"]})
             await db.commit()
-            return TeamQueuePollResponse(status="searching")
+            return TeamQueuePollResponse(status="not_in_queue")
         # Seat lease + its 2h TOTAL ceiling (#276b): poll-renewal proves "a
         # client is running", not "a game is happening", so a wedged retry
         # loop must not be able to hold its own cross-mode exclusion forever.
@@ -22307,13 +22322,18 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
             "SELECT status FROM ovt_lobbies WHERE id = :lid"
         ), {"lid": me["series_id"]})).scalar()
         if _lstatus != "open":
+            # Codex r3 f4 (HIGH): DELETE, never reset to searching — same
+            # consent rule as the 2v2 twin (a closed lobby's seat must not
+            # feed the public matcher). Lease dies with the seat, fenced.
             await db.execute(text(
-                "UPDATE ovt_queue SET status='searching', series_id=NULL,"
-                "       side_assigned=NULL, room_name=NULL, room_region=NULL,"
-                "       matched_at=NULL, joined_at=NOW()"
+                "DELETE FROM ovt_queue"
                 " WHERE player_id = :pid AND status = 'lobby'"), {"pid": me["player_id"]})
+            await db.execute(text(
+                "DELETE FROM queue_leases WHERE player_id = :pid"
+                "   AND mode = 'ovt' AND group_id = :lid"),
+                {"pid": me["player_id"], "lid": me["series_id"]})
             await db.commit()
-            return {"status": "searching", "queue_count": 0}
+            return {"status": "lobby_closed", "queue_count": 0}
         _seat_ok = False
         try:
             async with db.begin_nested():
@@ -24547,6 +24567,11 @@ async def _lobby_resolve_impl(mode: str, steam_id: str, request: Request,
 
 class _LobbyPrefsReq(BaseModel):
     steam_id: str = Field(..., max_length=20)
+    # Codex r3 f5: the write is predicated on THIS lobby — a delayed prefs
+    # request from lobby A must not mutate the seat the player has since
+    # taken in lobby B. Optional for one release of client skew; a request
+    # without it keeps the old caller-only binding.
+    expected_lobby_id: str | None = None
     # All optional: only fields the client SENDS are patched (Codex r1 f6 —
     # a whole-row resend overwrites the sibling setting with a stale local
     # copy). 0 is an explicit CLEAR (f7): team -> NULL (no preference),
@@ -24574,6 +24599,17 @@ async def _lobby_prefs_impl(mode: str, req: _LobbyPrefsReq, request: Request,
         # Distinct token: the client must NOT treat this as retryable — the
         # seat is gone or the lobby started; resolve tells it which.
         raise HTTPException(409, "not_in_open_lobby")
+    # Codex r3 f5: incarnation fence — a delayed request naming lobby A
+    # no-ops against a seat now in lobby B (same distinct token; the client
+    # clears its pending write and resolves).
+    if req.expected_lobby_id:
+        try:
+            _exp_lid = str(uuid.UUID(str(req.expected_lobby_id)))
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(422, "expected_lobby_id is not a valid id")
+        if str(me["series_id"]) != _exp_lid:
+            await db.commit()
+            raise HTTPException(409, "not_in_open_lobby")
     sets, params = [], {"pid": me["player_id"]}
     if mode == "team" and req.preferred_team is not None:
         v = int(req.preferred_team)

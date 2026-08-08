@@ -632,28 +632,63 @@ namespace CompetitiveRounds
 
         /// <summary>Set (or clear, width 0) a TMP label's outline in the given
         /// colour — the reliable way to FATTEN small SDF glyphs (Sid: "double
-        /// the thickness" on the card-bar letters). Reached by reflection
-        /// (#15); outlineWidth/outlineColor force a per-label instance
-        /// material, which is the #303-sanctioned pattern (never mutate the
-        /// shared font material).</summary>
+        /// the thickness" on the card-bar letters). Reached by reflection (#15).
+        ///
+        /// Codex r3 f9: implemented as a fontSharedMaterial POINTER SWAP to a
+        /// clone WE own (#303's sanctioned pattern) — TMP's own outlineWidth
+        /// property forces a native material instance per label, and card-bar
+        /// labels are destroyed wholesale every game with no restore pass, so
+        /// that leaked one native material per painted button per game. Our
+        /// clones are session-lived and bounded by the handful of distinct
+        /// team hues; restore is just pointing the label back at the clone's
+        /// recorded source.</summary>
+        private static readonly Dictionary<string, Material> _outlineClones =
+            new Dictionary<string, Material>();
+        private static readonly Dictionary<int, Material> _outlineCloneSource =
+            new Dictionary<int, Material>();
+        private static PropertyInfo _fontSharedMatProp;
+        private static bool _fontSharedMatResolved;
+
         public static void SetTmpOutline(Component tmp, Color color, float width)
         {
             if (tmp == null) return;
             try
             {
-                var t = tmp.GetType();
-                var pw = t.GetProperty("outlineWidth", BindingFlags.Public | BindingFlags.Instance);
-                var pc = t.GetProperty("outlineColor", BindingFlags.Public | BindingFlags.Instance);
-                if (pw == null) return;
-                if (pc != null)
+                if (!_fontSharedMatResolved)
                 {
-                    // outlineColor is Color32 on TMP_Text.
-                    object c32 = pc.PropertyType == typeof(Color)
-                        ? (object)color
-                        : (object)(Color32)color;
-                    pc.SetValue(tmp, c32, null);
+                    _fontSharedMatResolved = true;
+                    for (var t = tmp.GetType(); t != null; t = t.BaseType)
+                    {
+                        _fontSharedMatProp = t.GetProperty("fontSharedMaterial",
+                            BindingFlags.Public | BindingFlags.Instance);
+                        if (_fontSharedMatProp != null) break;
+                    }
                 }
-                pw.SetValue(tmp, width, null);
+                if (_fontSharedMatProp == null) return;
+                var cur = _fontSharedMatProp.GetValue(tmp, null) as Material;
+                if (cur == null) return;
+                Material curSource;
+                bool curIsOurs = _outlineCloneSource.TryGetValue(cur.GetInstanceID(), out curSource);
+                if (width <= 0f)
+                {
+                    if (curIsOurs && curSource != null)
+                        _fontSharedMatProp.SetValue(tmp, curSource, null);
+                    return;
+                }
+                Material source = curIsOurs && curSource != null ? curSource : cur;
+                var c32 = (Color32)color;
+                string key = source.GetInstanceID() + "|" + c32.r + "," + c32.g + "," + c32.b;
+                Material clone;
+                if (!_outlineClones.TryGetValue(key, out clone) || clone == null)
+                {
+                    clone = new Material(source) { hideFlags = HideFlags.HideAndDontSave };
+                    try { clone.SetColor("_OutlineColor", color); } catch { }
+                    try { clone.SetFloat("_OutlineWidth", width); } catch { }
+                    _outlineClones[key] = clone;
+                    _outlineCloneSource[clone.GetInstanceID()] = source;
+                }
+                if (!ReferenceEquals(cur, clone))
+                    _fontSharedMatProp.SetValue(tmp, clone, null);
             }
             catch { }
         }

@@ -2710,17 +2710,23 @@ namespace CompetitiveRounds
                     if(!string.IsNullOrEmpty(blkTxt))
                         RegisterPairGraphRectFor(ui.txtBlock,player.block_timeline,true,false,null,match.timeline,ffaTabOuterViewport,subjectName,match.duration_seconds);
                     if(!string.IsNullOrEmpty(fpsTxt))
-                        RegisterTeleGraphRectFor(ui.txtFps,player.fps_timeline,null,false,null,match.timeline,outerClip:ffaTabOuterViewport,subjectLabel:subjectName);
+                        RegisterTeleGraphRectFor(ui.txtFps,player.fps_timeline,null,false,null,match.timeline,outerClip:ffaTabOuterViewport,subjectLabel:subjectName,durationSeconds:match.duration_seconds);
                     if(!string.IsNullOrEmpty(pingTxt))
-                        RegisterTeleGraphRectFor(ui.txtPing,player.ping_timeline,null,true,null,match.timeline,outerClip:ffaTabOuterViewport,subjectLabel:subjectName);
+                        RegisterTeleGraphRectFor(ui.txtPing,player.ping_timeline,null,true,null,match.timeline,outerClip:ffaTabOuterViewport,subjectLabel:subjectName,durationSeconds:match.duration_seconds);
                     /* Aug 7 item 3d: per-second damage line. FFA samples every
                      * participant on the one 3s telemetry tick, so unlike 1v1
                      * there is a single cadence for the whole match. A row
                      * predating the damage columns has no timeline, so the
                      * converter returns an EMPTY series and nothing is registered
-                     * even though the cell renders its dash. */
+                     * even though the cell renders its dash.
+                     * F7 (Codex r3): decimated timelines have variable stride —
+                     * derive the interval from the row's real duration
+                     * (DpsStepFor), falling back to the 3s tick. */
                     if(!string.IsNullOrEmpty(dpsTxt))
-                        RegisterDpsGraphRectFor(ui.txtDps,CumulativeToDps(player.damage_timeline,DPS_STEP_FFA),null,null,match.timeline,DPS_STEP_FFA,ffaTabOuterViewport,subjectName);
+                    {
+                        float ffaDpsStep=DpsStepFor(player.damage_timeline,match.duration_seconds,DPS_STEP_FFA);
+                        RegisterDpsGraphRectFor(ui.txtDps,CumulativeToDps(player.damage_timeline,ffaDpsStep),null,null,match.timeline,ffaDpsStep,ffaTabOuterViewport,subjectName,match.duration_seconds);
+                    }
                 }
 
                 string cards=BuildFfaCardsText(player,out string cardsHover);
@@ -3786,12 +3792,22 @@ namespace CompetitiveRounds
         private static bool ovtSoloExtraPick = false;
         /// <summary>Aug 8: the extra pick is the HOST's setting. Seated =
         /// render the host member's row value (ground truth from the state
-        /// payload); browsing = the local toggle that rides create/join.</summary>
+        /// payload); browsing = the local toggle that rides create/join.
+        /// F6 (Codex r3): while the seated HOST's own prefs write is
+        /// pending/unacked, the member row is STALE — deriving the next
+        /// toggle value from it sent ON twice on a rapid ON-then-OFF. The
+        /// local desired value (HostLobbyClient's structured prefs, ack-echo
+        /// kept server-true) wins for that window; the server row stays the
+        /// idle-hydration ground truth. Non-hosts never have a pending
+        /// extra-pick write of their own, and their row's solo_extra_pick is
+        /// NOT the host's — they always read the host row.</summary>
         private static bool OvtEffectiveExtraPick()
         {
-            if(!string.IsNullOrEmpty(ApiClient.OvtLobby.OpenLobbyId))
+            var cli=ApiClient.OvtLobby;
+            if(!string.IsNullOrEmpty(cli.OpenLobbyId))
             {
-                var mem=ApiClient.OvtLobby.Members;
+                if(cli.IsHost&&cli.PrefsInFlight)return cli.LocalDesiredExtraPick;
+                var mem=cli.Members;
                 if(mem!=null)foreach(var m in mem)if(m.is_host)return m.solo_extra_pick;
             }
             return ovtSoloExtraPick;
@@ -6699,10 +6715,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var bets = ApiClient.CachedMyBets;
             if (bets == null || bets.Count == 0) { UIFactory.SetText(txtMyBets, ""); return; }
             var sb = new System.Text.StringBuilder();
+            // #245 + hosted-lobby r3 finding 10: this label is auto-height and
+            // sits BELOW the budgeted 16 live rows in a column with no bounded
+            // scroll — up to 50 unsettled server rows used to render one line
+            // each and overpaint the lower column. Cap the ledger at 6 lines
+            // (pending first — live money — then settled outcomes) and
+            // collapse the rest into one "+N more bets" line.
+            const int LEDGER_MAX_LINES = 6;
+            int ledgerLines = 0, ledgerOverflow = 0;
             int settledShown = 0;
             foreach (var b in bets)
             {
                 if (b.settled) continue;
+                if (ledgerLines >= LEDGER_MAX_LINES) { ledgerOverflow++; continue; }
+                ledgerLines++;
                 sb.Append($"<color=#FFD94D>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name}</color> <color=#AAA>- in play, score {b.series_score}</color>\n");
             }
             foreach (var b in bets)
@@ -6710,6 +6736,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // July 12 round 2 item 5: outcomes older than 3 days age out of
                 // the panel (pending bets always show — they're live money).
                 if (!b.settled || settledShown >= 3 || !BetWithinDays(b, 3)) continue;
+                if (ledgerLines >= LEDGER_MAX_LINES) { ledgerOverflow++; continue; }
+                ledgerLines++;
                 settledShown++;
                 // Prefer the server's EXPLICIT state (#244; Codex round-4
                 // find 5): payout==amount inference mislabels a floored 1g
@@ -6725,6 +6753,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 else
                     sb.Append($"<color=#DD7777>{BetDate(b)}  Bet {b.amount:N0} gold on {b.bet_on_name} vs {b.vs_name} - LOST</color>\n");
             }
+            if (ledgerOverflow > 0)
+                sb.Append($"<color=#888>{I18n.TrF("+{0} more bets", ledgerOverflow)}</color>\n");
             string body = sb.ToString().TrimEnd('\n');
             // Leading newline: a blank line between the live-games list above and
             // this ledger so the two sections stop blending (item 5).
@@ -8498,8 +8528,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
 <color=#FFD94D><b>BLOCK SUCCESS</b></color>
 
-- One right-click = one attempt, and at most ONE
-  success no matter how many bullets that block absorbs.
+- One OFF-COOLDOWN block activation = one attempt
+  (right-clicks during cooldown don't count), and at
+  most ONE success no matter how many bullets that
+  block absorbs.
 - Echo repeats and Shield Charge dashes belong to the
   right-click that started them - they never add
   attempts.
@@ -8536,9 +8568,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
 <color=#FFD94D><b>TIMELINE GRAPHS</b></color>
 
-- Graphs sample every 3 seconds (longer games compress
-  older samples), so graph ratios can differ slightly
-  from the exact totals.");
+- Graphs sample every 3-5 seconds (longer games
+  compress older samples), so graph ratios can differ
+  slightly from the exact totals.");
 
         private static GameObject BuildSettingsTab(Transform parent)
         {
@@ -9590,7 +9622,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         /// rendered "6-x" (Sid's July 12 item 1). Treat >=2 as already-counted.</summary>
         private static string FmtHalfScore(int rounds,int pts){if(pts>=2)pts=0;return pts>0?(rounds+pts*0.5f).ToString("0.#",System.Globalization.CultureInfo.InvariantCulture):rounds.ToString();}
 
-        private static void FillRow(HistoryRow row,ApiClient.MatchHistoryEntry m,bool indent){string r=m.won?"W":"L";Color c=m.won?C_GREEN:C_RED;UIFactory.SetText(row.txtResult,$"{(indent?"    ":"  ")}{r}  {FmtHalfScore(m.player_rounds_won,m.player_points)}-{FmtHalfScore(m.opponent_rounds_won,m.opponent_points)}");UIFactory.SetColor(row.txtResult,c);/* r2 find 3: the character budget below is a first pass; the pixel fit is what actually keeps this cell out of the FPS column, because FitOneLine leaves it unclipped. 236 = the 240px cell less a hair of slack. *//* r3 find 14: TrF the whole template — `$"vs {name}"` produced the dynamic string "vs Alice", which can never match the catalogue key "vs {0}", so this cell stayed English in es/ru (compose-after-Tr, learning #298c). Raw because the text is already translated. */UIFactory.SetTextRaw(row.txtOpp,indent?"":UIFactory.FitToWidth(row.txtOpp,I18n.TrF("vs {0}",FormatOpponentForRow(m,HIST_OPP_BUDGET_ROW,HIST_OPP_BUDGET_ROW)),236f));UIFactory.SetText(row.txtFps,BuildFpsTag(m));UIFactory.SetText(row.txtPing,BuildPingTag(m));RegisterTeleGraphRectFor(row.txtFps,m.player_fps_timeline,m.opp_fps_timeline,false,m.point_times,m.point_timeline);RegisterTeleGraphRectFor(row.txtPing,m.player_ping_timeline,m.opp_ping_timeline,true,m.point_times,m.point_timeline);/* Item 4: per-game combat stats under the FPS line. Only rows with telemetry (post-mig-111 + both mods) render; old rows stay clean. July 22 item 1: split into per-player elements — hovering a Hit% pops that player's fired-vs-hit graph, a Block% pops dmg-taken-vs-blocks, all with point markers. */{string durTag=m.duration_seconds>0?$"      <color=#8FA3B8>{m.duration_seconds/60}:{m.duration_seconds%60:00}</color>":"";UIFactory.SetText(row.txtStats,durTag);string hy="",by="",ky="",ho="",bo="",ko="";if(m.player_bullets_fired>0||m.player_blocks_activated>0){float hp=m.player_bullets_fired>0?100f*m.player_bullets_hit/m.player_bullets_fired:0f;float bp=m.player_blocks_activated>0?100f*m.player_blocks_successful/m.player_blocks_activated:0f;float kps=m.player_active_seconds>0.5f?m.player_keys_pressed/m.player_active_seconds:0f;hy=I18n.TrF("<color=#99B3E6>You: Hit {0}%</color>",hp.ToString("F0",_INV));by=$"<color=#99B3E6>{I18n.TrF("Block {0}%",bp.ToString("F0",_INV))}</color>";ky=$"<color=#99B3E6>{I18n.TrF("{0} keys/s",kps.ToString("F1",_INV))}</color>";if(m.opp_bullets_fired>0||m.opp_blocks_activated>0){float ohp=m.opp_bullets_fired>0?100f*m.opp_bullets_hit/m.opp_bullets_fired:0f;float obp=m.opp_blocks_activated>0?100f*m.opp_blocks_successful/m.opp_blocks_activated:0f;float okps=m.opp_active_seconds>0.5f?m.opp_keys_pressed/m.opp_active_seconds:0f;ho=I18n.TrF("<color=#E69988>Opp: Hit {0}%</color>",ohp.ToString("F0",_INV));bo=$"<color=#E69988>{I18n.TrF("Block {0}%",obp.ToString("F0",_INV))}</color>";ko=$"<color=#E69988>{I18n.TrF("{0} keys/s",okps.ToString("F1",_INV))}</color>";}}
+        private static void FillRow(HistoryRow row,ApiClient.MatchHistoryEntry m,bool indent){string r=m.won?"W":"L";Color c=m.won?C_GREEN:C_RED;UIFactory.SetText(row.txtResult,$"{(indent?"    ":"  ")}{r}  {FmtHalfScore(m.player_rounds_won,m.player_points)}-{FmtHalfScore(m.opponent_rounds_won,m.opponent_points)}");UIFactory.SetColor(row.txtResult,c);/* r2 find 3: the character budget below is a first pass; the pixel fit is what actually keeps this cell out of the FPS column, because FitOneLine leaves it unclipped. 236 = the 240px cell less a hair of slack. *//* r3 find 14: TrF the whole template — `$"vs {name}"` produced the dynamic string "vs Alice", which can never match the catalogue key "vs {0}", so this cell stayed English in es/ru (compose-after-Tr, learning #298c). Raw because the text is already translated. */UIFactory.SetTextRaw(row.txtOpp,indent?"":UIFactory.FitToWidth(row.txtOpp,I18n.TrF("vs {0}",FormatOpponentForRow(m,HIST_OPP_BUDGET_ROW,HIST_OPP_BUDGET_ROW)),236f));UIFactory.SetText(row.txtFps,BuildFpsTag(m));UIFactory.SetText(row.txtPing,BuildPingTag(m));RegisterTeleGraphRectFor(row.txtFps,m.player_fps_timeline,m.opp_fps_timeline,false,m.point_times,m.point_timeline,durationSeconds:m.duration_seconds);RegisterTeleGraphRectFor(row.txtPing,m.player_ping_timeline,m.opp_ping_timeline,true,m.point_times,m.point_timeline,durationSeconds:m.duration_seconds);/* Item 4: per-game combat stats under the FPS line. Only rows with telemetry (post-mig-111 + both mods) render; old rows stay clean. July 22 item 1: split into per-player elements — hovering a Hit% pops that player's fired-vs-hit graph, a Block% pops dmg-taken-vs-blocks, all with point markers. */{string durTag=m.duration_seconds>0?$"      <color=#8FA3B8>{m.duration_seconds/60}:{m.duration_seconds%60:00}</color>":"";UIFactory.SetText(row.txtStats,durTag);string hy="",by="",ky="",ho="",bo="",ko="";if(m.player_bullets_fired>0||m.player_blocks_activated>0){float hp=m.player_bullets_fired>0?100f*m.player_bullets_hit/m.player_bullets_fired:0f;float bp=m.player_blocks_activated>0?100f*m.player_blocks_successful/m.player_blocks_activated:0f;float kps=m.player_active_seconds>0.5f?m.player_keys_pressed/m.player_active_seconds:0f;hy=I18n.TrF("<color=#99B3E6>You: Hit {0}%</color>",hp.ToString("F0",_INV));by=$"<color=#99B3E6>{I18n.TrF("Block {0}%",bp.ToString("F0",_INV))}</color>";ky=$"<color=#99B3E6>{I18n.TrF("{0} keys/s",kps.ToString("F1",_INV))}</color>";if(m.opp_bullets_fired>0||m.opp_blocks_activated>0){float ohp=m.opp_bullets_fired>0?100f*m.opp_bullets_hit/m.opp_bullets_fired:0f;float obp=m.opp_blocks_activated>0?100f*m.opp_blocks_successful/m.opp_blocks_activated:0f;float okps=m.opp_active_seconds>0.5f?m.opp_keys_pressed/m.opp_active_seconds:0f;ho=I18n.TrF("<color=#E69988>Opp: Hit {0}%</color>",ohp.ToString("F0",_INV));bo=$"<color=#E69988>{I18n.TrF("Block {0}%",obp.ToString("F0",_INV))}</color>";ko=$"<color=#E69988>{I18n.TrF("{0} keys/s",okps.ToString("F1",_INV))}</color>";}}
         /* Aug 6 item 4: avg DPS = damage dealt / game length. A row whose damage
          * column is NULL shows a DASH rather than "0.0 dps" (#257 — 0 is a real
          * value here: a player can genuinely deal no damage).
@@ -9618,11 +9650,15 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 dmgOpp&&m.duration_seconds>0
                     ?(m.opp_damage_dealt/(float)m.duration_seconds).ToString("F1",_INV):"-")+"</color>";
         /* Which sample grid each side's timeline sits on follows the REPORTER,
-         * never the viewer — see ViewerWasReporter. */
+         * never the viewer — see ViewerWasReporter.
+         * F7 (Codex r3): decimated timelines have variable stride — when the
+         * row carries a real duration, the honest interval is
+         * duration/(n-1) over the samples actually present (DpsStepFor);
+         * the reporter-grid cadence survives only as the no-duration fallback. */
         bool viewerReported=ViewerWasReporter(m);
-        float dpsStepYou=viewerReported?DPS_STEP_LOCAL:DPS_STEP_PEER;
-        float dpsStepOpp=viewerReported?DPS_STEP_PEER:DPS_STEP_LOCAL;
-        UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtDpsYou,dy);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);UIFactory.SetTextRaw(row.txtDpsOpp,dorp);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);/* Aug 7 item 3d: hovering a DPS cell pops that side's per-second damage line. ONE side per region, never the pair: the two series come off different emitters (a 5s own-seat grid vs a ~3s peer heartbeat) and the DPS chart drives both its lines from a single step, so pairing them would stretch one line 1.67x across the time axis AND scale its values wrong. Each cell registers its own series in the MY slot so the popup's blue subject label matches the blue line it names. CumulativeToDps returns an EMPTY series for a missing or one-sample timeline, and the register call early-returns on that, so a row with no damage timeline registers nothing even though the cell renders its dash. */if(!string.IsNullOrEmpty(dy))RegisterDpsGraphRectFor(row.txtDpsYou,CumulativeToDps(m.player_damage_timeline,dpsStepYou),null,m.point_times,m.point_timeline,dpsStepYou,null,I18n.Tr("you"));if(!string.IsNullOrEmpty(dorp))RegisterDpsGraphRectFor(row.txtDpsOpp,CumulativeToDps(m.opp_damage_timeline,dpsStepOpp),null,m.point_times,m.point_timeline,dpsStepOpp,null,FfaSafeRich(Trunc(string.IsNullOrEmpty(m.opponent_name)?I18n.Tr("opponent"):m.opponent_name,18)));}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);UIFactory.SetTextRaw(row.txtCards,!string.IsNullOrEmpty(m.cards_display)?$"        {I18n.Tr("Cards:")} {(_historyCardsFull ? m.cards_display : FormatCardLine(m.cards_display))}":"");UIFactory.SetTextRaw(row.txtOppCards,!string.IsNullOrEmpty(m.opp_cards_display)?$"        {I18n.Tr("Opp:")}   {(_historyCardsFull ? m.opp_cards_display : FormatCardLine(m.opp_cards_display))}":"");if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());RegisterHoverRectFor(row.txtCards,m.cards_display,false);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true);row.root.SetActive(true);}
+        float dpsStepYou=DpsStepFor(m.player_damage_timeline,m.duration_seconds,viewerReported?DPS_STEP_LOCAL:DPS_STEP_PEER);
+        float dpsStepOpp=DpsStepFor(m.opp_damage_timeline,m.duration_seconds,viewerReported?DPS_STEP_PEER:DPS_STEP_LOCAL);
+        UIFactory.SetTextRaw(row.txtHitYou,hy);UIFactory.SetTextRaw(row.txtBlockYou,by);UIFactory.SetTextRaw(row.txtKpsYou,ky);UIFactory.SetTextRaw(row.txtDpsYou,dy);UIFactory.SetTextRaw(row.txtHitOpp,ho);UIFactory.SetTextRaw(row.txtBlockOpp,bo);UIFactory.SetTextRaw(row.txtKpsOpp,ko);UIFactory.SetTextRaw(row.txtDpsOpp,dorp);/* Review [8]: only register a hover zone when the cell actually renders text — an EMPTY element has preferredWidth 0, which ResolveHoverSource treats as "no fraction" = FULL-width region: an invisible hover trap across the row. */if(!string.IsNullOrEmpty(hy))RegisterPairGraphRectFor(row.txtHitYou,m.player_hit_timeline,false,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(by))RegisterPairGraphRectFor(row.txtBlockYou,m.player_block_timeline,true,false,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(ho))RegisterPairGraphRectFor(row.txtHitOpp,m.opp_hit_timeline,false,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);if(!string.IsNullOrEmpty(bo))RegisterPairGraphRectFor(row.txtBlockOpp,m.opp_block_timeline,true,true,m.point_times,m.point_timeline,null,null,m.duration_seconds);/* Aug 7 item 3d: hovering a DPS cell pops that side's per-second damage line. ONE side per region, never the pair: the two series come off different emitters (a 5s own-seat grid vs a ~3s peer heartbeat) and the DPS chart drives both its lines from a single step, so pairing them would stretch one line 1.67x across the time axis AND scale its values wrong. Each cell registers its own series in the MY slot so the popup's blue subject label matches the blue line it names. CumulativeToDps returns an EMPTY series for a missing or one-sample timeline, and the register call early-returns on that, so a row with no damage timeline registers nothing even though the cell renders its dash. */if(!string.IsNullOrEmpty(dy))RegisterDpsGraphRectFor(row.txtDpsYou,CumulativeToDps(m.player_damage_timeline,dpsStepYou),null,m.point_times,m.point_timeline,dpsStepYou,null,I18n.Tr("you"),m.duration_seconds);if(!string.IsNullOrEmpty(dorp))RegisterDpsGraphRectFor(row.txtDpsOpp,CumulativeToDps(m.opp_damage_timeline,dpsStepOpp),null,m.point_times,m.point_timeline,dpsStepOpp,null,FfaSafeRich(Trunc(string.IsNullOrEmpty(m.opponent_name)?I18n.Tr("opponent"):m.opponent_name,18)),m.duration_seconds);}/* Item 4: hovering the W/L score pops a line graph of the scoring history. */RegisterScoreGraphRectFor(row.txtResult,m.point_timeline,m.won);/* July 22 item 6: click-to-copy game ID. */row.currentMatchId=m.match_id;if(row.btnId!=null)row.btnId.SetActive(!string.IsNullOrEmpty(m.match_id));UIFactory.SetText(row.txtXP,m.xp_gained>0?(m.gold_gained>0?$"+{m.xp_gained}xp <color=#FFD94D>+{m.gold_gained}g</color>":$"+{m.xp_gained}xp"):"");string dt="";try{if(!string.IsNullOrEmpty(m.ended_at)&&m.ended_at.Length>=10)dt=DateFmt.Short(DateTime.Parse(m.ended_at));}catch{}UIFactory.SetText(row.txtDate,dt);UIFactory.SetTextRaw(row.txtCards,!string.IsNullOrEmpty(m.cards_display)?$"        {I18n.Tr("Cards:")} {(_historyCardsFull ? m.cards_display : FormatCardLine(m.cards_display))}":"");UIFactory.SetTextRaw(row.txtOppCards,!string.IsNullOrEmpty(m.opp_cards_display)?$"        {I18n.Tr("Opp:")}   {(_historyCardsFull ? m.opp_cards_display : FormatCardLine(m.opp_cards_display))}":"");if(rCardModeTxt!=null)UIFactory.SetText(rCardModeTxt,HistoryCardModeLabel());if(cCardModeTxt!=null)UIFactory.SetText(cCardModeTxt,HistoryCardModeLabel());RegisterHoverRectFor(row.txtCards,m.cards_display,false);RegisterHoverRectFor(row.txtOppCards,m.opp_cards_display,true);row.root.SetActive(true);}
 
         // Resolve a TMP text component's screen-space rect via its parent
         // chain. Handles both Screen Space - Overlay (corners are screen
@@ -9733,15 +9769,20 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         private static void RegisterTeleGraphRectFor(object txt, string mySeries, string oppSeries, bool isPing,
                                                      string pointTimes = null, string pointTimeline = null,
                                                      float myStep = 0f,
-                                                     RectTransform outerClip = null, string subjectLabel = null)
+                                                     RectTransform outerClip = null, string subjectLabel = null,
+                                                     int durationSeconds = 0)
         {
             if (txt == null || (string.IsNullOrEmpty(mySeries) && string.IsNullOrEmpty(oppSeries))) return;
             try
             {
                 RectTransform rt; Camera cam; float frac; Rect rect; RectTransform clip;
                 if (!ResolveHoverSource(txt, out rt, out cam, out frac, out rect, out clip)) return;
+                // F7 (Codex r3): the row's real match length rides along so
+                // the chart scales decimated (variable-stride) timelines
+                // across the whole game — same contract as the pair graphs.
                 CompetitiveUI.RegisterFpsGraphRegion(rect, mySeries, oppSeries, isPing, rt, cam, frac, clip, txt,
-                                                     pointTimes, pointTimeline, myStep, outerClip, subjectLabel);
+                                                     pointTimes, pointTimeline, myStep, outerClip, subjectLabel,
+                                                     durationSeconds);
             }
             catch { }
         }
@@ -9754,7 +9795,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         private static void RegisterDpsGraphRectFor(object txt, string mySeries, string oppSeries,
                                                     string pointTimes = null, string pointTimeline = null,
                                                     float myStep = 0f,
-                                                    RectTransform outerClip = null, string subjectLabel = null)
+                                                    RectTransform outerClip = null, string subjectLabel = null,
+                                                    int durationSeconds = 0)
         {
             if (txt == null || (string.IsNullOrEmpty(mySeries) && string.IsNullOrEmpty(oppSeries))) return;
             try
@@ -9762,7 +9804,8 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 RectTransform rt; Camera cam; float frac; Rect rect; RectTransform clip;
                 if (!ResolveHoverSource(txt, out rt, out cam, out frac, out rect, out clip)) return;
                 CompetitiveUI.RegisterDpsGraphRegion(rect, mySeries, oppSeries, rt, cam, frac, clip, txt,
-                                                     pointTimes, pointTimeline, myStep, outerClip, subjectLabel);
+                                                     pointTimes, pointTimeline, myStep, outerClip, subjectLabel,
+                                                     durationSeconds);   // F7 (Codex r3)
             }
             catch { }
         }
@@ -9928,6 +9971,23 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 return written >= 2 ? sb.ToString() : "";
             }
             catch { return ""; }
+        }
+
+        /// <summary>F7 (Codex r3): the sample interval a DECIMATED cumulative
+        /// timeline actually carries. Decimation (ClampTimeline's decimate-to-
+        /// fit, and the server-side compaction on long games) makes the stride
+        /// variable — dividing deltas by the fixed 3s/5s cadence overstates
+        /// DPS by however much was decimated. When the row's real duration is
+        /// known, the honest uniform approximation is duration/(n-1) across
+        /// the n samples present; a row without a duration keeps the legacy
+        /// cadence estimate. Comma-count is used for n so this needs no parse
+        /// (unparseable samples are rare and skew it negligibly).</summary>
+        public static float DpsStepFor(string cumulativeCsv, int durationSeconds, float fallbackStep)
+        {
+            if (durationSeconds <= 0 || string.IsNullOrEmpty(cumulativeCsv)) return fallbackStep;
+            int n = 1;
+            for (int i = 0; i < cumulativeCsv.Length; i++) if (cumulativeCsv[i] == ',') n++;
+            return n >= 2 ? durationSeconds / (float)(n - 1) : fallbackStep;
         }
 
         /// <summary>Sample interval, in seconds, of the stream a client records for
