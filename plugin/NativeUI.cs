@@ -1348,6 +1348,9 @@ namespace CompetitiveRounds
             // the inline panel inside the 2v2 tab stays current without
             // requiring the user to switch to the leaderboard tab.
             ApiClient.FetchActiveTeamSeries();
+            // Aug 7 item 13: WATCH buttons on the live strip need the spectate
+            // eligibility feed; its own 10s global throttle dedupes traffic.
+            ApiClient.MaybeFetchSpectateGames();
             // Recent 2v2 Series (paged) — refresh every 10s. Page state lives
             // in teamSeriesPageReq so prev/next buttons can change it.
             if (Time.unscaledTime >= teamSeriesRefreshAt)
@@ -1401,6 +1404,7 @@ namespace CompetitiveRounds
             artistRows.Clear();artistBlockRows.Clear();liveBetRowPool.Clear();
             comparePickerRows.Clear();comparePickerTexts.Clear();comparePickerSteamIds.Clear();
             ffaBrowserRows.Clear();ffaBetLobbyRows.Clear();ffaCfgHostBtns.Clear();
+            teamLiveRows.Clear();teamLiveRowsHost=null;ovtLiveRows.Clear();ovtLiveRowsHost=null;
             /* Codex review: these are keyed by Image components owned by the
              * DESTROYED page. A stale key makes the next animation tick throw
              * inside the single catch around the whole foreach, aborting the
@@ -1785,6 +1789,10 @@ namespace CompetitiveRounds
         {
             public GameObject root;
             public object txtHeader;
+            // Aug 7 item 13: WATCH slot in the header row; watchGameId is the
+            // #265-safe click-time binding (rows are pooled and rebound).
+            public GameObject watchBtn;
+            public string watchGameId;
             public readonly List<FfaBetPlayerRow> players = new List<FfaBetPlayerRow>();
         }
         private static readonly List<FfaBetLobbyRow> ffaBetLobbyRows = new List<FfaBetLobbyRow>();
@@ -2106,8 +2114,20 @@ namespace CompetitiveRounds
             row.root=UIFactory.CreatePanel(name,parent,new Color(0.13f,0.14f,0.18f,0.88f));
             UIFactory.AddVLG(row.root,spacing:1,padL:4,padR:4,padT:3,padB:4);
             UIFactory.AddLE(row.root,prefH:34,minH:34,flexH:0);
-            row.txtHeader=UIFactory.CreateText("Header",row.root.transform,"",18f,C_WHITE,
-                UIFactory.AlignMidLeft,sizeDelta:new Vector2(1000,27));
+            // Aug 7 item 13: header becomes an HLG row so a WATCH button can
+            // sit beside the text (text 930, was a bare 1000-wide VLG child).
+            var hdrRow=new GameObject("HdrRow");hdrRow.transform.SetParent(row.root.transform,false);hdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(hdrRow,spacing:6);UIFactory.AddLE(hdrRow,prefH:27,minH:27,flexH:0);
+            row.txtHeader=UIFactory.CreateText("Header",hdrRow.transform,"",18f,C_WHITE,
+                UIFactory.AlignMidLeft,sizeDelta:new Vector2(930,27));
+            var hdrTxtComp=row.txtHeader as Component;
+            if(hdrTxtComp!=null)UIFactory.AddLE(hdrTxtComp.gameObject,prefW:930,flexW:0,flexH:0);
+            row.watchBtn=UIFactory.CreateButton("watch",hdrRow.transform,
+                I18n.Tr("WATCH"),12f,Color.white,new Color(0.16f,0.32f,0.45f),
+                ()=>{if(!string.IsNullOrEmpty(row.watchGameId))ApiClient.RequestSpectateGrant(row.watchGameId);},
+                sizeDelta:new Vector2(64,22));
+            UIFactory.AddLE(row.watchBtn,prefW:64,prefH:22,flexW:0,flexH:0);
+            row.watchBtn.SetActive(false);
             row.root.SetActive(false);
             return row;
         }
@@ -2930,6 +2950,8 @@ namespace CompetitiveRounds
             {
                 ffaBetRefreshAt=Time.unscaledTime+10f;
                 ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);
+                // Aug 7 item 13: WATCH on live FFA lobbies (10s global throttle inside).
+                ApiClient.MaybeFetchSpectateGames();
             }
             if(Time.unscaledTime>=ffaLbRefreshAt)
             {
@@ -3166,6 +3188,12 @@ namespace CompetitiveRounds
                     ?"  "+I18n.Tr("<color=#777>(your lobby)</color>")
                     :lobby.already_bet?"  "+I18n.Tr("<color=#777>(bet placed)</color>"):"";
                 UIFactory.SetTextRaw(ui.txtHeader,I18n.TrF("Game {0} - {1} players",lobby.game_number,count)+note);
+                // Aug 7 item 13: WATCH — /ffa/bettable's lobby_id IS the
+                // spectate feed's ffa source_ref (both are ffa_lobbies.id).
+                var specG=FindSpectateGame("ffa",lobby.lobby_id);
+                bool canWatch=specG!=null&&!lobby.is_member&&!LocalInSpectateRoster(specG);
+                ui.watchGameId=canWatch?specG.game_id:null;
+                if(ui.watchBtn!=null)ui.watchBtn.SetActive(canWatch);
                 while(ui.players.Count<playerRows)
                     ui.players.Add(CreateFfaBetPlayerRow(ui.root.transform,$"Player{ui.players.Count}"));
                 for(int p=0;p<ui.players.Count;p++)
@@ -3297,6 +3325,11 @@ namespace CompetitiveRounds
 
         // ── 1v2 tab (solo vs duo; UNSCORED beta) ──────────────────────────
         private static object txtOvtStatus, txtOvtLobbyHeader, txtOvtLobbyBody, txtOvtSoloLbHeader, txtOvtDuoLbHeader, txtOvtRecentHeader, txtOvtRecentPage;
+        // Aug 7 item 13: live 1v2 games panel (fed by the spectate eligibility
+        // feed; reuses the TeamLiveRow shape — text + bound WATCH button).
+        private static GameObject ovtLivePanel, ovtLiveRowsHost;
+        private static object txtOvtLiveHeader;
+        private static readonly List<TeamLiveRow> ovtLiveRows = new List<TeamLiveRow>();
         private static GameObject ovtJoinBtn, ovtLeaveBtn, ovtSideBtn, ovtExtraBtn, ovtSoloLbContainer, ovtDuoLbContainer, ovtRecentContainer, ovtRecentPrevBtn, ovtRecentNextBtn;
         private static int ovtPreferredSide = 0;   // 0 any, 1 solo, 2 duo
         private static bool ovtSoloExtraPick = false;
@@ -3353,6 +3386,19 @@ namespace CompetitiveRounds
             if(qlbComp!=null)UIFactory.AddLE(qlbComp.gameObject,prefH:29,minH:29,flexH:0);
             UIFactory.SetWordWrap(txtOvtLobbyBody,true);
 
+            // Aug 7 item 13: live 1v2 games with WATCH. The 1v2 tab had NO
+            // live-games surface at all — rendered straight from the spectate
+            // eligibility feed (names/ratings/seats all ride it), so no new
+            // endpoint. Hidden when nothing is live. Fixed prefH rows inside
+            // the outer scroll (#63).
+            ovtLivePanel=UIFactory.CreatePanel("O1Live",panel.transform,C_PANEL);
+            UIFactory.AddVLG(ovtLivePanel,spacing:2,padL:10,padR:10,padT:6,padB:6);
+            UIFactory.AddLE(ovtLivePanel,flexH:0);
+            txtOvtLiveHeader=UIFactory.CreateText("O1LvH",ovtLivePanel.transform,"<b><color=#FF6688>* Live 1v2 Games</color></b>",21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(891,29));
+            ovtLiveRowsHost=new GameObject("O1LvRows");ovtLiveRowsHost.transform.SetParent(ovtLivePanel.transform,false);ovtLiveRowsHost.AddComponent<RectTransform>();
+            UIFactory.AddVLG(ovtLiveRowsHost,spacing:2);UIFactory.AddLE(ovtLiveRowsHost,flexH:0);
+            ovtLivePanel.SetActive(false);
+
             // Bottom row: split solo/duo activity boards (left, fixed width)
             // + recent 1v2 games (right, flex). Fixed prefH inside the outer
             // scroll — never flexH:1 (learning #63).
@@ -3393,6 +3439,39 @@ namespace CompetitiveRounds
             return outer;
         }
 
+        /// <summary>Aug 7 item 13: fill the 1v2 live-games panel from
+        /// CachedSpectateGames (mode=="1v2"). Panel hides when nothing is
+        /// live-and-watchable; fighters never see their own game's button.</summary>
+        private static void RenderOvtLiveGames()
+        {
+            if (ovtLivePanel == null || ovtLiveRowsHost == null) return;
+            var games = ApiClient.CachedSpectateGames;
+            int shown = 0;
+            if (games != null)
+            {
+                foreach (var g in games)
+                {
+                    if (g == null || g.mode != "1v2" || !g.spectatable) continue;
+                    if (shown >= 10) break;
+                    if (ovtLiveRows.Count <= shown) ovtLiveRows.Add(CreateTeamLiveRow(ovtLiveRowsHost.transform));
+                    var row = ovtLiveRows[shown];
+                    row.root.SetActive(true);
+                    // names is the server-composed display string; user-authored,
+                    // so sanitize before it reaches TMP rich text.
+                    UIFactory.SetTextRaw(row.txt,
+                        $"<color=#DDD>{FfaSafeRich(Trunc(g.names, 60))}</color>  "
+                        + $"<color=#888>({g.spectator_count}/{g.spectator_cap} {I18n.Tr("watching")})</color>");
+                    bool canWatch = !LocalInSpectateRoster(g);
+                    row.gameId = canWatch ? g.game_id : null;
+                    if (row.watchBtn != null) row.watchBtn.SetActive(canWatch);
+                    shown++;
+                }
+            }
+            for (int i = shown; i < ovtLiveRows.Count; i++)
+            { ovtLiveRows[i].gameId = null; ovtLiveRows[i].root.SetActive(false); }
+            ovtLivePanel.SetActive(shown > 0);
+        }
+
         private static float ovtTabRefreshAt, ovtRecentRefreshAt;
         private static void MaybeRefreshOvtTab()
         {
@@ -3403,6 +3482,8 @@ namespace CompetitiveRounds
             {
                 ovtRecentRefreshAt=Time.unscaledTime+10f;
                 ApiClient.FetchOvtRecent(ovtRecentPageReq);
+                // Aug 7 item 13: live 1v2 panel data (10s global throttle inside).
+                ApiClient.MaybeFetchSpectateGames();
             }
             if(Time.unscaledTime>=ovtTabRefreshAt)
             {
@@ -3455,6 +3536,8 @@ namespace CompetitiveRounds
                 UIFactory.SetTextRaw(txtOvtStatus,msg);
             }
             RenderOvtLobbySection();
+            // Aug 7 item 13: live 1v2 games straight from the spectate feed.
+            RenderOvtLiveGames();
             // Split activity boards (server-ordered; role-scoped W/L).
             FillOvtRoleBoard(ovtSoloLbContainer,ovtSoloLbRows,ApiClient.CachedOvtLeaderboardSolo,txtOvtSoloLbHeader,I18n.Tr("Solo Leaderboard"),"#FFB347");
             FillOvtRoleBoard(ovtDuoLbContainer,ovtDuoLbRows,ApiClient.CachedOvtLeaderboardDuo,txtOvtDuoLbHeader,I18n.Tr("Duo Leaderboard"),"#88AAFF");
@@ -6036,31 +6119,57 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         /// moved source_ref server-side). The game_id is captured at
         /// row-build time (#265: bind to the entity the row RENDERS, never
         /// re-index a mutable cache in the click handler).</summary>
+        /// <summary>Aug 7 item 13: the eligibility matcher, extracted from
+        /// AddSpectateButton so every mode tab can share it. Matches by
+        /// source_ref first (2v2=team_series.id, 1v2=ovt_series.id,
+        /// ffa=ffa_lobbies.id, 1v1 queue=series id), then by two-steam roster
+        /// containment (1v1 code-rooms have empty source_ref). The optional
+        /// mode filter keeps a 1v2 row from matching a 2v2 game that happens
+        /// to share players.</summary>
+        internal static ApiClient.SpectateGameInfo FindSpectateGame(string mode, string sourceRef,
+                                                                    string steamA = null, string steamB = null)
+        {
+            var games = ApiClient.CachedSpectateGames;
+            if (games == null) return null;
+            foreach (var g in games)
+            {
+                if (g == null || !g.spectatable) continue;
+                if (!string.IsNullOrEmpty(mode) && g.mode != mode) continue;
+                if (!string.IsNullOrEmpty(sourceRef) && g.source_ref == sourceRef) return g;
+                if (!string.IsNullOrEmpty(steamA) && !string.IsNullOrEmpty(steamB)
+                    && !string.IsNullOrEmpty(g.roster))
+                {
+                    var members = g.roster.Split(',');
+                    bool hasA = false, hasB = false;
+                    foreach (var m in members)
+                    {
+                        if (m == steamA) hasA = true;
+                        else if (m == steamB) hasB = true;
+                    }
+                    if (hasA && hasB) return g;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>True when the local player is inside the game's fighter
+        /// roster — a fighter browsing the tab must not see a WATCH button for
+        /// their own game (the grant would 409 on the commitment check anyway).</summary>
+        private static bool LocalInSpectateRoster(ApiClient.SpectateGameInfo g)
+        {
+            string myId = MatchTracker.LocalSteamId;
+            if (string.IsNullOrEmpty(myId) || g == null || string.IsNullOrEmpty(g.roster)) return false;
+            foreach (var m in g.roster.Split(','))
+                if (m == myId) return true;
+            return false;
+        }
+
         private static void AddSpectateButton(Transform rowParent, string seriesId,
                                               string steamA = null, string steamB = null)
         {
             try
             {
-                var games = ApiClient.CachedSpectateGames;
-                if (games == null) return;
-                ApiClient.SpectateGameInfo match = null;
-                foreach (var g in games)
-                {
-                    if (g == null || !g.spectatable) continue;
-                    if (!string.IsNullOrEmpty(seriesId) && g.source_ref == seriesId) { match = g; break; }
-                    if (!string.IsNullOrEmpty(steamA) && !string.IsNullOrEmpty(steamB)
-                        && !string.IsNullOrEmpty(g.roster))
-                    {
-                        var members = g.roster.Split(',');
-                        bool hasA = false, hasB = false;
-                        foreach (var m in members)
-                        {
-                            if (m == steamA) hasA = true;
-                            else if (m == steamB) hasB = true;
-                        }
-                        if (hasA && hasB) { match = g; break; }
-                    }
-                }
+                var match = FindSpectateGame(null, seriesId, steamA, steamB);
                 if (match == null) return;
                 string gameId = match.game_id;   // capture the ENTITY, not the cache index
                 var btn = UIFactory.CreateButton("watch", rowParent,
@@ -17433,12 +17542,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             txtTeamLiveHeader = UIFactory.CreateText("TLTH", liveTeamPanel.transform,
                 "<b><color=#FF6688>* Live 2v2 Series</color></b>", 16f, C_SUB,
                 UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
-            txtTeamLiveBody = UIFactory.CreateText("TLTB", liveTeamPanel.transform,
-                "<color=#666><i>No live 2v2 series right now.</i></color>", 14f, C_LABEL,
-                UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 22));
-            var ltbComp = txtTeamLiveBody as Component;
-            if (ltbComp != null) UIFactory.AddLE(ltbComp.gameObject, prefH: 22, minH: 22, flexH: 0);
-            UIFactory.SetWordWrap(txtTeamLiveBody, false);
+            /* Aug 7 item 13: the strip was ONE text body, which had nowhere to
+             * put a per-series WATCH button. Pooled per-series rows instead;
+             * each row binds its spectate game_id at fill time (#265). */
+            teamLiveRowsHost = new GameObject("TLRows");
+            teamLiveRowsHost.transform.SetParent(liveTeamPanel.transform, false);
+            teamLiveRowsHost.AddComponent<RectTransform>();
+            UIFactory.AddVLG(teamLiveRowsHost, spacing: 2);
+            UIFactory.AddLE(teamLiveRowsHost, flexH: 0);
             teamLivePanel = liveTeamPanel;
 
             // Queue row — Random Queue + Custom Lobbies side-by-side as two
@@ -17678,7 +17789,40 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         // Ranked Games panel but lives directly inside the 2v2 view.
         private static GameObject teamLivePanel;
         private static object txtTeamLiveHeader;
-        private static object txtTeamLiveBody;
+        // Aug 7 item 13: pooled per-series rows (text + WATCH). gameId is the
+        // row's live binding — the button callback reads it at CLICK time so an
+        // async cache refresh can never retarget an already-rendered row (#265).
+        private class TeamLiveRow
+        {
+            public GameObject root;
+            public object txt;
+            public GameObject watchBtn;
+            public string gameId;
+        }
+        private static readonly List<TeamLiveRow> teamLiveRows = new List<TeamLiveRow>();
+        private static GameObject teamLiveRowsHost;
+
+        private static TeamLiveRow CreateTeamLiveRow(Transform parent)
+        {
+            var r = new TeamLiveRow();
+            r.root = new GameObject("TLRow");
+            r.root.transform.SetParent(parent, false);
+            r.root.AddComponent<RectTransform>();
+            UIFactory.AddHLG(r.root, spacing: 6);
+            UIFactory.AddLE(r.root, prefH: 24, flexH: 0);
+            r.txt = UIFactory.CreateText("TLine", r.root.transform, "", 14f, C_LABEL,
+                UIFactory.AlignMidLeft, sizeDelta: new Vector2(830, 22));
+            var txtComp = r.txt as Component;
+            if (txtComp != null) UIFactory.AddLE(txtComp.gameObject, prefW: 830, flexW: 0, flexH: 0);
+            UIFactory.SetWordWrap(r.txt, false);
+            r.watchBtn = UIFactory.CreateButton("watch", r.root.transform,
+                I18n.Tr("WATCH"), 12f, Color.white, new Color(0.16f, 0.32f, 0.45f),
+                () => { if (!string.IsNullOrEmpty(r.gameId)) ApiClient.RequestSpectateGrant(r.gameId); },
+                sizeDelta: new Vector2(64, 22));
+            UIFactory.AddLE(r.watchBtn, prefW: 64, prefH: 22, flexW: 0, flexH: 0);
+            r.watchBtn.SetActive(false);
+            return r;
+        }
 
         private static TeamHistRow CreateTeamHistRow(Transform parent, string name)
         {
@@ -18027,32 +18171,34 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             RenderTeamQueueSection(autoList, txtTeamQueueListHeader, txtTeamQueueListBody, I18n.Tr("Random Queue"));
             RenderTeamQueueSection(manualList, txtTeamQueueManualHeader, txtTeamQueueManualBody, I18n.Tr("Custom Lobbies"));
 
-            // Live 2v2 Now strip. One line per active team series. Hidden
-            // entirely when no 2v2 is live.
+            // Live 2v2 Now strip. One pooled ROW per active team series (Aug 7
+            // item 13: rows instead of one text body so each series carries a
+            // WATCH button). Hidden entirely when no 2v2 is live.
             var liveTeam = ApiClient.CachedActiveTeamSeries;
             int liveCount = liveTeam != null ? liveTeam.Count : 0;
             if (teamLivePanel != null) teamLivePanel.SetActive(liveCount > 0);
-            if (liveCount > 0)
+            if (liveCount > 0 && teamLiveRowsHost != null)
             {
                 UIFactory.SetText(txtTeamLiveHeader, I18n.TrF("<b><color=#FF6688>* Live 2v2 Now</color></b>  <color=#888>({0})</color>", liveCount));
-                var sbLive = new StringBuilder();
-                foreach (var ts in liveTeam)
+                while (teamLiveRows.Count < liveCount && teamLiveRows.Count < 20)
+                    teamLiveRows.Add(CreateTeamLiveRow(teamLiveRowsHost.transform));
+                for (int i = 0; i < teamLiveRows.Count; i++)
                 {
-                    sbLive.Append($"<color=#AAF>{Trunc(ts.t1a_name, 7)}({ts.t1a_rating})+{Trunc(ts.t1b_name, 7)}({ts.t1b_rating})</color>");
-                    sbLive.Append($"  <b>{ts.t1_wins}-{ts.t2_wins}</b>  ");
-                    sbLive.Append($"<color=#FAA>{Trunc(ts.t2a_name, 7)}({ts.t2a_rating})+{Trunc(ts.t2b_name, 7)}({ts.t2b_rating})</color>\n");
-                }
-                UIFactory.SetText(txtTeamLiveBody, sbLive.ToString().TrimEnd('\n'));
-                int newH = Math.Max(22, liveCount * 18 + 4);
-                var liveBodyComp = txtTeamLiveBody as Component;
-                if (liveBodyComp != null)
-                {
-                    var le = liveBodyComp.gameObject.GetComponent(UIFactory.tLE);
-                    if (le != null)
-                    {
-                        UIFactory.tLE.GetProperty("preferredHeight", BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, (float)newH);
-                        UIFactory.tLE.GetProperty("minHeight",       BindingFlags.Public | BindingFlags.Instance)?.SetValue(le, (float)newH);
-                    }
+                    var row = teamLiveRows[i];
+                    bool show = i < liveCount;
+                    if (row.root != null) row.root.SetActive(show);
+                    if (!show) { row.gameId = null; continue; }
+                    var ts = liveTeam[i];
+                    // Names are user-authored — FfaSafeRich before they touch
+                    // TMP rich text (the old one-body strip interpolated raw).
+                    UIFactory.SetTextRaw(row.txt,
+                        $"<color=#AAF>{FfaSafeRich(Trunc(ts.t1a_name, 7))}({ts.t1a_rating})+{FfaSafeRich(Trunc(ts.t1b_name, 7))}({ts.t1b_rating})</color>"
+                        + $"  <b>{ts.t1_wins}-{ts.t2_wins}</b>  "
+                        + $"<color=#FAA>{FfaSafeRich(Trunc(ts.t2a_name, 7))}({ts.t2a_rating})+{FfaSafeRich(Trunc(ts.t2b_name, 7))}({ts.t2b_rating})</color>");
+                    var g = FindSpectateGame("2v2", ts.series_id);
+                    bool canWatch = g != null && !LocalInSpectateRoster(g);
+                    row.gameId = canWatch ? g.game_id : null;
+                    if (row.watchBtn != null) row.watchBtn.SetActive(canWatch);
                 }
             }
 

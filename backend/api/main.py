@@ -28586,6 +28586,14 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
 # ═══════════════════════════════════════════════════════════════════════════
 
 _SPECTATE_MODES = {"1v1", "2v2", "1v2", "ffa"}
+# Aug 7 item 13: the modes players may actually WATCH. Until now the changelog
+# said "1v1 + 2v2" but nothing enforced it — the only gate was which rows
+# happened to render buttons. Now /spectate/games forces spectatable=False and
+# /spectate/grant 409s for any mode outside this set, so pulling a mode back
+# (e.g. if the FFA/1v2 first-playtest goes badly) is a ONE-LINE server change
+# with no client release. All four are enabled per the Aug 7 batch; FFA and
+# 1v2 are labeled first-playtest in the changelog (#145).
+_SPECTATE_WATCHABLE_MODES = {"1v1", "2v2", "1v2", "ffa"}
 _SPECTATE_ROOM_PREFIX = {"1v1": "ranked_", "2v2": "team_", "1v2": "ovt_", "ffa": "ffa_"}
 SPECTATE_ATTEST_FRESH_SECONDS = 150      # attest cadence is 60s; 150 covers one miss
 SPECTATE_SEAT_CAP = 4                    # Sid's Aug 6 decision (client SEAT_CAP mirrors)
@@ -28915,6 +28923,10 @@ async def spectate_games(db: AsyncSession = Depends(get_db)):
     out = []
     for g in games:
         ready, reason = await _ready_batched(g)
+        # Aug 7 item 13: per-mode watchability flag — see
+        # _SPECTATE_WATCHABLE_MODES for why this exists.
+        if ready and g["mode"] not in _SPECTATE_WATCHABLE_MODES:
+            ready, reason = False, "mode_not_ready"
         seats = seats_by_game.get(g["id"], 0)
         if ready and seats >= g["spectator_cap"]:
             ready, reason = False, "spectator_full"
@@ -28974,6 +28986,10 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
     """), {"gid": req.game_id})).mappings().first()
     if game is None or game["last_attest_at"] is None:
         raise HTTPException(status_code=404, detail="game_not_live")
+    # Aug 7 item 13: the grant enforces the same per-mode flag the games list
+    # advertises — a crafted request must not watch a mode the UI hides.
+    if game["mode"] not in _SPECTATE_WATCHABLE_MODES:
+        raise HTTPException(status_code=409, detail="mode_not_ready")
 
     # Advisory locks: spectator + every roster member, canonical sorted order
     # (#197) — serializes against concurrent grants, opt-out toggles and the
