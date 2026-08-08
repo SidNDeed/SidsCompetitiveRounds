@@ -6089,6 +6089,13 @@ async def _send_release_chunks(tag: str, msgs: list) -> bool:
     if not RELEASES_CHANNEL_ID:
         return True
     async with _release_send_lock:
+        # Codex r6 f3: authoritative re-read UNDER the lock (#208) — a waiter
+        # that queued behind a sender of the SAME tag must observe that the
+        # tag completed (the finisher advances _last_release_tag after its
+        # send) and no-op, not recreate the deleted cursor at offset zero and
+        # repost every chunk.
+        if tag == _last_release_tag:
+            return True
         return await _send_release_chunks_locked(tag, msgs)
 
 

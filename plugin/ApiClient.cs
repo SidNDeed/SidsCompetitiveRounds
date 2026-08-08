@@ -15063,11 +15063,19 @@ namespace CompetitiveRounds
                 // — a value can never contain that raw sequence because
                 // in-string quotes are escaped, so a player literally named
                 // password no longer poisons their own match reports.
+                // Codex r6 f1/f2: /chat/moderate/* is an admin surface whose
+                // bodies carry a plain "steam_id" (the TARGET), so the
+                // credential match alone missed it — and the credential token
+                // is COLON-anchored, because a player literally named
+                // admin_steam_id would otherwise block their own match
+                // reports (a value can't contain the raw key sequence; its
+                // quotes arrive escaped).
                 bool sensitive =
                     url.IndexOf("/admin/", StringComparison.OrdinalIgnoreCase) >= 0
+                    || url.IndexOf("/chat/moderate/", StringComparison.OrdinalIgnoreCase) >= 0
                     || url.IndexOf("admin_steam_id=", StringComparison.OrdinalIgnoreCase) >= 0
                     || (json != null
-                        && (json.IndexOf("\"admin_steam_id\"", StringComparison.Ordinal) >= 0
+                        && (json.IndexOf("\"admin_steam_id\":", StringComparison.Ordinal) >= 0
                             || json.IndexOf("\"password\":", StringComparison.Ordinal) >= 0));
                 if (!sensitive) return false;
                 if (!_loggedSensitiveBlocked)
