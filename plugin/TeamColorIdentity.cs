@@ -648,6 +648,22 @@ namespace CompetitiveRounds
             new Dictionary<int, Material>();
         private static PropertyInfo _fontSharedMatProp;
         private static bool _fontSharedMatResolved;
+        private static bool _loggedOutlineCap;
+
+        /// <summary>Destroy the owned outline clones. Callable ONLY from
+        /// room-lifecycle resets, where every card-bar label that could
+        /// reference a clone has been destroyed with its bar.</summary>
+        public static void FlushOutlineMaterials()
+        {
+            foreach (var kv in _outlineClones)
+            {
+                try { if (kv.Value != null) UnityEngine.Object.Destroy(kv.Value); }
+                catch { }
+            }
+            _outlineClones.Clear();
+            _outlineCloneSource.Clear();
+            _loggedOutlineCap = false;
+        }
 
         public static void SetTmpOutline(Component tmp, Color color, float width)
         {
@@ -676,11 +692,33 @@ namespace CompetitiveRounds
                     return;
                 }
                 Material source = curIsOurs && curSource != null ? curSource : cur;
+                // Codex r4 f6: quantize the cache key to 5 bits/channel AND
+                // hard-cap the cache — a modified peer cycling arbitrary hex
+                // values could otherwise mint a session-lived native Material
+                // per distinct RGB. Quantization is invisible at outline
+                // scale; the cap turns a sustained attack into a periodic
+                // destroy-and-rebuild (the 0.5s sweep re-swaps within a tick).
                 var c32 = (Color32)color;
-                string key = source.GetInstanceID() + "|" + c32.r + "," + c32.g + "," + c32.b;
+                string key = source.GetInstanceID() + "|"
+                    + (c32.r >> 3) + "," + (c32.g >> 3) + "," + (c32.b >> 3);
                 Material clone;
                 if (!_outlineClones.TryGetValue(key, out clone) || clone == null)
                 {
+                    // At the cap, a NOVEL colour simply gets no outline —
+                    // never destroy live clones here (a label still pointing
+                    // at a destroyed material is fake-null and unrepairable
+                    // until the room ends). The cache is destroyed for real
+                    // in FlushOutlineMaterials(), from room-lifecycle resets
+                    // where no card-bar label can be referencing it.
+                    if (_outlineClones.Count >= 32)
+                    {
+                        if (!_loggedOutlineCap)
+                        {
+                            _loggedOutlineCap = true;
+                            Plugin.Log?.LogWarning("[TEAMCOLOR] outline material cache at cap — novel colours skip the outline until the next room");
+                        }
+                        return;
+                    }
                     clone = new Material(source) { hideFlags = HideFlags.HideAndDontSave };
                     try { clone.SetColor("_OutlineColor", color); } catch { }
                     try { clone.SetFloat("_OutlineWidth", width); } catch { }
@@ -1433,6 +1471,9 @@ namespace CompetitiveRounds
             _next = 0f;
             _loggedOnce = false;
             _tinted.Clear();
+            // Room over: every bar (and label) is gone — safe point to
+            // destroy the owned outline materials (Codex r4 f6).
+            TeamColorIdentity.FlushOutlineMaterials();
         }
     }
 }

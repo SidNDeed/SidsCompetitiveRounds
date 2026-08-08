@@ -13626,26 +13626,45 @@ namespace CompetitiveRounds
                         // rejoin body is built from (r2 f5-residual).
                         try
                         {
+                            // Codex r4 f4: NEVER fold an echoed field over a
+                            // NEWER pending write — the server echoes EVERY
+                            // field it stores, so an older ack (or a sibling
+                            // field's ack) used to overwrite the value the
+                            // user selected mid-flight, and the next toggle
+                            // then derived from the wrong base. The acked
+                            // entry was already removed above, so anything
+                            // still in prefsPending IS newer — its field's
+                            // cur* value is the user's desire, not the echo.
+                            bool ptPend = prefsPending.ContainsKey("preferred_team");
+                            bool psPend = prefsPending.ContainsKey("preferred_side");
+                            bool sepPend = prefsPending.ContainsKey("solo_extra_pick");
                             int ptEcho = IsTeam ? ExtractJsonInt(resp, "preferred_team") : 0;
                             int psEcho = IsTeam ? 0 : ExtractJsonInt(resp, "preferred_side");
                             bool sepEcho = !IsTeam && ExtractJsonBool(resp, "solo_extra_pick");
                             if (IsTeam)
-                                curPreferredTeam = (ptEcho == 1 || ptEcho == 2) ? ptEcho : 0;
+                            {
+                                if (!ptPend)
+                                    curPreferredTeam = (ptEcho == 1 || ptEcho == 2) ? ptEcho : 0;
+                            }
                             else
                             {
-                                curPreferredSide = (psEcho == 1 || psEcho == 2) ? psEcho : 0;
-                                curSoloExtraPick = sepEcho;
+                                if (!psPend)
+                                    curPreferredSide = (psEcho == 1 || psEcho == 2) ? psEcho : 0;
+                                if (!sepPend)
+                                    curSoloExtraPick = sepEcho;
                             }
                             if (Members != null)
                                 foreach (var m in Members)
                                 {
                                     if (m == null || m.steam_id != sid) continue;
                                     if (IsTeam)
-                                        m.preferred_team = curPreferredTeam;
+                                    {
+                                        if (!ptPend) m.preferred_team = curPreferredTeam;
+                                    }
                                     else
                                     {
-                                        m.preferred_side = curPreferredSide;
-                                        m.solo_extra_pick = curSoloExtraPick;
+                                        if (!psPend) m.preferred_side = curPreferredSide;
+                                        if (!sepPend) m.solo_extra_pick = curSoloExtraPick;
                                     }
                                     break;
                                 }
@@ -14795,19 +14814,32 @@ namespace CompetitiveRounds
         // would capture the 24h bearer off every request. The PRIVATE/loopback
         // carve-out is load-bearing: Sid's own dev config deliberately
         // overrides BaseUrl to http://192.168.72.90:8443 and must keep working.
-        private static readonly char[] _hostEndChars = { ':', '/', '?', '#' };
         private static bool CredentialedTransportAllowed(string url)
         {
             if (string.IsNullOrEmpty(url)) return false;
             if (url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return true;
             if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) return false;
-            string host = url.Substring(7);
-            int cut = host.IndexOfAny(_hostEndChars);
-            if (cut >= 0) host = host.Substring(0, cut);
-            return host.StartsWith("192.168.", StringComparison.Ordinal)
-                || host.StartsWith("10.", StringComparison.Ordinal)
-                || host.StartsWith("127.", StringComparison.Ordinal)
-                || string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase);
+            // Codex r4 f2: the first cut was a textual PREFIX test on a
+            // hand-sliced host — "192.168.evil.example" and
+            // "192.168.1.1@evil.example" both passed it. Parse properly,
+            // refuse userinfo outright, and accept plaintext only for exact
+            // localhost or a REAL IPv4 in the private/loopback ranges.
+            try
+            {
+                Uri uri;
+                if (!Uri.TryCreate(url, UriKind.Absolute, out uri)) return false;
+                if (!string.IsNullOrEmpty(uri.UserInfo)) return false;
+                string host = uri.Host;
+                if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)) return true;
+                System.Net.IPAddress ip;
+                if (!System.Net.IPAddress.TryParse(host, out ip)) return false;
+                if (ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return false;
+                byte[] b = ip.GetAddressBytes();
+                return (b[0] == 192 && b[1] == 168)
+                    || b[0] == 10
+                    || b[0] == 127;
+            }
+            catch { return false; }
         }
         private static bool _loggedTokenWithheld;     // once-per-session log (F1)
         private static bool _insecureAuthNotified;    // once-per-session toast (F1)
@@ -15009,10 +15041,40 @@ namespace CompetitiveRounds
         /// FastAPI {"detail": ...} that has to reach the operator verbatim —
         /// "HTTP/1.1 403 Forbidden" cannot tell a moderator that their grant
         /// does not cover a channel.</param>
+        /// <summary>Codex r4 f1: refuse SENSITIVE payloads on plaintext-to-
+        /// public transport. The r3 gate covered only the session bearer;
+        /// admin-HMAC requests (signed with each admin's REAL per-config
+        /// secret) and lobby passwords were still dispatched. Scope is
+        /// deliberate: match-report HMACs are deterrent-tier (the secret
+        /// ships in every DLL, #188 family), so blocking them would break
+        /// core reporting for fallback users while protecting nothing.</summary>
+        private static bool _loggedSensitiveBlocked;
+        private static bool SensitiveTransportBlocked(string url, string json,
+            Action<bool, string> callback)
+        {
+            try
+            {
+                if (CredentialedTransportAllowed(url)) return false;
+                bool sensitive =
+                    url.IndexOf("/admin/", StringComparison.OrdinalIgnoreCase) >= 0
+                    || (json != null && json.IndexOf("\"password\"", StringComparison.Ordinal) >= 0);
+                if (!sensitive) return false;
+                if (!_loggedSensitiveBlocked)
+                {
+                    _loggedSensitiveBlocked = true;
+                    Plugin.Log.LogWarning("[API] plaintext public endpoint — admin/password requests are refused this session");
+                }
+            }
+            catch { return false; }
+            callback(false, "insecure-transport");
+            return true;
+        }
+
         private static IEnumerator GetRequest(string url, Action<bool, string> callback,
             bool detailedErrors = false)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
+            if (SensitiveTransportBlocked(url, null, callback)) yield break;
             NoteAttempt();
             using (var request = UnityWebRequest.Get(url))
             {
@@ -15032,6 +15094,7 @@ namespace CompetitiveRounds
         private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
+            if (SensitiveTransportBlocked(url, json, callback)) yield break;
             NoteAttempt();
             using (var request = new UnityWebRequest(url, "POST"))
             {
@@ -15081,6 +15144,7 @@ namespace CompetitiveRounds
         private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
+            if (SensitiveTransportBlocked(url, json, callback)) yield break;
             for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
                 NoteAttempt();

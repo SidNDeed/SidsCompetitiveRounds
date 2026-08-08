@@ -19432,6 +19432,13 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
     # member to searching (dissolving the other three). Any live locked
     # lifecycle now refuses the join outright; only a lease-dead husk may be
     # reclaimed (#276 — the row-without-lease class must never block forever).
+    # Codex r4 f3: flush the dirty Player row BEFORE taking the queue-row
+    # lock. The ranked_enabled write above leaves the ORM row dirty; a later
+    # autoflush (inside the checks below) would take the players tuple lock
+    # AFTER team_queue — inverting the documented players -> team_queue order
+    # against the final-report path, which holds players and then wants the
+    # queue row (#197: one global order, no exceptions).
+    await db.flush()
     _mine = (await db.execute(text(
         "SELECT status, series_id FROM team_queue WHERE player_id = :pid FOR UPDATE"
     ), {"pid": player.id})).mappings().first()

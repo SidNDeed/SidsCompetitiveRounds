@@ -6186,35 +6186,40 @@ async def poll_github_releases():
     if not tag:
         return
 
+    # Drain OLDER incomplete tags on EVERY tick (Codex r2 f12 / r3 f11b /
+    # r4 f7): an announcement can be mid-flight for a tag that is no longer
+    # /latest, and a cold-start-only single attempt permanently stranded it
+    # on any transient failure. Each pending tag is fetched by ITS OWN
+    # endpoint; the cursor is deleted ONLY on a definitive 404/410 (release
+    # gone) — transient statuses and send failures keep it for the next tick.
+    for _pend in [t for t in _release_state_load() if t != tag]:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/tags/{_pend}",
+                    headers={"Accept": "application/vnd.github+json",
+                             "User-Agent": "comp-rounds-bot"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as _pr:
+                    if _pr.status in (404, 410):
+                        _st = _release_state_load()
+                        _st.pop(_pend, None)
+                        _release_state_save(_st)
+                        print(f"[RELEASES] pending {_pend} is gone upstream — cursor dropped")
+                        continue
+                    if _pr.status != 200:
+                        print(f"[RELEASES] pending {_pend} fetch status={_pr.status} — retrying next tick")
+                        continue
+                    _ppayload = await _pr.json()
+            if await _send_release_chunks(_pend, _format_release_message(_ppayload)):
+                print(f"[RELEASES] drained incomplete {_pend}")
+        except Exception as _pe:
+            print(f"[RELEASES] drain of {_pend} failed: {_pe} — retrying next tick")
+
     # Cold-start: don't repost on bot restart — EXCEPT when the durable
-    # cursor says an announcement was mid-flight when the process died
-    # (Codex r2 f12 / r3 f11b): anchoring past it would permanently truncate
-    # the post. Drain EVERY incomplete tag, not just the current latest — an
-    # older tag can remain in the cursor while a newer release became
-    # /latest, and each is fetched by ITS OWN tag endpoint.
+    # cursor says THIS tag was mid-announcement when the process died.
     if not _release_poller_initialized:
         _release_poller_initialized = True
-        for _pend in [t for t in _release_state_load() if t != tag]:
-            try:
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(
-                        f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/tags/{_pend}",
-                        headers={"Accept": "application/vnd.github+json",
-                                 "User-Agent": "comp-rounds-bot"},
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as _pr:
-                        if _pr.status != 200:
-                            # Tag gone (deleted release) — drop the cursor so it
-                            # can't block anchoring forever.
-                            _st = _release_state_load()
-                            _st.pop(_pend, None)
-                            _release_state_save(_st)
-                            continue
-                        _ppayload = await _pr.json()
-                if await _send_release_chunks(_pend, _format_release_message(_ppayload)):
-                    print(f"[RELEASES] cold start: drained incomplete {_pend}")
-            except Exception as _pe:
-                print(f"[RELEASES] cold-start drain of {_pend} failed: {_pe}")
         if tag in _release_state_load():
             msgs = _format_release_message(payload)
             if await _send_release_chunks(tag, msgs):

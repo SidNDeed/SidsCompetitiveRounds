@@ -9653,7 +9653,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
          * never the viewer — see ViewerWasReporter.
          * F7 (Codex r3): decimated timelines have variable stride — when the
          * row carries a real duration, the honest interval is
-         * duration/(n-1) over the samples actually present (DpsStepFor);
+         * duration/n over the derivative buckets present (DpsStepFor);
          * the reporter-grid cadence survives only as the no-duration fallback. */
         bool viewerReported=ViewerWasReporter(m);
         float dpsStepYou=DpsStepFor(m.player_damage_timeline,m.duration_seconds,viewerReported?DPS_STEP_LOCAL:DPS_STEP_PEER);
@@ -9978,16 +9978,19 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
         /// fit, and the server-side compaction on long games) makes the stride
         /// variable — dividing deltas by the fixed 3s/5s cadence overstates
         /// DPS by however much was decimated. When the row's real duration is
-        /// known, the honest uniform approximation is duration/(n-1) across
-        /// the n samples present; a row without a duration keeps the legacy
-        /// cadence estimate. Comma-count is used for n so this needs no parse
-        /// (unparseable samples are rare and skew it negligibly).</summary>
+        /// known, the honest uniform approximation is duration/n — Codex r4
+        /// f5: there are n DERIVATIVE buckets, because the first sample is
+        /// differenced against zero (the pre-match baseline), so n-1 here
+        /// halved the DPS of a two-sample game. duration/(n-1) is only right
+        /// for plot COORDINATES, which the graph regions compute separately.
+        /// A row without a duration keeps the legacy cadence estimate.
+        /// Comma-count is used for n so this needs no parse.</summary>
         public static float DpsStepFor(string cumulativeCsv, int durationSeconds, float fallbackStep)
         {
             if (durationSeconds <= 0 || string.IsNullOrEmpty(cumulativeCsv)) return fallbackStep;
             int n = 1;
             for (int i = 0; i < cumulativeCsv.Length; i++) if (cumulativeCsv[i] == ',') n++;
-            return n >= 2 ? durationSeconds / (float)(n - 1) : fallbackStep;
+            return durationSeconds / (float)n;
         }
 
         /// <summary>Sample interval, in seconds, of the stream a client records for
