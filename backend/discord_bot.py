@@ -5998,6 +5998,9 @@ async def poll_anticheat_flags():
 # a rebuild window won't be auto-announced and needs /announce-release.
 _last_release_tag = None
 _release_poller_initialized = False
+# Codex r1 f14: tag -> chunks already posted, so a mid-announcement Discord
+# error resumes at the failed chunk next tick instead of truncating forever.
+_release_chunk_progress = {}
 
 
 def _format_release_message(release_json):
@@ -6085,22 +6088,37 @@ async def poll_github_releases():
 
     # New release — post to #releases only (chat mirror dropped per user
     # request: "only post new releases in the Releases channel instead of both").
+    # Codex r1 f14: the tag advances ONLY once every chunk lands. A transient
+    # Discord error on chunk 3 of 4 used to log-and-advance, permanently
+    # truncating the announcement; now the per-tag chunk cursor makes the next
+    # 5-min tick resume from the failed chunk (deterministic re-chunking of
+    # the same payload keeps the indexes aligned). In-memory is the right
+    # durability tier: a bot restart re-anchors cold anyway (deliberate
+    # anti-repost), so only the live-process retry path needs the cursor.
     msgs = _format_release_message(payload)
-    posted = 0
+    start = _release_chunk_progress.get(tag, 0)
+    posted_all = not RELEASES_CHANNEL_ID   # nothing to post = nothing to fail
     if RELEASES_CHANNEL_ID:
         try:
             ch = bot.get_channel(RELEASES_CHANNEL_ID) or await bot.fetch_channel(RELEASES_CHANNEL_ID)
             if ch is None:
-                print(f"[RELEASES] channel {RELEASES_CHANNEL_ID} not resolvable")
+                print(f"[RELEASES] channel {RELEASES_CHANNEL_ID} not resolvable — will retry")
             else:
-                for msg in msgs:
-                    await ch.send(msg[:2000])
+                for i in range(start, len(msgs)):
+                    await ch.send(msgs[i][:2000])
+                    _release_chunk_progress[tag] = i + 1
                     await asyncio.sleep(0.4)
-                posted = 1
+                posted_all = True
         except Exception as e:
-            print(f"[RELEASES] post error: {e}")
-    _last_release_tag = tag
-    print(f"[RELEASES] announced {tag} to {posted} channel(s) in {len(msgs)} message(s)")
+            print(f"[RELEASES] post error after "
+                  f"{_release_chunk_progress.get(tag, 0)}/{len(msgs)} chunks: {e}")
+    if posted_all:
+        _last_release_tag = tag
+        _release_chunk_progress.pop(tag, None)
+        print(f"[RELEASES] announced {tag} in {len(msgs)} message(s)"
+              f"{f' (resumed at chunk {start + 1})' if start else ''}")
+    else:
+        print(f"[RELEASES] {tag} incomplete — resuming next tick")
 
 
 @bot.hybrid_command(

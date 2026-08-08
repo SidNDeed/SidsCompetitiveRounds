@@ -2,8 +2,9 @@
 
 ## Unreleased — Aug 7-8 batch (version at Sid's call) — Private lobbies live, alerts, animated uploads
 
-Schema: migrations **202–205** (202 LFP modes, 203 admin alerts, 204 cosmetic
-animation frames, 205 lobby kicks — all must apply BEFORE the API deploy). Deploy notes: the
+Schema: migrations **202–206** (202 LFP modes, 203 admin alerts, 204 cosmetic
+animation frames, 205 lobby kicks, 206 team/FFA colour identity — all must
+apply BEFORE the API deploy). Deploy notes: the
 GIF-split endpoint needs **Pillow added to the server-side API Dockerfile**
 (fetch the live copy per #192, add `pip install Pillow`, push back — until
 then it answers 503 and the multi-PNG path is unaffected); ship step 11 now
@@ -62,6 +63,14 @@ seed migration for the new i18n keys is a ship-time step.
   newest cosmetics; face thumbnails grew 80→112; every face row has a Preview
   button showing the item on the player body at its real shipped placement —
   animated items animate.
+- **Body-color team identity (server half).** A 2v2 team is named after its
+  color holder's equipped body color — sole holder wins, two holders coin-flip
+  — decided once at series creation, frozen for the series (rematches inherit
+  the sitting's identity, sides swapped when the split flips; mirror matches
+  leave team 2 vanilla). FFA games stamp each player's color at report time.
+  The stamp rides the series state/live/recent feeds and `/ffa/recent`, ready
+  for the client tinting pass (points, card shading, Recent panels).
+  Migration 206; actual body colors are never changed.
 
 ### Changed
 
@@ -83,8 +92,10 @@ seed migration for the new i18n keys is a ship-time step.
   anchored bottom-left as everywhere else.
 - **Body-color identity polish.** The point/win animation's balls and fills
   tint to each team's equipped color; card-bar boxes fill with the player's
-  color (outline back to vanilla) and darken the letters when the color is too
-  light to read.
+  color (outline back to vanilla) and the box letters are always a readable
+  deep version of that same color (pale version on near-black colors) — the
+  first cut only darkened past a threshold and missed the HUD bar's labels
+  entirely, which is why light colors read as blank white squares.
 - The FFA host Start button says "Start unlocks in Ns (settings changed)"
   instead of a countdown that read as an auto-start.
 
@@ -102,6 +113,41 @@ seed migration for the new i18n keys is a ship-time step.
   HUD line).
 - The unfocused-FPS cap can no longer stick if the mod disables itself during
   an unfocused launch.
+- The FFA "GET READY" banner no longer clips its text top and bottom — the
+  banner box now sizes to the rendered text instead of a fixed 260px slot.
+
+### Review hardening (Codex adversarial round 1 — 16 confirmed findings fixed)
+
+- **Hosted lobbies:** survivors of a dissolved hosted 2v2/1v2 start are
+  released outright instead of being recycled into public matchmaking; the
+  client's start-vs-disband recovery uses a new read-only resolve endpoint
+  (the old probe could lock you with strangers); an explicit Leave that races
+  Start now reports "started" and completes through the proper queue-leave;
+  seated preferences are patched one field at a time through a dedicated
+  endpoint (racing Start via re-join could orphan a seat), hydrate from the
+  server, and "Team: Any" actually clears a previous claim; a full kick list
+  refuses new kicks rather than quietly re-admitting the earliest-kicked
+  player.
+- **Chat moderation:** the censor's auto-mute only fires on a socket whose
+  Steam identity is session-verified — an unauthenticated socket could
+  previously mute an arbitrary victim by forging their ID. Unverified hits
+  are still censored, just not persisted as strikes.
+- **Admin/ops:** the ban-velocity gate is race-proof (advisory lock — parallel
+  bans could previously slip past it); admin alert banners expire client-side
+  when timed alerts lapse; the release announcer resumes from the failed
+  chunk instead of marking a partial announcement complete; the Home tab's
+  release feed anchors on ship-time order so editing an old translation can't
+  hoist it above newer releases.
+- **Animated cosmetics:** abandoned half-uploads free their submission slot
+  even at the cap; admin frame review pages one frame per request (a 16-frame
+  submission could exceed the fetch timeout and become unreviewable); GIFs
+  outside the supported 0.5–15 fps band are rejected with the measured rate
+  instead of silently retimed; the release-candidates feed and ship runbook
+  carry frame counts + fps so an approved animation can never ship as a
+  static frame 1.
+- **Spectating:** pulling a mode from the server's watchable set now also
+  evicts existing viewers (heartbeat + fighter validation), not just new
+  grants.
 
 ## v1.37.0 — 2026-08-07 — Spectator mode, FFA achievements, Compare-tab depth
 
