@@ -1,5 +1,101 @@
 # Sid's Competitive Rounds — Changelog
 
+## Unreleased — Aug 7-8 batch (version at Sid's call) — Private lobbies live, alerts, animated uploads
+
+Schema: migrations **202–204** (202 LFP modes, 203 admin alerts, 204 cosmetic
+animation frames — all must apply BEFORE the API deploy). Deploy notes: the
+GIF-split endpoint needs **Pillow added to the server-side API Dockerfile**
+(fetch the live copy per #192, add `pip install Pillow`, push back — until
+then it answers 503 and the multi-PNG path is unaffected); ship step 11 now
+also POSTs the ENGLISH release notes (`en` accepted; the Home tab's primary
+source is the new uncut `/release-notes/full/{locale}` — post v1.37.0's
+English body retroactively at deploy so the current notes uncut too); an es/ru
+seed migration for the new i18n keys is a ship-time step.
+
+### Added
+
+- **Private lobbies actually reachable.** v1.37.0 shipped only the server half —
+  no client UI existed. Now: FFA Create Private + password prompts + [PRIVATE]
+  browser markers; full hosted-lobby panels on the 2v2 and 1v2 tabs (create,
+  browse/join with password, member list, host-only Start, Leave) whose state
+  poll keeps the seat lease alive even with the menu closed. Start hands off to
+  the normal ready-up/room flow with a match-found alert for idle members;
+  a closed lobby never strands or conscripts anyone. *Multi-player flows are
+  first-playtest.*
+- **Standing server alerts.** Admins broadcast a notice (outage / issue /
+  update / info) from the Admin tab; every player gets a one-time toast (also
+  for players coming online later) and a persistent banner on every menu tab
+  showing category, message, admin and time. Echoed to the admin Discord
+  channel. Revocable; optional expiry.
+- **Automatic chat moderation.** A hard-slur filter on both chat paths removes
+  the message before it exists anywhere, auto-mutes the sender in all channels
+  for 15 minutes (doubling per repeat offense in 90 days, 7-day cap), logs a
+  system action, posts who/what/action to the admin channel, and tells the
+  sender why their line vanished.
+- **Animated cosmetic uploads in-game.** Multi-PNG sets (name.png +
+  name__f2.png + ... — the picker explains the convention and validates every
+  frame) with an artist-set frame-rate slider in the live preview, or a GIF
+  the server splits at the GIF's own speed. Admin review shows the animation
+  actually moving before approval.
+- **Max card draw unlocked (FFA).** Hosts set 1-5 cards offered per draw in
+  the lobby settings row; non-default values show in the load-in banner and
+  history.
+- **Watch from the mode tabs.** WATCH buttons on the 2v2 live strip, a new
+  Live 1v2 Games panel, and live FFA lobbies — same eligibility rules as the
+  Leaderboard panel, which keeps its buttons. *FFA/1v2 spectating is
+  first-playtest; a server-side per-mode switch can pull a mode back without a
+  client update.*
+- **RLFP ping upgrades.** Pick any of 1v1 / 2v2 / FFA under the duration
+  selector — the Discord ping reads "LFP: ranked 1v1+FFA for 30min" — and
+  `:emojiname:` in the optional message renders as real server emojis.
+- **Deep idle.** After 60s unfocused outside any room/battle/match-found, the
+  engine drops to 15 FPS (on top of the existing 120 cap), waking instantly on
+  focus or a match. Toggleable in Settings.
+- **Shop: New chip + on-body preview.** A New filter beside All shows the
+  newest cosmetics; face thumbnails grew 80→112; every face row has a Preview
+  button showing the item on the player body at its real shipped placement —
+  animated items animate.
+
+### Changed
+
+- **Release notes are uncut and formatted on both surfaces.** Discord posts the
+  full notes as multiple messages instead of cutting at 2000 chars
+  mid-sentence; the Home tab renders the complete notes with gold headings,
+  colored bullets, bold/underline/code — and stops wrapping at the author's
+  column width (the actual bug-160 regression).
+- **Admin tab restructure.** Banned users moved to a dedicated admin-only
+  Banned sub-tab (full height + search); the Action Log now lives in-panel
+  where the bans sat, with the searchable full log one click away. Banning 5+
+  players inside 5 minutes blocks further bans and flags the admin channel;
+  ban failures now surface instead of silently logging.
+- **Compare tab.** The < > metric cycling arrows are back beside the dropdown
+  (both stay in sync); Ranked Friends pie slices are guaranteed distinct
+  colors with an honest legend (tail folds into a grey Other); labels like
+  Bullet Speed size to the cell instead of a hard 10-char cut.
+- **Chat is visible on every menu tab** (except Home, where the pane lives),
+  anchored bottom-left as everywhere else.
+- **Body-color identity polish.** The point/win animation's balls and fills
+  tint to each team's equipped color; card-bar boxes fill with the player's
+  color (outline back to vanilla) and darken the letters when the color is too
+  light to read.
+- The FFA host Start button says "Start unlocks in Ns (settings changed)"
+  instead of a countdown that read as an auto-start.
+
+### Fixed
+
+- **FFA: Radiance no longer damages its own caster.** The FFA targeting
+  replacement excluded the shooter by position, so a moving player became
+  their own sun wave's nearest target — one self-hit per wave, which also
+  suppressed lifesteal (the "Parasite not healing" half of the report).
+- **"Leftover parasite stacks" at round start.** End-of-round projectiles
+  could register hits after the victim respawned; every client now despawns
+  its own bullets the moment the round is decided.
+- The 2v2 live-series and team-history parsers survive display names
+  containing brackets (they blanked the Live panel, 2v2 tab and spectator
+  HUD line).
+- The unfocused-FPS cap can no longer stick if the mod disables itself during
+  an unfocused launch.
+
 ## v1.37.0 — 2026-08-07 — Spectator mode, FFA achievements, Compare-tab depth
 
 Schema: migrations **191–201**. 191–194 were applied on Aug 7 before this release was
