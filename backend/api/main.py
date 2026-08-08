@@ -15095,6 +15095,27 @@ COSMETIC_MAX_PENDING_PER_ARTIST = 5
 COSMETIC_SCALE_MIN = 0.50
 COSMETIC_SCALE_MAX = 2.25
 COSMETIC_OFFSET_RADIUS_MAX = 4.50
+# Aug 7 item 8: animated submissions. Frame cap matches the __fN catalog
+# convention's practical ceiling (Magical Hat ships 10); fps bounds mirror the
+# artist slider. GIF uploads are split server-side — Pillow must be added to
+# the API image (the Dockerfile lives ONLY on the LXC, #192: fetch the live
+# copy, add `pip install Pillow`, push back, deploy-api); until then the GIF
+# endpoint answers 503 gif_processing_unavailable and the multi-PNG path is
+# unaffected.
+COSMETIC_MAX_FRAMES = 16
+COSMETIC_FPS_CENTI_MIN = 50           # 0.5 fps
+COSMETIC_FPS_CENTI_MAX = 1500         # 15 fps
+COSMETIC_GIF_MAX_B64 = 3_000_000      # ~2.2 MB decoded GIF
+try:
+    from PIL import Image as _PILImage, ImageSequence as _PILImageSequence
+    _PIL_AVAILABLE = True
+    # Decompression-bomb guard: today's header-only PNG validation never
+    # decodes; the GIF path DOES, so bound it hard.
+    _PILImage.MAX_IMAGE_PIXELS = 20_000_000
+except Exception:
+    _PILImage = None
+    _PILImageSequence = None
+    _PIL_AVAILABLE = False
 
 
 def _validated_cosmetic_placement(scale, offset_x, offset_y):
@@ -15145,7 +15166,9 @@ async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = D
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid signature version")
     submission_fingerprint = None
-    if signature_version == 2:
+    frame_count = 1
+    anim_fps = None
+    if signature_version in (2, 3):
         try:
             scale_centi = int(payload["scale_centi"])
             offset_x_milli = int(payload["offset_x_milli"])
@@ -15159,10 +15182,37 @@ async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = D
             raise HTTPException(status_code=400, detail="Valid upload_request_id is required")
         name_hash = hashlib.sha256(raw_name.encode("utf-8")).hexdigest()
         png_hash = hashlib.sha256(b64.encode("utf-8")).hexdigest()
-        canonical = (
-            f"artist:{steam_id}:submit-v2:{request_id}:{slot}:{len(b64)}:{scale_centi}:"
-            f"{offset_x_milli}:{offset_y_milli}:{name_hash}:{png_hash}"
-        )
+        if signature_version == 3:
+            # Aug 7 item 8: animated multi-PNG start. v3 = v2 + the signed
+            # animation triple; frames 2..N follow via submit-cosmetic-frame
+            # and the row stays status='uploading' (invisible to review)
+            # until finalize proves the set is contiguous and complete.
+            # frames_hash covers every frame's content, so the fingerprint
+            # distinguishes animations that differ only in frame 2+ (#170's
+            # retry-vs-resubmit line).
+            try:
+                frame_count = int(payload["frame_count"])
+                fps_centi = int(payload["anim_fps_centi"])
+                frames_hash = str(payload["frames_hash"] or "").lower()
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Signed animation fields are required")
+            if not (2 <= frame_count <= COSMETIC_MAX_FRAMES):
+                raise HTTPException(status_code=400, detail=f"frame_count must be 2-{COSMETIC_MAX_FRAMES}")
+            if not (COSMETIC_FPS_CENTI_MIN <= fps_centi <= COSMETIC_FPS_CENTI_MAX):
+                raise HTTPException(status_code=400, detail="anim_fps must be 0.5-15")
+            if not _re.fullmatch(r"[0-9a-f]{64}", frames_hash):
+                raise HTTPException(status_code=400, detail="frames_hash must be sha256 hex")
+            anim_fps = fps_centi / 100.0
+            canonical = (
+                f"artist:{steam_id}:submit-v3:{request_id}:{slot}:{len(b64)}:{scale_centi}:"
+                f"{offset_x_milli}:{offset_y_milli}:{name_hash}:{png_hash}:"
+                f"{frame_count}:{fps_centi}:{frames_hash}"
+            )
+        else:
+            canonical = (
+                f"artist:{steam_id}:submit-v2:{request_id}:{slot}:{len(b64)}:{scale_centi}:"
+                f"{offset_x_milli}:{offset_y_milli}:{name_hash}:{png_hash}"
+            )
         submission_fingerprint = hashlib.sha256(
             canonical.encode("utf-8")
         ).hexdigest()
@@ -15206,21 +15256,31 @@ async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = D
         raise HTTPException(status_code=400, detail=f"must be exactly 512x512 (got {w}x{h})")
     if not has_alpha:
         raise HTTPException(status_code=400, detail="PNG has no transparency layer — export with alpha")
+    # Aug 7 item 8: half-uploaded animations ('uploading') hold a cap slot too
+    # — otherwise 20 abandoned starts could queue unbounded frame storage.
     pending = (await db.execute(text(
         "SELECT COUNT(*) FROM cosmetic_submissions WHERE artist_steam_id = :s "
-        "AND (status = 'pending' OR (status = 'approved' AND placement_status = 'pending'))"
+        "AND (status IN ('pending', 'uploading') OR (status = 'approved' AND placement_status = 'pending'))"
     ), {"s": steam_id})).scalar() or 0
     if pending >= COSMETIC_MAX_PENDING_PER_ARTIST:
         raise HTTPException(status_code=429, detail=f"{pending} submissions already awaiting review — wait for those first")
+    # Housekeeping: an animated start abandoned >24h ago frees its slot (its
+    # frames cascade-delete with the row).
+    await db.execute(text(
+        "DELETE FROM cosmetic_submissions WHERE artist_steam_id = :s "
+        "AND status = 'uploading' AND created_at < NOW() - INTERVAL '24 hours'"
+    ), {"s": steam_id})
     new_id = (await db.execute(text(
         "INSERT INTO cosmetic_submissions "
         "(artist_steam_id, name, slot, png_data, png_bytes, render_scale, "
-        " render_offset_x, render_offset_y, submission_fingerprint) "
-        "VALUES (:s, :n, :sl, :png, :b, :sc, :ox, :oy, :f) "
+        " render_offset_x, render_offset_y, submission_fingerprint, status, frame_count, anim_fps) "
+        "VALUES (:s, :n, :sl, :png, :b, :sc, :ox, :oy, :f, :st, :fc, :fps) "
         "ON CONFLICT (submission_fingerprint) DO NOTHING RETURNING id"
     ), {"s": steam_id, "n": name, "sl": slot, "png": data, "b": len(data),
         "sc": render_scale, "ox": render_offset_x, "oy": render_offset_y,
-        "f": submission_fingerprint})).scalar()
+        "f": submission_fingerprint,
+        "st": "uploading" if frame_count > 1 else "pending",
+        "fc": frame_count, "fps": anim_fps})).scalar()
     if new_id is None and submission_fingerprint is not None:
         # Concurrent retry: the unique fingerprint won between our pre-check
         # and insert. Return the original row rather than minting a duplicate.
@@ -15232,10 +15292,257 @@ async def artist_submit_cosmetic(payload: dict = Body(...), db: AsyncSession = D
     await _artist_audit(
         db, steam_id, "submit-cosmetic", f"sub#{new_id}",
         f"{name} ({slot}, {len(data)}b, scale={render_scale:.2f}, "
-        f"offset={render_offset_x:.3f}:{render_offset_y:.3f})")
+        f"offset={render_offset_x:.3f}:{render_offset_y:.3f}"
+        + (f", {frame_count} frames @ {anim_fps:.2f}fps" if frame_count > 1 else "") + ")")
     await db.commit()
-    print(f"[COSMETIC] submission #{new_id} '{name}' ({slot}) from {steam_id}")
-    return {"status": "submitted", "id": new_id}
+    print(f"[COSMETIC] submission #{new_id} '{name}' ({slot}) from {steam_id}"
+          + (f" [animated start: {frame_count} frames]" if frame_count > 1 else ""))
+    return {"status": "uploading" if frame_count > 1 else "submitted", "id": new_id}
+
+
+@app.post("/api/v1/artist/submit-cosmetic-frame", tags=["Artist"])
+async def artist_submit_cosmetic_frame(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
+    """Aug 7 item 8: one extra frame (2..frame_count) of an animated
+    submission started via signature_version=3. Per-frame POSTs keep each
+    request ~1.6MB — a single 16-frame body would hit the 16MB app gate and
+    the client's 10s-per-attempt retry timeout (the payload-math wall).
+    Idempotent per (submission, frame_no): a transport-lost retry re-sends
+    and conflicts silently."""
+    steam_id = str(payload.get("steam_id") or "")
+    sig = str(payload.get("sig") or "")
+    b64 = str(payload.get("png_base64") or "")
+    try:
+        submission_id = int(payload.get("submission_id"))
+        frame_no = int(payload.get("frame_no"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="submission_id and frame_no are required")
+    frame_hash = hashlib.sha256(b64.encode("utf-8")).hexdigest()
+    canonical = f"artist:{steam_id}:submit-frame:{submission_id}:{frame_no}:{len(b64)}:{frame_hash}"
+    if not _artist_hmac_ok(sig, canonical):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    if not b64 or len(b64) > COSMETIC_MAX_B64:
+        raise HTTPException(status_code=400, detail="frame PNG missing or too large")
+    sub = (await db.execute(text(
+        "SELECT artist_steam_id, status, frame_count FROM cosmetic_submissions WHERE id = :i"
+    ), {"i": submission_id})).mappings().first()
+    if sub is None or sub["artist_steam_id"] != steam_id:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if sub["status"] != "uploading":
+        raise HTTPException(status_code=409, detail="submission is not accepting frames")
+    if not (2 <= frame_no <= int(sub["frame_count"] or 1)):
+        raise HTTPException(status_code=400, detail=f"frame_no must be 2-{sub['frame_count']}")
+    try:
+        data = base64.b64decode(b64, validate=True)
+        w, h, has_alpha = _png_dims_and_alpha(data)
+    except Exception as ve:
+        raise HTTPException(status_code=400, detail=f"bad frame PNG: {ve}")
+    if (w, h) != (512, 512):
+        raise HTTPException(status_code=400, detail=f"frames must be exactly 512x512 (got {w}x{h})")
+    if not has_alpha:
+        raise HTTPException(status_code=400, detail="frame has no transparency layer")
+    await db.execute(text(
+        "INSERT INTO cosmetic_submission_frames (submission_id, frame_no, png_data, png_bytes) "
+        "VALUES (:i, :n, :png, :b) ON CONFLICT (submission_id, frame_no) DO NOTHING"
+    ), {"i": submission_id, "n": frame_no, "png": data, "b": len(data)})
+    await db.commit()
+    return {"status": "ok", "frame_no": frame_no}
+
+
+@app.post("/api/v1/artist/submit-cosmetic-finalize", tags=["Artist"])
+async def artist_submit_cosmetic_finalize(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
+    """Aug 7 item 8: prove frames 2..frame_count all arrived, then flip
+    'uploading' -> 'pending' so the submission enters admin review. A
+    half-upload can never reach review (the status gate is the whole point)."""
+    steam_id = str(payload.get("steam_id") or "")
+    sig = str(payload.get("sig") or "")
+    try:
+        submission_id = int(payload.get("submission_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="submission_id is required")
+    canonical = f"artist:{steam_id}:submit-finalize:{submission_id}"
+    if not _artist_hmac_ok(sig, canonical):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    sub = (await db.execute(text(
+        "SELECT artist_steam_id, status, frame_count FROM cosmetic_submissions WHERE id = :i FOR UPDATE"
+    ), {"i": submission_id})).mappings().first()
+    if sub is None or sub["artist_steam_id"] != steam_id:
+        raise HTTPException(status_code=404, detail="submission not found")
+    if sub["status"] == "pending":
+        return {"status": "submitted", "id": submission_id}   # idempotent retry
+    if sub["status"] != "uploading":
+        raise HTTPException(status_code=409, detail="submission is not finalizable")
+    fc = int(sub["frame_count"] or 1)
+    have = (await db.execute(text(
+        "SELECT COUNT(DISTINCT frame_no) FROM cosmetic_submission_frames "
+        "WHERE submission_id = :i AND frame_no BETWEEN 2 AND :fc"
+    ), {"i": submission_id, "fc": fc})).scalar() or 0
+    if int(have) != fc - 1:
+        raise HTTPException(status_code=409, detail=f"missing frames: have {have} of {fc - 1}")
+    await db.execute(text(
+        "UPDATE cosmetic_submissions SET status = 'pending' WHERE id = :i"
+    ), {"i": submission_id})
+    await _artist_audit(db, steam_id, "submit-cosmetic-finalize", f"sub#{submission_id}",
+                        f"animated set complete ({fc} frames)")
+    await db.commit()
+    print(f"[COSMETIC] submission #{submission_id} animated set complete ({fc} frames)")
+    return {"status": "submitted", "id": submission_id}
+
+
+@app.post("/api/v1/artist/submit-cosmetic-gif", tags=["Artist"])
+async def artist_submit_cosmetic_gif(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
+    """Aug 7 item 8: GIF upload — the server splits frames (Unity cannot
+    decode GIFs). Preserves learning #317's rules: fps = frame_count /
+    (sum of per-frame durations), NEVER a resample or loop-length guess;
+    frames are uniformly scaled+centered onto the 512 canvas with ONE shared
+    transform (no per-frame trim — trimming re-frames the art and invalidates
+    the artist's previewed placement). Native frames beyond the cap are
+    REJECTED, not resampled."""
+    if not _PIL_AVAILABLE:
+        raise HTTPException(status_code=503, detail="gif_processing_unavailable")
+    steam_id = str(payload.get("steam_id") or "")
+    raw_name = str(payload.get("name") or "")
+    name = _re.sub(r"[^A-Za-z0-9 '\-]", "", raw_name).strip()[:40]
+    slot = str(payload.get("slot") or "").lower().strip()
+    b64 = str(payload.get("gif_base64") or "")
+    sig = str(payload.get("sig") or "")
+    try:
+        scale_centi = int(payload["scale_centi"])
+        offset_x_milli = int(payload["offset_x_milli"])
+        offset_y_milli = int(payload["offset_y_milli"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Signed placement integers are required")
+    render_scale, render_offset_x, render_offset_y = _validated_cosmetic_placement(
+        scale_centi / 100.0, offset_x_milli / 1000.0, offset_y_milli / 1000.0)
+    request_id = str(payload.get("upload_request_id") or "").lower()
+    if not _re.fullmatch(r"[0-9a-f]{32}", request_id):
+        raise HTTPException(status_code=400, detail="Valid upload_request_id is required")
+    name_hash = hashlib.sha256(raw_name.encode("utf-8")).hexdigest()
+    gif_hash = hashlib.sha256(b64.encode("utf-8")).hexdigest()
+    canonical = (
+        f"artist:{steam_id}:submit-gif:{request_id}:{slot}:{len(b64)}:{scale_centi}:"
+        f"{offset_x_milli}:{offset_y_milli}:{name_hash}:{gif_hash}"
+    )
+    if not _artist_hmac_ok(sig, canonical):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not await _is_artist(db, steam_id):
+        raise HTTPException(status_code=403, detail="Not an artist account")
+    if slot not in COSMETIC_SLOTS:
+        raise HTTPException(status_code=400, detail="slot must be eyes, mouth or detail")
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="name too short (letters/numbers/spaces only)")
+    if not b64 or len(b64) > COSMETIC_GIF_MAX_B64:
+        raise HTTPException(status_code=400, detail="GIF missing or too large (~2 MB max)")
+    submission_fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    existing_id = (await db.execute(text(
+        "SELECT id FROM cosmetic_submissions "
+        "WHERE submission_fingerprint = :f AND artist_steam_id = :s"
+    ), {"f": submission_fingerprint, "s": steam_id})).scalar_one_or_none()
+    if existing_id is not None:
+        return {"status": "already_submitted", "id": existing_id}
+    try:
+        gif_bytes = base64.b64decode(b64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="gif_base64 is not valid base64")
+    # ── Split (mirrors scripts/gif_to_cosmetic.py, minus the trim) ──
+    import io as _io
+    try:
+        im = _PILImage.open(_io.BytesIO(gif_bytes))
+        if (im.format or "").upper() != "GIF":
+            raise HTTPException(status_code=400, detail="not a GIF file")
+        if im.width > 2048 or im.height > 2048:
+            raise HTTPException(status_code=400, detail="GIF frame size over 2048px")
+        frames_rgba = []
+        total_ms = 0
+        for fr in _PILImageSequence.Iterator(im):
+            total_ms += int(fr.info.get("duration", 100) or 100)
+            frames_rgba.append(fr.convert("RGBA"))
+            if len(frames_rgba) > COSMETIC_MAX_FRAMES:
+                raise HTTPException(status_code=400,
+                                    detail=f"GIF has more than {COSMETIC_MAX_FRAMES} frames — reduce it, don't resample")
+        if len(frames_rgba) < 2:
+            raise HTTPException(status_code=400, detail="GIF has fewer than 2 frames — upload a PNG instead")
+        # #317: the SOURCE RATE, from real durations (100ms fallback per frame).
+        anim_fps = round(len(frames_rgba) / max(0.1, total_ms / 1000.0), 2)
+        anim_fps = max(COSMETIC_FPS_CENTI_MIN / 100.0, min(COSMETIC_FPS_CENTI_MAX / 100.0, anim_fps))
+        # One SHARED transform: fit the source rect into 512, centered.
+        sw, sh = frames_rgba[0].width, frames_rgba[0].height
+        ratio = min(512.0 / sw, 512.0 / sh)
+        nw, nh = max(1, int(sw * ratio)), max(1, int(sh * ratio))
+        ox, oy = (512 - nw) // 2, (512 - nh) // 2
+        frame_pngs = []
+        for fr in frames_rgba:
+            canvas = _PILImage.new("RGBA", (512, 512), (0, 0, 0, 0))
+            canvas.paste(fr.resize((nw, nh), _PILImage.LANCZOS), (ox, oy))
+            buf = _io.BytesIO()
+            canvas.save(buf, format="PNG", optimize=True)
+            png = buf.getvalue()
+            if len(png) * 4 // 3 > COSMETIC_MAX_B64:
+                raise HTTPException(status_code=400, detail="a converted frame exceeds the per-image size cap")
+            frame_pngs.append(png)
+    except HTTPException:
+        raise
+    except Exception as ex:
+        raise HTTPException(status_code=400, detail=f"could not process GIF: {ex}")
+    pending = (await db.execute(text(
+        "SELECT COUNT(*) FROM cosmetic_submissions WHERE artist_steam_id = :s "
+        "AND (status IN ('pending', 'uploading') OR (status = 'approved' AND placement_status = 'pending'))"
+    ), {"s": steam_id})).scalar() or 0
+    if pending >= COSMETIC_MAX_PENDING_PER_ARTIST:
+        raise HTTPException(status_code=429, detail=f"{pending} submissions already awaiting review — wait for those first")
+    new_id = (await db.execute(text(
+        "INSERT INTO cosmetic_submissions "
+        "(artist_steam_id, name, slot, png_data, png_bytes, render_scale, "
+        " render_offset_x, render_offset_y, submission_fingerprint, status, frame_count, anim_fps) "
+        "VALUES (:s, :n, :sl, :png, :b, :sc, :ox, :oy, :f, 'pending', :fc, :fps) "
+        "ON CONFLICT (submission_fingerprint) DO NOTHING RETURNING id"
+    ), {"s": steam_id, "n": name, "sl": slot, "png": frame_pngs[0], "b": len(frame_pngs[0]),
+        "sc": render_scale, "ox": render_offset_x, "oy": render_offset_y,
+        "f": submission_fingerprint, "fc": len(frame_pngs), "fps": anim_fps})).scalar()
+    if new_id is None:
+        new_id = (await db.execute(text(
+            "SELECT id FROM cosmetic_submissions "
+            "WHERE submission_fingerprint = :f AND artist_steam_id = :s"
+        ), {"f": submission_fingerprint, "s": steam_id})).scalar_one()
+        return {"status": "already_submitted", "id": new_id}
+    for i in range(1, len(frame_pngs)):
+        await db.execute(text(
+            "INSERT INTO cosmetic_submission_frames (submission_id, frame_no, png_data, png_bytes) "
+            "VALUES (:i, :n, :png, :b) ON CONFLICT (submission_id, frame_no) DO NOTHING"
+        ), {"i": new_id, "n": i + 1, "png": frame_pngs[i], "b": len(frame_pngs[i])})
+    await _artist_audit(
+        db, steam_id, "submit-cosmetic-gif", f"sub#{new_id}",
+        f"{name} ({slot}, GIF -> {len(frame_pngs)} frames @ {anim_fps:.2f}fps, "
+        f"scale={render_scale:.2f})")
+    await db.commit()
+    print(f"[COSMETIC] submission #{new_id} '{name}' ({slot}) GIF split: "
+          f"{len(frame_pngs)} frames @ {anim_fps:.2f}fps from {steam_id}")
+    return {"status": "submitted", "id": new_id, "frame_count": len(frame_pngs),
+            "anim_fps": anim_fps}
+
+
+@app.get("/api/v1/admin/cosmetic-frames", tags=["Admin"])
+async def admin_cosmetic_frames(
+    admin_steam_id: str = Query(...),
+    submission_id: int = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aug 7 item 8: lazy per-submission frame fetch for the animated admin
+    preview. Deliberately NOT inlined into /admin/cosmetic-submissions — that
+    list already carries full base64 per row, and 5 pending x 16 frames would
+    be tens of MB."""
+    await _require_admin(db, admin_steam_id, "cosmetic-frames", str(int(submission_id)), sig)
+    rows = (await db.execute(text(
+        "SELECT frame_no, png_data FROM cosmetic_submission_frames "
+        "WHERE submission_id = :i ORDER BY frame_no"
+    ), {"i": int(submission_id)})).mappings().all()
+    return {"submission_id": int(submission_id), "frames": [
+        {"frame_no": int(r["frame_no"]),
+         "png_base64": base64.b64encode(r["png_data"]).decode("ascii")} for r in rows]}
 
 
 @app.get("/api/v1/artist/my-submissions", tags=["Artist"])
@@ -15251,12 +15558,15 @@ async def artist_my_submissions(
         "       render_scale, render_offset_x, render_offset_y, placement_revision, "
         "       placement_status, placement_review_note, approved_render_scale, "
         "       approved_render_offset_x, approved_render_offset_y, "
-        "       approved_placement_revision, published_placement_revision, created_at "
+        "       approved_placement_revision, published_placement_revision, created_at, "
+        "       frame_count, anim_fps "
         "FROM cosmetic_submissions WHERE artist_steam_id = :s "
         "ORDER BY created_at DESC"
     ), {"s": steam_id})).mappings().all()
     return {"submissions": [
         {"id": r["id"], "name": r["name"], "slot": r["slot"], "status": r["status"],
+         "frame_count": int(r["frame_count"] or 1),
+         "anim_fps": float(r["anim_fps"]) if r["anim_fps"] is not None else None,
          "review_note": r["review_note"] or "", "shop_sku": r["shop_sku"] or "",
          "render_scale": float(r["render_scale"] or 1.0),
          "render_offset_x": float(r["render_offset_x"] or 0.0),
@@ -15545,6 +15855,7 @@ async def admin_cosmetic_submissions(
         "       cs.placement_status, cs.approved_render_scale, cs.approved_render_offset_x, "
         "       cs.approved_render_offset_y, cs.approved_placement_revision, "
         "       cs.published_placement_revision, cs.created_at, "
+        "       cs.frame_count, cs.anim_fps, "
         "       cs.artist_steam_id, COALESCE(p.display_name, au.display_name, cs.artist_steam_id) AS artist_name "
         "FROM cosmetic_submissions cs "
         "LEFT JOIN artist_users au ON au.steam_id = cs.artist_steam_id "
@@ -15575,6 +15886,11 @@ async def admin_cosmetic_submissions(
          "approved_placement_revision": r["approved_placement_revision"],
          "published_placement_revision": int(r["published_placement_revision"] or 0),
          "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+         # Aug 7 item 8: animation metadata only — extra frames are fetched
+         # LAZILY via /admin/cosmetic-frames (this list already inlines a
+         # full base64 per row; 5 pending x 16 frames would be tens of MB).
+         "frame_count": int(r["frame_count"] or 1),
+         "anim_fps": float(r["anim_fps"]) if r["anim_fps"] is not None else None,
          "png_base64": base64.b64encode(r["png_data"]).decode("ascii")}
         for r in rows
     ]}
