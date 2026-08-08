@@ -18074,6 +18074,41 @@ class _AdminBanReq(BaseModel):
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
+    # Aug 7 item 7: ban-velocity gate — 5+ COMMITTED bans by one admin inside
+    # 5 minutes blocks further bans (429) and alerts #scr-admin. Counting
+    # player_bans rows (not admin_actions) means already_banned no-ops never
+    # consume budget; DB-derived, so restart-safe (#281 — no process memory).
+    recent_bans = (await db.execute(text(
+        "SELECT COUNT(*) FROM player_bans "
+        "WHERE banned_by_steam_id = :adm AND banned_at > NOW() - INTERVAL '5 minutes'"
+    ), {"adm": req.admin_steam_id})).scalar() or 0
+    if int(recent_bans) >= 5:
+        await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="ban_rate_blocked",
+                                target_steam_id=req.target_steam_id,
+                                details={"recent_bans": int(recent_bans), "window": "5m"})
+        # Alert once per burst: only on the FIRST blocked attempt (count==5
+        # exactly would miss retries; instead check whether we already posted
+        # for this window via the audit trail).
+        already_alerted = (await db.execute(text(
+            "SELECT COUNT(*) FROM admin_actions "
+            "WHERE admin_steam_id = :adm AND action = 'ban_rate_blocked' "
+            "AND created_at > NOW() - INTERVAL '5 minutes'"
+        ), {"adm": req.admin_steam_id})).scalar() or 0
+        if int(already_alerted) <= 1:  # the row we just wrote is #1
+            try:
+                async with db.begin_nested():
+                    await db.execute(text(
+                        "INSERT INTO pending_channel_posts (channel_id, content) VALUES (:ch, :c)"
+                    ), {"ch": "1495392567687250061",
+                        "c": f"\N{WARNING SIGN} **Ban rate flag**: admin `{req.admin_steam_id}` "
+                             f"hit {int(recent_bans)} bans in 5 minutes — further bans are "
+                             f"blocked until the window passes. Latest target: `{req.target_steam_id}`."})
+            except Exception as ex:
+                print(f"[ADMIN] ban-rate alert queue failed: {ex}")
+        await db.commit()
+        raise HTTPException(status_code=429,
+                            detail="Ban rate limit: 5 bans in 5 minutes. Further bans are "
+                                   "blocked for now - flagged to #scr-admin.")
     # Identity lock FIRST, before any purge (round-13 find 6: with the lock
     # taken after the session purge, a steam_auth finalization holding the
     # lock could insert a fresh session AFTER our purge but BEFORE our ban

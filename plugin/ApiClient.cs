@@ -2979,7 +2979,11 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, body) =>
             {
                 if (!ok) { Plugin.Log.LogWarning($"[ADMIN] bans fetch failed: {body}"); callback?.Invoke(false); return; }
-                try { CachedBannedUsers = ParseBannedUsers(body); callback?.Invoke(true); }
+                // Aug 7 item 7: MarkDirty on success — on the dedicated Banned
+                // tab this is the ONLY fetch, so without it the list renders
+                // stale until something else dirties the UI (it used to be
+                // masked by FetchFlaggedMatches running alongside).
+                try { CachedBannedUsers = ParseBannedUsers(body); NativeUI.MarkDirty(); callback?.Invoke(true); }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[ADMIN] bans parse: {ex.Message}"); callback?.Invoke(false); }
             }));
         }

@@ -1402,7 +1402,7 @@ namespace CompetitiveRounds
              * stay blank, and Save sends an empty set the server rejects
              * silently. */
             _tVoteLocalEdited = false; _tVoteSlotSig = "";
-            adminFlagRowPool.Clear();adminBanRowPool.Clear();adminSeriesRowPool.Clear();
+            adminFlagRowPool.Clear();adminBanRowPool.Clear();adminSeriesRowPool.Clear();adminActLogRowPool.Clear();
             adminQuarantineRowPool.Clear();adminQuarantineRowBindings.Clear();
             artistRows.Clear();artistBlockRows.Clear();liveBetRowPool.Clear();
             comparePickerRows.Clear();comparePickerTexts.Clear();comparePickerSteamIds.Clear();
@@ -1461,7 +1461,7 @@ namespace CompetitiveRounds
             tIndRow.SetActive(false);
             tournamentIndRow = tIndRow;
             BuildTabBar(content.transform);
-            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);
+            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);
             // (The [ID] button's position is set in CreateHistoryRow itself, so
             // it cannot desync from tab-build ordering.)
 
@@ -1566,9 +1566,10 @@ namespace CompetitiveRounds
         // i18n: expression-bodied property (NOT a static readonly field) so the
         // I18n.Tr calls run at ACCESS time — after I18nCatalogues.Install() — and
         // re-evaluate after a language switch (which rebuilds the page).
-        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home")};
-        private const int NUM_TABS=14;
+        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned")};
+        private const int NUM_TABS=15;   // Aug 7 item 7: 14 = Banned (Admin sub-tab)
         private const int TAB_HOME=13;
+        private const int TAB_BANNED=14;
         // Top bar order per Sid's spec (July 12 round 2): Multiplayer right after
         // Tournaments; Settings last; Admin gated. Sub-tabs: Compare under
         // Leaderboard, Artist under Shop, 2v2/1v2/FFA under Multiplayer. First
@@ -1577,10 +1578,15 @@ namespace CompetitiveRounds
         // moved under My Stats as sub-tabs (Sid's item 4).
         // i18n: property for the same access-time-translation reason as TAB_NAMES.
         private static string[] GROUP_LABELS=>new[]{I18n.Tr("Home"),I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Tournaments"),I18n.Tr("Multiplayer"),I18n.Tr("Shop"),I18n.Tr("Admin"),I18n.Tr("Settings")};
-        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10},new[]{6},new[]{5}};
+        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10},new[]{6,14},new[]{5}};
         private const int GROUP_ADMIN=6;   // GROUP_LABELS index of the admin-gated slot
         private static int GroupOf(int tabIdx){for(int g=0;g<GROUP_MEMBERS.Length;g++)for(int m=0;m<GROUP_MEMBERS[g].Length;m++)if(GROUP_MEMBERS[g][m]==tabIdx)return g;return 0;}
-        private static bool TabVisible(int i){return i!=10||ApiClient.IsArtist;}
+        /* Aug 7 item 7: the Banned sub-tab is ADMIN-only (its only fetch is the
+         * admin-HMAC banned list). Gating here also keeps the sub-tab bar
+         * hidden for chat moderators — their Admin group then has one visible
+         * member, which is exactly the <2-members condition that suppresses
+         * the bar. */
+        private static bool TabVisible(int i){if(i==10)return ApiClient.IsArtist;if(i==TAB_BANNED)return ApiClient.IsAdmin;return true;}
 
         /* Aug 7 review find 2: T-chat moderation is NOT an admin-only power on the
          * server. A live `chat_moderate` language grant authorises mute / unmute /
@@ -3770,7 +3776,7 @@ namespace CompetitiveRounds
                 if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
             }
         }
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchBannedUsers(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);}}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -5838,7 +5844,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         }
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();/* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;}}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();/* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;}}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
         // every-refresh toggle from re-firing and re-posting /toggle-ranked
@@ -14248,6 +14254,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         private static GameObject adminFlagsContainer;
         private static GameObject adminBansContainer;
         private static object txtAdminFlagsHdr, txtAdminBansHdr;
+        // Aug 7 item 7: in-panel Action Log (right column of ASplit).
+        private static GameObject adminActLogContainer;
+        private static object txtAdminActLogHdr;
+        private static List<object> adminActLogRowPool = new List<object>();
         private static List<GameObject> adminFlagRowPool = new List<GameObject>();
         private static List<GameObject> adminBanRowPool = new List<GameObject>();
         private static GameObject adminSeriesContainer;
@@ -14342,6 +14352,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             panel.AddComponent<RectTransform>();
             UIFactory.AddVLG(panel, spacing: 6, padL: 8, padR: 8, padT: 6, padB: 6);
             UIFactory.AddLE(panel, flexH: 1);
+            // Aug 7 item 7: the Admin group now has a Banned sibling — without
+            // an anchor on THIS panel the shared sub-tab bar can never show
+            // here (the #1 way a tab restructure "does nothing" in playtest).
+            MakeSubTabAnchor(6, panel.transform, true);
 
             // BuildPage re-runs on a language switch, so the collected set has to
             // start empty or it accumulates destroyed objects across rebuilds.
@@ -14594,33 +14608,74 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddLE(flagSV.scrollGO, flexH: 1);
             adminFlagsContainer = flagSV.content;
 
-            // Right column: banned users.
+            /* Right column (Aug 7 item 7): the ACTION LOG, in-panel, where the
+             * banned list used to sit — bans moved to the dedicated Banned
+             * sub-tab. Same width-budget discipline as the old bans header
+             * (#199/#245/#132: header flexW:1 + button flexW:0 inside 360). */
             var rightCol = new GameObject("AFRight"); rightCol.transform.SetParent(split.transform, false); rightCol.AddComponent<RectTransform>();
             UIFactory.AddVLG(rightCol, spacing: 4); UIFactory.AddLE(rightCol, prefW: 360, flexH: 1);
-            /* Aug 7 item 4: the header is now a row so the SEARCH control can sit
-             * beside it. Width budget inside the 360px column: header 232 (flexW 1,
-             * minW 180) + 6 spacing + button 100 (flexW 0) = 338, leaving 22px of
-             * slack — an over-budget HLG compresses its children and TMP paints the
-             * overflow across the neighbour (#199/#245). The explicit flexW:0 on the
-             * button is load-bearing: without a SET value it inherits nothing and the
-             * group-derived flex would stretch it (#132). */
-            var bansHdrRow = new GameObject("ABHRow"); bansHdrRow.transform.SetParent(rightCol.transform, false); bansHdrRow.AddComponent<RectTransform>();
-            UIFactory.AddHLG(bansHdrRow, spacing: 6); UIFactory.AddLE(bansHdrRow, prefH: 26, flexH: 0);
-            txtAdminBansHdr = UIFactory.CreateText("ABH", bansHdrRow.transform, "Banned Players", 16f, new Color(1f, 0.45f, 0.45f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(232, 24));
-            UIFactory.SetBold(txtAdminBansHdr, true);
+            var actHdrRow = new GameObject("AALRow"); actHdrRow.transform.SetParent(rightCol.transform, false); actHdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(actHdrRow, spacing: 6); UIFactory.AddLE(actHdrRow, prefH: 26, flexH: 0);
+            txtAdminActLogHdr = UIFactory.CreateText("AALH", actHdrRow.transform, "Action Log", 16f, new Color(0.72f, 0.80f, 1f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(232, 24));
+            UIFactory.SetBold(txtAdminActLogHdr, true);
             {
-                var hdrGO = (txtAdminBansHdr as Component)?.gameObject;
+                var hdrGO = (txtAdminActLogHdr as Component)?.gameObject;
                 if (hdrGO != null) UIFactory.AddLE(hdrGO, minW: 180, prefW: 232, flexW: 1, flexH: 0);
             }
-            var banSearchBtn = UIFactory.CreateButton("ABSearch", bansHdrRow.transform, "Search...", 12f, C_WHITE,
-                new Color(0.28f, 0.30f, 0.38f, 0.95f), OpenBanSearchPicker, sizeDelta: new Vector2(100, 24));
-            UIFactory.AddLE(banSearchBtn, prefW: 100, prefH: 24, flexW: 0, flexH: 0);
-            var banSV = UIFactory.CreateScrollView("ABSV", rightCol.transform, spacing: 2);
-            UIFactory.AddLE(banSV.scrollGO, flexH: 1);
-            adminBansContainer = banSV.content;
+            var actFullBtn = UIFactory.CreateButton("AALFull", actHdrRow.transform, "Full log...", 12f, C_WHITE,
+                new Color(0.28f, 0.30f, 0.38f, 0.95f), () => OpenAdminActionLogPicker(0), sizeDelta: new Vector2(100, 24));
+            UIFactory.AddLE(actFullBtn, prefW: 100, prefH: 24, flexW: 0, flexH: 0);
+            var actSV = UIFactory.CreateScrollView("AALSV", rightCol.transform, spacing: 2);
+            UIFactory.AddLE(actSV.scrollGO, flexH: 1);
+            adminActLogContainer = actSV.content;
 
             ApplyAdminPanelScope();
             return panel;
+        }
+
+        /// <summary>Aug 7 item 7: the dedicated Banned sub-tab — the banned
+        /// list moved here wholesale from the Admin panel's bottom-right
+        /// column, gaining the full tab height. Reuses BuildAdminBanRow /
+        /// FillAdminBanRow / ConfirmUnban / OpenBanSearchPicker unchanged.</summary>
+        private static GameObject BuildBannedTab(Transform parent)
+        {
+            var panel = new GameObject("BannedPanel");
+            panel.transform.SetParent(parent, false);
+            panel.AddComponent<RectTransform>();
+            UIFactory.AddVLG(panel, spacing: 6, padL: 8, padR: 8, padT: 6, padB: 6);
+            UIFactory.AddLE(panel, flexH: 1);
+            MakeSubTabAnchor(TAB_BANNED, panel.transform, true);
+
+            var bansHdrRow = new GameObject("ABHRow"); bansHdrRow.transform.SetParent(panel.transform, false); bansHdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(bansHdrRow, spacing: 6); UIFactory.AddLE(bansHdrRow, prefH: 28, flexH: 0);
+            txtAdminBansHdr = UIFactory.CreateText("ABH", bansHdrRow.transform, "Banned Players", 17f, new Color(1f, 0.45f, 0.45f), UIFactory.AlignMidLeft, sizeDelta: new Vector2(400, 26));
+            UIFactory.SetBold(txtAdminBansHdr, true);
+            {
+                var hdrGO = (txtAdminBansHdr as Component)?.gameObject;
+                if (hdrGO != null) UIFactory.AddLE(hdrGO, minW: 200, prefW: 400, flexW: 1, flexH: 0);
+            }
+            var banSearchBtn = UIFactory.CreateButton("ABSearch", bansHdrRow.transform, "Search...", 13f, C_WHITE,
+                new Color(0.28f, 0.30f, 0.38f, 0.95f), OpenBanSearchPicker, sizeDelta: new Vector2(110, 26));
+            UIFactory.AddLE(banSearchBtn, prefW: 110, prefH: 26, flexW: 0, flexH: 0);
+            var banSV = UIFactory.CreateScrollView("ABSV", panel.transform, spacing: 2);
+            UIFactory.AddLE(banSV.scrollGO, flexH: 1);
+            adminBansContainer = banSV.content;
+            return panel;
+        }
+
+        private static void RefreshBannedTab()
+        {
+            // Admin-only data; the tab itself is IsAdmin-gated in TabVisible,
+            // but the authority resolves asynchronously — mirror RefreshAdmin.
+            if (!ApiClient.IsAdmin) return;
+            var bans = ApiClient.CachedBannedUsers ?? new List<ApiClient.BannedUserEntry>();
+            UIFactory.SetText(txtAdminBansHdr, $"Banned Users ({bans.Count})");
+            for (int i = bans.Count; i < adminBanRowPool.Count; i++) adminBanRowPool[i].SetActive(false);
+            for (int i = 0; i < bans.Count; i++)
+            {
+                if (i >= adminBanRowPool.Count) adminBanRowPool.Add(BuildAdminBanRow(adminBansContainer.transform, i));
+                FillAdminBanRow(adminBanRowPool[i], bans[i]);
+            }
         }
 
         private static void RefreshAdmin()
@@ -14646,14 +14701,29 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 FillAdminFlagRow(adminFlagRowPool[i], flags[i]);
             }
 
-            // Ban rows
-            var bans = ApiClient.CachedBannedUsers ?? new List<ApiClient.BannedUserEntry>();
-            UIFactory.SetText(txtAdminBansHdr, $"Banned Users ({bans.Count})");
-            for (int i = bans.Count; i < adminBanRowPool.Count; i++) adminBanRowPool[i].SetActive(false);
-            for (int i = 0; i < bans.Count; i++)
+            // Action Log rows (Aug 7 item 7 — in-panel where the bans sat; the
+            // bans render in RefreshBannedTab now). Plain text rows; the Full
+            // log button keeps search/paging/details.
+            var acts = ApiClient.CachedAdminActions ?? new List<ApiClient.AdminActionEntry>();
+            int actShown = Math.Min(25, acts.Count);
+            UIFactory.SetText(txtAdminActLogHdr, ApiClient.CachedAdminActionsTotal > 0
+                ? $"Action Log ({ApiClient.CachedAdminActionsTotal})" : "Action Log");
+            for (int i = actShown; i < adminActLogRowPool.Count; i++)
+            { var go = (adminActLogRowPool[i] as Component)?.gameObject; if (go != null) go.SetActive(false); }
+            for (int i = 0; i < actShown; i++)
             {
-                if (i >= adminBanRowPool.Count) adminBanRowPool.Add(BuildAdminBanRow(adminBansContainer.transform, i));
-                FillAdminBanRow(adminBanRowPool[i], bans[i]);
+                if (i >= adminActLogRowPool.Count)
+                {
+                    var t = UIFactory.CreateText($"AAL{i}", adminActLogContainer.transform, "", 12f, C_LABEL,
+                        UIFactory.AlignMidLeft, sizeDelta: new Vector2(340, 18));
+                    UIFactory.FitOneLine(t);   // one-line cells, translated-metrics class (#292/#297)
+                    adminActLogRowPool.Add(t);
+                }
+                var rowGO = (adminActLogRowPool[i] as Component)?.gameObject;
+                if (rowGO != null) rowGO.SetActive(true);
+                // AdminActionLabel already routes every user-authored field
+                // through AdminDisplay (hostile-input flattening).
+                UIFactory.SetTextRaw(adminActLogRowPool[i], AdminActionLabel(acts[i].id));
             }
 
             // Recent series rows (Award/Void/Reverse)
@@ -15050,6 +15120,10 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     // Mirrors the old prompt's refresh set: a new ban can also
                     // resolve a flag, so both lists are re-pulled.
                     if (ok) { ApiClient.FetchBannedUsers(sid); ApiClient.FetchFlaggedMatches(sid); }
+                    // Aug 7 item 7: surface failures — the server's new
+                    // ban-velocity 429 (5 bans / 5 min) was invisible while
+                    // this branch only logged ("the button does nothing").
+                    else ShowModerationRefusal(I18n.Tr("Ban"), resp);
                 }));
         }
 
