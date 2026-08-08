@@ -6265,7 +6265,13 @@ async def poll_github_releases():
         print(f"[RELEASES] cold start, anchored at {tag}")
         return
 
-    if tag == _last_release_tag:
+    # Codex r8: an anchored tag with a LIVE CURSOR is a partially-sent
+    # announcement, not a done one — a /announce-release that posted some
+    # chunks and then failed leaves exactly that state, and the drain above
+    # deliberately skips the latest tag, so nothing else would ever resume
+    # it. _send_release_chunks' own sent-set makes this cheap and idempotent:
+    # a genuinely completed tag returns immediately without touching Discord.
+    if tag == _last_release_tag and tag not in _release_state_load():
         return
 
     # New release — post to #releases only (chat mirror dropped per user
