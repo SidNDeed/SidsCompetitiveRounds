@@ -3000,6 +3000,11 @@ namespace CompetitiveRounds
             // Role/roster caches die with the room, on every client.
             try { RoomActors.Reset(); } catch { }
             try { SpectatorSync.MasterResetSpectatorState(); } catch { }
+            // Codex r5 f3: the card-bar tint bookkeeping + the owned outline
+            // materials die with the room too — Reset() previously had NO
+            // caller, so the flush the r4 cap depends on never ran and a
+            // filled cache stayed capped for the rest of the process.
+            try { CardBarTeamColor.Reset(); } catch { }
             if (Diag2v2.PendingSlot() < 0) return;
             try { Plugin.Log.LogWarning($"[2v2-DIAG] LeftRoom (Photon callback) stack={Diag2v2.ShortStack()}"); }
             catch { }

@@ -1470,9 +1470,13 @@ namespace CompetitiveRounds
         {
             _next = 0f;
             _loggedOnce = false;
+            // Codex r5 f3: restore FIRST — OnLeftRoom can observe labels
+            // that are torn down later in the same frame, and a label still
+            // pointing at a clone we are about to destroy would be
+            // unrepairable. RestoreTinted points every swapped label back at
+            // its source material and zeroes the outlines before the flush.
+            try { RestoreTinted(); } catch { }
             _tinted.Clear();
-            // Room over: every bar (and label) is gone — safe point to
-            // destroy the owned outline materials (Codex r4 f6).
             TeamColorIdentity.FlushOutlineMaterials();
         }
     }

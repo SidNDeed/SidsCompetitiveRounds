@@ -3,6 +3,7 @@ Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
 import os, asyncio, aiohttp, discord, json, io, threading, re
+import urllib.parse
 from typing import Literal
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -6075,13 +6076,23 @@ def _release_state_save(d: dict) -> None:
         print(f"[RELEASES] cursor save failed: {e}")
 
 
+_release_send_lock = asyncio.Lock()
+
+
 async def _send_release_chunks(tag: str, msgs: list) -> bool:
     """Completion-gated sender shared by the poller AND /announce-release
     (Codex r2 f12 — the manual path used to mark partial sends complete).
     Resumes from the durable per-tag cursor; True only when every chunk is
-    on the channel."""
+    on the channel. Codex r5 f5: ONE async lock serializes every sender —
+    the every-tick drain racing a mid-chunk /announce-release used to start
+    a second sender from the same cursor and duplicate the remainder."""
     if not RELEASES_CHANNEL_ID:
         return True
+    async with _release_send_lock:
+        return await _send_release_chunks_locked(tag, msgs)
+
+
+async def _send_release_chunks_locked(tag: str, msgs: list) -> bool:
     st = _release_state_load()
     start = int(st.get(tag, 0) or 0)
     try:
@@ -6196,7 +6207,11 @@ async def poll_github_releases():
         try:
             async with aiohttp.ClientSession() as s:
                 async with s.get(
-                    f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/tags/{_pend}",
+                    # Codex r5 f4: the tag is one PATH SEGMENT — raw
+                    # interpolation turned "release#1" into a fragment, the
+                    # wrong tag 404'd, and the cursor was wrongly deleted.
+                    f"https://api.github.com/repos/{GITHUB_RELEASES_REPO}/releases/tags/"
+                    + urllib.parse.quote(_pend, safe=""),
                     headers={"Accept": "application/vnd.github+json",
                              "User-Agent": "comp-rounds-bot"},
                     timeout=aiohttp.ClientTimeout(total=10),

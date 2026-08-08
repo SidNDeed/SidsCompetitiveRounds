@@ -15055,9 +15055,20 @@ namespace CompetitiveRounds
             try
             {
                 if (CredentialedTransportAllowed(url)) return false;
+                // Codex r5 f1/f2: admin-HMAC traffic is identified by the
+                // admin_steam_id credential it carries, not by a path prefix
+                // (/bug-reports/* and /chat/moderate/* are admin surfaces
+                // too, while player bug SUBMISSION must keep working on the
+                // fallback). The password match is the KEY TOKEN "password":
+                // — a value can never contain that raw sequence because
+                // in-string quotes are escaped, so a player literally named
+                // password no longer poisons their own match reports.
                 bool sensitive =
                     url.IndexOf("/admin/", StringComparison.OrdinalIgnoreCase) >= 0
-                    || (json != null && json.IndexOf("\"password\"", StringComparison.Ordinal) >= 0);
+                    || url.IndexOf("admin_steam_id=", StringComparison.OrdinalIgnoreCase) >= 0
+                    || (json != null
+                        && (json.IndexOf("\"admin_steam_id\"", StringComparison.Ordinal) >= 0
+                            || json.IndexOf("\"password\":", StringComparison.Ordinal) >= 0));
                 if (!sensitive) return false;
                 if (!_loggedSensitiveBlocked)
                 {
