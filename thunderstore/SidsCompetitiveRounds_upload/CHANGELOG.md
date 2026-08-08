@@ -1,3 +1,218 @@
+## v1.38.0 — 2026-08-08 — Hosted lobbies, alerts, chat moderation, animated cosmetics
+
+Schema: migrations **202–206** (202 LFP modes, 203 admin alerts, 204 cosmetic
+animation frames, 205 lobby kicks, 206 team/FFA colour identity — all must
+apply BEFORE the API deploy). Deploy notes: the
+GIF-split endpoint needs **Pillow added to the server-side API Dockerfile**
+(fetch the live copy per #192, add `pip install Pillow`, push back — until
+then it answers 503 and the multi-PNG path is unaffected); ship step 11 now
+also POSTs the ENGLISH release notes (`en` accepted; the Home tab's primary
+source is the new uncut `/release-notes/full/{locale}` — post v1.37.0's
+English body retroactively at deploy so the current notes uncut too); an es/ru
+seed migration for the new i18n keys is a ship-time step.
+
+### Added
+
+- **Hosted lobbies are THE way to play custom 2v2s and 1v2s** (Sid's follow-up:
+  the old blind manual queue and the 1v2 consent queue are gone from the
+  tabs). v1.37.0 shipped only the server half — no client UI existed. Now:
+  FFA Create Private + password prompts + [PRIVATE] browser markers; full
+  hosted-lobby panels on the 2v2 and 1v2 tabs (create, browse/join with
+  password, member list, host-only Start, Leave) whose state poll keeps the
+  seat lease alive even with the menu closed. **Hosts can kick** members
+  before start (admins are unkickable, and a kicked player cannot rejoin that
+  lobby); the 1v2 solo-extra-pick is the **host's setting** now; and every
+  lobby browser shows **who is inside before you join — names, titles and
+  elo**, with 2v2/FFA elos shown only once established (10+ rated
+  series/games; 1v1 elo otherwise). Start hands off to the normal
+  ready-up/room flow with a match-found alert for idle members; a closed
+  lobby never strands or conscripts anyone. *Multi-player flows are
+  first-playtest.*
+- **Standing server alerts.** Admins broadcast a notice (outage / issue /
+  update / info) from the Admin tab; every player gets a one-time toast (also
+  for players coming online later) and a persistent banner on every menu tab
+  showing category, message, admin and time. Echoed to the admin Discord
+  channel. Revocable; optional expiry.
+- **Automatic chat moderation.** A hard-slur filter on both chat paths removes
+  the message before it exists anywhere, auto-mutes the sender in all channels
+  for 15 minutes (doubling per repeat offense in 90 days, 7-day cap), logs a
+  system action, posts who/what/action to the admin channel, and tells the
+  sender why their line vanished.
+- **Animated cosmetic uploads in-game.** Multi-PNG sets (name.png +
+  name__f2.png + ... — the picker explains the convention and validates every
+  frame) with an artist-set frame-rate slider in the live preview, or a GIF
+  the server splits at the GIF's own speed. Admin review shows the animation
+  actually moving before approval.
+- **Max card draw unlocked (FFA).** Hosts set 1-5 cards offered per draw in
+  the lobby settings row; non-default values show in the load-in banner and
+  history.
+- **Watch from the mode tabs.** WATCH buttons on the 2v2 live strip, a new
+  Live 1v2 Games panel, and live FFA lobbies — same eligibility rules as the
+  Leaderboard panel, which keeps its buttons. *FFA/1v2 spectating is
+  first-playtest; a server-side per-mode switch can pull a mode back without a
+  client update.*
+- **RLFP ping upgrades.** Pick any of 1v1 / 2v2 / FFA under the duration
+  selector — the Discord ping reads "LFP: ranked 1v1+FFA for 30min" — and
+  `:emojiname:` in the optional message renders as real server emojis.
+- **Deep idle.** After 60s unfocused outside any room/battle/match-found, the
+  engine drops to 15 FPS (on top of the existing 120 cap), waking instantly on
+  focus or a match. Toggleable in Settings.
+- **Shop: New chip + on-body preview.** A New filter beside All shows the
+  newest cosmetics; face thumbnails grew 80→112; every face row has a Preview
+  button showing the item on the player body at its real shipped placement —
+  animated items animate.
+- **Body-color team identity (server half).** A 2v2 team is named after its
+  color holder's equipped body color — sole holder wins, two holders coin-flip
+  — decided once at series creation, frozen for the series (rematches inherit
+  the sitting's identity, sides swapped when the split flips; mirror matches
+  leave team 2 vanilla). FFA games stamp each player's color at report time.
+  The stamp rides the series state/live/recent feeds and `/ffa/recent`, ready
+  for the client tinting pass (points, card shading, Recent panels).
+  Migration 206; actual body colors are never changed.
+
+### Changed
+
+- **Release notes are uncut and formatted on both surfaces.** Discord posts the
+  full notes as multiple messages instead of cutting at 2000 chars
+  mid-sentence; the Home tab renders the complete notes with gold headings,
+  colored bullets, bold/underline/code — and stops wrapping at the author's
+  column width (the actual bug-160 regression).
+- **Admin tab restructure.** Banned users moved to a dedicated admin-only
+  Banned sub-tab (full height + search); the Action Log now lives in-panel
+  where the bans sat, with the searchable full log one click away. Banning 5+
+  players inside 5 minutes blocks further bans and flags the admin channel;
+  ban failures now surface instead of silently logging.
+- **Compare tab.** The < > metric cycling arrows are back beside the dropdown
+  (both stay in sync); Ranked Friends pie slices are guaranteed distinct
+  colors with an honest legend (tail folds into a grey Other); labels like
+  Bullet Speed size to the cell instead of a hard 10-char cut.
+- **Chat is visible on every menu tab** (except Home, where the pane lives),
+  anchored bottom-left as everywhere else.
+- **Body-color identity polish.** The point/win animation's balls and fills
+  tint to each team's equipped color; card-bar boxes fill with the player's
+  color (outline back to vanilla) and the box letters are always a readable
+  deep version of that same color (pale version on near-black colors) — the
+  first cut only darkened past a threshold and missed the HUD bar's labels
+  entirely, which is why light colors read as blank white squares.
+- The FFA host Start button says "Start unlocks in Ns (settings changed)"
+  instead of a countdown that read as an auto-start.
+
+### Fixed
+
+- **FFA: Radiance no longer damages its own caster.** The FFA targeting
+  replacement excluded the shooter by position, so a moving player became
+  their own sun wave's nearest target — one self-hit per wave, which also
+  suppressed lifesteal (the "Parasite not healing" half of the report).
+- **"Leftover parasite stacks" at round start.** End-of-round projectiles
+  could register hits after the victim respawned; every client now despawns
+  its own bullets the moment the round is decided.
+- The 2v2 live-series and team-history parsers survive display names
+  containing brackets (they blanked the Live panel, 2v2 tab and spectator
+  HUD line).
+- The unfocused-FPS cap can no longer stick if the mod disables itself during
+  an unfocused launch.
+- The FFA "GET READY" banner no longer clips its text top and bottom — the
+  banner box now sizes to the rendered text instead of a fixed 260px slot.
+
+### Stan's feature requests (#178–181, all accepted)
+
+- **Discord FFA results show every player's before→after rating** (stamped at
+  match time, so later games never rewrite history), and **every ranked
+  result post carries its `/game` codes** — inspect a game from Discord
+  without opening ROUNDS.
+- **"How stats are tracked"** — a Settings-tab page stating the verified
+  mechanics: what counts as a shot, why one block absorbing three bullets is
+  one success, which cards do and don't count as attempts, what Rage Quit %
+  vs Leave actually measure, when the game-length clock runs, and which
+  modes feed which lifetime stats.
+- **Stat hover graphs redesigned**: two-line headers with the legend colored
+  as the lines (distinct hues), real x-axis time ticks scaled to the game's
+  actual length, the block graph now charts **activations vs successful
+  blocks** (older games keep their honest damage-taken labels), and the
+  marker footer is replaced by a real green/red "point won / point lost"
+  legend that only appears when markers do.
+- **The graph-vs-summary discrepancy Stan caught was real and is fixed at the
+  root**: every stat timeline stopped recording at 6 minutes 24 seconds (a
+  128-sample cap) while the totals kept counting — nearly every 2v2 and FFA
+  game overran it. Timelines now compress as they grow and always span the
+  whole game. Also found in the same audit: FFA spawn-grace right-clicks
+  were counting as block attempts that could never block — no longer.
+
+### Review hardening (Codex adversarial rounds 3–8 — 40 further findings fixed)
+
+- **Authenticated requests refuse plaintext transport.** If the secure
+  connection ever fails and the client falls back to the legacy endpoint,
+  your Steam session is no longer exchanged or attached, and admin actions
+  and lobby passwords are refused outright rather than sent in the clear.
+  (LAN/loopback addresses are exempt so local setups keep working.)
+- **Nothing can drop you into a match you didn't consent to.** Joining the
+  public 2v2 queue can no longer overwrite a live locked match; a seat in a
+  closed hosted lobby is released instead of being recycled into public
+  matchmaking; leave requests are bound to the exact match they were issued
+  for, so a delayed retry can't dissolve a newer one.
+- **Preference clicks land in order** — the last thing you clicked is what
+  the server stores, and Start waits for it.
+- Assorted: DPS graphs no longer halve short games; the card-letter outline
+  can't leak materials; live-column and bets-ledger rows share one height
+  budget; release announcements resume correctly after a crash, restart, or
+  partial post.
+
+### Review hardening (Codex adversarial round 2 — 12 confirmed findings fixed)
+
+- Hosted-lobby groups are released (never recycled into public matchmaking)
+  by EVERY dissolution path now — ready timeouts, dead-lock resets, ban
+  evictions, account deletion — via one shared disposition authority; queue
+  leaves are incarnation-fenced so a delayed retry can't tear down a newer
+  enrollment, and joining is blocked while a leave is still settling.
+- The chat auth token is never sent over the plaintext fallback socket — a
+  downgraded session stays unverified (censored without strikes) instead of
+  exposing the session bearer.
+- Preference writes serialize one-at-a-time with Start disabled until the
+  host's last change is acknowledged; recovery rejoins re-send the current
+  preferences, not a stale join-time snapshot; "Team: Any" clears server-side.
+- The team-color coin flip distributes to every seat and spectator via a
+  room property (the continuation response only ever reached one client);
+  an all-vanilla decision is now explicitly frozen so a mid-series color
+  equip can't re-open it; spectators never repaint a watched room with their
+  own previous series' colors.
+- The Leaderboard live column enforces a single row budget across all modes
+  so it can never overpaint the bet ledger; release announcements survive
+  bot restarts mid-post and the manual command can no longer mark a partial
+  announcement complete.
+
+### Review hardening (Codex adversarial round 1 — 16 confirmed findings fixed)
+
+- **Hosted lobbies:** survivors of a dissolved hosted 2v2/1v2 start are
+  released outright instead of being recycled into public matchmaking; the
+  client's start-vs-disband recovery uses a new read-only resolve endpoint
+  (the old probe could lock you with strangers); an explicit Leave that races
+  Start now reports "started" and completes through the proper queue-leave;
+  seated preferences are patched one field at a time through a dedicated
+  endpoint (racing Start via re-join could orphan a seat), hydrate from the
+  server, and "Team: Any" actually clears a previous claim; a full kick list
+  refuses new kicks rather than quietly re-admitting the earliest-kicked
+  player.
+- **Chat moderation:** the censor's auto-mute only fires on a socket whose
+  Steam identity is session-verified — an unauthenticated socket could
+  previously mute an arbitrary victim by forging their ID. Unverified hits
+  are still censored, just not persisted as strikes.
+- **Admin/ops:** the ban-velocity gate is race-proof (advisory lock — parallel
+  bans could previously slip past it); admin alert banners expire client-side
+  when timed alerts lapse; the release announcer resumes from the failed
+  chunk instead of marking a partial announcement complete; the Home tab's
+  release feed anchors on ship-time order so editing an old translation can't
+  hoist it above newer releases.
+- **Animated cosmetics:** abandoned half-uploads free their submission slot
+  even at the cap; admin frame review pages one frame per request (a 16-frame
+  submission could exceed the fetch timeout and become unreviewable); GIFs
+  outside the supported 0.5–15 fps band are rejected with the measured rate
+  instead of silently retimed; the release-candidates feed and ship runbook
+  carry frame counts + fps so an approved animation can never ship as a
+  static frame 1.
+- **Spectating:** pulling a mode from the server's watchable set now also
+  evicts existing viewers (heartbeat + fighter validation), not just new
+  grants.
+
 ## v1.36.0 — 2026-08-04 — Spanish + Russian, translation portal, native cards
 
 Schema: migrations **179–189**. 187 adds the FFA kills-tiebreak capability columns, 188
@@ -920,74 +1135,7 @@ Settings tab with your log attached — that is what turns these into confirmed 
 - The game-ID button sits left of the score in both ranked and casual history.
 - Artist rows hidden by scrolling are no longer clickable through the section above them.
 
-## v1.34.1 — 2026-07-22 — July 22 nine-item batch + live feedback
-
-### Discord identity (feedback round)
-- **Discord name on the leaderboard is now opt-OUT** (was opt-in): linked players' Discord `@display name` shows on their leaderboard detail by default, so people looking for a ranked game know who to @. Turn it off in Settings → "Show Discord on leaderboard".
-- **Search Ranked beacons now name who to @** — the Discord "searching for a ranked match" post (and the 2v2/1v2 equivalents) includes the searcher's `@display name` as plain text. It never pings them (only the RLFP Ping button does).
-- **`/mystats` shows your Discord `@display name`** under the title.
-
-### Client (mod)
-- **My Stats history stat line tightened + ID button moved** (feedback): the Hit/Block/keys text is back to hugging its content (the wide split spacing is gone), and the game-ID copy button now sits right after the score instead of next to the opponent name.
-- **2v2 Recent Series widened + enlarged** (feedback): the panel takes the previously-empty space left of it, text is bigger, the game-row ID chip is just `[ID]` (click the row to copy), and the row-height math is fixed at the root so player names no longer overlap the "Game N:" line. Each game shows a per-player FPS/ping/Hit%/Block% line with a hover mini-dashboard.
-- **Hit % and Block % hover graphs** in My Stats Ranked/Casual history — for you AND your opponent (4 graphs per game). The stats line under each game is now clickable territory: hover your (or their) Hit % for a shots-fired-vs-hits chart, hover a Block % for damage-taken-vs-successful-blocks. Both are cumulative over the match, sampled every 3 seconds.
-- **Point markers on every match graph.** FPS, Ping, Hit % and Block % hover graphs now show a vertical marker at each point scored — green when you took the point, red when the opponent did — so you can line a bad stretch up against the scoreboard.
-- **Disconnect banner (bug #81).** When anyone disconnects or quits mid-game — casual, ranked, 2v2 or 1v2 — every remaining player gets a top-of-screen banner naming who left, on the spot. Between games of an unfinished series it shows an orange "left — series unfinished (1-0)" variant, and if the player left to join a ranked match it says exactly that. In 1v1 you also get an immediate note telling you whether leaving gives you the win or voids the game (the old message only appeared after you quit out yourself).
-- **Game ID buttons.** Every recorded game now has a tiny ID button (My Stats history rows) or click-to-copy row (2v2 Recent Series games) that copies a short game code — paste it into `/game` in Discord to pull up that game's full breakdown.
-- **2v2 Recent Series telemetry.** Game rows now show each player's FPS / ping / Hit % / Block % line, and hovering a player pops a 4-panel mini dashboard (FPS, ping, shots-vs-hits, damage-vs-blocks). Also: the top-left player name no longer crowds the "Game N:" line.
-- **1v2 Solo Extra Initial Pick is live in-game** — when the lobby had the toggle on, the solo's first card screen deals twice. (First-playtest-pending: the mechanism is vanilla's own multi-pick loop, but online multi-pick has never run in the wild.)
-- **1v2 leaderboard W/L split** — solo record and duo record shown separately (orange solo 3W-1L / blue duo 2W-4L) instead of one combined tally.
-- **Achievements earner lists**: now sized to their content (no more giant empty box on a 0-1 earner achievement), show 20 earners per page with a pager for the rest.
-- **Leaderboard search** — a search box under the Leaderboard/Compare sub-tabs filters the board as you type (typing "t" no longer opens chat, same guard as the Compare search).
-- **Discord on profiles (opt-out)**: linked players' "Discord: @displayname" shows on their leaderboard detail panel (above the Mod line) by default; a Settings toggle "Show Discord on leaderboard" turns it off.
-- **Home tab Discord Link** now shows your actual Discord username (the unique @handle), not your display name; falls back to the account ID. Still click-to-reveal.
-
-### Server
-- **1v2 fixes from the July 22 forensics pass**: the janitor's status-spelling mismatch that made canceled locks invisible to the continuation lookup (unrecorded-games risk, bug #70 family); abandoned mid-series 1v2 rows now close after 24h instead of staying "active" forever; a stale-husk guard on the continuation lookup (6h activity window); series slot columns realign to the in-game truth on the first reported match (protects per-slot rewards + future ranked replay).
-- **Achievements**: the earner list now resolves dynamic titles (Sid's "1st Place" podium title was silently dropped — string/UUID key mismatch), reports the true total, and serves up to 500 earners.
-- **Game lookup**: `GET /matches/by-code/{code}` — full per-game detail (both/all players' stats, timelines, cards, rewards) for the Discord bot, across 1v1/2v2/1v2.
-- **2v2 telemetry**: per-player FPS/ping/hit/block timelines + counters stored per game (new `team_match_telemetry` table) and served in the series feed.
-- **Discord identity split**: `discord_username` now holds the real @handle, new `discord_display_name` holds the display name, plus the opt-in `show_discord` flag gating third-party visibility.
-- Migrations: 141 (hit/block timelines + point times), 142 (team match telemetry), 143 (game-code indexes), 144 (discord display/show), 145 (ovt status data-fix).
-
-### Discord bot
-- **`/game <code>`** — paste a game ID copied in-game to get the full breakdown: score, per-player Hit %/Block %, FPS and ping (with graphs), cards, and gold/XP/Elo changes. (Feedback fixes: the score-progression graph reads in rounds, not doubled points, and a game with no recorded picks for a side now says so explicitly instead of dropping the field.)
-- **`!link` now stores both your @username and display name**, existing links are re-resolved on the next bot restart, and renames are tracked automatically by the half-hour role sync.
-
-### Server
-- Migration 146 flips `show_discord` to opt-out (default TRUE); recent-joins queue endpoints carry the searcher's Discord display name (gated on the opt-out).
-
-## v1.34.0 — 2026-07-22 — July 20-22 mega-batch
-
-### Client (mod)
-- **Accuracy & block counters restarted.** Hit % and Block % lifetime totals were reset to zero because the way they're counted changed this release (below) and old mixed-era totals couldn't be corrected per game. They rebuild cleanly from your next games on 1.34.0. If your Hit/Block shows "-" for a bit, that's why.
-- **Block % counting reworked** to the community-agreed rule: only your **right-click blocks** count. One right-click is one activation, and if that block (or its Echo / Shield Charge follow-ups) stops a bullet it counts as one success — so blocking is never over 100%. Passive auto-blocks (Abyssal Countdown, Shields Up, etc.) don't count toward the stat at all.
-- **Hit % kill-shot fix (finishing bugs #77/#80).** The round-ending kill shot was being dropped from your hit count, so high-damage builds (Careful Planning, Wind Up + Poison) could read absurdly low. Kill shots now count. Reload-spam clicks and card-spawned projectiles (EMP rings, etc.) no longer inflate your shots-fired.
-- **FPS & Latency in match history.** Ranked/Casual history rows now show both players' **FPS** and **Ping** (you / opponent). Hover the FPS number for a graph of frame-rate over the match; hover Ping for a graph of latency over the match. Handy for seeing whether a rough game was a real connection issue.
-- **Game-streak vs series-streak.** My Stats now shows both your ranked **game** streak and your **series** streak, each with its own Best, clearly labeled (they used to be mixed on one line).
-- **Rating History graph upgrade.** The leaderboard rating graph now spans the full panel, is taller, and has fixed reference lines at 1500 / 1600 / 1800 / 2000 / 2400 so you can read a player's tier at a glance. "Ranked:" record is now labeled "Ranked (series):".
-- **Achievements tab overhaul.** Sortable (Default / Rarity / Gold / Date earned — click again to reverse), the gold reward shows on every achievement even before you earn it, and clicking an achievement expands an inline list right under it of everyone who's earned it, in the order they got it, with their titles.
-- **RLFP Ping button** (top bar, between Search Ranked and Enable/Disable): pings the Ranked Looking For Player role in Discord with an optional message and an expiry (15m / 30m / 1h / 3h) so people can find you a ranked game even when your game's closed. Requires a linked Discord + ranked enabled; once per hour.
-- **Chromatic aberration toggle** in Settings — turn off the RGB color-fringing for crisper edges and a tiny FPS gain.
-- **Body-color shop previews**: each Body Color now shows a little character-shaped color swatch so you can see the real color, not just the name.
-- **Popup fixes**: on-screen messages no longer get clipped or vanish too fast, and achievement-unlock popups now show the requirement.
-- **Casual-downgrade notice** now fires reliably when your opponent has ranked disabled or isn't running the mod, so you always know a game recorded casual before investing 10 minutes.
-- **Matchmaking "Press Jump to Join" — mitigation (NOT confirmed fixed).** Added a fast detector that, when the dead-connection state is hit, restarts and drops you back into the quickplay queue automatically instead of stranding you on a dead screen, plus a guard for the underlying vanilla race. This still needs live verification — if you hit the dead screen again, please file a bug report with the log.
-- **Account verification (opt-in, staged).** The mod now proves Steam ownership to the server via a Steam auth ticket, closing the door on someone using the mod under a Steam ID that isn't theirs. Rolls out in log-only mode first.
-
-### Server
-- **Ranked series never expire.** An unfinished series now resumes whenever you next play that person, no matter how long later — so leaving mid-series can't save your rating. 52 old unfinished series were reattached. FAQ wording updated.
-- **Casual games no longer create phantom ranked series** (bug #78): a game against someone registered but not currently running the mod was being upgraded to a ranked series server-side. Fixed to require the opponent's mod to actually be live; the stray series was cleaned up.
-- **Opponent-tier gold & XP.** Ranked rewards now scale by your opponent's rank tier — Beginner ×1 up to Grand Master ×3 — on both gold **and** XP, win or lose. Winning a series doubles the series reward, and beating a current top-3 player doubles it again. Series losers now earn tier-scaled gold too. Level-up gold and the correct series gold now show in match history (previously under-reported).
-- **Achievement gold retiered** per difficulty (500 / 300 / 1000 tiers) with everyone's existing earns back-paid the difference.
-- **Sync tournament timing.** Force-start now schedules 10 minutes out through the normal notification flow (lock DM, countdown, banner) instead of starting instantly with no warning; stale-vote window tightened; a crash mid-BO3 no longer forfeits you out of the whole bracket, and an abandoned match can't wedge the tournament forever.
-- **Expanded match-review tools for admins**: additional per-match connection/performance signals (FPS/latency/freeze/heartbeat) recorded for admin review, with per-player baselines so consistent conditions aren't flagged.
-
-### v1.33.1 (rolled into this release) — bug reports 77-80
-- #77 / #80: hit-count kill-shot fix (see above).
-- #78: casual phantom-series fix (see above).
-- #79: matchmaking "Press Jump to Join" mitigation (see above — not confirmed fixed).
-
 ---
 
-*Older releases (v1.33.0 and earlier - the betting system, chat bridge, tournaments, cosmetics, and the road to here) are in the full changelog on GitHub: https://github.com/SidNDeed/SidsCompetitiveRounds/blob/main/docs/CHANGELOG.md*
+Older versions are listed in the full changelog on GitHub:
+https://github.com/SidNDeed/SidsCompetitiveRounds/blob/main/docs/CHANGELOG.md
