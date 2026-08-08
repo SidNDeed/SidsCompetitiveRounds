@@ -5626,28 +5626,75 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return dir;
         }
 
+        /// <summary>Aug 7 item 8: true when a filename (no extension) ends in
+        /// the __fN frame suffix — those are ANIMATION FRAMES, discovered by
+        /// their base file, and hidden from the picker so nobody uploads
+        /// frame 3 as a standalone static cosmetic.</summary>
+        private static bool IsFrameFileName(string nameNoExt)
+        {
+            int at = nameNoExt.LastIndexOf("__f", StringComparison.OrdinalIgnoreCase);
+            if (at < 0 || at + 3 >= nameNoExt.Length) return false;
+            for (int i = at + 3; i < nameNoExt.Length; i++)
+                if (!char.IsDigit(nameNoExt[i])) return false;
+            return true;
+        }
+
         private static void StartCosmeticUpload()
         {
             try
             {
                 string dir = CosmeticUploadDir();
-                var files = System.IO.Directory.GetFiles(dir, "*.png");
-                if (files.Length == 0)
+                var files = new List<string>();
+                foreach (var f in System.IO.Directory.GetFiles(dir, "*.png"))
+                    if (!IsFrameFileName(System.IO.Path.GetFileNameWithoutExtension(f)))
+                        files.Add(f);
+                // Aug 7 item 8: GIFs upload too — the server splits the frames.
+                files.AddRange(System.IO.Directory.GetFiles(dir, "*.gif"));
+                if (files.Count == 0)
                 {
                     CompetitiveUI.ShowNotification(
-                        "Opening the upload folder - drop a 512x512 transparent PNG in there.",
+                        "Opening the upload folder - drop a 512x512 transparent PNG (or a GIF) in there.",
                         new Color(1f, 0.8f, 0.4f), 6f);
                     Application.OpenURL("file:///" + dir.Replace('\\', '/'));
                     return;
                 }
-                var names = new string[files.Length];
-                var ids = new string[files.Length];
-                for (int i = 0; i < files.Length; i++)
+                var names = new string[files.Count];
+                var ids = new string[files.Count];
+                for (int i = 0; i < files.Count; i++)
                 { names[i] = System.IO.Path.GetFileName(files[i]); ids[i] = files[i]; }
-                CompetitiveUI.OpenArtistPicker("Pick the PNG to submit", names, ids,
+                // The picker title doubles as the naming-convention tip.
+                CompetitiveUI.OpenArtistPicker(
+                    "Pick the file to submit. Animated? Either drop a GIF, or name PNG frames wizard.png + wizard__f2.png + wizard__f3.png... and pick the base",
+                    names, ids,
                     ValidateAndNameCosmetic, actionLabel: "Next", showClear: false);
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] upload start: {ex.Message}"); }
+        }
+
+        /// <summary>One frame's full client-side validation (size / decodes /
+        /// 512x512 / real per-pixel alpha). Returns null when valid, else the
+        /// ShowArtistResult-ready error JSON.</summary>
+        private static string ValidateCosmeticPngBytes(byte[] bytes, string label)
+        {
+            if (bytes == null || bytes.Length > 1_200_000)
+                return $"{{\"detail\":\"{label}: PNG missing or too large - 1 MB max\"}}";
+            var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            bool loaded = tex.LoadImage(bytes);
+            int w = tex.width, h = tex.height;
+            int transparent = 0, total = 1;
+            if (loaded)
+            {
+                var px = tex.GetPixels32();
+                total = px.Length;
+                for (int i = 0; i < px.Length; i++) if (px[i].a < 250) transparent++;
+            }
+            UnityEngine.Object.Destroy(tex);
+            if (!loaded) return $"{{\"detail\":\"{label} is not a readable PNG\"}}";
+            if (w != 512 || h != 512)
+                return $"{{\"detail\":\"{label} must be exactly 512x512 - it is {w}x{h}\"}}";
+            if (transparent < total / 50)
+                return $"{{\"detail\":\"{label} has no transparent background - export with an alpha layer\"}}";
+            return null;
         }
 
         private static void ValidateAndNameCosmetic(string path)
@@ -5655,35 +5702,134 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             try
             {
                 if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return;
+                // Aug 7 item 8: GIFs take their own route (server-side split).
+                if (path.EndsWith(".gif", StringComparison.OrdinalIgnoreCase))
+                { ValidateAndNameGifCosmetic(path); return; }
                 var bytes = System.IO.File.ReadAllBytes(path);
-                if (bytes.Length > 1_200_000)
-                { ShowArtistResult(false, "{\"detail\":\"PNG too large - 1 MB max\"}"); return; }
-                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                bool loaded = tex.LoadImage(bytes);
-                int w = tex.width, h = tex.height;
-                int transparent = 0, total = 1;
-                if (loaded)
+                string err = ValidateCosmeticPngBytes(bytes, System.IO.Path.GetFileName(path));
+                if (err != null) { ShowArtistResult(false, err); return; }
+                // Aug 7 item 8: contiguous __fN siblings make it ANIMATED —
+                // same convention as the shipped catalog loader (base.png +
+                // base__f2.png + base__f3.png..., stop at the first gap).
+                var frames = new List<byte[]> { bytes };
+                string dir = System.IO.Path.GetDirectoryName(path);
+                string baseName = System.IO.Path.GetFileNameWithoutExtension(path);
+                for (int n = 2; n <= 16; n++)
                 {
-                    var px = tex.GetPixels32();
-                    total = px.Length;
-                    for (int i = 0; i < px.Length; i++) if (px[i].a < 250) transparent++;
+                    string fp = System.IO.Path.Combine(dir, $"{baseName}__f{n}.png");
+                    if (!System.IO.File.Exists(fp)) break;
+                    var fb = System.IO.File.ReadAllBytes(fp);
+                    string fErr = ValidateCosmeticPngBytes(fb, System.IO.Path.GetFileName(fp));
+                    if (fErr != null) { ShowArtistResult(false, fErr); return; }
+                    frames.Add(fb);
                 }
-                UnityEngine.Object.Destroy(tex);
-                if (!loaded)
-                { ShowArtistResult(false, "{\"detail\":\"that file is not a readable PNG\"}"); return; }
-                if (w != 512 || h != 512)
-                { ShowArtistResult(false, $"{{\"detail\":\"must be exactly 512x512 - this one is {w}x{h}\"}}"); return; }
-                if (transparent < total / 50)
-                { ShowArtistResult(false, "{\"detail\":\"no transparent background detected - export with an alpha layer\"}"); return; }
+                if (frames.Count > 1)
+                    CompetitiveUI.ShowNotification(
+                        $"{frames.Count} animation frames detected ({baseName}__f2..__f{frames.Count}).",
+                        new Color(0.6f, 0.9f, 1f), 5f);
                 CompetitiveUI.OpenArtistInput("Name your cosmetic", "Display name (letters/numbers, max 40)", "",
                     nm =>
                     {
                         if (string.IsNullOrEmpty(nm) || nm.Trim().Length < 2)
                         { ShowArtistResult(false, "{\"detail\":\"name too short\"}"); return; }
-                        PickSlotAndSubmitCosmetic(bytes, nm.Trim());
+                        if (frames.Count > 1) PickSlotAndSubmitAnimatedCosmetic(frames, nm.Trim());
+                        else PickSlotAndSubmitCosmetic(bytes, nm.Trim());
                     });
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] validate: {ex.Message}"); }
+        }
+
+        /// <summary>Aug 7 item 8: GIF route. Unity cannot decode GIFs, so the
+        /// flow is submit-first: the server splits the frames (fps from the
+        /// GIF's own timing), then frame 1 comes back and the artist sets the
+        /// SIZE on the real render via the placement modal (updating the
+        /// pending submission — same endpoint the Adjust Placement flow uses).</summary>
+        private static void ValidateAndNameGifCosmetic(string path)
+        {
+            try
+            {
+                var bytes = System.IO.File.ReadAllBytes(path);
+                if (bytes.Length > 2_200_000)
+                { ShowArtistResult(false, "{\"detail\":\"GIF too large - about 2 MB max\"}"); return; }
+                if (bytes.Length < 6 || bytes[0] != (byte)'G' || bytes[1] != (byte)'I' || bytes[2] != (byte)'F')
+                { ShowArtistResult(false, "{\"detail\":\"that file is not a GIF\"}"); return; }
+                CompetitiveUI.OpenArtistInput("Name your cosmetic", "Display name (letters/numbers, max 40)", "",
+                    nm =>
+                    {
+                        if (string.IsNullOrEmpty(nm) || nm.Trim().Length < 2)
+                        { ShowArtistResult(false, "{\"detail\":\"name too short\"}"); return; }
+                        string name = nm.Trim();
+                        CompetitiveUI.OpenArtistPicker($"What type of cosmetic is '{name}'?",
+                            new[] { "Eyes", "Mouth", "Detail (hat / accessory)" },
+                            new[] { "eyes", "mouth", "detail" },
+                            slot =>
+                            {
+                                if (string.IsNullOrEmpty(slot)) return;
+                                CompetitiveUI.OpenConfirm(
+                                    $"Upload '{name}' as an ANIMATED cosmetic?\n\nThe server splits the GIF into frames at the GIF's own speed; you set the size on the next screen once the first frame comes back.",
+                                    () =>
+                                {
+                                    string sid = MatchTracker.LocalSteamId;
+                                    ApiClient.ArtistSubmitCosmeticGif(sid, name, slot,
+                                        Convert.ToBase64String(bytes), 1.30f, 0f, 0f,
+                                        (ok, subId, resp) =>
+                                    {
+                                        if (!ok || subId <= 0) { ShowArtistResult(false, resp); return; }
+                                        ApiClient.FetchCosmeticSubmissionPreview(sid, subId, (pOk, sub, _) =>
+                                        {
+                                            string png64 = pOk ? sub?.png_base64 : null;
+                                            if (string.IsNullOrEmpty(png64))
+                                            {
+                                                ShowArtistResult(true,
+                                                    $"'{name}' uploaded and split. Use Adjust Placement to set its size.");
+                                                return;
+                                            }
+                                            byte[] f1;
+                                            try { f1 = Convert.FromBase64String(png64); }
+                                            catch { f1 = null; }
+                                            if (f1 == null)
+                                            {
+                                                ShowArtistResult(true,
+                                                    $"'{name}' uploaded and split. Use Adjust Placement to set its size.");
+                                                return;
+                                            }
+                                            CompetitiveUI.OpenCosmeticTestPreview(f1, name, slot,
+                                                (sc, ox, oy) => ApiClient.ArtistUpdateCosmeticPlacement(
+                                                    sid, subId, 1, sc, ox, oy,
+                                                    (uOk, uResp) => ShowArtistResult(uOk,
+                                                        uOk ? $"'{name}' submitted for review (animated - speed comes from the GIF)."
+                                                            : uResp)),
+                                                1.30f, 0f, 0f, "Set size");
+                                        });
+                                    });
+                                });
+                            }, actionLabel: "Next", showClear: false);
+                    });
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] gif validate: {ex.Message}"); }
+        }
+
+        private static void PickSlotAndSubmitAnimatedCosmetic(List<byte[]> frames, string name)
+        {
+            CompetitiveUI.OpenArtistPicker($"What type of cosmetic is '{name}'? ({frames.Count} frames)",
+                new[] { "Eyes", "Mouth", "Detail (hat / accessory)" },
+                new[] { "eyes", "mouth", "detail" },
+                slot =>
+                {
+                    if (string.IsNullOrEmpty(slot)) return;
+                    CompetitiveUI.OpenCosmeticAnimTestPreview(frames, name, slot,
+                        (renderScale, renderOffsetX, renderOffsetY, fps) =>
+                    {
+                        var b64s = new List<string>(frames.Count);
+                        foreach (var f in frames) b64s.Add(Convert.ToBase64String(f));
+                        ApiClient.ArtistSubmitCosmeticAnimated(
+                            MatchTracker.LocalSteamId, name, slot, b64s, fps,
+                            renderScale, renderOffsetX, renderOffsetY,
+                            (ok, resp) => ShowArtistResult(ok,
+                                ok ? $"'{name}' submitted ({frames.Count} frames @ {fps:0.0}fps) for review."
+                                   : resp));
+                    });
+                }, actionLabel: "Preview", showClear: false);
         }
 
         private static void PickSlotAndSubmitCosmetic(byte[] bytes, string name)

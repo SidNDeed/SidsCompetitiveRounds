@@ -3477,6 +3477,12 @@ namespace CompetitiveRounds
         private static bool cosTestViewOnly = false;
         private static Sprite[] cosTestFrames = null;
         private static float cosTestFps = 2.5f;
+        // Aug 7 item 8: animated ARTIST upload preview — these textures are
+        // OURS (decoded from the artist's files) and are destroyed on close;
+        // fps is artist-editable via a slider and rides the submit callback.
+        private static Texture2D[] cosTestOwnedFrames = null;
+        private static float cosTestFpsEdit = 2.5f;
+        private static Action<float, float, float, float> cosTestOnSubmitAnim = null;
         private const float COS_BODY_SOURCE_PX = 662.5f;
         // CharacterItem.offset is expressed before the face-parent's 0.16
         // scale. A 1.06-world-unit body is therefore about 6.625 local units.
@@ -3535,7 +3541,55 @@ namespace CompetitiveRounds
             cosTestOnSubmit = onSubmit;
             cosTestViewOnly = false;
             cosTestFrames = null;
+            DestroyOwnedFrames();
+            cosTestOnSubmitAnim = null;
             cosTestOpen = true;
+        }
+
+        /// <summary>Aug 7 item 8: animated ARTIST preview — all frames decoded
+        /// locally (multi-PNG path), cycling live, with an fps slider whose
+        /// value rides the submit callback (scale, offsetX, offsetY, fps).</summary>
+        public static void OpenCosmeticAnimTestPreview(List<byte[]> framePngs, string name, string slot,
+            Action<float, float, float, float> onSubmit, float initialFps = 2.5f)
+        {
+            if (framePngs == null || framePngs.Count < 2) return;
+            var frames = new Texture2D[framePngs.Count];
+            for (int i = 0; i < framePngs.Count; i++)
+            {
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (framePngs[i] == null || !tex.LoadImage(framePngs[i]))
+                {
+                    try { UnityEngine.Object.Destroy(tex); } catch { }
+                    for (int k = 0; k < i; k++) { try { UnityEngine.Object.Destroy(frames[k]); } catch { } }
+                    ShowNotification("Could not decode one of the animation frames.", new Color(1f, 0.45f, 0.4f), 5f);
+                    return;
+                }
+                frames[i] = tex;
+            }
+            // Reuse the static open for all the shared state (it clears any
+            // previous animated state), then layer the animation on top. The
+            // static path already decoded frame 1 into cosTestTex; the owned
+            // array is the cycling source and is destroyed on close.
+            OpenCosmeticTestPreview(framePngs[0], name, slot, null);
+            if (!cosTestOpen)
+            {
+                foreach (var f in frames) { try { UnityEngine.Object.Destroy(f); } catch { } }
+                return;
+            }
+            cosTestOwnedFrames = frames;
+            cosTestFpsEdit = Mathf.Clamp(initialFps, 0.5f, 15f);
+            cosTestOnSubmitAnim = onSubmit;
+        }
+
+        private static void DestroyOwnedFrames()
+        {
+            if (cosTestOwnedFrames == null) return;
+            foreach (var f in cosTestOwnedFrames)
+            {
+                if (f == null || ReferenceEquals(f, cosTestTex)) continue;  // cosTestTex has its own Destroy
+                try { UnityEngine.Object.Destroy(f); } catch { }
+            }
+            cosTestOwnedFrames = null;
         }
 
         /// <summary>Aug 7 item 10: view-only body preview for any BUNDLED
@@ -3577,12 +3631,16 @@ namespace CompetitiveRounds
         private static void CloseCosmeticTestPreview(bool submit)
         {
             var cb = submit ? cosTestOnSubmit : null;
+            var cbAnim = submit ? cosTestOnSubmitAnim : null;
+            float fpsOut = Mathf.Clamp(cosTestFpsEdit, 0.5f, 15f);
             float scale = Mathf.Clamp(cosTestScale, 0.50f, 2.25f);
             cosTestOpen = false;
             cosTestDragging = false;
             cosTestOnSubmit = null;
+            cosTestOnSubmitAnim = null;
             cosTestViewOnly = false;
             cosTestFrames = null;   // shared catalog sprites — do NOT destroy
+            DestroyOwnedFrames();   // artist-upload frame decodes — OURS
             try { if (cosTestTex != null) UnityEngine.Object.Destroy(cosTestTex); } catch { }
             cosTestTex = null;
             cosTestName = "";
@@ -3599,6 +3657,12 @@ namespace CompetitiveRounds
                 // the modal actually edits.
                 try { cb(scale, initialOffset.x, initialOffset.y); }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] preview submit: {ex.Message}"); }
+            }
+            if (cbAnim != null)
+            {
+                // Animated submit: same placement contract + the edited fps.
+                try { cbAnim(scale, initialOffset.x, initialOffset.y, fpsOut); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] anim preview submit: {ex.Message}"); }
             }
         }
 
@@ -3702,6 +3766,14 @@ namespace CompetitiveRounds
                 var ft = cosTestFrames[fi] != null ? cosTestFrames[fi].texture : null;
                 if (ft != null) drawTex = ft;
             }
+            // Aug 7 item 8: artist animated upload — cycle the OWNED frames at
+            // the fps the slider currently holds, so the artist sees exactly
+            // what they are submitting.
+            else if (cosTestOwnedFrames != null && cosTestOwnedFrames.Length > 1)
+            {
+                int fi = (int)(Time.unscaledTime * Mathf.Max(0.5f, cosTestFpsEdit)) % cosTestOwnedFrames.Length;
+                if (cosTestOwnedFrames[fi] != null) drawTex = cosTestOwnedFrames[fi];
+            }
             DrawCosmeticScalePreview(preview, drawTex, cosTestScale, cosTestOffset);
             HandleCosmeticPlacementDrag(
                 preview, ref cosTestOffset, ref cosTestDragging, ref cosTestLastMouse);
@@ -3744,12 +3816,27 @@ namespace CompetitiveRounds
 
             GUI.Label(new Rect(rx, y + 218, rw, 22),
                 $"Preview offset: {cosTestOffset.x:F2}, {cosTestOffset.y:F2} (not saved)", adminLabelStyle);
-            GUI.Label(new Rect(rx, y + 244, rw, 22), "Useful scale presets:", adminLabelStyle);
-            float bw = (rw - 8f) / 2f;
-            if (GUI.Button(new Rect(rx, y + 268, bw, 28), "1.00  compact")) cosTestScale = 1.00f;
-            if (GUI.Button(new Rect(rx + bw + 8, y + 268, bw, 28), "1.30  body")) cosTestScale = 1.30f;
-            if (GUI.Button(new Rect(rx, y + 302, bw, 28), "1.70  cape")) cosTestScale = 1.70f;
-            if (GUI.Button(new Rect(rx + bw + 8, y + 302, bw, 28), "2.10  wings")) cosTestScale = 2.10f;
+            if (cosTestOwnedFrames != null && cosTestOwnedFrames.Length > 1)
+            {
+                // Aug 7 item 8: the artist sets the animation speed here — it
+                // rides the submission. Replaces the scale presets (the slider
+                // and +/- still cover scale).
+                GUI.Label(new Rect(rx, y + 244, rw, 22),
+                    $"Frame rate: {cosTestFpsEdit:0.0} fps  ({cosTestOwnedFrames.Length} frames, "
+                    + $"loop {cosTestOwnedFrames.Length / Mathf.Max(0.5f, cosTestFpsEdit):0.0}s)",
+                    adminLabelStyle);
+                cosTestFpsEdit = GUI.HorizontalSlider(new Rect(rx, y + 270, rw, 22), cosTestFpsEdit, 0.5f, 15f);
+                cosTestFpsEdit = Mathf.Round(cosTestFpsEdit * 10f) / 10f;
+            }
+            else
+            {
+                GUI.Label(new Rect(rx, y + 244, rw, 22), "Useful scale presets:", adminLabelStyle);
+                float bw = (rw - 8f) / 2f;
+                if (GUI.Button(new Rect(rx, y + 268, bw, 28), "1.00  compact")) cosTestScale = 1.00f;
+                if (GUI.Button(new Rect(rx + bw + 8, y + 268, bw, 28), "1.30  body")) cosTestScale = 1.30f;
+                if (GUI.Button(new Rect(rx, y + 302, bw, 28), "1.70  cape")) cosTestScale = 1.70f;
+                if (GUI.Button(new Rect(rx + bw + 8, y + 302, bw, 28), "2.10  wings")) cosTestScale = 2.10f;
+            }
             GUI.Label(new Rect(rx, y + 336, rw, 72),
                 (cosTestIsRevision
                     ? "Changing scale or placement sends this cosmetic back to admin review. Its last approved placement stays active meanwhile. "
@@ -3805,6 +3892,10 @@ namespace CompetitiveRounds
             cosReviewOpen = false;
             foreach (var t in cosReviewTex.Values) { try { if (t != null) UnityEngine.Object.Destroy(t); } catch { } }
             cosReviewTex.Clear();
+            // Aug 7 item 8: animation frames too (index 0 aliases the frame-1
+            // texture destroyed above — DropCosReviewFrames skips it).
+            var animIds = new List<int>(cosReviewFrames.Keys);
+            foreach (int id in animIds) DropCosReviewFrames(id);
             cosReviewSubs = null;
             cosReviewDenialReason = "";
             cosReviewDragging = false;
@@ -3831,9 +3922,57 @@ namespace CompetitiveRounds
             cosReviewSubs.RemoveAll(q => q.id == id);
             Texture2D t;
             if (cosReviewTex.TryGetValue(id, out t)) { try { if (t != null) UnityEngine.Object.Destroy(t); } catch { } cosReviewTex.Remove(id); }
+            DropCosReviewFrames(id);
             if (cosReviewSubs.Count == 0) cosReviewStatus = "All reviewed!";
             cosReviewDenialReason = "";
             cosReviewDragging = false;
+        }
+
+        // ── Aug 7 item 8: animated review preview ────────────────────────────
+        // Frames 2..N are fetched LAZILY per submission (the list response
+        // deliberately carries only frame 1) and decoded once; index 0 aliases
+        // the frame-1 texture owned by cosReviewTex, so cleanup skips it.
+        private static readonly Dictionary<int, Texture2D[]> cosReviewFrames =
+            new Dictionary<int, Texture2D[]>();
+
+        private static void DropCosReviewFrames(int id)
+        {
+            Texture2D[] frames;
+            if (!cosReviewFrames.TryGetValue(id, out frames)) return;
+            for (int i = 1; i < frames.Length; i++)   // 0 = cosReviewTex's texture
+                { try { if (frames[i] != null) UnityEngine.Object.Destroy(frames[i]); } catch { } }
+            cosReviewFrames.Remove(id);
+        }
+
+        private static Texture2D CosReviewFrameTexture(ApiClient.CosmeticSubmission s, Texture2D frame1)
+        {
+            if (s == null || s.frame_count <= 1 || frame1 == null) return frame1;
+            Texture2D[] frames;
+            if (!cosReviewFrames.TryGetValue(s.id, out frames))
+            {
+                // Kick the lazy fetch (deduped inside); build the local decode
+                // set only once the payload has arrived.
+                ApiClient.FetchCosmeticFrames(MatchTracker.LocalSteamId, s.id);
+                List<string> b64s;
+                if (!ApiClient.CachedCosmeticFrames.TryGetValue(s.id, out b64s) || b64s.Count == 0)
+                    return frame1;
+                frames = new Texture2D[b64s.Count + 1];
+                frames[0] = frame1;
+                for (int i = 0; i < b64s.Count; i++)
+                {
+                    try
+                    {
+                        var t = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                        if (t.LoadImage(Convert.FromBase64String(b64s[i]))) frames[i + 1] = t;
+                        else UnityEngine.Object.Destroy(t);
+                    }
+                    catch { }
+                }
+                cosReviewFrames[s.id] = frames;
+            }
+            float fps = s.anim_fps > 0f ? s.anim_fps : 2.5f;
+            int fi = (int)(Time.unscaledTime * fps) % frames.Length;
+            return frames[fi] != null ? frames[fi] : frame1;
         }
 
         private static string CosTrunc(string s, int n) => string.IsNullOrEmpty(s) ? "" : (s.Length <= n ? s : s.Substring(0, n));
@@ -3879,12 +4018,17 @@ namespace CompetitiveRounds
             var s = subs[cosReviewIdx];
             int approxKb = (s.png_base64 != null ? s.png_base64.Length * 3 / 4 : 0) / 1024;
             string reviewKind = s.review_kind == "placement" ? "PLACEMENT CHANGE" : "NEW COSMETIC";
+            // Aug 7 item 8: an animated submission announces itself — an admin
+            // approving one must see it MOVE (#161's cycling-preview rule).
+            string animTag = s.frame_count > 1
+                ? $"  ANIMATED {s.frame_count}f @ {(s.anim_fps > 0f ? s.anim_fps : 2.5f):0.0}fps"
+                : "";
             GUI.Label(new Rect(x + 12, y + 164, w - 24, 22),
-                $"[{reviewKind}]  #{s.id} rev {s.placement_revision}  '{s.name}' ({s.slot}) by {s.artist_name}  {approxKb} KB   -   {cosReviewIdx + 1}/{subs.Count}",
+                $"[{reviewKind}]{animTag}  #{s.id} rev {s.placement_revision}  '{s.name}' ({s.slot}) by {s.artist_name}  {approxKb} KB   -   {cosReviewIdx + 1}/{subs.Count}",
                 new GUIStyle(adminLabelStyle) { fontStyle = FontStyle.Bold });
             float prevSize = Mathf.Clamp(h - 320f, 170f, 235f);
             Rect prev = new Rect(x + 12, y + 192, prevSize, prevSize);
-            var tex = CosReviewTexture(s);
+            var tex = CosReviewFrameTexture(s, CosReviewTexture(s));
             if (s.render_scale <= 0f) s.render_scale = 1f;
             // Adversarial-review correction (item 5): the drag lives in a LOCAL
             // preview offset and is never written back onto the submission —

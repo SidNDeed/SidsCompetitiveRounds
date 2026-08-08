@@ -2468,6 +2468,9 @@ namespace CompetitiveRounds
             public string name, slot, status, review_note, shop_sku, created_at;
             public string artist_name, artist_steam_id;   // admin list only
             public string png_base64;                      // admin list / targeted artist preview
+            // Aug 7 item 8: animation metadata (1/0 = static).
+            public int frame_count = 1;
+            public float anim_fps;
         }
         public class CosmeticReleaseCandidate
         {
@@ -2572,6 +2575,223 @@ namespace CompetitiveRounds
             }));
         }
 
+        // ── Aug 7 item 8: animated submissions ───────────────────────────────
+        /// <summary>Multi-PNG animated upload: a signed v3 START (frame 1 +
+        /// the animation triple), then one POST PER EXTRA FRAME (~1.6MB each —
+        /// a single 16-frame body would hit the 16MB app gate and the 10s
+        /// retry timeout), then a FINALIZE that proves the set is complete.
+        /// The whole chain reuses one persistent request id (#170/#172) so a
+        /// crash mid-sequence resumes instead of duplicating.</summary>
+        public static void ArtistSubmitCosmeticAnimated(string steamId, string name, string slot,
+            List<string> frameB64s, float fps, float renderScale, float renderOffsetX, float renderOffsetY,
+            Action<bool, string> callback = null)
+        {
+            if (frameB64s == null || frameB64s.Count < 2)
+            { callback?.Invoke(false, "{\"detail\":\"animated upload needs 2+ frames\"}"); return; }
+            Plugin.Instance.StartCoroutine(DoSubmitAnimated(steamId, name, slot, frameB64s, fps,
+                renderScale, renderOffsetX, renderOffsetY, callback));
+        }
+
+        private static IEnumerator DoSubmitAnimated(string steamId, string name, string slot,
+            List<string> frameB64s, float fps, float renderScale, float renderOffsetX, float renderOffsetY,
+            Action<bool, string> callback)
+        {
+            int scaleCenti, offsetXMilli, offsetYMilli;
+            QuantizeCosmeticPlacement(renderScale, renderOffsetX, renderOffsetY,
+                out scaleCenti, out offsetXMilli, out offsetYMilli);
+            int fpsCenti = Mathf.Clamp(Mathf.RoundToInt(fps * 100f), 50, 1500);
+            string nameHash = ComputeSha256Hex(name ?? "");
+            string pngHash = ComputeSha256Hex(frameB64s[0]);
+            var frameHashes = new List<string>(frameB64s.Count);
+            var cat = new StringBuilder();
+            foreach (var f in frameB64s) { string h = ComputeSha256Hex(f); frameHashes.Add(h); cat.Append(h); }
+            // frames_hash covers every frame in order — the server folds it
+            // into the dedup fingerprint so an animation differing only in
+            // frame 2+ is a NEW submission, not a dedup echo.
+            string framesHash = ComputeSha256Hex(cat.ToString());
+            const string retryHashKey = "cr_cosmetic_anim_retry_hash";
+            const string retryIdKey = "cr_cosmetic_anim_retry_id";
+            string retryHash = ComputeSha256Hex(
+                $"{steamId}:{slot}:anim:{scaleCenti}:{offsetXMilli}:{offsetYMilli}:{fpsCenti}:{nameHash}:{framesHash}");
+            string requestId = "";
+            if (PlayerPrefs.GetString(retryHashKey, "") == retryHash)
+                requestId = PlayerPrefs.GetString(retryIdKey, "");
+            if (!Regex.IsMatch(requestId ?? "", "^[0-9a-f]{32}$"))
+            {
+                requestId = Guid.NewGuid().ToString("N");
+                PlayerPrefs.SetString(retryHashKey, retryHash);
+                PlayerPrefs.SetString(retryIdKey, requestId);
+                PlayerPrefs.Save();
+            }
+            string canonical = $"artist:{steamId}:submit-v3:{requestId}:{slot}:{frameB64s[0].Length}:"
+                             + $"{scaleCenti}:{offsetXMilli}:{offsetYMilli}:{nameHash}:{pngHash}:"
+                             + $"{frameB64s.Count}:{fpsCenti}:{framesHash}";
+            string sig = ComputeHmacHex(canonical);
+            string scaleJson = (scaleCenti / 100f).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+            string offsetXJson = (offsetXMilli / 1000f).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+            string offsetYJson = (offsetYMilli / 1000f).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+            string startBody = "{\"steam_id\":\"" + Escape(steamId) + "\",\"name\":\"" + JsonEscapeFull(name)
+                        + "\",\"slot\":\"" + slot + "\",\"png_base64\":\"" + frameB64s[0]
+                        + "\",\"signature_version\":3"
+                        + ",\"upload_request_id\":\"" + requestId + "\""
+                        + ",\"scale_centi\":" + scaleCenti
+                        + ",\"offset_x_milli\":" + offsetXMilli
+                        + ",\"offset_y_milli\":" + offsetYMilli
+                        + ",\"render_scale\":" + scaleJson
+                        + ",\"render_offset_x\":" + offsetXJson
+                        + ",\"render_offset_y\":" + offsetYJson
+                        + ",\"frame_count\":" + frameB64s.Count
+                        + ",\"anim_fps_centi\":" + fpsCenti
+                        + ",\"frames_hash\":\"" + framesHash + "\""
+                        + ",\"sig\":\"" + sig + "\"}";
+            bool stepOk = false; string stepResp = null;
+            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                $"{baseUrl}/api/v1/artist/submit-cosmetic", startBody,
+                (ok, resp) => { stepOk = ok; stepResp = resp; }));
+            if (!stepOk) { callback?.Invoke(false, stepResp); yield break; }
+            int subId = ExtractJsonInt(stepResp, "id");
+            if (subId <= 0) { callback?.Invoke(false, stepResp); yield break; }
+            Plugin.Log.LogInfo($"[COSMETIC] animated start '{name}' -> #{subId}, uploading {frameB64s.Count - 1} extra frame(s)");
+            for (int i = 1; i < frameB64s.Count; i++)
+            {
+                string fSig = ComputeHmacHex(
+                    $"artist:{steamId}:submit-frame:{subId}:{i + 1}:{frameB64s[i].Length}:{frameHashes[i]}");
+                string fBody = "{\"steam_id\":\"" + Escape(steamId) + "\""
+                             + ",\"submission_id\":" + subId
+                             + ",\"frame_no\":" + (i + 1)
+                             + ",\"png_base64\":\"" + frameB64s[i] + "\""
+                             + ",\"sig\":\"" + fSig + "\"}";
+                stepOk = false; stepResp = null;
+                yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                    $"{baseUrl}/api/v1/artist/submit-cosmetic-frame", fBody,
+                    (ok, resp) => { stepOk = ok; stepResp = resp; }));
+                if (!stepOk)
+                {
+                    // The retry keys survive — repeating the SAME upload later
+                    // resumes this submission id and re-sends only what the
+                    // server is missing (frame POSTs are idempotent).
+                    callback?.Invoke(false, stepResp);
+                    yield break;
+                }
+            }
+            string finSig = ComputeHmacHex($"artist:{steamId}:submit-finalize:{subId}");
+            string finBody = "{\"steam_id\":\"" + Escape(steamId) + "\""
+                           + ",\"submission_id\":" + subId
+                           + ",\"sig\":\"" + finSig + "\"}";
+            stepOk = false; stepResp = null;
+            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                $"{baseUrl}/api/v1/artist/submit-cosmetic-finalize", finBody,
+                (ok, resp) => { stepOk = ok; stepResp = resp; }));
+            if (stepOk)
+            {
+                if (PlayerPrefs.GetString(retryHashKey, "") == retryHash)
+                {
+                    PlayerPrefs.DeleteKey(retryHashKey);
+                    PlayerPrefs.DeleteKey(retryIdKey);
+                    PlayerPrefs.Save();
+                }
+                FetchMySubmissions(steamId);
+            }
+            callback?.Invoke(stepOk, stepResp);
+        }
+
+        /// <summary>GIF upload — the SERVER splits frames (Unity has no GIF
+        /// decoder) and computes fps from the GIF's own durations (#317).
+        /// Returns the new submission id so the caller can fetch frame 1 back
+        /// and open the placement modal on the real render.</summary>
+        public static void ArtistSubmitCosmeticGif(string steamId, string name, string slot,
+            string gifB64, float renderScale, float renderOffsetX, float renderOffsetY,
+            Action<bool, int, string> callback = null)
+        {
+            int scaleCenti, offsetXMilli, offsetYMilli;
+            QuantizeCosmeticPlacement(renderScale, renderOffsetX, renderOffsetY,
+                out scaleCenti, out offsetXMilli, out offsetYMilli);
+            string nameHash = ComputeSha256Hex(name ?? "");
+            string gifHash = ComputeSha256Hex(gifB64 ?? "");
+            const string retryHashKey = "cr_cosmetic_gif_retry_hash";
+            const string retryIdKey = "cr_cosmetic_gif_retry_id";
+            string retryHash = ComputeSha256Hex(
+                $"{steamId}:{slot}:gif:{scaleCenti}:{offsetXMilli}:{offsetYMilli}:{nameHash}:{gifHash}");
+            string requestId = "";
+            if (PlayerPrefs.GetString(retryHashKey, "") == retryHash)
+                requestId = PlayerPrefs.GetString(retryIdKey, "");
+            if (!Regex.IsMatch(requestId ?? "", "^[0-9a-f]{32}$"))
+            {
+                requestId = Guid.NewGuid().ToString("N");
+                PlayerPrefs.SetString(retryHashKey, retryHash);
+                PlayerPrefs.SetString(retryIdKey, requestId);
+                PlayerPrefs.Save();
+            }
+            string canonical = $"artist:{steamId}:submit-gif:{requestId}:{slot}:{gifB64.Length}:"
+                             + $"{scaleCenti}:{offsetXMilli}:{offsetYMilli}:{nameHash}:{gifHash}";
+            string sig = ComputeHmacHex(canonical);
+            string scaleJson = (scaleCenti / 100f).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+            string offsetXJson = (offsetXMilli / 1000f).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+            string offsetYJson = (offsetYMilli / 1000f).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+            string body = "{\"steam_id\":\"" + Escape(steamId) + "\",\"name\":\"" + JsonEscapeFull(name)
+                        + "\",\"slot\":\"" + slot + "\",\"gif_base64\":\"" + gifB64
+                        + "\",\"upload_request_id\":\"" + requestId + "\""
+                        + ",\"scale_centi\":" + scaleCenti
+                        + ",\"offset_x_milli\":" + offsetXMilli
+                        + ",\"offset_y_milli\":" + offsetYMilli
+                        + ",\"render_scale\":" + scaleJson
+                        + ",\"render_offset_x\":" + offsetXJson
+                        + ",\"render_offset_y\":" + offsetYJson
+                        + ",\"sig\":\"" + sig + "\"}";
+            Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                $"{baseUrl}/api/v1/artist/submit-cosmetic-gif", body, (ok, resp) =>
+            {
+                int id = ok ? ExtractJsonInt(resp, "id") : 0;
+                Plugin.Log.LogInfo($"[COSMETIC] gif submit '{name}': ok={ok} id={id}");
+                if (ok && id > 0)
+                {
+                    if (PlayerPrefs.GetString(retryHashKey, "") == retryHash)
+                    {
+                        PlayerPrefs.DeleteKey(retryHashKey);
+                        PlayerPrefs.DeleteKey(retryIdKey);
+                        PlayerPrefs.Save();
+                    }
+                    FetchMySubmissions(steamId);
+                }
+                callback?.Invoke(ok, id, resp);
+            }));
+        }
+
+        /// <summary>Admin: lazy per-submission frame fetch for the animated
+        /// review preview (frames 2..N; frame 1 rides the list row).</summary>
+        public static readonly Dictionary<int, List<string>> CachedCosmeticFrames =
+            new Dictionary<int, List<string>>();
+        private static readonly HashSet<int> _cosmeticFramesRequested = new HashSet<int>();
+        public static void FetchCosmeticFrames(string adminSteamId, int submissionId)
+        {
+            if (submissionId <= 0 || _cosmeticFramesRequested.Contains(submissionId)) return;
+            _cosmeticFramesRequested.Add(submissionId);
+            string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:cosmetic-frames:{submissionId}");
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/admin/cosmetic-frames?admin_steam_id={Escape(adminSteamId)}"
+                + $"&submission_id={submissionId}&sig={sig}",
+                (ok, resp) =>
+                {
+                    if (!ok) { _cosmeticFramesRequested.Remove(submissionId); return; }
+                    try
+                    {
+                        var frames = new List<string>();
+                        int arr = resp.IndexOf("\"frames\"", StringComparison.Ordinal);
+                        int open = arr >= 0 ? resp.IndexOf('[', arr) : -1;
+                        int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
+                        if (close > open)
+                            foreach (var obj in SliceTopLevelObjects(resp.Substring(open, close - open + 1)))
+                            {
+                                string b64 = ExtractJsonString(obj, "png_base64");
+                                if (!string.IsNullOrEmpty(b64)) frames.Add(b64);
+                            }
+                        CachedCosmeticFrames[submissionId] = frames;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] frames parse: {ex.Message}"); }
+                }));
+        }
+
         private static CosmeticSubmission ParseCosmeticSubmissionObject(string chunk)
         {
             var s = new CosmeticSubmission();
@@ -2579,6 +2799,8 @@ namespace CompetitiveRounds
             s.name = ExtractJsonString(chunk, "name");
             s.slot = ExtractJsonString(chunk, "slot");
             s.status = ExtractJsonString(chunk, "status");
+            s.frame_count = Math.Max(1, ExtractJsonInt(chunk, "frame_count"));
+            s.anim_fps = ExtractJsonFloat(chunk, "anim_fps");
             s.review_note = ExtractJsonString(chunk, "review_note");
             s.shop_sku = ExtractJsonString(chunk, "shop_sku");
             s.artist_steam_id = ExtractJsonString(chunk, "artist_steam_id");
