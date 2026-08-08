@@ -3985,28 +3985,35 @@ namespace CompetitiveRounds
         private static Texture2D CosReviewFrameTexture(ApiClient.CosmeticSubmission s, Texture2D frame1)
         {
             if (s == null || s.frame_count <= 1 || frame1 == null) return frame1;
+            // Kick the lazy fetch (deduped inside). Codex r1 f11: frames now
+            // arrive ONE REQUEST AT A TIME — grow the decoded cycle as each
+            // lands instead of waiting for (or ever holding) one giant payload.
+            ApiClient.FetchCosmeticFrames(MatchTracker.LocalSteamId, s.id);
+            List<string> b64s;
+            ApiClient.CachedCosmeticFrames.TryGetValue(s.id, out b64s);
+            int avail = b64s != null ? b64s.Count : 0;
             Texture2D[] frames;
-            if (!cosReviewFrames.TryGetValue(s.id, out frames))
+            bool have = cosReviewFrames.TryGetValue(s.id, out frames);
+            if (!have || frames.Length != avail + 1)
             {
-                // Kick the lazy fetch (deduped inside); build the local decode
-                // set only once the payload has arrived.
-                ApiClient.FetchCosmeticFrames(MatchTracker.LocalSteamId, s.id);
-                List<string> b64s;
-                if (!ApiClient.CachedCosmeticFrames.TryGetValue(s.id, out b64s) || b64s.Count == 0)
-                    return frame1;
-                frames = new Texture2D[b64s.Count + 1];
-                frames[0] = frame1;
-                for (int i = 0; i < b64s.Count; i++)
+                if (avail == 0) return frame1;
+                var next = new Texture2D[avail + 1];
+                next[0] = frame1;   // index 0 aliases cosReviewTex's texture
+                for (int i = 0; i < avail; i++)
                 {
+                    // Already-decoded frames carry over; only the new ones decode.
+                    if (have && i + 1 < frames.Length && frames[i + 1] != null)
+                    { next[i + 1] = frames[i + 1]; continue; }
                     try
                     {
                         var t = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                        if (t.LoadImage(Convert.FromBase64String(b64s[i]))) frames[i + 1] = t;
+                        if (t.LoadImage(Convert.FromBase64String(b64s[i]))) next[i + 1] = t;
                         else UnityEngine.Object.Destroy(t);
                     }
                     catch { }
                 }
-                cosReviewFrames[s.id] = frames;
+                cosReviewFrames[s.id] = next;
+                frames = next;
             }
             float fps = s.anim_fps > 0f ? s.anim_fps : 2.5f;
             int fi = (int)(Time.unscaledTime * fps) % frames.Length;
@@ -4061,6 +4068,15 @@ namespace CompetitiveRounds
             string animTag = s.frame_count > 1
                 ? $"  ANIMATED {s.frame_count}f @ {(s.anim_fps > 0f ? s.anim_fps : 2.5f):0.0}fps"
                 : "";
+            // Codex r1 f11: frames stream in one request at a time — say how
+            // much of the cycle is on screen, and flag a partial fetch.
+            if (s.frame_count > 1
+                && ApiClient.CosmeticFrameProgress.TryGetValue(s.id, out var fprog)
+                && fprog != null && fprog.total > 0 && (!fprog.done || fprog.failed))
+            {
+                animTag += $"  ({fprog.fetched + 1}/{fprog.total + 1} frames"
+                         + (fprog.failed ? " - fetch incomplete)" : "...)");
+            }
             GUI.Label(new Rect(x + 12, y + 164, w - 24, 22),
                 $"[{reviewKind}]{animTag}  #{s.id} rev {s.placement_revision}  '{s.name}' ({s.slot}) by {s.artist_name}  {approxKb} KB   -   {cosReviewIdx + 1}/{subs.Count}",
                 new GUIStyle(adminLabelStyle) { fontStyle = FontStyle.Bold });

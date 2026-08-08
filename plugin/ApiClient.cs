@@ -1615,6 +1615,8 @@ namespace CompetitiveRounds
             public string lock_reason;
             public string started_at;
             public string dc_grace_until;
+            // Aug 8 (Sid): frozen body-colour team identity ("" = vanilla).
+            public string t1_color_name, t1_color_hex, t2_color_name, t2_color_hex;
         }
         public static List<ActiveTeamSeriesEntry> CachedActiveTeamSeries { get; private set; } = new List<ActiveTeamSeriesEntry>();
 
@@ -1670,6 +1672,10 @@ namespace CompetitiveRounds
                     lock_reason = ExtractJsonString(obj, "lock_reason"),
                     started_at = ExtractJsonString(obj, "started_at"),
                     dc_grace_until = ExtractJsonString(obj, "dc_grace_until"),
+                    t1_color_name = ExtractJsonString(obj, "t1_color_name") ?? "",
+                    t1_color_hex = ExtractJsonString(obj, "t1_color_hex") ?? "",
+                    t2_color_name = ExtractJsonString(obj, "t2_color_name") ?? "",
+                    t2_color_hex = ExtractJsonString(obj, "t2_color_hex") ?? "",
                 });
             }
             CachedActiveTeamSeries = list;
@@ -2758,14 +2764,31 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Admin: lazy per-submission frame fetch for the animated
-        /// review preview (frames 2..N; frame 1 rides the list row).</summary>
+        /// review preview (frames 2..N; frame 1 rides the list row).
+        /// Codex r1 f11: PAGED — metadata first (frame numbers + byte sizes),
+        /// then one frame per request SEQUENTIALLY, each on its own 20s GET
+        /// timeout, appended to the cache as it lands. A 16-frame submission
+        /// near the image cap is ~24 MB of base64; one response used to blow
+        /// the fixed GET timeout on slow links and make it unreviewable.</summary>
         public static readonly Dictionary<int, List<string>> CachedCosmeticFrames =
             new Dictionary<int, List<string>>();
+        public class CosmeticFrameProgressInfo
+        {
+            public int total;      // extra frames the server holds (2..N)
+            public int fetched;    // how many have landed so far
+            public bool done;      // sequence finished (possibly partial)
+            public bool failed;    // a frame failed twice — partial result
+        }
+        public static readonly Dictionary<int, CosmeticFrameProgressInfo> CosmeticFrameProgress =
+            new Dictionary<int, CosmeticFrameProgressInfo>();
         private static readonly HashSet<int> _cosmeticFramesRequested = new HashSet<int>();
         public static void FetchCosmeticFrames(string adminSteamId, int submissionId)
         {
             if (submissionId <= 0 || _cosmeticFramesRequested.Contains(submissionId)) return;
             _cosmeticFramesRequested.Add(submissionId);
+            // One signature covers the whole submission — frame_no is a
+            // sub-selector of the signed target, not new authority (server
+            // contract note at admin_cosmetic_frames).
             string sig = ComputeAdminHmacHex($"admin:{adminSteamId}:cosmetic-frames:{submissionId}");
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/admin/cosmetic-frames?admin_steam_id={Escape(adminSteamId)}"
@@ -2775,21 +2798,71 @@ namespace CompetitiveRounds
                     if (!ok) { _cosmeticFramesRequested.Remove(submissionId); return; }
                     try
                     {
-                        var frames = new List<string>();
+                        var frameNos = new List<int>();
                         int arr = resp.IndexOf("\"frames\"", StringComparison.Ordinal);
                         int open = arr >= 0 ? resp.IndexOf('[', arr) : -1;
                         int close = open >= 0 ? FindMatchingBracketStringAware(resp, open) : -1;
                         if (close > open)
                             foreach (var obj in SliceTopLevelObjects(resp.Substring(open, close - open + 1)))
                             {
-                                string b64 = ExtractJsonString(obj, "png_base64");
-                                if (!string.IsNullOrEmpty(b64)) frames.Add(b64);
+                                int fn = ExtractJsonInt(obj, "frame_no");
+                                if (fn >= 2) frameNos.Add(fn);
                             }
-                        CachedCosmeticFrames[submissionId] = frames;
+                        frameNos.Sort();
+                        CachedCosmeticFrames[submissionId] = new List<string>();
+                        CosmeticFrameProgress[submissionId] = new CosmeticFrameProgressInfo
+                        { total = frameNos.Count, done = frameNos.Count == 0 };
+                        if (frameNos.Count > 0)
+                            Plugin.Instance.StartCoroutine(
+                                FetchCosmeticFramesSequential(adminSteamId, submissionId, sig, frameNos));
                         NativeUI.MarkDirty();
                     }
-                    catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] frames parse: {ex.Message}"); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[COSMETIC] frames metadata parse: {ex.Message}"); }
                 }));
+        }
+
+        private static IEnumerator FetchCosmeticFramesSequential(
+            string adminSteamId, int submissionId, string sig, List<int> frameNos)
+        {
+            CosmeticFrameProgressInfo st;
+            if (!CosmeticFrameProgress.TryGetValue(submissionId, out st)) yield break;
+            foreach (int fn in frameNos)
+            {
+                bool got = false;
+                for (int attempt = 0; attempt < 2 && !got; attempt++)
+                {
+                    bool ok = false; string body = null;
+                    yield return GetRequest(
+                        $"{baseUrl}/api/v1/admin/cosmetic-frames?admin_steam_id={Escape(adminSteamId)}"
+                        + $"&submission_id={submissionId}&frame_no={fn}&sig={sig}",
+                        (o, r) => { ok = o; body = r; });
+                    if (ok && !string.IsNullOrEmpty(body))
+                    {
+                        string b64 = ExtractJsonString(body, "png_base64");
+                        if (!string.IsNullOrEmpty(b64))
+                        {
+                            List<string> frames;
+                            if (!CachedCosmeticFrames.TryGetValue(submissionId, out frames))
+                                yield break;   // dropped (review closed a fetch-reset path)
+                            frames.Add(b64);
+                            st.fetched++;
+                            got = true;
+                            NativeUI.MarkDirty();
+                        }
+                    }
+                }
+                if (!got)
+                {
+                    // One retry spent — stop here and show what arrived (a
+                    // contiguous prefix keeps the cycle coherent; skipping a
+                    // MIDDLE frame would scramble the animation order).
+                    Plugin.Log.LogWarning($"[COSMETIC] frame {fn} of submission {submissionId} failed twice — showing {st.fetched}/{st.total} extra frames");
+                    st.failed = true;
+                    break;
+                }
+            }
+            st.done = true;
+            NativeUI.MarkDirty();
         }
 
         private static CosmeticSubmission ParseCosmeticSubmissionObject(string chunk)
@@ -8456,11 +8529,39 @@ namespace CompetitiveRounds
         {
             public int id;
             public string category, admin_name, created_at, expires_at, message;
+            // Codex r1 f16: parsed expiry (UTC). MaxValue = never expires
+            // (empty/unparseable expires_at) so comparisons stay branch-free.
+            public DateTime expiresUtc = DateTime.MaxValue;
         }
         public static List<AlertEntry> CachedAlerts = new List<AlertEntry>();
         public static int LastAlertsRev;
         private static bool alertsFetchInFlight;
         private const string PP_SEEN_ALERTS = "CR_SeenAlertIds";
+
+        private static DateTime ParseAlertExpiry(string iso)
+        {
+            if (string.IsNullOrEmpty(iso)) return DateTime.MaxValue;
+            try
+            {
+                if (DateTime.TryParse(iso, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out DateTime dt))
+                    return dt;
+            }
+            catch { }
+            return DateTime.MaxValue;
+        }
+
+        /// <summary>Codex r1 f16: drop CachedAlerts entries whose expiry has
+        /// passed. Purely local (no server call); returns true when anything
+        /// was removed so the caller can MarkDirty and clear the banner.</summary>
+        public static bool PruneExpiredAlerts()
+        {
+            var list = CachedAlerts;
+            if (list == null || list.Count == 0) return false;
+            int removed = list.RemoveAll(a => a != null && a.expiresUtc <= DateTime.UtcNow);
+            return removed > 0;
+        }
 
         public static void FetchActiveAlerts()
         {
@@ -8495,6 +8596,10 @@ namespace CompetitiveRounds
                                     expires_at = ExtractJsonString(raw, "expires_at") ?? "",
                                     message = ExtractJsonString(raw, "message") ?? "",
                                 };
+                                a.expiresUtc = ParseAlertExpiry(a.expires_at);
+                                // Codex r1 f16: an already-expired alert never
+                                // enters the cache (nor the announce pass).
+                                if (a.expiresUtc <= DateTime.UtcNow) continue;
                                 if (a.id > 0 && !string.IsNullOrEmpty(a.message)) list.Add(a);
                             }
                         }
@@ -8692,7 +8797,28 @@ namespace CompetitiveRounds
         private static float teamLeavingSince = -999f;
         private static int teamGen = 0;  // lifecycle generation — see queueGen
         public static TeamQueuePollData LastTeamPollData { get; private set; }
-        public static string ActiveTeamSeriesId { get; set; }
+        // Aug 8 (Sid): frozen body-colour team identity for the ACTIVE 2v2
+        // series, published for the in-game tinting pass (another writer).
+        // Empty string = vanilla / not stamped. Set by the series-state poll;
+        // cleared by the ActiveTeamSeriesId setter below, which is the single
+        // chokepoint every series-context change (leave, expiry, escape,
+        // completion teardown) already flows through.
+        public static string SeriesTeam1ColorName = "", SeriesTeam1ColorHex = "";
+        public static string SeriesTeam2ColorName = "", SeriesTeam2ColorHex = "";
+        private static string activeTeamSeriesId;
+        public static string ActiveTeamSeriesId
+        {
+            get => activeTeamSeriesId;
+            set
+            {
+                if (!string.Equals(value, activeTeamSeriesId, StringComparison.Ordinal))
+                {
+                    SeriesTeam1ColorName = ""; SeriesTeam1ColorHex = "";
+                    SeriesTeam2ColorName = ""; SeriesTeam2ColorHex = "";
+                }
+                activeTeamSeriesId = value;
+            }
+        }
         public static bool IsTeamQueuePolling { get; private set; } = false;
         public static int CachedTeamQueueSearching { get; private set; } = 0;
         private static float teamQueuePollTimer = 0f;
@@ -9296,6 +9422,17 @@ namespace CompetitiveRounds
                 LastSeriesDcTeamRemaining = ExtractJsonInt(resp, "dc_team_remaining");
                 LastSeriesT1Wins = ExtractJsonInt(resp, "t1_series_wins");
                 LastSeriesT2Wins = ExtractJsonInt(resp, "t2_series_wins");
+                // Aug 8 (Sid): the frozen team-colour stamp rides this poll
+                // (empty = vanilla / pre-migration). Publish only while the
+                // response still describes the ACTIVE series — a late callback
+                // for a previous series must not repaint the new one's stamp.
+                if (seriesId == ActiveTeamSeriesId)
+                {
+                    SeriesTeam1ColorName = ExtractJsonString(resp, "t1_color_name") ?? "";
+                    SeriesTeam1ColorHex = ExtractJsonString(resp, "t1_color_hex") ?? "";
+                    SeriesTeam2ColorName = ExtractJsonString(resp, "t2_color_name") ?? "";
+                    SeriesTeam2ColorHex = ExtractJsonString(resp, "t2_color_hex") ?? "";
+                }
                 onResponse?.Invoke(status, reason, conf);
             }));
         }
@@ -9551,6 +9688,9 @@ namespace CompetitiveRounds
         {
             public string series_id, completed_at;
             public int winner_team, t1_series_wins, t2_series_wins;
+            // Aug 8 (Sid): frozen body-colour team identity ("" = unstamped —
+            // every series completed before migration 206 renders as today).
+            public string t1_color_name, t1_color_hex, t2_color_name, t2_color_hex;
             public TeamSeriesSlot t1a, t1b, t2a, t2b;
             public List<TeamSeriesMatch> matches = new List<TeamSeriesMatch>();
         }
@@ -9598,6 +9738,10 @@ namespace CompetitiveRounds
                     winner_team = ExtractJsonInt(obj, "winner_team"),
                     t1_series_wins = ExtractJsonInt(obj, "t1_series_wins"),
                     t2_series_wins = ExtractJsonInt(obj, "t2_series_wins"),
+                    t1_color_name = ExtractJsonString(obj, "t1_color_name") ?? "",
+                    t1_color_hex = ExtractJsonString(obj, "t1_color_hex") ?? "",
+                    t2_color_name = ExtractJsonString(obj, "t2_color_name") ?? "",
+                    t2_color_hex = ExtractJsonString(obj, "t2_color_hex") ?? "",
                     t1a = ParseSeriesSlot(obj, "t1a"),
                     t1b = ParseSeriesSlot(obj, "t1b"),
                     t2a = ParseSeriesSlot(obj, "t2a"),
@@ -10861,6 +11005,9 @@ namespace CompetitiveRounds
             public bool left_early;
             public float rating_change;
             public bool has_rating_change;
+            // Aug 8 (Sid): match-time body-colour stamp ("" = pre-stamp row,
+            // which must render exactly as today).
+            public string color_name, color_hex;
             public List<FfaRecentCard> cards = new List<FfaRecentCard>();
         }
         public class FfaRecentCard
@@ -12181,6 +12328,18 @@ namespace CompetitiveRounds
             private float handoffUntil = -999f, handoffProbeAt = -999f;
             private bool actionInFlight; private float actionAt = -999f; private int actionGen;
             private bool probed;
+            // Codex r1 f5: a Start that converts the seat mid-leave re-targets
+            // the standing leave intent at the LOCKED group. Lives on this
+            // process-wide singleton, never in a callback closure (#252e), so
+            // a NetworkRestart-killed request cannot lose it; Tick() retries.
+            private bool queueLeaveIntent;
+            private bool queueLeaveInFlight;
+            private float queueLeaveAt = -999f, queueLeaveRetryAt = -999f;
+            private int queueLeaveAttempts;
+            // Codex r1 f4/f6/f7: seated preference PATCH bookkeeping. While a
+            // prefs request is in flight the local control value outranks the
+            // state-poll hydration (the poll may still carry the old value).
+            private bool prefsInFlight; private float prefsAt = -999f;
             // Remembered for recovery rejoins: a same-lobby rejoin of a
             // PRIVATE lobby must re-send the password or it 403s (a supplied
             // password on a public lobby is ignored server-side, so a stale
@@ -12482,16 +12641,33 @@ namespace CompetitiveRounds
                     if (g != gen) return;
                     if (ok)
                     {
-                        ClearMembershipSilent();
-                        leaveIntent = false; leaveTarget = null;
-                        Plugin.Log.LogInfo($"[{label}-LOBBY] left lobby");
+                        // Codex r1 f5: HTTP 200 "started" = Start converted the
+                        // seat while the leave was in flight. The leave INTENT
+                        // stands and now targets the locked group — route it
+                        // through the mode's /queue/leave (which owns
+                        // locked-group dissolution) and clear it only on THAT
+                        // call's ack, never here.
+                        if ((ExtractJsonString(resp ?? "", "status") ?? "") == "started")
+                        {
+                            Plugin.Log.LogWarning($"[{label}-LOBBY] leave raced a Start (server said started) — leaving via the {label} queue");
+                            ClearMembershipSilent();
+                            DirectQueueLeave();
+                        }
+                        else
+                        {
+                            ClearMembershipSilent();
+                            leaveIntent = false; leaveTarget = null;
+                            Plugin.Log.LogInfo($"[{label}-LOBBY] left lobby");
+                        }
                     }
                     else
                     {
-                        // 409 "Not in an open lobby" = the row is LOCKED (the
-                        // host's Start raced this leave). The player asked OUT —
-                        // honor it through the mode's queue leave, which owns
-                        // locked-group dissolution (server scope note).
+                        // 409 "Not in an open lobby" = the row is LOCKED (a
+                        // Start raced this leave on an old-contract answer).
+                        // The player asked OUT — honor it through the mode's
+                        // queue leave via the UNCONDITIONAL direct request
+                        // (Codex r1 f5: LeaveTeamQueue no-ops when locally
+                        // Idle, which is exactly this client's state).
                         bool lockedRace = resp != null
                             && resp.StartsWith("HTTP 4", StringComparison.Ordinal)
                             && resp.Contains("Not in an open lobby");
@@ -12499,8 +12675,7 @@ namespace CompetitiveRounds
                         {
                             Plugin.Log.LogWarning($"[{label}-LOBBY] leave raced a Start — leaving via the {label} queue instead");
                             ClearMembershipSilent();
-                            leaveIntent = false; leaveTarget = null;
-                            if (IsTeam) LeaveTeamQueue(sid); else OvtLeaveQueue();
+                            DirectQueueLeave();
                         }
                         else
                         {
@@ -12516,6 +12691,82 @@ namespace CompetitiveRounds
                     }
                     if (Status == "leaving") Status = "";
                     FetchLobbies(force: true);
+                    NativeUI.MarkDirty();
+                }, maxRetries: 3, retryDelay: 2f));
+            }
+
+            /// <summary>Codex r1 f5: the leave intent survived a Start
+            /// conversion (or a legacy dissolution reset the row) — tear the
+            /// QUEUE-side row down with a direct POST to the mode's
+            /// /queue/leave. Deliberately independent of the mode's local
+            /// polling/Idle state: LeaveTeamQueue early-returns on
+            /// (Idle && !polling), which is exactly the state a lobby client
+            /// is in when Start lands under it, so this must not ride it.
+            /// Intent clears ONLY on the ack; a transport failure retries from
+            /// Tick(). The mode's local queue state is disarmed here (not in
+            /// the callback) because this client never adopted the started
+            /// match — there is no belief to preserve, only one to prevent.</summary>
+            private void DirectQueueLeave()
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                if (!queueLeaveIntent) queueLeaveAttempts = 0;   // fresh intent = fresh budget
+                queueLeaveIntent = true;
+                if (queueLeaveInFlight && Time.realtimeSinceStartup - queueLeaveAt > 30f)
+                    queueLeaveInFlight = false;
+                if (queueLeaveInFlight) return;
+                if (queueLeaveAttempts >= 10)
+                {
+                    // Give up locally — the server's lease expiry frees the row
+                    // within minutes regardless (#276's failure direction).
+                    Plugin.Log.LogWarning($"[{label}-LOBBY] queue-leave retry budget exhausted — leaving cleanup to the server lease expiry");
+                    queueLeaveIntent = false;
+                    leaveIntent = false; leaveTarget = null;
+                    return;
+                }
+                queueLeaveAttempts++;
+                queueLeaveInFlight = true; queueLeaveAt = Time.realtimeSinceStartup;
+                // Disarm the mode's queue machinery so a racing poll callback
+                // can't adopt the match this leave is dissolving. Gen bumps
+                // invalidate in-flight callbacks (they all check their gen).
+                if (IsTeam)
+                {
+                    teamGen++;
+                    IsTeamQueuePolling = false;
+                    LastTeamPollData = null;
+                    ActiveTeamSeriesId = null;
+                    Plugin.ClearPending2v2Slot();
+                    if (CurrentTeamQueueState != TeamQueueState.Idle)
+                        CurrentTeamQueueState = TeamQueueState.Idle;
+                }
+                else
+                {
+                    ovtGen++;
+                    IsOvtQueuePolling = false;
+                    ActiveOvt1v2SeriesId = null;
+                    Plugin.ClearPendingOvtSlot();
+                    if (OvtQueueStatus != "leaving") OvtQueueStatus = "";
+                }
+                int g = gen;
+                Plugin.Instance.StartCoroutine(PostRequestWithRetry(
+                    $"{baseUrl}/api/v1/{mode}/queue/leave?steam_id={UnityWebRequest.EscapeURL(sid)}", "",
+                    (ok, resp) =>
+                {
+                    queueLeaveInFlight = false;
+                    if (g != gen) return;   // TearDown/escape took over
+                    if (ok)
+                    {
+                        Plugin.Log.LogInfo($"[{label}-LOBBY] queue-leave for the converted seat acked");
+                        queueLeaveIntent = false; queueLeaveAttempts = 0;
+                        leaveIntent = false; leaveTarget = null;
+                    }
+                    else
+                    {
+                        // Keep BOTH intents; Tick retries (the resolve probe's
+                        // not_in_queue answer also clears them authoritatively).
+                        queueLeaveRetryAt = Time.realtimeSinceStartup + 15f;
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] queue-leave for the converted seat failed: {resp} — will retry");
+                    }
                     NativeUI.MarkDirty();
                 }, maxRetries: 3, retryDelay: 2f));
             }
@@ -12541,8 +12792,14 @@ namespace CompetitiveRounds
                             + (leaveIntent ? $" (leave retry re-armed for {OpenLobbyId})" : ""));
                         NativeUI.MarkDirty();
                     }
-                    // Handoff window: the state poll pauses; the mode's queue
-                    // poll resolves start-vs-closed (see class comment).
+                    // Codex r1 f5: a standing queue-leave intent (Start
+                    // converted the seat mid-leave) retries here — the request
+                    // coroutine may have died with its host (#249).
+                    if (queueLeaveIntent && !queueLeaveInFlight
+                        && Time.realtimeSinceStartup >= queueLeaveRetryAt)
+                        DirectQueueLeave();
+                    // Handoff window: the state poll pauses; the READ-ONLY
+                    // /lobby/resolve probe settles start-vs-closed (r1 f1).
                     if (handoffUntil > 0f)
                     {
                         if (Time.unscaledTime > handoffUntil)
@@ -12666,12 +12923,14 @@ namespace CompetitiveRounds
                 {
                     if (leaveIntent)
                     {
-                        // The leave LANDED (its ack was just lost) — clear the
-                        // belief silently; re-enrolling an explicit leaver is
-                        // the one thing recovery must never do.
-                        ClearMembershipSilent();
-                        leaveIntent = false; leaveTarget = null;
-                        NativeUI.MarkDirty();
+                        // Either the leave LANDED (ack lost) or a Start
+                        // CONVERTED the seat — the state endpoint cannot tell
+                        // them apart (a matched row is not_in_lobby here).
+                        // Codex r1 f5: only the read-only resolve may clear a
+                        // standing leave intent; its not_in_queue answer clears
+                        // silently, its matched answer routes the intent
+                        // through the mode's queue leave.
+                        BeginHandoff();
                         return;
                     }
                     if (string.IsNullOrEmpty(OpenLobbyId))
@@ -12713,7 +12972,17 @@ namespace CompetitiveRounds
                 Polling = false;
                 handoffUntil = Time.unscaledTime + 25f;
                 handoffProbeAt = Time.unscaledTime;   // first probe on the next Tick
-                Plugin.Log.LogInfo($"[{label}-LOBBY] membership left the lobby state — resolving start-vs-closed via the {label} queue poll");
+                Plugin.Log.LogInfo($"[{label}-LOBBY] membership left the lobby state — resolving start-vs-closed via /{mode}/lobby/resolve");
+            }
+
+            /// <summary>Codex r1 prefs contract: a 409 not_in_open_lobby from
+            /// the prefs PATCH means the seat is gone or the lobby started —
+            /// never retry the PATCH; the read-only resolve decides which.</summary>
+            public void ResolveStaleSeat()
+            {
+                if (handoffUntil > 0f) return;   // already resolving
+                if (string.IsNullOrEmpty(OpenLobbyId) && Status != "lobby") return;
+                BeginHandoff();
             }
 
             private void SendHandoffProbe()
@@ -12721,36 +12990,81 @@ namespace CompetitiveRounds
                 string sid = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
                 int g = gen;
-                Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/{mode}/queue/poll/{sid}", (ok, resp) =>
+                // Codex r1 f1: READ-ONLY resolve. The old probe was the mode's
+                // MUTATING /queue/poll — against a 'searching' row it could
+                // LOCK this client into a public match it never consented to,
+                // and it read ANY matched row as "our lobby started".
+                Plugin.Instance.StartCoroutine(GetRequest(
+                    $"{baseUrl}/api/v1/{mode}/lobby/resolve?steam_id={UnityWebRequest.EscapeURL(sid)}", (ok, resp) =>
                 {
                     if (g != gen || handoffUntil <= 0f) return;
                     if (!ok || string.IsNullOrEmpty(resp)) return;   // retried at the next probe tick
-                    HandleHandoffProbe(ExtractJsonString(resp, "status") ?? "", resp, sid);
+                    HandleResolveProbe(ExtractJsonString(resp, "status") ?? "", resp, sid);
                 }));
             }
 
-            private void HandleHandoffProbe(string status, string resp, string sid)
+            private void HandleResolveProbe(string status, string resp, string sid)
             {
                 if (status == "lobby")
                 {
-                    // The queue endpoint still sees the seat — the state read
-                    // was transient. Back to the state poll.
+                    // Row still says lobby. Only lobby_status 'open' keeps the
+                    // membership; anything else (active/canceled/gone) means a
+                    // seat orphaned from its lobby — treat as disbanded.
+                    string lstat = ExtractJsonString(resp, "lobby_status") ?? "";
                     handoffUntil = -999f;
-                    Polling = true; lastPollAt = -999f;
+                    if (lstat == "open")
+                    {
+                        // The state read was transient. Back to the state poll,
+                        // whose 'lobby' branch also owns leave-intent retries.
+                        Polling = true; lastPollAt = -999f;
+                        return;
+                    }
+                    bool told = leaveIntent;
+                    ClearMembershipSilent();
+                    leaveIntent = false; leaveTarget = null;
+                    if (!told)
+                        CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby closed.", label), new Color(1f, 0.75f, 0.4f), 6f);
+                    NativeUI.MarkDirty();
                     return;
                 }
                 handoffUntil = -999f;
-                if (status == "matched" || status == "ready_join")
+                if (status == "matched" || status == "ready" || status == "ready_join")
                 {
-                    // The host STARTED the lobby. Hand the flow to the normal
-                    // queue machinery, which owns ready-up / room issuance /
-                    // reports — the seat became a locked group.
+                    // The host STARTED the lobby and the seat is a locked group.
+                    if (leaveIntent)
+                    {
+                        // Codex r1 f5: the player asked OUT before the Start
+                        // won — the intent stands and its teardown belongs to
+                        // the mode's /queue/leave.
+                        Plugin.Log.LogInfo($"[{label}-LOBBY] resolve found a started group under a standing leave intent — leaving via the {label} queue");
+                        ClearMembershipSilent();
+                        DirectQueueLeave();
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    // Adopt the handoff only while a remembered seat awaited
+                    // this start (TearDown / kick already dropped the belief
+                    // for every other path — this is the belt).
+                    if (string.IsNullOrEmpty(OpenLobbyId))
+                    {
+                        Polling = false;
+                        NativeUI.MarkDirty();
+                        return;
+                    }
                     Plugin.Log.LogInfo($"[{label}-LOBBY] lobby started — handing off to the {label} queue flow (status={status})");
                     ClearMembershipSilent();
+                    string seriesId = ExtractJsonString(resp, "series_id") ?? "";
                     if (IsTeam)
                     {
                         IsTeamQueuePolling = true;
                         CurrentTeamQueueType = "manual";
+                        if (!string.IsNullOrEmpty(seriesId)) ActiveTeamSeriesId = seriesId;
+                        if (CurrentTeamQueueState != TeamQueueState.ReadySent)
+                            CurrentTeamQueueState = TeamQueueState.Matched;
+                        // The resolve answer carries no teammates payload, so
+                        // the ready_join room join (slot compute needs it) is
+                        // the real queue poll's job — fire its next tick now.
+                        teamQueuePollTimer = TEAM_QUEUE_POLL_INTERVAL;
                         if (status == "matched")
                         {
                             // Lobby members can be idle for minutes — unlike a
@@ -12760,14 +13074,13 @@ namespace CompetitiveRounds
                             try { CompetitiveUI.PlayMatchFoundSound(); } catch { }
                             try { TaskbarFlash.Flash(); } catch { }
                         }
-                        try { ParseTeamQueuePoll(resp); }
-                        catch (Exception ex) { Plugin.Log.LogError($"[{label}-LOBBY] handoff parse: {ex.Message}"); }
                     }
                     else
                     {
                         // The existing ovt poll owns ready_join (slot compute,
-                        // pre-join props, auto room join) — re-arm it and let
-                        // its next fetch carry the payload.
+                        // pre-join props, auto room join — resolve's bare
+                        // room_name/room_region can't place the duo slots) —
+                        // re-arm it and let its next fetch carry the payload.
                         IsOvtQueuePolling = true;
                         _ovtLastPollAt = -999f;
                         UpdateOvtQueuePoll(force: true);
@@ -12777,32 +13090,37 @@ namespace CompetitiveRounds
                 }
                 if (status == "searching")
                 {
-                    // Disband path: the server reset our dead-lobby seat to a
-                    // SEARCHING queue row. Never keep a queue the player didn't
-                    // ask for (#238) — leave it and say why.
+                    // Legacy dissolution reset the seat to a PUBLIC searching
+                    // row. The player never consented to public matchmaking
+                    // from a hosted lobby (#238) — leave it unconditionally
+                    // (DirectQueueLeave carries its own retry intent) and say
+                    // why. NEVER adopt a searching row.
                     Plugin.Log.LogInfo($"[{label}-LOBBY] lobby closed server-side — leaving the reset queue row");
+                    bool told = leaveIntent;
                     ClearMembershipSilent();
-                    CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby closed.", label), new Color(1f, 0.75f, 0.4f), 6f);
-                    if (IsTeam)
-                    {
-                        // Adopt the row's REAL state first: LeaveTeamQueue
-                        // no-ops on (Idle && !polling), and skipping the leave
-                        // here would conscript the player into the manual
-                        // queue the server just reset their row into (#238).
-                        CurrentTeamQueueState = TeamQueueState.Searching;
-                        LeaveTeamQueue(sid);
-                    }
-                    else OvtLeaveQueue();
+                    DirectQueueLeave();
+                    if (!told)
+                        CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby closed.", label), new Color(1f, 0.75f, 0.4f), 6f);
                     NativeUI.MarkDirty();
                     return;
                 }
                 if (status == "not_in_queue")
                 {
-                    // Row gone entirely. Could be a lease hiccup that expired
-                    // the seat while the lobby lives on — a same-lobby rejoin
-                    // recovers it; a truly dead lobby turns that join into the
-                    // 4xx -> "lobby closed" path.
-                    if (!leaveIntent && !string.IsNullOrEmpty(OpenLobbyId)
+                    // Authoritative: the row is gone. Every standing leave
+                    // intent is satisfied (Codex r1 f5's "authoritative
+                    // resolve answer" — the only non-ack way intents clear).
+                    if (leaveIntent || queueLeaveIntent)
+                    {
+                        ClearMembershipSilent();
+                        leaveIntent = false; leaveTarget = null;
+                        queueLeaveIntent = false; queueLeaveAttempts = 0;
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    // Could be a lease hiccup that expired the seat while the
+                    // lobby lives on — a same-lobby rejoin recovers it; a truly
+                    // dead lobby turns that join into the 4xx "closed" path.
+                    if (!string.IsNullOrEmpty(OpenLobbyId)
                         && Time.unscaledTime - rejoinAt > 60f)
                     {
                         rejoinAt = Time.unscaledTime;
@@ -12810,19 +13128,8 @@ namespace CompetitiveRounds
                         Join(OpenLobbyId, lastPassword, lastExtras);
                         return;
                     }
-                    bool hadIntent = leaveIntent;
                     ClearMembershipSilent();
-                    leaveIntent = false; leaveTarget = null;
-                    if (!hadIntent)
-                        CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby closed.", label), new Color(1f, 0.75f, 0.4f), 6f);
-                    NativeUI.MarkDirty();
-                    return;
-                }
-                if (status == "lobby_closed" || status == "expired")
-                {
-                    ClearMembershipSilent();
-                    leaveIntent = false; leaveTarget = null;
-                    CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby seat expired — join or create a new one.", label), new Color(1f, 0.75f, 0.4f), 6f);
+                    CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby closed.", label), new Color(1f, 0.75f, 0.4f), 6f);
                     NativeUI.MarkDirty();
                     return;
                 }
@@ -12865,15 +13172,72 @@ namespace CompetitiveRounds
                 }));
             }
 
-            /// <summary>Aug 8: re-send the idempotent same-lobby join carrying
-            /// updated extras (preferred_side / solo_extra_pick / preferred_
-            /// team). NOTE: needs the server's idempotent-rejoin branch to
-            /// ADOPT the preference fields (flagged to Sid) — until then it is
-            /// a harmless heartbeat-only no-op server-side.</summary>
-            public void ResendEnrollExtras(string extras)
+            /// <summary>True while a preference PATCH is unresolved — the
+            /// hydration pass must not overwrite the just-clicked local value
+            /// with a state poll that predates it (Codex r1 f4).</summary>
+            public bool PrefsInFlight
+                => prefsInFlight && Time.realtimeSinceStartup - prefsAt < 25f;
+
+            /// <summary>Codex r1 f4/f6/f7: seated preference PATCH — ONE
+            /// changed field per request (a whole-row resend overwrites the
+            /// sibling setting with a stale local copy, and the old full
+            /// lobby-JOIN resend raced Start). fieldJson is a leading-comma
+            /// fragment like ",\"preferred_team\":2" from the static wrappers
+            /// below — never user input. 409 not_in_open_lobby is terminal:
+            /// resolve, don't retry.</summary>
+            public void SendPrefs(string fieldJson)
             {
-                if (string.IsNullOrEmpty(OpenLobbyId)) return;
-                Join(OpenLobbyId, lastPassword, extras);
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                if (string.IsNullOrEmpty(OpenLobbyId)) return;   // seated-only surface
+                prefsInFlight = true; prefsAt = Time.realtimeSinceStartup;
+                int g = gen;
+                Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/prefs",
+                    $"{{\"steam_id\":\"{Escape(sid)}\"{fieldJson}}}", (ok, resp) =>
+                {
+                    prefsInFlight = false;
+                    if (g != gen) return;
+                    if (ok)
+                    {
+                        // Fold the echoed STORED values into our cached member
+                        // row so the hydration pass can't briefly revert the
+                        // control from a state poll that predates the PATCH.
+                        try
+                        {
+                            if (Members != null)
+                                foreach (var m in Members)
+                                {
+                                    if (m == null || m.steam_id != sid) continue;
+                                    if (IsTeam)
+                                    {
+                                        int pt = ExtractJsonInt(resp, "preferred_team");
+                                        m.preferred_team = (pt == 1 || pt == 2) ? pt : 0;
+                                    }
+                                    else
+                                    {
+                                        int ps = ExtractJsonInt(resp, "preferred_side");
+                                        m.preferred_side = (ps == 1 || ps == 2) ? ps : 0;
+                                        m.solo_extra_pick = ExtractJsonBool(resp, "solo_extra_pick");
+                                    }
+                                    break;
+                                }
+                        }
+                        catch { }
+                        // Pull the member list now so every seat's claim tags
+                        // update within a tick.
+                        lastPollAt = -999f;
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    if (resp != null && resp.Contains("not_in_open_lobby"))
+                    {
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] prefs refused — seat gone or lobby started; resolving");
+                        ResolveStaleSeat();
+                    }
+                    else
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] prefs update failed: {resp}");
+                    NativeUI.MarkDirty();
+                }));
             }
 
             /// <summary>Adopt a seat discovered by the MODE's queue poll (a
@@ -12964,6 +13328,8 @@ namespace CompetitiveRounds
                 ClearMembershipSilent();
                 Status = "";
                 leaveIntent = false; leaveTarget = null;
+                queueLeaveIntent = false; queueLeaveInFlight = false; queueLeaveAttempts = 0;
+                prefsInFlight = false;
                 actionInFlight = false;
             }
         }
@@ -12985,10 +13351,16 @@ namespace CompetitiveRounds
             => OvtLobby.Create(password, OvtLobbyExtras(preferredSide, soloExtraPick));
         public static void OvtLobbyJoin(string lobbyId, int preferredSide, bool soloExtraPick, string password = null)
             => OvtLobby.Join(lobbyId, password, OvtLobbyExtras(preferredSide, soloExtraPick));
-        /// <summary>Aug 8: seated preference update — rides the idempotent
-        /// same-lobby rejoin (see ResendEnrollExtras' server-adoption note).</summary>
-        public static void OvtLobbyResendPrefs(int preferredSide, bool soloExtraPick)
-            => OvtLobby.ResendEnrollExtras(OvtLobbyExtras(preferredSide, soloExtraPick));
+        // Codex r1 f4/f6/f7: seated preference changes are single-field
+        // PATCHes on /lobby/prefs — never a whole lobby-JOIN resend (which
+        // raced Start and resent stale sibling fields). 0 is an explicit
+        // "Any"/clear and IS sent (f7 — the stale claim used to stand).
+        public static void TeamLobbyPrefs(int preferredTeam)
+            => TeamLobby.SendPrefs($",\"preferred_team\":{((preferredTeam == 1 || preferredTeam == 2) ? preferredTeam : 0)}");
+        public static void OvtLobbyPrefsSide(int preferredSide)
+            => OvtLobby.SendPrefs($",\"preferred_side\":{((preferredSide == 1 || preferredSide == 2) ? preferredSide : 0)}");
+        public static void OvtLobbyPrefsExtraPick(bool soloExtraPick)
+            => OvtLobby.SendPrefs($",\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}");
         private static string OvtLobbyExtras(int preferredSide, bool soloExtraPick)
             => $",\"preferred_side\":{((preferredSide == 1 || preferredSide == 2) ? preferredSide : 0)},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}";
 
@@ -13261,6 +13633,8 @@ namespace CompetitiveRounds
                                         xp_gained = ExtractJsonInt(pObj, "xp_gained"),
                                         gold_gained = ExtractJsonInt(pObj, "gold_gained"),
                                         left_early = ExtractJsonBool(pObj, "left_early"),
+                                        color_name = ExtractJsonString(pObj, "color_name") ?? "",
+                                        color_hex = ExtractJsonString(pObj, "color_hex") ?? "",
                                     };
                                     try
                                     {

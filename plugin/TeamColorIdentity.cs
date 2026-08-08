@@ -161,6 +161,14 @@ namespace CompetitiveRounds
 
         // ── Resolution ────────────────────────────────────────────────────────
 
+        /// <summary>Aug 8 (Sid): "Team names stay custom even if the player
+        /// bodies do not" — identity NAMES ignore the Show Player Colors
+        /// toggle; only the visual TINTS (balls, dots, card fills) honor it.
+        /// Every tint consumer checks this instead of relying on Rebuild
+        /// going empty.</summary>
+        public static bool TintsEnabled =>
+            Plugin.ShowPlayerColors == null || Plugin.ShowPlayerColors.Value;
+
         private static void Rebuild()
         {
             float now = Time.realtimeSinceStartup;
@@ -172,10 +180,21 @@ namespace CompetitiveRounds
             _bestByTeam.Clear();
             _nameCounts.Clear();
 
-            // The user's own "hide player colours" preference turns the whole
-            // feature off locally: with vanilla bodies on screen a "Mustard got a
-            // point" announcement would name a colour they cannot see.
-            if (Plugin.ShowPlayerColors != null && !Plugin.ShowPlayerColors.Value) return;
+            // (The old ShowPlayerColors early-return lived here. Removed per
+            // Sid's Aug 8 ruling above — TryGet now answers for name surfaces
+            // regardless of the toggle, and tint surfaces gate themselves on
+            // TintsEnabled.)
+
+            // ── Server-stamped 2v2 identity (Aug 8, team-color-v2) ──
+            // When the live series carries a frozen colour stamp, it overrides
+            // the local lowest-actor resolution entirely: the server decided
+            // the coin flip ONCE at series creation (mirror matches resolved
+            // there too), so every seat and spectator renders the same answer
+            // and a mid-series re-equip cannot shift it. A stamped-vanilla
+            // side is DECIDED vanilla — no local fallback for it. Gated on a
+            // live team_ room so a stale ActiveTeamSeriesId can never paint a
+            // later, unrelated room.
+            if (TryBuildFromServerStamp()) return;
 
             var pm = PlayerManager.instance;
             if (pm == null || pm.players == null) return;
@@ -301,6 +320,55 @@ namespace CompetitiveRounds
             if (!TryParseHex(hex, out parsed)) return false;
             color = parsed;
             return true;
+        }
+
+        /// <summary>Consume ApiClient's series-state colour stamp (published by
+        /// the 2v2 series state poll, cleared with ActiveTeamSeriesId). Returns
+        /// true when the stamp is PRESENT and we are in the series' team_ room
+        /// — in that case the stamp is the complete answer for BOTH teams,
+        /// including a deliberately-vanilla side. Server team 1/2 map to ROUNDS
+        /// TeamID 0/1 (the same mapping the 2v2 slot machinery uses).</summary>
+        private static bool TryBuildFromServerStamp()
+        {
+            string n1, h1, n2, h2;
+            try
+            {
+                n1 = ApiClient.SeriesTeam1ColorName; h1 = ApiClient.SeriesTeam1ColorHex;
+                n2 = ApiClient.SeriesTeam2ColorName; h2 = ApiClient.SeriesTeam2ColorHex;
+            }
+            catch { return false; }
+            if (string.IsNullOrEmpty(h1) && string.IsNullOrEmpty(h2)) return false;
+            try
+            {
+                if (PhotonNetwork.OfflineMode || !PhotonNetwork.InRoom) return false;
+                var room = PhotonNetwork.CurrentRoom;
+                string roomName = room != null ? room.Name : null;
+                if (string.IsNullOrEmpty(roomName)
+                    || !roomName.StartsWith("team_", StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            catch { return false; }
+            AddServerStamp(0, n1, h1);
+            AddServerStamp(1, n2, h2);
+            return true;
+        }
+
+        private static void AddServerStamp(int team, string name, string hex)
+        {
+            Color c;
+            if (!TryParseHex(hex, out c)) return;   // this side is decided vanilla
+            string nm = !string.IsNullOrEmpty(name) ? name : (team == 0 ? "Team 1" : "Team 2");
+            _byTeam[team] = new TeamIdentity
+            {
+                Valid = true,
+                Sku = null,
+                ColorName = nm,
+                Name = nm,
+                AnnounceName = nm.ToUpperInvariant(),
+                Color = c,
+                TextColor = ReadableOnDark(c),
+                OwnerActor = -1,
+            };
         }
 
         private static bool TryParseHex(string hex, out Color color)
@@ -651,8 +719,11 @@ namespace CompetitiveRounds
 
         private static void TintBallSet(Transform ball, Component fill, int team)
         {
-            TeamColorIdentity.TeamIdentity id;
-            bool has = TeamColorIdentity.TryGet(team, out id);
+            var id = default(TeamColorIdentity.TeamIdentity);
+            // TintsEnabled first (Aug 8): identity now exists even with Show
+            // Player Colors off (names stay custom), but a toggle-off viewer
+            // must keep vanilla PAINT — has=false routes into the restore arm.
+            bool has = TeamColorIdentity.TintsEnabled && TeamColorIdentity.TryGet(team, out id);
             Color tint = has ? TeamColorIdentity.ReadableOnDark(id.Color) : Color.white;
             var targets = TeamColorIdentity.FindImages(ball, includeInactive: true);
             if (fill != null && !targets.Contains(fill)) targets.Add(fill);
@@ -726,6 +797,10 @@ namespace CompetitiveRounds
         private static void Recolor(Transform parent, int team, int litCount)
         {
             if (parent == null || litCount <= 0) return;
+            // Tint surface: honors the toggle (Aug 8 split — names don't).
+            // Skipping = vanilla, because vanilla's own ReDraw just repainted
+            // every dot before this Postfix ran.
+            if (!TeamColorIdentity.TintsEnabled) return;
             TeamColorIdentity.TeamIdentity id;
             if (!TeamColorIdentity.TryGet(team, out id)) return;
             int n = Mathf.Min(litCount, parent.childCount);
@@ -931,15 +1006,17 @@ namespace CompetitiveRounds
     /// (FfaMode.cs:2821-2840). A paint-the-new-clone Postfix would miss all
     /// three. A cheap idempotent sweep survives every one of them.
     ///
-    /// ── Per-PLAYER, not per-team ──────────────────────────────────────────
-    /// Uses <see cref="TeamColorIdentity.TryReadEquipped"/> against the owning
-    /// player's own view, NOT `TryGet(team)`. In 2v2 the team identity resolves
-    /// to the lowest-ActorNumber holder, so a team-keyed lookup would paint
-    /// both teammates' bars with one player's colour.
+    /// ── Per-TEAM (Aug 8 — reverses the earlier per-player rule) ──────────
+    /// Keyed by `TryGet(p.TeamID)`: Sid's team-color-v2 ruling ("points/card
+    /// shading/etc should follow the Team color... yes, it rewrites the old
+    /// rule") makes both teammates' bars carry the TEAM identity — the server
+    /// stamp in a live 2v2 series, the local lowest-actor resolution in
+    /// unstamped rooms. FFA is unchanged in effect: every player is a team of
+    /// one there, so the team identity IS their own colour.
     ///
-    /// Inert when: the feature is off, nobody has a colour equipped, or the
-    /// handler/bars are absent. Never touches a bar whose owner has no colour,
-    /// so vanilla bars keep their authored hue.
+    /// Inert when: the feature is off, the team has no identity (including a
+    /// stamped-vanilla mirror side), or the handler/bars are absent — those
+    /// bars keep/restore their authored hue.
     /// </summary>
     internal static class CardBarTeamColor
     {
@@ -999,26 +1076,18 @@ namespace CompetitiveRounds
                     var bar = cbh.cardBars[barIndex];
                     if (bar == null) continue;
 
-                    PhotonView pv = null;
-                    try { pv = p.data.view; } catch { }
-                    if (pv == null) { try { pv = p.GetComponent<PhotonView>(); } catch { } }
-                    if (pv == null) continue;
-
-                    string sku; Color equipped;
-                    if (!TeamColorIdentity.TryReadEquipped(pv, out sku, out equipped))
+                    // Aug 8 (Sid, team-color-v2): TEAM identity, not the owner's
+                    // own equip — see the class doc. Restore-then-continue on a
+                    // no-identity team keeps the Codex Aug-7 r3 unequip fix: a
+                    // just-vanished identity (unequip, series end, mirror-side
+                    // vanilla stamp) un-paints instead of lingering.
+                    TeamColorIdentity.TeamIdentity tid;
+                    if (!TeamColorIdentity.TryGet(p.TeamID, out tid))
                     {
-                        // Codex Aug-7 r3 (LOW): this used to `continue`, which is
-                        // correct for "never had a colour" and WRONG for "just
-                        // unequipped one" — the two are indistinguishable here,
-                        // and in the second case the cards this sweep already
-                        // painted stayed tinted for the rest of the room while
-                        // the body reverted immediately. Restoring this bar's own
-                        // children covers the unequip without needing per-player
-                        // bookkeeping, and is a no-op when nothing was painted.
                         RestoreTintedUnder(bar.transform);
                         continue;
                     }
-                    Color tint = TeamColorIdentity.ReadableOnDark(equipped);
+                    Color tint = tid.TextColor;
 
                     // Paint every live button under this bar. Index 0 of the
                     // bar is the hidden m_source TEMPLATE (CardBar.cs:30) —
@@ -1031,9 +1100,9 @@ namespace CompetitiveRounds
                      * outline and left the fill vanilla, exactly backwards.
                      * Now: the outline keeps its vanilla colour (and any tint
                      * an earlier sweep applied is undone), every FURTHER Image
-                     * gets the player's colour, and the two-letter label is
-                     * darkened to a deep version of the same hue when the fill
-                     * is too light to carry light lettering. */
+                     * gets the TEAM colour, and the two-letter label is always
+                     * restyled to a readable variant of the same hue (see
+                     * TintButtonLabel). */
                     var t = bar.transform;
                     int painted = 0, noImage = 0;
                     for (int i = 0; i < t.childCount; i++)
@@ -1082,8 +1151,8 @@ namespace CompetitiveRounds
                     {
                         _loggedOnce = true;
                         Plugin.Log?.LogInfo(
-                            $"[TEAMCOLOR] card bar pid={pid} bar={barIndex} sku={sku} " +
-                            $"painted={painted} noImage={noImage} " +
+                            $"[TEAMCOLOR] card bar pid={pid} bar={barIndex} team={p.TeamID} " +
+                            $"color={tid.ColorName} painted={painted} noImage={noImage} " +
                             (painted > 0 ? "— bound OK" : "— NOTHING PAINTED, surface not bound"));
                     }
                 }

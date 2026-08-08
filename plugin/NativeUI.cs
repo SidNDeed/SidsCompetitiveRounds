@@ -840,6 +840,7 @@ namespace CompetitiveRounds
         // Aug 7 item 1: standing admin-alert banner (its sibling row).
         private static GameObject alertBannerRow;
         private static object txtAlertBanner;
+        private static float alertExpiryCheckAt;   // Codex r1 f16 — local expiry tick
         // Auto-refresh of /series/active when Leaderboard tab is open. Throttled to every 10s.
         private static float liveSeriesAutoRefreshAt;
         // F8: manual Refresh-button debounce. Mashing it fired a burst of fetches
@@ -1171,6 +1172,14 @@ namespace CompetitiveRounds
                 return;
             }
             dataCheckTimer+=Time.deltaTime;if(dataCheckTimer>=0.3f){dataCheckTimer=0f;int mc=ApiClient.CachedMatchHistory?.Count??0,lc=ApiClient.CachedLeaderboard?.entries?.Length??0,cc=ApiClient.CachedCardStats?.Count??0;if(mc!=lastMatchCount||lc!=lastLBCount||cc!=lastCardCount){lastMatchCount=mc;lastLBCount=lc;lastCardCount=cc;dirty=true;}}
+            // Codex r1 f16: timed alerts expire LOCALLY — when the soonest
+            // expiry passes, drop it and repaint so the banner clears within
+            // seconds. Throttled; no server calls.
+            if(Time.unscaledTime>=alertExpiryCheckAt)
+            {
+                alertExpiryCheckAt=Time.unscaledTime+2f;
+                if(ApiClient.PruneExpiredAlerts())dirty=true;
+            }
             if(dirty){dirty=false;RefreshCurrentTab();}
             MaybeRefreshTournament();
             MaybeRefreshTeamTab();
@@ -2602,11 +2611,16 @@ namespace CompetitiveRounds
                 int shownHalves=Math.Min(FFA_HALF_DOT_CAP,leftover);
                 FillFfaDotPool(ui.fullDots,ui.fullDotsGO,points,ffaFullDotSprite,dotColor,"P");
                 FillFfaDotPool(ui.halfDots,ui.halfDotsGO,shownHalves,ffaHalfDotSprite,dotColor,"H");
-                UIFactory.SetText(ui.txtPoints,$"{points}(P)");
+                // Aug 8 (Sid): the match-time body-colour stamp tints the
+                // points/score readout. Pre-stamp rows (empty color_hex)
+                // render exactly as today; the slot-palette dots/graph pair
+                // stays untouched so they keep matching each other.
+                string stampHex=SafeHexColor(player.color_hex);
+                UIFactory.SetText(ui.txtPoints,stampHex!=null?$"<color={stampHex}>{points}(P)</color>":$"{points}(P)");
                 int hiddenHalves=leftover-shownHalves;
                 if(ui.halfOverflowGO!=null)ui.halfOverflowGO.SetActive(hiddenHalves>0);
-                if(hiddenHalves>0)UIFactory.SetText(ui.txtHalfOverflow,$"+{hiddenHalves}");
-                UIFactory.SetText(ui.txtHalves,$"{leftover}(H)");
+                if(hiddenHalves>0)UIFactory.SetText(ui.txtHalfOverflow,stampHex!=null?$"<color={stampHex}>+{hiddenHalves}</color>":$"+{hiddenHalves}");
+                UIFactory.SetText(ui.txtHalves,stampHex!=null?$"<color={stampHex}>{leftover}(H)</color>":$"{leftover}(H)");
                 UIFactory.SetText(ui.txtKills,$"{Math.Max(0,player.kills)}k");
                 UIFactory.SetText(ui.txtRewards,player.xp_gained==0&&player.gold_gained==0?""
                     :$"+{player.xp_gained}xp <color=#FFD94D>+{player.gold_gained}g</color>");
@@ -3563,6 +3577,31 @@ namespace CompetitiveRounds
             else ApiClient.OvtLobbyJoin(id,ovtPreferredSide,ovtSoloExtraPick,null);
         }
 
+        /// <summary>Codex r1 f6: hydrate the local Side/Extra/Team control
+        /// state from the caller's OWN member row in the freshest /lobby/state
+        /// payload, so recovery/rejoin never shows stale values. Runs from the
+        /// render pass (every state poll MarkDirty()s, so it follows each
+        /// poll); an in-flight prefs request's value wins until its response
+        /// lands (PrefsInFlight covers request + response window).</summary>
+        private static void HydrateHostLobbyPrefControls(ApiClient.HostLobbyClient cli,bool team)
+        {
+            if(string.IsNullOrEmpty(cli.OpenLobbyId)||cli.Members==null||cli.PrefsInFlight)return;
+            string mySid=MatchTracker.LocalSteamId;
+            if(string.IsNullOrEmpty(mySid)||mySid=="unknown")return;
+            foreach(var m in cli.Members)
+            {
+                if(m==null||m.steam_id!=mySid)continue;
+                if(team)
+                    teamLobbyPrefTeam=(m.preferred_team==1||m.preferred_team==2)?m.preferred_team:0;
+                else
+                {
+                    ovtPreferredSide=(m.preferred_side==1||m.preferred_side==2)?m.preferred_side:0;
+                    ovtSoloExtraPick=m.solo_extra_pick;
+                }
+                return;
+            }
+        }
+
         /// <summary>One renderer for both host-lobby panels. Two modes, FFA
         /// pattern: browser rows (idle) / member-list text (seated). Every
         /// dynamic-height write mirrors RenderFfaLobbySection's prefH+minH+
@@ -3575,6 +3614,7 @@ namespace CompetitiveRounds
             if(headerTxt==null||bodyTxt==null||browserHost==null)return;
             bool seated=!string.IsNullOrEmpty(cli.OpenLobbyId);
             bool leaving=cli.Status=="leaving";
+            HydrateHostLobbyPrefControls(cli,team);
             // A live locked group in this mode owns the tab flow — lobby
             // controls step aside (mirror of the FFA locked gate).
             bool busy=team
@@ -3587,9 +3627,12 @@ namespace CompetitiveRounds
             if(prefBtn!=null)
             {
                 prefBtn.SetActive(!leaving&&!busy);
+                // Aug 8 (Sid): "Team 1"/"Team 2" everywhere in the lobby
+                // surfaces — the button said Orange/Blue while the member rows
+                // said T1/T2. Color NAMES arrive with the team-color pass.
                 UIFactory.SetTextRaw(UIFactory.GetButtonText(prefBtn),
-                    teamLobbyPrefTeam==1?I18n.Tr("Team: <color=#FFB347>Orange</color>")
-                    :teamLobbyPrefTeam==2?I18n.Tr("Team: <color=#88AAFF>Blue</color>"):I18n.Tr("Team: Any"));
+                    teamLobbyPrefTeam==1?I18n.Tr("Team: <color=#FFB347>1</color>")
+                    :teamLobbyPrefTeam==2?I18n.Tr("Team: <color=#88AAFF>2</color>"):I18n.Tr("Team: Any"));
             }
             if(startBtn!=null)
             {
@@ -3616,13 +3659,16 @@ namespace CompetitiveRounds
                         bool isMe=m.steam_id==MatchTracker.LocalSteamId;
                         string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
                         string hostTag=m.is_host?"  <color=#FFD94D>"+I18n.Tr("HOST")+"</color>":"";
+                        // Aug 8 (Sid): claims render as "Team 1"/"Team 2" and
+                        // "Solo"/"Duo" — same words as the selector buttons;
+                        // nothing when unset/Any. Live from every state poll.
                         string prefTag;
                         if(team)
-                            prefTag=m.preferred_team==1?"  <color=#FFB347>T1</color>"
-                                   :m.preferred_team==2?"  <color=#88AAFF>T2</color>":"";
+                            prefTag=m.preferred_team==1?"  <color=#FFB347>"+I18n.Tr("Team 1")+"</color>"
+                                   :m.preferred_team==2?"  <color=#88AAFF>"+I18n.Tr("Team 2")+"</color>":"";
                         else
-                            prefTag=(m.preferred_side==1?"  <color=#FFB347>"+I18n.Tr("solo")+"</color>"
-                                   :m.preferred_side==2?"  <color=#88AAFF>"+I18n.Tr("duo")+"</color>":"")
+                            prefTag=(m.preferred_side==1?"  <color=#FFB347>"+I18n.Tr("Solo")+"</color>"
+                                   :m.preferred_side==2?"  <color=#88AAFF>"+I18n.Tr("Duo")+"</color>":"")
                                    +(m.solo_extra_pick?"  <color=#888>+pick</color>":"");
                         int wm=m.wait_seconds/60,ws=m.wait_seconds%60;
                         string waitStr=wm>0?$"{wm}m{ws:D2}s":$"{ws}s";
@@ -3785,11 +3831,12 @@ namespace CompetitiveRounds
             ovtSideBtn=UIFactory.CreateButton("O1HSide",o1hCtl.transform,"Side: Any",16f,C_WHITE,C_BTN,
                 ()=>{
                     ovtPreferredSide=(ovtPreferredSide+1)%3;
-                    // Seated members push the change via the idempotent
-                    // same-lobby rejoin (needs the server to adopt prefs on
-                    // that path - flagged to Sid; harmless no-op until then).
+                    // Codex r1 f4: seated members PATCH the one changed field
+                    // via /lobby/prefs — never a whole lobby-JOIN resend
+                    // (which raced Start and resent stale sibling fields).
+                    // 0 (Any) is an explicit value and IS sent.
                     if(!string.IsNullOrEmpty(ApiClient.OvtLobby.OpenLobbyId))
-                        ApiClient.OvtLobbyResendPrefs(ovtPreferredSide,ovtSoloExtraPick);
+                        ApiClient.OvtLobbyPrefsSide(ovtPreferredSide);
                     dirty=true;
                 },sizeDelta:new Vector2(120,28));
             /* Aug 8 (Sid): the extra pick is the HOST's setting now - the
@@ -3805,7 +3852,8 @@ namespace CompetitiveRounds
                         return;
                     }
                     ovtSoloExtraPick=!OvtEffectiveExtraPick();
-                    if(seated)ApiClient.OvtLobbyResendPrefs(ovtPreferredSide,ovtSoloExtraPick);
+                    // Codex r1 f4: single-field PATCH (see the Side button).
+                    if(seated)ApiClient.OvtLobbyPrefsExtraPick(ovtSoloExtraPick);
                     dirty=true;
                 },sizeDelta:new Vector2(250,28));
             ovtLobbyStartBtn=UIFactory.CreateButton("O1HStart",o1hCtl.transform,"Start Game",16f,C_WHITE,new Color(0.55f,0.42f,0.10f,0.95f),
@@ -3947,6 +3995,9 @@ namespace CompetitiveRounds
 
         private static void RefreshOneVTwoTab()
         {
+            // Codex r1 f6: hydrate BEFORE the button text renders (the shared
+            // section renderer also hydrates, but it runs after these writes).
+            HydrateHostLobbyPrefControls(ApiClient.OvtLobby,team:false);
             if(ovtSideBtn!=null)UIFactory.SetText(UIFactory.GetButtonText(ovtSideBtn),ovtPreferredSide==1?"Side: Solo":ovtPreferredSide==2?"Side: Duo":"Side: Any");
             // Aug 8: host's setting - seated members render the HOST's row
             // value (ground truth from the state payload), not their local.
@@ -6451,7 +6502,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             ApiClient.AlertEntry top = null;
             int Sev(string c) => c == "outage" ? 3 : c == "issue" ? 2 : c == "update" ? 1 : 0;
             foreach (var a in alerts)
+            {
+                // Codex r1 f16: never render an expired alert, even before the
+                // throttled prune tick has removed it from the cache.
+                if (a == null || a.expiresUtc <= DateTime.UtcNow) continue;
                 if (top == null || Sev(a.category) > Sev(top.category)) top = a;
+            }
             if (top == null) { alertBannerRow.SetActive(false); return; }
             string hex = top.category == "outage" ? "#FF6055" : top.category == "issue" ? "#FFB84D"
                        : top.category == "update" ? "#73D9FF" : "#C0C8E0";
@@ -6497,11 +6553,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 }
             }
             var teamList = ApiClient.CachedActiveTeamSeries;
+            // Bug 177: live FFA / 1v2 games ride the EXISTING spectate feed —
+            // without rows here a live ranked FFA was invisible on this panel.
+            var liveSpec = CollectSpectateLiveGames();
             int oneVOneCount = list.Count;
             int teamCount = teamList != null ? teamList.Count : 0;
             // Clear pool first, then rebuild.
             foreach (var g in liveBetRowPool) g.SetActive(false);
-            if (oneVOneCount == 0 && teamCount == 0)
+            if (oneVOneCount == 0 && teamCount == 0 && liveSpec.Count == 0)
             {
                 UIFactory.SetText(txtLiveSeries, "<color=#666><i>No live ranked series right now.</i></color>");
                 if (liveBetsPager != null) liveBetsPager.SetActive(false);
@@ -6541,6 +6600,25 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     ApplyTeamBetRow(bT1, ts, 1);
                     var bT2 = GetOrCreateLiveRow(poolIdx++);
                     ApplyTeamBetRow(bT2, ts, 2);
+                }
+            }
+
+            // Bug 177: live FFA / 1v2 rows (mode tag + names + WATCH). CAPPED
+            // at 4 — this column has NO bounded scroll and has overpainted
+            // before (#245); anything past the cap collapses into one "+N
+            // more" line pointing at the mode tabs. Rows stay one line.
+            if (liveSpec.Count > 0)
+            {
+                int specShown = Math.Min(liveSpec.Count, LIVE_SPECTATE_ROWS_CAP);
+                for (int i = 0; i < specShown; i++)
+                    ApplySpectateLiveRow(GetOrCreateLiveRow(poolIdx++), liveSpec[i]);
+                if (liveSpec.Count > specShown)
+                {
+                    var more = GetOrCreateLiveRow(poolIdx++);
+                    var tMore = UIFactory.CreateText("more", more.transform,
+                        I18n.TrF("<color=#888>+{0} more live games - see the mode tabs</color>", liveSpec.Count - specShown),
+                        13f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(384, 22));
+                    UIFactory.SetWordWrap(tMore, false);
                 }
             }
 
@@ -6640,11 +6718,58 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 liveBetRowPool.Add(go);
             }
             var row = liveBetRowPool[idx];
-            // Clear children (builders will recreate).
+            // Clear children (builders will recreate). Re-assert the creation
+            // prefH — the spectate rows shrink theirs, and pooled rows swap
+            // shapes between refreshes (#63 prefH rules).
+            UIFactory.SetPrefH(row, 26f);
             for (int i = row.transform.childCount - 1; i >= 0; i--)
                 UnityEngine.Object.Destroy(row.transform.GetChild(i).gameObject);
             row.SetActive(true);
             return row;
+        }
+
+        // Bug 177 (#245): the live-bets column has no bounded scroll, so the
+        // FFA/1v2 rows are hard-capped and the remainder collapses into one
+        // "+N more" line. Keep this small — every unit is 24px of un-scrolled
+        // column height on top of the unbounded 1v1/2v2 lists above it.
+        private const int LIVE_SPECTATE_ROWS_CAP = 4;
+
+        private static List<ApiClient.SpectateGameInfo> CollectSpectateLiveGames()
+        {
+            var outList = new List<ApiClient.SpectateGameInfo>();
+            var games = ApiClient.CachedSpectateGames;
+            if (games == null) return outList;
+            foreach (var g in games)
+            {
+                if (g == null || !g.spectatable) continue;
+                if (g.mode != "ffa" && g.mode != "1v2") continue;
+                outList.Add(g);
+            }
+            return outList;
+        }
+
+        private static void ApplySpectateLiveRow(GameObject row, ApiClient.SpectateGameInfo g)
+        {
+            UIFactory.SetPrefH(row, 24f);   // single 22px line + breathing room
+            string tag = g.mode == "ffa"
+                ? "<color=#66CCA8><b>[FFA]</b></color>"
+                : "<color=#C9A6E8><b>[1v2]</b></color>";
+            // names is server-composed but carries user-authored display
+            // names — sanitize before TMP rich text (#156 family).
+            var t = UIFactory.CreateText("sg", row.transform,
+                $"{tag} <color=#DDD>{FfaSafeRich(Trunc(g.names, 42))}</color>",
+                13f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(316, 22));
+            UIFactory.SetWordWrap(t, false);
+            // A fighter never sees a WATCH for their own game (the grant
+            // would 409 on the commitment check anyway).
+            if (!LocalInSpectateRoster(g))
+            {
+                string gameId = g.game_id;   // #265: bind the ENTITY at fill time
+                UIFactory.CreateButton("watch", row.transform, I18n.Tr("WATCH"), 12f, Color.white,
+                    new Color(0.16f, 0.32f, 0.45f),
+                    () => ApiClient.RequestSpectateGrant(gameId),
+                    sizeDelta: new Vector2(64, 22));
+            }
         }
 
         private static void ApplyHeaderRow(GameObject row, ApiClient.ActiveSeriesEntry s)
@@ -18320,17 +18445,13 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 () =>
                 {
                     teamLobbyPrefTeam = (teamLobbyPrefTeam + 1) % 3;
-                    // Seated members can update the claim live: lobby seats are
-                    // queue_type='manual' rows, so the existing preferred-team
-                    // endpoint updates them and the next state poll re-renders
-                    // everyone's tags. ("Any" has no endpoint value — it only
-                    // matters at create/join time.)
-                    if (teamLobbyPrefTeam != 0 && !string.IsNullOrEmpty(ApiClient.TeamLobby.OpenLobbyId))
-                    {
-                        var psid = MatchTracker.LocalSteamId;
-                        if (!string.IsNullOrEmpty(psid) && psid != "unknown")
-                            ApiClient.SetTeamPreferredTeam(psid, teamLobbyPrefTeam);
-                    }
+                    // Codex r1 f4/f7: seated members PATCH the one field via
+                    // /lobby/prefs — including 0 ("Any"), which used to send
+                    // NOTHING and leave the stale claim standing at Start.
+                    // Browsing (not seated) keeps the local value that rides
+                    // the next create/join body.
+                    if (!string.IsNullOrEmpty(ApiClient.TeamLobby.OpenLobbyId))
+                        ApiClient.TeamLobbyPrefs(teamLobbyPrefTeam);
                     dirty = true;
                 },
                 sizeDelta: new Vector2(150, 26));
@@ -19124,17 +19245,28 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 // red on loss rows) — that's the "all players show red" bug. We now
                 // color each name span individually and never nest team-vs-title.
                 ApiClient.TeamSeriesSlot leftA, leftB, rightA, rightB;
-                if (callerInSeries && callerTeam == 2)
+                bool leftIsT1 = !(callerInSeries && callerTeam == 2);
+                if (!leftIsT1)
                 { leftA = s.t2a; leftB = s.t2b; rightA = s.t1a; rightB = s.t1b; }
                 else
                 { leftA = s.t1a; leftB = s.t1b; rightA = s.t2a; rightB = s.t2b; }
                 const string LEFT_COL = "#6FB7FF";   // blue side
                 const string RIGHT_COL = "#FFA864";  // orange side
+                // Aug 8 (Sid): stamped body-colour team identity. A stamped
+                // team's NAMES tint with the team hex (this Recent section
+                // only — Sid's scope ruling; equipped nametag cosmetics would
+                // win, but this panel renders plain names). Unstamped series
+                // (pre-migration) keep today's side colors exactly.
+                string t1Hex = SafeHexColor(s.t1_color_hex), t2Hex = SafeHexColor(s.t2_color_hex);
+                string leftHex = leftIsT1 ? t1Hex : t2Hex;
+                string rightHex = leftIsT1 ? t2Hex : t1Hex;
+                string leftColorName = leftIsT1 ? s.t1_color_name : s.t2_color_name;
+                string rightColorName = leftIsT1 ? s.t2_color_name : s.t1_color_name;
                 string youTag = callerInSeries ? "  " + I18n.Tr("<size=80%><color=#7CFF7C>(you)</color></size>") : "";
                 string vsLine =
-                    $"{FormatTeamSide(leftA, leftB, LEFT_COL)}{youTag}"
+                    $"{FormatTeamSide(leftA, leftB, leftHex ?? LEFT_COL)}{youTag}"
                   + "   " + I18n.Tr("<color=#888>vs</color>") + "   "
-                  + $"{FormatTeamSide(rightA, rightB, RIGHT_COL)}";
+                  + $"{FormatTeamSide(rightA, rightB, rightHex ?? RIGHT_COL)}";
 
                 bool isExpanded;
                 _teamSeriesExpanded.TryGetValue(s.series_id ?? "", out isExpanded);
@@ -19149,8 +19281,16 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         : I18n.TrF("<color=#FF6666><b>LOST</b></color> {0}-{1}", leftScore, rightScore);
                 else
                 {
-                    bool leftWonNeutral = (s.winner_team == 1);
-                    string wSide = leftWonNeutral ? I18n.TrF("<color={0}>Blue</color>", LEFT_COL) : I18n.TrF("<color={0}>Orange</color>", RIGHT_COL);
+                    bool leftWonNeutral = (s.winner_team == 1);   // neutral view: left IS t1
+                    // Aug 8 (Sid): a stamped winner is named "Team <ColorName>"
+                    // tinted its hex; unstamped keeps today's Blue/Orange.
+                    string wHex = leftWonNeutral ? leftHex : rightHex;
+                    string wName = leftWonNeutral ? leftColorName : rightColorName;
+                    string wSide;
+                    if (wHex != null && !string.IsNullOrEmpty(wName))
+                        wSide = $"<color={wHex}>" + I18n.TrF("Team {0}", FfaSafeRich(wName)) + "</color>";
+                    else
+                        wSide = leftWonNeutral ? I18n.TrF("<color={0}>Blue</color>", LEFT_COL) : I18n.TrF("<color={0}>Orange</color>", RIGHT_COL);
                     int wHi = Math.Max(leftScore, rightScore), wLo = Math.Min(leftScore, rightScore);
                     winLine = I18n.TrF("{0} <b>won</b> {1}-{2}", wSide, wHi, wLo);
                 }
@@ -19600,9 +19740,11 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     int waitMin = q.wait_seconds / 60;
                     int waitSec = q.wait_seconds % 60;
                     string waitStr = waitMin > 0 ? $"{waitMin}m{waitSec:D2}s" : $"{waitSec}s";
+                    // Aug 8 (Sid): "Team 1"/"Team 2" everywhere in the lobby
+                    // surfaces — no more T1/T2 shorthand.
                     string teamTag = "";
-                    if (q.preferred_team == 1) teamTag = "  <color=#FFB347>T1</color>";
-                    else if (q.preferred_team == 2) teamTag = "  <color=#88AAFF>T2</color>";
+                    if (q.preferred_team == 1) teamTag = "  <color=#FFB347>" + I18n.Tr("Team 1") + "</color>";
+                    else if (q.preferred_team == 2) teamTag = "  <color=#88AAFF>" + I18n.Tr("Team 2") + "</color>";
                     sb.Append($"  {nameC}{Trunc(q.display_name, 18)}</color>  {ratingDisplay}  {statusTag}  <color=#888>{waitStr}</color>{teamTag}\n");
                 }
                 UIFactory.SetText(body, sb.ToString());
