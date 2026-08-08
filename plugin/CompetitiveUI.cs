@@ -3041,7 +3041,15 @@ namespace CompetitiveRounds
             if (Event.current == null || Event.current.type != EventType.Repaint) return;
             if (Plugin.ShowIngameChat != null && !Plugin.ShowIngameChat.Value) return;
             if (!Plugin.DataConsentGranted) return;
-            if (NativeUI.IsOpen) return;  // the F5 chat panel covers this
+            /* Aug 7 item 3: the old `if (NativeUI.IsOpen) return;` assumed "the
+             * F5 chat panel covers this" — true only on the Home tab. Now chat
+             * stays visible on every OTHER menu tab, repositioned to the right
+             * edge so it sits over dead chrome instead of the left-column
+             * tables. Display-only IMGUI (no input path), so #141/#200 are
+             * moot; IMGUI paints above the uGUI page, and DrawUI order keeps
+             * every modal painting above THIS. */
+            if (NativeUI.HomeChatPaneVisible) return;  // the Home tab chat pane covers this
+            bool overMenu = NativeUI.IsOpen;
 
             NativeUI.CopyChatTail(_chatEntryScratch, 8);
             var entries = _chatEntryScratch;
@@ -3074,9 +3082,12 @@ namespace CompetitiveRounds
             }
             if (visibleCount == 0) return;
 
-            // Anchor bottom-left, grow upward (newest at the bottom, older above).
+            // Anchor bottom-left in-game; bottom-RIGHT while the menu is open
+            // (the left column is dense tables on most tabs; the right edge
+            // below the detail panels is the quietest region — and the menu's
+            // bottom bar ends ~40px up, which yBottom already clears).
             float w = 440, padding = 6, lineGap = 2;
-            float x = 12;
+            float x = overMenu ? Screen.width - w - 16 : 12;
 
             // Measure every visible line first so the backdrop matches the
             // true stacked height (wrapped lines are taller than one row).

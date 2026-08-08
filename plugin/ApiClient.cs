@@ -1629,26 +1629,18 @@ namespace CompetitiveRounds
         private static void ParseActiveTeamSeries(string response)
         {
             var list = new List<ActiveTeamSeriesEntry>();
+            // #156: fighter display names ride this payload — a name containing
+            // ']' / '{' / '}' broke the old naive bracket/depth slicing and
+            // blanked the Live 2v2 panel, the 2v2 tab strip AND the spectator
+            // HUD series line. String-aware slicers only.
             int sStart = response.IndexOf("\"series\"");
             if (sStart < 0) { CachedActiveTeamSeries = list; return; }
             int arrStart = response.IndexOf('[', sStart);
-            int arrEnd = FindMatchingBracket(response, arrStart);
-            if (arrStart < 0 || arrEnd < 0) { CachedActiveTeamSeries = list; return; }
-            string slice = response.Substring(arrStart + 1, arrEnd - arrStart - 1);
-            int oIdx = 0;
-            while (oIdx < slice.Length)
+            if (arrStart < 0) { CachedActiveTeamSeries = list; return; }
+            int arrEnd = FindMatchingBracketStringAware(response, arrStart);
+            if (arrEnd < 0) { CachedActiveTeamSeries = list; return; }
+            foreach (string obj in SliceTopLevelObjects(response.Substring(arrStart, arrEnd - arrStart + 1)))
             {
-                int objStart = slice.IndexOf('{', oIdx);
-                if (objStart < 0) break;
-                int oDepth = 1, j = objStart + 1;
-                while (j < slice.Length && oDepth > 0)
-                {
-                    if (slice[j] == '{') oDepth++;
-                    else if (slice[j] == '}') oDepth--;
-                    j++;
-                }
-                if (oDepth != 0) break;
-                string obj = slice.Substring(objStart, j - objStart);
                 list.Add(new ActiveTeamSeriesEntry
                 {
                     series_id = ExtractJsonString(obj, "series_id"),
@@ -1675,7 +1667,6 @@ namespace CompetitiveRounds
                     started_at = ExtractJsonString(obj, "started_at"),
                     dc_grace_until = ExtractJsonString(obj, "dc_grace_until"),
                 });
-                oIdx = j;
             }
             CachedActiveTeamSeries = list;
         }
@@ -9270,13 +9261,18 @@ namespace CompetitiveRounds
                             NativeUI.MarkDirty();
                             return;
                         }
-                        var parts = response.Split(new[] { "\"match_id\"" }, StringSplitOptions.None);
-                        for (int i = 1; i < parts.Length; i++)
+                        // #156: each match object carries four display names, so
+                        // the old '"match_id"' token split + naive brace/bracket
+                        // matchers broke on a name containing '{' '[' or '"'.
+                        // String-aware slice over the top-level array instead.
+                        int tArr = response.IndexOf('[');
+                        int tEnd = tArr >= 0 ? FindMatchingBracketStringAware(response, tArr) : -1;
+                        if (tEnd < 0) { CachedTeamMatchHistory = entries; NativeUI.MarkDirty(); return; }
+                        foreach (var chunk in SliceTopLevelObjects(response.Substring(tArr, tEnd - tArr + 1)))
                         {
-                            var chunk = parts[i];
                             var e = new TeamMatchHistoryEntry
                             {
-                                match_id = ExtractJsonString(chunk, ""),
+                                match_id = ExtractJsonString(chunk, "match_id"),
                                 series_id = ExtractJsonString(chunk, "series_id"),
                                 ended_at = ExtractJsonString(chunk, "ended_at"),
                                 won = chunk.Contains("\"won\":true"),
@@ -9304,39 +9300,30 @@ namespace CompetitiveRounds
                                 if (cStart >= 0)
                                 {
                                     int oStart = chunk.IndexOf('{', cStart);
-                                    int oEnd = FindMatchingBrace(chunk, oStart);
+                                    int oEnd = FindMatchingBraceStringAware(chunk, oStart);
                                     if (oStart >= 0 && oEnd > oStart)
                                     {
                                         string slice = chunk.Substring(oStart + 1, oEnd - oStart - 1);
                                         int cursor = 0;
                                         while (cursor < slice.Length)
                                         {
+                                            // Keys are server-generated steam ids
+                                            // (digits) — the plain quote scan is
+                                            // safe for the KEY, but the value
+                                            // arrays get string-aware slicing.
                                             int kS = slice.IndexOf('"', cursor);
                                             if (kS < 0) break;
                                             int kE = slice.IndexOf('"', kS + 1);
                                             if (kE < 0) break;
                                             string sid = slice.Substring(kS + 1, kE - kS - 1);
                                             int aS = slice.IndexOf('[', kE);
-                                            int aE = FindMatchingBracket(slice, aS);
+                                            int aE = aS >= 0 ? FindMatchingBracketStringAware(slice, aS) : -1;
                                             if (aS < 0 || aE < 0) break;
-                                            string aSlice = slice.Substring(aS + 1, aE - aS - 1);
                                             var cardList = new List<string>();
-                                            int oC = 0;
-                                            while (oC < aSlice.Length)
+                                            foreach (var objStr in SliceTopLevelObjects(slice.Substring(aS, aE - aS + 1)))
                                             {
-                                                int oS = aSlice.IndexOf('{', oC);
-                                                if (oS < 0) break;
-                                                int oD = 1, j = oS + 1;
-                                                while (j < aSlice.Length && oD > 0)
-                                                {
-                                                    if (aSlice[j] == '{') oD++;
-                                                    else if (aSlice[j] == '}') oD--;
-                                                    j++;
-                                                }
-                                                string objStr = aSlice.Substring(oS, j - oS);
                                                 string cn = ExtractJsonString(objStr, "card_name");
                                                 if (!string.IsNullOrEmpty(cn)) cardList.Add(cn);
-                                                oC = j;
                                             }
                                             e.cards_by_player[sid] = cardList;
                                             cursor = aE + 1;

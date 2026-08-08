@@ -1016,6 +1016,11 @@ namespace CompetitiveRounds
         private const float S = 1.25f;
 
         public static bool IsOpen=>isOpen;
+        /// <summary>Aug 7 item 3: true only when the Home tab's dedicated chat
+        /// pane is actually on screen. DrawInGameChat used to gate on IsOpen —
+        /// "the F5 chat panel covers this" — which is only true on ONE of the 14
+        /// tabs; on the other 13, arriving chat was invisible.</summary>
+        public static bool HomeChatPaneVisible => isOpen && currentTab == TAB_HOME;
         public static void Toggle(){if(isOpen)Close();else Open();}
         public static void MarkDirty()=>dirty=true;
         public static void SetLinkCode(string code){if(txtLinkCode!=null)UIFactory.SetTextRaw(txtLinkCode,I18n.TrF("<color=#00FFFF>{0}</color>  - type <color=#FFFFFF>!link {1}</color> in Discord",code,code));}
@@ -2952,8 +2957,11 @@ namespace CompetitiveRounds
                 if(showStart)
                 {
                     float lockS=ApiClient.FfaLobbyLockRemaining;
+                    // Bug 163: "Start in {0}s" read as an AUTO-start countdown; it
+                    // is actually the settings-change lockout re-arming the 60s
+                    // start gate. Name the mechanism so hosts don't panic-wait.
                     UIFactory.SetText(UIFactory.GetButtonText(ffaStartBtn),
-                        lockS>0.5f?I18n.TrF("Start in {0}s",Mathf.CeilToInt(lockS))
+                        lockS>0.5f?I18n.TrF("Start unlocks in {0}s (settings changed)",Mathf.CeilToInt(lockS))
                         :ApiClient.FfaLobbyCanStart
                         ?I18n.TrF("Start Game ({0}/{1})",ApiClient.FfaLobbyMemberCount,ApiClient.FfaLobbyMaxPlayers)
                         :I18n.TrF("Start (need {0}+)",ApiClient.FfaLobbyMinPlayers));
@@ -7500,7 +7508,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // -- Settings Tab ----------------------------------------
         private static object txtConsentStatus, txtDeleteStatus;
         private static GameObject consentToggleBtn, deleteBtn, confirmDeleteBtn, cancelDelBtn, notifToggleBtn;
-        private static GameObject fpsToggleBtn, fpsCapToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn;
+        private static GameObject fpsToggleBtn, fpsCapToggleBtn, deepIdleToggleBtn, pingToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn;
         private static GameObject appearOfflineBtn; private static object appearOfflineTxt;
         private static GameObject showDiscordBtn; private static object showDiscordTxt;
         private static GameObject allowSpectatorsBtn; private static object allowSpectatorsTxt;
@@ -7516,7 +7524,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // Bug #159: heavier menu text (the game's own font at a higher SDF weight).
         private static GameObject heavyFontBtn;
         private static object heavyFontTxt;
-        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt;
+        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, deepIdleToggleTxt, pingToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt;
         // v1.26.8 perf-pass toggles. Master + 7 per-patch flags; renders in a
         // collapsible section at the bottom of the Settings panel.
         private static GameObject perfMasterBtn, perfStunBtn, perfBulletsBtn, perfHitSndBtn, perfColorGhBtn, perfEdgeBnBtn, perfTagBtn, perfMenuBtn;
@@ -7743,6 +7751,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 },
                 "Caps the game at 120 FPS while the window is not focused. Saves GPU/CPU when alt-tabbed; lifts instantly when you come back.");
             fpsCapToggleTxt = UIFactory.GetButtonText(fpsCapToggleBtn);
+            deepIdleToggleBtn = SettingsToggle(intBox.transform, "SDeepIdle", new Vector2(260, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Deep idle toggled");
+                    Plugin.DeepIdleUnfocused.Value = !Plugin.DeepIdleUnfocused.Value;
+                    dirty = true;
+                },
+                "After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a match is found; wakes instantly on focus.");
+            deepIdleToggleTxt = UIFactory.GetButtonText(deepIdleToggleBtn);
             pingToggleBtn = SettingsToggle(intBox.transform, "SPing", new Vector2(260, 28),
                 () =>
                 {
@@ -8225,6 +8242,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     Plugin.CapFpsUnfocused.Value
                         ? "Unfocused 120 FPS cap: <color=#88FF88>ON</color>"
                         : "Unfocused 120 FPS cap: <color=#FF9966>OFF</color>");
+            if (deepIdleToggleTxt != null && Plugin.DeepIdleUnfocused != null)
+                UIFactory.SetText(deepIdleToggleTxt,
+                    Plugin.DeepIdleUnfocused.Value
+                        ? "Unfocused deep idle (60s): <color=#88FF88>ON</color>"
+                        : "Unfocused deep idle (60s): <color=#FF9966>OFF</color>");
             if (appearOfflineTxt != null)
             {
                 var stAo = ApiClient.CachedPlayerStats;
@@ -10116,12 +10138,31 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             var metricRow = new GameObject("CmpMetRow"); metricRow.transform.SetParent(right.transform, false);
             metricRow.AddComponent<RectTransform>(); UIFactory.AddHLG(metricRow, spacing: 4, forceExpandH: true);
             UIFactory.AddLE(metricRow, prefH: 30, flexH: 0);
-            /* Aug 6 item 2: the < / label / > CYCLER is replaced by a searchable
-             * dropdown. Cycling was already awkward at 19 metrics; the Players
-             * list is 32 now, so a linear walk is not a usable control. */
+            /* Aug 6 item 2 replaced the < / label / > cycler with the searchable
+             * dropdown; bug 176 (Stan) asked for BOTH — the arrows walk the list
+             * one step at a time, the center button still opens the picker. The
+             * arrows write ActiveMetricIndex (NOT compareMetric directly) so they
+             * stay sub-tab aware — same state the picker rows write, so the two
+             * controls can never fork. */
+            var cmpPrev = UIFactory.CreateButton("CmpMetP", metricRow.transform, "<",
+                15f, C_WHITE, C_TAB, () =>
+                {
+                    int len = ActiveMetrics.Length;
+                    ActiveMetricIndex = (ActiveMetricIndex - 1 + len) % len;
+                    dirty = true;
+                }, sizeDelta: new Vector2(30, 30));
+            UIFactory.AddLE(cmpPrev, prefW: 30, prefH: 30, flexW: 0, flexH: 0);
             compareMetricBtn = UIFactory.CreateButton("CmpMet", metricRow.transform, "Showing: Elo over games",
                 15f, C_WHITE, C_TAB, OpenMetricPicker, sizeDelta: new Vector2(320, 30));
             UIFactory.AddLE(compareMetricBtn, prefH: 30, flexW: 1, flexH: 0);
+            var cmpNext = UIFactory.CreateButton("CmpMetN", metricRow.transform, ">",
+                15f, C_WHITE, C_TAB, () =>
+                {
+                    int len = ActiveMetrics.Length;
+                    ActiveMetricIndex = (ActiveMetricIndex + 1) % len;
+                    dirty = true;
+                }, sizeDelta: new Vector2(30, 30));
+            UIFactory.AddLE(cmpNext, prefW: 30, prefH: 30, flexW: 0, flexH: 0);
             compareMetricBtnTxt = UIFactory.GetButtonText(compareMetricBtn);
             // The label is one line in a 30px row and carries a translated metric
             // name; without this the global Truncate default clips it (#292).
@@ -11332,6 +11373,9 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             new Color(0.90f, 0.42f, 0.42f), new Color(0.50f, 0.58f, 0.90f),
             new Color(0.80f, 0.66f, 0.44f), new Color(0.56f, 0.76f, 0.68f),
         };
+        // Aug 7 item 12: the tail bucket for label sets larger than the palette.
+        // Grey on purpose — it must never be confusable with a real slice color.
+        private static readonly Color PIE_OTHER_COLOR = new Color(0.55f, 0.55f, 0.58f);
 
         /// <summary>Per-player pie grid for Build Types / Ranked Friends / Gold
         /// Sources. Structurally the same as BuildComparePieChart, but the labels
@@ -11369,10 +11413,18 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     return;
                 }
 
-                // Gather each player's (labels, values) and the label union.
+                // Gather each player's (labels, values), then rank labels by their
+                // AGGREGATE value across all selected players. Aug 7 item 12: the
+                // old union was encounter-ordered and colored via `ui % 12`, so
+                // Ranked Friends (up to ~96 distinct opponents across 12 players)
+                // wrapped the palette — 3+ opponents shared the same yellow — and
+                // every label past the 12-key legend cap silently had no key.
+                // Now: <=12 distinct labels keep the exact palette; beyond that
+                // the top 11 by aggregate stay and the tail folds into one grey
+                // "Other" slice, so every drawn color is distinct AND keyed.
                 var labelsPer = new List<List<string>>();
                 var valuesPer = new List<List<int>>();
-                var union = new List<string>();
+                var agg = new Dictionary<string, long>();
                 foreach (int i in idxs)
                 {
                     string sid = compareSelected[i];
@@ -11385,27 +11437,45 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     { var d = ApiClient.GoldSources[sid]; L = d.buckets; V = d.amounts; }
                     labelsPer.Add(L); valuesPer.Add(V);
                     for (int li = 0; li < L.Count; li++)
-                        if (V.Count > li && V[li] > 0 && !union.Contains(L[li])) union.Add(L[li]);
+                        if (V.Count > li && V[li] > 0)
+                            agg[L[li]] = (agg.TryGetValue(L[li], out long prev) ? prev : 0L) + V[li];
                 }
+                var ranked = new List<KeyValuePair<string, long>>(agg);
+                // Deterministic order: aggregate desc, then ordinal name — the kept
+                // set must not depend on selection order or fetch arrival (#265-adjacent
+                // flicker: caches land asynchronously between renders).
+                ranked.Sort((a, b) =>
+                {
+                    int c = b.Value.CompareTo(a.Value);
+                    return c != 0 ? c : string.CompareOrdinal(a.Key, b.Key);
+                });
+                bool hasOther = ranked.Count > PIE_SLICE_COLORS.Length;
+                int keep = hasOther ? PIE_SLICE_COLORS.Length - 1 : ranked.Count;
+                var union = new List<string>();
+                for (int ri = 0; ri < keep; ri++) union.Add(ranked[ri].Key);
 
                 // Shared legend, 4 chips per line (same <mark> swatch trick as the
-                // region legend — a separately-positioned swatch drifts).
-                for (int li = 0; li < union.Count && li < 12; li++)
+                // region legend — a separately-positioned swatch drifts). One count
+                // drives both the loop and topPad below — they must never disagree.
+                int legendCount = union.Count + (hasOther ? 1 : 0);
+                for (int li = 0; li < legendCount; li++)
                 {
+                    bool isOther = li >= union.Count;
                     float lxr = -14f - (li % 4) * 118f;
                     float lyr = -4f - (li / 4) * 17f;
-                    string hex = ColorToHex(PIE_SLICE_COLORS[li % PIE_SLICE_COLORS.Length]);
+                    string hex = ColorToHex(isOther ? PIE_OTHER_COLOR : PIE_SLICE_COLORS[li]);
+                    string lbl = isOther ? I18n.Tr("Other") : PieLabelDisplay(metricName, union[li]);
                     MakeGraphLabel($"CmpGPLeg{li}",
                         /* R2 finding 16: Ranked Friends puts OPPONENT DISPLAY NAMES in this
                          * legend, so it is user-authored text reaching TMP rich text. */
-                        $"<mark=#{hex}FF>  </mark> <b>{FfaSafeRich(Trunc(PieLabelDisplay(metricName, union[li]), 13))}</b>",
+                        $"<mark=#{hex}FF>  </mark> <b>{FfaSafeRich(Trunc(lbl, 13))}</b>",
                         new Vector2(1, 1), new Vector2(lxr, lyr), new Vector2(110, 14), UIFactory.AlignMidLeft, 13f);
                 }
 
                 int n = idxs.Count;
                 int cols = n <= 1 ? 1 : n <= 2 ? 2 : n <= 6 ? 3 : 4;
                 int rows = (n + cols - 1) / cols;
-                float topPad = 30f + Mathf.Ceil(Mathf.Min(union.Count, 12) / 4f) * 17f;
+                float topPad = 30f + Mathf.Ceil(legendCount / 4f) * 17f;
                 float cellW = (W - 20f) / cols;
                 float cellH = (H - topPad - 8f) / Mathf.Max(1, rows);
                 float radius = Mathf.Max(24f, Mathf.Min(cellW, cellH) * 0.34f);
@@ -11435,13 +11505,24 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     }
                     DrawPieSlice($"CmpGPBdr{k}", cx, cy, radius + 2.5f, 0f, 1f, new Color(0.10f, 0.11f, 0.14f, 1f));
                     float acc = 0f;
+                    long otherV = 0;
+                    /* Aug 7 item 12: label width is derived from the cell, not a
+                     * hard 96px — "Bullet Speed" was Trunc(…,10)'d to "Bullet S.."
+                     * even with half a cell of empty space beside it. ~9px/char at
+                     * MakeGraphLabel's 12pt floor (measured in the Aug-3 pass:
+                     * 64px could not hold "US 42%", 80px could). The clamp keeps
+                     * labels from spilling into the NEIGHBORING pie cell — the
+                     * panel mask only clips at panel edges (#292). */
+                    float lblW = Mathf.Max(96f, cellW * 0.5f - 24f);
+                    int lblChars = Mathf.Clamp((int)(lblW / 9f) - 4, 10, 24); // -4 chars reserved for " NN%"
                     for (int si = 0; si < L.Count; si++)
                     {
                         int v = V.Count > si ? V[si] : 0;
                         if (v <= 0) continue;
+                        int ui = union.IndexOf(L[si]);
+                        if (ui < 0) { otherV += v; continue; } // tail label -> Other slice below
                         float frac = (float)v / tot;
-                        int ui = union.IndexOf(L[si]); if (ui < 0) ui = si;
-                        Color sc = PIE_SLICE_COLORS[ui % PIE_SLICE_COLORS.Length];
+                        Color sc = PIE_SLICE_COLORS[ui];
                         DrawPieSlice($"CmpGP{k}_{si}", cx, cy, radius, acc, frac, sc);
                         if (leaderLines && frac >= 0.08f)
                         {
@@ -11452,13 +11533,32 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                             DrawGraphSegment($"CmpGPLn{k}_{si}", ex, ey, lx, ly, new Color(0.8f, 0.8f, 0.8f, 0.7f), 1.5f);
                             bool rightSide = Mathf.Cos(ang) >= 0f;
                             int align = rightSide ? UIFactory.AlignMidLeft : UIFactory.AlignMidRight;
-                            float lblX = rightSide ? lx + 2f : lx - 96f;
+                            float lblX = rightSide ? lx + 2f : lx - lblW;
                             MakeGraphLabel($"CmpGPLbl{k}_{si}",
                                 /* R3: leader labels carry the same user-authored names as the legend. */
-                                $"<color=#CCC>{FfaSafeRich(Trunc(PieLabelDisplay(metricName, L[si]), 10))} {frac * 100f:F0}%</color>",
-                                new Vector2(0, 0), new Vector2(lblX, ly - 6f), new Vector2(96, 12), align);
+                                $"<color=#CCC>{FfaSafeRich(Trunc(PieLabelDisplay(metricName, L[si]), lblChars))} {frac * 100f:F0}%</color>",
+                                new Vector2(0, 0), new Vector2(lblX, ly - 6f), new Vector2(lblW, 12), align);
                         }
                         acc += frac;
+                    }
+                    if (otherV > 0)
+                    {
+                        float frac = (float)otherV / tot;
+                        DrawPieSlice($"CmpGP{k}_oth", cx, cy, radius, acc, frac, PIE_OTHER_COLOR);
+                        if (leaderLines && frac >= 0.08f)
+                        {
+                            float midFrac = acc + frac * 0.5f;
+                            float ang = Mathf.PI * 0.5f - midFrac * 2f * Mathf.PI;
+                            float ex = cx + Mathf.Cos(ang) * radius, ey = cy + Mathf.Sin(ang) * radius;
+                            float lx = cx + Mathf.Cos(ang) * (radius + 20f), ly = cy + Mathf.Sin(ang) * (radius + 20f);
+                            DrawGraphSegment($"CmpGPLn{k}_oth", ex, ey, lx, ly, new Color(0.8f, 0.8f, 0.8f, 0.7f), 1.5f);
+                            bool rightSide = Mathf.Cos(ang) >= 0f;
+                            int align = rightSide ? UIFactory.AlignMidLeft : UIFactory.AlignMidRight;
+                            float lblX = rightSide ? lx + 2f : lx - lblW;
+                            MakeGraphLabel($"CmpGPLblOth{k}",
+                                $"<color=#CCC>{I18n.Tr("Other")} {frac * 100f:F0}%</color>",
+                                new Vector2(0, 0), new Vector2(lblX, ly - 6f), new Vector2(lblW, 12), align);
+                        }
                     }
                 }
             }

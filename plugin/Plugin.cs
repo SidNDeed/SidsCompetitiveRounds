@@ -52,6 +52,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowNotifications;
         internal static ConfigEntry<bool> ShowFps;
         internal static ConfigEntry<bool> CapFpsUnfocused;
+        internal static ConfigEntry<bool> DeepIdleUnfocused;
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowIngameChat;
         internal static ConfigEntry<bool> ShowTrails;
@@ -359,6 +360,15 @@ namespace CompetitiveRounds
                 "Performance", "CapFpsUnfocused",
                 true,
                 "Cap the frame rate at 120 FPS while the game window is not focused (Aug 6 item 8). Saves GPU/CPU for alt-tabbed players without affecting gameplay; the cap is lifted the moment focus returns."
+            );
+
+            // Aug 7 item 2: a NEW key, not a repurposed CapFpsUnfocused — that
+            // key's on-disk description promises "no gameplay effect" and #190
+            // means existing installs would never see a changed meaning anyway.
+            DeepIdleUnfocused = Config.Bind(
+                "Performance", "DeepIdleUnfocused",
+                true,
+                "After 60 seconds continuously unfocused AND outside any online room/battle/queue-match, drop the engine to 15 FPS (deep idle). Restores instantly on focus, on match found, or on joining a room. Never active during online play."
             );
 
             ShowRegionPing = Config.Bind(
@@ -1237,6 +1247,20 @@ namespace CompetitiveRounds
         private bool fpsCapApplied = false;
         private int fpsCapSavedTarget = -1;
         private int fpsCapSavedVsync = 0;
+        /* Aug 7 item 2: stage 2 — deep idle. After 60s continuously unfocused
+         * AND provably out of any online room / offline battle / pending
+         * match-found, drop to 15 fps. Unlike stage 1 this DOES override vSync:
+         * after 60s out-of-room "zeroing vSync could raise the rate" is moot
+         * (15 < any refresh), and vSync-on players — the vanilla-default
+         * majority — otherwise get zero idle savings. 15 (not 10) keeps PUN
+         * serialization at its native 10/s ceiling if a gate is ever wrong and
+         * bounds WaitForSeconds jitter at ~67ms; a Photon disconnect needs the
+         * main loop SILENT >60s (ack-fallback window), unreachable via any
+         * positive targetFrameRate. */
+        private float unfocusedSinceRt = -1f;
+        private bool fpsDeepIdleApplied = false;
+        private int deepSavedTarget = -1;
+        private int deepSavedVsync = 0;
 
         // Ranked queue room joining — now handled by Plugin.Update()
         // (Plugin's MonoBehaviour survives scene changes via BepInEx)
@@ -1249,12 +1273,63 @@ namespace CompetitiveRounds
             Plugin.Log.LogInfo("[PERSIST] Behaviour Awake, DontDestroyOnLoad set");
         }
 
+        /// <summary>Aug 7 item 2: all five deep-idle gates in one place. Any
+        /// gate failing wakes the engine within one frame (≤67ms at 15fps)
+        /// because this ticks first in Update. The pending-slot gate is
+        /// load-bearing, not a nicety: queue auto-join fires while unfocused BY
+        /// DESIGN (TaskbarFlash exists for that flow) and the Photon handshake
+        /// should run at stage-1 speed — the predicate flips BEFORE the room
+        /// join begins, exactly when we want to wake.</summary>
+        private bool WantDeepIdle()
+        {
+            if (Plugin.modDisabled) return false;                       // disabled mod may only restore
+            if (Plugin.DeepIdleUnfocused == null || !Plugin.DeepIdleUnfocused.Value) return false;
+            if (unfocusedSinceRt < 0f) return false;
+            if (Time.realtimeSinceStartup - unfocusedSinceRt < 60f) return false;
+            if (GameStateWatcher.IsInOnlineRoom) return false;          // never in online play (#122-safe accessor)
+            try { if (GameManager.instance != null && GameManager.instance.battleOngoing) return false; } catch { }
+            if (!string.IsNullOrEmpty(Plugin.PendingRankedRoom)) return false;
+            if (Plugin.Pending2v2Slot >= 0 || Plugin.PendingOvtSlot >= 0 || Plugin.PendingFfaSlot >= 0) return false;
+            return true;
+        }
+
         private void TickUnfocusedFpsCap()
         {
             try
             {
+                bool unfocused = !Application.isFocused;
+                if (!unfocused) unfocusedSinceRt = -1f;
+                else if (unfocusedSinceRt < 0f) unfocusedSinceRt = Time.realtimeSinceStartup;
+
+                // ── Stage 2: deep idle (checked first so its restore runs
+                // before stage 1's check in the same tick — the two stages
+                // layer: deep saves whatever stage 1 left in place). ──
+                bool wantDeep = unfocused && WantDeepIdle();
+                if (wantDeep && !fpsDeepIdleApplied)
+                {
+                    deepSavedTarget = Application.targetFrameRate;
+                    deepSavedVsync = QualitySettings.vSyncCount;
+                    QualitySettings.vSyncCount = 0; // vSync overrides targetFrameRate
+                    Application.targetFrameRate = 15;
+                    fpsDeepIdleApplied = true;
+                    Plugin.Log.LogInfo("[FPSCAP] deep idle engaged (60s+ unfocused, out of room)");
+                }
+                else if (!wantDeep && fpsDeepIdleApplied)
+                {
+                    // Value-checked restore, targetFrameRate before vSync — only
+                    // undo what is still OURS (player video changes win).
+                    if (Application.targetFrameRate == 15)
+                        Application.targetFrameRate = deepSavedTarget;
+                    if (QualitySettings.vSyncCount == 0)
+                        QualitySettings.vSyncCount = deepSavedVsync;
+                    fpsDeepIdleApplied = false;
+                    Plugin.Log.LogInfo($"[FPSCAP] deep idle lifted (focused={Application.isFocused})");
+                }
+                if (fpsDeepIdleApplied) return; // stage 1 is subsumed while deep
+
                 bool wantCap = Plugin.CapFpsUnfocused != null && Plugin.CapFpsUnfocused.Value
-                               && !Application.isFocused;
+                               && !Plugin.modDisabled
+                               && unfocused;
                 if (wantCap && !fpsCapApplied)
                 {
                     int cur = Application.targetFrameRate; // -1/0 = uncapped
@@ -1293,11 +1368,15 @@ namespace CompetitiveRounds
 
         private void Update()
         {
-            if (Plugin.modDisabled) return;
-
-            // Aug 6 item 8: cap FPS at 120 while the window is unfocused.
-            // Runs pre-init on purpose — it has no dependency on the API.
+            // Aug 6 item 8 / Aug 7 item 2: the fps tick runs BEFORE the
+            // modDisabled return — the compat check flips modDisabled ~3s after
+            // launch, and the old order left an applied cap stuck for the whole
+            // session if the launch happened unfocused (cosmetic at 120, a
+            // ruined session at 15). Apply paths gate on !modDisabled inside;
+            // a disabled mod can only ever RESTORE.
             TickUnfocusedFpsCap();
+
+            if (Plugin.modDisabled) return;
 
             // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }
