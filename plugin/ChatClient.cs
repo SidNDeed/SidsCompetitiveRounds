@@ -399,6 +399,28 @@ namespace CompetitiveRounds
                     catch (Exception subEx)
                     { Plugin.Log.LogWarning($"[CHAT] subscribe frame failed: {subEx.Message}"); }
 
+                    /* Codex r1 f2: bind this socket to our verified Steam
+                     * session so censor strikes can only ever land on OUR OWN
+                     * identity server-side. Same direct-send rationale as the
+                     * subscribe frame above. Best-effort: no token yet (early
+                     * launch) just means this socket stays unverified until
+                     * the next reconnect — messages still relay either way. */
+                    try
+                    {
+                        string sid = MatchTracker.LocalSteamId;
+                        string tok = SteamAuth.SessionToken;
+                        if (!string.IsNullOrEmpty(sid) && sid != "unknown" && !string.IsNullOrEmpty(tok))
+                        {
+                            string authJson = "{\"type\":\"auth\",\"steam_id\":\"" + JsonEscape(sid)
+                                            + "\",\"token\":\"" + JsonEscape(tok) + "\"}";
+                            var authBytes = Encoding.UTF8.GetBytes(authJson);
+                            await socket.SendAsync(new ArraySegment<byte>(authBytes),
+                                WebSocketMessageType.Text, true, token);
+                        }
+                    }
+                    catch (Exception authEx)
+                    { Plugin.Log.LogWarning($"[CHAT] auth frame failed: {authEx.Message}"); }
+
                     // Populate scrollback the first time we connect in a session.
                     try { ApiClient.FetchRecentChat(50); } catch { }
 

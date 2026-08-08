@@ -466,6 +466,32 @@ namespace CompetitiveRounds
             catch { return null; }
         }
 
+        /// <summary>First TMP text component under <paramref name="root"/>.
+        /// Tries the UILocalizedString route first (vanilla's own label
+        /// binding), then falls back to a base-type-name walk for TMP_Text —
+        /// TMPro is deliberately not a csproj reference (#15), and the HUD
+        /// card-bar's two-letter labels are TMP components with NO
+        /// UILocalizedString attached, which is exactly the case the
+        /// UILocalizedString-only lookup silently missed (Sid's unreadable
+        /// top-right squares, Aug 8 screenshot).</summary>
+        public static Component FindTmp(Transform root, bool includeInactive = false)
+        {
+            if (root == null) return null;
+            try
+            {
+                var viaUls = TmpOf(root.GetComponentInChildren<UILocalizedString>(includeInactive));
+                if (viaUls != null) return viaUls;
+                foreach (var c in root.GetComponentsInChildren<Component>(includeInactive))
+                {
+                    if (c == null) continue;
+                    for (var t = c.GetType(); t != null; t = t.BaseType)
+                        if (t.Name == "TMP_Text") return c;
+                }
+            }
+            catch { }
+            return null;
+        }
+
         /// <summary>Current <c>.text</c> of any TMP-ish component, or null.</summary>
         public static string TextOf(Component c)
         {
@@ -1081,38 +1107,30 @@ namespace CompetitiveRounds
         private static readonly Dictionary<int, KeyValuePair<Component, Color>> _tinted =
             new Dictionary<int, KeyValuePair<Component, Color>>();
 
-        /// <summary>Aug 8 (Sid): with the FILL now carrying the player's
-        /// colour, a very light colour (Pearl/Ivory class) makes the vanilla
-        /// light lettering unreadable — darken the label to a deep version of
-        /// the SAME hue in that case; otherwise make sure any earlier
-        /// darkening is undone.</summary>
+        /// <summary>Aug 8 (Sid, second screenshot round): the label is ALWAYS
+        /// restyled to a readable variant of the SAME hue as the fill. The
+        /// first cut only darkened past a luminance threshold and looked the
+        /// label up via UILocalizedString — the HUD bar's two-letter labels
+        /// have no UILocalizedString, so nothing ever fired and light-on-light
+        /// stayed unreadable. Light fill -> deep version of the colour
+        /// ("a dark version of that team/body color", his words); dark fill ->
+        /// pale version, so near-black body colours keep readable lettering
+        /// too. Originals ride _tinted for every restore path.</summary>
         private static void TintButtonLabel(Transform button, Color fill)
         {
             try
             {
-                var uls = button.GetComponentInChildren<UILocalizedString>();
-                var label = TeamColorIdentity.TmpOf(uls);
+                var label = TeamColorIdentity.FindTmp(button);
                 if (label == null) return;
                 int iid = label.GetInstanceID();
                 float lum = 0.299f * fill.r + 0.587f * fill.g + 0.114f * fill.b;
-                if (lum > 0.62f)
-                {
-                    Color deep = new Color(fill.r * 0.30f, fill.g * 0.30f, fill.b * 0.30f, 1f);
-                    Color prev;
-                    TeamColorIdentity.TrySetComponentColor(label, deep, out prev);
-                    if (!_tinted.ContainsKey(iid))
-                        _tinted[iid] = new KeyValuePair<Component, Color>(label, prev);
-                }
-                else
-                {
-                    KeyValuePair<Component, Color> rec;
-                    if (_tinted.TryGetValue(iid, out rec))
-                    {
-                        Color ignored;
-                        TeamColorIdentity.TrySetComponentColor(label, rec.Value, out ignored);
-                        _tinted.Remove(iid);
-                    }
-                }
+                Color styled = lum >= 0.45f
+                    ? new Color(fill.r * 0.25f, fill.g * 0.25f, fill.b * 0.25f, 1f)
+                    : Color.Lerp(fill, Color.white, 0.75f);
+                Color prev;
+                TeamColorIdentity.TrySetComponentColor(label, styled, out prev);
+                if (!_tinted.ContainsKey(iid))
+                    _tinted[iid] = new KeyValuePair<Component, Color>(label, prev);
             }
             catch { }
         }
@@ -1152,7 +1170,10 @@ namespace CompetitiveRounds
                 // fills (and any outline an earlier build painted) plus the
                 // darkened label; the single-Image restore missed the rest.
                 var comps = new List<Component>(TeamColorIdentity.FindImages(child, includeInactive: true));
-                try { comps.Add(TeamColorIdentity.TmpOf(child.GetComponentInChildren<UILocalizedString>())); }
+                // Same finder the tint uses (FindTmp) — the UILocalizedString
+                // route alone missed the HUD bar's plain-TMP labels, leaving
+                // them tinted after an unequip.
+                try { comps.Add(TeamColorIdentity.FindTmp(child, includeInactive: true)); }
                 catch { }
                 foreach (var comp in comps)
                 {

@@ -313,6 +313,14 @@ namespace CompetitiveRounds
         private static float ffaPickBannerCachedAt = -999f;
         private static int ffaPickBannerSeconds = -1;
         private static bool ffaPickBannerLocal;
+        // Aug 8 (Sid): the banner rect is content-fitted at draw time (#237 —
+        // never size an IMGUI text rect from a guess); measure cache keyed by
+        // (text, fontSize), and the REAL bottom edge for the banners stacked
+        // beneath.
+        private static Vector2 ffaPickBannerMeasured;
+        private static string ffaPickBannerMeasuredText;
+        private static int ffaPickBannerMeasuredFont = -1;
+        private static float ffaPickBannerYMax;
 
         // Bug #132: 5s "FFA starting" countdown between the host's Start and
         // the room join. Realtime clock — the countdown must tick at menu
@@ -405,7 +413,12 @@ namespace CompetitiveRounds
                     alignment = TextAnchor.MiddleCenter,
                     fontStyle = FontStyle.Bold,
                     richText = false,
-                    clipping = TextClipping.Clip,
+                    // #143 — IMGUI metrics run taller than the point size, and
+                    // the skin's wordWrap can add a second line; Clip was
+                    // shaving GET READY top and bottom (Sid, Aug 8 screenshot).
+                    // The rect is content-fitted at draw time; Overflow is the
+                    // backstop.
+                    clipping = TextClipping.Overflow,
                 };
                 ffaPickBannerStyle.normal.textColor = Color.white;
             }
@@ -576,6 +589,9 @@ namespace CompetitiveRounds
             float bannerW = 260f * ffaHudScale;
             ffaPickBannerRect = new Rect((width - bannerW) * 0.5f, 6f * ffaHudScale,
                 bannerW, 28f * ffaHudScale);
+            // Default until a banner draws taller this frame — consumers below
+            // the banner stack off the REAL drawn edge, not the layout slot.
+            ffaPickBannerYMax = ffaPickBannerRect.yMax;
             ffaHudNameStyle.fontSize = Mathf.Max(1, Mathf.RoundToInt(12f * ffaHudScale));
             ffaPickBannerStyle.fontSize = Mathf.Max(1, Mathf.RoundToInt(14f * ffaHudScale));
         }
@@ -709,7 +725,7 @@ namespace CompetitiveRounds
             if (ffaCfgBannerSize == Vector2.zero)
                 ffaCfgBannerSize = ffaCfgBannerStyle.CalcSize(new GUIContent(ffaCfgBannerText));
             float w = ffaCfgBannerSize.x + 34f, h = ffaCfgBannerSize.y + 14f;
-            var rect = new Rect((Screen.width - w) * 0.5f, ffaPickBannerRect.yMax + 8f, w, h);
+            var rect = new Rect((Screen.width - w) * 0.5f, ffaPickBannerYMax + 8f, w, h);
             float fade = Mathf.Clamp01(ffaCfgBannerUntil - now);   // last second fades out
             Color previous = GUI.color;
             GUI.color = new Color(0.10f, 0.13f, 0.20f, 0.90f * fade);
@@ -849,7 +865,7 @@ namespace CompetitiveRounds
             // (the settings banner runs for 9s at game start, when every score is
             // 0 and match point is arithmetically impossible), but stacking below
             // a live one costs two lines and removes the question entirely.
-            float y = ffaPickBannerRect.yMax + 8f;
+            float y = ffaPickBannerYMax + 8f;
             if (!string.IsNullOrEmpty(ffaCfgBannerText) && now <= ffaCfgBannerUntil)
                 y += ffaCfgBannerSize.y + 20f;
             var rect = new Rect((Screen.width - w) * 0.5f, y, w, h);
@@ -864,7 +880,11 @@ namespace CompetitiveRounds
 
         private static void DrawFfaPickBanner(float now)
         {
-            if (string.IsNullOrEmpty(ffaPickBannerText)) return;
+            if (string.IsNullOrEmpty(ffaPickBannerText))
+            {
+                ffaPickBannerYMax = ffaPickBannerRect.yMax;
+                return;
+            }
             Color background;
             Color foreground;
             if (!ffaPickBannerLocal)
@@ -885,11 +905,29 @@ namespace CompetitiveRounds
                 foreground = new Color(1f, 0.86f, 0.30f, 1f);
             }
 
+            // Fit the rect to the RENDERED text (#237): the 260px layout slot
+            // clipped the two-line GET READY string top and bottom. Measured
+            // once per (text, fontSize); the slot keeps the anchor (center x,
+            // top y) and acts as the minimum footprint so the short countdown
+            // strings don't shrink the box frame-to-frame.
+            if (ffaPickBannerText != ffaPickBannerMeasuredText
+                || ffaPickBannerStyle.fontSize != ffaPickBannerMeasuredFont)
+            {
+                ffaPickBannerMeasuredText = ffaPickBannerText;
+                ffaPickBannerMeasuredFont = ffaPickBannerStyle.fontSize;
+                ffaPickBannerMeasured = ffaPickBannerStyle.CalcSize(new GUIContent(ffaPickBannerText));
+            }
+            float bw = Mathf.Min(Mathf.Max(ffaPickBannerRect.width, ffaPickBannerMeasured.x + 26f),
+                Screen.width - 20f);
+            float bh = Mathf.Max(ffaPickBannerRect.height, ffaPickBannerMeasured.y + 8f);
+            var bannerRect = new Rect((Screen.width - bw) * 0.5f, ffaPickBannerRect.y, bw, bh);
+            ffaPickBannerYMax = bannerRect.yMax;
+
             Color previous = GUI.color;
             GUI.color = background;
-            GUI.DrawTexture(ffaPickBannerRect, Texture2D.whiteTexture);
+            GUI.DrawTexture(bannerRect, Texture2D.whiteTexture);
             GUI.color = foreground;
-            GUI.Label(ffaPickBannerRect, ffaPickBannerText, ffaPickBannerStyle);
+            GUI.Label(bannerRect, ffaPickBannerText, ffaPickBannerStyle);
             GUI.color = previous;
         }
 
