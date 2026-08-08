@@ -6909,6 +6909,12 @@ namespace CompetitiveRounds
                 else _ffaRoomlessSince = -1f;
             }
             else _ffaRoomlessSince = -1f;
+            // v1.37 host lobbies: the /lobby/state heartbeat MUST run from
+            // this always-on loop — a member whose polls stop for ~75s is
+            // lease-expired out of the lobby server-side, and a tab ticker
+            // dies the moment the F5 menu closes (learning #50's class).
+            TeamLobby.Tick();
+            OvtLobby.Tick();
         }
 
         private static float _ffaRoomlessSince = -1f;
@@ -6980,6 +6986,12 @@ namespace CompetitiveRounds
                 _ffaLeaveIntent = false; _ffaLeaveTargetLobby = null; _ffaLeaveCause = "";
                 _ffaJoinCountdownKey = null; _ffaJoinCountdownActiveToken = 0;
                 _ffaRoomlessSince = -1f;
+
+                // v1.37 host lobbies: open 2v2/1v2 seats are queue commitments
+                // too — the escape lease-delete frees them server-side, and the
+                // local beliefs must die with it.
+                TeamLobby.TearDown();
+                OvtLobby.TearDown();
 
                 try { CompetitiveUI.CancelFfaStartCountdown(); } catch { }
                 try { Plugin.ClearPendingFfaSlot(); } catch { }
@@ -8476,6 +8488,13 @@ namespace CompetitiveRounds
         {
             if (SpectatorBlocksQueue()) return;
             NoteQueueRequestInFlight();   // r3: WATCH is blocked for the whole join round-trip   // design §3.1
+            // v1.37 host lobbies: a queue join from a held open seat would
+            // clobber the seat's row server-side. Leave first, explicitly.
+            if (!string.IsNullOrEmpty(TeamLobby.OpenLobbyId))
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Leave your 2v2 lobby first."), new Color(1f, 0.7f, 0.3f), 5f);
+                return;
+            }
             // Suppress joining while a leave retry is in flight (same rationale
             // as JoinQueue); force-recover past the safety timeout.
             if (CurrentTeamQueueState == TeamQueueState.Leaving)
@@ -8811,6 +8830,24 @@ namespace CompetitiveRounds
                     Plugin.ClearPending2v2Slot();
                     CompetitiveUI.ShowNotification("Match canceled — searching again...", new Color(1f, 0.6f, 0.2f), 5f);
                 }
+                NativeUI.MarkDirty();
+            }
+            else if (status == "lobby")
+            {
+                // v1.37 host lobbies: a still-armed queue poll whose searching
+                // row was CONVERTED by a lobby enroll. The /team/lobby/state
+                // heartbeat owns this state — disarm the queue machinery and
+                // adopt the seat.
+                IsTeamQueuePolling = false;
+                CurrentTeamQueueState = TeamQueueState.Idle;
+                TeamLobby.AdoptSeatFromQueuePoll(ExtractJsonString(response, "series_id"));
+                NativeUI.MarkDirty();
+            }
+            else if (status == "lobby_closed")
+            {
+                IsTeamQueuePolling = false;
+                CurrentTeamQueueState = TeamQueueState.Idle;
+                TeamLobby.HandleSeatExpired();
                 NativeUI.MarkDirty();
             }
             else if (status == "expired" || status == "not_in_queue")
@@ -9779,6 +9816,10 @@ namespace CompetitiveRounds
         // exact queue entry the player asked for.
         private static int _ovtLastPreferredSide = 0;
         private static bool _ovtLastSoloExtraPick = false;
+        // TRUE only after a successful /ovt/queue/join this session — gates
+        // the not_in_queue auto-rejoin so polling armed by the v1.37 lobby
+        // handoff can never conscript the player into the consent queue.
+        private static bool _ovtConsentQueueJoined = false;
         private static float _ovtLastAutoRejoinAt = -999f;
         private static float _ovtLeavingSince = -999f;
         private static int ovtGen = 0;  // lifecycle generation — see queueGen
@@ -9791,6 +9832,13 @@ namespace CompetitiveRounds
             // (Codex sitting-over review find 2).
             string sid = MatchTracker.LocalSteamId;
             if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+            // v1.37 host lobbies: a queue join from a held open seat would
+            // clobber the seat's row server-side. Leave first, explicitly.
+            if (!string.IsNullOrEmpty(OvtLobby.OpenLobbyId))
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Leave your custom 1v2 lobby first."), new Color(1f, 0.7f, 0.3f), 5f);
+                return;
+            }
             // Suppress joining while a leave retry is in flight (same rationale
             // as JoinQueue); force-recover past the safety timeout.
             if (OvtQueueStatus == "leaving")
@@ -9829,7 +9877,15 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ovt/queue/join", body, (ok, resp) =>
             {
                 if (gen != ovtGen) { Plugin.Log.LogInfo("[1v2] stale join ack ignored (lifecycle moved on)"); return; }
-                if (ok) { IsOvtQueuePolling = true; OvtQueueStatus = "searching"; UpdateOvtQueueList(force: true); NativeUI.MarkDirty(); }
+                if (ok)
+                {
+                    // The not_in_queue auto-rejoin may only restore a consent
+                    // queue the player actually ENTERED this session — polling
+                    // armed by the v1.37 lobby handoff must never conscript
+                    // them into the queue on a bare not_in_queue (#238).
+                    _ovtConsentQueueJoined = true;
+                    IsOvtQueuePolling = true; OvtQueueStatus = "searching"; UpdateOvtQueueList(force: true); NativeUI.MarkDirty();
+                }
                 else Plugin.Log.LogWarning($"[1v2] join failed: {resp}");
             }));
         }
@@ -10004,6 +10060,19 @@ namespace CompetitiveRounds
                         try { if (NativeUI.IsOpen) NativeUI.Close(); } catch { }
                     }
                 }
+                else if (status == "lobby")
+                {
+                    // v1.37 host lobbies: a still-armed queue poll whose
+                    // searching row was CONVERTED by a lobby enroll — the
+                    // /ovt/lobby/state heartbeat owns this state.
+                    IsOvtQueuePolling = false; OvtQueueStatus = "";
+                    OvtLobby.AdoptSeatFromQueuePoll(ExtractJsonString(resp, "lobby_id"));
+                }
+                else if (status == "lobby_closed")
+                {
+                    IsOvtQueuePolling = false; OvtQueueStatus = "";
+                    OvtLobby.HandleSeatExpired();
+                }
                 else if (status == "not_in_queue" || status == "expired")
                 {
                     IsOvtQueuePolling = false; OvtQueueStatus = "";
@@ -10030,6 +10099,7 @@ namespace CompetitiveRounds
                     // linger at the menu (learning #122) and stay eligible for
                     // the normal ghost-prune recovery.
                     if (status == "not_in_queue"
+                        && _ovtConsentQueueJoined
                         && (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode)
                         && Time.unscaledTime - _ovtLastAutoRejoinAt > 60f)
                     {
@@ -10713,6 +10783,7 @@ namespace CompetitiveRounds
         {
             public string lobby_id, host_name;
             public int player_count, max_players, age_seconds;
+            public bool has_password;   // v1.37: private lobbies are LISTED with a marker (Sid's spec)
         }
         public static List<FfaOpenLobbyEntry> CachedFfaLobbies = null;
         public static bool FfaLobbiesUnavailable = false;   // old server / fetch failing
@@ -10878,14 +10949,21 @@ namespace CompetitiveRounds
             return true;
         }
 
-        private static string FfaLobbyBody(string sid, string lobbyId = null)
+        private static string FfaLobbyBody(string sid, string lobbyId = null, string password = null)
         {
             string name = Escape(MatchTracker.LocalDisplayName ?? "Player");
             string region = "";
             try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
             string lob = lobbyId == null ? "" : $",\"lobby_id\":\"{Escape(lobbyId)}\"";
-            return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}}}";
+            // v1.37 private lobbies: password rides create AND join; the server
+            // ignores it on public lobbies, so a stale value is harmless.
+            string pw = string.IsNullOrEmpty(password) ? "" : $",\"password\":\"{Escape(password)}\"";
+            return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}{pw}}}";
         }
+
+        // Remembered for recovery rejoins (the ghost-prune same-lobby rejoin
+        // must re-send a private lobby's password or it 403s). Memory-only.
+        private static string _ffaLastLobbyPassword = null;
 
         /// <summary>Shared post-enroll handling: adopt the membership, or —
         /// when the server may have committed without us hearing (transport
@@ -10944,6 +11022,40 @@ namespace CompetitiveRounds
                 // committed (round-2 find 4).
                 bool serverSpoke = resp != null && resp.StartsWith("HTTP 4", StringComparison.Ordinal);
                 Plugin.Log.LogWarning($"[FFA-LOBBY] enroll failed (recovery={wasRecovery}, serverSpoke={serverSpoke}): {resp}");
+                // v1.37 private lobbies: the two password 403 details are exact
+                // API contract (main.py LOBBY_PW_*_DETAIL) — map them to a
+                // readable prompt instead of toasting the raw token.
+                string pwDetail = serverSpoke ? (ExtractJsonString(resp ?? "", "detail") ?? "") : "";
+                if (pwDetail == "password_required" || pwDetail == "password_incorrect")
+                {
+                    bool pwWrong = pwDetail == "password_incorrect";
+                    if (wasRecovery)
+                    {
+                        // A background recovery rejoin has no user mid-flow —
+                        // never pop a modal from it. The seat is already gone
+                        // server-side, so dropping the belief leaves nothing
+                        // behind; tell the player the way back in.
+                        OpenFfaLobbyId = null; FfaLobbyIsHost = false; FfaLobbyCanStart = false;
+                        FfaLobbyMembers = null; FfaLobbyMemberCount = 0;
+                        IsFfaQueuePolling = false;
+                        if (FfaQueueStatus == "lobby") FfaQueueStatus = "";
+                        CompetitiveUI.ShowNotification(I18n.Tr("Couldn't rejoin your private FFA lobby — join it again from the browser."), new Color(1f, 0.75f, 0.4f), 7f);
+                    }
+                    else
+                    {
+                        CompetitiveUI.ShowNotification(pwWrong
+                            ? I18n.Tr("Wrong password — try again.")
+                            : I18n.Tr("That FFA lobby is private — enter its password."), new Color(1f, 0.7f, 0.3f), 5f);
+                        string relobby = intendedLobbyId;   // captured — the modal outlives this callback
+                        if (!string.IsNullOrEmpty(relobby))
+                            CompetitiveUI.OpenArtistInput(I18n.Tr("Private FFA lobby"),
+                                pwWrong ? I18n.Tr("Wrong password - try again") : I18n.Tr("Password"), "",
+                                pw => FfaJoinLobby(relobby, pw));
+                    }
+                    FetchFfaLobbies(force: true);
+                    NativeUI.MarkDirty();
+                    return;
+                }
                 if (wasRecovery && serverSpoke)
                 {
                     // The server judged our old membership: it's gone.
@@ -10975,15 +11087,22 @@ namespace CompetitiveRounds
             NativeUI.MarkDirty();
         }
 
-        public static void FfaCreateLobby()
+        public static void FfaCreateLobby(string password = null)
         {
             if (SpectatorBlocksQueue()) return;   // r4: the one enrollment POST that lacked the guard
             NoteQueueRequestInFlight();
+            if (password != null && password.Length > 64)
+            {
+                // Server 400s over 64 (LOBBY_PASSWORD_MAX_LEN) — say it plainly.
+                CompetitiveUI.ShowNotification(I18n.Tr("Password must be 64 characters or fewer."), new Color(1f, 0.6f, 0.2f), 5f);
+                return;
+            }
             if (!FfaLobbyActionPreflight(out string sid)) return;
             _ffaLeaveIntent = false;
+            _ffaLastLobbyPassword = password;
             int gen = ++ffaGen;
             FfaLobbyActionBegin(); int actionGen = _ffaLobbyActionGen;
-            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/lobby/create", FfaLobbyBody(sid), (ok, resp) =>
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/lobby/create", FfaLobbyBody(sid, null, password), (ok, resp) =>
             {
                 FfaLobbyActionEnd(actionGen);
                 if (gen != ffaGen) return;
@@ -10992,17 +11111,23 @@ namespace CompetitiveRounds
             }));
         }
 
-        public static void FfaJoinLobby(string lobbyId)
+        public static void FfaJoinLobby(string lobbyId, string password = null)
         {
             if (SpectatorBlocksQueue()) return;
             NoteQueueRequestInFlight();   // r3: WATCH is blocked for the whole join round-trip   // design §3.1
             if (string.IsNullOrEmpty(lobbyId)) return;
+            if (password != null && password.Length > 64)
+            {
+                CompetitiveUI.ShowNotification(I18n.Tr("Password must be 64 characters or fewer."), new Color(1f, 0.6f, 0.2f), 5f);
+                return;
+            }
             if (!FfaLobbyActionPreflight(out string sid)) return;
             bool wasRecovery = OpenFfaLobbyId == lobbyId;
             if (!wasRecovery) _ffaLeaveIntent = false;
+            _ffaLastLobbyPassword = password;
             int gen = ++ffaGen;
             FfaLobbyActionBegin(); int actionGen = _ffaLobbyActionGen;
-            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/lobby/join", FfaLobbyBody(sid, lobbyId), (ok, resp) =>
+            Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/lobby/join", FfaLobbyBody(sid, lobbyId, password), (ok, resp) =>
             {
                 FfaLobbyActionEnd(actionGen);
                 if (gen != ffaGen) return;
@@ -11121,6 +11246,7 @@ namespace CompetitiveRounds
                                 player_count = ExtractJsonInt(obj, "player_count"),
                                 max_players = Math.Max(1, ExtractJsonInt(obj, "max_players")),
                                 age_seconds = ExtractJsonInt(obj, "age_seconds"),
+                                has_password = ExtractJsonBool(obj, "has_password"),
                             };
                             if (!string.IsNullOrEmpty(e.lobby_id)) list.Add(e);
                         }
@@ -11666,7 +11792,9 @@ namespace CompetitiveRounds
                     {
                         _ffaLobbyRejoinAt = Time.unscaledTime;
                         Plugin.Log.LogWarning("[FFA-LOBBY] membership row vanished server-side — attempting same-lobby rejoin");
-                        FfaJoinLobby(OpenFfaLobbyId);
+                        // Re-send the remembered password: a private lobby's
+                        // recovery rejoin 403s without it (v1.37).
+                        FfaJoinLobby(OpenFfaLobbyId, _ffaLastLobbyPassword);
                     }
                 }
                 NativeUI.MarkDirty();
@@ -11743,6 +11871,819 @@ namespace CompetitiveRounds
             IsFfaQueuePolling = false;
             Plugin.SetPendingRoom(room, region);
         }
+
+        // ── 2v2 / 1v2 host lobbies (v1.37 private-lobby client half) ───────
+        // One generalized client mirroring the server's _LOBBY_MODE_CFG engine
+        // and the FFA lobby machinery's shapes: leave-intent set BEFORE any
+        // request with response-driven state clearing (#249), ambiguity
+        // windows for transport-failed enrolls, level-triggered competitive-
+        // room exclusion (#132 pattern), and the stuck-leave watchdog.
+        //
+        // HEARTBEAT CONTRACT: GET /{mode}/lobby/state is the server-side
+        // lease-renewing heartbeat — a member whose polls stop for ~75s is
+        // expired from the lobby (main.py _lobby_state_impl). Tick() is
+        // driven from TickLeaveRecovery (the always-on Plugin.Update loop),
+        // NOT from a tab ticker, so the seat survives a closed F5 menu
+        // (learning #50's class).
+        //
+        // HANDOFF CONTRACT: after the host's Start, members' queue rows flip
+        // to 'matched' (2v2) / 'ready_join' (1v2) and /lobby/state returns
+        // not_in_lobby — indistinguishable from a disband. A confirmed member
+        // seeing not_in_lobby therefore probes the mode's own /queue/poll and
+        // resolves: matched/ready_join = STARTED (hand the flow to the normal
+        // queue machinery, which owns ready-up / room issuance / reports);
+        // 'searching' = the server reset our dead-lobby seat to a searching
+        // queue row — leave it (never keep a queue the player didn't ask for,
+        // #238); 'lobby' = transient disagreement, resume the state poll;
+        // 'not_in_queue' = row gone — one same-lobby rejoin attempt (FFA
+        // ghost-prune pattern), then declare the lobby closed;
+        // 'lobby_closed' = seat lease expired server-side.
+        public class HostLobbyMemberEntry
+        {
+            public string steam_id, display_name;
+            public int rating, rating_1v1, wait_seconds, preferred_team, preferred_side;
+            public bool is_host, solo_extra_pick;
+        }
+        public class HostLobbyOpenEntry
+        {
+            public string lobby_id, host_name;
+            public int player_count, max_players, age_seconds;
+            public bool has_password;
+        }
+
+        public sealed class HostLobbyClient
+        {
+            private readonly string mode;    // "team" | "ovt" — URL segment
+            private readonly string label;   // "2v2" | "1v2" — user-facing + log tag
+            private bool IsTeam => mode == "team";
+
+            // Belief state (OpenLobbyId kept until a leave is ACKED or the
+            // server authoritatively closes it — FFA design-review find 6).
+            public string OpenLobbyId;
+            public bool IsHost, CanStart, HasPassword;
+            public int MemberCount, MaxPlayers;
+            public List<HostLobbyMemberEntry> Members;
+            public string Status = "";        // "" | "lobby" | "leaving"
+            public bool Polling;              // the 2s /lobby/state heartbeat armed
+
+            // Browser (with the FfaLobbiesUnavailable degradation, recon risk 6).
+            public List<HostLobbyOpenEntry> CachedLobbies;
+            public bool LobbiesUnavailable;
+
+            private int gen;                  // lifecycle generation — see queueGen
+            private bool leaveIntent;         // explicit leave = standing intent (#252e)
+            private string leaveTarget;       // durable leave target (FFA round-2 find 2)
+            private bool confirmedMember;     // enroll-ok or a state-poll 'lobby' seen
+            private float leavingSince = -999f, lastPollAt = -999f, lobbiesLastAt = -999f;
+            private float ambiguousUntil = -999f, rejoinAt = -999f, leaveRetryAt = -999f;
+            private float handoffUntil = -999f, handoffProbeAt = -999f;
+            private bool actionInFlight; private float actionAt = -999f; private int actionGen;
+            private bool probed;
+            // Remembered for recovery rejoins: a same-lobby rejoin of a
+            // PRIVATE lobby must re-send the password or it 403s (a supplied
+            // password on a public lobby is ignored server-side, so a stale
+            // value is harmless).
+            private string lastPassword; private string lastExtras = "";
+
+            public HostLobbyClient(string mode, string label, int defaultPlayers)
+            { this.mode = mode; this.label = label; MaxPlayers = defaultPlayers; }
+
+            private void ActionBegin()
+            { actionInFlight = true; actionAt = Time.realtimeSinceStartup; actionGen++; }
+            private void ActionEnd(int aGen)
+            { if (aGen == actionGen) actionInFlight = false; }
+
+            private static bool InCompetitiveRoomNow()
+            {
+                try
+                {
+                    return PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode
+                        && CompetitiveRoomDetect.IsCompetitiveRoom();
+                }
+                catch { return false; }
+            }
+
+            private bool ActionPreflight(out string sid)
+            {
+                sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown") return false;
+                // Watchdog release: 30s > the 20s POST timeout, so a live
+                // request can never overlap its successor (FFA pattern).
+                if (actionInFlight && Time.realtimeSinceStartup - actionAt > 30f)
+                    actionInFlight = false;
+                if (actionInFlight) return false;
+                if (Status == "leaving")
+                {
+                    CompetitiveUI.ShowNotification(I18n.Tr("Still leaving — try again in a moment."), new Color(1f, 0.6f, 0.2f));
+                    return false;
+                }
+                // A live locked group in this mode outranks lobby actions
+                // (mirror of FFA's Codex round-3 regression 5 gate).
+                bool lockedElsewhere = IsTeam
+                    ? (!string.IsNullOrEmpty(ActiveTeamSeriesId)
+                       || CurrentTeamQueueState == TeamQueueState.Matched
+                       || CurrentTeamQueueState == TeamQueueState.ReadySent)
+                    : (!string.IsNullOrEmpty(ActiveOvt1v2SeriesId) || Plugin.PendingOvtSlot >= 0);
+                if (lockedElsewhere)
+                {
+                    CompetitiveUI.ShowNotification(I18n.TrF("You're in a live {0} game — finish or leave it first.", label), new Color(1f, 0.7f, 0.3f), 5f);
+                    return false;
+                }
+                // Open seats may ride a CASUAL game (#132); competitive rooms refuse.
+                if (InCompetitiveRoomNow())
+                {
+                    CompetitiveUI.ShowNotification(I18n.Tr("Finish or leave your current game first."), new Color(1f, 0.7f, 0.3f), 5f);
+                    return false;
+                }
+                return true;
+            }
+
+            private string EnrollBody(string sid, string lobbyId, string password, string extras)
+            {
+                string name = Escape(MatchTracker.LocalDisplayName ?? "Player");
+                string region = "";
+                try { region = PhotonNetwork.CloudRegion?.Replace("/*", "") ?? ""; } catch { region = ""; }
+                string lob = lobbyId == null ? "" : $",\"lobby_id\":\"{Escape(lobbyId)}\"";
+                string pw = string.IsNullOrEmpty(password) ? "" : $",\"password\":\"{Escape(password)}\"";
+                return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}{pw}{extras ?? ""}}}";
+            }
+
+            private static bool PasswordTooLong(string password)
+            {
+                // Server 400s over 64 chars (LOBBY_PASSWORD_MAX_LEN) — catch it
+                // client-side with a readable message instead.
+                if (password == null || password.Length <= 64) return false;
+                CompetitiveUI.ShowNotification(I18n.Tr("Password must be 64 characters or fewer."), new Color(1f, 0.6f, 0.2f), 5f);
+                return true;
+            }
+
+            public void Create(string password, string extras)
+            {
+                if (SpectatorBlocksQueue()) return;
+                NoteQueueRequestInFlight();
+                if (PasswordTooLong(password)) return;
+                if (!ActionPreflight(out string sid)) return;
+                leaveIntent = false;
+                lastPassword = password; lastExtras = extras ?? "";
+                int g = ++gen;
+                ActionBegin(); int aGen = actionGen;
+                Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/create",
+                    EnrollBody(sid, null, password, extras), (ok, resp) =>
+                {
+                    ActionEnd(aGen);
+                    if (g != gen) return;
+                    if (ok) IsHost = true;
+                    EnrollResult(ok, resp, null, wasRecovery: false);
+                }));
+            }
+
+            public void Join(string lobbyId, string password, string extras)
+            {
+                if (SpectatorBlocksQueue()) return;
+                NoteQueueRequestInFlight();
+                if (string.IsNullOrEmpty(lobbyId)) return;
+                if (PasswordTooLong(password)) return;
+                if (!ActionPreflight(out string sid)) return;
+                bool wasRecovery = OpenLobbyId == lobbyId;
+                if (!wasRecovery) { leaveIntent = false; confirmedMember = false; }
+                lastPassword = password; lastExtras = extras ?? "";
+                int g = ++gen;
+                ActionBegin(); int aGen = actionGen;
+                Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/join",
+                    EnrollBody(sid, lobbyId, password, extras), (ok, resp) =>
+                {
+                    ActionEnd(aGen);
+                    if (g != gen) return;
+                    EnrollResult(ok, resp, lobbyId, wasRecovery);
+                }));
+            }
+
+            /// <summary>Shared post-enroll handling — direct port of
+            /// FfaEnrollResult, plus the password 403 contract mapping
+            /// ("password_required"/"password_incorrect" are exact API
+            /// tokens, main.py LOBBY_PW_*_DETAIL).</summary>
+            private void EnrollResult(bool ok, string resp, string intendedLobbyId, bool wasRecovery)
+            {
+                if (ok)
+                {
+                    string lid = ExtractJsonString(resp, "lobby_id");
+                    OpenLobbyId = string.IsNullOrEmpty(lid) ? intendedLobbyId : lid;
+                    HasPassword = ExtractJsonBool(resp, "has_password") || !string.IsNullOrEmpty(lastPassword);
+                    int mx = ExtractJsonInt(resp, "max_players"); if (mx > 0) MaxPlayers = mx;
+                    int pc = ExtractJsonInt(resp, "player_count"); if (pc > 0) MemberCount = pc;
+                    leaveIntent = false; leaveTarget = null;
+                    confirmedMember = true;
+                    ambiguousUntil = -999f; handoffUntil = -999f;
+                    Status = "lobby"; Polling = true; lastPollAt = -999f;
+                    // The seat CONVERTED any searching row in this mode — a
+                    // still-armed queue poll would now see 'lobby' forever, so
+                    // the state heartbeat takes over cleanly here.
+                    if (IsTeam)
+                    {
+                        IsTeamQueuePolling = false;
+                        if (CurrentTeamQueueState == TeamQueueState.Searching)
+                            CurrentTeamQueueState = TeamQueueState.Idle;
+                    }
+                    else
+                    {
+                        IsOvtQueuePolling = false;
+                        if (OvtQueueStatus == "searching") OvtQueueStatus = "";
+                    }
+                    Plugin.Log.LogInfo($"[{label}-LOBBY] enrolled in lobby {OpenLobbyId} (recovery={wasRecovery})");
+                    // Level-triggered room exclusion: a COMPETITIVE game that
+                    // finished connecting while the enroll was in flight means
+                    // we hold a seat we cannot sit in (#150).
+                    if (InCompetitiveRoomNow())
+                    {
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] enrolled while inside a competitive room — leaving the lobby");
+                        LeaveLobby();
+                        return;
+                    }
+                }
+                else
+                {
+                    bool serverSpoke = resp != null && resp.StartsWith("HTTP 4", StringComparison.Ordinal);
+                    Plugin.Log.LogWarning($"[{label}-LOBBY] enroll failed (recovery={wasRecovery}, serverSpoke={serverSpoke}): {resp}");
+                    string detail = serverSpoke ? (ExtractJsonString(resp ?? "", "detail") ?? "") : "";
+                    if (detail == "password_required" || detail == "password_incorrect")
+                    {
+                        bool wrong = detail == "password_incorrect";
+                        if (wasRecovery)
+                        {
+                            // A background recovery rejoin has no user mid-flow —
+                            // never pop a modal from it. The seat is already gone
+                            // server-side, so dropping the belief leaves nothing
+                            // behind; tell the player the way back in.
+                            ClearMembershipSilent();
+                            CompetitiveUI.ShowNotification(I18n.TrF("Couldn't rejoin your private {0} lobby — join it again from the browser.", label), new Color(1f, 0.75f, 0.4f), 7f);
+                        }
+                        else
+                        {
+                            CompetitiveUI.ShowNotification(wrong
+                                ? I18n.Tr("Wrong password — try again.")
+                                : I18n.TrF("That {0} lobby is private — enter its password.", label), new Color(1f, 0.7f, 0.3f), 5f);
+                            string relobby = intendedLobbyId; string reextras = lastExtras;
+                            if (!string.IsNullOrEmpty(relobby))
+                                CompetitiveUI.OpenArtistInput(I18n.TrF("Private {0} lobby", label),
+                                    wrong ? I18n.Tr("Wrong password - try again") : I18n.Tr("Password"), "",
+                                    pw => Join(relobby, pw, reextras));
+                        }
+                        FetchLobbies(force: true);
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    if (wasRecovery && serverSpoke)
+                    {
+                        // The server judged our old membership: it's gone.
+                        ClearMembershipSilent();
+                        leaveIntent = false; leaveTarget = null;
+                        CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby closed.", label), new Color(1f, 0.75f, 0.4f), 6f);
+                    }
+                    else if (!serverSpoke)
+                    {
+                        // Transport failure — the request may have COMMITTED.
+                        // Adopt the intended belief when we know it (join) and
+                        // keep polling through a 90s ambiguity window so a late
+                        // commit surfaces instead of becoming a hidden seat.
+                        if (!string.IsNullOrEmpty(intendedLobbyId))
+                            OpenLobbyId = intendedLobbyId;
+                        ambiguousUntil = Time.unscaledTime + 90f;
+                        Polling = true; lastPollAt = -999f;
+                    }
+                    else
+                        CompetitiveUI.ShowNotification(DetailOr(resp, I18n.Tr("Couldn't join that lobby.")), new Color(1f, 0.6f, 0.2f), 5f);
+                }
+                FetchLobbies(force: true);
+                NativeUI.MarkDirty();
+            }
+
+            /// <summary>Drop every membership belief WITHOUT touching leave
+            /// intent (callers decide that). Local-only — no request.</summary>
+            private void ClearMembershipSilent()
+            {
+                OpenLobbyId = null;
+                IsHost = false; CanStart = false; HasPassword = false;
+                Members = null; MemberCount = 0;
+                Polling = false; confirmedMember = false;
+                ambiguousUntil = -999f; handoffUntil = -999f;
+                if (Status == "lobby") Status = "";
+            }
+
+            public void StartLobby()
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                if (actionInFlight && Time.realtimeSinceStartup - actionAt > 30f)
+                    actionInFlight = false;
+                if (actionInFlight) return;
+                int g = gen;   // NOT ++: starting must not orphan the poll lifecycle
+                ActionBegin(); int aGen = actionGen;
+                Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/start",
+                    $"{{\"steam_id\":\"{sid}\"}}", (ok, resp) =>
+                {
+                    ActionEnd(aGen);
+                    if (g != gen) return;
+                    if (!ok)
+                    {
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] start failed: {resp}");
+                        CompetitiveUI.ShowNotification(DetailOr(resp, I18n.Tr("Couldn't start the game.")), new Color(1f, 0.6f, 0.2f), 5f);
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    // The rows are locked now; the state poll would discover
+                    // not_in_lobby within ~2s anyway — begin the handoff
+                    // immediately so the host's ready-up (2v2) / room join
+                    // (1v2) engages without the extra round-trip.
+                    Plugin.Log.LogInfo($"[{label}-LOBBY] start accepted — handing off to the queue flow");
+                    BeginHandoff();
+                    NativeUI.MarkDirty();
+                }));
+            }
+
+            /// <summary>Leave the OPEN lobby seat. Explicit leave = standing
+            /// intent (#252e): belief and intent survive until the server acks
+            /// or authoritatively resolves; state clears in the RESPONSE
+            /// handler, never before the request (#249).</summary>
+            public void LeaveLobby()
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (Status == "leaving") return;
+                string expected = OpenLobbyId;
+                leaveIntent = true;
+                if (!string.IsNullOrEmpty(expected)) leaveTarget = expected;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown")
+                { Status = ""; OpenLobbyId = null; leaveIntent = false; return; }
+                int g = ++gen;
+                Status = "leaving";
+                leavingSince = Time.realtimeSinceStartup;
+                handoffUntil = -999f;
+                NativeUI.MarkDirty();
+                string url = $"{baseUrl}/api/v1/{mode}/lobby/leave?steam_id={UnityWebRequest.EscapeURL(sid)}";
+                if (!string.IsNullOrEmpty(expected))
+                    url += $"&expected_lobby_id={UnityWebRequest.EscapeURL(expected)}";
+                Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "", (ok, resp) =>
+                {
+                    if (g != gen) return;
+                    if (ok)
+                    {
+                        ClearMembershipSilent();
+                        leaveIntent = false; leaveTarget = null;
+                        Plugin.Log.LogInfo($"[{label}-LOBBY] left lobby");
+                    }
+                    else
+                    {
+                        // 409 "Not in an open lobby" = the row is LOCKED (the
+                        // host's Start raced this leave). The player asked OUT —
+                        // honor it through the mode's queue leave, which owns
+                        // locked-group dissolution (server scope note).
+                        bool lockedRace = resp != null
+                            && resp.StartsWith("HTTP 4", StringComparison.Ordinal)
+                            && resp.Contains("Not in an open lobby");
+                        if (lockedRace)
+                        {
+                            Plugin.Log.LogWarning($"[{label}-LOBBY] leave raced a Start — leaving via the {label} queue instead");
+                            ClearMembershipSilent();
+                            leaveIntent = false; leaveTarget = null;
+                            if (IsTeam) LeaveTeamQueue(sid); else OvtLeaveQueue();
+                        }
+                        else
+                        {
+                            // Keep the belief AND the intent: the state poll
+                            // re-arm lets the server state win — a surviving
+                            // seat triggers a leave RETRY, a dead row clears
+                            // us silently.
+                            Plugin.Log.LogWarning($"[{label}-LOBBY] leave failed after retries: {resp} — re-arming the poll to recover");
+                            OpenLobbyId = OpenLobbyId ?? expected;
+                            Polling = !string.IsNullOrEmpty(OpenLobbyId);
+                            CompetitiveUI.ShowNotification(I18n.TrF("Couldn't confirm the {0} lobby leave — retrying in the background.", label), new Color(1f, 0.6f, 0.2f), 5f);
+                        }
+                    }
+                    if (Status == "leaving") Status = "";
+                    FetchLobbies(force: true);
+                    NativeUI.MarkDirty();
+                }, maxRetries: 3, retryDelay: 2f));
+            }
+
+            /// <summary>Always-on upkeep, driven from TickLeaveRecovery so the
+            /// heartbeat never depends on a tab being open. No-op unless armed.</summary>
+            public void Tick()
+            {
+                try
+                {
+                    float now = Time.realtimeSinceStartup;
+                    // Stuck-leave watchdog (FFA pattern: the callback that
+                    // carried the belief may be dead — NetworkRestart kills
+                    // coroutine-hosted requests).
+                    if (Status == "leaving" && now - leavingSince > LEAVE_STUCK_TIMEOUT)
+                    {
+                        gen++;
+                        Status = "";
+                        if (leaveIntent && string.IsNullOrEmpty(OpenLobbyId) && !string.IsNullOrEmpty(leaveTarget))
+                            OpenLobbyId = leaveTarget;
+                        Polling = !string.IsNullOrEmpty(OpenLobbyId);
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] Leaving state stuck past timeout — recovered"
+                            + (leaveIntent ? $" (leave retry re-armed for {OpenLobbyId})" : ""));
+                        NativeUI.MarkDirty();
+                    }
+                    // Handoff window: the state poll pauses; the mode's queue
+                    // poll resolves start-vs-closed (see class comment).
+                    if (handoffUntil > 0f)
+                    {
+                        if (Time.unscaledTime > handoffUntil)
+                        {
+                            // Unresolved (server unreachable) — fall back to
+                            // the state poll; a still-dead membership simply
+                            // re-enters the handoff on its next answer.
+                            handoffUntil = -999f;
+                            Polling = !string.IsNullOrEmpty(OpenLobbyId);
+                        }
+                        else if (Time.unscaledTime >= handoffProbeAt)
+                        {
+                            handoffProbeAt = Time.unscaledTime + 3f;
+                            SendHandoffProbe();
+                        }
+                        return;
+                    }
+                    if (actionInFlight && now - actionAt > 30f) actionInFlight = false;
+                    // Level-triggered re-arm: a held belief with a dead poll
+                    // loop is always wrong — the poll is both the seat's lease
+                    // heartbeat and the only channel that discovers closure.
+                    if (!Polling && !string.IsNullOrEmpty(OpenLobbyId)
+                        && Status != "leaving" && !actionInFlight)
+                        Polling = true;
+                    if (!Polling) return;
+                    // Ambiguity-window expiry must not depend on a SUCCESSFUL
+                    // poll response (FFA round-3 find E1 mirror).
+                    if (ambiguousUntil > 0f && Time.unscaledTime > ambiguousUntil
+                        && string.IsNullOrEmpty(OpenLobbyId) && !leaveIntent)
+                    {
+                        ambiguousUntil = -999f;
+                        Polling = false;
+                        if (Status != "leaving") Status = "";
+                        Plugin.Log.LogInfo($"[{label}-LOBBY] ambiguity window lapsed with no resolution — stopping the probe poll");
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    string sid = MatchTracker.LocalSteamId;
+                    if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                    if (Time.unscaledTime - lastPollAt < 2f) return;
+                    lastPollAt = Time.unscaledTime;
+                    int g = gen;
+                    Plugin.Instance.StartCoroutine(GetRequest(
+                        $"{baseUrl}/api/v1/{mode}/lobby/state?steam_id={UnityWebRequest.EscapeURL(sid)}", (ok, resp) =>
+                    {
+                        if (!ok || string.IsNullOrEmpty(resp)) return;
+                        if (!Polling || g != gen) return;
+                        HandleState(resp);
+                    }));
+                }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[{label}-LOBBY] tick: {ex.Message}"); }
+            }
+
+            private void HandleState(string resp)
+            {
+                string status = ExtractJsonString(resp, "status") ?? "";
+                if (status == "lobby")
+                {
+                    // Leave intent outranks membership: the seat still existing
+                    // means the leave never landed — retry it instead of
+                    // re-adopting (FFA impl review find 2).
+                    if (leaveIntent)
+                    {
+                        if (Time.unscaledTime - leaveRetryAt > 10f)
+                        {
+                            leaveRetryAt = Time.unscaledTime;
+                            Plugin.Log.LogWarning($"[{label}-LOBBY] leave intent pending but seat still exists — retrying leave");
+                            LeaveLobby();
+                        }
+                        return;
+                    }
+                    // Room-entry teardown, level-triggered every poll: an open
+                    // seat may ride a CASUAL game (#132), but a competitive
+                    // room means a Start could yank us out mid-match (#150).
+                    if (InCompetitiveRoomNow())
+                    {
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] in a competitive room while holding a lobby seat — leaving the lobby");
+                        LeaveLobby();
+                        return;
+                    }
+                    ambiguousUntil = -999f;
+                    confirmedMember = true;
+                    OpenLobbyId = ExtractJsonString(resp, "lobby_id") ?? OpenLobbyId;
+                    IsHost = ExtractJsonBool(resp, "is_host");
+                    CanStart = ExtractJsonBool(resp, "can_start");
+                    HasPassword = ExtractJsonBool(resp, "has_password");
+                    MemberCount = ExtractJsonInt(resp, "player_count");
+                    int mx = ExtractJsonInt(resp, "max_players"); if (mx > 0) MaxPlayers = mx;
+                    Status = "lobby";
+                    try
+                    {
+                        var members = new List<HostLobbyMemberEntry>();
+                        int mStart = resp.IndexOf("\"members\"");
+                        int arrStart = mStart >= 0 ? resp.IndexOf('[', mStart) : -1;
+                        int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
+                        if (arrStart >= 0 && arrEnd > arrStart)
+                        {
+                            foreach (string obj in SliceTopLevelObjects(resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                            {
+                                members.Add(new HostLobbyMemberEntry
+                                {
+                                    steam_id = ExtractJsonString(obj, "steam_id"),
+                                    display_name = ExtractJsonString(obj, "display_name") ?? "?",
+                                    rating = ExtractJsonInt(obj, "rating"),
+                                    rating_1v1 = ExtractJsonInt(obj, "rating_1v1"),
+                                    wait_seconds = ExtractJsonInt(obj, "wait_seconds"),
+                                    preferred_team = ExtractJsonInt(obj, "preferred_team"),
+                                    preferred_side = ExtractJsonInt(obj, "preferred_side"),
+                                    solo_extra_pick = ExtractJsonBool(obj, "solo_extra_pick"),
+                                    is_host = ExtractJsonBool(obj, "is_host"),
+                                });
+                            }
+                        }
+                        Members = members;
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[{label}-LOBBY] member parse: {ex.Message}"); }
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                if (status == "not_in_lobby")
+                {
+                    if (leaveIntent)
+                    {
+                        // The leave LANDED (its ack was just lost) — clear the
+                        // belief silently; re-enrolling an explicit leaver is
+                        // the one thing recovery must never do.
+                        ClearMembershipSilent();
+                        leaveIntent = false; leaveTarget = null;
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    if (string.IsNullOrEmpty(OpenLobbyId))
+                    {
+                        // No belief: one-shot probe found nothing, or an
+                        // ambiguity window is still open (keep polling until
+                        // it lapses in Tick).
+                        if (ambiguousUntil <= 0f || Time.unscaledTime >= ambiguousUntil)
+                        {
+                            Polling = false;
+                            if (Status != "leaving") Status = "";
+                        }
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    if (!confirmedMember)
+                    {
+                        // Ambiguous enroll (transport-failed join): a same-lobby
+                        // rejoin is idempotent server-side and resolves the
+                        // belief either way (FFA ghost-prune pattern).
+                        if (Time.unscaledTime - rejoinAt > 60f)
+                        {
+                            rejoinAt = Time.unscaledTime;
+                            Plugin.Log.LogWarning($"[{label}-LOBBY] unconfirmed membership not found server-side — attempting same-lobby rejoin");
+                            Join(OpenLobbyId, lastPassword, lastExtras);
+                        }
+                        return;
+                    }
+                    // Confirmed member + not_in_lobby: Start and disband are
+                    // indistinguishable HERE — resolve via the queue poll.
+                    BeginHandoff();
+                    return;
+                }
+                // Unknown status: ignore (old server / new field).
+            }
+
+            private void BeginHandoff()
+            {
+                Polling = false;
+                handoffUntil = Time.unscaledTime + 25f;
+                handoffProbeAt = Time.unscaledTime;   // first probe on the next Tick
+                Plugin.Log.LogInfo($"[{label}-LOBBY] membership left the lobby state — resolving start-vs-closed via the {label} queue poll");
+            }
+
+            private void SendHandoffProbe()
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                int g = gen;
+                Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/{mode}/queue/poll/{sid}", (ok, resp) =>
+                {
+                    if (g != gen || handoffUntil <= 0f) return;
+                    if (!ok || string.IsNullOrEmpty(resp)) return;   // retried at the next probe tick
+                    HandleHandoffProbe(ExtractJsonString(resp, "status") ?? "", resp, sid);
+                }));
+            }
+
+            private void HandleHandoffProbe(string status, string resp, string sid)
+            {
+                if (status == "lobby")
+                {
+                    // The queue endpoint still sees the seat — the state read
+                    // was transient. Back to the state poll.
+                    handoffUntil = -999f;
+                    Polling = true; lastPollAt = -999f;
+                    return;
+                }
+                handoffUntil = -999f;
+                if (status == "matched" || status == "ready_join")
+                {
+                    // The host STARTED the lobby. Hand the flow to the normal
+                    // queue machinery, which owns ready-up / room issuance /
+                    // reports — the seat became a locked group.
+                    Plugin.Log.LogInfo($"[{label}-LOBBY] lobby started — handing off to the {label} queue flow (status={status})");
+                    ClearMembershipSilent();
+                    if (IsTeam)
+                    {
+                        IsTeamQueuePolling = true;
+                        CurrentTeamQueueType = "manual";
+                        if (status == "matched")
+                        {
+                            // Lobby members can be idle for minutes — unlike a
+                            // fresh queuer they need the full match-found blast
+                            // or the 90s ready window burns silently.
+                            CompetitiveUI.ShowNotification(I18n.Tr("Your 2v2 lobby is starting — Ready Up in the 2v2 tab (F5)!"), Color.green, 8f);
+                            try { CompetitiveUI.PlayMatchFoundSound(); } catch { }
+                            try { TaskbarFlash.Flash(); } catch { }
+                        }
+                        try { ParseTeamQueuePoll(resp); }
+                        catch (Exception ex) { Plugin.Log.LogError($"[{label}-LOBBY] handoff parse: {ex.Message}"); }
+                    }
+                    else
+                    {
+                        // The existing ovt poll owns ready_join (slot compute,
+                        // pre-join props, auto room join) — re-arm it and let
+                        // its next fetch carry the payload.
+                        IsOvtQueuePolling = true;
+                        _ovtLastPollAt = -999f;
+                        UpdateOvtQueuePoll(force: true);
+                    }
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                if (status == "searching")
+                {
+                    // Disband path: the server reset our dead-lobby seat to a
+                    // SEARCHING queue row. Never keep a queue the player didn't
+                    // ask for (#238) — leave it and say why.
+                    Plugin.Log.LogInfo($"[{label}-LOBBY] lobby closed server-side — leaving the reset queue row");
+                    ClearMembershipSilent();
+                    CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby closed.", label), new Color(1f, 0.75f, 0.4f), 6f);
+                    if (IsTeam)
+                    {
+                        // Adopt the row's REAL state first: LeaveTeamQueue
+                        // no-ops on (Idle && !polling), and skipping the leave
+                        // here would conscript the player into the manual
+                        // queue the server just reset their row into (#238).
+                        CurrentTeamQueueState = TeamQueueState.Searching;
+                        LeaveTeamQueue(sid);
+                    }
+                    else OvtLeaveQueue();
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                if (status == "not_in_queue")
+                {
+                    // Row gone entirely. Could be a lease hiccup that expired
+                    // the seat while the lobby lives on — a same-lobby rejoin
+                    // recovers it; a truly dead lobby turns that join into the
+                    // 4xx -> "lobby closed" path.
+                    if (!leaveIntent && !string.IsNullOrEmpty(OpenLobbyId)
+                        && Time.unscaledTime - rejoinAt > 60f)
+                    {
+                        rejoinAt = Time.unscaledTime;
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] membership row vanished server-side — attempting same-lobby rejoin");
+                        Join(OpenLobbyId, lastPassword, lastExtras);
+                        return;
+                    }
+                    bool hadIntent = leaveIntent;
+                    ClearMembershipSilent();
+                    leaveIntent = false; leaveTarget = null;
+                    if (!hadIntent)
+                        CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby closed.", label), new Color(1f, 0.75f, 0.4f), 6f);
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                if (status == "lobby_closed" || status == "expired")
+                {
+                    ClearMembershipSilent();
+                    leaveIntent = false; leaveTarget = null;
+                    CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby seat expired — join or create a new one.", label), new Color(1f, 0.75f, 0.4f), 6f);
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                // Unknown — resume the state poll and let it re-resolve.
+                Polling = !string.IsNullOrEmpty(OpenLobbyId);
+            }
+
+            /// <summary>Adopt a seat discovered by the MODE's queue poll (a
+            /// still-armed queue poll seeing 'lobby' after an enroll converted
+            /// its searching row). The state heartbeat owns it from here.</summary>
+            public void AdoptSeatFromQueuePoll(string lobbyId)
+            {
+                if (Status == "leaving") return;   // a leave in flight outranks adoption
+                if (!string.IsNullOrEmpty(lobbyId)) OpenLobbyId = OpenLobbyId ?? lobbyId;
+                if (string.IsNullOrEmpty(OpenLobbyId)) return;
+                confirmedMember = true;
+                Status = "lobby";
+                Polling = true; lastPollAt = -999f;
+            }
+
+            /// <summary>The MODE's queue poll reported our open seat lease-
+            /// expired ('lobby_closed').</summary>
+            public void HandleSeatExpired()
+            {
+                if (string.IsNullOrEmpty(OpenLobbyId) && Status != "lobby") return;
+                ClearMembershipSilent();
+                leaveIntent = false; leaveTarget = null;
+                CompetitiveUI.ShowNotification(I18n.TrF("Your {0} lobby seat expired — join or create a new one.", label), new Color(1f, 0.75f, 0.4f), 6f);
+            }
+
+            /// <summary>One-shot membership discovery on tab open (FFA design
+            /// review find 6): a relaunched client whose server row survived
+            /// must find it before its seat lease expires. Harmless when
+            /// nothing is held (not_in_lobby with no belief stops the poll).</summary>
+            public void ProbeServerState()
+            {
+                if (probed || Polling) { probed = true; return; }
+                probed = true;
+                Polling = true; lastPollAt = -999f;
+            }
+
+            public void FetchLobbies(bool force = false)
+            {
+                if (!force && Time.unscaledTime - lobbiesLastAt < 3f) return;
+                lobbiesLastAt = Time.unscaledTime;
+                Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/{mode}/lobbies", (ok, resp) =>
+                {
+                    if (!ok || string.IsNullOrEmpty(resp))
+                    {
+                        // Old server / outage: show "unavailable", never an
+                        // eternal "Loading..." (recon risk 6).
+                        LobbiesUnavailable = true;
+                        if (CachedLobbies == null) CachedLobbies = new List<HostLobbyOpenEntry>();
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    LobbiesUnavailable = false;
+                    try
+                    {
+                        var list = new List<HostLobbyOpenEntry>();
+                        int aStart = resp.IndexOf("\"lobbies\"");
+                        int arrStart = aStart >= 0 ? resp.IndexOf('[', aStart) : -1;
+                        int arrEnd = arrStart >= 0 ? FindMatchingBracketStringAware(resp, arrStart) : -1;
+                        if (arrStart >= 0 && arrEnd > arrStart)
+                        {
+                            foreach (string obj in SliceTopLevelObjects(resp.Substring(arrStart + 1, arrEnd - arrStart - 1)))
+                            {
+                                var e = new HostLobbyOpenEntry
+                                {
+                                    lobby_id = ExtractJsonString(obj, "lobby_id"),
+                                    host_name = ExtractJsonString(obj, "host_name") ?? "?",
+                                    player_count = ExtractJsonInt(obj, "player_count"),
+                                    max_players = Math.Max(1, ExtractJsonInt(obj, "max_players")),
+                                    age_seconds = ExtractJsonInt(obj, "age_seconds"),
+                                    has_password = ExtractJsonBool(obj, "has_password"),
+                                };
+                                if (!string.IsNullOrEmpty(e.lobby_id)) list.Add(e);
+                            }
+                        }
+                        CachedLobbies = list;
+                        NativeUI.MarkDirty();
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[{label}-LOBBY] browser parse: {ex.Message}"); }
+                }));
+            }
+
+            /// <summary>Escape-hatch teardown — every local belief dies, no
+            /// requests (the escape endpoint owns the server side).</summary>
+            public void TearDown()
+            {
+                gen++;
+                ClearMembershipSilent();
+                Status = "";
+                leaveIntent = false; leaveTarget = null;
+                actionInFlight = false;
+            }
+        }
+
+        public static readonly HostLobbyClient TeamLobby = new HostLobbyClient("team", "2v2", 4);
+        public static readonly HostLobbyClient OvtLobby = new HostLobbyClient("ovt", "1v2", 3);
+
+        // Mode-specific enroll wrappers: the server's _LobbyCreateReq carries
+        // preferred_team (2v2) / preferred_side + solo_extra_pick (1v2 — the
+        // server ORs solo_extra_pick across members at Start, main.py comment
+        // at _LobbyCreateReq; omitting it would make that OR always false).
+        public static void TeamLobbyCreate(int preferredTeam, string password = null)
+            => TeamLobby.Create(password, TeamLobbyExtras(preferredTeam));
+        public static void TeamLobbyJoin(string lobbyId, int preferredTeam, string password = null)
+            => TeamLobby.Join(lobbyId, password, TeamLobbyExtras(preferredTeam));
+        private static string TeamLobbyExtras(int preferredTeam)
+            => (preferredTeam == 1 || preferredTeam == 2) ? $",\"preferred_team\":{preferredTeam}" : "";
+        public static void OvtLobbyCreate(int preferredSide, bool soloExtraPick, string password = null)
+            => OvtLobby.Create(password, OvtLobbyExtras(preferredSide, soloExtraPick));
+        public static void OvtLobbyJoin(string lobbyId, int preferredSide, bool soloExtraPick, string password = null)
+            => OvtLobby.Join(lobbyId, password, OvtLobbyExtras(preferredSide, soloExtraPick));
+        private static string OvtLobbyExtras(int preferredSide, bool soloExtraPick)
+            => $",\"preferred_side\":{((preferredSide == 1 || preferredSide == 2) ? preferredSide : 0)},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}";
 
         public static void UpdateFfaQueueList(bool force = false)
         {

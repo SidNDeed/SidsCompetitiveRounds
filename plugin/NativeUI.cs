@@ -1344,6 +1344,11 @@ namespace CompetitiveRounds
             if (currentTab != 8) return;
             if (Time.unscaledTime < teamTabRefreshAt) return;
             teamTabRefreshAt = Time.unscaledTime + 2f;
+            // v1.37 host lobbies: one-shot membership rediscovery + the
+            // browser fetch. The state HEARTBEAT itself runs from
+            // TickLeaveRecovery, not from this tab ticker.
+            ApiClient.TeamLobby.ProbeServerState();
+            ApiClient.TeamLobby.FetchLobbies(false);   // internally 3s-throttled
             ApiClient.UpdateTeamQueueList(force: true);
             // Header count auto-refreshes via its own internal 10s timer.
             ApiClient.UpdateTeamQueueCount();
@@ -1407,6 +1412,7 @@ namespace CompetitiveRounds
             artistRows.Clear();artistBlockRows.Clear();liveBetRowPool.Clear();
             comparePickerRows.Clear();comparePickerTexts.Clear();comparePickerSteamIds.Clear();
             ffaBrowserRows.Clear();ffaBetLobbyRows.Clear();ffaCfgHostBtns.Clear();
+            teamLobbyBrowserRows.Clear();ovtLobbyBrowserRows.Clear();   // v1.37 host-lobby pools (#147/#149/#150)
             teamLiveRows.Clear();teamLiveRowsHost=null;ovtLiveRows.Clear();ovtLiveRowsHost=null;
             /* Codex review: these are keyed by Image components owned by the
              * DESTROYED page. A stale key makes the next animation tick throw
@@ -1700,7 +1706,7 @@ namespace CompetitiveRounds
         }
         // ── FFA tab (live — first playtest build, ranked from day one) ─────
         private static object txtFfaStatus, txtFfaLobbyHeader, txtFfaLobbyBody, txtFfaLbHeader, txtFfaRecentHeader, txtFfaRecentPage;
-        private static GameObject ffaJoinBtn, ffaLeaveBtn, ffaStartBtn, ffaBetPanel, ffaBetContainer;
+        private static GameObject ffaJoinBtn, ffaCreatePrivBtn, ffaLeaveBtn, ffaStartBtn, ffaBetPanel, ffaBetContainer;
         private static GameObject langToggleBtn; private static object langToggleTxt;   // L10n picker
         // v1.36 host settings row (visible while sitting in an OPEN lobby;
         // controls interactable for the host only, labels visible to all).
@@ -1715,8 +1721,27 @@ namespace CompetitiveRounds
             public GameObject root, joinBtn;
             public object txtInfo;
             public string lobbyId;
+            public bool hasPassword;   // v1.37: routes Join through the password prompt
         }
         private static readonly List<FfaBrowserRow> ffaBrowserRows = new List<FfaBrowserRow>();
+
+        // ── 2v2 / 1v2 host-lobby panels (v1.37 private lobbies) ────────────
+        // One pooled row shape + one renderer shared by both tabs; the mode
+        // client lives in ApiClient (TeamLobby / OvtLobby).
+        private sealed class HostLobbyBrowserRow
+        {
+            public GameObject root, joinBtn;
+            public object txtInfo;
+            public string lobbyId;
+            public bool hasPassword;
+        }
+        private static readonly List<HostLobbyBrowserRow> teamLobbyBrowserRows = new List<HostLobbyBrowserRow>();
+        private static readonly List<HostLobbyBrowserRow> ovtLobbyBrowserRows = new List<HostLobbyBrowserRow>();
+        private static object txtTeamLobbyHeader, txtTeamLobbyBody, txtOvtHostLobbyHeader, txtOvtHostLobbyBody;
+        private static GameObject teamLobbyBrowserHost, ovtLobbyBrowserHost;
+        private static GameObject teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyPrefBtn, teamLobbyStartBtn, teamLobbyLeaveBtn;
+        private static GameObject ovtLobbyCreateBtn, ovtLobbyCreatePrivBtn, ovtLobbyStartBtn, ovtLobbyLeaveBtn;
+        private static int teamLobbyPrefTeam = 0;   // 0 any, 1 orange, 2 blue — rides create/join
         private static GameObject ffaLbContainer, ffaRecentContainer, ffaRecentPrevBtn, ffaRecentNextBtn;
         private static List<GameObject> ffaLbSortBtns; private static string[] ffaLbSortKeys; private static object[] ffaLbHeaderTexts;
         private static string ffaLbSortReq = "rating";   // last requested sort — highlights the header
@@ -1891,6 +1916,12 @@ namespace CompetitiveRounds
             var ctl=new GameObject("FfaCtl");ctl.transform.SetParent(panel.transform,false);ctl.AddComponent<RectTransform>();
             UIFactory.AddHLG(ctl,spacing:8);UIFactory.AddLE(ctl,prefH:44,flexH:0);
             ffaJoinBtn=UIFactory.CreateButton("FfaCreate",ctl.transform,"Create Lobby",18f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),()=>{ApiClient.FfaCreateLobby();dirty=true;},sizeDelta:new Vector2(184,36));
+            /* v1.37 private lobbies: prompt for a password, then create. The
+             * artist-input modal already gates BOTH input paths (#141/#200)
+             * and its onSubmit is not a CreateButton callback (#158). */
+            ffaCreatePrivBtn=UIFactory.CreateButton("FfaCreatePriv",ctl.transform,"Create Private...",18f,C_WHITE,new Color(0.40f,0.30f,0.55f,0.9f),
+                ()=>{CompetitiveUI.OpenArtistInput(I18n.Tr("Create Private FFA Lobby"),I18n.Tr("Password (share it with friends)"),"",
+                    pw=>{ApiClient.FfaCreateLobby(pw);dirty=true;});},sizeDelta:new Vector2(205,36));
             ffaStartBtn=UIFactory.CreateButton("FfaStart",ctl.transform,"Start Game",18f,C_WHITE,new Color(0.55f,0.42f,0.10f,0.95f),()=>{ApiClient.FfaStartLobby();dirty=true;},sizeDelta:new Vector2(158,36));
             ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",18f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(103,36));
 
@@ -3011,6 +3042,7 @@ namespace CompetitiveRounds
             bool inFfaRoom=false;
             try{inFfaRoom=PhotonNetwork.InRoom&&(PhotonNetwork.CurrentRoom?.Name??"").StartsWith("ffa_");}catch{}
             if(ffaJoinBtn!=null)ffaJoinBtn.SetActive(!polling&&!ffaLocked&&!inFfaRoom&&!inLobby&&st!="leaving");
+            if(ffaCreatePrivBtn!=null)ffaCreatePrivBtn.SetActive(!polling&&!ffaLocked&&!inFfaRoom&&!inLobby&&st!="leaving");
             if(ffaStartBtn!=null)
             {
                 bool showStart=inLobby&&ApiClient.FfaLobbyIsHost&&!ffaLocked&&!inFfaRoom&&st!="leaving";
@@ -3262,7 +3294,17 @@ namespace CompetitiveRounds
             UIFactory.SetOverflowMode(row.txtInfo,3);
             row.joinBtn=UIFactory.CreateButton("Join",row.root.transform,"Join",16f,C_WHITE,
                 new Color(0.25f,0.42f,0.20f,0.95f),
-                ()=>{if(!string.IsNullOrEmpty(row.lobbyId))ApiClient.FfaJoinLobby(row.lobbyId);dirty=true;},
+                ()=>{
+                    if(string.IsNullOrEmpty(row.lobbyId))return;
+                    // Capture NOW (#265): the pooled row is rebound on refresh,
+                    // and the password modal outlives this click.
+                    string id=row.lobbyId;
+                    if(row.hasPassword)
+                        CompetitiveUI.OpenArtistInput(I18n.Tr("Private FFA lobby"),I18n.Tr("Password"),"",
+                            pw=>{ApiClient.FfaJoinLobby(id,pw);dirty=true;});
+                    else ApiClient.FfaJoinLobby(id);
+                    dirty=true;
+                },
                 sizeDelta:new Vector2(88,26));
             SetFfaLayoutWidth(row.joinBtn,88f,0f,88f);
             row.root.SetActive(false);
@@ -3323,10 +3365,14 @@ namespace CompetitiveRounds
                     if(lobbies==null||i>=lobbies.Count){row.root.SetActive(false);continue;}
                     var l=lobbies[i];
                     row.lobbyId=l.lobby_id;
+                    row.hasPassword=l.has_password;
                     int ageMin=l.age_seconds/60;
                     string age=ageMin>0?$"{ageMin}m":$"{l.age_seconds}s";
-                    UIFactory.SetText(row.txtInfo,
-                        I18n.TrF("<color=#FFFFFF>{0}'s lobby</color>  <color=#7FD4FF>{1}/{2}</color>  <color=#888>open {3}</color>",
+                    /* ASCII marker only — Gravity has no padlock glyph (#47).
+                     * Compose-after-Tr, written Raw (#298c). */
+                    string privTag=l.has_password?I18n.Tr("<color=#FFD94D>[PRIVATE]</color>")+"  ":"";
+                    UIFactory.SetTextRaw(row.txtInfo,
+                        privTag+I18n.TrF("<color=#FFFFFF>{0}'s lobby</color>  <color=#7FD4FF>{1}/{2}</color>  <color=#888>open {3}</color>",
                             FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age));
                     bool joinable=l.player_count<l.max_players
                         &&ApiClient.FfaQueueStatus!="leaving";
@@ -3342,6 +3388,181 @@ namespace CompetitiveRounds
                 newH=n==0?29:2;
             }
             var bodyComp=txtFfaLobbyBody as Component;
+            if(bodyComp!=null)
+            {
+                var le=bodyComp.gameObject.GetComponent(UIFactory.tLE);
+                if(le!=null)
+                {
+                    UIFactory.tLE.GetProperty("preferredHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,(float)newH);
+                    UIFactory.tLE.GetProperty("minHeight",BindingFlags.Public|BindingFlags.Instance)?.SetValue(le,(float)newH);
+                }
+                var rt=bodyComp.GetComponent<RectTransform>();
+                if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
+            }
+        }
+
+        // ── Shared host-lobby panel machinery (v1.37 private lobbies) ──────
+        private static HostLobbyBrowserRow CreateHostLobbyBrowserRow(Transform parent,string name,bool team)
+        {
+            var row=new HostLobbyBrowserRow();
+            row.root=new GameObject(name);
+            row.root.transform.SetParent(parent,false);
+            row.root.AddComponent<RectTransform>();
+            UIFactory.AddHLG(row.root,spacing:8,padL:6,padR:6,forceExpandH:false);
+            UIFactory.AddLE(row.root,prefH:29,minH:29,flexH:0);
+            row.txtInfo=CreateFfaTextCell("Info",row.root.transform,700,UIFactory.AlignMidLeft,15f,C_WHITE,true,300);
+            UIFactory.SetOverflowMode(row.txtInfo,3);
+            row.joinBtn=UIFactory.CreateButton("Join",row.root.transform,"Join",14f,C_WHITE,
+                new Color(0.25f,0.42f,0.20f,0.95f),
+                ()=>{JoinHostLobbyRow(row,team);dirty=true;},
+                sizeDelta:new Vector2(80,24));
+            SetFfaLayoutWidth(row.joinBtn,80f,0f,80f);
+            row.root.SetActive(false);
+            return row;
+        }
+
+        private static void JoinHostLobbyRow(HostLobbyBrowserRow row,bool team)
+        {
+            if(string.IsNullOrEmpty(row.lobbyId))return;
+            // Capture NOW (#265): the pooled row is rebound on refresh, and
+            // the password modal outlives this click.
+            string id=row.lobbyId;
+            if(row.hasPassword)
+            {
+                CompetitiveUI.OpenArtistInput(
+                    team?I18n.Tr("Private 2v2 lobby"):I18n.Tr("Private 1v2 lobby"),
+                    I18n.Tr("Password"),"",
+                    pw=>{
+                        if(team)ApiClient.TeamLobbyJoin(id,teamLobbyPrefTeam,pw);
+                        else ApiClient.OvtLobbyJoin(id,ovtPreferredSide,ovtSoloExtraPick,pw);
+                        dirty=true;
+                    });
+                return;
+            }
+            if(team)ApiClient.TeamLobbyJoin(id,teamLobbyPrefTeam,null);
+            else ApiClient.OvtLobbyJoin(id,ovtPreferredSide,ovtSoloExtraPick,null);
+        }
+
+        /// <summary>One renderer for both host-lobby panels. Two modes, FFA
+        /// pattern: browser rows (idle) / member-list text (seated). Every
+        /// dynamic-height write mirrors RenderFfaLobbySection's prefH+minH+
+        /// sizeDelta triple so #63's collapse can't happen.</summary>
+        private static void RenderHostLobbySection(ApiClient.HostLobbyClient cli,List<HostLobbyBrowserRow> rows,
+            GameObject browserHost,object headerTxt,object bodyTxt,bool team,
+            GameObject createBtn,GameObject createPrivBtn,GameObject startBtn,GameObject leaveBtn,GameObject prefBtn)
+        {
+            if(headerTxt==null||bodyTxt==null||browserHost==null)return;
+            bool seated=!string.IsNullOrEmpty(cli.OpenLobbyId);
+            bool leaving=cli.Status=="leaving";
+            // A live locked group in this mode owns the tab flow — lobby
+            // controls step aside (mirror of the FFA locked gate).
+            bool busy=team
+                ?(ApiClient.CurrentTeamQueueState==ApiClient.TeamQueueState.Matched
+                  ||ApiClient.CurrentTeamQueueState==ApiClient.TeamQueueState.ReadySent
+                  ||!string.IsNullOrEmpty(ApiClient.ActiveTeamSeriesId))
+                :(Plugin.PendingOvtSlot>=0||!string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId));
+            if(createBtn!=null)createBtn.SetActive(!seated&&!leaving&&!busy);
+            if(createPrivBtn!=null)createPrivBtn.SetActive(!seated&&!leaving&&!busy);
+            if(prefBtn!=null)
+            {
+                prefBtn.SetActive(!leaving&&!busy);
+                UIFactory.SetTextRaw(UIFactory.GetButtonText(prefBtn),
+                    teamLobbyPrefTeam==1?I18n.Tr("Team: <color=#FFB347>Orange</color>")
+                    :teamLobbyPrefTeam==2?I18n.Tr("Team: <color=#88AAFF>Blue</color>"):I18n.Tr("Team: Any"));
+            }
+            if(startBtn!=null)
+            {
+                bool showStart=seated&&cli.IsHost&&!leaving;
+                startBtn.SetActive(showStart);
+                if(showStart)
+                    UIFactory.SetTextRaw(UIFactory.GetButtonText(startBtn),
+                        cli.CanStart?I18n.TrF("<b>Start Game ({0}/{1})</b>",cli.MemberCount,cli.MaxPlayers)
+                                    :I18n.TrF("<b>Start (need {0})</b>",cli.MaxPlayers));
+            }
+            if(leaveBtn!=null)leaveBtn.SetActive(seated||leaving);
+            string browseHdr=team?I18n.Tr("<b>Hosted 2v2 Lobbies</b>"):I18n.Tr("<b>Custom 1v2 Lobbies</b>");
+            string seatedHdr=team?I18n.Tr("<b>Your 2v2 Lobby</b>"):I18n.Tr("<b>Your Custom 1v2 Lobby</b>");
+            int newH;
+            if(seated)
+            {
+                for(int i=0;i<rows.Count;i++)rows[i].root.SetActive(false);
+                var mem=cli.Members;
+                int n=mem?.Count??0;
+                UIFactory.SetTextRaw(headerTxt,seatedHdr
+                    +I18n.TrF("  <color=#888>({0}/{1}{2})</color>",Math.Max(n,cli.MemberCount),cli.MaxPlayers,
+                        cli.HasPassword?" - "+I18n.Tr("private"):""));
+                if(n==0)
+                {
+                    UIFactory.SetTextRaw(bodyTxt,I18n.Tr("<color=#888>Loading members...</color>"));
+                    newH=24;
+                }
+                else
+                {
+                    var sb=new StringBuilder();
+                    foreach(var m in mem)
+                    {
+                        bool isMe=m.steam_id==MatchTracker.LocalSteamId;
+                        string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
+                        string hostTag=m.is_host?"  <color=#FFD94D>"+I18n.Tr("HOST")+"</color>":"";
+                        string prefTag;
+                        if(team)
+                            prefTag=m.preferred_team==1?"  <color=#FFB347>T1</color>"
+                                   :m.preferred_team==2?"  <color=#88AAFF>T2</color>":"";
+                        else
+                            prefTag=(m.preferred_side==1?"  <color=#FFB347>"+I18n.Tr("solo")+"</color>"
+                                   :m.preferred_side==2?"  <color=#88AAFF>"+I18n.Tr("duo")+"</color>":"")
+                                   +(m.solo_extra_pick?"  <color=#888>+pick</color>":"");
+                        int wm=m.wait_seconds/60,ws=m.wait_seconds%60;
+                        string waitStr=wm>0?$"{wm}m{ws:D2}s":$"{ws}s";
+                        // 2v2 shows the mode rating when one exists; both fall
+                        // back to the 1v1 number the server sends for context.
+                        string ratingStr=team&&m.rating>0
+                            ?$"<color=#FFFFFF>2v2 {m.rating}</color>"
+                            :$"<color=#DDDDDD>1v1 {m.rating_1v1}</color>";
+                        sb.Append($"  {nameC}{FfaSafeRich(Trunc(m.display_name,18))}</color>  {ratingStr}{prefTag}{hostTag}  <color=#888>{waitStr}</color>\n");
+                    }
+                    UIFactory.SetTextRaw(bodyTxt,sb.ToString());
+                    // 22px/line covers the 1v2 panel's 16pt body and the OS
+                    // fallback fonts' taller metrics (#297's class).
+                    newH=(int)(n*22f+8);
+                }
+            }
+            else
+            {
+                var lobbies=cli.CachedLobbies;
+                int n=lobbies?.Count??0;
+                UIFactory.SetTextRaw(headerTxt,n==0
+                    ?browseHdr+"  "+I18n.Tr("<color=#888>(none right now)</color>")
+                    :browseHdr+I18n.TrF("  <color=#888>({0})</color>",n));
+                while(rows.Count<Math.Min(n,12))
+                    rows.Add(CreateHostLobbyBrowserRow(browserHost.transform,$"{(team?"T":"O")}HLob{rows.Count}",team));
+                for(int i=0;i<rows.Count;i++)
+                {
+                    var row=rows[i];
+                    if(lobbies==null||i>=lobbies.Count){row.root.SetActive(false);continue;}
+                    var l=lobbies[i];
+                    row.lobbyId=l.lobby_id;
+                    row.hasPassword=l.has_password;
+                    int ageMin=l.age_seconds/60;
+                    string age=ageMin>0?$"{ageMin}m":$"{l.age_seconds}s";
+                    /* ASCII marker only — no padlock glyph in Gravity (#47). */
+                    string privTag=l.has_password?I18n.Tr("<color=#FFD94D>[PRIVATE]</color>")+"  ":"";
+                    UIFactory.SetTextRaw(row.txtInfo,
+                        privTag+I18n.TrF("<color=#FFFFFF>{0}'s lobby</color>  <color=#7FD4FF>{1}/{2}</color>  <color=#888>open {3}</color>",
+                            FfaSafeRich(Trunc(l.host_name,18)),l.player_count,l.max_players,age));
+                    row.joinBtn.SetActive(l.player_count<l.max_players&&!leaving&&!busy);
+                    row.root.SetActive(true);
+                }
+                UIFactory.SetTextRaw(bodyTxt,n==0
+                    ?(cli.LobbiesUnavailable
+                        ?I18n.Tr("<color=#FFAA55>Lobby browser unavailable right now — the server may be updating.</color>")
+                        :lobbies==null?$"<color=#888>{I18n.Tr("Loading...")}</color>"
+                            :(team?I18n.Tr("<color=#888>No hosted 2v2 lobbies — create one and invite your friends!</color>")
+                                  :I18n.Tr("<color=#888>No custom 1v2 lobbies — create one and invite your friends!</color>")))
+                    :(leaving?I18n.Tr("<color=#888>Leaving...</color>"):""));
+                newH=n==0?24:2;
+            }
+            var bodyComp=bodyTxt as Component;
             if(bodyComp!=null)
             {
                 var le=bodyComp.gameObject.GetComponent(UIFactory.tLE);
@@ -3417,6 +3638,38 @@ namespace CompetitiveRounds
             var qlbComp=txtOvtLobbyBody as Component;
             if(qlbComp!=null)UIFactory.AddLE(qlbComp.gameObject,prefH:29,minH:29,flexH:0);
             UIFactory.SetWordWrap(txtOvtLobbyBody,true);
+
+            /* v1.37 private lobbies: host-controlled CUSTOM lobbies (create /
+             * browse / password / host Start), distinct from the consent
+             * QUEUE panel above — which this tab already calls "1v2 Lobby",
+             * hence "Custom 1v2 Lobby" here (recon C naming note). The Side /
+             * Solo-Extra-Pick toggles above apply to BOTH: their values ride
+             * the custom lobby's create/join body too. */
+            var ovtHostPanel=UIFactory.CreatePanel("O1Host",panel.transform,C_PANEL);
+            UIFactory.AddVLG(ovtHostPanel,spacing:3,padL:10,padR:10,padT:6,padB:6);
+            UIFactory.AddLE(ovtHostPanel,flexH:0);
+            txtOvtHostLobbyHeader=UIFactory.CreateText("O1HH",ovtHostPanel.transform,I18n.Tr("<b>Custom 1v2 Lobbies</b>"),21f,C_SUB,UIFactory.AlignMidLeft,sizeDelta:new Vector2(891,29));
+            var o1hCtl=new GameObject("O1HCtl");o1hCtl.transform.SetParent(ovtHostPanel.transform,false);o1hCtl.AddComponent<RectTransform>();
+            UIFactory.AddHLG(o1hCtl,spacing:8);UIFactory.AddLE(o1hCtl,prefH:34,minH:34,flexH:0);
+            ovtLobbyCreateBtn=UIFactory.CreateButton("O1HCreate",o1hCtl.transform,"Create Lobby",16f,C_WHITE,new Color(0.25f,0.45f,0.18f,0.9f),
+                ()=>{ApiClient.OvtLobbyCreate(ovtPreferredSide,ovtSoloExtraPick);dirty=true;},sizeDelta:new Vector2(160,28));
+            ovtLobbyCreatePrivBtn=UIFactory.CreateButton("O1HPriv",o1hCtl.transform,"Create Private...",16f,C_WHITE,new Color(0.40f,0.30f,0.55f,0.9f),
+                ()=>{CompetitiveUI.OpenArtistInput(I18n.Tr("Create Private 1v2 Lobby"),I18n.Tr("Password (share it with friends)"),"",
+                    pw=>{ApiClient.OvtLobbyCreate(ovtPreferredSide,ovtSoloExtraPick,pw);dirty=true;});},sizeDelta:new Vector2(180,28));
+            ovtLobbyStartBtn=UIFactory.CreateButton("O1HStart",o1hCtl.transform,"Start Game",16f,C_WHITE,new Color(0.55f,0.42f,0.10f,0.95f),
+                ()=>{ApiClient.OvtLobby.StartLobby();dirty=true;},sizeDelta:new Vector2(190,28));
+            ovtLobbyStartBtn.SetActive(false);
+            ovtLobbyLeaveBtn=UIFactory.CreateButton("O1HLeave",o1hCtl.transform,"Leave Lobby",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),
+                ()=>{ApiClient.OvtLobby.LeaveLobby();dirty=true;},sizeDelta:new Vector2(140,28));
+            ovtLobbyLeaveBtn.SetActive(false);
+            ovtLobbyBrowserHost=new GameObject("O1HBrowser");
+            ovtLobbyBrowserHost.transform.SetParent(ovtHostPanel.transform,false);
+            ovtLobbyBrowserHost.AddComponent<RectTransform>();
+            UIFactory.AddVLG(ovtLobbyBrowserHost,spacing:3);
+            txtOvtHostLobbyBody=UIFactory.CreateText("O1HB",ovtHostPanel.transform,$"<color=#888>{I18n.Tr("Loading...")}</color>",16f,C_LABEL,UIFactory.AlignTopLeft,sizeDelta:new Vector2(891,24));
+            var o1hbComp=txtOvtHostLobbyBody as Component;
+            if(o1hbComp!=null)UIFactory.AddLE(o1hbComp.gameObject,prefH:24,minH:24,flexH:0);
+            UIFactory.SetWordWrap(txtOvtHostLobbyBody,true);
 
             // Aug 7 item 13: live 1v2 games with WATCH. The 1v2 tab had NO
             // live-games surface at all — rendered straight from the spectate
@@ -3510,6 +3763,12 @@ namespace CompetitiveRounds
             if(currentTab!=11)return;
             ApiClient.UpdateOvtQueuePoll(false);   // safe no-op when not polling
             ApiClient.UpdateOvtQueueList(false);   // lobby panel snapshot (2s throttle)
+            // v1.37 custom lobbies: one-shot membership rediscovery (a
+            // relaunched client's seat must be found before its lease dies)
+            // + the browser fetch. The state HEARTBEAT itself runs from
+            // TickLeaveRecovery, not from this tab ticker.
+            ApiClient.OvtLobby.ProbeServerState();
+            ApiClient.OvtLobby.FetchLobbies(false);   // internally 3s-throttled
             if(Time.unscaledTime>=ovtRecentRefreshAt)
             {
                 ovtRecentRefreshAt=Time.unscaledTime+10f;
@@ -3545,7 +3804,10 @@ namespace CompetitiveRounds
             bool ovtLocked=Plugin.PendingOvtSlot>=0||!string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId);
             bool inOvtRoom=false;
             try{inOvtRoom=PhotonNetwork.InRoom&&(PhotonNetwork.CurrentRoom?.Name??"").StartsWith("ovt_");}catch{}
-            if(ovtJoinBtn!=null)ovtJoinBtn.SetActive(!polling&&!ovtLocked&&!inOvtRoom&&ApiClient.OvtQueueStatus!="leaving");
+            // v1.37: a held custom-lobby seat hides the consent-queue Join —
+            // OvtJoinQueue would clobber the seat's row server-side.
+            bool ovtSeated=!string.IsNullOrEmpty(ApiClient.OvtLobby.OpenLobbyId);
+            if(ovtJoinBtn!=null)ovtJoinBtn.SetActive(!polling&&!ovtLocked&&!inOvtRoom&&!ovtSeated&&ApiClient.OvtQueueStatus!="leaving");
             if(ovtLeaveBtn!=null)ovtLeaveBtn.SetActive((polling||ovtLocked)&&!inOvtRoom);
             if(txtOvtStatus!=null)
             {
@@ -3564,10 +3826,15 @@ namespace CompetitiveRounds
                 }
                 else if(st=="leaving")msg=I18n.Tr("<color=#888>Leaving queue…</color>");
                 else if(ovtLocked)msg=I18n.Tr("<color=#FFB347>1v2 lobby pending</color> — Leave to dissolve it if nothing happens.");
+                else if(ovtSeated)msg=I18n.Tr("<color=#88FF88>In a custom 1v2 lobby</color> <color=#888>— manage it in the panel below.</color>");
                 else msg=I18n.Tr("Not in queue.");
                 UIFactory.SetTextRaw(txtOvtStatus,msg);
             }
             RenderOvtLobbySection();
+            // v1.37 custom lobbies panel (create/browse/password/host Start).
+            RenderHostLobbySection(ApiClient.OvtLobby,ovtLobbyBrowserRows,ovtLobbyBrowserHost,
+                txtOvtHostLobbyHeader,txtOvtHostLobbyBody,team:false,
+                ovtLobbyCreateBtn,ovtLobbyCreatePrivBtn,ovtLobbyStartBtn,ovtLobbyLeaveBtn,null);
             // Aug 7 item 13: live 1v2 games straight from the spectate feed.
             RenderOvtLiveGames();
             // Split activity boards (server-ordered; role-scoped W/L).
@@ -17804,6 +18071,75 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             UIFactory.AddLE(teamLiveRowsHost, flexH: 0);
             teamLivePanel = liveTeamPanel;
 
+            /* v1.37 private lobbies: host-controlled 2v2 lobbies (create /
+             * browse / password / host Start). DISTINCT from the "Custom
+             * Lobbies" manual-QUEUE column below, which stays — it is a
+             * shipped consent-queue feature (#127, recon risk 7). The Team
+             * claim button here rides create/join (and, while seated, the
+             * existing manual-queue preferred-team endpoint, which updates
+             * any queue_type='manual' row — lobby seats included). */
+            var tHostPanel = UIFactory.CreatePanel("THostLobby", panel.transform, C_PANEL);
+            UIFactory.AddVLG(tHostPanel, spacing: 3, padL: 10, padR: 10, padT: 6, padB: 6);
+            UIFactory.AddLE(tHostPanel, flexH: 0);
+            txtTeamLobbyHeader = UIFactory.CreateText("THLH", tHostPanel.transform,
+                I18n.Tr("<b>Hosted 2v2 Lobbies</b>"), 16f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
+            var thlCtl = new GameObject("THLCtl");
+            thlCtl.transform.SetParent(tHostPanel.transform, false);
+            thlCtl.AddComponent<RectTransform>();
+            UIFactory.AddHLG(thlCtl, spacing: 8);
+            UIFactory.AddLE(thlCtl, prefH: 32, minH: 32, flexH: 0);
+            teamLobbyCreateBtn = UIFactory.CreateButton("THLCreate", thlCtl.transform, "Create Lobby", 15f, C_WHITE,
+                new Color(0.25f, 0.45f, 0.18f, 0.9f),
+                () => { ApiClient.TeamLobbyCreate(teamLobbyPrefTeam); dirty = true; },
+                sizeDelta: new Vector2(150, 26));
+            teamLobbyCreatePrivBtn = UIFactory.CreateButton("THLPriv", thlCtl.transform, "Create Private...", 15f, C_WHITE,
+                new Color(0.40f, 0.30f, 0.55f, 0.9f),
+                () =>
+                {
+                    CompetitiveUI.OpenArtistInput(I18n.Tr("Create Private 2v2 Lobby"),
+                        I18n.Tr("Password (share it with friends)"), "",
+                        pw => { ApiClient.TeamLobbyCreate(teamLobbyPrefTeam, pw); dirty = true; });
+                },
+                sizeDelta: new Vector2(170, 26));
+            teamLobbyPrefBtn = UIFactory.CreateButton("THLPref", thlCtl.transform, "Team: Any", 15f, C_WHITE, C_BTN,
+                () =>
+                {
+                    teamLobbyPrefTeam = (teamLobbyPrefTeam + 1) % 3;
+                    // Seated members can update the claim live: lobby seats are
+                    // queue_type='manual' rows, so the existing preferred-team
+                    // endpoint updates them and the next state poll re-renders
+                    // everyone's tags. ("Any" has no endpoint value — it only
+                    // matters at create/join time.)
+                    if (teamLobbyPrefTeam != 0 && !string.IsNullOrEmpty(ApiClient.TeamLobby.OpenLobbyId))
+                    {
+                        var psid = MatchTracker.LocalSteamId;
+                        if (!string.IsNullOrEmpty(psid) && psid != "unknown")
+                            ApiClient.SetTeamPreferredTeam(psid, teamLobbyPrefTeam);
+                    }
+                    dirty = true;
+                },
+                sizeDelta: new Vector2(150, 26));
+            teamLobbyStartBtn = UIFactory.CreateButton("THLStart", thlCtl.transform, "Start Game", 15f, C_WHITE,
+                new Color(0.55f, 0.42f, 0.10f, 0.95f),
+                () => { ApiClient.TeamLobby.StartLobby(); dirty = true; },
+                sizeDelta: new Vector2(180, 26));
+            teamLobbyStartBtn.SetActive(false);
+            teamLobbyLeaveBtn = UIFactory.CreateButton("THLLeave", thlCtl.transform, "Leave Lobby", 15f, C_WHITE,
+                new Color(0.5f, 0.2f, 0.2f, 0.9f),
+                () => { ApiClient.TeamLobby.LeaveLobby(); dirty = true; },
+                sizeDelta: new Vector2(130, 26));
+            teamLobbyLeaveBtn.SetActive(false);
+            teamLobbyBrowserHost = new GameObject("THLBrowser");
+            teamLobbyBrowserHost.transform.SetParent(tHostPanel.transform, false);
+            teamLobbyBrowserHost.AddComponent<RectTransform>();
+            UIFactory.AddVLG(teamLobbyBrowserHost, spacing: 3);
+            txtTeamLobbyBody = UIFactory.CreateText("THLB", tHostPanel.transform,
+                $"<color=#888>{I18n.Tr("Loading...")}</color>", 14f, C_LABEL, UIFactory.AlignTopLeft,
+                sizeDelta: new Vector2(900, 24));
+            var thlbComp = txtTeamLobbyBody as Component;
+            if (thlbComp != null) UIFactory.AddLE(thlbComp.gameObject, prefH: 24, minH: 24, flexH: 0);
+            UIFactory.SetWordWrap(txtTeamLobbyBody, true);
+
             // Queue row — Random Queue + Custom Lobbies side-by-side as two
             // columns. Was previously stacked vertically with both bodies at
             // a fixed 900-wide × 160-tall block; that wasted half the screen
@@ -17852,6 +18188,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 if (pImg != null) UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(pImg, false);
             }
             disablePanelRaycast(liveTeamPanel);
+            disablePanelRaycast(tHostPanel);   // v1.37 host-lobby panel scrolls like its siblings
             disablePanelRaycast(queueListPanel);
             disablePanelRaycast(manualPanel);
 
@@ -18349,8 +18686,23 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     status = "";
                     break;
             }
+            // v1.37 host lobbies: a held open seat owns the tab — the queue
+            // Search buttons hide (JoinTeamQueue would clobber the seat's row
+            // server-side; it also refuses with a toast, this is the visual).
+            bool teamSeated = !string.IsNullOrEmpty(ApiClient.TeamLobby.OpenLobbyId);
+            if (teamSeated || ApiClient.TeamLobby.Status == "leaving")
+            {
+                if (teamSearchBtn != null) teamSearchBtn.SetActive(false);
+                if (teamSearchCustomBtn != null) teamSearchCustomBtn.SetActive(false);
+                if (teamSeated && st == ApiClient.TeamQueueState.Idle)
+                    status = I18n.Tr("<color=#88FF88>In a hosted 2v2 lobby</color> <color=#888>— manage it in the panel below.</color>");
+            }
             UIFactory.SetTextRaw(txtTeamStatus, status);
             UIFactory.SetTextRaw(txtTeamMembers, members);
+            // v1.37 host-lobby panel (create/browse/password/host Start).
+            RenderHostLobbySection(ApiClient.TeamLobby, teamLobbyBrowserRows, teamLobbyBrowserHost,
+                txtTeamLobbyHeader, txtTeamLobbyBody, team: true,
+                teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyStartBtn, teamLobbyLeaveBtn, teamLobbyPrefBtn);
 
             // DC grace banner. Driven by ApiClient.LastSeriesStateStatus etc. —
             // poll the most-recent series's state when we have one cached and
