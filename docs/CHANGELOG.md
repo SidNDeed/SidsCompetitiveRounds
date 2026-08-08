@@ -2,8 +2,8 @@
 
 ## Unreleased — Aug 7-8 batch (version at Sid's call) — Private lobbies live, alerts, animated uploads
 
-Schema: migrations **202–204** (202 LFP modes, 203 admin alerts, 204 cosmetic
-animation frames — all must apply BEFORE the API deploy). Deploy notes: the
+Schema: migrations **202–205** (202 LFP modes, 203 admin alerts, 204 cosmetic
+animation frames, 205 lobby kicks — all must apply BEFORE the API deploy). Deploy notes: the
 GIF-split endpoint needs **Pillow added to the server-side API Dockerfile**
 (fetch the live copy per #192, add `pip install Pillow`, push back — until
 then it answers 503 and the multi-PNG path is unaffected); ship step 11 now
@@ -14,13 +14,20 @@ seed migration for the new i18n keys is a ship-time step.
 
 ### Added
 
-- **Private lobbies actually reachable.** v1.37.0 shipped only the server half —
-  no client UI existed. Now: FFA Create Private + password prompts + [PRIVATE]
-  browser markers; full hosted-lobby panels on the 2v2 and 1v2 tabs (create,
-  browse/join with password, member list, host-only Start, Leave) whose state
-  poll keeps the seat lease alive even with the menu closed. Start hands off to
-  the normal ready-up/room flow with a match-found alert for idle members;
-  a closed lobby never strands or conscripts anyone. *Multi-player flows are
+- **Hosted lobbies are THE way to play custom 2v2s and 1v2s** (Sid's follow-up:
+  the old blind manual queue and the 1v2 consent queue are gone from the
+  tabs). v1.37.0 shipped only the server half — no client UI existed. Now:
+  FFA Create Private + password prompts + [PRIVATE] browser markers; full
+  hosted-lobby panels on the 2v2 and 1v2 tabs (create, browse/join with
+  password, member list, host-only Start, Leave) whose state poll keeps the
+  seat lease alive even with the menu closed. **Hosts can kick** members
+  before start (admins are unkickable, and a kicked player cannot rejoin that
+  lobby); the 1v2 solo-extra-pick is the **host's setting** now; and every
+  lobby browser shows **who is inside before you join — names, titles and
+  elo**, with 2v2/FFA elos shown only once established (10+ rated
+  series/games; 1v1 elo otherwise). Start hands off to the normal
+  ready-up/room flow with a match-found alert for idle members; a closed
+  lobby never strands or conscripts anyone. *Multi-player flows are
   first-playtest.*
 - **Standing server alerts.** Admins broadcast a notice (outage / issue /
   update / info) from the Admin tab; every player gets a one-time toast (also
