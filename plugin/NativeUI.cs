@@ -3776,7 +3776,7 @@ namespace CompetitiveRounds
                 if(rt!=null)rt.sizeDelta=new Vector2(rt.sizeDelta.x,newH);
             }
         }
-        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+        private static void SwitchTab(int idx){currentTab=idx;CompetitiveUI.ClearCardHoverRegions();for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);ApiClient.UpdateOvtQueueList(force:true);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -6517,6 +6517,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static readonly List<object> shopArtistBtnTexts = new List<object>();
         private static readonly List<string> shopArtistBtnNames = new List<string>();
         private const string SHOP_HOUSE_ARTIST = "House";
+        // Aug 7 item 10: sentinel for the "New" filter chip. A control char
+        // cannot collide with a user-authored artist display name.
+        private const string SHOP_NEW_FILTER = "\u0001new";
         // Shop category filter: 0=All, then categories ordered "cooler and more
         // affordable first" (v1.32 item 9): Cosmetics, Name Styles, Maps, Titles.
         // Clicking a tab narrows the scroll view to that category so users don't have to
@@ -6563,6 +6566,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             public string previewColor;
             public int previewPrice;
             public string kind;
+            public string displayName;   // Aug 7 item 10: for the body-preview modal title
             // Item 1 previews: cosmetic art thumbnail (faces), 3-color scheme
             // swatches (map skins), and the admin-only "assign artist" button.
             public GameObject artImgGO;
@@ -6822,9 +6826,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     {
                         var rr = shopRows[captured];
                         if (rr == null || string.IsNullOrEmpty(rr.sku)) return;
-                        // Item 1: the button now serves trails AND player effects —
-                        // effects preview as a cursor-following particle aura.
-                        if (rr.kind == "player_effect")
+                        // Item 1: the button serves trails AND player effects;
+                        // Aug 7 item 10 adds faces — those open the on-body
+                        // preview modal (the artist renderer, view-only).
+                        if (rr.kind == "face")
+                            CompetitiveUI.OpenCosmeticBodyPreview(rr.sku, rr.displayName);
+                        else if (rr.kind == "player_effect")
                             PlayerEffectCosmetic.TogglePreview(rr.sku);
                         else
                             TrailPreview.Toggle(rr.sku, rr.previewColor, rr.previewPrice);
@@ -7225,10 +7232,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     // "House" sorts with the rest; pin it last so real artists lead.
                     if (artistNames.Remove(SHOP_HOUSE_ARTIST)) artistNames.Add(SHOP_HOUSE_ARTIST);
                     var btnNames = new List<string> { "" };  // "" = All
+                    /* Aug 7 item 10: "New" beside All — the same newest set the
+                     * Home panel shows. Sentinel is a control char: artist
+                     * names are user-authored, so the literal string "New"
+                     * could be hijacked by an artist named New. Only offered
+                     * when the newest cache has faces to filter by. */
+                    var newestFaceSkus = new HashSet<string>();
+                    var newest = ApiClient.CachedNewestCosmetics;
+                    if (newest != null)
+                        foreach (var nc in newest)
+                            if (nc != null && nc.kind == "face" && !string.IsNullOrEmpty(nc.sku))
+                                newestFaceSkus.Add(nc.sku);
+                    if (newestFaceSkus.Count > 0) btnNames.Add(SHOP_NEW_FILTER);
                     btnNames.AddRange(artistNames);
                     SyncShopArtistFilterButtons(btnNames);
                     shopArtistFilterRow.transform.SetSiblingIndex(sibling++);
-                    if (!string.IsNullOrEmpty(shopArtistFilter))
+                    if (shopArtistFilter == SHOP_NEW_FILTER)
+                    {
+                        facesShown = faces.FindAll(f => newestFaceSkus.Contains(f.sku));
+                        if (facesShown.Count == 0) { shopArtistFilter = null; facesShown = faces; }
+                    }
+                    else if (!string.IsNullOrEmpty(shopArtistFilter))
                     {
                         facesShown = faces.FindAll(f =>
                             (string.IsNullOrEmpty(f.artist_name) ? SHOP_HOUSE_ARTIST : f.artist_name) == shopArtistFilter);
@@ -7375,7 +7399,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (!used) continue;
                 shopArtistBtnNames[i] = names[i];
                 bool active = string.IsNullOrEmpty(names[i]) ? shopArtistFilter == null : shopArtistFilter == names[i];
-                if (string.IsNullOrEmpty(names[i])) UIFactory.SetText(shopArtistBtnTexts[i], "All"); else UIFactory.SetTextRaw(shopArtistBtnTexts[i], names[i]);  /* find 15: artist names are user-authored */
+                // Sentinel chips render translated labels; real artist names
+                // stay SetTextRaw (user-authored).
+                if (string.IsNullOrEmpty(names[i])) UIFactory.SetText(shopArtistBtnTexts[i], "All");
+                else if (names[i] == SHOP_NEW_FILTER) UIFactory.SetText(shopArtistBtnTexts[i], "New");
+                else UIFactory.SetTextRaw(shopArtistBtnTexts[i], names[i]);  /* find 15: artist names are user-authored */
                 UIFactory.SetImageColor(shopArtistBtns[i], active ? C_TABACT : C_BTN);
                 UIFactory.SetColor(shopArtistBtnTexts[i], active ? C_WHITE : C_LABEL);
             }
@@ -7402,6 +7430,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             r.itemId = it.id;
             r.sku = it.sku;
             r.kind = it.kind;
+            r.displayName = it.name;   // Aug 7 item 10
             // Click-to-highlight: tint the whole row while selected. Rows are
             // pooled, so both states must be asserted on every fill.
             UIFactory.SetImageColor(r.root, (!string.IsNullOrEmpty(shopSelectedSku) && shopSelectedSku == it.sku) ? C_ROWSEL : C_PANEL);
@@ -7485,8 +7514,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // split is load-bearing (July 21 item 9): body-color glyphs set
             // showArt but must NOT double every row's height.
             bool bigArt = showArt && it.kind == "face";
-            if (r.artImgGO != null) UIFactory.SetPrefWH(r.artImgGO, bigArt ? 80 : 40, bigArt ? 80 : 40);
-            UIFactory.SetPrefH(r.root, bigArt ? 88 : 44);
+            // Aug 7 item 10: face art 80->112 / row 88->120 ("make the preview
+            // pictures bigger"). Rows live inside SHSV's flexH:1 ScrollView, so
+            // taller rows only cost scroll length (#63/#199 do not bite here).
+            if (r.artImgGO != null) UIFactory.SetPrefWH(r.artImgGO, bigArt ? 112 : 40, bigArt ? 112 : 40);
+            UIFactory.SetPrefH(r.root, bigArt ? 120 : 44);
             bool showSwatches = false;
             if (it.kind == "color" && r.swatchGO != null && CustomMapColors.IsCustomSku(it.sku))
             {
@@ -7660,7 +7692,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 bool isTrail = it.kind == "trail";
                 bool isEffect = it.kind == "player_effect";
-                r.previewBtn.SetActive(isTrail || isEffect);
+                // Aug 7 item 10: faces get the button too — it opens the
+                // on-body preview modal instead of a toggling cursor preview.
+                bool isFace = it.kind == "face";
+                r.previewBtn.SetActive(isTrail || isEffect || isFace);
                 if (isTrail || isEffect)
                 {
                     r.previewColor = it.preview_color ?? "";
@@ -7673,6 +7708,13 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     UIFactory.SetImageColor(r.previewBtn, previewingThis
                         ? new Color(0.5f, 0.3f, 0.25f, 0.9f)    // active preview = warm red
                         : new Color(0.25f, 0.4f, 0.55f, 0.9f));
+                }
+                else if (isFace)
+                {
+                    // Pooled-row reset (#265 family): a recycled trail row's
+                    // "Stop" label/tint must not leak onto a face row.
+                    if (r.previewBtnTxt != null) UIFactory.SetText(r.previewBtnTxt, "Preview");
+                    UIFactory.SetImageColor(r.previewBtn, new Color(0.25f, 0.4f, 0.55f, 0.9f));
                 }
             }
 

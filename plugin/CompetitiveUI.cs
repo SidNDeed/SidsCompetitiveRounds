@@ -3473,6 +3473,12 @@ namespace CompetitiveRounds
         private static string cosTestSubmitLabel = "Submit";
         private static bool cosTestIsRevision = false;
         private static Action<float, float, float> cosTestOnSubmit = null;
+        // Aug 7 item 10: view-only mode (shop body preview). Frames are the
+        // SHARED catalog sprites — never destroyed here; only cosTestTex (our
+        // own decode) is owned by this modal.
+        private static bool cosTestViewOnly = false;
+        private static Sprite[] cosTestFrames = null;
+        private static float cosTestFps = 2.5f;
         private const float COS_BODY_SOURCE_PX = 662.5f;
         // CharacterItem.offset is expressed before the face-parent's 0.16
         // scale. A 1.06-world-unit body is therefore about 6.625 local units.
@@ -3529,7 +3535,45 @@ namespace CompetitiveRounds
             cosTestSubmitLabel = string.IsNullOrEmpty(submitLabel) ? "Submit" : submitLabel;
             cosTestIsRevision = isRevision;
             cosTestOnSubmit = onSubmit;
+            cosTestViewOnly = false;
+            cosTestFrames = null;
             cosTestOpen = true;
+        }
+
+        /// <summary>Aug 7 item 10: view-only body preview for any BUNDLED
+        /// catalog cosmetic (shop browsing — "see it on the body before you
+        /// buy"). Reuses the artist modal wholesale: same body-circle renderer,
+        /// same input gating (cosTestOpen is already in the anyModal set), with
+        /// the editing chrome hidden. Placement comes from the COMPILED catalog
+        /// via TryGetPublishedPlacement — the shipped values, never the
+        /// server's mutable proposal columns (#164/#165).</summary>
+        public static void OpenCosmeticBodyPreview(string sku, string displayName)
+        {
+            try
+            {
+                if (!CustomCosmetics.TryGetPublishedPlacement(sku, out string slot, out float scale,
+                        out Vector2 off, out byte[] png) || png == null)
+                {
+                    // GitHub installs can be mid-bootstrap (cosmetics.zip
+                    // download in flight) — degrade like the Home fill does.
+                    ShowNotification("Preview art isn't downloaded yet - try again in a minute.",
+                        new Color(1f, 0.75f, 0.4f), 5f);
+                    return;
+                }
+                OpenCosmeticTestPreview(png, displayName, slot, null, scale, off.x, off.y, "Close");
+                if (!cosTestOpen) return;   // decode failed; the notification already fired
+                cosTestViewOnly = true;
+                var frames = CustomCosmetics.GetShopFrames(sku, out float fps);
+                // Honor the player's animation toggle (a frozen preview is the
+                // "Animated Cosmetics: OFF" contract, not a bug).
+                if (frames != null && frames.Length > 1 && fps > 0f
+                    && (Plugin.AnimatedCosmetics == null || Plugin.AnimatedCosmetics.Value))
+                {
+                    cosTestFrames = frames;
+                    cosTestFps = fps;
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[SHOP] body preview: {ex.Message}"); }
         }
 
         private static void CloseCosmeticTestPreview(bool submit)
@@ -3539,6 +3583,8 @@ namespace CompetitiveRounds
             cosTestOpen = false;
             cosTestDragging = false;
             cosTestOnSubmit = null;
+            cosTestViewOnly = false;
+            cosTestFrames = null;   // shared catalog sprites — do NOT destroy
             try { if (cosTestTex != null) UnityEngine.Object.Destroy(cosTestTex); } catch { }
             cosTestTex = null;
             cosTestName = "";
@@ -3641,18 +3687,46 @@ namespace CompetitiveRounds
                 $"Placement preview: '{cosTestName}' ({cosTestSlot})",
                 new GUIStyle(adminLabelStyle) { fontSize = 17, fontStyle = FontStyle.Bold });
             GUI.Label(new Rect(x + 12, y + 40, w - 24, 38),
-                "Orange circle = player body. Drag to preview positions (visual aid only - position is never saved; items spawn centered and players drag them in the character editor). White square = your 512x512 canvas.",
+                cosTestViewOnly
+                    ? "Orange circle = player body, shown at this item's shipped scale and position. Drag the art to peek around - nothing is saved."
+                    : "Orange circle = player body. Drag to preview positions (visual aid only - position is never saved; items spawn centered and players drag them in the character editor). White square = your 512x512 canvas.",
                 new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
 
             float previewSize = Mathf.Min(h - 142f, w - 330f);
             previewSize = Mathf.Clamp(previewSize, 300f, 414f);
             Rect preview = new Rect(x + 12, y + 80, previewSize, previewSize);
-            DrawCosmeticScalePreview(preview, cosTestTex, cosTestScale, cosTestOffset);
+            // Aug 7 item 10: animated catalog items cycle in view-only mode
+            // (IMGUI repaints continuously, so this is free).
+            Texture2D drawTex = cosTestTex;
+            if (cosTestViewOnly && cosTestFrames != null && cosTestFrames.Length > 1 && cosTestFps > 0f)
+            {
+                int fi = (int)(Time.unscaledTime * cosTestFps) % cosTestFrames.Length;
+                var ft = cosTestFrames[fi] != null ? cosTestFrames[fi].texture : null;
+                if (ft != null) drawTex = ft;
+            }
+            DrawCosmeticScalePreview(preview, drawTex, cosTestScale, cosTestOffset);
             HandleCosmeticPlacementDrag(
                 preview, ref cosTestOffset, ref cosTestDragging, ref cosTestLastMouse);
 
             float rx = preview.xMax + 18f;
             float rw = x + w - 12f - rx;
+            if (cosTestViewOnly)
+            {
+                // Buyer-facing chrome only: no slider/presets/submit copy — the
+                // artist controls would read as editable (and 403 for
+                // non-artists on submit).
+                GUI.Label(new Rect(rx, y + 84, rw, 24), $"Render scale: {cosTestScale:F2}x",
+                    new GUIStyle(adminLabelStyle) { fontSize = 16, fontStyle = FontStyle.Bold });
+                GUI.Label(new Rect(rx, y + 112, rw, 76),
+                    "This is exactly how the item renders on a player in-game.",
+                    new GUIStyle(adminLabelStyle) { fontSize = 12, wordWrap = true });
+                if (cosTestFrames != null && cosTestFrames.Length > 1)
+                    GUI.Label(new Rect(rx, y + 192, rw, 22),
+                        $"Animated - {cosTestFrames.Length} frames @ {cosTestFps:0.#} fps", adminLabelStyle);
+                if (GUI.Button(new Rect(x + w - 152, y + h - 42, 140, 30), "Close"))
+                { CloseCosmeticTestPreview(false); return; }
+                return;
+            }
             GUI.Label(new Rect(rx, y + 84, rw, 24), $"Render scale: {cosTestScale:F2}x",
                 new GUIStyle(adminLabelStyle) { fontSize = 16, fontStyle = FontStyle.Bold });
             int bodyPx = Mathf.RoundToInt(COS_BODY_SOURCE_PX / cosTestScale);
