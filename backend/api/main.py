@@ -23840,10 +23840,17 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
     # Lobby-first lock, then prune/count/enroll under it: without the lock two
     # joins at capacity-1 would both pass the count check.
     lrow = (await db.execute(text(
-        f"SELECT id, status, password_hash FROM {cfg['lobbies']} WHERE id = :lid FOR UPDATE"
+        f"SELECT id, status, password_hash, kicked_steam_ids"
+        f"  FROM {cfg['lobbies']} WHERE id = :lid FOR UPDATE"
     ), {"lid": lobby_id})).mappings().first()
     if lrow is None or lrow["status"] != "open":
         raise HTTPException(404, "That lobby is no longer open")
+    # Aug 8 (Sid): a kicked player may not rejoin THIS lobby. Checked before
+    # the password so the kicked client's auto-rejoin recovery gets a
+    # TERMINAL answer rather than a password prompt. Exact token is client
+    # contract.
+    if req.steam_id in [s for s in (lrow["kicked_steam_ids"] or "").split(",") if s]:
+        raise HTTPException(403, "kicked_from_lobby")
     # Password AFTER the open-check (so a wrong password and a dead lobby stay
     # distinguishable) and BEFORE any membership mutation (so a failed guess
     # can never leave a partial enrollment behind).
@@ -24098,6 +24105,32 @@ async def _lobby_leave_impl(mode: str, steam_id: str, expected_lobby_id: str | N
     return {"status": "ok", "disbanded": disbanded, "remaining": len(remaining)}
 
 
+async def _lobby_browser_titles(db: AsyncSession, steam_ids) -> dict:
+    """Aug 8 (Sid): steam_id -> (title, title_color) for browser member lines.
+    ONE batched query + the shared display-title resolver (title_rank/podium
+    aware) — same shape as /spectate/games' roster meta batch."""
+    sids = sorted({s for s in steam_ids if s})
+    if not sids:
+        return {}
+    rows = (await db.execute(text("""
+        SELECT p.steam_id, p.id::text AS player_id,
+               COALESCE(gr.rating, 1500) AS rating_1v1,
+               si.name AS title, si.preview_color AS title_color, si.sku AS title_sku
+          FROM players p
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+         WHERE p.steam_id = ANY(:sids)
+    """), {"sids": sids})).mappings().all()
+    _colors = await _rank_colors(db)
+    _pmap = await _podium_map(db)
+    out = {}
+    for r in rows:
+        t, tc = _display_title_sync(_colors, r["title_sku"], r["title"], r["title_color"],
+                                    float(r["rating_1v1"]), podium_pos=_pmap.get(r["player_id"]))
+        out[r["steam_id"]] = (t or "", tc or "")
+    return out
+
+
 async def _lobby_browser_impl(mode: str, db: AsyncSession) -> dict:
     """Open lobbies for the browser panel. A PRIVATE lobby is still listed —
     it shows a lock and refuses joins without the password (Sid's spec).
@@ -24120,13 +24153,39 @@ async def _lobby_browser_impl(mode: str, db: AsyncSession) -> dict:
          LIMIT 20
     """))).mappings().all()
     now = datetime.now(timezone.utc)
-    out = []
+    lobby_live = []
     for l in lobbies:
         live = await _lobby_live_members(db, mode, l["id"])
         if not live:
             continue   # started/emptied between the two reads
+        lobby_live.append((l, live))
+    titles = await _lobby_browser_titles(
+        db, [m["steam_id"] for _, live in lobby_live for m in live])
+    out = []
+    for l, live in lobby_live:
         host_id = _lobby_effective_host(l["host_player_id"], live)
         host = next((m for m in live if m["player_id"] == host_id), None)
+        # Aug 8 (Sid): show WHO is inside before joining — name, title, elo.
+        # 2v2 shows the 2v2 glicko only once ESTABLISHED (same trust rule the
+        # balancer uses), else the 1v1 snapshot; 1v2 is unrated so its display
+        # rating IS the 1v1 one (established by definition).
+        members = []
+        for m in live:
+            t, tc = titles.get(m["steam_id"], ("", ""))
+            if mode == "team":
+                est = int(m["completed_series"] or 0) >= TEAM_TRUST_2V2_RATING_AFTER
+                rating = float(m["rating"]) if est else float(m["fallback_rating"] or 1500.0)
+            else:
+                est = True
+                rating = float(m["rating"] or m["fallback_rating"] or 1500.0)
+            members.append({
+                "rating": int(round(rating)),
+                "established": bool(est),
+                "title_color": tc,
+                "title": t,
+                # user-authored fields LAST (client slices string-aware, #156)
+                "name": (m["display_name"] or "?"),
+            })
         out.append({
             "lobby_id": str(l["id"]),
             "host_name": (host["display_name"] if host else "?") or "?",
@@ -24134,8 +24193,71 @@ async def _lobby_browser_impl(mode: str, db: AsyncSession) -> dict:
             "max_players": cfg["players"],
             "has_password": bool(l["has_password"]),
             "age_seconds": int((now - l["created_at"]).total_seconds()) if l["created_at"] else 0,
+            "members": members,
         })
     return {"lobbies": out, "count": len(out)}
+
+
+class _LobbyKickReq(BaseModel):
+    steam_id: str = Field(..., max_length=20)
+    target_steam_id: str = Field(..., max_length=20)
+
+
+async def _lobby_kick_impl(mode: str, req: _LobbyKickReq, request: Request,
+                           db: AsyncSession) -> dict:
+    """Aug 8 (Sid): the host removes a member from an OPEN lobby. Admins are
+    unkickable. The kicked id joins the lobby's kicked list, so the kicked
+    client's auto-rejoin recovery gets a terminal 403 kicked_from_lobby
+    instead of silently fighting the kick forever. Refusal detail tokens are
+    client contract: not_host / target_not_in_lobby / target_is_admin /
+    cannot_kick_yourself."""
+    cfg = _lobby_cfg(mode)
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    if req.target_steam_id == req.steam_id:
+        raise HTTPException(400, "cannot_kick_yourself")
+    me = await _lock_queue_group_for_player(db, cfg["queue"], req.steam_id)
+    if me is None or me["status"] != "lobby" or me["series_id"] is None:
+        raise HTTPException(409, "You're not in an open lobby")
+    lobby_id = me["series_id"]
+    lrow = (await db.execute(text(
+        f"SELECT id, status, host_player_id, kicked_steam_ids"
+        f"  FROM {cfg['lobbies']} WHERE id = :lid FOR UPDATE"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        raise HTTPException(409, "That lobby is no longer open")
+    live = await _lobby_live_members(db, mode, lobby_id)
+    host_id = _lobby_effective_host(lrow["host_player_id"], live)
+    if host_id != me["player_id"]:
+        raise HTTPException(403, "not_host")
+    target = next((m for m in live if m["steam_id"] == req.target_steam_id), None)
+    if target is None:
+        raise HTTPException(404, "target_not_in_lobby")
+    if (await db.execute(text(
+        "SELECT 1 FROM admin_users WHERE steam_id = :sid"
+    ), {"sid": req.target_steam_id})).scalar():
+        raise HTTPException(403, "target_is_admin")
+    kicked = [s for s in (lrow["kicked_steam_ids"] or "").split(",") if s]
+    if req.target_steam_id not in kicked:
+        kicked.append(req.target_steam_id)
+        # 700-char column; a 20-char id + comma fits 33 — drop oldest past that.
+        while len(",".join(kicked)) > 700 and len(kicked) > 1:
+            kicked.pop(0)
+        await db.execute(text(
+            f"UPDATE {cfg['lobbies']} SET kicked_steam_ids = :k WHERE id = :lid"),
+            {"k": ",".join(kicked), "lid": lobby_id})
+    await db.execute(text(
+        f"DELETE FROM {cfg['queue']} WHERE player_id = :pid"),
+        {"pid": target["player_id"]})
+    # The seat's lease dies with the seat — fenced to this mode+lobby so a
+    # lease the player since claimed elsewhere is never destroyed.
+    await db.execute(text(
+        "DELETE FROM queue_leases WHERE player_id = :pid AND mode = :m AND group_id = :lid"),
+        {"pid": target["player_id"], "m": mode, "lid": lobby_id})
+    await db.commit()
+    print(f"[{cfg['label']}-LOBBY] host {req.steam_id} kicked {req.target_steam_id} "
+          f"from lobby {lobby_id}")
+    return {"status": "kicked"}
 
 
 async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str):
@@ -24221,6 +24343,18 @@ async def _lobby_activate(db: AsyncSession, mode: str, lobby_id, series_id,
          WHERE id=:lid AND status='open'
     """), {"sid": series_id, "room": room, "reg": (region or "us")[:8] if region else None,
            "n": len(member_ids), "members": member_ids, "lid": lobby_id})
+
+
+@app.post("/api/v1/team/lobby/kick", tags=["Team Queue"])
+async def team_lobby_kick(req: _LobbyKickReq, request: Request,
+                          db: AsyncSession = Depends(get_db)):
+    return await _lobby_kick_impl("team", req, request, db)
+
+
+@app.post("/api/v1/ovt/lobby/kick", tags=["1v2 Queue"])
+async def ovt_lobby_kick(req: _LobbyKickReq, request: Request,
+                         db: AsyncSession = Depends(get_db)):
+    return await _lobby_kick_impl("ovt", req, request, db)
 
 
 @app.post("/api/v1/team/lobby/create", tags=["Team Queue"])
@@ -24373,9 +24507,11 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     duo = [m for m in live if m["player_id"] != solo["player_id"]]
     if len(duo) != 2:
         raise HTTPException(409, "Could not assign sides — try again")
-    # Any member may enable the solo's extra initial pick; the lock takes the
-    # OR across the lobby and stamps it on the series (same as the auto-lock).
-    extra_pick = any(bool(m["solo_extra_pick"]) for m in live)
+    # Aug 8 (Sid): the extra pick is the HOST's setting now, not a lobby OR —
+    # `me` IS the verified host (start_common raised otherwise). The consent
+    # QUEUE's auto-lock keeps its OR (no host exists there).
+    extra_pick = bool(next(
+        (m["solo_extra_pick"] for m in live if m["player_id"] == me["player_id"]), False))
     region = next((m["region"] for m in live if m["region"]), "us")
     room = f"ovt_{uuid.uuid4().hex[:12]}"
     series_id = uuid.uuid4()
@@ -24697,10 +24833,14 @@ async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSessi
     # revalidate open + capacity under the lobby lock, or two joins at 9/10
     # both pass and produce 11).
     lrow = (await db.execute(text(
-        "SELECT id, status, password_hash FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
+        "SELECT id, status, password_hash, kicked_steam_ids FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
     ), {"lid": lobby_id})).mappings().first()
     if lrow is None or lrow["status"] != "open":
         raise HTTPException(404, "That lobby is no longer open")
+    # Aug 8 (Sid): kicked players may not rejoin — before the password so the
+    # kicked client's auto-rejoin gets a terminal answer (token is contract).
+    if req.steam_id in [s for s in (lrow["kicked_steam_ids"] or "").split(",") if s]:
+        raise HTTPException(403, "kicked_from_lobby")
     # Aug 6 item 9. Checked under the lobby lock and BEFORE any membership
     # mutation, so a wrong password cannot leave a partial enrollment behind.
     # Deliberately AFTER the open-check so a wrong password and a dead lobby
@@ -25139,9 +25279,9 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
 
 @app.get("/api/v1/ffa/lobbies", tags=["FFA Queue"])
 async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
-    """Open host lobbies for the browser panel. Host name + live member count
-    only (round-one scope per the design review — member names arrive in the
-    joined poll). Read-only: effective host is derived, never persisted here."""
+    """Open host lobbies for the browser panel, WITH per-member name/title/elo
+    (Aug 8 — Sid: show who is inside before joining). Read-only: effective
+    host is derived, never persisted here."""
     # HAVING inside the query, not a post-LIMIT filter (impl review find 6):
     # zero-member husks awaiting the janitor must not consume the LIMIT and
     # crowd real lobbies out of the browser.
@@ -25158,13 +25298,34 @@ async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
          LIMIT 20
     """))).mappings().all()
     now = datetime.now(timezone.utc)
-    out = []
+    lobby_live = []
     for l in lobbies:
         live = await _ffa_live_lobby_members(db, l["id"])
         if not live:
             continue   # started/emptied between the two reads — skip, not "?"
+        lobby_live.append((l, live))
+    titles = await _lobby_browser_titles(
+        db, [m["steam_id"] for _, live in lobby_live for m in live])
+    out = []
+    for l, live in lobby_live:
         host_id = _ffa_effective_host(l["host_player_id"], live)
         host = next((m for m in live if m["player_id"] == host_id), None)
+        # Aug 8 (Sid): every member with title + elo, pre-join. FFA elo shows
+        # only once ESTABLISHED (10+ rated games — mirror of the 2v2 trust
+        # rule's shape); before that the 1v1 snapshot shows instead.
+        members = []
+        for m in live:
+            t, tc = titles.get(m["steam_id"], ("", ""))
+            est = int(m["games_played"] or 0) >= 10
+            rating = float(m["rating"]) if est else float(m["fallback_rating"] or 1500.0)
+            members.append({
+                "rating": int(round(rating)),
+                "established": bool(est),
+                "title_color": tc,
+                "title": t,
+                # user-authored fields LAST (client slices string-aware, #156)
+                "name": (m["display_name"] or "?"),
+            })
         out.append({
             "lobby_id": str(l["id"]),
             "host_name": (host["display_name"] if host else "?") or "?",
@@ -25175,8 +25336,59 @@ async def ffa_lobby_browser(db: AsyncSession = Depends(get_db)):
             # make "where did my friend's lobby go?" a support question.
             "has_password": bool(l["has_password"]),
             "age_seconds": int((now - l["created_at"]).total_seconds()) if l["created_at"] else 0,
+            "members": members,
         })
     return {"lobbies": out, "count": len(out)}
+
+
+@app.post("/api/v1/ffa/lobby/kick", tags=["FFA Queue"])
+async def ffa_lobby_kick(req: _LobbyKickReq, request: Request,
+                         db: AsyncSession = Depends(get_db)):
+    """Aug 8 (Sid): host kicks a member from an OPEN FFA lobby. Same contract
+    as the team/ovt kick (tokens: not_host / target_not_in_lobby /
+    target_is_admin / cannot_kick_yourself; kicked ids get a terminal 403
+    kicked_from_lobby on rejoin). Admins are unkickable."""
+    await _check_steam_session(request, req.steam_id, db)
+    _presence_touch(req.steam_id)
+    if req.target_steam_id == req.steam_id:
+        raise HTTPException(400, "cannot_kick_yourself")
+    me = await _lock_queue_group_for_player(db, "ffa_queue", req.steam_id)
+    if me is None or me["status"] != "lobby" or me["series_id"] is None:
+        raise HTTPException(409, "You're not in an open lobby")
+    lobby_id = me["series_id"]
+    lrow = (await db.execute(text(
+        "SELECT id, status, host_player_id, kicked_steam_ids"
+        "  FROM ffa_lobbies WHERE id = :lid FOR UPDATE"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        raise HTTPException(409, "That lobby is no longer open")
+    live = await _ffa_live_lobby_members(db, lobby_id)
+    host_id = _ffa_effective_host(lrow["host_player_id"], live)
+    if host_id != me["player_id"]:
+        raise HTTPException(403, "not_host")
+    target = next((m for m in live if m["steam_id"] == req.target_steam_id), None)
+    if target is None:
+        raise HTTPException(404, "target_not_in_lobby")
+    if (await db.execute(text(
+        "SELECT 1 FROM admin_users WHERE steam_id = :sid"
+    ), {"sid": req.target_steam_id})).scalar():
+        raise HTTPException(403, "target_is_admin")
+    kicked = [s for s in (lrow["kicked_steam_ids"] or "").split(",") if s]
+    if req.target_steam_id not in kicked:
+        kicked.append(req.target_steam_id)
+        while len(",".join(kicked)) > 700 and len(kicked) > 1:
+            kicked.pop(0)
+        await db.execute(text(
+            "UPDATE ffa_lobbies SET kicked_steam_ids = :k WHERE id = :lid"),
+            {"k": ",".join(kicked), "lid": lobby_id})
+    await db.execute(text(
+        "DELETE FROM ffa_queue WHERE player_id = :pid"), {"pid": target["player_id"]})
+    await db.execute(text(
+        "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid"),
+        {"pid": target["player_id"], "lid": lobby_id})
+    await db.commit()
+    print(f"[FFA-LOBBY] host {req.steam_id} kicked {req.target_steam_id} from lobby {lobby_id}")
+    return {"status": "kicked"}
 
 
 @app.post("/api/v1/ffa/queue/leave", tags=["FFA Queue"])
