@@ -8405,7 +8405,7 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(line)) return line ?? "";
             var sb = new StringBuilder(line.Length + 24);
-            bool bold = false, under = false, code = false;
+            bool bold = false, under = false, code = false, ital = false;
             for (int i = 0; i < line.Length; i++)
             {
                 char c = line[i];
@@ -8413,6 +8413,16 @@ namespace CompetitiveRounds
                 { sb.Append(code ? "</color>" : "<color=#AAD4FF>"); code = !code; continue; }
                 if (!code && c == '*' && i + 1 < line.Length && line[i + 1] == '*')
                 { sb.Append(bold ? "</b>" : "<b>"); bold = !bold; i++; continue; }
+                // Aug 8 (Sid, item 6): ITALICS were the one requested style the
+                // formatter never had — a single '*' fell through as a literal
+                // asterisk. Checked AFTER the '**' branch so bold still wins,
+                // and only when the asterisk is adjacent to a non-space (so
+                // "3 * 4" and a lone trailing '*' stay literal rather than
+                // opening a span that swallows the rest of the line).
+                if (!code && c == '*'
+                    && (ital ? (i > 0 && line[i - 1] != ' ')
+                             : (i + 1 < line.Length && line[i + 1] != ' ')))
+                { sb.Append(ital ? "</i>" : "<i>"); ital = !ital; continue; }
                 if (!code && c == '_' && i + 1 < line.Length && line[i + 1] == '_')
                 { sb.Append(under ? "</u>" : "<u>"); under = !under; i++; continue; }
                 sb.Append(c);
@@ -8420,6 +8430,7 @@ namespace CompetitiveRounds
             if (code) sb.Append("</color>");
             if (bold) sb.Append("</b>");
             if (under) sb.Append("</u>");
+            if (ital) sb.Append("</i>");
             return sb.ToString();
         }
 

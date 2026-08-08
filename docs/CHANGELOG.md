@@ -1,6 +1,6 @@
 # Sid's Competitive Rounds — Changelog
 
-## Unreleased — Aug 7-8 batch (version at Sid's call) — Private lobbies live, alerts, animated uploads
+## v1.38.0 — 2026-08-08 — Hosted lobbies, alerts, chat moderation, animated cosmetics
 
 Schema: migrations **202–206** (202 LFP modes, 203 admin alerts, 204 cosmetic
 animation frames, 205 lobby kicks, 206 team/FFA colour identity — all must

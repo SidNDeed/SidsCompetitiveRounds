@@ -22,7 +22,7 @@ namespace CompetitiveRounds
     {
         public const string ModId = "com.competitiverounds.mod";
         public const string ModName = "Competitive ROUNDS";
-        public const string ModVersion = "1.37.0";   // Aug 7: spectator mode, FFA achievements, Compare FFA-Elo + Player Nemesis, per-game DPS graphs, admin panel + T-chat moderation, private lobbies
+        public const string ModVersion = "1.38.0";   // Aug 8: hosted lobbies (2v2/1v2) with kick + member lists, standing admin alerts, chat slur filter, animated cosmetic uploads, body-colour team identity, deep idle, uncut formatted release notes, stats help page, graph redesign + whole-game timelines
         public const string RequiredGameVersion = "1.1.2";
 
         // API endpoint migration (2026-07-26). LegacyApiUrl is the exact string
