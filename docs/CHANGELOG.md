@@ -140,6 +140,25 @@ seed migration for the new i18n keys is a ship-time step.
   whole game. Also found in the same audit: FFA spawn-grace right-clicks
   were counting as block attempts that could never block — no longer.
 
+### Review hardening (Codex adversarial rounds 3–8 — 40 further findings fixed)
+
+- **Authenticated requests refuse plaintext transport.** If the secure
+  connection ever fails and the client falls back to the legacy endpoint,
+  your Steam session is no longer exchanged or attached, and admin actions
+  and lobby passwords are refused outright rather than sent in the clear.
+  (LAN/loopback addresses are exempt so local setups keep working.)
+- **Nothing can drop you into a match you didn't consent to.** Joining the
+  public 2v2 queue can no longer overwrite a live locked match; a seat in a
+  closed hosted lobby is released instead of being recycled into public
+  matchmaking; leave requests are bound to the exact match they were issued
+  for, so a delayed retry can't dissolve a newer one.
+- **Preference clicks land in order** — the last thing you clicked is what
+  the server stores, and Start waits for it.
+- Assorted: DPS graphs no longer halve short games; the card-letter outline
+  can't leak materials; live-column and bets-ledger rows share one height
+  budget; release announcements resume correctly after a crash, restart, or
+  partial post.
+
 ### Review hardening (Codex adversarial round 2 — 12 confirmed findings fixed)
 
 - Hosted-lobby groups are released (never recycled into public matchmaking)
