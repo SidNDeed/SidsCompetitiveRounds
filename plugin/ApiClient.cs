@@ -10346,6 +10346,10 @@ namespace CompetitiveRounds
         // v1.36 lobby config mirror for the settings panel (display values —
         // the server row is the authority; these track the open-lobby poll).
         public static int FfaLobbyCfgTarget = 5;
+        // Aug 7 item 5: cards offered per draw — the knob unlocked (was
+        // hard-5 since v1.36; consumption via cr_ffa_cfg segment 2 shipped
+        // then, so every allowed client already honors non-5 values).
+        public static int FfaLobbyCfgCand = 5;
         public static int FfaLobbyCfgPicks = 1;
         public static int FfaLobbyCfgCap = 5;
         public static bool FfaLobbyCfgSame = false;
@@ -10568,6 +10572,8 @@ namespace CompetitiveRounds
                 int ecP = ExtractJsonInt(resp, "initial_picks");
                 int ecC = ExtractJsonInt(resp, "card_cap");
                 FfaLobbyCfgTarget = ecT > 0 ? ecT : 5;
+                int ecCand = ExtractJsonInt(resp, "card_candidates");
+                FfaLobbyCfgCand = ecCand > 0 ? ecCand : 5;
                 FfaLobbyCfgPicks = ecP > 0 ? ecP : 1;
                 FfaLobbyCfgCap = ecC > 0 ? ecC : 5;
                 FfaLobbyCfgSame = ExtractJsonBool(resp, "same_card_rule");
@@ -10729,6 +10735,7 @@ namespace CompetitiveRounds
                     return;
                 }
                 int t = ExtractJsonInt(resp, "score_target"); if (t > 0) FfaLobbyCfgTarget = t;
+                int cd = ExtractJsonInt(resp, "card_candidates"); if (cd > 0) FfaLobbyCfgCand = cd;
                 int p = ExtractJsonInt(resp, "initial_picks"); if (p > 0) FfaLobbyCfgPicks = p;
                 int c = ExtractJsonInt(resp, "card_cap"); if (c > 0) FfaLobbyCfgCap = c;
                 FfaLobbyCfgSame = ExtractJsonBool(resp, "same_card_rule");
@@ -10999,6 +11006,7 @@ namespace CompetitiveRounds
                     // v1.36 lobby config + settings-lock (flat scalars, #73;
                     // absent on an old server -> zeros keep the defaults).
                     int cfgT = ExtractJsonInt(resp, "score_target"); if (cfgT > 0) FfaLobbyCfgTarget = cfgT;
+                    int cfgCand = ExtractJsonInt(resp, "card_candidates"); if (cfgCand > 0) FfaLobbyCfgCand = cfgCand;
                     int cfgP = ExtractJsonInt(resp, "initial_picks"); if (cfgP > 0) FfaLobbyCfgPicks = cfgP;
                     int cfgC = ExtractJsonInt(resp, "card_cap"); if (cfgC > 0) FfaLobbyCfgCap = cfgC;
                     FfaLobbyCfgSame = ExtractJsonBool(resp, "same_card_rule");

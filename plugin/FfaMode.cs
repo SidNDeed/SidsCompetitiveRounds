@@ -41,7 +41,7 @@ namespace CompetitiveRounds
         public const int PointsToWinRound = 2;   // not configurable
         public static int CardCap = 5;
         public static int InitialPicks = 1;      // TOTAL opening draws (base 1 + knob)
-        public static int CardCandidates = 5;    // knob LOCKED at 5 for v1.36 (§9c)
+        public static int CardCandidates = 5;    // host knob 1-5 (unlocked Aug 7; was pinned 5 through v1.37)
         public static bool SameCardRule = false;
         public static bool LobbyRanked = true;
         /// <summary>Aug 6 item 10 — sudden death. While at least one LIVE player is
@@ -768,6 +768,9 @@ namespace CompetitiveRounds
                 string cfgLine = (InitialPicks == 1
                         ? I18n.TrF("FIRST TO {0}   -   {1} OPENING DRAW   -   {2}-CARD HAND", RoundsToWin, InitialPicks, CardCap)
                         : I18n.TrF("FIRST TO {0}   -   {1} OPENING DRAWS   -   {2}-CARD HAND", RoundsToWin, InitialPicks, CardCap))
+                    // Aug 7 item 5: only surfaced when non-default, like the
+                    // history tail — the banner stays short for stock lobbies.
+                    + (CardCandidates != 5 ? I18n.TrF("   -   {0}-CARD DRAW", CardCandidates) : "")
                     + (SameCardRule ? I18n.Tr("   -   SAME CARDS FOR EVERYONE") : "")
                     + (LobbyRanked ? "" : I18n.Tr("   -   CASUAL (UNRATED)"));
                 CompetitiveUI.ShowFfaSettingsBanner(cfgLine, 9f);

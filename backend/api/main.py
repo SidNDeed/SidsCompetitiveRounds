@@ -24003,7 +24003,7 @@ async def ffa_lobby_join(req: _FfaLobbyJoinReq, request: Request, db: AsyncSessi
 
 
 async def _ffa_lobby_config_echo(db: AsyncSession, lobby_id) -> dict:
-    """The five config fields the client mirrors, straight off the row.
+    """The config fields the client mirrors, straight off the row.
     Best-effort: an error returns {} (client falls back to defaults + poll)."""
     try:
         row = (await db.execute(text(
@@ -24013,6 +24013,7 @@ async def _ffa_lobby_config_echo(db: AsyncSession, lobby_id) -> dict:
         cfg = _ffa_lobby_config(row)
         return {
             "score_target": cfg["score_target"],
+            "card_candidates": cfg["card_candidates"],
             "initial_picks": cfg["initial_picks"],
             "card_cap": cfg["card_cap"],
             "same_card_rule": bool(cfg["same_card_rule"]),
@@ -24104,13 +24105,14 @@ async def ffa_lobby_settings(req: _FfaLobbySettingsReq, request: Request,
             raise HTTPException(400, "score_target must be 3-10")
         new["score_target"] = int(req.score_target)
     if req.card_candidates is not None:
-        # Range check kept 1-5 but the KNOB IS LOCKED for v1.36.0 (Sid,
-        # 2026-08-01: same-card rule ships this release; the candidates knob
-        # ships a later one — §9c forbids both in one release). Reject any
-        # non-default so no lobby row can carry a value no client honors yet.
-        if req.card_candidates != 5:
-            raise HTTPException(400, "Card draw size is locked at 5 for now")
-        new["card_candidates"] = 5
+        # Aug 7 item 5: the knob UNLOCKS. §9c's constraint (same-card rule and
+        # the candidates knob must not ship in one release) is satisfied —
+        # same-card shipped v1.36.0 — and every client >= 1.36.0 already
+        # honors non-5 values (the symmetric slot table + FfaCardSequence
+        # _candCount shipped with it); MIN_MOD_VERSION is 1.37.0.
+        if not (1 <= req.card_candidates <= 5):
+            raise HTTPException(400, "card_candidates must be 1-5")
+        new["card_candidates"] = int(req.card_candidates)
     if req.card_cap is not None:
         if not (3 <= req.card_cap <= 6):
             raise HTTPException(400, "card_cap must be 3-6")

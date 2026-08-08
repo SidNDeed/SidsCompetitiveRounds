@@ -1669,7 +1669,7 @@ namespace CompetitiveRounds
         // v1.36 host settings row (visible while sitting in an OPEN lobby;
         // controls interactable for the host only, labels visible to all).
         private static GameObject ffaSettingsRow;
-        private static object txtFfaCfgTarget, txtFfaCfgPicks, txtFfaCfgCap;
+        private static object txtFfaCfgTarget, txtFfaCfgCand, txtFfaCfgPicks, txtFfaCfgCap;
         private static GameObject ffaCfgSameBtn, ffaCfgRankedBtn;   // sudden-death toggle cut (r4 HIGH)
         private static readonly List<GameObject> ffaCfgHostBtns = new List<GameObject>();
         private static float ffaCfgTickAt;   // 1s dirty ticker while lock countdown live (#62)
@@ -1857,8 +1857,9 @@ namespace CompetitiveRounds
             /* v1.36 host settings row (ffa-configurable-lobbies §1). Compact
              * -/value/+ clusters; each press sends ONLY that field and adopts
              * the server's clamped echo (§7d), so an out-of-floor value snaps
-             * back visibly. Candidates knob deliberately absent (locked at 5
-             * this release, §9c). */
+             * back visibly. Aug 7 item 5: the candidates knob JOINS the row —
+             * §9c is satisfied (same-card shipped v1.36) and consumption has
+             * been live since v1.36 (symmetric slot table + _candCount). */
             ffaSettingsRow=new GameObject("FfaCfg");ffaSettingsRow.transform.SetParent(panel.transform,false);ffaSettingsRow.AddComponent<RectTransform>();
             UIFactory.AddHLG(ffaSettingsRow,spacing:5);UIFactory.AddLE(ffaSettingsRow,prefH:36,flexH:0);
             ffaCfgHostBtns.Clear();
@@ -1868,11 +1869,16 @@ namespace CompetitiveRounds
                 var valTxt=UIFactory.CreateText("V_"+field,ffaSettingsRow.transform,"?",19f,C_WHITE,UIFactory.AlignMidCenter,sizeDelta:new Vector2(30,30));
                 var plus=UIFactory.CreateButton("P_"+field,ffaSettingsRow.transform,"+",18f,C_WHITE,C_BTN,()=>{int v=Mathf.Clamp(get()+1,min,max);ApiClient.FfaSetLobbySetting(field,v);dirty=true;},sizeDelta:new Vector2(30,30));
                 ffaCfgHostBtns.Add(minus);ffaCfgHostBtns.Add(plus);
+                // #217/#5-r5: explicit case per field — the old bare `else`
+                // caught card_cap and would silently bind a 4th field's text
+                // to the wrong mirror.
                 if(field=="score_target")txtFfaCfgTarget=valTxt;
+                else if(field=="card_candidates")txtFfaCfgCand=valTxt;
                 else if(field=="initial_picks")txtFfaCfgPicks=valTxt;
-                else txtFfaCfgCap=valTxt;
+                else if(field=="card_cap")txtFfaCfgCap=valTxt;
             };
             mkStepper(I18n.Tr("First to:"),"score_target",()=>ApiClient.FfaLobbyCfgTarget,3,10);
+            mkStepper(I18n.Tr("Card draw:"),"card_candidates",()=>ApiClient.FfaLobbyCfgCand,1,5);
             mkStepper(I18n.Tr("Opening draws:"),"initial_picks",()=>ApiClient.FfaLobbyCfgPicks,1,4);
             mkStepper(I18n.Tr("Max cards:"),"card_cap",()=>ApiClient.FfaLobbyCfgCap,3,6);
             /* The two BOOLEAN settings render their value inside the button
@@ -2437,6 +2443,7 @@ namespace CompetitiveRounds
             // "to N"/"cap N" stay literal: 2-letter connectors can never be
             // harvestable keys (#295c) and fold poorly into a template here.
             if(m.score_target>0&&m.score_target!=5)bits.Add($"to {m.score_target}");
+            if(m.card_candidates>0&&m.card_candidates!=5)bits.Add(I18n.TrF("{0}-card draw",m.card_candidates));
             if(m.card_cap>0&&m.card_cap!=5)bits.Add($"cap {m.card_cap}");
             if(m.initial_picks>1)bits.Add(I18n.TrF("{0} opening picks",m.initial_picks));
             if(m.same_card_rule)bits.Add(I18n.Tr("same-card"));
@@ -2976,6 +2983,7 @@ namespace CompetitiveRounds
                 if(showCfg)
                 {
                     UIFactory.SetText(txtFfaCfgTarget,ApiClient.FfaLobbyCfgTarget.ToString());
+                    UIFactory.SetText(txtFfaCfgCand,ApiClient.FfaLobbyCfgCand.ToString());
                     UIFactory.SetText(txtFfaCfgPicks,ApiClient.FfaLobbyCfgPicks.ToString());
                     UIFactory.SetText(txtFfaCfgCap,ApiClient.FfaLobbyCfgCap.ToString());
                     UIFactory.SetText(UIFactory.GetButtonText(ffaCfgSameBtn),
