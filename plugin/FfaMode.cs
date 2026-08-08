@@ -2967,9 +2967,15 @@ namespace CompetitiveRounds
     {
         /// <summary>Nearest living player to `position` that is neither the
         /// asker (excludeTeam, when known) nor standing exactly at `position`
-        /// (the positional self-exclusion the vanilla call sites need).</summary>
+        /// (the positional self-exclusion the vanilla call sites need).
+        /// Bug #165: the positional exclusion is only sound when the call site
+        /// queries from the ASKER'S OWN transform — a detached attack (a
+        /// Radiance wave parked where it was emitted) must pass excludePlayer
+        /// so its owner is excluded by IDENTITY, or the owner becomes the
+        /// wave's nearest target the moment they move.</summary>
         public static Player NearestOpponent(PlayerManager pm, Vector3 position,
-                                             int excludeTeam, bool needVision = false)
+                                             int excludeTeam, bool needVision = false,
+                                             Player excludePlayer = null)
         {
             Player best = null;
             float bestDist = float.PositiveInfinity;
@@ -2979,6 +2985,7 @@ namespace CompetitiveRounds
                 if (p == null || p.gameObject == null || p.data == null) continue;
                 if (p.data.dead) continue;
                 if (excludeTeam >= 0 && p.TeamID == excludeTeam) continue;
+                if (excludePlayer != null && p == excludePlayer) continue;   // identity exclusion (bug #165)
                 float d = Vector2.Distance(position, p.transform.position);
                 if (d < 0.01f) continue;                 // that's the asker
                 if (d >= bestDist) continue;
@@ -2990,6 +2997,57 @@ namespace CompetitiveRounds
                 bestDist = d; best = p;
             }
             return best;
+        }
+    }
+
+    /// <summary>Bug #165 (Radiance self-damage in FFA, first field report of
+    /// the class). The shared GetClosestPlayerInTeam patch above excludes the
+    /// asker POSITIONALLY (d &lt; 0.01) on the premise that vanilla call sites
+    /// query from their own transform — but LineRangeEffect (Radiance's
+    /// expanding sun wave) is spawned UNPARENTED at the owner's feet and
+    /// queries from the wave's center. The moment the owner moves, they are
+    /// the wave's nearest valid target: one guaranteed self-hit per wave, the
+    /// `done` latch then means that wave can never hit anyone else, and
+    /// lifesteal never fires on self-damage (vanilla DealtDamage gates on
+    /// !selfDamage) — which is why the report blamed Parasite too. Fix:
+    /// replicate vanilla's tiny Update with an IDENTITY exclusion of the
+    /// owner. Runs on the wave owner's client only (spawned.IsMine()) and the
+    /// hit travels the normal damage RPC, so no shared simulation is touched
+    /// and no capability gate is needed (#269 does not apply). On exception
+    /// return FALSE (skip this frame's targeting — under-application, #288);
+    /// returning true would re-enter vanilla + the shared patch, i.e. the bug.</summary>
+    [HarmonyPatch(typeof(LineRangeEffect), "Update")]
+    class LineRangeEffect_FfaOwnerExclusion_Patch
+    {
+        static bool Prefix(LineRangeEffect __instance)
+        {
+            if (!FfaMode.EngineActive()) return true;
+            try
+            {
+                if (__instance.done || __instance.spawned == null || !__instance.spawned.IsMine())
+                    return false;
+                var owner = __instance.owner;
+                var target = FfaTargeting.NearestOpponent(PlayerManager.instance,
+                    __instance.transform.position, -1, needVision: true, excludePlayer: owner);
+                if (target != null)
+                {
+                    const float slack = 2f;
+                    float radius = __instance.lineEffect != null ? __instance.lineEffect.GetRadius() : 0f;
+                    float d = Vector2.Distance(__instance.transform.position, target.transform.position);
+                    if (d < radius + slack && d > radius - slack)
+                    {
+                        __instance.done = true;
+                        Vector3 dir = (target.transform.position - __instance.transform.position).normalized;
+                        target.data.healthHandler.CallTakeDamage(
+                            __instance.dmg * __instance.transform.localScale.x * dir,
+                            target.transform.position, null, owner);
+                        target.data.healthHandler.CallTakeForce(
+                            __instance.knockback * __instance.transform.localScale.x * dir);
+                    }
+                }
+                return false;
+            }
+            catch { return false; }
         }
     }
 

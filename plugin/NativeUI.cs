@@ -1469,6 +1469,10 @@ namespace CompetitiveRounds
         public static int LfpExpiryIdx = 2;   // default 1h
         public static readonly int[] LfpExpiryMinutes = { 15, 30, 60, 180 };
         public static readonly string[] LfpExpiryLabels = { "15m", "30m", "1h", "3h" };
+        // Aug 7 item 11: mode multi-select (toggles, not radio). Labels are
+        // display-only; the wire value is built lowercase in SubmitLfpPing.
+        public static readonly string[] LfpModeLabels = { "1v1", "2v2", "FFA" };
+        public static readonly bool[] LfpModeSel = { true, false, false };
         private static float lfpCooldownUntil = -1f;   // Time.realtimeSinceStartup
         private static object _lfpStatsRef;
 
@@ -1485,6 +1489,7 @@ namespace CompetitiveRounds
             { CompetitiveUI.ShowNotification($"RLFP ping available in {(int)(remain / 60)}m {(int)(remain % 60)}s (1 per hour).", C_DIM, 6f); return; }
             LfpMessageText = "";
             LfpExpiryIdx = 2;
+            LfpModeSel[0] = true; LfpModeSel[1] = false; LfpModeSel[2] = false;
             LfpPromptOpen = true;
         }
 
@@ -1492,7 +1497,14 @@ namespace CompetitiveRounds
         {
             LfpPromptOpen = false;
             int mins = LfpExpiryMinutes[Mathf.Clamp(LfpExpiryIdx, 0, LfpExpiryMinutes.Length - 1)];
-            ApiClient.SendLfpPing(MatchTracker.LocalSteamId, LfpMessageText ?? "", mins);
+            // Canonical lowercase, fixed order, comma-joined ("1v1,ffa");
+            // nothing selected falls back to 1v1 (matches the server default).
+            var picked = new List<string>(3);
+            if (LfpModeSel[0]) picked.Add("1v1");
+            if (LfpModeSel[1]) picked.Add("2v2");
+            if (LfpModeSel[2]) picked.Add("ffa");
+            string modes = picked.Count > 0 ? string.Join(",", picked.ToArray()) : "1v1";
+            ApiClient.SendLfpPing(MatchTracker.LocalSteamId, LfpMessageText ?? "", mins, modes);
         }
 
         public static void CancelLfpPing() { LfpPromptOpen = false; }

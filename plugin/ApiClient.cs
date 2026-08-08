@@ -12576,10 +12576,13 @@ namespace CompetitiveRounds
         // only request.error on non-2xx, so a 429-style design would lose the
         // remaining-time info). Message uses JsonEscapeFull — user-typed text
         // can carry control chars (learning #100).
-        public static void SendLfpPing(string steamId, string message, int expiresMinutes)
+        public static void SendLfpPing(string steamId, string message, int expiresMinutes, string modes = "1v1")
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
-            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"message\":\"{JsonEscapeFull(message ?? "")}\",\"expires_minutes\":{expiresMinutes}}}";
+            // modes is client-constructed from fixed constants ("1v1,ffa"), so
+            // plain Escape is enough; the server re-validates against its own
+            // allowlist anyway.
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"message\":\"{JsonEscapeFull(message ?? "")}\",\"expires_minutes\":{expiresMinutes},\"modes\":\"{Escape(modes ?? "1v1")}\"}}";
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/lfp-ping",
                 json,

@@ -15999,6 +15999,9 @@ class LfpPingRequest(BaseModel):
     steam_id: str = Field(..., max_length=20)
     message: str = Field("", max_length=300)
     expires_minutes: int = 60
+    # Aug 7 item 11: comma-joined mode picks ("1v1,ffa"); default matches
+    # pre-modes clients so old builds keep working unchanged.
+    modes: str = Field("1v1", max_length=32)
 
 
 @app.post("/api/v1/lfp-ping", tags=["Players"])
@@ -16035,10 +16038,17 @@ async def lfp_ping(req: LfpPingRequest, request: Request, db: AsyncSession = Dep
     msg = _re.sub(r"(?i)\b(?:https?://|www\.|discord(?:app)?\.(?:gg|com/invite)/)\S+",
                   "(link removed)", msg)
     msg = _re.sub(r"[\r\n]+", " ", msg).strip()[:200]
+    # Aug 7 item 11: mode multi-select. Canonicalize against a closed allowlist
+    # (split, lowercase, dedupe, FIXED order) — never interpolated into SQL and
+    # never echoed raw (#188 mindset). Empty/garbage falls back to 1v1, which
+    # is also what pre-modes clients get via the Pydantic default.
+    _mode_order = ("1v1", "2v2", "ffa")
+    picked = {m.strip().lower() for m in (req.modes or "").split(",")}
+    modes = ",".join(m for m in _mode_order if m in picked) or "1v1"
     await db.execute(text(
-        "INSERT INTO lfp_pings (steam_id, message, expires_minutes, expires_at) "
-        "VALUES (:sid, :msg, :m, NOW() + make_interval(mins => :m))"
-    ), {"sid": req.steam_id, "msg": msg, "m": exp_min})
+        "INSERT INTO lfp_pings (steam_id, message, expires_minutes, expires_at, modes) "
+        "VALUES (:sid, :msg, :m, NOW() + make_interval(mins => :m), :modes)"
+    ), {"sid": req.steam_id, "msg": msg, "m": exp_min, "modes": modes})
     await db.commit()
     return {"status": "queued", "cooldown_seconds": LFP_COOLDOWN_SECONDS}
 
@@ -16056,7 +16066,7 @@ async def internal_lfp_pings(
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     rows = (await db.execute(text("""
-        SELECT l.id AS ping_id, l.steam_id, l.message,
+        SELECT l.id AS ping_id, l.steam_id, l.message, l.modes, l.expires_minutes,
                EXTRACT(EPOCH FROM l.expires_at)::bigint AS expires_unix,
                p.discord_id, p.display_name
           FROM lfp_pings l
@@ -16070,6 +16080,10 @@ async def internal_lfp_pings(
                 "ping_id": str(r["ping_id"]),
                 "steam_id": r["steam_id"],
                 "message": r["message"] or "",
+                # Aug 7 item 11: bot renders "LFP: 1v1+FFA for 30min" from
+                # these two — key names read verbatim bot-side (#152).
+                "modes": r["modes"] or "1v1",
+                "expires_minutes": int(r["expires_minutes"] or 60),
                 "expires_unix": int(r["expires_unix"]) if r["expires_unix"] is not None else 0,
                 "discord_id": r["discord_id"],
                 "display_name": r["display_name"] or "",

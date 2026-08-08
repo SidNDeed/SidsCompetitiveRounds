@@ -1209,7 +1209,9 @@ namespace CompetitiveRounds
                     lfpFieldStyle = new GUIStyle(GUI.skin.textField) { fontSize = 15, alignment = TextAnchor.MiddleLeft };
                 if (lfpTitleStyle == null)
                     lfpTitleStyle = new GUIStyle(GUI.skin.label) { fontSize = 14, alignment = TextAnchor.MiddleCenter, richText = true, fontStyle = FontStyle.Bold, clipping = TextClipping.Overflow };
-                float w = 520f, h = 208f;
+                // Aug 7 item 11: +48px for the mode row; Send/Cancel shift down
+                // with it (absolute-offset IMGUI — grow the box or overlap, #199).
+                float w = 520f, h = 256f;
                 float x = (Screen.width - w) / 2f, y = (Screen.height - h) / 2f;
                 GUI.color = new Color(0f, 0f, 0f, 0.55f);
                 GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
@@ -1236,9 +1238,22 @@ namespace CompetitiveRounds
                     if (GUI.Button(new Rect(bx + i * (bw + 8f), y + 112f, bw, 26f), NativeUI.LfpExpiryLabels[i], lfpTitleStyle))
                         NativeUI.LfpExpiryIdx = i;
                 }
-                if (GUI.Button(new Rect(x + 60f, y + 156f, 180f, 32f), I18n.Tr("Send ping")))
+                // Mode multi-select: TOGGLES (any combination), not radio.
+                GUI.Label(new Rect(x, y + 144f, w, 18f),
+                    I18n.Tr("<color=#8899AA>Which modes? (pick any)</color>"), lfpTitleStyle);
+                float mbx = x + (w - (bw * 3 + 16f)) / 2f;
+                for (int i = 0; i < 3; i++)
+                {
+                    bool sel = NativeUI.LfpModeSel[i];
+                    GUI.color = sel ? new Color(0.35f, 0.55f, 0.85f, 1f) : new Color(0.22f, 0.24f, 0.30f, 1f);
+                    GUI.DrawTexture(new Rect(mbx + i * (bw + 8f), y + 166f, bw, 26f), Texture2D.whiteTexture);
+                    GUI.color = Color.white;
+                    if (GUI.Button(new Rect(mbx + i * (bw + 8f), y + 166f, bw, 26f), NativeUI.LfpModeLabels[i], lfpTitleStyle))
+                        NativeUI.LfpModeSel[i] = !NativeUI.LfpModeSel[i];
+                }
+                if (GUI.Button(new Rect(x + 60f, y + 204f, 180f, 32f), I18n.Tr("Send ping")))
                     NativeUI.SubmitLfpPing();
-                if (GUI.Button(new Rect(x + w - 240f, y + 156f, 180f, 32f), I18n.Tr("Cancel")))
+                if (GUI.Button(new Rect(x + w - 240f, y + 204f, 180f, 32f), I18n.Tr("Cancel")))
                     NativeUI.CancelLfpPing();
             }
             catch { }

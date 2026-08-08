@@ -2,7 +2,7 @@
 Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
-import os, asyncio, aiohttp, discord, json, io, threading
+import os, asyncio, aiohttp, discord, json, io, threading, re
 from typing import Literal
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -4169,6 +4169,35 @@ def _game_embed_plain(value) -> str:
     return discord.utils.escape_markdown(inert)
 
 
+_LFP_EMOJI_TOKEN = re.compile(r"(:[A-Za-z0-9_~]{2,32}:)")
+
+
+def _lfp_render_message(text_in: str, guild) -> str:
+    """Aug 7 item 11: render :emojiname: tokens in the LFP optional message as
+    real server emojis.
+
+    TOKENIZE-FIRST is load-bearing, not a nicety: emoji names routinely
+    contain underscores, and escape_markdown escapes "_" — so escaping before
+    translation breaks the name match (":pog\\_champ:" != ":pog_champ:") and
+    translating before escaping corrupts the emitted "<:pog_champ:123>" into
+    "<:pog\\_champ:123>", which Discord will not render. Split on the token
+    regex, translate matched tokens, escape ONLY the non-token segments.
+
+    Emoji strings are not mentions, so the caller's AllowedMentions needs no
+    change; an unmatched token survives as escaped literal text."""
+    parts = _LFP_EMOJI_TOKEN.split(text_in or "")
+    out = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1 and guild is not None:  # odd indexes = token matches
+            name = part.strip(":")
+            emoji = next((e for e in guild.emojis if e.name.lower() == name.lower()), None)
+            if emoji is not None:
+                out.append(str(emoji))  # "<:name:id>" / "<a:name:id>" — animated free
+                continue
+        out.append(discord.utils.escape_markdown(part))
+    return "".join(out)
+
+
 def _game_card_list(items, limit=300, strikethrough=False) -> str:
     rendered = []
     used = 0
@@ -6910,11 +6939,19 @@ async def poll_lfp_pings():
             display_name = ping.get("display_name") or ping.get("steam_id") or "Player"
             message = (ping.get("message") or "").strip()
             expires_unix = int(ping.get("expires_unix") or 0)
+            # Aug 7 item 11: mode picks + duration in the headline. Key names
+            # match the server's serialization verbatim (#152).
+            modes = (ping.get("modes") or "1v1").strip()
+            exp_min = int(ping.get("expires_minutes") or 60)
+            modes_label = "+".join(
+                part.upper() if part == "ffa" else part
+                for part in modes.split(",") if part)
+            dur_label = {15: "15min", 30: "30min", 60: "1h", 180: "3h"}.get(exp_min, f"{exp_min}min")
             content = (f"{mention} \N{LEFT-POINTING MAGNIFYING GLASS} "
                        f"**{discord.utils.escape_markdown(str(display_name))}** "
-                       f"(<@{discord_id}>) is looking for a ranked match!")
+                       f"(<@{discord_id}>) LFP: ranked {modes_label} for {dur_label}!")
             if message:
-                content += f"\n> {discord.utils.escape_markdown(message)}"
+                content += f"\n> {_lfp_render_message(message, channel.guild)}"
             content += f"\nExpires <t:{expires_unix}:R>"
             try:
                 # allowed_mentions is the real anti-injection gate: ONLY the
