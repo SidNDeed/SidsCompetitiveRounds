@@ -6077,6 +6077,12 @@ def _release_state_save(d: dict) -> None:
 
 
 _release_send_lock = asyncio.Lock()
+# Codex r7: tags this PROCESS actually finished sending. Deliberately NOT
+# _last_release_tag — that field also advances on the cold-start anchor
+# (which posts nothing), so using it as the completion test made the
+# documented /announce-release bootstrap a silent no-op that reported
+# success. Sent-ness and anchored-ness are different facts; keep them apart.
+_release_sent_tags = set()
 
 
 async def _send_release_chunks(tag: str, msgs: list) -> bool:
@@ -6091,12 +6097,17 @@ async def _send_release_chunks(tag: str, msgs: list) -> bool:
     async with _release_send_lock:
         # Codex r6 f3: authoritative re-read UNDER the lock (#208) — a waiter
         # that queued behind a sender of the SAME tag must observe that the
-        # tag completed (the finisher advances _last_release_tag after its
-        # send) and no-op, not recreate the deleted cursor at offset zero and
-        # repost every chunk.
-        if tag == _last_release_tag:
+        # send already completed and no-op, rather than recreate the deleted
+        # cursor at offset zero and repost every chunk.
+        if tag in _release_sent_tags:
             return True
-        return await _send_release_chunks_locked(tag, msgs)
+        ok = await _send_release_chunks_locked(tag, msgs)
+        if ok:
+            _release_sent_tags.add(tag)
+            if len(_release_sent_tags) > 32:
+                _release_sent_tags.clear()
+                _release_sent_tags.add(tag)
+        return ok
 
 
 async def _send_release_chunks_locked(tag: str, msgs: list) -> bool:
